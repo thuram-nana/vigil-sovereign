@@ -183,8 +183,10 @@ specific account, project, subscription, or cluster. The rules the code enforces
 - Leaving the section out entirely leaves cloud testing unauthorised.
 
 **Where this stands in practice.** This gate, and the six cloud and
-container-cluster confirmations that sit behind it, are built, wired end to end,
-and proven offline against fixed sample evidence. They have **not** been run
+container-cluster confirmations that sit behind it, are built and wired end to
+end. The two container-cluster (Kubernetes) ones are proven against a real
+Kubernetes cluster the system stands up, owns and destroys itself. The four cloud
+ones are proven offline against fixed sample evidence and have **not** been run
 against a live cloud account belonging to a third party. That step needs two
 things from the customer: their own cloud credentials, and their account named in
 the cloud-scope block of a signed charter. Until both exist, the safe answer the
@@ -1756,20 +1758,27 @@ relevant to safety and control.
     application on the operator's own machine, plus a vendor-published practice
     target on the public internet.** The project states in its own words that this
     is "proven on a local target, not proven in the field".
-11. **The cloud and container-cluster confirmations have not been fired at a live
-    third-party account, and that is waiting on the customer.** All six are built,
-    wired end to end and proven offline against fixed sample evidence: capturing a
-    credential from a cloud server's metadata service, checking whether an exposed
-    secret is actually valid, impersonating a cloud service account, escalating
-    permissions through an access-policy weakness, and both tiers of
+11. **The four cloud confirmations have not been fired at a live third-party
+    account, and that is waiting on the customer. The two container-cluster ones
+    have been fired, at a real cluster.** All six are built and wired end to end:
+    capturing a credential from a cloud server's metadata service, checking whether
+    an exposed secret is actually valid, impersonating a cloud service account,
+    escalating permissions through an access-policy weakness, and both tiers of
     container-cluster permission checking — the anonymous-privileged binding and
     the dangerous-verb or default-account grant. The detection logic, the evidence
     handling, the signed certificates and the safety gates around them are all
-    finished. What has not happened is the act of pointing them at a live cloud
-    account belonging to a third party, because that requires the customer to
-    provide their own cloud credentials and to name the account in the signed
-    charter's cloud-scope block. This is a deferral by design, not an unfinished
-    feature — and it should not be described as field-proven until it has been done.
+    finished. The two container-cluster checks are proven against a real
+    single-node Kubernetes cluster the system stands up, owns and destroys itself:
+    the dangerous binding is confirmed and its certificate re-verifies offline,
+    while benign bindings in the same cluster are correctly left as leads. What
+    that run does not cover is discovering bindings across a whole cluster, and a
+    managed provider's control plane (Amazon EKS, Google GKE, Azure AKS). For the
+    four cloud confirmations the evidence is fixed sample evidence, and what has
+    not happened is the act of pointing them at a live cloud account belonging to a
+    third party, because that requires the customer to provide their own cloud
+    credentials and to name the account in the signed charter's cloud-scope block.
+    That is a deferral by design, not an unfinished feature — and it should not be
+    described as field-proven until it has been done.
 12. **Charter soft limits — off-peak windows, how many requests run in parallel,
     backing off from rate limits, advance notice of heavy scans — are doctrine in
     the authorisation document.** The rate limits per posture and the request

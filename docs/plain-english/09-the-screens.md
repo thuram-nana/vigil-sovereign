@@ -1434,8 +1434,14 @@ confirmations that a weakness was not merely *present* but actually *achieved*.
 **Status, stated exactly.** All six are complete and part of the released software. Each is built
 from two halves: a deterministic automatic checker — the same kind of fixed, non-AI test that
 adjudicates every other result in this system — and a capture module owned by this project that
-produces the evidence the checker judges. They are wired end to end and proven offline with fixture
-evidence, meaning recorded sample data standing in for a live cloud account.
+produces the evidence the checker judges. All six are wired end to end. The two Kubernetes ones are
+proven against a real single-node cluster the system stands up, owns and destroys itself: the
+dangerous binding confirmed with a certificate that re-verifies offline, and the benign bindings in
+the same cluster — including the namespace's own default identity bound to the built-in `admin` role,
+whose real rules do grant secret reads — correctly left as leads. What that run does not cover is
+discovering bindings across a whole cluster, and a managed provider's control plane (Amazon EKS,
+Google GKE, Azure AKS). The four cloud ones are proven offline with fixture evidence, meaning
+recorded sample data standing in for a live cloud account.
 
 **There is no dedicated screen for any of them, and no dedicated typed command either.** This was
 checked directly: none of the twenty-eight screens names any of these capabilities, and the six

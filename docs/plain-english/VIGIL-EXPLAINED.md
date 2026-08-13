@@ -141,8 +141,10 @@ positives, no false positives and no misses, against comparison tools scoring ze
 positives with zero, seven and eight false positives; the benchmark document's own fairness caveats
 are carried forward in Chapter 1 and should be read with it. One live external run against a
 vendor-published deliberately vulnerable test site is recorded. Six cloud and container-platform
-exploitation confirmations are complete, part of the released software, and proven against recorded
-sample data with no internet connection; what remains for them is the act of pointing them at a live
+exploitation confirmations are complete and part of the released software: the two
+container-platform (Kubernetes) ones are proven against a real Kubernetes cluster the system stands
+up, owns and destroys itself, while the four cloud ones are proven against recorded sample data with
+no internet connection, and what remains for those four is the act of pointing them at a live
 third-party cloud account, which waits on that customer's own credentials by design, because the
 system is built not to obtain a credential any other way. Safeguards over the system's own build were
 folded into the released software on the day this briefing was written, with one inventory file
@@ -476,11 +478,13 @@ permission. It will not modify its own attacking code without human sign-off. An
 credentials it was not given.
 
 **Status, stated plainly.** The core proving machinery is built and has been run from end to end. The
-six cloud and Kubernetes exploitation confirmations are complete, are part of the released software,
-and have been proven against saved evidence with no internet connection. ("Kubernetes" is the
-standard system for running and coordinating large numbers of software containers; it is the control
-layer under most modern cloud deployments.) What remains for those six is the act of pointing them at
-a live third-party cloud account, which waits on that customer's own credentials, by design.
+six cloud and Kubernetes exploitation confirmations are complete and are part of the released
+software. ("Kubernetes" is the standard system for running and coordinating large numbers of software
+containers; it is the control layer under most modern cloud deployments.) The two Kubernetes ones
+have been proven against a real Kubernetes cluster that the system stands up, owns and destroys
+itself. The four cloud ones have been proven against saved evidence with no internet connection, and
+what remains for those four is the act of pointing them at a live third-party cloud account, which
+waits on that customer's own credentials, by design.
 Safeguards over the system's own build and release — pinning exactly which third-party software the
 system is built from, and blocking a build that pulls in a critical known vulnerability — were folded
 into the released software during the day this was written; section 9.4 gives the exact position,
@@ -4644,10 +4648,14 @@ its own ledger of it. The relevant entries for the workflow described in this ch
   itself more power than it started with, and both tiers of container-platform access control
   (an anonymous caller bound to a dangerous role, and a dangerous permission or the default
   identity granted rights it should not have) — are written, reviewed, folded into the
-  released software, wired from end to end, and proven offline against recorded sample data
-  standing in for a live cloud account. What has *not* happened for several of them is the
-  final step of pointing them at a live third-party cloud account; that is the entry in the
-  next list, and it waits on the customer's own credentials by design.
+  released software and wired from end to end. The **two container-platform (Kubernetes)**
+  ones are proven against a real single-node cluster the system stands up, owns and destroys
+  itself: the dangerous binding is confirmed with a certificate that re-verifies offline, and
+  the benign arrangements in the same cluster are correctly left as leads. The **four cloud**
+  ones are proven offline against recorded sample data standing in for a live cloud account.
+  What has *not* happened for those four is the final step of pointing them at a live
+  third-party cloud account; that is the entry in the next list, and it waits on the
+  customer's own credentials by design.
 - **The safeguards around how this software is built and shipped.** These protect the supply
   chain — the parts an attacker could change without ever touching this project's own code.
   Four of them, delivered together: every third-party software package the system installs is
@@ -6248,11 +6256,13 @@ scope.
     does not prove that the evidence reflects the live target. The countermeasure
     for that is built as a working mechanism, but its independent witness is the
     system's own software today, not an outside party.
-  - Several cloud and cluster exploitation capabilities are complete, wired end to
-    end and proven offline against recorded sample data, but have not yet been
-    fired at a live third-party account. That waits on a customer supplying their
-    own cloud or cluster credentials. None of the six carries any outstanding
-    engineering work; the deferral is operational, not technical.
+  - The four cloud exploitation capabilities are complete, wired end to end and
+    proven offline against recorded sample data, but have not yet been fired at a
+    live third-party account. That waits on a customer supplying their own cloud
+    credentials. The two cluster ones are no longer in that position: they are
+    proven against a real Kubernetes cluster the system stands up, owns and
+    destroys itself. None of the six carries any outstanding engineering work; the
+    remaining deferral is operational, not technical.
   - The demotion-only firewall is a working layer with real call sites rather than
     a single universal gateway.
 
@@ -9183,11 +9193,13 @@ operations as well as to findings:
 The heading is deliberately flat, because the honest position is mixed and a reader skimming
 headings should not take away a stronger claim than the text supports. **None of the cloud and
 container-platform confirmations described below has been pointed at a live third-party cloud
-account.** They are built, wired end to end, and proven against recorded sample data. Five of the
-six wait on a customer supplying credentials to their own account; the sixth deliberately never
-carries out the action it detects, which 11.1 explains. The web-facing tests, the signing and
-certificate machinery, and the packaging are a different matter entirely, and the table below says
-which is which, one line at a time.
+account.** All six are built and wired end to end. The two container-platform ones are proven
+against a real Kubernetes cluster the system stands up, owns and destroys itself, so they wait on
+nobody; the four cloud ones are proven against recorded sample data, three of them waiting on a
+customer supplying credentials to their own account, while the fourth deliberately never carries out
+the action it detects, which 11.1 explains. The web-facing tests, the signing and certificate
+machinery, and the packaging are a different matter entirely, and the table below says which is
+which, one line at a time.
 
 The project maintains an explicit ledger distinguishing three states: fully working end to end;
 built and proven offline but not yet exercised against a live third-party system; and deliberately
@@ -9642,15 +9654,20 @@ procedure:
   genuine trap: restoring an old or missing anti-rollback record silently weakens the "no older
   report substituted" guarantee without raising any error.
 - The six cloud and Kubernetes exploitation confirmations are **complete and part of the released
-  software**, wired end to end, and proven offline against recorded sample data standing in for the
-  real thing. **Five of the six await use against a real third-party cloud account**, which waits on
-  the customer supplying credentials to their own account — the detection logic, evidence handling,
-  certificates and safety gates are all built and proven, and only the act of pointing them at a
-  live outside account is pending. The sixth, the permission-escalation check, deliberately never
-  carries out the escalation at all; that is a design decision rather than a gap. **None of the six
-  can fire during an ordinary scan**, by two independent mechanisms. Other capabilities are
-  similarly labelled as built-but-not-yet-used-against-a-live-outside-system in the registry, in the
-  code, and in this chapter.
+  software** and wired end to end. **The two Kubernetes ones are proven against a real Kubernetes
+  cluster** the system stands up, owns and destroys itself — the dangerous binding confirmed with a
+  certificate that re-verifies offline, the benign ones in the same cluster correctly left as leads
+  — with cluster-wide discovery of bindings and a managed provider's control plane (Amazon EKS,
+  Google GKE, Azure AKS) outside what that run shows. The four cloud ones are proven offline against
+  recorded sample data standing in for the real thing, and **three of them await use against a real
+  third-party cloud account**, which waits on the customer supplying credentials to their own
+  account — the detection logic, evidence handling, certificates and safety gates are all built and
+  proven, and only the act of pointing them at a live outside account is pending. The fourth, the
+  permission-escalation check, deliberately never carries out the escalation at all; that is a
+  design decision rather than a gap. **None of the six can fire during an ordinary scan**, by two
+  independent mechanisms. Other capabilities are similarly labelled as
+  built-but-not-yet-used-against-a-live-outside-system in the registry, in the code, and in this
+  chapter.
 - The system's **own build** is hardened on the same principle: starting images pinned by content
   rather than by a movable name, packages pinned to exact files by cryptographic fingerprint, a
   generated bill of materials cross-checked against that fixed list, and a vulnerability gate that
@@ -11092,8 +11109,10 @@ specific account, project, subscription, or cluster. The rules the code enforces
 - Leaving the section out entirely leaves cloud testing unauthorised.
 
 **Where this stands in practice.** This gate, and the six cloud and
-container-cluster confirmations that sit behind it, are built, wired end to end,
-and proven offline against fixed sample evidence. They have **not** been run
+container-cluster confirmations that sit behind it, are built and wired end to
+end. The two container-cluster (Kubernetes) ones are proven against a real
+Kubernetes cluster the system stands up, owns and destroys itself. The four cloud
+ones are proven offline against fixed sample evidence and have **not** been run
 against a live cloud account belonging to a third party. That step needs two
 things from the customer: their own cloud credentials, and their account named in
 the cloud-scope block of a signed charter. Until both exist, the safe answer the
@@ -12665,20 +12684,27 @@ relevant to safety and control.
     application on the operator's own machine, plus a vendor-published practice
     target on the public internet.** The project states in its own words that this
     is "proven on a local target, not proven in the field".
-11. **The cloud and container-cluster confirmations have not been fired at a live
-    third-party account, and that is waiting on the customer.** All six are built,
-    wired end to end and proven offline against fixed sample evidence: capturing a
-    credential from a cloud server's metadata service, checking whether an exposed
-    secret is actually valid, impersonating a cloud service account, escalating
-    permissions through an access-policy weakness, and both tiers of
+11. **The four cloud confirmations have not been fired at a live third-party
+    account, and that is waiting on the customer. The two container-cluster ones
+    have been fired, at a real cluster.** All six are built and wired end to end:
+    capturing a credential from a cloud server's metadata service, checking whether
+    an exposed secret is actually valid, impersonating a cloud service account,
+    escalating permissions through an access-policy weakness, and both tiers of
     container-cluster permission checking — the anonymous-privileged binding and
     the dangerous-verb or default-account grant. The detection logic, the evidence
     handling, the signed certificates and the safety gates around them are all
-    finished. What has not happened is the act of pointing them at a live cloud
-    account belonging to a third party, because that requires the customer to
-    provide their own cloud credentials and to name the account in the signed
-    charter's cloud-scope block. This is a deferral by design, not an unfinished
-    feature — and it should not be described as field-proven until it has been done.
+    finished. The two container-cluster checks are proven against a real
+    single-node Kubernetes cluster the system stands up, owns and destroys itself:
+    the dangerous binding is confirmed and its certificate re-verifies offline,
+    while benign bindings in the same cluster are correctly left as leads. What
+    that run does not cover is discovering bindings across a whole cluster, and a
+    managed provider's control plane (Amazon EKS, Google GKE, Azure AKS). For the
+    four cloud confirmations the evidence is fixed sample evidence, and what has
+    not happened is the act of pointing them at a live cloud account belonging to a
+    third party, because that requires the customer to provide their own cloud
+    credentials and to name the account in the signed charter's cloud-scope block.
+    That is a deferral by design, not an unfinished feature — and it should not be
+    described as field-proven until it has been done.
 12. **Charter soft limits — off-peak windows, how many requests run in parallel,
     backing off from rate limits, advance notice of heavy scans — are doctrine in
     the authorisation document.** The rate limits per posture and the request
@@ -14186,8 +14212,14 @@ confirmations that a weakness was not merely *present* but actually *achieved*.
 **Status, stated exactly.** All six are complete and part of the released software. Each is built
 from two halves: a deterministic automatic checker — the same kind of fixed, non-AI test that
 adjudicates every other result in this system — and a capture module owned by this project that
-produces the evidence the checker judges. They are wired end to end and proven offline with fixture
-evidence, meaning recorded sample data standing in for a live cloud account.
+produces the evidence the checker judges. All six are wired end to end. The two Kubernetes ones are
+proven against a real single-node cluster the system stands up, owns and destroys itself: the
+dangerous binding confirmed with a certificate that re-verifies offline, and the benign bindings in
+the same cluster — including the namespace's own default identity bound to the built-in `admin` role,
+whose real rules do grant secret reads — correctly left as leads. What that run does not cover is
+discovering bindings across a whole cluster, and a managed provider's control plane (Amazon EKS,
+Google GKE, Azure AKS). The four cloud ones are proven offline with fixture evidence, meaning
+recorded sample data standing in for a live cloud account.
 
 **There is no dedicated screen for any of them, and no dedicated typed command either.** This was
 checked directly: none of the twenty-eight screens names any of these capabilities, and the six
@@ -19179,25 +19211,41 @@ merely that a setting looked wrong:
 6. On the same platform, a role genuinely grants dangerous powers, proven by
    reading the role's actual rules rather than trusting its name.
 
-All six are proven **offline, against recorded sample data**. (Recorded sample data
-means exactly what it sounds like: a saved, realistic copy of what a cloud account
-would have replied, kept on file so the test can be run and re-run without
-touching anybody's real account. It is the software equivalent of a laboratory
-running a known reference sample through its instrument to prove the instrument
-reads correctly.) The detection logic, the evidence handling, the certificates and
-the safety gates are built and proven.
+The four **cloud** confirmations — numbers 1 to 4 above — are proven **offline,
+against recorded sample data**. (Recorded sample data means exactly what it sounds
+like: a saved, realistic copy of what a cloud account would have replied, kept on
+file so the test can be run and re-run without touching anybody's real account. It
+is the software equivalent of a laboratory running a known reference sample through
+its instrument to prove the instrument reads correctly.) The two **Kubernetes**
+confirmations — numbers 5 and 6 — are no longer in that position. They are proven
+against a real single-node cluster, k3s version 1.31.5, running in a container on
+the machine's own internal address, which the system stands up, owns and destroys
+itself. It plants known-dangerous and known-benign access rules in that cluster,
+captures what the real Kubernetes interface returns, and puts those bytes through
+the ordinary path: checker, admission, certificate, offline re-verification. The
+dangerous binding is confirmed and its certificate re-verifies with no network; the
+benign ones in the same cluster stay leads, including the namespace's own default
+identity bound to the built-in `admin` role, whose real rules do grant secret reads
+— the commonest legitimate arrangement in Kubernetes, and the one a careless
+detector would wrongly call critical. For all six, the detection logic, the evidence
+handling, the certificates and the safety gates are built and proven.
 
-**What remains deferred is one thing only: pointing them at a live third-party
-cloud account.** That waits on the customer supplying their own cloud
-credentials, and it is deferred by design — a credential is a thing only the
-account owner can issue, and the system is deliberately built not to obtain one
-any other way.
+**What remains deferred, for the four cloud confirmations, is one thing only:
+pointing them at a live third-party cloud account.** That waits on the customer
+supplying their own cloud credentials, and it is deferred by design — a credential
+is a thing only the account owner can issue, and the system is deliberately built
+not to obtain one any other way. For the two Kubernetes confirmations nothing
+external is waited on; what that run does not cover is a scope-gated capability
+that discovers access rules across a whole cluster, and a managed provider's
+control plane (Amazon EKS, Google GKE, Azure AKS).
 
-The accurate sentence, which should be used wherever this comes up, is: *built,
-gated, and proven offline; the first use against a real, live account awaits the
-customer's own credentials, by design.* Calling these capabilities unfinished
-would understate the system. Calling them proven in customer clouds would
-overstate it. Both errors mislead, in opposite directions.
+The accurate sentence, which should be used wherever this comes up, is: *built and
+gated throughout; the two Kubernetes confirmations proven against a real cluster
+the system creates itself, the four cloud ones proven offline, their first use
+against a real, live cloud account awaiting the customer's own credentials, by
+design.* Calling these capabilities unfinished would understate the system. Calling
+the cloud ones proven in customer clouds would overstate it. Both errors mislead,
+in opposite directions.
 
 Five safety properties are shared by all six, and they answer the obvious concern
 about letting an automated system anywhere near a cloud credential:
@@ -19329,7 +19377,7 @@ With that stated, the remaining honest deferrals are:
 - Container software — for the isolated agent, the container-based tool runner
   and the optional services.
 - Read-only cloud credentials — for cloud and Kubernetes posture checks, and for
-  the first real use of the six cloud and Kubernetes confirmations.
+  the first real use of the four cloud confirmations.
 - A source-code-host token plus multi-signature keys — for automatic fix pull
   requests.
 - A graph database — for the visual knowledge map.
@@ -19344,7 +19392,7 @@ inputs, not as missing features.
 | What | Why the system cannot supply it |
 |---|---|
 | Written authorisation to test a system | Only the system's owner can grant it. The charter is where it is recorded, and nothing runs without one. |
-| Cloud credentials for live cloud testing | Only the account owner can issue a credential, and the system is designed not to obtain one any other way. This is the single remaining blocker for the first real use of the six cloud confirmations. |
+| Cloud credentials for live cloud testing | Only the account owner can issue a credential, and the system is designed not to obtain one any other way. This is the single remaining blocker for the first real use of the four cloud confirmations. The two Kubernetes confirmations do not need it — the system stands up a cluster of its own. |
 | Genuinely separate holders of the multi-signature keys | The code can require several distinct keys. It cannot verify that different people hold them. |
 | A security chip, or a virtual equivalent | Without it, keys sit unencrypted on disk. Acceptable on a trusted single-user machine, inadequate on a shared or hosted one. Setup warns loudly rather than degrading silently. |
 | Independently operated witnesses | The protocol and a deployable witness service are built and working. Independence is a deployment arrangement, and the project's own trust document says plainly that distinct keys are not distinct operators. |

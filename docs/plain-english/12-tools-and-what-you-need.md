@@ -1502,25 +1502,41 @@ merely that a setting looked wrong:
 6. On the same platform, a role genuinely grants dangerous powers, proven by
    reading the role's actual rules rather than trusting its name.
 
-All six are proven **offline, against recorded sample data**. (Recorded sample data
-means exactly what it sounds like: a saved, realistic copy of what a cloud account
-would have replied, kept on file so the test can be run and re-run without
-touching anybody's real account. It is the software equivalent of a laboratory
-running a known reference sample through its instrument to prove the instrument
-reads correctly.) The detection logic, the evidence handling, the certificates and
-the safety gates are built and proven.
+The four **cloud** confirmations — numbers 1 to 4 above — are proven **offline,
+against recorded sample data**. (Recorded sample data means exactly what it sounds
+like: a saved, realistic copy of what a cloud account would have replied, kept on
+file so the test can be run and re-run without touching anybody's real account. It
+is the software equivalent of a laboratory running a known reference sample through
+its instrument to prove the instrument reads correctly.) The two **Kubernetes**
+confirmations — numbers 5 and 6 — are no longer in that position. They are proven
+against a real single-node cluster, k3s version 1.31.5, running in a container on
+the machine's own internal address, which the system stands up, owns and destroys
+itself. It plants known-dangerous and known-benign access rules in that cluster,
+captures what the real Kubernetes interface returns, and puts those bytes through
+the ordinary path: checker, admission, certificate, offline re-verification. The
+dangerous binding is confirmed and its certificate re-verifies with no network; the
+benign ones in the same cluster stay leads, including the namespace's own default
+identity bound to the built-in `admin` role, whose real rules do grant secret reads
+— the commonest legitimate arrangement in Kubernetes, and the one a careless
+detector would wrongly call critical. For all six, the detection logic, the evidence
+handling, the certificates and the safety gates are built and proven.
 
-**What remains deferred is one thing only: pointing them at a live third-party
-cloud account.** That waits on the customer supplying their own cloud
-credentials, and it is deferred by design — a credential is a thing only the
-account owner can issue, and the system is deliberately built not to obtain one
-any other way.
+**What remains deferred, for the four cloud confirmations, is one thing only:
+pointing them at a live third-party cloud account.** That waits on the customer
+supplying their own cloud credentials, and it is deferred by design — a credential
+is a thing only the account owner can issue, and the system is deliberately built
+not to obtain one any other way. For the two Kubernetes confirmations nothing
+external is waited on; what that run does not cover is a scope-gated capability
+that discovers access rules across a whole cluster, and a managed provider's
+control plane (Amazon EKS, Google GKE, Azure AKS).
 
-The accurate sentence, which should be used wherever this comes up, is: *built,
-gated, and proven offline; the first use against a real, live account awaits the
-customer's own credentials, by design.* Calling these capabilities unfinished
-would understate the system. Calling them proven in customer clouds would
-overstate it. Both errors mislead, in opposite directions.
+The accurate sentence, which should be used wherever this comes up, is: *built and
+gated throughout; the two Kubernetes confirmations proven against a real cluster
+the system creates itself, the four cloud ones proven offline, their first use
+against a real, live cloud account awaiting the customer's own credentials, by
+design.* Calling these capabilities unfinished would understate the system. Calling
+the cloud ones proven in customer clouds would overstate it. Both errors mislead,
+in opposite directions.
 
 Five safety properties are shared by all six, and they answer the obvious concern
 about letting an automated system anywhere near a cloud credential:
@@ -1652,7 +1668,7 @@ With that stated, the remaining honest deferrals are:
 - Container software — for the isolated agent, the container-based tool runner
   and the optional services.
 - Read-only cloud credentials — for cloud and Kubernetes posture checks, and for
-  the first real use of the six cloud and Kubernetes confirmations.
+  the first real use of the four cloud confirmations.
 - A source-code-host token plus multi-signature keys — for automatic fix pull
   requests.
 - A graph database — for the visual knowledge map.
@@ -1667,7 +1683,7 @@ inputs, not as missing features.
 | What | Why the system cannot supply it |
 |---|---|
 | Written authorisation to test a system | Only the system's owner can grant it. The charter is where it is recorded, and nothing runs without one. |
-| Cloud credentials for live cloud testing | Only the account owner can issue a credential, and the system is designed not to obtain one any other way. This is the single remaining blocker for the first real use of the six cloud confirmations. |
+| Cloud credentials for live cloud testing | Only the account owner can issue a credential, and the system is designed not to obtain one any other way. This is the single remaining blocker for the first real use of the four cloud confirmations. The two Kubernetes confirmations do not need it — the system stands up a cluster of its own. |
 | Genuinely separate holders of the multi-signature keys | The code can require several distinct keys. It cannot verify that different people hold them. |
 | A security chip, or a virtual equivalent | Without it, keys sit unencrypted on disk. Acceptable on a trusted single-user machine, inadequate on a shared or hosted one. Setup warns loudly rather than degrading silently. |
 | Independently operated witnesses | The protocol and a deployable witness service are built and working. Independence is a deployment arrangement, and the project's own trust document says plainly that distinct keys are not distinct operators. |

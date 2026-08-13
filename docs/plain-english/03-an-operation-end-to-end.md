@@ -1542,10 +1542,14 @@ its own ledger of it. The relevant entries for the workflow described in this ch
   itself more power than it started with, and both tiers of container-platform access control
   (an anonymous caller bound to a dangerous role, and a dangerous permission or the default
   identity granted rights it should not have) — are written, reviewed, folded into the
-  released software, wired from end to end, and proven offline against recorded sample data
-  standing in for a live cloud account. What has *not* happened for several of them is the
-  final step of pointing them at a live third-party cloud account; that is the entry in the
-  next list, and it waits on the customer's own credentials by design.
+  released software and wired from end to end. The **two container-platform (Kubernetes)**
+  ones are proven against a real single-node cluster the system stands up, owns and destroys
+  itself: the dangerous binding is confirmed with a certificate that re-verifies offline, and
+  the benign arrangements in the same cluster are correctly left as leads. The **four cloud**
+  ones are proven offline against recorded sample data standing in for a live cloud account.
+  What has *not* happened for those four is the final step of pointing them at a live
+  third-party cloud account; that is the entry in the next list, and it waits on the
+  customer's own credentials by design.
 - **The safeguards around how this software is built and shipped.** These protect the supply
   chain — the parts an attacker could change without ever touching this project's own code.
   Four of them, delivered together: every third-party software package the system installs is

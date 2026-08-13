@@ -1509,11 +1509,13 @@ scope.
     does not prove that the evidence reflects the live target. The countermeasure
     for that is built as a working mechanism, but its independent witness is the
     system's own software today, not an outside party.
-  - Several cloud and cluster exploitation capabilities are complete, wired end to
-    end and proven offline against recorded sample data, but have not yet been
-    fired at a live third-party account. That waits on a customer supplying their
-    own cloud or cluster credentials. None of the six carries any outstanding
-    engineering work; the deferral is operational, not technical.
+  - The four cloud exploitation capabilities are complete, wired end to end and
+    proven offline against recorded sample data, but have not yet been fired at a
+    live third-party account. That waits on a customer supplying their own cloud
+    credentials. The two cluster ones are no longer in that position: they are
+    proven against a real Kubernetes cluster the system stands up, owns and
+    destroys itself. None of the six carries any outstanding engineering work; the
+    remaining deferral is operational, not technical.
   - The demotion-only firewall is a working layer with real call sites rather than
     a single universal gateway.
 

@@ -1425,11 +1425,13 @@ operations as well as to findings:
 The heading is deliberately flat, because the honest position is mixed and a reader skimming
 headings should not take away a stronger claim than the text supports. **None of the cloud and
 container-platform confirmations described below has been pointed at a live third-party cloud
-account.** They are built, wired end to end, and proven against recorded sample data. Five of the
-six wait on a customer supplying credentials to their own account; the sixth deliberately never
-carries out the action it detects, which 11.1 explains. The web-facing tests, the signing and
-certificate machinery, and the packaging are a different matter entirely, and the table below says
-which is which, one line at a time.
+account.** All six are built and wired end to end. The two container-platform ones are proven
+against a real Kubernetes cluster the system stands up, owns and destroys itself, so they wait on
+nobody; the four cloud ones are proven against recorded sample data, three of them waiting on a
+customer supplying credentials to their own account, while the fourth deliberately never carries out
+the action it detects, which 11.1 explains. The web-facing tests, the signing and certificate
+machinery, and the packaging are a different matter entirely, and the table below says which is
+which, one line at a time.
 
 The project maintains an explicit ledger distinguishing three states: fully working end to end;
 built and proven offline but not yet exercised against a live third-party system; and deliberately
@@ -1884,15 +1886,20 @@ procedure:
   genuine trap: restoring an old or missing anti-rollback record silently weakens the "no older
   report substituted" guarantee without raising any error.
 - The six cloud and Kubernetes exploitation confirmations are **complete and part of the released
-  software**, wired end to end, and proven offline against recorded sample data standing in for the
-  real thing. **Five of the six await use against a real third-party cloud account**, which waits on
-  the customer supplying credentials to their own account — the detection logic, evidence handling,
-  certificates and safety gates are all built and proven, and only the act of pointing them at a
-  live outside account is pending. The sixth, the permission-escalation check, deliberately never
-  carries out the escalation at all; that is a design decision rather than a gap. **None of the six
-  can fire during an ordinary scan**, by two independent mechanisms. Other capabilities are
-  similarly labelled as built-but-not-yet-used-against-a-live-outside-system in the registry, in the
-  code, and in this chapter.
+  software** and wired end to end. **The two Kubernetes ones are proven against a real Kubernetes
+  cluster** the system stands up, owns and destroys itself — the dangerous binding confirmed with a
+  certificate that re-verifies offline, the benign ones in the same cluster correctly left as leads
+  — with cluster-wide discovery of bindings and a managed provider's control plane (Amazon EKS,
+  Google GKE, Azure AKS) outside what that run shows. The four cloud ones are proven offline against
+  recorded sample data standing in for the real thing, and **three of them await use against a real
+  third-party cloud account**, which waits on the customer supplying credentials to their own
+  account — the detection logic, evidence handling, certificates and safety gates are all built and
+  proven, and only the act of pointing them at a live outside account is pending. The fourth, the
+  permission-escalation check, deliberately never carries out the escalation at all; that is a
+  design decision rather than a gap. **None of the six can fire during an ordinary scan**, by two
+  independent mechanisms. Other capabilities are similarly labelled as
+  built-but-not-yet-used-against-a-live-outside-system in the registry, in the code, and in this
+  chapter.
 - The system's **own build** is hardened on the same principle: starting images pinned by content
   rather than by a movable name, packages pinned to exact files by cryptographic fingerprint, a
   generated bill of materials cross-checked against that fixed list, and a vulnerability gate that
