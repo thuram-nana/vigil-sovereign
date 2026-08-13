@@ -20,9 +20,12 @@ Guarantees enforced here (constitution §II/§VI + the operator's E1 audit):
     can require the IMDS GET hit a metadata peer and the confirming call hit an allow-listed https endpoint
     with a validated TLS peer and no proxy/redirect.
 
-The transport is INJECTED so this module is unit-tested with a mock and its live-fire is a thin real-transport
-binding (httpx with proxies disabled + redirects disabled + TLS verification on), deferred until an authorized
-lab credential is available.
+The transport is INJECTED so this module is unit-tested with a mock. The REAL binding now EXISTS —
+``live_transport.LiveTransport``: httpx with proxies disabled, redirects reported rather than followed, TLS
+verification on, and every provenance field DERIVED from the connection instead of asserted. E1's own
+live-fire is still gated on an operator-provisioned lab metadata credential, but the missing transport is no
+longer the blocker: the same binding is exercised against a real provider by the E5 GitHub live-fire
+(``tools/livefire/secret_github_livefire.sh``).
 """
 
 from __future__ import annotations
