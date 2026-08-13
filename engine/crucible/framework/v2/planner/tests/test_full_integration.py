@@ -104,6 +104,77 @@ def _write_fixture_corpus(fixture_dir: Path) -> None:
         _save_fixture(fixture_dir, ex)
 
 
+# ---------------------------------------------------------------------------
+# Two DIFFERENT bug-class vocabularies meet in this pipeline, and conflating
+# them is what made this test red.
+#
+#   * The HYPOTHESIS class is the archetype's own label. `intake/archetypes/
+#     php-smarty-smm-panel-fork.yaml` lists "webhook-forgery" under
+#     `common_vulnerabilities`, so `seed_tree` mints leaves carrying it and the
+#     exploit-agent looks the deterministic executor up by exactly that
+#     (bug_class, surface) key. The exploratory class set is legitimately
+#     BROADER than the provable one — see verify.verifier: "Exploratory
+#     hypotheses may name broader classes ... a class asserted as
+#     oracle-provable must be in this set or it is fabricated."
+#
+#   * The CONFIRMED-FINDING class must be one the deterministic substrate can
+#     actually adjudicate, i.e. in `verify.verifier.known_bug_classes()`.
+#     "webhook_forgery" is NOT: no oracle is mapped to it in BUG_CLASS_ORACLES
+#     and no check emits it, so `OracleVerifier.confirm` fail-closes it ("an
+#     unknown class is a lead at most, never oracle-confirmed"). The old fixture
+#     asserted that class on a CONFIRMED finding, the veracity firewall refused
+#     it, the critique-agent stamped `objections`, and the reporter — correctly
+#     — never emitted technical.md.
+#
+# The defect this scenario demonstrates IS in the vocabulary: a payment callback
+# that never authenticates the origin of the request (no HMAC signature check)
+# and then performs the authenticated-only effect is an authentication bypass,
+# proved by the ACHIEVED_STATE oracle over the illicit post-state. So the leaf
+# keeps its (legitimate) hypothesis label and the FINDING names the provable
+# class it actually demonstrated. Nothing in the firewall is relaxed.
+HYPOTHESIS_BUG_CLASS = "webhook-forgery"
+PROVABLE_BUG_CLASS = "auth_bypass"
+# The stale label the old fixture asserted on a CONFIRMED finding. It is the same
+# string as HYPOTHESIS_BUG_CLASS — deliberately, because that coincidence is the
+# whole bug: the leaf's exploratory label was copied onto the finding, where it is
+# unprovable. Named separately because the two roles are different, and kept as a
+# NEGATIVE CONTROL below so this fix stays load-bearing: if anyone ever turns a
+# future red run green by widening the oracle vocabulary instead of naming the
+# real class, that control fails and says why.
+OUT_OF_VOCAB_BUG_CLASS = HYPOTHESIS_BUG_CLASS
+
+
+def _webhook_forgery_finding(bug_class: str) -> FindingPayload:
+    """The confirming finding the deterministic executor hands back.
+
+    ``bug_class`` is a parameter so the identical payload can be driven with the
+    oracle-provable class (the real case) and with an out-of-vocabulary class
+    (the fail-closed negative control) — the ONLY difference between the two.
+    """
+    return FindingPayload(
+        finding_slug="fix-001-webhook-forgery",
+        title="Forged Cryptomus webhook credits balance to attacker user",
+        severity="Critical",
+        bug_class=bug_class,
+        surface="/api/v2/orders/123",
+        summary=(
+            "Reproduced twice end-to-end with a working PoC: POST to "
+            "/payment/cryptomus/callback with arbitrary user_id credits "
+            "balance; signature verification absent, so the handler performs "
+            "an authenticated-only effect for an unauthenticated caller."
+        ),
+        impact="Direct unbounded balance creation.",
+        # A CONFIRMED finding must carry real oracle proof: the achieved-state oracle
+        # fires on the illicit state (a forged webhook was accepted) — deterministic
+        # promotion, not the LLM's say-so. The context's class must match the
+        # finding's, or the veracity firewall demotes on the mismatch alone.
+        oracle_context=FindingContext.from_state(
+            {"forged_webhook_accepted": True, "balance_credited_to_attacker": True},
+            {"forged_webhook_accepted": True, "balance_credited_to_attacker": True},
+            bug_class=bug_class).model_dump(mode="json"),
+    )
+
+
 def test_full_pipeline_url_to_report(
     isolated_paths: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -151,29 +222,10 @@ def test_full_pipeline_url_to_report(
     assert tree.stats()["leaves"] >= 1
 
     # ---- 4. MAO: stand up agents + executor ----
-    confirming_finding = FindingPayload(
-        finding_slug="fix-001-webhook-forgery",
-        title="Forged Cryptomus webhook credits balance to attacker user",
-        severity="Critical",
-        bug_class="webhook-forgery",
-        surface="/api/v2/orders/123",
-        summary=(
-            "Reproduced twice end-to-end with a working PoC: POST to "
-            "/payment/cryptomus/callback with arbitrary user_id credits "
-            "balance; signature verification absent."
-        ),
-        impact="Direct unbounded balance creation.",
-        # A CONFIRMED finding must carry real oracle proof: the achieved-state oracle
-        # fires on the illicit state (a forged webhook was accepted) — deterministic
-        # promotion, not the LLM's say-so.
-        oracle_context=FindingContext.from_state(
-            {"forged_webhook_accepted": True, "balance_credited_to_attacker": True},
-            {"forged_webhook_accepted": True, "balance_credited_to_attacker": True},
-            bug_class="webhook_forgery").model_dump(mode="json"),
-    )
     outcomes = {
-        ("webhook-forgery", "/api/v2/orders/123"): ExecutionOutcome(
-            success=True, status_code=200, finding=confirming_finding,
+        (HYPOTHESIS_BUG_CLASS, "/api/v2/orders/123"): ExecutionOutcome(
+            success=True, status_code=200,
+            finding=_webhook_forgery_finding(PROVABLE_BUG_CLASS),
             note="confirmed",
         ),
     }
@@ -213,12 +265,24 @@ def test_full_pipeline_url_to_report(
     assert report.dispatched > 0
     # at least one webhook-forgery leaf succeeded
     assert report.succeeded >= 1
+    # The oracle confirmed the finding, so the critique-agent stamped it
+    # `confirmed` + `verified_by_oracle` — not `objections`.
+    findings = bb.read(engagement=slug, kinds=["finding"])
+    confirmed = [
+        f for f in findings
+        if (f.payload or {}).get("critique_status") == "confirmed"
+    ]
+    assert confirmed, (
+        "no finding reached critique_status='confirmed'; statuses="
+        f"{[(f.payload or {}).get('critique_status') for f in findings]}"
+    )
+    assert all((f.payload or {}).get("verified_by_oracle") for f in confirmed)
     # report file emitted by reporter-agent
     tech_path = paths.target_dir(slug) / "reports" / "technical.md"
     assert tech_path.is_file()
     text = tech_path.read_text(encoding="utf-8")
     assert "fix-001-webhook-forgery" in text
-    assert "webhook-forgery" in text
+    assert PROVABLE_BUG_CLASS in text
 
     # ---- 7. MLS mirrored the confirmed finding ----
     with open_store() as store:
@@ -227,7 +291,7 @@ def test_full_pipeline_url_to_report(
             "WHERE engagement_id IN (SELECT id FROM engagements WHERE slug = ?)",
             (slug,),
         )
-    assert any(r["bug_class"] == "webhook-forgery" for r in rows)
+    assert any(r["bug_class"] == PROVABLE_BUG_CLASS for r in rows)
 
     # ---- 8. Checkpoint exists ----
     ckpt = paths.planner_state(slug)
@@ -235,6 +299,126 @@ def test_full_pipeline_url_to_report(
     payload = json.loads(ckpt.read_text(encoding="utf-8"))
     assert payload["slug"] == slug
     assert "tree" in payload and "budget" in payload
+
+    bb.close()
+    mem.close()
+
+
+def test_out_of_vocabulary_bug_class_never_reaches_the_report(
+    isolated_paths: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NEGATIVE CONTROL / mutation control for the test above.
+
+    Identical pipeline, identical evidence, identical firing achieved-state
+    oracle — the ONLY change is the finding's declared ``bug_class``, swapped
+    from the oracle-provable ``auth_bypass`` to the out-of-vocabulary
+    ``webhook-forgery``. The veracity firewall must fail-closed: no
+    ``confirmed`` finding, no technical.md, nothing mirrored into MLS.
+
+    This is what makes the fix above load-bearing. The green test proves the
+    pipeline reaches the report; THIS test proves it reaches it *because the
+    class is provable*, not because the gate is permissive. If someone ever
+    turns the sibling test green by adding ``webhook_forgery`` to
+    ``BUG_CLASS_ORACLES`` / ``_ALIASES`` instead of naming the real class,
+    this control goes red and names the reason.
+    """
+    slug = "fix-target-oov"
+    target_url = "https://fix-target.invalid"
+
+    led = ethics.authorization_ledger()
+    led.parent.mkdir(parents=True, exist_ok=True)
+    led.write_text(
+        f"{ethics.now_iso()} | testbot | fix-target.invalid\n", encoding="utf-8",
+    )
+
+    fixture_dir = isolated_paths / "fixtures"
+    _write_fixture_corpus(fixture_dir)
+    monkeypatch.setenv("CRUCIBLE_INTAKE_FIXTURE_DIR", str(fixture_dir))
+
+    out = intake_mod.run(
+        target_url, slug=slug,
+        operator_name="testbot",
+        business_context="Fail-closed negative control for the full pipeline.",
+    )
+    archetype_slug = out.classification.primary.archetype.slug
+
+    # Guard the premise of this control: the class really is out of vocabulary.
+    # If it ever becomes a mapped, oracle-provable class this assertion fires
+    # first and says so, rather than the test silently losing its meaning.
+    from framework.v2.verify.verifier import is_known_bug_class
+    assert not is_known_bug_class(OUT_OF_VOCAB_BUG_CLASS), (
+        f"{OUT_OF_VOCAB_BUG_CLASS!r} is now in the oracle vocabulary — this "
+        f"negative control no longer controls anything. Either it is a real "
+        f"provable class (then update the sibling test to use it and delete "
+        f"this one) or the vocabulary was widened to make a test pass, which "
+        f"is exactly the regression this guards."
+    )
+
+    with open_store() as store:
+        tree = seed_tree(
+            archetype_slug=archetype_slug, target_url=target_url,
+            surfaces=["/", "/api/v2/orders/123"], mls_store=store,
+        )
+
+    outcomes = {
+        (HYPOTHESIS_BUG_CLASS, "/api/v2/orders/123"): ExecutionOutcome(
+            success=True, status_code=200,
+            finding=_webhook_forgery_finding(OUT_OF_VOCAB_BUG_CLASS),
+            note="confirmed",
+        ),
+    }
+    bb = open_blackboard(db_path=isolated_paths / "bb-oov.sqlite")
+    bb.engagement_id(slug)
+
+    executor = DeterministicExecutor(outcomes=outcomes)
+    hyp = HypothesisAgent(bb, slug)
+    exp = ExploitAgent(bb, slug, executor=executor, max_per_step=2)
+    crit = CritiqueAgent(bb, slug)
+    rpt = ReporterAgent(bb, slug)
+    mem = MemoryAgent(bb, slug, archetype=archetype_slug, target_url=target_url)
+    coord = Coordinator(
+        blackboard=bb, engagement_slug=slug,
+        agents=[hyp, exp, crit, rpt, mem],
+        max_ticks=200, quiet_ticks=2,
+    )
+    budget = Budget(
+        request_max=2000, token_max=200_000.0, wall_clock_max_seconds=30.0,
+    )
+    pruner = Pruner(max_failures_per_node=2)
+    watchdog = Watchdog(engagement_slug=slug, tree=tree, budget=budget)
+    planner = Planner(
+        blackboard=bb, coordinator=coord, engagement_slug=slug,
+        tree=tree, budget=budget, pruner=pruner, watchdog=watchdog,
+        coordinator_ticks_per_step=4,
+        scope_check=False,
+        checkpoint_interval_s=0.5,
+    )
+    report = planner.run(max_steps=200)
+
+    # The pipeline RAN — this is not a vacuous pass. The leaf was dispatched
+    # and the executor reported success; only the CONFIRMATION was refused.
+    assert report.steps > 0
+    assert report.dispatched > 0
+    assert report.succeeded >= 1
+
+    findings = bb.read(engagement=slug, kinds=["finding"])
+    assert findings, "no finding was ever posted — the control proved nothing"
+    statuses = [(f.payload or {}).get("critique_status") for f in findings]
+    assert "confirmed" not in statuses, (
+        f"an out-of-vocabulary bug_class reached critique_status='confirmed' "
+        f"(statuses={statuses}) — the anti-hallucination gate is permissive"
+    )
+    assert not any((f.payload or {}).get("verified_by_oracle") for f in findings)
+
+    # Nothing reported, nothing remembered.
+    assert not (paths.target_dir(slug) / "reports" / "technical.md").is_file()
+    with open_store() as store:
+        rows = store.fetchall(
+            "SELECT bug_class FROM findings "
+            "WHERE engagement_id IN (SELECT id FROM engagements WHERE slug = ?)",
+            (slug,),
+        )
+    assert not rows, f"MLS mirrored an unconfirmed finding: {rows}"
 
     bb.close()
     mem.close()
@@ -260,6 +444,20 @@ def test_full_pipeline_url_to_report(
 # because each run costs ~$0.50 of subscription quota and ~5 minutes
 # wall-clock.  The skip mark also requires a live LLM backend to be
 # selectable (claude-code or anthropic).
+#
+# KNOWN-STALE, NOT FIXED HERE (found while fixing the offline test above;
+# unverified because this test cannot be executed without a live LLM budget):
+# `agents/realistic_executor._STRONG_FINDING` carries NO `oracle_context`, and
+# `critique_agent` reserves `critique_status="confirmed"` for the oracle path
+# ("an LLM verdict — however confident — can NEVER reach confirmed"). An
+# oracle-less finding therefore lands on `llm_advisory`, which the reporter does
+# not emit, so the assertion below that `real-001-webhook-forgery` appears in
+# technical.md should not hold on current main.  Its declared bug_class
+# ("webhook-forgery") is also out of the oracle vocabulary, so attaching a
+# context alone would not be enough — it needs the same two-vocabulary fix
+# applied above.  Left alone deliberately rather than blind-patched: this needs
+# one paid live run to verify, and a fix asserted without that run would be
+# exactly the unverified claim this framework exists to refuse.
 
 
 @pytest.mark.skipif(

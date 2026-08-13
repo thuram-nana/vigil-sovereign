@@ -168,15 +168,25 @@ class NmapServiceSensor:
             return ToolResult(ok=False, note=(
                 "nmap target must be a single host or IPv4 address — a CIDR, address range, list, "
                 "wildcard, or option-like value is refused (it would scan beyond the scoped host)"))
+        # Validate the remaining untrusted input BEFORE checking whether the tool is installed, so a
+        # malformed argument is refused identically on every machine. `ports` used to be validated only
+        # after the PATH lookup, which made the refusal environment-dependent: on a host without nmap an
+        # option-shaped ports value ("-oN") came back as "not on PATH" instead of being rejected as
+        # malformed. That is the wrong answer to give about untrusted input, and it hid the guard from any
+        # environment lacking nmap — which is exactly where it surfaced once `sensors` entered CI. The
+        # single-host target guard above already validates before this point; this makes the two agree.
+        ports = args.get("ports") if isinstance(args, dict) else None
+        ports_arg: "str | None" = None
+        if isinstance(ports, str) and ports.strip():
+            if not _PORTS_RE.match(ports.strip()):
+                return ToolResult(ok=False, note="nmap args['ports'] must be a port spec (e.g. '1-1024', '22,80,443')")
+            ports_arg = ports.strip()
         binary = shutil.which("nmap")
         if binary is None:
             return ToolResult(ok=False, note="nmap not on PATH (install to enable active service discovery)")
         argv = [binary, "-oX", "-", "-Pn", "-sV"]
-        ports = args.get("ports") if isinstance(args, dict) else None
-        if isinstance(ports, str) and ports.strip():
-            if not _PORTS_RE.match(ports.strip()):
-                return ToolResult(ok=False, note="nmap args['ports'] must be a port spec (e.g. '1-1024', '22,80,443')")
-            argv += ["-p", ports.strip()]
+        if ports_arg is not None:
+            argv += ["-p", ports_arg]
         argv += ["--", target]   # end-of-options guard: the target can never be read as a flag
         try:
             proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
