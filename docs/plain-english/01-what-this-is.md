@@ -82,8 +82,9 @@ credentials it was not given.
 
 **Status, stated plainly.** The core proving machinery is built and has been run from end to end. The
 six cloud and Kubernetes exploitation confirmations are complete and are part of the released
-software. ("Kubernetes" is the standard system for running and coordinating large numbers of software
-containers; it is the control layer under most modern cloud deployments.) The two Kubernetes ones
+software. ("Kubernetes" is the standard system for running and coordinating large numbers of
+software containers; it is the control layer under most modern cloud deployments.) The two
+Kubernetes ones
 have been proven against a real Kubernetes cluster that the system stands up, owns and destroys
 itself. The four cloud ones have been proven against saved evidence with no internet connection, and
 what remains for those four is the act of pointing them at a live third-party cloud account, which

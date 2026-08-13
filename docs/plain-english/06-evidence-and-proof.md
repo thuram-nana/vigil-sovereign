@@ -1423,15 +1423,15 @@ operations as well as to findings:
 ## 11. Honest status: what is working, what is proven offline, and what is deferred
 
 The heading is deliberately flat, because the honest position is mixed and a reader skimming
-headings should not take away a stronger claim than the text supports. **None of the cloud and
-container-platform confirmations described below has been pointed at a live third-party cloud
-account.** All six are built and wired end to end. The two container-platform ones are proven
-against a real Kubernetes cluster the system stands up, owns and destroys itself, so they wait on
-nobody; the four cloud ones are proven against recorded sample data, three of them waiting on a
-customer supplying credentials to their own account, while the fourth deliberately never carries out
-the action it detects, which 11.1 explains. The web-facing tests, the signing and certificate
-machinery, and the packaging are a different matter entirely, and the table below says which is
-which, one line at a time.
+headings should not take away a stronger claim than the text supports — or a weaker one. **None of
+the four cloud confirmations described below has been pointed at a live third-party cloud account.
+The two container-platform ones have been run against a real Kubernetes cluster: one the system
+creates and owns, rather than one belonging to anybody else.** All six are built and wired end to
+end. Of the four cloud ones, proven against recorded sample data, three wait on a customer supplying
+credentials to their own account, while the fourth deliberately never carries out the action it
+detects, which 11.1 explains. The web-facing tests, the signing and certificate machinery, and the
+packaging are a different matter entirely, and the table below says which is which, one line at a
+time.
 
 The project maintains an explicit ledger distinguishing three states: fully working end to end;
 built and proven offline but not yet exercised against a live third-party system; and deliberately

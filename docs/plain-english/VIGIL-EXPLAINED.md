@@ -479,8 +479,9 @@ credentials it was not given.
 
 **Status, stated plainly.** The core proving machinery is built and has been run from end to end. The
 six cloud and Kubernetes exploitation confirmations are complete and are part of the released
-software. ("Kubernetes" is the standard system for running and coordinating large numbers of software
-containers; it is the control layer under most modern cloud deployments.) The two Kubernetes ones
+software. ("Kubernetes" is the standard system for running and coordinating large numbers of
+software containers; it is the control layer under most modern cloud deployments.) The two
+Kubernetes ones
 have been proven against a real Kubernetes cluster that the system stands up, owns and destroys
 itself. The four cloud ones have been proven against saved evidence with no internet connection, and
 what remains for those four is the act of pointing them at a live third-party cloud account, which
@@ -9191,15 +9192,15 @@ operations as well as to findings:
 ### 11. Honest status: what is working, what is proven offline, and what is deferred
 
 The heading is deliberately flat, because the honest position is mixed and a reader skimming
-headings should not take away a stronger claim than the text supports. **None of the cloud and
-container-platform confirmations described below has been pointed at a live third-party cloud
-account.** All six are built and wired end to end. The two container-platform ones are proven
-against a real Kubernetes cluster the system stands up, owns and destroys itself, so they wait on
-nobody; the four cloud ones are proven against recorded sample data, three of them waiting on a
-customer supplying credentials to their own account, while the fourth deliberately never carries out
-the action it detects, which 11.1 explains. The web-facing tests, the signing and certificate
-machinery, and the packaging are a different matter entirely, and the table below says which is
-which, one line at a time.
+headings should not take away a stronger claim than the text supports — or a weaker one. **None of
+the four cloud confirmations described below has been pointed at a live third-party cloud account.
+The two container-platform ones have been run against a real Kubernetes cluster: one the system
+creates and owns, rather than one belonging to anybody else.** All six are built and wired end to
+end. Of the four cloud ones, proven against recorded sample data, three wait on a customer supplying
+credentials to their own account, while the fourth deliberately never carries out the action it
+detects, which 11.1 explains. The web-facing tests, the signing and certificate machinery, and the
+packaging are a different matter entirely, and the table below says which is which, one line at a
+time.
 
 The project maintains an explicit ledger distinguishing three states: fully working end to end;
 built and proven offline but not yet exercised against a live third-party system; and deliberately
@@ -14215,8 +14216,9 @@ adjudicates every other result in this system — and a capture module owned by 
 produces the evidence the checker judges. All six are wired end to end. The two Kubernetes ones are
 proven against a real single-node cluster the system stands up, owns and destroys itself: the
 dangerous binding confirmed with a certificate that re-verifies offline, and the benign bindings in
-the same cluster — including the namespace's own default identity bound to the built-in `admin` role,
-whose real rules do grant secret reads — correctly left as leads. What that run does not cover is
+the same cluster — including the namespace's own default identity bound to the built-in `admin`
+role, whose real rules do grant secret reads — correctly left as leads. What that run does not cover
+is
 discovering bindings across a whole cluster, and a managed provider's control plane (Amazon EKS,
 Google GKE, Azure AKS). The four cloud ones are proven offline with fixture evidence, meaning
 recorded sample data standing in for a live cloud account.
