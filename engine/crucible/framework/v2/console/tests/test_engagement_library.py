@@ -313,8 +313,18 @@ def test_renaming_never_breaks_the_PROOF_BUNDLE_verification(proof_run, tmp_path
     Nothing is stubbed here. (The companion test above stubs the bundler so it stays runnable on the
     offense-only CI path, where the integration package is absent; this one needs it and skips
     without it.) If a label could reach signed content, the second verification would fail."""
+    # The bundler needs BOTH sides of the two-env boundary: `vigil_integration.proof.bundle` builds
+    # the bundle and `vigil_gateway` backs the GOVERNANCE SIGNER it provisions the authority from
+    # (`vigil_integration.live.wiring` imports `vigil_gateway.scope_source` lazily). crucible-core
+    # installs neither, so guard on both — guarding on only the first let this test RUN there and
+    # fail on an environment gap, and it did.
+    #
+    # Note this cannot be relaxed into "skip when there is no bundle": that would green-wash a real
+    # regression in bundling. Past the guard, a missing bundle is a FAILURE.
     pytest.importorskip("vigil_integration.proof.bundle",
                         reason="the proof bundle needs the integration package (two-env boundary)")
+    pytest.importorskip("vigil_gateway",
+                        reason="the bundle's governance signer needs the gateway package")
     from framework.v2.evidence.cli import main as evidence_cli
     from framework.v2.report import dossier as D
 
