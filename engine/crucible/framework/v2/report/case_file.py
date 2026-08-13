@@ -48,9 +48,10 @@ from .grounding import GRADE_DEMOTED, GradedFinding
 from .howto import finding_specific_remediation
 from .catalogue import COVERAGE_GAP_NOTE, Catalogue, build_catalogue
 from .plainspeak import oracle_plain as _oracle_plain
-from .plainspeak import oracle_establishes, oracle_plain_map, plain_for as _plain_for, short_plain
+from .plainspeak import (category_title, oracle_establishes, oracle_plain_map,
+                         plain_for as _plain_for, short_plain)
 from .priority import effort_size, prioritize
-from .runinfo import RunInfo, safe_command_token
+from .runinfo import RunInfo, human_time, safe_command_token
 
 # The documents this module always writes, in reading order. Every one is emitted on every
 # build, even when it has nothing to report — a document that says "none" is information; a
@@ -98,6 +99,36 @@ class _Item:
     why: str
     generic: bool          # True when no plain-language description was on file for the category
 
+    @property
+    def title(self) -> str:
+        """A readable title.
+
+        The engine records titles in its own shorthand ("boolean_sqli confirmed at q"), which is
+        jargon in a document written for someone with no technical background. Where a readable
+        name for the category is on file, the title is composed from that name and the finding's
+        OWN recorded parameter — both fields the finding already carries, so this derives rather
+        than invents. Where no readable name is on file, the engine's title is used unchanged, and
+        the recorded title is shown alongside in every case so nothing is replaced silently."""
+        name = category_title(self.graded.finding.bug_class)
+        if not name:
+            return _md_inline(self.graded.finding.title)
+        param = self.extras.parameter or ""
+        if param:
+            return f"{name} in the '{_md_inline(param)}' parameter"
+        return name
+
+    @property
+    def recorded_title(self) -> Optional[str]:
+        """The engine's own title, when it differs from the readable one."""
+        raw = _md_inline(self.graded.finding.title)
+        return raw if raw and raw != self.title else None
+
+    @property
+    def where(self) -> str:
+        """Where the finding is, without the engine's internal position token."""
+        loc = self.extras.endpoint or self.extras.location or self.graded.finding.surface or ""
+        return _md_inline(loc) or "not recorded"
+
 
 # --------------------------------------------------------------------------------------------------
 # small shared helpers
@@ -106,6 +137,12 @@ class _Item:
 
 def _e(s: Any) -> str:
     return html.escape(str(s if s is not None else ""), quote=True)
+
+
+def _plain(s: Any) -> str:
+    """Drop Markdown emphasis from a sentence written for the .md documents before it is put
+    into the HTML page, where `**` would render literally."""
+    return str(s if s is not None else "").replace("**", "")
 
 
 def _md_inline(s: Any) -> str:
@@ -129,6 +166,114 @@ def _header(title: str, label: str, run_id: str, built: Optional[str]) -> list[s
     ]
 
 
+# The boundaries inherent in each KIND of examination — the things that were out of reach for
+# reasons no setting could change. Written per operation type, because the honest limits of a
+# source-code review (no running system, so nothing about deployment or configuration) are not the
+# limits of a cloud posture assessment (configuration only, so nothing about the applications
+# running on it). A type with no entry gets the conservative default.
+_INHERENT_LIMITS: dict[str, tuple[str, ...]] = {
+    "url": (
+        "- **Only the address named above, and what could be reached from it.** Other systems, "
+        "other addresses, other environments and internal networks were not examined.",
+        "- **Only what was reachable without credentials that were not supplied.** Areas behind a "
+        "login, a payment step, or a role that was not provided remained unvisited, and therefore "
+        "unexamined.",
+    ),
+    "codebase": (
+        "- **Only the source code, as written.** A review of code cannot observe how the running "
+        "service is configured, what it is connected to, or what data it holds. A weakness that "
+        "exists only in deployment or configuration is invisible to it.",
+        "- **Only the code that was present.** Dependencies pulled in at build time, generated "
+        "code, and anything held in a different repository were not examined unless they were in "
+        "the folder named above.",
+        "- **The version of the code is not recorded**, so this pack cannot state which commit was "
+        "reviewed. Treat it as describing the code as it stood when the review ran.",
+    ),
+    "cloud": (
+        "- **Only the account named above, and only its configuration.** A posture assessment "
+        "reads how the account is set up. It does not test the applications running inside it, and "
+        "a weakness in an application would not appear here.",
+        "- **Only what the collection step returned.** Regions, services and resources the "
+        "collection did not cover are not covered by this pack, and which those were is not "
+        "recorded.",
+    ),
+    "k8s": (
+        "- **Only the cluster named above, and only its configuration.** This reads how the "
+        "cluster is set up. It does not test the applications running in it.",
+        "- **Only what the collection step returned.** Namespaces and workloads the collection did "
+        "not cover are not covered here, and which those were is not recorded.",
+    ),
+    "infra": (
+        "- **Only the hosts and services declared in the plan.** Anything not declared was not "
+        "examined, and the declaration is a statement of intent rather than a discovery.",
+    ),
+    "aegis": (
+        "- **Only the logs that were supplied, for the period they cover.** An attack that left no "
+        "trace in those logs, or that happened outside the period, cannot appear here.",
+    ),
+}
+
+_INHERENT_LIMITS_DEFAULT: tuple[str, ...] = (
+    "- **Only what this kind of operation reaches.** The boundaries of this operation type are not "
+    "written down anywhere this pack can read, so they cannot be listed precisely. Ask the team "
+    "that ran it what it did and did not cover before relying on the result.",
+)
+
+
+def _subject_block(info: RunInfo) -> list[str]:
+    """The subject, in this operation type's own vocabulary. A source-code review names a
+    repository; a cloud assessment names an account and its provider; a web test names an address.
+    Forcing all of them into a single "Target" line would misdescribe most engagements."""
+    L = [f"- **{info.subject.label}:** `{_md_inline(info.subject.value)}`"]
+    for key, value in info.subject.detail:
+        L.append(f"- **{_md_inline(key)}:** {_md_inline(value)}")
+    L.append(f"- **Kind of work:** {info.operation.name}")
+    return L
+
+
+def _subject_unrecorded_block(info: RunInfo) -> list[str]:
+    """The aspects of the subject that this kind of operation does NOT record. Stating them is what
+    stops a reader assuming the examination covered ground it never recorded covering."""
+    if not info.subject.unrecorded:
+        return []
+    L = [f"The record of {_article(info.operation.name)} {info.operation.name} does not capture "
+         "everything a reader might reasonably expect. In particular it does not record:", ""]
+    for item in info.subject.unrecorded:
+        L.append(f"- {item}")
+    L += ["",
+          "Those are gaps in what was written down. They are not statements that the work did not "
+          "happen, and they are not statements that anything is fine.", ""]
+    return L
+
+
+def _article(word: str) -> str:
+    return "an" if (word or "")[:1].lower() in "aeiou" else "a"
+
+
+def _extra_proofs_note(n_certs: int, n_facts: int) -> Optional[str]:
+    """A reconciliation sentence when the evidence bundle carries MORE proofs than there are proven
+    findings in the findings record.
+
+    The two numbers come from different places and can legitimately differ: the findings record is
+    written by one kind of run, while proofs accumulate in the run directory from any tool that
+    minted one. A reader who sees "2 proven findings" here and "3 certificates" in the evidence
+    bundle would otherwise be left to guess which is wrong — and would be right to distrust both.
+    Saying so plainly costs a sentence and keeps the archive internally consistent."""
+    extra = n_certs - n_facts
+    if extra <= 0:
+        return None
+    return (
+        f"The evidence bundle in this pack carries {_count_word(n_certs, 'proof')}, which is "
+        f"{extra} more than the {_count_word(n_facts, 'proven finding')} described "
+        f"here. That is not a contradiction. The findings above come from the examination's own "
+        f"findings record; the additional {_count_word(extra, 'proof')} were saved into this "
+        f"engagement's working directory by other tooling and were not matched to any entry in "
+        f"that record. They are included because they are part of the evidence, and they can be "
+        f"re-checked with everything else — but no finding in this pack rests on them, and no "
+        f"claim is made about what they show."
+    )
+
+
 def _remediation_text(item: _Item) -> str:
     """The fix to recommend. The scanner's own finding-specific text is preferred when the export
     carried one; otherwise the class-level rule, woven with this finding's parameter."""
@@ -138,8 +283,10 @@ def _remediation_text(item: _Item) -> str:
 
 
 def _where(item: _Item) -> str:
-    loc = item.extras.location or item.graded.finding.surface or ""
-    return _md_inline(loc) or "not recorded"
+    """Where the finding is, in a form a person can read. The engine's location carries an internal
+    position token (``[query_value:0]``) that means nothing outside the engine; the readable form
+    names the address and the affected parameter separately."""
+    return item.where
 
 
 def _confirmed_time(item: _Item, info: RunInfo) -> str:
@@ -169,31 +316,34 @@ def _standards_line(item: _Item) -> Optional[str]:
 
 def render_executive(*, label: str, info: RunInfo, facts: list[_Item], observed: list[_Item],
                      unproven: list[_Item], built: Optional[str], signed: bool,
-                     proof_ok: bool) -> str:
+                     proof_ok: bool, n_certs: int = 0) -> str:
     n_f, n_o, n_u = len(facts), len(observed), len(unproven)
     L = _header("Executive summary", label, info.run_id, built)
     L += [
         "## What this is",
         "",
-        "This is the summary of an authorised security examination of a computer system owned by "
-        "this organisation. It was carried out with permission, against the organisation's own "
-        "system. Nothing in it was obtained from anybody else's system.",
+        f"This is the summary of an authorised {info.operation.name} carried out on something this "
+        "organisation owns. It was done with permission, against the organisation's own property. "
+        "Nothing in it was obtained from anybody else's systems.",
         "",
         "It is written to be read without a technical background. Every technical term used "
         "anywhere in this pack is explained in `08-glossary.md`.",
         "",
-        "## The system that was examined",
+        "## What was examined",
         "",
-        f"- **System:** `{_md_inline(info.target or 'not recorded')}`",
+    ]
+    L += _subject_block(info)
+    L += [
         f"- **Examination started:** {info.started_text}",
         f"- **Examination finished:** {info.finished_text}",
         f"- **Time taken:** {info.duration_text}",
         f"- **This pack was produced:** {built or 'not recorded'}",
         "",
     ]
+    L += _subject_unrecorded_block(info)
     if info.notes:
-        L += ["Where a time is shown as *not recorded*, the system genuinely did not record it. "
-              "No time in this pack has been estimated or reconstructed.", ""]
+        L += ["Where something reads *not recorded*, the run genuinely did not record it. Nothing "
+              "in this pack has been estimated or reconstructed to fill such a gap.", ""]
 
     L += ["## What was found", "",
           "Findings are separated by how strongly they are established. That distinction is the "
@@ -215,26 +365,30 @@ def render_executive(*, label: str, info: RunInfo, facts: list[_Item], observed:
           f"| Suspected, not proven | {n_u} |",
           f"| **Total recorded** | **{n_f + n_o + n_u}** |",
           ""]
+    extra = _extra_proofs_note(n_certs, n_f)
+    if extra:
+        L += [extra, ""]
 
     L += ["## What it means for this organisation", ""]
     if facts:
         worst = facts[0]
         L += [
-            f"{_count_word(n_f, 'weakness', 'weaknesses')} in this system "
+            f"{_count_word(n_f, 'weakness', 'weaknesses')} in this {info.operation.subject_noun} "
             f"{'was' if n_f == 1 else 'were'} demonstrated, not merely suspected. In plain terms:",
             "",
         ]
         for it in facts:
-            L.append(f"- **{_md_inline(it.graded.finding.title)}** — {it.what}")
+            L.append(f"- **{it.title}** — {it.what}")
         L += ["",
               f"The most serious of these is **{_md_inline(worst.graded.finding.title)}**, rated "
               f"{_SEVERITY_WORDS.get(worst.graded.finding.severity, worst.graded.finding.severity)}.",
               ""]
     else:
         L += [
-            "No weakness in this system was proven during this examination.",
+            f"No weakness in this {info.operation.subject_noun} was proven during this examination.",
             "",
-            "**That is not the same as the system being secure.** It means that within the "
+            f"**That is not the same as this {info.operation.subject_noun} being secure.** It "
+            "means that within the "
             "boundaries described in `02-approach-and-scope.md`, and within the time this "
             "examination ran, nothing was demonstrated. Anything outside those boundaries was not "
             "looked at. `02` states the boundaries plainly, and it should be read before this "
@@ -279,13 +433,14 @@ def render_executive(*, label: str, info: RunInfo, facts: list[_Item], observed:
     L += ["## What this pack does not tell you", "",
           "It is worth being explicit about the limits, because a security report is easy to "
           "over-read:", "",
-          "- It does not say the system is secure. It says what was examined and what was found.",
+          f"- It does not say this {info.operation.subject_noun} is secure. It says what was "
+          "examined and what was found.",
           "- It does not cover anything outside the boundaries in `02-approach-and-scope.md`. "
           "Anything not examined is simply unknown, not safe.",
           "- A proven finding shows that a weakness exists. It does not show that anybody has "
           "used it, and it is not evidence that data has been taken.",
-          "- It describes the system as it was during the examination window above. A system that "
-          "changes afterwards has not been examined in its changed form.",
+          f"- It describes this {info.operation.subject_noun} as it was during the examination "
+          "window above. Anything that changes afterwards has not been examined in its changed form.",
           ""]
 
     L += ["## How much you can trust this document", "",
@@ -294,7 +449,7 @@ def render_executive(*, label: str, info: RunInfo, facts: list[_Item], observed:
         L.append("- **The proven findings can be re-checked by you, without trusting us.** The "
                  "saved evidence travels with this pack, together with an independent program "
                  "that re-runs the checks over it. `07-verify-it-yourself.md` gives the exact "
-                 "command. It does not contact the examined system and it does not need the "
+                 "command. It does not contact anything that was examined and it does not need the "
                  "internet.")
     else:
         L.append("- **No re-checkable evidence bundle is included**, because nothing in this "
@@ -355,8 +510,8 @@ def render_approach(*, label: str, info: RunInfo, built: Optional[str],
         "",
         "## Exactly what was examined",
         "",
-        f"- **Address examined:** `{_md_inline(info.target or 'not recorded')}`",
     ]
+    L += _subject_block(info)
     if info.pages_examined is not None:
         L.append(f"- **Pages explored:** {info.pages_examined}")
     if info.requests_examined is not None:
@@ -371,6 +526,7 @@ def render_approach(*, label: str, info: RunInfo, built: Optional[str],
         f"- **Time taken:** {info.duration_text}",
         "",
     ]
+    L += _subject_unrecorded_block(info)
     for n in info.notes:
         L += [f"> {n}", ""]
 
@@ -401,20 +557,16 @@ def render_approach(*, label: str, info: RunInfo, built: Optional[str],
         for lim in info.limits:
             L.append(f"- {lim.meaning}")
         L.append("")
+    noun = info.operation.subject_noun
+    L += ["**Limits inherent in this kind of examination:**", ""]
+    L += list(_INHERENT_LIMITS.get(info.operation.key, _INHERENT_LIMITS_DEFAULT))
     L += [
-        "**Limits inherent in this kind of examination:**",
-        "",
-        "- **Only the address named above, and what could be reached from it.** Other systems, "
-        "other addresses, other environments and internal networks were not examined.",
-        "- **Only what was reachable without credentials that were not supplied.** Areas behind a "
-        "login, a payment step, or a role that was not provided remained unvisited, and therefore "
-        "unexamined.",
-        "- **Only automated examination.** A person testing by hand finds categories of problem "
+        f"- **Only the state of the {noun} during the window above.** Any change made afterwards "
+        "has not been examined.",
+        "- **Only automated examination.** A person working by hand finds categories of problem "
         "that automation does not — in particular business-logic flaws, where every individual "
         "step works correctly but the sequence produces a wrong outcome. Nothing of that kind was "
         "looked for here.",
-        "- **Only the state of the system during the window above.** Any change made afterwards "
-        "has not been examined.",
         "- **No third-party services.** Payment providers, identity providers, hosting platforms "
         "and similar were not tested, and must not be tested without their own authorisation.",
         "",
@@ -423,12 +575,15 @@ def render_approach(*, label: str, info: RunInfo, built: Optional[str],
         "",
         "## How the record was assembled",
         "",
-        "The findings in this pack were read from the machine-readable record the examination "
-        "wrote (`appendix/report.json`), translated into the form the written reports use, and "
-        "joined back to the saved evidence so that each proof could be re-run. That translation "
-        "copies values; it does not add any.",
-        "",
     ]
+    if info.has_findings_record:
+        L += ["The findings in this pack were read from the machine-readable record the "
+              "examination wrote (`appendix/report.json`), translated into the form the written "
+              "reports use, and joined back to the saved evidence so that each proof could be "
+              "re-run. That translation copies values; it does not add any.", ""]
+    else:
+        L += ["No structured findings record was available to build this pack from.", "",
+              info.artefact_gap("findings") or "", ""]
     trans = list(adapted.notes) + [n for n in notes if n]
     if trans:
         L += ["What happened during that assembly, recorded plainly:", ""]
@@ -472,13 +627,18 @@ def _category_line(item: _Item) -> str:
 
 def _finding_block(item: _Item, info: RunInfo, *, proven: bool, index: int) -> list[str]:
     f = item.graded.finding
-    L = [f"### {index}. {_md_inline(f.title)}", "",
+    L = [f"### {index}. {item.title}", "",
          f"**Reference:** `{_md_inline(f.finding_slug)}`  "]
+    if item.recorded_title:
+        L.append(f"**Recorded by the engine as:** `{item.recorded_title}`  ")
     cat = _category_line(item)
     if cat:
         L.append(cat)
     L += [f"**Rating:** {_SEVERITY_WORDS.get(f.severity, f.severity)}  ",
-          f"**Where:** `{_where(item)}`  ",
+          f"**Where:** `{_where(item)}`  "]
+    if item.extras.parameter:
+        L.append(f"**Affected input:** the `{_md_inline(item.extras.parameter)}` parameter  ")
+    L += [
           f"**When it was recorded:** {_confirmed_time(item, info)}  ",
           "",
           "**What this kind of weakness is.** " + item.what,
@@ -487,12 +647,14 @@ def _finding_block(item: _Item, info: RunInfo, *, proven: bool, index: int) -> l
           "",
           "> The paragraph above describes the CATEGORY. It is general knowledge about this kind "
           "of weakness, and it is the reason the category is taken seriously — not a description "
-          "of what happened to this system. What was actually established here is stated next, "
+          f"of what happened to this {info.operation.subject_noun}. What was actually established "
+          "here is stated next, "
           "and it is narrower.",
           ""]
 
     if proven:
-        L += ["**What was established on this system.** The examination sent test input to "
+        L += [f"**What was established on this {info.operation.subject_noun}.** The examination "
+              "sent test input to "
               f"`{_where(item)}` and an automatic check confirmed "
               + oracle_establishes(item.graded.oracle_kind) + ".", ""]
         L += ["**How that was proved.** " + _oracle_plain(item.graded.oracle_kind), ""]
@@ -537,10 +699,12 @@ def _finding_block(item: _Item, info: RunInfo, *, proven: bool, index: int) -> l
                   "attacker can do.", ""]
             if item.extras.evidence:
                 L += ["The engine recorded:", "", "> " + _md_inline(item.extras.evidence), ""]
-        L += ["**What was established on this system.** Nothing beyond the observation above. In "
+        L += [f"**What was established on this {info.operation.subject_noun}.** Nothing beyond "
+              "the observation above. In "
               "particular, none of the general consequences described earlier was demonstrated "
               "here — they are what this category of weakness is capable of, which is why the item "
-              "is worth resolving, and they are not a description of this system.", ""]
+              f"is worth resolving, and they are not a description of this "
+              f"{info.operation.subject_noun}.", ""]
 
     L += ["**What to do about it.** " + _md_inline(_remediation_text(item)), ""]
 
@@ -590,13 +754,24 @@ def render_findings(*, label: str, info: RunInfo, facts: list[_Item], built: Opt
         "",
     ]
     if not facts:
+        gap = info.artefact_gap("findings")
+        if gap is not None:
+            L += ["## This section could not be produced", "", gap, "",
+                  "Nothing should be inferred from the absence of findings below. The examination "
+                  "may or may not have encountered something; what is certain is only that its "
+                  "record does not say. `02-approach-and-scope.md` sets out what this kind of "
+                  "operation does and does not record.", ""]
+            return "\n".join(L) + "\n"
         L += ["## Nothing was proven in this examination", "",
-              "No finding met the standard of proof described in `02-approach-and-scope.md`.",
+              "A structured record of findings WAS produced, and nothing in it met the standard of "
+              "proof described in `02-approach-and-scope.md`. So this is a real result, not a "
+              "missing one.",
               "",
-              "This is a statement about what was demonstrated, not a clean bill of health. "
-              "`02-approach-and-scope.md` sets out what was and was not examined, and "
-              "`04-leads.md` lists what was observed or suspected without being proven. Both "
-              "should be read before concluding anything.",
+              "It is still a statement about what was demonstrated, not a clean bill of health. "
+              "`02-approach-and-scope.md` sets out what was and was not examined, "
+              "`04-leads.md` lists what was observed or suspected without being proven, and "
+              "`05-what-was-looked-for.md` shows how much of what the engine can look for this "
+              "engagement actually recorded. All three should be read before concluding anything.",
               ""]
         return "\n".join(L) + "\n"
 
@@ -604,7 +779,7 @@ def render_findings(*, label: str, info: RunInfo, facts: list[_Item], built: Opt
           "| # | Finding | Rating | Where |",
           "|--:|---------|--------|-------|"]
     for i, it in enumerate(facts, start=1):
-        L.append(f"| {i} | {_md_inline(it.graded.finding.title)} | {it.graded.finding.severity} | "
+        L.append(f"| {i} | {it.title} | {it.graded.finding.severity} | "
                  f"`{_where(it)}` |")
     L += ["", "## The findings in detail", ""]
     for i, it in enumerate(facts, start=1):
@@ -631,9 +806,13 @@ def render_leads(*, label: str, info: RunInfo, observed: list[_Item], unproven: 
         "",
     ]
     if not observed and not unproven:
+        gap = info.artefact_gap("findings")
+        if gap is not None:
+            L += ["## This section could not be produced", "", gap, ""]
+            return "\n".join(L) + "\n"
         L += ["## Nothing to report", "",
-              "The examination recorded no unproven observations or leads. Everything it recorded "
-              "is in `03-findings.md`.", ""]
+              "A structured record of findings was produced, and it contained no unproven "
+              "observations or leads. Everything it recorded is in `03-findings.md`.", ""]
         return "\n".join(L) + "\n"
 
     L += [f"## Observed but not exploited — {_count_word(len(observed), 'item')}", ""]
@@ -644,7 +823,7 @@ def render_leads(*, label: str, info: RunInfo, observed: list[_Item], unproven: 
               "",
               "| # | Item | Rating |", "|--:|------|--------|"]
         for i, it in enumerate(observed, start=1):
-            L.append(f"| {i} | {_md_inline(it.graded.finding.title)} | {it.graded.finding.severity} |")
+            L.append(f"| {i} | {it.title} | {it.graded.finding.severity} |")
         L += ["", "### In detail", ""]
         for i, it in enumerate(observed, start=1):
             L += _finding_block(it, info, proven=False, index=i)
@@ -705,6 +884,19 @@ def render_catalogue(*, label: str, info: RunInfo, cat: Catalogue, built: Option
         "is not a pass, and it should not be presented to anyone as either. If assurance is needed "
         "over a particular category, that assurance has to come from work that recorded it — not "
         "from this row.",
+        "",
+        "## Which of these categories even apply here",
+        "",
+        f"This engagement was {_article(info.operation.name)} {info.operation.name}. Not every "
+        "category below is relevant to that kind of work — the categories that matter to a review "
+        "of source code are not the categories that matter to a cloud account, and neither set "
+        "matches a web application.",
+        "",
+        "**The engine does not record which categories apply to which kind of operation**, so this "
+        "document cannot mark the irrelevant ones, and it does not guess. Every category is listed, "
+        "and a reader who knows the domain should discount the ones that plainly do not apply. "
+        "Marking rows relevant on a hunch would be inventing information, which is worse than "
+        "listing a few rows that obviously do not apply.",
         "",
         "## This engagement at a glance",
         "",
@@ -839,7 +1031,7 @@ def render_what_to_do(*, label: str, info: RunInfo, facts: list[_Item], observed
               "rating:", "",
               "| Item | Rating | What is needed |", "|------|--------|----------------|"]
         for it in observed:
-            L.append(f"| {_md_inline(it.graded.finding.title)} | {it.graded.finding.severity} | "
+            L.append(f"| {it.title} | {it.graded.finding.severity} | "
                      f"{_md_inline(_remediation_text(it))} |")
         L.append("")
     else:
@@ -851,7 +1043,7 @@ def render_what_to_do(*, label: str, info: RunInfo, facts: list[_Item], observed
               "dismissed with a reason. Leaving them permanently unresolved is the outcome to "
               "avoid: an unresolved lead accumulates into a backlog nobody trusts.", ""]
         for it in unproven:
-            L.append(f"- **{_md_inline(it.graded.finding.title)}** "
+            L.append(f"- **{it.title}** "
                      f"({it.graded.finding.severity}) — see `04-leads.md`.")
         L.append("")
     else:
@@ -1047,6 +1239,8 @@ def render_verify(*, label: str, info: RunInfo, built: Optional[str], signed: bo
             "the saved evidence, that the evidence has not been altered, and that it was sealed "
             "by the signing authority whose fingerprint you compared in check 2.",
             "",
+            (_extra_proofs_note(int(proof.get("certificates") or 0), n_facts) or ""),
+            "",
             "**What a pass does not mean.** It says nothing about the system's condition today. "
             "It re-checks evidence captured during the examination window, so it will keep "
             "passing after the weaknesses are fixed. To find out whether the system is still "
@@ -1106,7 +1300,7 @@ _GLOSSARY: tuple[tuple[str, str], ...] = (
     ("Evidence bundle / proof bundle",
      "The folder named `proof-bundle` inside this pack. It holds the saved requests and replies "
      "for each proven finding, the sealed record of each proof, and the program that re-derives "
-     "them. It works offline and does not contact the examined system."),
+     "them. It works offline and does not contact anything that was examined."),
     ("Fact", "The word the machine-readable files use for a proven finding, as defined above. "
              "The written documents say 'proven' instead."),
     ("Fingerprint (of a file)",
@@ -1330,16 +1524,21 @@ def render_start_here(*, label: str, info: RunInfo, built: Optional[str], facts:
     proof_ok = bool(proof.get("ok"))
     L: list[str] = ["<main>"]
     L.append(f"<h1>{_e(label)}</h1>")
-    L.append("<p class='lede'>An authorised security examination of a computer system owned by "
-             "this organisation. This page explains what is in this pack, what it found, and how "
-             "to check any of it for yourself. No technical background is needed.</p>")
+    L.append(f"<p class='lede'>An authorised {_e(info.operation.name)}, carried out with "
+             "permission on something this organisation owns. This page explains what is in this "
+             "pack, what it found, and how to check any of it for yourself. No technical "
+             "background is needed.</p>")
 
     # --- the facts of the engagement -------------------------------------------------------------
     L.append("<h2>The essentials</h2>")
     L.append("<table class='meta'><tbody>")
-    for k, v in (
+    rows: list[tuple[str, str]] = [
         ("Engagement", label),
-        ("System examined", info.target or "not recorded"),
+        ("Kind of work", info.operation.name),
+        (info.subject.label, info.subject.value),
+    ]
+    rows += [(k, v) for k, v in info.subject.detail]
+    for k, v in tuple(rows) + (
         ("Examination started", info.started_text),
         ("Examination finished", info.finished_text),
         ("Time taken", info.duration_text),
@@ -1350,8 +1549,18 @@ def render_start_here(*, label: str, info: RunInfo, built: Optional[str], facts:
     L.append(f"<tr><td>Signed</td><td>{'Yes — see check 2 below' if signed else 'No — see below'}</td></tr>")
     L.append("</tbody></table>")
     if info.started is None:
-        L.append("<p class='meta'>Where a time reads <em>not recorded</em>, the system genuinely "
-                 "did not record it. No time in this pack has been estimated.</p>")
+        L.append("<p class='meta'>Where a value reads <em>not recorded</em>, the run genuinely "
+                 "did not record it. Nothing in this pack has been estimated to fill such a "
+                 "gap.</p>")
+
+    if info.subject.unrecorded:
+        L.append("<div class='panel'><p><strong>What the record does not capture.</strong> "
+                 f"{_e(_article(info.operation.name).capitalize())} {_e(info.operation.name)} "
+                 "records less than a reader might expect. This engagement has no record of:</p><ul>")
+        for u in info.subject.unrecorded:
+            L.append(f"<li>{_e(u)}</li>")
+        L.append("</ul><p>Those are gaps in what was written down — not statements that the work "
+                 "did not happen, and not statements that anything is fine.</p></div>")
 
     # --- the result -------------------------------------------------------------------------------
     L.append("<h2>What was found</h2>")
@@ -1371,22 +1580,27 @@ def render_start_here(*, label: str, info: RunInfo, built: Optional[str], facts:
     if facts:
         L.append("<p>In plain terms, what was demonstrated is:</p><ul>")
         for it in facts:
-            L.append(f"<li><strong>{_e(it.graded.finding.title)}</strong> — {_e(it.what)}</li>")
+            L.append(f"<li><strong>{_e(it.title)}</strong> — {_e(it.what)}</li>")
         L.append("</ul>")
         L.append("<p>Each of those is set out in full in <code>03-findings.md</code>, which "
                  "states separately what was demonstrated here and what that kind of weakness can "
                  "lead to in general — the two are different, and the difference matters. What to "
                  "do about them, in order, is in <code>06-what-to-do.md</code>.</p>")
+    elif info.artefact_gap("findings") is not None:
+        L.append("<div class='panel caution'><p><strong>This engagement produced no findings "
+                 "record, so the counts above are not a result.</strong> "
+                 f"{_e(_plain(info.artefact_gap('findings')))}</p></div>")
     else:
         L.append("<div class='panel caution'><p><strong>Nothing was proven in this "
-                 "examination.</strong> That is not the same as the system being secure. It means "
-                 "that within the boundaries described in <code>02-approach-and-scope.md</code>, "
-                 "nothing was demonstrated. Anything outside those boundaries was not looked at. "
-                 "Please read <code>02-approach-and-scope.md</code> before relying on this "
-                 "result.</p></div>")
+                 f"examination.</strong> That is not the same as this {_e(info.operation.subject_noun)} "
+                 "being secure. It means that within the boundaries described in "
+                 "<code>02-approach-and-scope.md</code>, nothing was demonstrated. Anything outside "
+                 "those boundaries was not looked at. Please read "
+                 "<code>02-approach-and-scope.md</code> before relying on this result.</p></div>")
 
     L.append("<div class='panel caution'><p><strong>What this pack does not say.</strong> It does "
-             "not say the system is secure. It says what was examined and what was found. "
+             f"not say this {_e(info.operation.subject_noun)} is secure. It says what was examined "
+             "and what was found. "
              "<code>02-approach-and-scope.md</code> sets out plainly what was <em>not</em> "
              "examined — anything in that list is unknown, not safe. A proven finding shows that "
              "a weakness exists; it is not evidence that anybody has used it or that data has "
@@ -1400,7 +1614,7 @@ def render_start_here(*, label: str, info: RunInfo, built: Optional[str], facts:
         (DOC_APPROACH, "How the work was done — and what was not examined. Read this before "
                        "drawing any conclusion from the result."),
         (DOC_FINDINGS, "Every proven finding: what kind of weakness it is, what was actually "
-                       "demonstrated on this system, how it was proved, what it does not prove, "
+                       "demonstrated here, how it was proved, what it does not prove, "
                        "what to do, and how to check the fix worked."),
         (DOC_LEADS, "What was observed or suspected but not proven, kept separate so that it is "
                     "not overstated."),
@@ -1533,7 +1747,9 @@ def build_case_file(
 
     Pure and deterministic given its inputs (``generated_at`` is the only injected clock)."""
     facts, observed, unproven = _classify(graded, adapted)
-    built = generated_at
+    # The build stamp is injected as an ISO string; render it the way every other time in the pack
+    # is rendered, falling back to the raw value if it cannot be parsed (never dropping it).
+    built = human_time(generated_at) or generated_at
     cat = catalogue if catalogue is not None else build_catalogue(graded)
 
     out: dict[str, bytes] = {}
@@ -1543,7 +1759,8 @@ def build_case_file(
         inventory=sorted(inventory)).encode("utf-8")
     out[DOC_EXECUTIVE] = render_executive(
         label=label, info=run_info, facts=facts, observed=observed, unproven=unproven,
-        built=built, signed=signed, proof_ok=bool(proof.get("ok"))).encode("utf-8")
+        built=built, signed=signed, proof_ok=bool(proof.get("ok")),
+        n_certs=int(proof.get("certificates") or 0)).encode("utf-8")
     out[DOC_APPROACH] = render_approach(
         label=label, info=run_info, built=built, adapted=adapted, n_facts=len(facts),
         notes=notes).encode("utf-8")

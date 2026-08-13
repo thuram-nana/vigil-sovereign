@@ -174,6 +174,7 @@ class FindingExtras:
     recorded_re_verifiable: bool = False
     proof_joined: bool = False         # a retained oracle_context was located and attached
     unrecognised_severity: Optional[str] = None
+    parameter: str = ""                # the affected input name, when one can be identified
 
 
 @dataclass
@@ -345,8 +346,17 @@ def adapt_scan_export(
             "oracle_rationale": "",
         }
         res.findings.append(payload)
+        # The affected input's name. The retained proof records it explicitly; otherwise it is the
+        # first parameter in the endpoint's query string. Empty when neither is available — the
+        # documents then omit it rather than naming a parameter nothing recorded.
+        parameter = str((proof or {}).get("param") or "").strip()
+        if not parameter and "?" in endpoint:
+            first = endpoint.partition("?")[2].split("&", 1)[0]
+            parameter = first.split("=", 1)[0].strip()
+
         res.extras[slug] = FindingExtras(
             slug=slug,
+            parameter=parameter,
             kind=kind,
             location=location,
             endpoint=endpoint,

@@ -49,9 +49,12 @@ from typing import Any, Optional
 
 from ..common.logging import _scrub  # reuse the engagement-log secret scrubber verbatim
 from .adapt import AdaptResult, adapt_scan_export, auditfinding_to_payload
+from .case_file import CASE_FILE_NAMES, build_case_file
+from .catalogue import build_catalogue, catalogue_export
 from .export import export_json, export_sarif
 from .generate import ReportMeta, generate_reports
 from .grounding import GradedFinding, grade_findings
+from .runinfo import read_run_info
 
 # A fixed zip entry timestamp (the ZIP epoch) so the archive framing carries NO wallclock and two
 # builds over the same inputs produce byte-identical entries. The MANIFEST hashes the entry CONTENT,
@@ -173,6 +176,11 @@ def _read_reverifiable(run_dir: Path) -> list[dict]:
     dossier-build time. Handles BOTH conventions: the proof studio's ``proofs/reverifiable.json``
     and a scan/console run's top-level ``reverifiable.json``. Total on a missing/unreadable file.
 
+    BOTH conventions are read and MERGED (de-duplicated by canonical content), matching
+    ``proof.run.read_reverifiable`` exactly — otherwise this count and the number of certificates in
+    the embedded bundle would disagree, and a reader comparing the two would have no way to tell
+    which was wrong.
+
     UNIVERSAL veracity choke point (T1): a finding is returned here — and thus counted as one of
     the dossier's "N oracle-confirmed FACT(s)" (banner, fact table, MANIFEST ``facts``) — ONLY if
     its retained ``oracle_context`` RE-FIRES NOW via ``report.grounding.grade_finding``. A finding
@@ -180,6 +188,8 @@ def _read_reverifiable(run_dir: Path) -> list[dict]:
     or tampered certificate can never inflate the fact count. Fail-closed: an ungradeable finding
     is excluded. Returns the RAW finding dicts (unchanged) that survive the re-execution grade, so
     downstream display reads the original fields."""
+    out: list[dict] = []
+    seen: set[str] = set()
     for rel in ("proofs/reverifiable.json", "reverifiable.json"):
         p = run_dir / rel
         if p.is_symlink() or not p.is_file():
@@ -189,9 +199,21 @@ def _read_reverifiable(run_dir: Path) -> list[dict]:
         except (OSError, ValueError):
             continue
         fs = doc.get("active_findings") if isinstance(doc, dict) else None
-        if isinstance(fs, list):
-            return [f for f in fs if isinstance(f, dict) and _reverifiable_finding_is_fact(f)]
-    return []
+        if not isinstance(fs, list):
+            continue
+        for f in fs:
+            if not isinstance(f, dict):
+                continue
+            try:
+                key = json.dumps(f, sort_keys=True, default=str)
+            except (TypeError, ValueError):
+                key = repr(f)
+            if key in seen:
+                continue
+            seen.add(key)
+            if _reverifiable_finding_is_fact(f):
+                out.append(f)
+    return out
 
 
 def _scrub_log(run_dir: Path) -> tuple[Optional[str], int]:
@@ -551,7 +573,8 @@ def _report_pointer(included: list[str]) -> str:
 def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
                   proof: dict, spine_names: list[str], has_drift: bool, has_log: bool,
                   signed: bool, fingerprint: str, generated_at: Optional[str],
-                  included: list[str], has_terminal: bool = False) -> str:
+                  included: list[str], has_terminal: bool = False,
+                  has_case_file: bool = False, label: str = "") -> str:
     """Build the self-contained index.html. Reflects EXACTLY what the run produced: FACTs from the
     reverifiable set, findings/remediation from the report export when present, and the REAL offline
     verify command for the embedded proof bundle. Never fabricates a fact, never overclaims a lead."""
@@ -575,6 +598,14 @@ def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
     if generated_at:
         sub += f" Generated {_e(generated_at)}."
     L.append(f"<p class='sub'>{sub}</p>")
+    if has_case_file:
+        # This page is written for a security engineer. Anyone else should be sent to the case file
+        # rather than left to work out that the numbered documents exist.
+        L.append("<div class='note'><b>Not a security specialist?</b> Open "
+                 "<code class='inl'>00-START-HERE.html</code> instead. It explains this engagement "
+                 "in plain English, accounts for every file in this archive, and is written to be "
+                 "read without a technical background. This page is the same material in one "
+                 "technical summary.</div>")
 
     # Honest headline banner.
     #
@@ -715,11 +746,20 @@ def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
 
 
 def _render_readme(*, engagement_slug: str, n_facts: int, proof: dict, signed: bool,
-                   fingerprint: str, included: list[str], notes: list[str]) -> str:
-    L = [f"# VIGIL engagement dossier — {engagement_slug}", "",
-         "One self-contained, tamper-evident record of a single engagement. Open `index.html` for the "
-         "readable view.", "", "## Integrity", "",
-         "`MANIFEST.json` lists every content entry with its sha256. Recompute any entry's hash and compare."]
+                   fingerprint: str, included: list[str], notes: list[str],
+                   has_case_file: bool = False, label: str = "") -> str:
+    L = [f"# VIGIL engagement dossier — {label or engagement_slug}", ""]
+    if label and label != engagement_slug:
+        L += [f"Machine reference: `{engagement_slug}`", ""]
+    L += ["One self-contained, tamper-evident record of a single engagement.", ""]
+    if has_case_file:
+        L += ["**Start with `00-START-HERE.html`.** It explains this engagement in plain English and "
+              "accounts for every file in this archive. `index.html` is the same material in one "
+              "technical summary, for a security engineer.", ""]
+    else:
+        L += ["Open `index.html` for the readable view.", ""]
+    L += ["## Integrity", "",
+          "`MANIFEST.json` lists every content entry with its sha256. Recompute any entry's hash and compare."]
     if signed:
         L += ["", f"`MANIFEST.sig.json` is an m-of-n governance Ed25519 signature over `MANIFEST.json`. "
                   f"The trust-root fingerprint (`TRUST-ROOT-FINGERPRINT.txt`) is `{fingerprint}` — pin it "
@@ -839,6 +879,7 @@ def build_dossier(
     vault: Any = None,
     generated_at: Optional[str] = None,
     terminal_history: Optional[str] = None,
+    label: Optional[str] = None,
 ) -> dict:
     """Assemble EVERYTHING a run produced into one self-contained, tamper-evident ``.zip`` at ``out_zip``.
 
@@ -848,6 +889,14 @@ def build_dossier(
     run has no oracle-confirmed FACT); the secret-scrubbed engagement log; any governance-signed spine
     chain; any drift record; a readable ``index.html`` + ``README.md``; a ``MANIFEST.json`` of sha256s;
     and (if a governance signer is resolvable) a ``MANIFEST.sig.json`` + ``TRUST-ROOT-FINGERPRINT.txt``.
+
+    ``label`` is a HUMAN title for the engagement ("Ministry of Health — Q3 external review"),
+    defaulting to ``engagement_slug``. It is PRESENTATION metadata and is deliberately confined to the
+    rendered documents: it is never passed to the proof-bundle export, never reaches a certificate, and
+    never becomes part of any signed claim about a finding. Two dossiers built from one run under
+    different labels therefore carry byte-identical proof bundles, and each verifies independently.
+    (The dossier's own MANIFEST does cover the rendered documents, as it must — it is a hash of this
+    archive's contents — and it is re-signed on every build.)
 
     Deterministic: sorted entries, no wallclock in the hashed content (``generated_at`` is the only,
     OPTIONAL, injected stamp and it defaults to none). Path-safe: every entry is confined; symlinks are
@@ -859,8 +908,9 @@ def build_dossier(
 
     meta = ReportMeta(target=engagement_slug, generated_at=generated_at)
     notes: list[str] = []
+    human_label = (label or "").strip() or engagement_slug
 
-    # 1) reports + exports (pre-rendered, else rendered from findings.json via the renderers)
+    # 1) reports + exports (pre-rendered, else rendered from the run's finding record)
     reports = _gather_reports(run, meta)
     notes += reports.notes
 
@@ -871,10 +921,13 @@ def build_dossier(
     entries: dict[str, bytes] = {}
     for name, b in sorted(reports.md.items()):
         entries[f"reports/{name}"] = b
+    # The machine formats live under appendix/ — they are the source record a tool or a future
+    # reviewer reads, not something a person is expected to open, and the numbered case-file
+    # documents at the archive root are what a reader is meant to find first.
     if reports.report_json is not None:
-        entries["reports/report.json"] = reports.report_json
+        entries["appendix/report.json"] = reports.report_json
     if reports.report_sarif is not None:
-        entries["reports/report.sarif"] = reports.report_sarif
+        entries["appendix/report.sarif"] = reports.report_sarif
 
     # 3) the offline-verifiable proof bundle
     proof_entries, proof = _build_proof_bundle(run, engagement_slug, base_dir, vault)
@@ -932,16 +985,41 @@ def build_dossier(
     signed = probe_sig is not None
     fingerprint = probe_fp or ""
 
+    # 7a) the plain-English case file — the part a non-specialist reads. Built from the SAME graded
+    #     findings the markdown reports are, so the two can never disagree about what was proven.
+    #     The catalogue export goes in first so the inventory the START-HERE page prints is complete.
+    case_entries: dict[str, bytes] = {}
+    try:
+        run_info = read_run_info(run, reports.export_doc)
+        cat = build_catalogue(reports.graded)
+        entries["appendix/catalogue.json"] = _canon_json(catalogue_export(cat))
+        # The FULL final entry list, so the START-HERE page can account for every file in the
+        # archive: the content gathered so far, the case-file documents themselves, the index and
+        # README added below, and the manifest envelope.
+        inventory = (sorted(entries) + list(CASE_FILE_NAMES) + ["index.html", "README.md",
+                                                               "MANIFEST.json"])
+        if signed:
+            inventory += ["MANIFEST.sig.json", "TRUST-ROOT-FINGERPRINT.txt"]
+        case_entries = build_case_file(
+            label=human_label, run_info=run_info, graded=reports.graded, adapted=reports.adapted,
+            proof=proof, signed=signed, fingerprint=fingerprint, generated_at=generated_at,
+            inventory=sorted(set(inventory)), notes=notes, catalogue=cat)
+        entries.update(case_entries)
+    except Exception as e:  # noqa: BLE001 — a rendering failure must never cost the archive its proof
+        notes.append(f"the plain-English case file could not be rendered ({type(e).__name__}: {e}); "
+                     f"the machine records and the proof bundle are unaffected")
+
     index_html = _render_index(
         engagement_slug=engagement_slug, facts=facts, reports=reports, proof=proof,
         spine_names=sorted(spine), has_drift=has_drift, has_log=has_log, has_terminal=has_terminal,
         signed=signed, fingerprint=fingerprint, generated_at=generated_at,
-        included=included_preview)
+        included=included_preview, has_case_file=bool(case_entries), label=human_label)
     entries["index.html"] = index_html.encode("utf-8")
 
     readme = _render_readme(
         engagement_slug=engagement_slug, n_facts=len(facts), proof=proof, signed=signed,
-        fingerprint=fingerprint, included=sorted(entries), notes=notes)
+        fingerprint=fingerprint, included=sorted(entries), notes=notes,
+        has_case_file=bool(case_entries), label=human_label)
     entries["README.md"] = readme.encode("utf-8")
 
     # 8) manifest over the FINAL content entries, then the governance signature over the manifest bytes
@@ -981,6 +1059,8 @@ def build_dossier(
         "verify_cmd": (proof.get("verify_cmd") if proof.get("ok") else None),
         "trust_root_fingerprint": (fingerprint or None),
         "manifest_sha256": manifest_sha,
+        "label": human_label,
+        "case_file": sorted(case_entries),
         "proof_bundle": bool(proof.get("ok")),
         "notes": notes,
     }

@@ -164,54 +164,55 @@ class OperationType:
     subject_kind: str              # how to describe the subject's form, for a reader
     records_findings: bool         # writes a structured findings record (report.json)
     records_proofs: bool           # can write retained proofs (reverifiable.json / proofs/)
+    subject_noun: str = "subject"  # the noun to use in prose: "this codebase", "this cluster"
     records_coverage: bool = False  # writes which checks it attempted (nothing does, today)
     note: str = ""                 # anything a reader needs to know about this type's records
 
 
 _OPERATION_TYPES: dict[str, OperationType] = {
     "url": OperationType(
-        key="url", name="web application test",
+        key="url", subject_noun="system", name="web application test",
         subject_label="Web address examined", subject_kind="a web address",
         records_findings=True, records_proofs=True),
     "codebase": OperationType(
-        key="codebase", name="source-code review",
+        key="codebase", subject_noun="codebase", name="source-code review",
         subject_label="Codebase examined", subject_kind="a folder of source code",
         records_findings=False, records_proofs=True,
         note="A source-code review records the proofs it establishes, but it does not write a "
              "structured list of findings the way a web test does. Its narrative output is the "
              "reviewing tool's own log."),
     "cloud": OperationType(
-        key="cloud", name="cloud posture assessment",
+        key="cloud", subject_noun="cloud account", name="cloud posture assessment",
         subject_label="Cloud account examined", subject_kind="an account or subscription label",
         records_findings=False, records_proofs=False,
         note="A cloud posture assessment currently records only that it ran, and its own summary "
              "text. It does not yet write a structured findings record or retained proofs."),
     "k8s": OperationType(
-        key="k8s", name="Kubernetes posture assessment",
+        key="k8s", subject_noun="cluster", name="Kubernetes posture assessment",
         subject_label="Cluster examined", subject_kind="a cluster label",
         records_findings=False, records_proofs=False,
         note="A Kubernetes posture assessment currently records only that it ran, and its own "
              "summary text. It does not yet write a structured findings record or retained proofs."),
     "infra": OperationType(
-        key="infra", name="infrastructure posture assessment",
+        key="infra", subject_noun="estate", name="infrastructure posture assessment",
         subject_label="Infrastructure examined", subject_kind="a host or service label",
         records_findings=False, records_proofs=False,
         note="An infrastructure posture assessment currently records only that it ran, and its own "
              "summary text. It does not yet write a structured findings record or retained proofs."),
     "aegis": OperationType(
-        key="aegis", name="defensive monitoring run",
+        key="aegis", subject_noun="monitored environment", name="defensive monitoring run",
         subject_label="Log sources examined", subject_kind="a set of log files",
         records_findings=False, records_proofs=False,
         note="A defensive monitoring run watches the organisation's own logs. It currently records "
              "only that it ran; it does not write a structured findings record."),
     "suite": OperationType(
-        key="suite", name="tool suite run",
+        key="suite", subject_noun="subject", name="tool suite run",
         subject_label="Subject examined", subject_kind="whatever the chosen tools accept",
         records_findings=False, records_proofs=False,
         note="A tool suite run currently records only that it ran and which tools were chosen. It "
              "does not write a structured findings record."),
     "tool": OperationType(
-        key="tool", name="single tool run",
+        key="tool", subject_noun="subject", name="single tool run",
         subject_label="Subject examined", subject_kind="whatever the chosen tool accepts",
         records_findings=False, records_proofs=False,
         note="A single tool run currently records only that it ran and which tool was chosen. It "

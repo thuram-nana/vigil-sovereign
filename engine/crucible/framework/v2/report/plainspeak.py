@@ -521,3 +521,59 @@ def has_oracle_plain(kind: str) -> bool:
 def oracle_plain_map() -> dict[str, str]:
     """A copy of the check-method descriptions, for a glossary that lists only the checks used."""
     return dict(_ORACLE_PLAIN)
+
+
+# A readable NAME for a weakness category — the noun phrase a person would use, as distinct from
+# the engine's internal identifier. Used to compose a human title for a finding whose recorded
+# title is machine-shaped ("boolean_sqli confirmed at q"). Composing a title from the category and
+# the affected parameter derives from fields the finding already carries; it invents nothing, and
+# the engine's own recorded title is always shown alongside so nothing is lost.
+_CATEGORY_TITLES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("boolean_sqli", "time_based_sqli", "error_based_sqli", "sql_injection", "sqli"),
+     "Database injection (SQL injection)"),
+    (("nosqli", "nosql_injection"), "Database injection (NoSQL)"),
+    (("ldap_injection",), "Directory-service injection"),
+    (("xpath_injection",), "XML query injection"),
+    (("reflected_xss", "stored_xss", "dom_xss", "xss"), "Cross-site scripting"),
+    (("ssti", "template_injection"), "Template injection"),
+    (("el_injection",), "Expression injection"),
+    (("command_injection", "os_command"), "Operating-system command injection"),
+    (("rce",), "Remote code execution"),
+    (("ssrf",), "Server-side request forgery"),
+    (("path_traversal", "lfi", "rfi"), "File-path traversal"),
+    (("xxe", "blind_xxe"), "XML external-entity processing"),
+    (("deserial",), "Unsafe deserialisation"),
+    (("idor", "bola", "broken_object", "insecure_direct"), "Missing per-record access control"),
+    (("bfla", "broken_function", "broken_access_control"), "Missing function-level access control"),
+    (("auth_bypass", "authentication_bypass"), "Authentication bypass"),
+    (("privilege_escalation", "priv_esc"), "Privilege escalation"),
+    (("authorization", "authz"), "Authorisation weakness"),
+    (("mass_assignment",), "Mass assignment"),
+    (("open_redirect",), "Open redirect"),
+    (("cors",), "Cross-origin sharing misconfiguration"),
+    (("host_header",), "Host-header injection"),
+    (("jwt",), "Token signature weakness"),
+    (("request_smuggling",), "HTTP request smuggling"),
+    (("request_race",), "Request race condition"),
+    (("websocket",), "WebSocket weakness"),
+    (("graphql",), "GraphQL query-interface weakness"),
+    (("business_logic",), "Business-logic flaw"),
+    (("weak_tls", "tls_weakness", "weak_cipher"), "Weak transport encryption"),
+    (("exposure", "sensitive_exposure", "info_disclosure"), "Information exposure"),
+    (("security_misconfiguration",), "Security misconfiguration"),
+    (("version_range", "supply_chain", "dependency", "outdated"), "Vulnerable third-party component"),
+    (("prompt_injection",), "AI prompt injection"),
+    (("credential_stuffing",), "Credential-stuffing exposure"),
+    (("rate_limit",), "Missing rate limiting"),
+)
+
+
+def category_title(bug_class: str) -> Optional[str]:
+    """A readable name for a weakness category, or ``None`` when none is on file."""
+    b = (bug_class or "").strip().lower()
+    if not b or b == "passive":
+        return None
+    for keys, title in _CATEGORY_TITLES:
+        if any(k in b for k in keys):
+            return title
+    return None
