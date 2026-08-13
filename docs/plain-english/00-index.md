@@ -370,6 +370,9 @@ index, in the released version the following are true:
 This is the category most easily misread in either direction. The project's own formulation is the
 one to use: **built, gated, and proven offline; live fire awaits operator-supplied credentials, by
 design.** Calling these unfinished understates the system. Calling them field-proven overstates it.
+One entry has since left this category, and the table marks it: the two container-platform
+(Kubernetes) confirmations are now proven against a real cluster the system creates and owns, so
+they wait on nobody.
 
 | Capability | What it is waiting for | Where explained |
 |---|---|---|
@@ -385,8 +388,8 @@ design.** Calling these unfinished understates the system. Calling them field-pr
 
 **The six cloud and container-platform confirmations, named.** All six are complete and merged into
 the released software. The four cloud ones are proven with recorded sample evidence offline; the two
-container-platform (Kubernetes) ones are proven against a real cluster the system stands up itself. Verified for this index, they
-are registered as six separate evidence routes:
+container-platform (Kubernetes) ones are proven against a real cluster the system stands up itself.
+Verified for this index, they are registered as six separate evidence routes:
 
 | Confirmation | What it establishes |
 |---|---|
