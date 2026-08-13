@@ -40,6 +40,7 @@ facts and the archive listing. No wallclock (the build time is injected), no RNG
 from __future__ import annotations
 
 import html
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
@@ -1359,12 +1360,23 @@ _GLOSSARY: tuple[tuple[str, str], ...] = (
 )
 
 
+_PATH_REF_RE = re.compile(r"`((?:reports|appendix|logs|spine|proof-bundle|drift)/[\w.\-/]+)`")
+
+
 def render_glossary(*, label: str, info: RunInfo, built: Optional[str],
-                    extra_terms: Iterable[tuple[str, str]] = ()) -> str:
+                    extra_terms: Iterable[tuple[str, str]] = (),
+                    inventory: Iterable[str] = ()) -> str:
     L = _header("Glossary", label, info.run_id, built)
     L += ["Every technical term used anywhere in this pack, in alphabetical order, explained "
           "without assuming a technical background.", ""]
     terms = list(_GLOSSARY) + [t for t in extra_terms if t]
+    # Drop any entry that points at a file this archive does not contain. A glossary entry for a
+    # format the pack does not ship is both a dangling cross-reference and an explanation of a term
+    # the reader will never meet — the same defect the index pointer guard exists to prevent.
+    present = set(inventory or ())
+    if present:
+        terms = [(term, meaning) for term, meaning in terms
+                 if all(ref in present for ref in _PATH_REF_RE.findall(meaning))]
     for term, meaning in sorted(terms, key=lambda t: t[0].lower()):
         L += [f"**{term}**", "", meaning, ""]
     L += ["---", "",
@@ -1778,5 +1790,5 @@ def build_case_file(
         proof=proof, n_facts=len(facts)).encode("utf-8")
     out[DOC_GLOSSARY] = render_glossary(
         label=label, info=run_info, built=built,
-        extra_terms=_extra_glossary_terms(facts)).encode("utf-8")
+        extra_terms=_extra_glossary_terms(facts), inventory=inventory).encode("utf-8")
     return out
