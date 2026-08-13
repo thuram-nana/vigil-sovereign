@@ -100,7 +100,7 @@ def test_owner_signed_reenable_resumes_injection():
     _disable(s)
     with pytest.raises(RuntimeError):
         g.arm(owner_key=OWNER)                   # refused while disabled
-    CapabilityGate(s, owner_key=OWNER, trusted_pubkey=OP).enable("gesture")   # owner-signed re-enable
+    CapabilityGate(s, owner_key=OWNER, trusted_pubkey=OP).enable("gesture", issued_at=1.0)  # owner re-enable
     g.arm(owner_key=OWNER)                        # now allowed
     v = g.handle(_click())
     assert v["injected"] is True and ("click", "left") in b.calls

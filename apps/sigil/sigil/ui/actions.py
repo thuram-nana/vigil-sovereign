@@ -108,7 +108,12 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
         # `autolearn` (K2) is deliberately NOT swept into "both": it is an independent, explicit toggle,
         # so the existing panic control's behaviour is unchanged when a new capability is registered.
         caps = ["gesture", "voice"] if which == "both" else [which]
-        seqs = {c: (cg.disable(c, reason=reason) if verb == "disable" else cg.enable(c, reason=reason))
+        # ONE server-clock `issued_at` for the whole request: the anti-replay high-water is PER CAPABILITY,
+        # so the same value on `gesture` and `voice` lands on two independent keys and neither refuses the
+        # other. Never from `params` — a browser-chosen value could pin the high-water out of reach.
+        now = _time.time()
+        seqs = {c: (cg.disable(c, reason=reason) if verb == "disable"
+                    else cg.enable(c, issued_at=now, reason=reason))
                 for c in caps}
         return {"ok": True, "action": action, "capabilities": caps, "recorded_seqs": seqs}
     if action in _SETTINGS_ACTIONS:

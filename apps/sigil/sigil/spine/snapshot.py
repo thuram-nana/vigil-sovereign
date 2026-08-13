@@ -17,6 +17,7 @@ Sub-state ↔ bearer (all identity-empty in Slice C):
   nonce_highwater        {device: max int-nonce}                 join-semilattice (max)         envelope replay floor
   killswitch_engaged     bool                                    last-write latch (ID/T/F)      governor halt
   killswitch_issued_hw   float|None                              join-semilattice (max)         release anti-replay
+  capability_issued      {capability: max issued_at}             join-semilattice (max)         enable anti-replay
   creation_created       {(service,origin): count}               count-add (PAIR key!)          DELEGATE account cap
   capability_map         {host_id: cap}                          right-biased LWW               mesh host capability
   mesh_dev_state         {device_pubkey: authorized|revoked}     LWW (keep revoked!)            mesh device authz
@@ -68,6 +69,10 @@ class SnapshotState(BaseModel):
     killswitch_issued_hw: Optional[float] = None
     capability_latch: list = []       # [[capability, enabled_bool], ...] — governor.capability latch (LWW:
     #                                   disable=any, enable=owner-verified). Missing capability ⇒ enabled.
+    capability_issued: list = []      # [[capability, issued_at], ...] — PER-CAPABILITY enable high-water.
+    #                                   Missing row ⇒ the -inf bottom. Per capability and never global: a
+    #                                   global one would let a fresh enable(voice) refuse a legitimate
+    #                                   later enable(gesture) carrying a smaller issued_at.
     # tuple-keyed / None-tolerant sub-states as list-of-rows (JSON-safe + type-verbatim): a non-str key an
     # owner-signed-but-malformed record could carry (host_id/device_pubkey/agent/scope = None/int) is
     # preserved EXACTLY — the live scans key on p.get(...) with no type guard, so dropping such a key would
@@ -93,6 +98,9 @@ class SnapshotState(BaseModel):
 
     def capability_latch_map(self) -> dict[Optional[str], bool]:
         return {row[0]: row[1] for row in self.capability_latch}
+
+    def capability_issued_map(self) -> dict[Optional[str], float]:
+        return {row[0]: row[1] for row in self.capability_issued}
 
     def arm_set(self) -> set:
         return {(row[0], row[1]) for row in self.consumed_arm_nonces}
@@ -194,6 +202,8 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     # Import each consumer's REAL signed-core tuple rather than restating it here. A restated tuple is a
     # silent drift hazard: adding a field to a consumer's core (as the anti-replay `issued_at` did) while
     # this copy lagged would make build() honor records the live scan rejects, and vice versa.
+    from ..governor.capability import SIGNAL as _CAPLATCH_SIGNAL
+    from ..governor.capability import _CORE as _CAPLATCH_CORE
     from ..governor.killswitch import SIGNAL as _KS_SIGNAL
     from ..governor.killswitch import _CORE as _KS_CORE
     from ..mesh.registry import CAP_SIGNAL, DEV_SIGNAL, _CAP_CORE, _DEV_CORE
@@ -209,6 +219,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     ks_issued = (s.killswitch_issued_hw if s.killswitch_issued_hw is not None else NO_HIGHWATER) \
         if s else NO_HIGHWATER
     cap_latch: dict[Any, bool] = dict(s.capability_latch) if s else {}   # list-of-rows -> {capability: bool}
+    cap_issued: dict[Any, float] = dict(s.capability_issued_map()) if s else {}
     creation: dict[tuple[Optional[str], Optional[str]], int] = dict(s.creation_counter()) if s else {}
     capability: dict[Any, dict] = dict(s.capability_map) if s else {}   # list-of-rows -> dict (keys verbatim)
     mesh_dev: dict[Any, str] = dict(s.mesh_dev_state) if s else {}
@@ -249,12 +260,16 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                     ks_engaged = False
         # --- capability latch (disable=any, enable=owner-verified, IN ORDER, per capability). No isinstance
         #     guard on the key — mirror the scan, which keys on p.get("capability") unconditionally. ---
-        if sig == "governor.capability":
+        if sig == _CAPLATCH_SIGNAL:
             state = p.get("state")
             if state == "disabled":
                 cap_latch[p.get("capability")] = False
-            elif state == "enabled" and verify_signed(p, ("signal", "capability", "state"), tp):
-                cap_latch[p.get("capability")] = True
+            elif state == "enabled" and verify_signed(p, _CAPLATCH_CORE, tp):
+                cap_key = p.get("capability")
+                issued = as_issued_at(p.get("issued_at"))
+                if issued > cap_issued.get(cap_key, NO_HIGHWATER):   # mirror _scan_enabled EXACTLY
+                    cap_issued[cap_key] = issued
+                    cap_latch[cap_key] = True
         # --- creation cap (PAIR-keyed count; account.create applied). Record shape (actor.py): kind="event",
         #     payload{signal:"web.actor.step", step_kind:"account.create", status:"applied", service, url}. ---
         if p.get("signal") == "web.actor.step" and p.get("step_kind") == "account.create" \
@@ -304,6 +319,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         killswitch_engaged=ks_engaged,
         killswitch_issued_hw=(None if ks_issued == NO_HIGHWATER else ks_issued),   # -inf ⇒ the None sentinel
         capability_latch=[[c, e] for c, e in cap_latch.items()],
+        capability_issued=[[c, i] for c, i in cap_issued.items()],
         creation_created=[[s, o, c] for (s, o), c in creation.items()],
         capability_map=[[h, c] for h, c in capability.items()],
         mesh_dev_state=[[d, s] for d, s in mesh_dev.items()],

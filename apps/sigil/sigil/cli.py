@@ -351,7 +351,11 @@ def cmd_capability(a) -> None:
     """Enable/disable gesture control, voice control, or autolearn (the Knowledge-Engine propose loop)
     via the owner-signed, tamper-evident capability latch (audit W0 / K2). `status` needs no key; toggling
     is owner-signed. Any disable is fail-safe (takes effect regardless of signature); only an owner-signed
-    enable re-enables. `both` is the physical-input pair (gesture+voice); `autolearn` is toggled explicitly."""
+    enable re-enables. `both` is the physical-input pair (gesture+voice); `autolearn` is toggled explicitly.
+
+    The CLI stamps `issued_at` on each enable (the anti-replay high-water); the gate reads no clock."""
+    import time as _time
+
     from .governor import CAPABILITIES, CapabilityGate
     from .governor.identity import ensure_owner_keypair
     store = SpineStore()
@@ -367,8 +371,12 @@ def cmd_capability(a) -> None:
     # "both" is the historical gesture+voice pair — autolearn is NOT swept in (matches the UI action plane).
     caps = ["gesture", "voice"] if a.target == "both" else [a.target]
     cg = CapabilityGate(store, owner_key=ensure_owner_keypair())
+    # ONE `issued_at` for the whole invocation is correct: the high-water is PER CAPABILITY, so the same
+    # value applied to `gesture` and `voice` lands on two independent keys and neither refuses the other.
+    now = _time.time()
     for c in caps:
-        seq = cg.disable(c, reason=a.reason) if a.state == "off" else cg.enable(c, reason=a.reason)
+        seq = cg.disable(c, reason=a.reason) if a.state == "off" else cg.enable(c, issued_at=now,
+                                                                                reason=a.reason)
         print(f"  {c} {'DISABLED' if a.state == 'off' else 'ENABLED (owner-signed)'} (seq {seq})")
 
 

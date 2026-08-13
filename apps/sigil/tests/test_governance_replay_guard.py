@@ -44,6 +44,8 @@ import tempfile
 import pytest
 
 from sigil.governor.authn import as_issued_at
+from sigil.governor.capability import _CORE as CAP_CORE
+from sigil.governor.capability import CapabilityGate
 from sigil.governor.killswitch import _CORE as KS_CORE
 from sigil.governor.killswitch import KillSwitch
 from sigil.reuse import generate_keypair
@@ -220,3 +222,123 @@ def test_killswitch_no_high_water_folds_to_the_none_sentinel():
     folded = build(list(s.iter_records()), trusted_pubkey=OWNER_PUB, base_seq=0, snapshot_seq=-1)
     assert folded.killswitch_issued_hw is None
     assert SnapshotState.model_validate(folded.model_dump()).killswitch_issued_hw is None
+
+
+# =====================================================================================================
+# governor.capability — replaying a captured `enabled` must not re-enable a disabled capability.
+# =====================================================================================================
+def _cg(store):
+    return CapabilityGate(store, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+
+
+def test_capability_replay_of_enable_after_disable_does_not_reenable():
+    s = _store()
+    g = _cg(s)
+    g.disable("gesture")
+    seq = g.enable("gesture", issued_at=100.0)
+    assert g._scan_enabled("gesture") is True
+    captured = dict(s.get(seq).payload)
+    g.disable("gesture", reason="panic")
+    assert g._scan_enabled("gesture") is False
+    _replay(s, captured)
+    assert g._scan_enabled("gesture") is False, "a replayed enable must NOT re-enable a disabled capability"
+
+
+def test_capability_stale_lower_issued_enable_cannot_override_a_newer_one():
+    s = _store()
+    g = _cg(s)
+    g.disable("voice")
+    old = dict(s.get(g.enable("voice", issued_at=10.0)).payload)
+    g.enable("voice", issued_at=20.0)
+    g.disable("voice", reason="panic")
+    _replay(s, old)
+    assert g._scan_enabled("voice") is False
+
+
+def test_capability_legitimate_retoggle_still_works():
+    """THE REGRESSION GUARD (cf. test_capability_latch.py's round-trip): disable→enable→disable→enable
+    re-signs BYTE-IDENTICALLY, so a signature-dedup fix would strand the capability off."""
+    s = _store()
+    g = _cg(s)
+    for _ in range(3):
+        g.disable("autolearn")
+        assert g._scan_enabled("autolearn") is False
+        g.enable("autolearn", issued_at=_iss())
+        assert g._scan_enabled("autolearn") is True, "a genuine enable with a fresh issued_at must re-enable"
+
+
+def test_capability_high_water_is_PER_CAPABILITY_not_global():
+    """HAZARD: a GLOBAL high-water would let a fresh enable(voice) refuse a legitimate later
+    enable(gesture) that carried a smaller issued_at. The keys must be independent."""
+    s = _store()
+    g = _cg(s)
+    g.disable("gesture")
+    g.disable("voice")
+    g.enable("voice", issued_at=900.0)              # a HIGH high-water, but only for `voice`
+    g.enable("gesture", issued_at=5.0)              # a genuine, much older enable for `gesture`
+    assert g._scan_enabled("gesture") is True, "a per-capability high-water must not leak across keys"
+    assert g._scan_enabled("voice") is True
+
+
+def test_capability_disable_needs_no_freshness_and_its_replay_is_harmless():
+    s = _store()
+    g = _cg(s)
+    dis = dict(s.get(g.disable("gesture")).payload)
+    g.enable("gesture", issued_at=_iss())
+    assert g._scan_enabled("gesture") is True
+    _replay(s, dis)                                  # replaying a DISABLE is fail-safe
+    assert g._scan_enabled("gesture") is False
+
+
+def test_capability_issued_at_is_in_the_signed_core():
+    assert "issued_at" in CAP_CORE
+
+
+def test_capability_tampered_issued_at_breaks_the_signature():
+    s = _store()
+    g = _cg(s)
+    g.disable("gesture")
+    captured = dict(s.get(g.enable("gesture", issued_at=10.0)).payload)
+    g.disable("gesture", reason="panic")
+    captured["issued_at"] = 10_000.0                 # re-stamp freshness WITHOUT re-signing
+    _replay(s, captured)
+    assert g._scan_enabled("gesture") is False
+
+
+def test_capability_high_water_survives_a_prune(monkeypatch):
+    s = _store()
+    g = _cg(s)
+    g.disable("gesture")
+    captured = dict(s.get(g.enable("gesture", issued_at=500.0)).payload)
+    K = len(list(s.iter_records()))
+    prefix = [r for r in s.iter_records() if r.seq < K]
+    synthetic = build(prefix, trusted_pubkey=OWNER_PUB, base_seq=K, snapshot_seq=K - 1)
+    assert synthetic.capability_issued_map() == {"gesture": 500.0}, "build() must fold the enable high-water"
+
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, store: synthetic))
+    g.disable("gesture", reason="panic after the prune")
+    _replay(s, captured)
+    assert g._scan_enabled("gesture") is False, "a pruned-prefix enable must stay un-replayable"
+
+
+def test_capability_build_matches_the_live_scan_under_a_replay():
+    s = _store()
+    g = _cg(s)
+    g.disable("gesture")
+    captured = dict(s.get(g.enable("gesture", issued_at=42.0)).payload)
+    g.disable("gesture", reason="panic")
+    _replay(s, captured)
+    folded = build(list(s.iter_records()), trusted_pubkey=OWNER_PUB, base_seq=0, snapshot_seq=-1)
+    assert folded.capability_latch_map()["gesture"] == g._scan_enabled("gesture") is False
+
+
+def test_capability_state_all_inherits_the_guard():
+    """`state_all()` is a comprehension over `is_enabled`, so it must report the guarded verdict — the
+    'a mint-side gate must be mirrored at the read surface' invariant, satisfied by construction here."""
+    s = _store()
+    g = _cg(s)
+    g.disable("gesture")
+    captured = dict(s.get(g.enable("gesture", issued_at=100.0)).payload)
+    g.disable("gesture", reason="panic")
+    _replay(s, captured)
+    assert g.state_all()["gesture"] == "disabled"
