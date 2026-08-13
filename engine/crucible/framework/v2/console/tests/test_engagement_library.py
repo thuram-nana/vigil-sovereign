@@ -108,6 +108,29 @@ def test_ordering_is_newest_activity_first_not_alphabetical(console_root, monkey
     assert order == ["alpha", "zeta", "mid"], "the most recently worked job leads, then the next"
 
 
+def test_jobs_touched_in_the_SAME_second_break_the_tie_on_a_real_signal(console_root, monkeypatch):
+    """Found by driving the real console: every stamp is second-precision, so several jobs created by
+    one invocation share a `last_activity` — and the roster then fell back to the SLUG, i.e. to the
+    alphabetical listing (reversed) this function exists to replace. The tie must break on a second
+    REAL signal: the more recently STARTED job leads.
+
+    Here all three were last touched in the same second; their FIRST-seen order is zeta (newest),
+    then alpha, then mid — which is neither alphabetical nor its reverse."""
+    same = 9_000.0
+    _write_run(console_root, "20260101-000000-001", slug="mid", target="http://m/", started=1_000.0)
+    _write_run(console_root, "20260101-000000-002", slug="mid", target="http://m/", started=same)
+    _write_run(console_root, "20260103-000000-003", slug="zeta", target="http://z/", started=5_000.0)
+    _write_run(console_root, "20260103-000000-004", slug="zeta", target="http://z/", started=same)
+    _write_run(console_root, "20260105-000000-005", slug="alpha", target="http://a/", started=3_000.0)
+    _write_run(console_root, "20260105-000000-006", slug="alpha", target="http://a/", started=same)
+    monkeypatch.setattr(api, "_target_slugs", lambda: ["alpha", "mid", "zeta"])
+    monkeypatch.setattr(api, "_spine_engagements", lambda labels: [])
+
+    rows = api.list_engagements()["engagements"]
+    assert len({r["last_activity"] for r in rows}) == 1, "the fixture must actually produce a tie"
+    assert [r["slug"] for r in rows] == ["zeta", "alpha", "mid"]
+
+
 def test_an_engagement_with_no_activity_is_honestly_null_not_backdated(console_root, monkeypatch):
     monkeypatch.setattr(api, "_target_slugs", lambda: ["dormant"])
     monkeypatch.setattr(api, "_spine_engagements", lambda labels: [])

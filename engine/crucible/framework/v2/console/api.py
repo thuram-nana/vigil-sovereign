@@ -230,8 +230,15 @@ def list_engagements() -> dict[str, Any]:
             "kinds": sorted({str(r.get("mode") or "") for r in runs if r.get("mode")}),
             "subjects": sorted({str(r.get("target") or "") for r in runs if r.get("target")})[:5],
         })
-    # newest activity first; an engagement with no activity at all sorts last (never back-dated).
-    rows.sort(key=lambda e: (e["last_activity"] or "", e["slug"]), reverse=True)
+    # Newest activity first; an engagement with no activity at all sorts last (never back-dated).
+    #
+    # The tie-break matters more than it looks. Every stamp here is second-precision, and a charter
+    # written by the same `engage` invocation gives several jobs the SAME `last_activity` — driving the
+    # real console showed exactly that, and the roster then fell back to the slug, i.e. to the
+    # alphabetical listing this function exists to replace (reversed, which is no better). So the
+    # tie-break is a second REAL signal — the more recently STARTED job leads — and the slug is only
+    # the final, purely-deterministic resort so the order never flickers between two identical rows.
+    rows.sort(key=lambda e: (e["last_activity"] or "", e["first_seen"] or "", e["slug"]), reverse=True)
     return {"engagements": rows}
 
 

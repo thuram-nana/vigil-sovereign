@@ -4749,6 +4749,22 @@
         hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
     } catch (e) { return d.toISOString(); }
   }
+  // A tile's value is set in a large display face, so a full "Aug 13, 2026, 08:25 AM EDT" wraps to four
+  // lines there (seen while driving it). Split it: the DAY is the value, the clock time + zone the foot.
+  function fmtDay(iso) {
+    if (!iso) return "—";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    try { return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "2-digit" }); }
+    catch (e) { return d.toISOString().slice(0, 10); }
+  }
+  function fmtClock(iso) {
+    if (!iso) return "no recorded activity";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    try { return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", timeZoneName: "short" }); }
+    catch (e) { return ""; }
+  }
   function libName(row) { return (row && row.label) || (row && row.slug) || "(unnamed)"; }
   function libRunName(run) { return (run && run.label) || (run && run.run_id) || "(run)"; }
   // "—" for a stamp we genuinely do not have. A dormant job is honestly blank, never back-dated.
@@ -4858,6 +4874,12 @@
   }
 
   function loadLibraryDetail(slug) {
+    // The detail route carries the runs + charter state; the timestamps and counts live on the ROSTER
+    // row. Deep-linking to #/library?slug=… (a bookmark, a shared link, a reload) never went through
+    // the list, so the roster was empty and the header honestly but uselessly showed "—" for "last
+    // worked on" and the finding count. Found by driving it. Fetch both, and let the detail render as
+    // soon as it lands rather than blocking on the roster.
+    var needRoster = !LIB.rows.length;
     V.getJSON(OFF("/api/library/" + encodeURIComponent(slug))).then(function (d) {
       LIB.detail = d || null;
       drawLibraryDetail(slug);
@@ -4865,6 +4887,12 @@
       var host = V.$("#library-detail"); if (!host) return;
       V.mount(host, h("div.empty", null, "Could not load this job: " + ((e && e.message) || e)));
     });
+    if (needRoster) {
+      V.getJSON(OFF("/api/engagements")).then(function (d) {
+        LIB.rows = (d && d.engagements) || [];
+        if (LIB.detail) drawLibraryDetail(slug);      // repaint the header with its real stamps
+      }).catch(function () { /* the detail still renders; the header stays honestly blank */ });
+    }
   }
 
   function drawLibraryDetail(slug) {
@@ -4883,8 +4911,9 @@
         h("button.btn.sm", { onClick: function () { renameEngagement({ slug: slug, label: d.label || "" }); } }, "Rename")]),
       h("div.grid.cols-4", { style: { marginTop: "12px" } }, [
         V.tile("Machine identity", slug, "never changes"),
-        V.tile("Last worked on", roster && roster.last_activity ? fmtWhen(roster.last_activity) : "—",
-          libTimeZone() || "your timezone"),
+        V.tile("Last worked on", fmtDay(roster && roster.last_activity),
+          fmtClock(roster && roster.last_activity)
+          + (roster && roster.last_activity && libTimeZone() ? " · " + libTimeZone() : "")),
         V.tile("Runs", String(runs.length), "in this job"),
         V.tile("Findings", String(roster && roster.finding_count != null ? roster.finding_count : "—"),
           roster && roster.fact_count ? roster.fact_count + " oracle-proven" : "as recorded"),
