@@ -1113,15 +1113,27 @@ def _cmd_dossier(args: argparse.Namespace) -> int:
     if not term_hist:
         default_hist = Path(run_dir) / "terminal-history.jsonl"
         term_hist = str(default_hist) if default_hist.is_file() else None
+    # Stamp the build time by default: a document handed to a regulator that cannot say when it
+    # was produced is weaker than one that can. --timestamp pins an explicit value and
+    # --no-timestamp restores the byte-reproducible build for anyone comparing two archives.
+    stamp = (args.timestamp or "").strip()
+    if not stamp and not getattr(args, "no_timestamp", False):
+        from datetime import datetime, timezone
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     res = build_dossier(run_dir=run_dir, out_zip=out, engagement_slug=(args.slug or "engagement"),
-                        base_dir=(args.base_dir or None), generated_at=(args.timestamp or None),
-                        terminal_history=(term_hist or None))
+                        base_dir=(args.base_dir or None), generated_at=(stamp or None),
+                        terminal_history=(term_hist or None), label=(args.label or None))
     if not res.get("ok"):
         print(f"dossier: {res.get('error', 'build failed')}", file=sys.stderr)
         return 1
     leads = res.get("leads")
     print("=== vigil dossier (one-click, tamper-evident run archive) ===")
     print(f"dossier:      {res['dossier']}")
+    if res.get("label"):
+        print(f"label:        {res['label']}")
+    if res.get("case_file"):
+        print(f"case file:    {len(res['case_file'])} plain-English document(s) — open "
+              f"<unzipped>/00-START-HERE.html")
     print(f"entries:      {res['entries']}  (facts={res['facts']}"
           + (f", leads={leads}" if leads is not None else "") + ")")
     print(f"integrity:    MANIFEST.json sha256={res['manifest_sha256']}")
@@ -1854,14 +1866,22 @@ def build_parser() -> argparse.ArgumentParser:
     pdo.add_argument("--run-dir", default="", help="the run dir to compile (else $VIGIL_PROOF_RUN_DIR)")
     pdo.add_argument("--out", default="", help="output .zip path (default <run-dir>/dossier.zip)")
     pdo.add_argument("--slug", default="engagement", help="engagement slug stamped into the dossier")
+    pdo.add_argument("--label", default="",
+                     help="a HUMAN title for the engagement (e.g. \"Ministry of Health — Q3 external "
+                          "review\"), shown alongside the machine run id in the readable documents. "
+                          "Presentation only: it never reaches a certificate or any signed claim about "
+                          "a finding, so a re-labelled dossier still verifies. Default: the slug.")
     pdo.add_argument("--base-dir", default="", help="governance-key home (stable signer); default = run dir")
     pdo.add_argument("--terminal-history", default="",
                      help="OPTIONAL path to the governed terminal-history.jsonl (the operator's signed "
                           "terminal.run records) to include as logs/terminal-transcript.jsonl; default = a "
                           "terminal-history.jsonl next to the run dir if present")
     pdo.add_argument("--timestamp", default="",
-                     help="OPTIONAL generation timestamp stamped into index.html/README (the only non-"
-                          "deterministic input; omit for a byte-reproducible dossier)")
+                     help="pin the generation timestamp stamped into the readable documents "
+                          "(default: the current time in UTC)")
+    pdo.add_argument("--no-timestamp", action="store_true",
+                     help="record NO generation time, for a byte-reproducible dossier (two builds "
+                          "over the same run then produce an identical MANIFEST)")
     pdo.set_defaults(func=_cmd_dossier)
 
     pd = sub.add_parser("detect", help="run the Detection Mirror over log files (defensive oracle plane)")

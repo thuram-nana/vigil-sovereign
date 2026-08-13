@@ -433,11 +433,31 @@ class _Record:
 def _graded_finding(finding: Any) -> GradedFinding | None:
     """Grade a finding through the shared report authority. Returns the ``GradedFinding``
     or ``None`` when the input cannot even be validated (then the caller treats it as an
-    unproven lead — the conservative, honest default)."""
+    unproven lead — the conservative, honest default).
+
+    Accepts BOTH finding shapes the platform stores. A ``FindingPayload``-shaped mapping
+    validates directly; an ``AuditFinding``-shaped one (what a run's ``reverifiable.json``
+    retains) does NOT, because it carries none of the required descriptive fields. Before this
+    retry existed, such a finding failed validation and was recorded as an unproven lead with
+    ``coverage_asserted=False`` — even when its retained proof re-fired perfectly. That is a
+    false NEGATIVE in the compliance mapping, so on the retry the same narrow coercion the
+    dossier uses (:func:`report.adapt.auditfinding_to_payload`) is applied.
+
+    The retry cannot manufacture a fact: it copies the retained ``oracle_context`` and nothing
+    else bearing on proof, and the grade still comes from RE-EXECUTING that proof. A finding
+    with no retained proof still grades as a lead."""
     if isinstance(finding, GradedFinding):
         return finding
     try:
         return grade_finding(finding)
+    except Exception:
+        pass
+    if not isinstance(finding, dict):
+        return None
+    try:
+        from .adapt import auditfinding_to_payload
+
+        return grade_finding(auditfinding_to_payload(finding))
     except Exception:
         return None
 

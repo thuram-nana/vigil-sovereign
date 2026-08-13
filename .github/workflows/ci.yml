@@ -279,6 +279,7 @@ jobs:
               --ignore=integration/tests/test_k8s_rbac_verify.py \
               --ignore=integration/tests/test_gcp_impersonation_verify.py \
               --ignore=integration/tests/test_k8s_rbac_grant_verify.py \
+              --ignore=integration/tests/test_dossier_case_file.py \
               --ignore=integration/tests/test_brain_engine.py \
               --ignore=integration/tests/test_sovereignty_governs_llm_egress.py -q
             # The offense-process suite: framework-dependent tests run in their OWN process. The
@@ -337,6 +338,7 @@ jobs:
               integration/tests/test_k8s_rbac_verify.py \
               integration/tests/test_gcp_impersonation_verify.py \
               integration/tests/test_k8s_rbac_grant_verify.py \
+              integration/tests/test_dossier_case_file.py \
               integration/tests/test_brain_engine.py \
               integration/tests/test_sovereignty_governs_llm_egress.py -q
           else
