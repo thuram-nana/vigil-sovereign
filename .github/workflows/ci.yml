@@ -38,7 +38,11 @@ jobs:
       #
       # Single source of truth: the guard step below and the pytest invocation both
       # expand THIS variable, so a path can never be guarded-but-not-run (or run
-      # but not guarded).
+      # but not guarded). A NEW test file under an otherwise-uncovered directory
+      # belongs HERE for exactly that reason — hand-listing it in the pytest step
+      # alone would run it unguarded, so a path typo that collects ZERO tests would
+      # merge green (`framework/v2/agents` is not covered wholesale; only named
+      # files under it run).
       CRUCIBLE_UNCOVERED_SUITES: >-
         framework/v2/veracity
         framework/v2/kernel
@@ -47,6 +51,7 @@ jobs:
         framework/v2/defender
         framework/v2/memory
         framework/v2/analysis
+        framework/v2/agents/tests/test_engagement_library.py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

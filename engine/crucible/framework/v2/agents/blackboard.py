@@ -435,6 +435,7 @@ class Blackboard:
                COUNT(v.id)   AS events,
                MIN(v.posted_at) AS first_event_at,
                MAX(v.posted_at) AS last_event_at,
+               MAX(v.id)     AS last_event_id,
                SUM(CASE WHEN v.kind = 'finding' THEN 1 ELSE 0 END) AS findings
           FROM bb_engagements e
           LEFT JOIN events v
@@ -507,10 +508,14 @@ class Blackboard:
                 "events": int(r["events"] or 0),
                 "findings": int(r["findings"] or 0),
                 "facts": int(facts.get(int(r["id"]), 0)),
+                "last_event_id": int(r["last_event_id"] or 0),
             })
-        # newest activity first. posted_at/started_at are `now_iso()` (UTC, second precision), which
-        # sorts lexicographically == chronologically; the slug breaks ties deterministically.
-        out.sort(key=lambda e: (e["last_activity"], e["slug"]), reverse=True)
+        # Newest activity first. posted_at/started_at are `now_iso()` (UTC, SECOND precision) and sort
+        # lexicographically == chronologically. Second precision means two engagements touched in the
+        # same second tie, so the tie-break is the spine's own LOGICAL CLOCK — the highest event id is
+        # genuinely the more recent one — and finally the registry id. Sorting on the slug there would
+        # be arbitrary (it would reintroduce the alphabetical listing this method exists to replace).
+        out.sort(key=lambda e: (e["last_activity"], e["last_event_id"], e["id"]), reverse=True)
         return out[: max(0, int(limit))]
 
 
