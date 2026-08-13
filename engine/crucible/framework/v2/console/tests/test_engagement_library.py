@@ -266,6 +266,73 @@ def test_renaming_never_invalidates_the_proof_or_the_dossier(proof_run, tmp_path
         assert token not in blob
 
 
+def _extract_proof_bundle(zip_path, dest):
+    """Pull the dossier's ``proof-bundle/`` tree out of the archive, exactly as a recipient does before
+    running the bundle's own ``verify_cmd``. Returns the bundle dir, or None when there is no bundle."""
+    dest.mkdir(parents=True, exist_ok=True)
+    found = False
+    with zipfile.ZipFile(zip_path) as z:
+        for name in z.namelist():
+            if not name.startswith("proof-bundle/") or name.endswith("/"):
+                continue
+            out = dest / name[len("proof-bundle/"):]
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(z.read(name))
+            found = True
+    return dest if found else None
+
+
+def test_renaming_never_breaks_the_PROOF_BUNDLE_verification(proof_run, tmp_path):
+    """THE test the label design has to survive: build the dossier under two DIFFERENT labels and run
+    the REAL offline proof-bundle verification over each — the one a client runs, with signatures, the
+    hash chain, the governance-signed head, the artifact manifest and the oracle RE-EXECUTION.
+
+    Nothing is stubbed here. (The companion test above stubs the bundler so it stays runnable on the
+    offense-only CI path, where the integration package is absent; this one needs it and skips
+    without it.) If a label could reach signed content, the second verification would fail."""
+    pytest.importorskip("vigil_integration.proof.bundle",
+                        reason="the proof bundle needs the integration package (two-env boundary)")
+    from framework.v2.evidence.cli import main as evidence_cli
+    from framework.v2.report import dossier as D
+
+    # the bundler reads the run's proof report from <run>/proofs/reverifiable.json (the console's own
+    # evidence view reads <run>/reverifiable.json); give it the same proven finding.
+    (proof_run / "proofs").mkdir(exist_ok=True)
+    (proof_run / "proofs" / "reverifiable.json").write_bytes((proof_run / "reverifiable.json").read_bytes())
+
+    def _build_and_verify(tag: str) -> tuple[int, list[str]]:
+        zpath = tmp_path / f"dossier-{tag}.zip"
+        res = D.build_dossier(run_dir=str(proof_run), out_zip=str(zpath), engagement_slug="acme",
+                              base_dir=str(tmp_path / "gov"))
+        assert res.get("ok"), res
+        bundle = _extract_proof_bundle(zpath, tmp_path / f"bundle-{tag}")
+        assert bundle is not None, f"the dossier carried no proof bundle ({res.get('notes')})"
+        fp = (bundle / "TRUST-ROOT-FINGERPRINT.txt").read_text(encoding="utf-8").strip()
+        # the bundle's OWN verify_cmd, run in-process: pinned trust root, evidence tree and all
+        rc = evidence_cli(["verify",
+                           "--report", str(bundle / "reverifiable.json"),
+                           "--bundle", str(bundle),
+                           "--trust-root", str(bundle / "trust-root.json"),
+                           "--evidence-root", str(bundle / "evidence"),
+                           "--trust-root-fingerprint", fp])
+        doc = json.loads((bundle / "evidence-bundle.json").read_text(encoding="utf-8"))
+        # the hash chain over the certificates — the digests the signed head anchors
+        return rc, [e["cert_digest"] for e in doc["chain"]]
+
+    labels.set_engagement_label("acme", "LABEL-ONE-9f3a")
+    labels.set_run_label("20260101-000000-001", "RUN-LABEL-ONE-9f3a")
+    rc1, digests1 = _build_and_verify("one")
+
+    labels.set_engagement_label("acme", "LABEL-TWO-4c81")
+    labels.set_run_label("20260101-000000-001", "RUN-LABEL-TWO-4c81")
+    rc2, digests2 = _build_and_verify("two")
+
+    assert rc1 == 0, "the proof bundle must verify under the first label"
+    assert rc2 == 0, "the proof bundle must STILL verify after the engagement and the run were renamed"
+    # the certificates cover the same proven content both times — a rename moved no signed byte
+    assert digests1 == digests2 != []
+
+
 def test_MUTATION_CONTROL_the_dossier_check_bites_when_content_changes(proof_run, tmp_path, monkeypatch):
     """Proof that the test above is load-bearing rather than vacuously green: make something the
     dossier DOES cover differ between the two builds and the byte-identity assertion must fail, and
