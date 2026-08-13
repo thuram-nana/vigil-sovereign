@@ -7,16 +7,17 @@ and exactly the wrong reading material for the people a dossier is usually hande
 regulator, an auditor, a government official, a client executive. This module writes the part
 they read.
 
-It produces eight numbered documents, so the reading order is obvious from the file names::
+It produces nine numbered documents, so the reading order is obvious from the file names::
 
     00-START-HERE.html        the one page to open; explains every other file in the archive
     01-executive-summary.md   what was done, what was found, what it means, what to do first
     02-approach-and-scope.md  how the work was done — and what was NOT examined
     03-findings.md            every proven finding, in plain language
     04-leads.md               what was observed or suspected but NOT proven
-    05-what-to-do.md          the prioritised remediation order
-    06-verify-it-yourself.md  the exact commands, and what a pass and a failure look like
-    07-glossary.md            every technical term used anywhere in the dossier
+    05-what-was-looked-for.md every category the engine can confirm, and this run's position
+    06-what-to-do.md          the prioritised remediation order
+    07-verify-it-yourself.md  the exact commands, and what a pass and a failure look like
+    08-glossary.md            every technical term used anywhere in the dossier
 
 Three rules run through all of it:
 
@@ -45,8 +46,9 @@ from typing import Any, Iterable, Optional
 from .adapt import AdaptResult, FindingExtras
 from .grounding import GRADE_DEMOTED, GradedFinding
 from .howto import finding_specific_remediation
+from .catalogue import COVERAGE_GAP_NOTE, Catalogue, build_catalogue
 from .plainspeak import oracle_plain as _oracle_plain
-from .plainspeak import oracle_plain_map, plain_for as _plain_for
+from .plainspeak import oracle_establishes, oracle_plain_map, plain_for as _plain_for, short_plain
 from .priority import effort_size, prioritize
 from .runinfo import RunInfo, safe_command_token
 
@@ -58,13 +60,14 @@ DOC_EXECUTIVE = "01-executive-summary.md"
 DOC_APPROACH = "02-approach-and-scope.md"
 DOC_FINDINGS = "03-findings.md"
 DOC_LEADS = "04-leads.md"
-DOC_WHAT_TO_DO = "05-what-to-do.md"
-DOC_VERIFY = "06-verify-it-yourself.md"
-DOC_GLOSSARY = "07-glossary.md"
+DOC_CATALOGUE = "05-what-was-looked-for.md"
+DOC_WHAT_TO_DO = "06-what-to-do.md"
+DOC_VERIFY = "07-verify-it-yourself.md"
+DOC_GLOSSARY = "08-glossary.md"
 
 CASE_FILE_NAMES: tuple[str, ...] = (
     START_HERE, DOC_EXECUTIVE, DOC_APPROACH, DOC_FINDINGS,
-    DOC_LEADS, DOC_WHAT_TO_DO, DOC_VERIFY, DOC_GLOSSARY,
+    DOC_LEADS, DOC_CATALOGUE, DOC_WHAT_TO_DO, DOC_VERIFY, DOC_GLOSSARY,
 )
 
 _EFFORT_WORDS = {
@@ -177,7 +180,7 @@ def render_executive(*, label: str, info: RunInfo, facts: list[_Item], observed:
         "system. Nothing in it was obtained from anybody else's system.",
         "",
         "It is written to be read without a technical background. Every technical term used "
-        "anywhere in this pack is explained in `07-glossary.md`.",
+        "anywhere in this pack is explained in `08-glossary.md`.",
         "",
         "## The system that was examined",
         "",
@@ -198,7 +201,7 @@ def render_executive(*, label: str, info: RunInfo, facts: list[_Item], observed:
           "- **Proven.** The examination performed the action and the result was confirmed by an "
           "automatic check. The evidence was saved, and the check was run again from that saved "
           "evidence while this pack was being assembled, with the same result. Anyone can repeat "
-          "that themselves — see `06-verify-it-yourself.md`.",
+          "that themselves — see `07-verify-it-yourself.md`.",
           "- **Observed but not exploited.** Something was directly seen to be missing or "
           "misconfigured. The observation is reliable, but no attack was performed to demonstrate "
           "consequences, so no consequence is claimed here.",
@@ -222,7 +225,7 @@ def render_executive(*, label: str, info: RunInfo, facts: list[_Item], observed:
             "",
         ]
         for it in facts:
-            L.append(f"- **{_md_inline(it.graded.finding.title)}** — {it.why}")
+            L.append(f"- **{_md_inline(it.graded.finding.title)}** — {it.what}")
         L += ["",
               f"The most serious of these is **{_md_inline(worst.graded.finding.title)}**, rated "
               f"{_SEVERITY_WORDS.get(worst.graded.finding.severity, worst.graded.finding.severity)}.",
@@ -264,11 +267,11 @@ def render_executive(*, label: str, info: RunInfo, facts: list[_Item], observed:
                      f"({_SEVERITY_WORDS.get(r.graded.finding.severity, r.graded.finding.severity)}; "
                      f"estimated effort: {_EFFORT_WORDS.get(r.effort, r.effort)}).  ")
             L.append(f"   {_md_inline(fix)}")
-        L += ["", "The full ordering, with the reasoning behind it, is in `05-what-to-do.md`.", ""]
+        L += ["", "The full ordering, with the reasoning behind it, is in `06-what-to-do.md`.", ""]
     elif observed:
         L += ["Nothing was proven, so nothing here is urgent. The missing protective settings "
               "listed in `04-leads.md` are inexpensive to add and are the sensible next step. "
-              "`05-what-to-do.md` gives the order.", ""]
+              "`06-what-to-do.md` gives the order.", ""]
     else:
         L += ["Nothing requiring action was recorded. `02-approach-and-scope.md` states what was "
               "examined, which is what determines how much weight this result carries.", ""]
@@ -290,7 +293,7 @@ def render_executive(*, label: str, info: RunInfo, facts: list[_Item], observed:
     if proof_ok:
         L.append("- **The proven findings can be re-checked by you, without trusting us.** The "
                  "saved evidence travels with this pack, together with an independent program "
-                 "that re-runs the checks over it. `06-verify-it-yourself.md` gives the exact "
+                 "that re-runs the checks over it. `07-verify-it-yourself.md` gives the exact "
                  "command. It does not contact the examined system and it does not need the "
                  "internet.")
     else:
@@ -299,7 +302,7 @@ def render_executive(*, label: str, info: RunInfo, facts: list[_Item], observed:
                  "outcome for this run, not an omission.")
     if signed:
         L.append("- **The pack has been digitally signed**, so alteration after the fact is "
-                 "detectable. `06-verify-it-yourself.md` explains how to check this, including "
+                 "detectable. `07-verify-it-yourself.md` explains how to check this, including "
                  "the one step that must be done through a separate channel.")
     else:
         L.append("- **The pack is not digitally signed.** No signing key was available when it "
@@ -452,35 +455,65 @@ def render_approach(*, label: str, info: RunInfo, built: Optional[str],
 # --------------------------------------------------------------------------------------------------
 
 
+def _category_line(item: _Item) -> str:
+    """The engine's own name for the weakness category, with its short meaning. Naming the
+    category matters: it is the word that appears in the machine records, in the catalogue, and in
+    any other tool's report, and a reader who cannot connect this entry to that word cannot
+    cross-check the finding anywhere else."""
+    bc = (item.graded.finding.bug_class or "").strip()
+    if not bc or bc.lower() == "passive":
+        return ""
+    meaning = short_plain(bc)
+    if meaning:
+        return f"**Category:** `{_md_inline(bc)}` — {meaning}  "
+    return (f"**Category:** `{_md_inline(bc)}` — no short description of this category is held on "
+            f"file.  ")
+
+
 def _finding_block(item: _Item, info: RunInfo, *, proven: bool, index: int) -> list[str]:
     f = item.graded.finding
     L = [f"### {index}. {_md_inline(f.title)}", "",
-         f"**Reference:** `{_md_inline(f.finding_slug)}`  ",
-         f"**Rating:** {_SEVERITY_WORDS.get(f.severity, f.severity)}  ",
-         f"**Where:** `{_where(item)}`  ",
-         f"**When it was recorded:** {_confirmed_time(item, info)}  ",
-         "",
-         "**What it is.** " + item.what,
-         "",
-         "**Why it matters to this organisation.** " + item.why,
-         ""]
+         f"**Reference:** `{_md_inline(f.finding_slug)}`  "]
+    cat = _category_line(item)
+    if cat:
+        L.append(cat)
+    L += [f"**Rating:** {_SEVERITY_WORDS.get(f.severity, f.severity)}  ",
+          f"**Where:** `{_where(item)}`  ",
+          f"**When it was recorded:** {_confirmed_time(item, info)}  ",
+          "",
+          "**What this kind of weakness is.** " + item.what,
+          "",
+          "**What this kind of weakness can lead to, in general.** " + item.why,
+          "",
+          "> The paragraph above describes the CATEGORY. It is general knowledge about this kind "
+          "of weakness, and it is the reason the category is taken seriously — not a description "
+          "of what happened to this system. What was actually established here is stated next, "
+          "and it is narrower.",
+          ""]
 
     if proven:
-        L += ["**How we proved it.** " + _oracle_plain(item.graded.oracle_kind), ""]
+        L += ["**What was established on this system.** The examination sent test input to "
+              f"`{_where(item)}` and an automatic check confirmed "
+              + oracle_establishes(item.graded.oracle_kind) + ".", ""]
+        L += ["**How that was proved.** " + _oracle_plain(item.graded.oracle_kind), ""]
         if item.extras.evidence:
             L += ["The engine recorded this observation at the time:", "",
                   "> " + _md_inline(item.extras.evidence), ""]
         L += ["The saved request and reply travel with this pack, and the same check was run over "
               "them again while the pack was assembled — it reached the same conclusion. "
-              "`06-verify-it-yourself.md` shows how to repeat that yourself.", ""]
+              "`07-verify-it-yourself.md` shows how to repeat that yourself.", ""]
         if item.graded.certificate_digest:
             L += [f"**Evidence reference:** `sha256:{item.graded.certificate_digest}` — the "
                   f"fingerprint of the saved evidence for this finding, so that this entry and "
                   f"that evidence can be tied together unambiguously.", ""]
-        L += ["**What this does not prove.** It shows that the weakness exists at the place named "
-              "above, and that the system behaved as described when tested. It does not show that "
-              "anybody has used it, it is not evidence that data has been taken, and it says "
-              "nothing about parts of the system that were not examined.", ""]
+        L += ["**What this does NOT prove.** Only the specific behaviour described above was "
+              "demonstrated. The examination did not go on to find out how far the weakness could "
+              "be pushed: no data was extracted, no account was taken over, and no attempt was "
+              "made to reach the general consequences described earlier. So the general "
+              "description is the reason to fix this promptly — it is not a record of what "
+              "happened here. Equally, this finding is not evidence that anybody has used the "
+              "weakness or that data has been taken, and it says nothing about parts of the system "
+              "that were not examined.", ""]
     else:
         if item.graded.grade == GRADE_DEMOTED:
             L += ["**Why it is not proven.** The record says an automatic check confirmed this "
@@ -504,6 +537,10 @@ def _finding_block(item: _Item, info: RunInfo, *, proven: bool, index: int) -> l
                   "attacker can do.", ""]
             if item.extras.evidence:
                 L += ["The engine recorded:", "", "> " + _md_inline(item.extras.evidence), ""]
+        L += ["**What was established on this system.** Nothing beyond the observation above. In "
+              "particular, none of the general consequences described earlier was demonstrated "
+              "here — they are what this category of weakness is capable of, which is why the item "
+              "is worth resolving, and they are not a description of this system.", ""]
 
     L += ["**What to do about it.** " + _md_inline(_remediation_text(item)), ""]
 
@@ -513,7 +550,7 @@ def _finding_block(item: _Item, info: RunInfo, *, proven: bool, index: int) -> l
               "The fix has worked when this finding no longer appears in the new result.",
               "",
               "> A caution worth understanding: the verification command in "
-              "`06-verify-it-yourself.md` will keep passing after the fix is deployed. That "
+              "`07-verify-it-yourself.md` will keep passing after the fix is deployed. That "
               "command re-checks the *saved evidence from this examination*, which proves the "
               "evidence is genuine and unaltered. It does not, and cannot, tell you anything "
               "about the system's condition today. Only a fresh examination does that.",
@@ -572,7 +609,7 @@ def render_findings(*, label: str, info: RunInfo, facts: list[_Item], built: Opt
     L += ["", "## The findings in detail", ""]
     for i, it in enumerate(facts, start=1):
         L += _finding_block(it, info, proven=True, index=i)
-    L += ["Continue with `04-leads.md`, then `05-what-to-do.md`.", ""]
+    L += ["Continue with `04-leads.md`, then `06-what-to-do.md`.", ""]
     return "\n".join(L) + "\n"
 
 
@@ -623,12 +660,116 @@ def render_leads(*, label: str, info: RunInfo, observed: list[_Item], unproven: 
             L += _finding_block(it, info, proven=False, index=i)
     else:
         L += ["_None._", ""]
-    L += ["Continue with `05-what-to-do.md`.", ""]
+    L += ["Continue with `06-what-to-do.md`.", ""]
     return "\n".join(L) + "\n"
 
 
 # --------------------------------------------------------------------------------------------------
-# 05 — what to do
+# 05 — what was looked for (the catalogue)
+# --------------------------------------------------------------------------------------------------
+
+
+def render_catalogue(*, label: str, info: RunInfo, cat: Catalogue, built: Optional[str]) -> str:
+    n_conf, n_rep, n_unk, n_all = (len(cat.confirmed), len(cat.reported),
+                                   len(cat.not_recorded), len(cat.rows))
+    L = _header("What the examination is able to look for", label, info.run_id, built)
+    L += [
+        "## Why this document exists",
+        "",
+        "A list of findings tells you what was found. It cannot tell you what the silence means. "
+        "Three findings out of three categories examined would be a very different result from "
+        "three out of ninety, and the findings alone do not distinguish them.",
+        "",
+        f"This document lists every one of the {n_all} categories of weakness the examination "
+        "engine is capable of confirming, and states this engagement's position against each. It "
+        "is generated from the engine's own internal register when the pack is assembled, not "
+        "written by hand, so it cannot quietly overstate what the engine can do.",
+        "",
+        "## The three states, and the one that is missing",
+        "",
+        "| State | Meaning |",
+        "|-------|---------|",
+        "| **Confirmed** | A weakness of this category was proven in this engagement. The finding "
+        "is named, and it appears in `03-findings.md`. |",
+        "| **Reported, not confirmed** | Something of this category was recorded but not proven. "
+        "It appears in `04-leads.md`. |",
+        "| **Not recorded** | The engagement record does not say whether this category was "
+        "examined. |",
+        "",
+        "**There is deliberately no state meaning \"examined and found clean\", and its absence "
+        "is the most important thing on this page.**",
+        "",
+        COVERAGE_GAP_NOTE,
+        "",
+        "So a row reading *not recorded* must be read as *unknown*. It is not a clean result, it "
+        "is not a pass, and it should not be presented to anyone as either. If assurance is needed "
+        "over a particular category, that assurance has to come from work that recorded it — not "
+        "from this row.",
+        "",
+        "## This engagement at a glance",
+        "",
+        "| | Categories |",
+        "|--|-----------:|",
+        f"| Confirmed | {n_conf} |",
+        f"| Reported, not confirmed | {n_rep} |",
+        f"| Not recorded whether examined | {n_unk} |",
+        f"| **Total the engine can confirm** | **{n_all}** |",
+        "",
+    ]
+    if n_conf or n_rep:
+        L += ["### The categories this engagement did record", "",
+              "| Category | Status | Findings |", "|----------|--------|----------|"]
+        for r in cat.confirmed + cat.reported:
+            refs = ", ".join(f"`{_md_inline(s)}`" for s in r.findings) or "—"
+            L.append(f"| `{_md_inline(r.bug_class)}` | {r.status_text} | {refs} |")
+        L.append("")
+
+    L += ["## The full catalogue", "",
+          "Grouped by family for readability. The **Confirmed by** column names the deterministic "
+          "checks the engine would use to establish a weakness of that category — these are the "
+          "same check names that appear on findings and in the saved evidence, so a category here "
+          "can be traced to a finding elsewhere in this pack.",
+          "",
+          "The **Standards** column shows what a weakness of that category *would* implicate under "
+          "the common frameworks. It is a property of the category, not a statement about this "
+          "organisation: only a confirmed row asserts anything about the system examined.",
+          ""]
+    for family, rows in cat.by_family():
+        L += [f"### {family}", "",
+              "| Category | What it means | Status | Confirmed by | Standards |",
+              "|----------|---------------|--------|--------------|-----------|"]
+        for r in rows:
+            meaning = r.meaning or "_no short description on file_"
+            oracles = ", ".join(f"`{_md_inline(o)}`" for o in r.oracles) or "—"
+            std = r.standards or {}
+            bits: list[str] = []
+            if std.get("owasp"):
+                bits.append(str(std["owasp"]))
+            for key in ("cwe", "attack"):
+                vals = std.get(key) or []
+                if vals:
+                    bits.append(", ".join(str(v) for v in vals[:3]))
+            L.append(f"| `{_md_inline(r.bug_class)}` | {meaning} | {r.status_text} | {oracles} | "
+                     f"{_md_inline('; '.join(bits)) or '—'} |")
+        L.append("")
+
+    if cat.notes:
+        L += ["## Notes on this catalogue", ""]
+        for n in cat.notes:
+            L.append(f"- {n}")
+        L.append("")
+    L += ["The machine-readable form of this catalogue, including the full standards mapping for "
+          "every category, is `appendix/catalogue.json`.",
+          "",
+          "---",
+          "",
+          "Continue with `06-what-to-do.md`.",
+          ""]
+    return "\n".join(L) + "\n"
+
+
+# --------------------------------------------------------------------------------------------------
+# 06 — what to do
 # --------------------------------------------------------------------------------------------------
 
 
@@ -721,7 +862,7 @@ def render_what_to_do(*, label: str, info: RunInfo, facts: list[_Item], observed
           "2. Run the examination again, using the instruction recorded in "
           "`02-approach-and-scope.md`, and check that the findings above no longer appear.",
           "3. Keep this pack. It is the record of the position before the changes, and it can be "
-          "checked independently at any time in the future — see `06-verify-it-yourself.md`.",
+          "checked independently at any time in the future — see `07-verify-it-yourself.md`.",
           "",
           "One thing to plan for: the areas listed as not examined in `02-approach-and-scope.md` "
           "remain unexamined after all of the above is done. If assurance is needed over those, "
@@ -929,7 +1070,7 @@ def render_verify(*, label: str, info: RunInfo, built: Optional[str], signed: bo
           "no connection to this organisation and no access to its systems. That is the point of "
           "packaging the evidence this way: the conclusions do not depend on trusting the party "
           "that produced them.",
-          "", "Continue with `07-glossary.md` if any term in this pack was unfamiliar.", ""]
+          "", "Continue with `08-glossary.md` if any term in this pack was unfamiliar.", ""]
     return "\n".join(L) + "\n"
 
 
@@ -986,7 +1127,7 @@ _GLOSSARY: tuple[tuple[str, str], ...] = (
      "group (n) to sign before the result counts as valid. It removes the single point of failure "
      "of one person's key."),
     ("MANIFEST.json", "The list, inside this pack, of every file it contains together with each "
-                      "file's fingerprint. Check 1 in `06-verify-it-yourself.md` uses it."),
+                      "file's fingerprint. Check 1 in `07-verify-it-yourself.md` uses it."),
     ("Out-of-band", "Communication through a separate channel from the one carrying the thing "
                     "being checked — for example, confirming a fingerprint by telephone rather "
                     "than reading it out of the same file you are trying to verify."),
@@ -1072,6 +1213,9 @@ _EXACT_EXPLAIN: dict[str, str] = {
     DOC_FINDINGS: "Every proven finding, in plain language.",
     DOC_LEADS: "What was observed or suspected but not proven, kept separate so it is not "
                "overstated.",
+    DOC_CATALOGUE: "Every category of weakness the examination is able to look for, with this "
+                   "engagement's position against each — so you can judge what the absence of a "
+                   "finding does and does not mean.",
     DOC_WHAT_TO_DO: "The recommended order of work, with the reasoning behind it.",
     DOC_VERIFY: "The exact commands to check all of this yourself, and what a pass and a failure "
                 "look like.",
@@ -1079,19 +1223,22 @@ _EXACT_EXPLAIN: dict[str, str] = {
     "README.md": "A short technical description of the archive, for whoever receives the file "
                  "itself.",
     "MANIFEST.json": "The list of every file in this pack with its fingerprint. Used by check 1 in "
-                     "`06-verify-it-yourself.md` to detect alteration.",
+                     "`07-verify-it-yourself.md` to detect alteration.",
     "MANIFEST.sig.json": "The digital signature over that list. Used by check 2 in "
-                         "`06-verify-it-yourself.md` to establish who produced the pack.",
+                         "`07-verify-it-yourself.md` to establish who produced the pack.",
     "TRUST-ROOT-FINGERPRINT.txt": "The fingerprint of the signing authority. Confirm this value "
                                   "through a separate channel — see check 2 in "
-                                  "`06-verify-it-yourself.md`.",
+                                  "`07-verify-it-yourself.md`.",
     "appendix/report.json": "The examination's own machine-readable record of every finding. It is "
                             "the source the written documents were produced from.",
     "appendix/report.sarif": "The same findings in SARIF, a standard format that security tooling "
                              "can load automatically.",
+    "appendix/catalogue.json": "The machine-readable form of the category catalogue in "
+                               "`05-what-was-looked-for.md`, with the full standards mapping for "
+                               "every category.",
     "proof-bundle/README.md": "Technical notes accompanying the evidence bundle.",
     "proof-bundle/HOW-TO-VERIFY.md": "The engineer-facing version of check 3 in "
-                                     "`06-verify-it-yourself.md`.",
+                                     "`07-verify-it-yourself.md`.",
     "proof-bundle/reverifiable.json": "The saved evidence for each proven finding, in the form the "
                                       "checking program reads.",
     "proof-bundle/evidence-bundle.json": "The sealed record of each proof, with its digital "
@@ -1110,7 +1257,7 @@ _PREFIX_EXPLAIN: tuple[tuple[str, str], ...] = (
     ("proof-bundle/evidence/", "A saved request or reply captured during the examination. These "
                                "are the raw bytes the automatic checks re-examine, kept exactly as "
                                "they were recorded."),
-    ("proof-bundle/", "Part of the evidence bundle used by check 3 in `06-verify-it-yourself.md`."),
+    ("proof-bundle/", "Part of the evidence bundle used by check 3 in `07-verify-it-yourself.md`."),
     ("reports/", "The detailed engineering report, written for the technical team that will make "
                  "the changes. The numbered documents cover the same ground in plain language."),
     ("appendix/", "A machine-readable record, included so that other tools and future reviewers "
@@ -1222,12 +1369,14 @@ def render_start_here(*, label: str, info: RunInfo, built: Optional[str], facts:
     L.append("</tbody></table>")
 
     if facts:
-        L.append("<p>In plain terms, the proven findings are:</p><ul>")
+        L.append("<p>In plain terms, what was demonstrated is:</p><ul>")
         for it in facts:
-            L.append(f"<li><strong>{_e(it.graded.finding.title)}</strong> — {_e(it.why)}</li>")
+            L.append(f"<li><strong>{_e(it.graded.finding.title)}</strong> — {_e(it.what)}</li>")
         L.append("</ul>")
-        L.append("<p>The full account is in <code>03-findings.md</code>; what to do about it, in "
-                 "order, is in <code>05-what-to-do.md</code>.</p>")
+        L.append("<p>Each of those is set out in full in <code>03-findings.md</code>, which "
+                 "states separately what was demonstrated here and what that kind of weakness can "
+                 "lead to in general — the two are different, and the difference matters. What to "
+                 "do about them, in order, is in <code>06-what-to-do.md</code>.</p>")
     else:
         L.append("<div class='panel caution'><p><strong>Nothing was proven in this "
                  "examination.</strong> That is not the same as the system being secure. It means "
@@ -1250,10 +1399,14 @@ def render_start_here(*, label: str, info: RunInfo, built: Optional[str], facts:
                         "If you read only one document, read this one."),
         (DOC_APPROACH, "How the work was done — and what was not examined. Read this before "
                        "drawing any conclusion from the result."),
-        (DOC_FINDINGS, "Every proven finding: what it is, why it matters here, how it was proved, "
-                       "what it does not prove, what to do, and how to check the fix worked."),
+        (DOC_FINDINGS, "Every proven finding: what kind of weakness it is, what was actually "
+                       "demonstrated on this system, how it was proved, what it does not prove, "
+                       "what to do, and how to check the fix worked."),
         (DOC_LEADS, "What was observed or suspected but not proven, kept separate so that it is "
                     "not overstated."),
+        (DOC_CATALOGUE, "Every category of weakness the examination can look for, and this "
+                        "engagement's position against each. Read it to judge what the silence "
+                        "means: a category with no finding is recorded as unknown, not as clean."),
         (DOC_WHAT_TO_DO, "The recommended order of work, with the reasoning behind it."),
         (DOC_VERIFY, "How to check everything above yourself, with the exact commands and what a "
                      "pass and a failure look like."),
@@ -1369,8 +1522,9 @@ def build_case_file(
     generated_at: Optional[str],
     inventory: list[str],
     notes: Iterable[str] = (),
+    catalogue: Optional[Catalogue] = None,
 ) -> dict[str, bytes]:
-    """Render the eight case-file documents. Returns ``{arcname: bytes}``.
+    """Render the case-file documents. Returns ``{arcname: bytes}``.
 
     ``inventory`` is the FULL list of archive entry names the finished dossier will contain,
     including the documents this function returns and the signature envelope — that is what lets
@@ -1380,6 +1534,7 @@ def build_case_file(
     Pure and deterministic given its inputs (``generated_at`` is the only injected clock)."""
     facts, observed, unproven = _classify(graded, adapted)
     built = generated_at
+    cat = catalogue if catalogue is not None else build_catalogue(graded)
 
     out: dict[str, bytes] = {}
     out[START_HERE] = render_start_here(
@@ -1396,6 +1551,8 @@ def build_case_file(
         label=label, info=run_info, facts=facts, built=built).encode("utf-8")
     out[DOC_LEADS] = render_leads(
         label=label, info=run_info, observed=observed, unproven=unproven, built=built).encode("utf-8")
+    out[DOC_CATALOGUE] = render_catalogue(
+        label=label, info=run_info, cat=cat, built=built).encode("utf-8")
     out[DOC_WHAT_TO_DO] = render_what_to_do(
         label=label, info=run_info, facts=facts, observed=observed, unproven=unproven,
         built=built).encode("utf-8")

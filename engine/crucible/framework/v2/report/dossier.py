@@ -531,6 +531,23 @@ code.inl { background: rgba(127,127,127,.16); padding: .05rem .35rem; border-rad
 """.strip()
 
 
+def _report_pointer(included: list[str]) -> str:
+    """A sentence naming the detailed engineering documents THIS archive contains, or "" when it
+    contains neither. Every cross-reference the index prints must be checked against the real entry
+    list: a pointer to a file that is not in the zip is a defect the reader discovers, and it
+    devalues every other statement in a document whose whole purpose is to be trustworthy."""
+    road = "reports/remediation-roadmap.md" in included
+    tech = "reports/technical.md" in included
+    if road and tech:
+        return ("Full remediation ordering (impact / effort) is in reports/remediation-roadmap.md; "
+                "per-finding proof and verification blocks are in reports/technical.md.")
+    if road:
+        return "Full remediation ordering (impact / effort) is in reports/remediation-roadmap.md."
+    if tech:
+        return "Per-finding proof and verification blocks are in reports/technical.md."
+    return ""
+
+
 def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
                   proof: dict, spine_names: list[str], has_drift: bool, has_log: bool,
                   signed: bool, fingerprint: str, generated_at: Optional[str],
@@ -559,11 +576,25 @@ def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
         sub += f" Generated {_e(generated_at)}."
     L.append(f"<p class='sub'>{sub}</p>")
 
-    # honest headline banner
+    # Honest headline banner.
+    #
+    # The re-verifiable-OFFLINE claim is gated on the proof bundle ACTUALLY being embedded, not on
+    # the fact count. Those are different conditions: the fact count comes from re-executing the
+    # retained proofs here, while the bundle is built by a separate export that can legitimately
+    # produce nothing (no signer, no artifacts, an export error). Gating the sentence on the fact
+    # count alone let a dossier promise an embedded bundle that its own README, on the very next
+    # screen, said was absent — a self-contradiction inside governance-SIGNED bytes, which is
+    # exactly the kind of defect that destroys a reader's warrant to believe any of it.
     if n_facts > 0:
         lead_txt = f"{n_leads} lead(s)" if n_leads is not None else "leads (see reports)"
-        L.append(f"<div class='banner fact'>{n_facts} oracle-confirmed FACT(s) — each re-verifiable "
-                 f"OFFLINE from the embedded proof bundle. Plus {_e(lead_txt)}{_e(lead_note)}.</div>")
+        if proof.get("ok"):
+            L.append(f"<div class='banner fact'>{n_facts} oracle-confirmed FACT(s) — each re-verifiable "
+                     f"OFFLINE from the embedded proof bundle. Plus {_e(lead_txt)}{_e(lead_note)}.</div>")
+        else:
+            L.append(f"<div class='banner lead'>{n_facts} oracle-confirmed FACT(s), each re-proved from "
+                     f"retained evidence when this dossier was built. NO offline proof bundle is embedded "
+                     f"({_e(proof.get('note', 'no bundle was produced'))}), so a third party CANNOT "
+                     f"re-verify them from this archive alone. Plus {_e(lead_txt)}{_e(lead_note)}.</div>")
     else:
         if n_leads and n_leads > 0:
             L.append(f"<div class='banner lead'>This run produced NO oracle-confirmed FACT — {n_leads} "
@@ -611,13 +642,14 @@ def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
                      f"<td>{_e(f.get('remediation', ''))}</td>"
                      "</tr>")
         L.append("</tbody></table>")
-        L.append("<p class='muted'>Full remediation ordering (impact ÷ effort) is in "
-                 "<code class='inl'>reports/remediation-roadmap.md</code>; per-finding proof/verification "
-                 "blocks are in <code class='inl'>reports/technical.md</code>.</p>")
-    elif "reports/remediation-roadmap.md" in included or "reports/technical.md" in included:
+        # Point ONLY at documents this archive actually contains. The renderers can fail (a
+        # malformed finding source), in which case the markdown reports are absent while the
+        # structured export is still present — the old unconditional pointer then sent the reader
+        # to two files that are not in the zip.
+        L.append("<p class='muted'>" + _e(_report_pointer(included)) + "</p>")
+    elif _report_pointer(included):
         L.append("<h2>How to patch</h2>")
-        L.append("<p>Remediation guidance is in <code class='inl'>reports/remediation-roadmap.md</code>; "
-                 "per-finding verification is in <code class='inl'>reports/technical.md</code>.</p>")
+        L.append("<p>" + _e(_report_pointer(included)) + "</p>")
 
     # how to verify — the REAL offline command
     L.append("<h2>How to verify each (offline, zero-trust)</h2>")

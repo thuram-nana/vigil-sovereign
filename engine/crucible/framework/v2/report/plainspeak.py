@@ -411,6 +411,109 @@ def oracle_plain(kind: Optional[str]) -> str:
             f"check works; the engineering team can look it up by that name.")
 
 
+# What a firing check ESTABLISHES — the narrow claim, as distinct from the METHOD above and from
+# the general consequences of the category. This is the sentence that keeps a reader from reading
+# the category's worst case as a description of their own system: the category description says
+# what this KIND of weakness can lead to; this says what THIS engagement actually settled.
+#
+# Each entry deliberately under-claims. Where a check proves something about the request alone and
+# not about what the application did with it, that limit is stated in the sentence itself.
+_ORACLE_ESTABLISHES: dict[str, str] = {
+    "differential_response": (
+        "that input supplied at this point changed what the system DID, not merely what it "
+        "displayed — the reply to the modified request diverged from the reply to the harmless one "
+        "by more than ordinary variation produces"
+    ),
+    "boolean_inference": (
+        "that the system's answer flipped consistently with a true/false condition embedded in the "
+        "supplied input, across repeated trials — which happens only when the input is being "
+        "evaluated rather than treated as data"
+    ),
+    "reflection_context": (
+        "that text supplied at this point reaches the page in a position where a browser treats it "
+        "as code rather than as text"
+    ),
+    "dom_execution": (
+        "that script supplied at this point actually executed inside a real browser page"
+    ),
+    "error_signature": (
+        "that input supplied at this point reached the underlying component and was processed by "
+        "it, rather than being rejected before it got there"
+    ),
+    "evaluation": (
+        "that the server evaluated an expression supplied in the input, rather than treating it as "
+        "literal text"
+    ),
+    "side_effect": (
+        "that a unique marker placed in the input reached the internal destination under test"
+    ),
+    "oob_callback": (
+        "that the system genuinely acted on an address supplied to it, because it connected "
+        "outward to a listener under the tester's control — an event that cannot occur by accident"
+    ),
+    "timing": (
+        "that the system's response time depended on the supplied input, consistently and by more "
+        "than ordinary variation explains"
+    ),
+    "statistical_timing": (
+        "that the system's response time depended on the supplied input, consistently and by more "
+        "than ordinary variation explains"
+    ),
+    "achieved_state": (
+        "that the system reached a state which only the attempted action produces"
+    ),
+    "sanitizer_signal": (
+        "that the program violated memory safety while handling this request, as reported by "
+        "instrumentation built into the running program"
+    ),
+    "sql_injection_breakout": (
+        "that the value sent provably closes a quoted string and introduces database-query "
+        "structure. This is established about the REQUEST. It does not by itself establish that "
+        "the application went on to execute that structure"
+    ),
+    "command_injection_breakout": (
+        "that the value sent provably contains a shell command-execution construct. This is "
+        "established about the REQUEST. It does not by itself establish that the application went "
+        "on to run it"
+    ),
+    "nosql_injection_breakout": (
+        "that the value sent provably injects database query-operator structure. This is "
+        "established about the REQUEST. It does not by itself establish that the application went "
+        "on to execute it"
+    ),
+    "service_reachability": (
+        "that a network service completed a real connection handshake at the address tested"
+    ),
+    "tls_weakness": (
+        "that a real encrypted connection was negotiated using the weak setting named"
+    ),
+    "version_range": (
+        "that the version in use falls inside the range a published advisory names as affected"
+    ),
+    "policy_path": (
+        "that the permissions as configured allow the identity named to reach the resource named"
+    ),
+}
+
+
+def oracle_establishes(kind: Optional[str]) -> str:
+    """The NARROW claim a firing check settles — never the category's general consequences.
+
+    Callers must render this separately from :func:`plain_for`'s second element, and must say
+    which is which. Conflating them is how a reader comes to believe the worst case for a
+    category was demonstrated on their own system."""
+    k = (kind or "").strip()
+    text = _ORACLE_ESTABLISHES.get(k)
+    if text:
+        return text
+    if k:
+        return (f"what the check named `{k}` is defined to establish. The record does not carry a "
+                f"plain-language statement of that, so it is not paraphrased here — ask the "
+                f"engineering team what this check proves before relying on the finding")
+    return ("something the record does not name, because it does not say which check fired. Treat "
+            "the confirmation as unexplained until the engineering team identifies it")
+
+
 def has_oracle_plain(kind: str) -> bool:
     return (kind or "").strip() in _ORACLE_PLAIN
 
