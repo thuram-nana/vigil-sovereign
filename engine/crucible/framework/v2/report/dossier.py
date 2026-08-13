@@ -48,8 +48,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..common.logging import _scrub  # reuse the engagement-log secret scrubber verbatim
+from .adapt import AdaptResult, adapt_scan_export, auditfinding_to_payload
 from .export import export_json, export_sarif
 from .generate import ReportMeta, generate_reports
+from .grounding import GradedFinding, grade_findings
 
 # A fixed zip entry timestamp (the ZIP epoch) so the archive framing carries NO wallclock and two
 # builds over the same inputs produce byte-identical entries. The MANIFEST hashes the entry CONTENT,
@@ -136,30 +138,10 @@ def _load_findings_source(run_dir: Path) -> Optional[list[dict]]:
     return None
 
 
-def _auditfinding_to_payload(f: dict) -> dict:
-    """Map an AuditFinding-shaped reverifiable finding onto the ``FindingPayload`` shape
-    ``report.grounding.grade_finding`` coerces. A ``reverifiable.json`` finding is a
-    serialized ``scanner.engine.AuditFinding`` (``check_id/bug_class/insertion_point/param/
-    endpoint/confidence/confirmed_by/oracle_context``) — it has none of ``FindingPayload``'s
-    required descriptive fields, so ``FindingPayload.model_validate`` rejects the raw dict.
-    Only the fields the grader reads matter — above all the retained ``oracle_context`` (what
-    RE-FIRES), plus ``bug_class`` and the oracle metadata; the descriptive fields are filled
-    from the finding's own identifiers so coercion succeeds. This never invents a proof: no
-    ``oracle_context`` in → no fact out. Deterministic; pure."""
-    return {
-        "finding_slug": str(f.get("check_id") or f.get("bug_class") or "finding"),
-        "title": str(f.get("bug_class") or f.get("check_id") or "finding"),
-        "severity": "Info",
-        "bug_class": str(f.get("bug_class") or ""),
-        "surface": str(f.get("insertion_point") or f.get("param") or f.get("endpoint") or ""),
-        "summary": "",
-        "oracle_context": f.get("oracle_context"),
-        # A reverifiable finding is oracle-RECORDED by construction (confirmed_by + retained
-        # context); mark it so a non-re-firing one grades DEMOTED (a lead), never LEAD-only.
-        "verified_by_oracle": bool(f.get("confirmed_by") or f.get("oracle_context")),
-        "confidence": f.get("confidence"),
-        "oracle_kind": f.get("confirmed_by"),
-    }
+# The AuditFinding -> FindingPayload coercion now lives in report.adapt, so the ONE definition is
+# shared by every site that must grade a retained proof (here, and report.standards). Re-exported
+# under the historical private name so existing callers/tests keep working.
+_auditfinding_to_payload = auditfinding_to_payload
 
 
 def _reverifiable_finding_is_fact(f: dict) -> bool:
@@ -333,13 +315,49 @@ class _Reports:
     report_sarif: Optional[bytes] = None
     export_doc: Optional[dict] = None                           # parsed report.json (report.export shape)
     notes: list[str] = field(default_factory=list)
+    # The findings in the RENDERERS' shape, graded by re-executing each retained proof. Populated
+    # whether they came from a raw findings.json or from a stored scan export via report.adapt —
+    # so the human case file is built from the same graded set the markdown reports are.
+    findings: list[dict] = field(default_factory=list)
+    graded: list[GradedFinding] = field(default_factory=list)
+    adapted: AdaptResult = field(default_factory=AdaptResult)
+
+
+def _read_json_file(run_dir: Path, rel: str) -> Optional[dict]:
+    p = run_dir / rel
+    if p.is_symlink() or not p.is_file():
+        return None
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _reverifiable_docs(run_dir: Path) -> list[dict]:
+    """Both re-verifiable conventions, parsed: a scan/console run's top-level ``reverifiable.json``
+    and the proof studio's ``proofs/reverifiable.json``. Either may be absent."""
+    out: list[dict] = []
+    for rel in ("reverifiable.json", "proofs/reverifiable.json"):
+        doc = _read_json_file(run_dir, rel)
+        if doc is not None:
+            out.append(doc)
+    return out
 
 
 def _gather_reports(run_dir: Path, meta: ReportMeta) -> _Reports:
-    """Collect the three markdown docs + the JSON/SARIF exports. Pre-rendered files under the run dir
-    win; any that are absent are rendered from a ``findings.json`` raw source via the SAME
-    ``report.generate`` / ``report.export`` renderers (so a doc and an export grade a finding
-    identically). Deterministic given ``meta`` (``generated_at`` is the only optional non-determinism)."""
+    """Collect the three markdown docs + the JSON/SARIF exports, and the GRADED finding set behind
+    them. Pre-rendered files under the run dir win; anything absent is rendered with the SAME
+    ``report.generate`` / ``report.export`` renderers (so a document and an export grade a finding
+    identically), from whichever finding source the run left behind:
+
+      * a raw ``findings.json`` already in the renderers' shape, or
+      * the stored ``report.json`` — the scanner EXPORT shape, which the renderers cannot validate.
+        :mod:`report.adapt` translates it and joins each finding back to the retained
+        ``oracle_context`` in ``reverifiable.json``, so a once-confirmed finding can have its proof
+        RE-EXECUTED here rather than being demoted merely because the export omits the evidence.
+
+    Deterministic given ``meta`` (``generated_at`` is the only optional non-determinism)."""
     r = _Reports()
 
     # pre-rendered markdown
@@ -357,27 +375,6 @@ def _gather_reports(run_dir: Path, meta: ReportMeta) -> _Reports:
     if ps is not None:
         r.report_sarif = _read_bytes(ps)
 
-    # render whatever is missing, from a raw findings source, using the report renderers
-    need_md = [n for n in _REPORT_MD if n not in r.md]
-    if need_md or r.report_json is None or r.report_sarif is None:
-        findings = _load_findings_source(run_dir)
-        if findings is not None:
-            try:
-                docs = generate_reports(findings, meta)
-                _name = {"executive": "executive.md", "technical": "technical.md",
-                         "remediation-roadmap": "remediation-roadmap.md"}
-                for key, fname in _name.items():
-                    if fname in need_md and key in docs:
-                        r.md[fname] = docs[key].encode("utf-8")
-                if r.report_json is None:
-                    r.report_json = export_json(findings, meta).encode("utf-8")
-                if r.report_sarif is None:
-                    r.report_sarif = export_sarif(findings, meta).encode("utf-8")
-                r.notes.append(f"rendered reports/exports from findings.json ({len(findings)} finding(s)) "
-                               "via report.generate/report.export")
-            except Exception as e:  # noqa: BLE001 — a malformed findings source never aborts the dossier
-                r.notes.append(f"could not render from findings.json: {e}")
-
     if r.report_json is not None:
         try:
             doc = json.loads(r.report_json.decode("utf-8"))
@@ -385,6 +382,45 @@ def _gather_reports(run_dir: Path, meta: ReportMeta) -> _Reports:
                 r.export_doc = doc
         except ValueError:
             pass
+
+    # ---- the finding set the renderers consume -------------------------------------------------
+    findings = _load_findings_source(run_dir)
+    if findings is None and r.export_doc is not None:
+        adapted = adapt_scan_export(r.export_doc, _reverifiable_docs(run_dir))
+        if adapted.findings:
+            findings = adapted.findings
+            r.adapted = adapted
+            r.notes += adapted.notes
+    if findings is not None:
+        r.findings = findings
+        try:
+            r.graded = grade_findings(findings)
+        except Exception as e:  # noqa: BLE001 — a malformed finding never aborts the dossier
+            r.notes.append(f"could not grade findings: {e}")
+
+    # render whatever is missing, from that finding set, using the report renderers
+    need_md = [n for n in _REPORT_MD if n not in r.md]
+    if (need_md or r.report_json is None or r.report_sarif is None) and findings is not None:
+        try:
+            docs = generate_reports(findings, meta)
+            _name = {"executive": "executive.md", "technical": "technical.md",
+                     "remediation-roadmap": "remediation-roadmap.md"}
+            for key, fname in _name.items():
+                if fname in need_md and key in docs:
+                    r.md[fname] = docs[key].encode("utf-8")
+            if r.report_json is None:
+                r.report_json = export_json(findings, meta).encode("utf-8")
+                try:
+                    r.export_doc = json.loads(r.report_json.decode("utf-8"))
+                except ValueError:
+                    pass
+            if r.report_sarif is None:
+                r.report_sarif = export_sarif(findings, meta).encode("utf-8")
+            r.notes.append(f"rendered the written reports from {len(findings)} recorded finding(s) "
+                           "via report.generate/report.export")
+        except Exception as e:  # noqa: BLE001 — a malformed findings source never aborts the dossier
+            r.notes.append(f"could not render the written reports: {e}")
+
     return r
 
 

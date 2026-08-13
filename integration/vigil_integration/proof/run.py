@@ -119,17 +119,44 @@ def _persist_record(run_dir: str | os.PathLike, res: Any, finding: dict, capture
 
 def read_reverifiable(run_dir: str | os.PathLike) -> dict:
     """The run's re-verifiable proof report ({"active_findings": [...]}) — each entry a proven FACT with its
-    ``oracle_context`` + ``action_id``, the material ``vigil proof-export`` builds a client bundle from. An
-    empty ``active_findings`` doc on a missing/unreadable file (never raises)."""
-    path = Path(run_dir) / PROOFS_SUBDIR / REVERIFIABLE_NAME
-    if not path.is_file():
-        return {"active_findings": []}
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {"active_findings": []}
-    findings = doc.get("active_findings") if isinstance(doc, dict) else None
-    return {"active_findings": findings if isinstance(findings, list) else []}
+    ``oracle_context`` (and, for a studio proof, its ``action_id``), the material ``vigil proof-export``
+    builds a client bundle from. An empty ``active_findings`` doc on missing/unreadable files (never raises).
+
+    BOTH storage conventions are read, because the platform writes two and they never met:
+
+      * ``proofs/reverifiable.json`` — appended by the proof studio (:func:`_persist_reverifiable`).
+      * ``reverifiable.json`` at the run root — written by a scan's ``--reverifiable-out``, which is
+        what every console/UI scan uses (``console/actions.py``).
+
+    Reading only the first meant a plain scan run exported ZERO certificates: its proofs were on disk,
+    re-firing, and simply never looked at, so every scan dossier shipped without the offline-verifiable
+    bundle that is the point of the exercise. Entries are merged, studio proofs first (so existing
+    bundles keep their certificate order), and de-duplicated by canonical content so a finding recorded
+    under both conventions is certified once."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for path in (Path(run_dir) / PROOFS_SUBDIR / REVERIFIABLE_NAME, Path(run_dir) / REVERIFIABLE_NAME):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        findings = doc.get("active_findings") if isinstance(doc, dict) else None
+        if not isinstance(findings, list):
+            continue
+        for f in findings:
+            if not isinstance(f, dict):
+                continue
+            try:
+                key = json.dumps(f, sort_keys=True, default=str)
+            except (TypeError, ValueError):
+                key = repr(f)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(f)
+    return {"active_findings": out}
 
 
 def _persist_reverifiable(run_dir: str | os.PathLike, finding: dict, action_id: str,
