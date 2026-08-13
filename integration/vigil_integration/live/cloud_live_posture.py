@@ -91,9 +91,15 @@ class CloudLivePostureResult:
         return "INCONCLUSIVE"                          # never CLEAN (a partial capture cannot prove absence)
 
 
-def _oracle_signal(bug_class: str, oracle_context: dict) -> "tuple[bool, bool]":
-    """Run the deterministic oracle over the retained context and return ``(fired, conclusive)`` WITHOUT
-    minting. All framework imports are function-local (FATAL-2)."""
+def _oracle_signal(bug_class: str, oracle_context: dict) -> "tuple[bool, bool, frozenset]":
+    """Run the deterministic oracle over the retained context and return ``(fired, conclusive, rules)``
+    WITHOUT minting. All framework imports are function-local (FATAL-2).
+
+    ``rules`` is the set of ``observed["rule"]`` values the FIRED signals reported. It comes out of the SAME
+    ``VerificationResult`` the verdict does — never a second, parallel oracle call, which could disagree
+    with the one that actually decided (the divergence bug this program keeps re-learning). It exists so a
+    caller can attribute a firing to the registered evidence branch that describes it, rather than filing
+    every firing under one branch (readiness audit 2.7)."""
     from framework.v2.scanner.engine import probe_verdict  # noqa: PLC0415
     from framework.v2.verify.confirmation import adjudicate_finding, confirmed_from_result  # noqa: PLC0415
     from framework.v2.verify.verifier import OracleVerifier  # noqa: PLC0415
@@ -104,7 +110,28 @@ def _oracle_signal(bug_class: str, oracle_context: dict) -> "tuple[bool, bool]":
     fired = confirmed_from_result(result, finding, verifier) is not None
     verdict, _kinds = probe_verdict(result)
     conclusive = fired or verdict == "clean"
-    return fired, conclusive
+    rules = frozenset(
+        str(r) for s in (result.signals or [])
+        if getattr(s, "fired", False)
+        for r in [(getattr(s, "observed", None) or {}).get("rule")]
+        if r
+    )
+    return fired, conclusive, rules
+
+
+def _owner_account_supplied(control: "dict") -> bool:
+    """Whether the RETAINED control threads the owner's own-account id(s) — the precondition
+    ``cloud_live.cloud_posture.cross_account_principal`` declares.
+
+    Re-uses the oracle's OWN canonicaliser (``_cloud_owner_accounts``) rather than re-reading the keys here:
+    a parallel matcher would drift from the rule it is supposed to gate, and a token the oracle drops (a
+    labelled id, a leading-zero-dropped numeric) must count as NOT supplied here too. Fail-closed: any error
+    reading the control is "not supplied", which yields INCONCLUSIVE rather than a FACT."""
+    try:
+        from framework.v2.verify.oracles import _cloud_owner_accounts  # noqa: PLC0415
+        return bool(_cloud_owner_accounts(dict(control or {})))
+    except Exception:      # noqa: BLE001 — an un-evaluable precondition is NOT a held precondition
+        return False
 
 
 def _canonical_capture(capture: "dict | bytes | str", budget: ParseBudget) -> "tuple[bytes, Any] | None":

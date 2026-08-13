@@ -104,3 +104,49 @@ def test_domain_tags_are_distinct_prefixes():
     tags = list(sd.DOMAIN_TAGS.values())
     assert len(set(tags)) == len(tags)                       # no two purposes share a prefix
     assert all(t.endswith(b"\x00") for t in tags)           # each is a NUL-terminated domain separator
+
+
+def _module_prose() -> str:
+    doc = sd.__doc__ or ""
+    assert doc, "the registry's module docstring is the human-readable half of this contract"
+    return doc
+
+
+def test_the_module_prose_does_not_contradict_the_registry_data():
+    """The prose above ``DOMAINS`` is a CLAIM ABOUT ``DOMAINS`` and must be checked like one.
+
+    It drifted once already, in the direction that matters least to a marketer and most to an auditor: it
+    said only ``offense-finding-anchor1`` was owner-rooted among the offense segments while the data said
+    THREE were, so the crypto substrate under-stated its own owner tie (readiness audit 2.3). Every
+    owner-rooted offense segment must therefore be NAMED in the prose, and no segment may be described as
+    the only one."""
+    prose = _module_prose()
+    offense_rooted = sorted(d.name for d in sd.DOMAINS if d.trust_domain == "offense" and d.owner_rooted)
+    assert offense_rooted, "no offense segment is owner-rooted — re-derive this test, do not delete it"
+    missing = [n for n in offense_rooted if n not in prose]
+    assert not missing, (
+        f"owner-rooted offense segment(s) {missing!r} are absent from the module prose — the docstring "
+        f"under-states the owner tie the DOMAINS tuple declares")
+
+    low = prose.lower()
+    for phrase in ("only ``offense-finding-anchor1``", "only `offense-finding-anchor1`",
+                   "only offense-finding-anchor1"):
+        assert phrase not in low, (
+            f"the prose still says {phrase!r}, but {len(offense_rooted)} offense segments are owner-rooted")
+
+
+def test_the_prose_count_matches_the_data():
+    """MUTATION CONTROL for the check above: the prose states a COUNT, and that count is derived from the
+    same tuple the assertion reads, so a segment gaining or losing its owner tie breaks the sentence rather
+    than silently outdating it."""
+    offense = [d for d in sd.DOMAINS if d.trust_domain == "offense"]
+    rooted = [d for d in offense if d.owner_rooted]
+    words = {3: "three", 4: "four", 5: "five", 6: "six"}
+    prose = _module_prose().lower()
+    assert f"{words[len(rooted)]} of the {words[len(offense)]} offense segments" in prose, (
+        f"the prose must state the true count: {len(rooted)} of {len(offense)} offense segments are "
+        f"owner-rooted ({sorted(d.name for d in rooted)})")
+    # The control: any OTHER count must be absent, so the sentence cannot be satisfied by a stale number.
+    for n in words:
+        if n != len(rooted):
+            assert f"{words[n]} of the {words[len(offense)]} offense segments" not in prose
