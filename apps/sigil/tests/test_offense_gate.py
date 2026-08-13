@@ -190,3 +190,23 @@ def test_open_requires_charter_binding():
 def test_expiry_charter_and_issued_at_are_in_the_signed_core():
     for field in ("not_after", "charter_hash", "charter_id", "state", "issued_at"):
         assert field in _CORE
+
+
+def test_nan_issued_at_cannot_poison_the_replay_high_water():
+    """A latent hole found while porting this gate's design to the other five governance ledgers: the
+    high-water is compared with `<=`, and EVERY comparison against NaN is False. An owner-signed OPEN
+    carrying a NaN `issued_at` would therefore set `max_issued = nan` and let EVERY subsequent replay
+    through — defeating the guard on this gate outright. `authn.as_issued_at` maps non-finite values to
+    the 0.0 bottom, so such an OPEN is honoured at most once and its own replay is still refused."""
+    s = _store()
+    g = _gate(s)
+    core = {"signal": SIGNAL, "state": "open", "charter_id": CID, "charter_hash": CHASH,
+            "not_after": FUTURE, "issued_at": float("nan")}
+    payload = {**signed_payload(core, OWNER), "tier": "A0", "decision": "auto"}
+    seq = s.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+    assert g.is_open(charter_id=CID, charter_hash=CHASH, now=NOW) is True   # honoured once, no exception
+    captured = dict(s.get(seq).payload)
+    g.close_gate()
+    s.append(kind="event", source="governor", actor="WARDEN", payload=captured)  # replay it verbatim
+    assert g.is_open(charter_id=CID, charter_hash=CHASH, now=NOW) is False, \
+        "a NaN issued_at must not poison the high-water into accepting replays"
