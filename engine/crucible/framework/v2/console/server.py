@@ -1,18 +1,34 @@
 """
-console.server — a loopback-only, read-only HTTP server for the Ops Console.
+console.server — a loopback-only, credentialed HTTP server for the Ops Console.
 
 Stdlib `ThreadingHTTPServer` bound to 127.0.0.1 ONLY (never a routable interface).
 Serves the self-contained SPA from `static/`, a set of read-only `/api/*` JSON
 endpoints (each delegating to `console.api`), and a Server-Sent-Events stream that
 tails the structured log. It issues zero outbound calls and performs no destructive
 action — a read-only console is inherently in-scope. Safe operator actions (launch /
-re-verify / kill-switch trip) are added in a later phase behind explicit POST routes.
+re-verify / kill-switch trip) live behind explicit POST routes.
+
+CREDENTIAL (the audit gap this closes): the console used to have NO credential of any
+kind — every local process, and every page that could get past the Host/Origin guard,
+could read findings, evidence, terminal history and dossiers. It now mints (or is
+handed) a SESSION TOKEN and requires it on EVERY `/api/*` request, exactly as the
+sovereign cockpit does (`apps/sigil/sigil/ui/server.py`): the header `X-SIGIL-Token`,
+or `?token=` for the SSE streams and file downloads, which cannot set a header.
+Compared with `hmac.compare_digest`. There is NO way to run without a credential —
+an unset/blank `VIGIL_CONSOLE_TOKEN` MINTS one (fail-closed); it never disables the
+check. Static assets and the index bootstrap stay token-free: they carry no secret,
+and the token is injected into the served page as a data attribute a cross-origin
+page cannot read. The CSRF / DNS-rebinding guards are unchanged and still apply —
+the token is an ADDITIONAL conjunct, never a replacement.
 """
 
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import json
+import os
+import secrets
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,6 +37,17 @@ from urllib.parse import parse_qs, urlsplit
 
 # X6 — a custom request header the same-origin SPA fetch sets and a cross-site HTML form cannot.
 _CSRF_HEADER = "X-Requested-With"
+# The session credential. Header form (SPA fetch) + query form (EventSource / <a download>, which
+# physically cannot set a request header) — the same two carriers the sovereign cockpit accepts.
+_TOKEN_HEADER = "X-SIGIL-Token"
+_TOKEN_QUERY = "token"
+# The placeholder the served index.html carries; substituted with the live token per response so the
+# same-origin page can authenticate. A cross-origin page cannot read the response body, so this is
+# the cockpit's own bootstrap pattern, not a leak.
+_TOKEN_PLACEHOLDER = "__CONSOLE_TOKEN__"
+# Env carrier: `vigil up` hands the console the SAME token it embeds in the unified UI's index.html,
+# so one credential covers both planes. Blank/unset ⇒ the console MINTS its own (never "no auth").
+_TOKEN_ENV = "VIGIL_CONSOLE_TOKEN"
 # A9: bound the POST body — the console's actions take small JSON; a huge/negative Content-Length must not be
 # read into memory. A body above the cap is refused (treated as empty → the action gets no valid params).
 _MAX_CONSOLE_BODY = 1 << 20   # 1 MiB
@@ -42,9 +69,24 @@ def _is_loopback_host(host: str) -> bool:
     except ValueError:
         return False
 
-from . import actions, api, chat, sessions
+from . import actions, api, chat, labels, sessions
 from .blackboard_sse import BlackboardTailer
 from .sse import EventTailer, stream_path
+
+
+def _resolve_token(explicit: str | None = None) -> str:
+    """The console's session credential. Order: an explicit argument → ``$VIGIL_CONSOLE_TOKEN`` → a
+    freshly minted 256-bit URL-safe token.
+
+    FAIL-CLOSED BY CONSTRUCTION: this never returns an empty string, so there is no configuration —
+    not an unset env var, not a blank one, not a missing flag — under which the console serves
+    ``/api/*`` without a credential. (An earlier design where "" meant "auth disabled" would be a
+    fail-open switch one typo away from the audit gap we are closing.)"""
+    for candidate in (explicit, os.environ.get(_TOKEN_ENV)):
+        tok = (candidate or "").strip()
+        if tok:
+            return tok
+    return secrets.token_urlsafe(32)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -90,6 +132,7 @@ _EXACT_ROUTES = {
 # dossier/report assembly (actions.py) and api.authority_full by charter_status + framework.v2.api.reads; the
 # unified UI reaches the same governance picture via `/api/charter/<slug>` (charter_status), not authority_full.
 _PREFIX_ROUTES = {
+    "/api/library/": api.library_engagement,    # the engagement library: one past job + its runs (newest first)
     "/api/inbox/": api.inbox,                   # U3: read-only agent-to-agent coordination messages (advisory)
     "/api/approvals/": api.approvals,           # A2: read-only pending per-action owner-approval requests (KEYLESS — lists only, never signs)
     "/api/report/": api.run_report,
@@ -150,6 +193,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, status=404)
             return
         body = target.read_bytes()
+        if target.name == "index.html":
+            # Bootstrap the same-origin page with the session token (the cockpit's own pattern): the
+            # page can then authenticate its /api/* calls. A cross-origin page cannot read this body,
+            # and the token never lands in a log line (log_message is silenced above).
+            body = body.replace(_TOKEN_PLACEHOLDER.encode("utf-8"),
+                                self.server.token.encode("utf-8"))
         self.send_response(200)
         self.send_header("Content-Type", _CTYPES.get(target.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
@@ -221,6 +270,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     # ---- routing ----------------------------------------------------------
 
+    def _token_ok(self) -> bool:
+        """The session credential on THIS request: the ``X-SIGIL-Token`` header, or ``?token=`` for
+        the carriers that cannot set a header (EventSource, an ``<a download>`` navigation). Compared
+        in constant time. Fail-closed: a missing/blank/wrong token is False."""
+        q = parse_qs(urlsplit(self.path).query)
+        tok = self.headers.get(_TOKEN_HEADER) or (q.get(_TOKEN_QUERY) or [""])[0]
+        expected = getattr(self.server, "token", "") or ""
+        if not tok or not expected:
+            return False
+        return hmac.compare_digest(str(tok), str(expected))
+
     def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
         parts = urlsplit(self.path)
         path = parts.path
@@ -230,6 +290,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         ok, why = self._host_is_console()
         if not ok:
             self._json({"error": f"cross-origin read refused ({why})"}, status=403)
+            return
+        # The session credential gates every DATA route (JSON, SSE and the dossier download alike).
+        # Static bootstrap assets stay token-free — they carry no secret, and index.html is where the
+        # token is handed to the same-origin page. This is checked BEFORE any provider runs, so an
+        # unauthenticated caller learns nothing about the tree (not even whether a run id exists).
+        if path.startswith("/api/") and not self._token_ok():
+            self._json({"error": "missing/invalid token"}, status=401)
             return
         try:
             if path.startswith("/api/events"):
@@ -381,6 +448,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         sfs = self.headers.get("Sec-Fetch-Site", "").strip().lower()
         if sfs and sfs not in ("same-origin", "none"):        # cross-site / same-site → refuse
             return False, f"Sec-Fetch-Site={sfs}"
+        if not self._token_ok():
+            return False, "missing/invalid token"
         return self._host_is_console()
 
     def do_POST(self) -> None:  # noqa: N802
@@ -534,6 +603,21 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # rebind-gated above; slug + seed-domain both allowlist-validated; BOUNDED + fail-soft.
                 self._json(actions.intel_ingest_offline(body))
                 return
+            if path == "/api/label/engagement":
+                # Engagement library: give a past job a HUMAN name. PRESENTATION ONLY — it writes one
+                # key in the label side-car and touches no run artifact, no certificate and no spine
+                # event, so a relabelled engagement still re-verifies. CSRF/rebind/token-gated above;
+                # an unsafe slug is refused inside set_engagement_label (fail-closed).
+                self._json(labels.set_engagement_label(str(body.get("slug", "")),
+                                                       str(body.get("label", ""))))
+                return
+            if path == "/api/label/run":
+                # Same, for ONE run. The run id passes the console's traversal guard and the run must
+                # exist; its engagement slug is resolved SERVER-SIDE from the run's own meta.json —
+                # the caller never supplies it, so a label cannot claim a run into another engagement.
+                self._json(labels.set_run_label(str(body.get("run_id", "")),
+                                                str(body.get("label", ""))))
+                return
             if path == "/api/session/create":
                 # F2: create a named session. CSRF/rebind-gated above; the registry mints no fact and
                 # authorizes nothing — it only organises runs/chats under an operator-editable name.
@@ -600,7 +684,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8787,
-          allowed_hosts=(), allowed_origins=()) -> ThreadingHTTPServer:
+          allowed_hosts=(), allowed_origins=(), token: str | None = None) -> ThreadingHTTPServer:
     """Create (but do not block on) the loopback console server. The caller runs
     ``serve_forever()``. Refuses any non-loopback BIND — the console is a
     single-operator, on-host surface by design (sovereignty); the unified reverse
@@ -609,10 +693,16 @@ def serve(host: str = "127.0.0.1", port: int = 8787,
     ``allowed_hosts``/``allowed_origins`` are the operator's exact reverse-proxy
     domain Host/Origin forms (e.g. ``vigil.example.com`` / ``https://vigil.example.com``)
     unioned into the anti-CSRF/anti-rebind guard so a same-origin request forwarded
-    by the proxy is accepted. Empty (the default) = loopback-only, unchanged."""
+    by the proxy is accepted. Empty (the default) = loopback-only, unchanged.
+
+    ``token`` is the session credential required on every ``/api/*`` request. Omit it
+    (the normal case) and one is taken from ``$VIGIL_CONSOLE_TOKEN`` or MINTED — it is
+    never empty, so the server cannot be started without a credential. The live value
+    is exposed as ``srv.token`` for the launcher to print and for tests to present."""
     if host not in ("127.0.0.1", "localhost", "::1"):
         raise ValueError(f"console binds loopback only, refusing host {host!r}")
     srv = ThreadingHTTPServer((host, port), ConsoleHandler)
     srv.allowed_hosts = frozenset(h.strip() for h in allowed_hosts if h and h.strip())
     srv.allowed_origins = frozenset(o.strip().rstrip("/") for o in allowed_origins if o and o.strip())
+    srv.token = _resolve_token(token)
     return srv

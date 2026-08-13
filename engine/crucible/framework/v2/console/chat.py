@@ -35,8 +35,14 @@ _MAX_ID = 128            # a chat id is a single filename component; cap length 
 
 def _live_dir() -> Path:
     """The operator-machine base for chat transcripts. `vigil up` sets VIGIL_LIVE_DIR to the same
-    ``.vigil-live`` the rest of the live plane uses; default keeps the console usable standalone."""
-    return Path(os.environ.get("VIGIL_LIVE_DIR") or ".vigil-live")
+    ``.vigil-live`` the rest of the live plane uses; default keeps the console usable standalone.
+
+    Delegates to ``sessions._live_dir`` — ONE resolver for the console's live base. The session
+    registry ADOPTS a chat transcript as a legacy session (``sessions._legacy_chat_entry`` reads
+    ``<live>/chats/<id>.jsonl``), so if the two resolvers disagreed a chat would vanish from the
+    session/library list. A single resolver makes that class of drift impossible."""
+    from . import sessions
+    return sessions._live_dir()      # noqa: SLF001 — one resolver for the console's live base
 
 
 def _safe_chat_id(raw: str) -> str:

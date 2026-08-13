@@ -55,8 +55,32 @@ _LOCK = threading.RLock()
 
 
 def _live_dir() -> Path:
-    """The operator-machine base (same ``.vigil-live`` the chat transcripts + live plane use)."""
-    return Path(os.environ.get("VIGIL_LIVE_DIR") or ".vigil-live")
+    """The operator-machine base (same ``.vigil-live`` the chat transcripts + live plane use).
+
+    ALWAYS ABSOLUTE. This used to return a bare ``Path(".vigil-live")`` — resolved against the
+    process CWD — while the runs a session points at live under ``CRUCIBLE_ROOT`` (``console_dir()``).
+    A console started from any other directory therefore read/created its session registry somewhere
+    else entirely, so the Sessions/Library screens showed phantom or empty run lists (and a rename
+    could silently land in a second, orphaned registry). Anchor the DEFAULT to the CRUCIBLE root so
+    the registry always sits beside the runs it references; an explicit ``VIGIL_LIVE_DIR`` (what
+    ``vigil up`` passes, already absolute) still wins and is resolved so a relative value is pinned
+    ONCE, at read time, rather than following the CWD around.
+
+    Total: if the CRUCIBLE root cannot be resolved (a bare checkout with no sentinel) we fall back to
+    the absolute CWD-anchored path — the historical location — never a raise into a request handler."""
+    env = (os.environ.get("VIGIL_LIVE_DIR") or "").strip()
+    if env:
+        p = Path(env).expanduser()
+    else:
+        try:
+            from ..common import paths
+            p = Path(paths.crucible_root()) / ".vigil-live"
+        except Exception:  # noqa: BLE001 — no resolvable root ⇒ the historical CWD-anchored default
+            p = Path(".vigil-live")
+    try:
+        return p.resolve()
+    except OSError:
+        return p.absolute()
 
 
 def _sessions_dir() -> Path:

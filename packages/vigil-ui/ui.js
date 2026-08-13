@@ -83,11 +83,17 @@
     if (!r.ok) { const err = new Error((data && data.error) || (r.status + " " + url)); err.status = r.status; err.data = data; throw err; }
     return data;
   }
+  // Query-param auth for the carriers that CANNOT set a request header: EventSource and a download
+  // navigation (<a href download>). Both backends accept the token as `?token=` for exactly this,
+  // so a credentialed console still streams events and still serves a dossier ZIP to a click.
+  function authUrl(url) {
+    if (!token()) return url;
+    const sep = url.indexOf("?") === -1 ? "?" : "&";
+    return url + sep + "token=" + encodeURIComponent(token());
+  }
   // SSE with query-param auth (EventSource can't set headers). onEvent(kind, data, id).
   function sse(url, onEvent, onError) {
-    const sep = url.indexOf("?") === -1 ? "?" : "&";
-    const full = token() ? url + sep + "token=" + encodeURIComponent(token()) : url;
-    const es = new EventSource(full, { withCredentials: true });
+    const es = new EventSource(authUrl(url), { withCredentials: true });
     es.onmessage = function (e) { let d; try { d = JSON.parse(e.data); } catch (_) { d = e.data; } onEvent(d, e.lastEventId); };
     if (onError) es.onerror = onError;
     return es;
@@ -149,6 +155,6 @@
   }
 
   window.VUI = { h: h, clear: clear, mount: mount, append: append, $: $, store: store,
-    getJSON: getJSON, postJSON: postJSON, sse: sse, toast: toast, router: router,
+    getJSON: getJSON, postJSON: postJSON, sse: sse, authUrl: authUrl, toast: toast, router: router,
     pill: pill, statusBadge: statusBadge, tile: tile, card: card, icon: icon, api: api, token: token };
 })();

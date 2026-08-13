@@ -12,8 +12,14 @@ const Console = (() => {
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const dash = (v) => (v == null || v === '' ? '<span class="dash">—</span>' : esc(v));
   const num = (v) => (v == null ? '<span class="dash">—</span>' : Number(v).toLocaleString());
+  // The console's session credential, handed to this same-origin page by the server (it substitutes
+  // the placeholder in index.html per response). Every /api/* call carries it as a header; the two
+  // carriers that CANNOT set a header — EventSource and a download navigation — carry it as ?token=.
+  const TOKEN = (document.body && document.body.dataset && document.body.dataset.token) || '';
+  const AUTH = (extra) => Object.assign({}, extra || {}, TOKEN ? { 'X-SIGIL-Token': TOKEN } : {});
+  const authURL = (url) => (TOKEN ? url + (url.indexOf('?') === -1 ? '?' : '&') + 'token=' + encodeURIComponent(TOKEN) : url);
   async function getJSON(url) {
-    const r = await fetch(url, { headers: { Accept: 'application/json' } });
+    const r = await fetch(url, { headers: AUTH({ Accept: 'application/json' }) });
     if (!r.ok) throw new Error(`${r.status} ${url}`);
     return r.json();
   }
@@ -138,7 +144,7 @@ const Console = (() => {
   function connectSSE() {
     if (state.evtSource) { state.evtSource.close(); state.evtSource = null; }
     const qs = state.activeSlug ? `?slug=${encodeURIComponent(state.activeSlug)}` : '';
-    const es = new EventSource('/api/events' + qs);
+    const es = new EventSource(authURL('/api/events' + qs));
     es.onmessage = (m) => {
       let ev; try { ev = JSON.parse(m.data); } catch { return; }
       state.feed.unshift(ev);
@@ -327,7 +333,7 @@ const Console = (() => {
     if (liveES) { liveES.close(); liveES = null; }
     Object.assign(liveCounters, { phase: '—', pages: 0, discovered: 0, surface: 0, findings: 0, requests: 0 });
     const qs = opts.run ? `?run=${encodeURIComponent(opts.run)}` : (opts.slug ? `?slug=${encodeURIComponent(opts.slug)}` : '');
-    const es = new EventSource('/api/events' + qs);
+    const es = new EventSource(authURL('/api/events' + qs));
     es.onmessage = (m) => { let ev; try { ev = JSON.parse(m.data); } catch { return; } onLiveEvent(ev, opts); };
     liveES = es;
   }
@@ -358,7 +364,7 @@ const Console = (() => {
     if (!target) { msg.innerHTML = '<span class="badge warn">enter a loopback target</span>'; return; }
     msg.innerHTML = '<span class="muted">launching…</span>';
     try {
-      const r = await fetch('/api/launch/scan', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'fetch' },
+      const r = await fetch('/api/launch/scan', { method: 'POST', headers: AUTH({ 'Content-Type': 'application/json', 'X-Requested-With': 'fetch' }),
         body: JSON.stringify({ target }) });
       const d = await r.json();
       if (d.error) { msg.innerHTML = `<span class="badge danger">${esc(d.error)}</span>`; return; }
@@ -393,7 +399,7 @@ const Console = (() => {
     try {
       const b = { slug, mode, target };
       if (mode === 'cloud') b.provider = provider;
-      const r = await fetch('/api/launch/cloud', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'fetch' },
+      const r = await fetch('/api/launch/cloud', { method: 'POST', headers: AUTH({ 'Content-Type': 'application/json', 'X-Requested-With': 'fetch' }),
         body: JSON.stringify(b) });
       const d = await r.json();
       if (d.error) { msg.innerHTML = `<span class="badge danger">${esc(d.error)}</span>`; return; }
@@ -480,7 +486,7 @@ const Console = (() => {
   async function reverify(runId) {
     const msg = document.getElementById('reverifyMsg'); msg.innerHTML = '<span class="muted">re-verifying…</span>';
     try {
-      const r = await fetch('/api/reverify/' + encodeURIComponent(runId), { method: 'POST', headers: { 'X-Requested-With': 'fetch' } });
+      const r = await fetch('/api/reverify/' + encodeURIComponent(runId), { method: 'POST', headers: AUTH({ 'X-Requested-With': 'fetch' }) });
       const d = await r.json();
       msg.innerHTML = d.error ? `<span class="badge danger">${esc(d.error)}</span>`
         : `<span class="badge ${d.reproduced === d.total ? 'ok' : 'warn'}">${d.reproduced}/${d.total} certificates reproduced</span>`;
@@ -774,7 +780,7 @@ const Console = (() => {
   async function tripKill(slug) {
     if (!confirm(`Trip the kill-switch for "${slug}"? This is an emergency hard stop.`)) return;
     const msg=document.getElementById('tripMsg'); msg.innerHTML='<span class="muted">tripping…</span>';
-    try { const r=await fetch('/api/killswitch/'+encodeURIComponent(slug)+'/trip',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'fetch'},body:JSON.stringify({reason:'tripped from Ops Console'})});
+    try { const r=await fetch('/api/killswitch/'+encodeURIComponent(slug)+'/trip',{method:'POST',headers: AUTH({ 'Content-Type': 'application/json', 'X-Requested-With': 'fetch' }),body:JSON.stringify({reason:'tripped from Ops Console'})});
       const d=await r.json(); msg.innerHTML = d.error?`<span class="badge danger">${esc(d.error)}</span>`:'<span class="badge danger">tripped</span>';
       refreshSafety(); setTimeout(()=>route(),400);
     } catch(e){ msg.innerHTML=`<span class="badge danger">${esc(e.message)}</span>`; }

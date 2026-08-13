@@ -5335,7 +5335,9 @@
         if (btn) btn.disabled = false;
         if (r && r.error) { if (statusEl) V.mount(statusEl, h("div.legend", null, [V.icon("info"), r.error])); return; }
         var a = document.createElement("a");
-        a.href = OFF("/api/dossier/" + encodeURIComponent(runId) + ".zip");
+        // A download navigation cannot set a request header, so the session token rides the query
+        // string (the same carrier the SSE streams use) — a credentialed console 401s otherwise.
+        a.href = V.authUrl(OFF("/api/dossier/" + encodeURIComponent(runId) + ".zip"));
         a.download = "vigil-dossier-" + runId + ".zip";
         document.body.appendChild(a); a.click(); document.body.removeChild(a);
         if (statusEl) V.mount(statusEl, [
