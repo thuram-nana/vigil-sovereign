@@ -418,7 +418,7 @@ def render_executive(*, label: str, info: RunInfo, facts: list[_Item], observed:
             match = next((it for it in facts if it.graded.finding.finding_slug ==
                           r.graded.finding.finding_slug), None)
             fix = _remediation_text(match) if match else ""
-            L.append(f"{r.rank}. **{_md_inline(r.graded.finding.title)}** "
+            L.append(f"{r.rank}. **{match.title if match else _md_inline(r.graded.finding.title)}** "
                      f"({_SEVERITY_WORDS.get(r.graded.finding.severity, r.graded.finding.severity)}; "
                      f"estimated effort: {_EFFORT_WORDS.get(r.effort, r.effort)}).  ")
             L.append(f"   {_md_inline(fix)}")
@@ -993,14 +993,15 @@ def render_what_to_do(*, label: str, info: RunInfo, facts: list[_Item], observed
         L += ["| Order | Finding | Rating | Effort to fix |",
               "|------:|---------|--------|---------------|"]
         for r in rows:
-            L.append(f"| {r.rank} | {_md_inline(r.graded.finding.title)} | "
+            it = by_slug.get(r.graded.finding.finding_slug)
+            L.append(f"| {r.rank} | {it.title if it else _md_inline(r.graded.finding.title)} | "
                      f"{r.graded.finding.severity} | {_EFFORT_WORDS.get(r.effort, r.effort)} |")
         L += ["", "### What each one requires", ""]
         for r in rows:
             it = by_slug.get(r.graded.finding.finding_slug)
             if it is None:
                 continue
-            L += [f"**{r.rank}. {_md_inline(r.graded.finding.title)}**  ",
+            L += [f"**{r.rank}. {it.title}**  ",
                   f"_Reference `{_md_inline(r.graded.finding.finding_slug)}`; "
                   f"{_SEVERITY_WORDS.get(r.graded.finding.severity, r.graded.finding.severity)}; "
                   f"estimated effort {_EFFORT_WORDS.get(r.effort, r.effort)}._",
@@ -1016,7 +1017,8 @@ def render_what_to_do(*, label: str, info: RunInfo, facts: list[_Item], observed
             L += ["### Do these first if capacity is limited", "",
                   "Serious, and inexpensive to fix — the best return on a constrained week:", ""]
             for r in quick:
-                L.append(f"- **{_md_inline(r.graded.finding.title)}** "
+                it = by_slug.get(r.graded.finding.finding_slug)
+                L.append(f"- **{it.title if it else _md_inline(r.graded.finding.title)}** "
                          f"({r.graded.finding.severity}, "
                          f"{_EFFORT_WORDS.get(r.effort, r.effort)}).")
             L.append("")
@@ -1115,7 +1117,8 @@ PYTHON"""
 
 
 def render_verify(*, label: str, info: RunInfo, built: Optional[str], signed: bool,
-                  fingerprint: str, proof: dict, n_facts: int) -> str:
+                  fingerprint: str, proof: dict, n_facts: int,
+                  key_is_run_local: bool = False) -> str:
     verify_cmd = str(proof.get("verify_cmd") or "")
     proof_fp = str(proof.get("trust_root_fingerprint") or fingerprint or "")
     L = _header("How to check all of this for yourself", label, info.run_id, built)
@@ -1127,7 +1130,8 @@ def render_verify(*, label: str, info: RunInfo, built: Optional[str], signed: bo
         "| Check | The question it answers |",
         "|-------|-------------------------|",
         "| 1. Contents | Has anything in this pack been altered since it was produced? |",
-        "| 2. Signature | Was it produced by the organisation that claims to have produced it? |",
+        "| 2. Signature | Is the pack sealed, and does the seal belong to a key the sender has "
+        "independently vouched for? |",
         "| 3. Proof | Do the findings actually follow from the saved evidence? |",
         "",
         "You need a computer with Python 3 installed. None of these checks contacts the examined "
@@ -1198,6 +1202,25 @@ def render_verify(*, label: str, info: RunInfo, built: Optional[str], signed: bo
             "",
             "If the two fingerprints differ, this pack was signed by somebody other than the "
             "party you obtained the fingerprint from. Treat it as untrustworthy.",
+            "",
+            "### What the signature does and does not establish",
+            "",
+            "A valid signature establishes that the pack has not been altered since it was sealed, "
+            "and that whoever sealed it held the private key belonging to the fingerprint above. "
+            "It does **not**, by itself, tell you who that was. Only the separate-channel "
+            "comparison does that, and only to the extent that the party you asked really is the "
+            "party you meant to ask.",
+            "",
+        ]
+    if key_is_run_local:
+        L += [
+            "One further caveat, stated because it materially affects how much the signature is "
+            "worth here. The signing key for this pack is held with the engagement's own working "
+            "files rather than in a long-lived organisational key store, which means a different "
+            "engagement will normally produce a different fingerprint. So the value above "
+            "identifies THIS pack's signer; it is not a standing identity you can check future "
+            "packs against. Ask the sender to publish the fingerprint for each pack they send, "
+            "and compare each one.",
             "",
         ]
     else:
@@ -1674,7 +1697,8 @@ def render_start_here(*, label: str, info: RunInfo, built: Optional[str], facts:
                  f"<p><code>{_e(fp)}</code></p>"
                  "<p>Obtain this same value from the sender by telephone, letter, or another "
                  "channel that did not carry this file, and compare it character by character. If "
-                 "the two differ, do not trust this pack.</p></div>")
+                 "the two differ, do not trust this pack. A signature on its own proves the pack "
+                 "is unaltered; it is this comparison that ties it to a sender.</p></div>")
 
     # --- complete inventory -------------------------------------------------------------------------
     L.append("<h2>Everything in this pack</h2>")
@@ -1749,6 +1773,7 @@ def build_case_file(
     inventory: list[str],
     notes: Iterable[str] = (),
     catalogue: Optional[Catalogue] = None,
+    key_is_run_local: bool = False,
 ) -> dict[str, bytes]:
     """Render the case-file documents. Returns ``{arcname: bytes}``.
 
@@ -1787,7 +1812,7 @@ def build_case_file(
         built=built).encode("utf-8")
     out[DOC_VERIFY] = render_verify(
         label=label, info=run_info, built=built, signed=signed, fingerprint=fingerprint,
-        proof=proof, n_facts=len(facts)).encode("utf-8")
+        proof=proof, n_facts=len(facts), key_is_run_local=key_is_run_local).encode("utf-8")
     out[DOC_GLOSSARY] = render_glossary(
         label=label, info=run_info, built=built,
         extra_terms=_extra_glossary_terms(facts), inventory=inventory).encode("utf-8")

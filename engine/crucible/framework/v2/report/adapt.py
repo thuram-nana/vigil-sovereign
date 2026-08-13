@@ -350,7 +350,11 @@ def adapt_scan_export(
         # first parameter in the endpoint's query string. Empty when neither is available — the
         # documents then omit it rather than naming a parameter nothing recorded.
         parameter = str((proof or {}).get("param") or "").strip()
-        if not parameter and "?" in endpoint:
+        # Only an ACTIVE finding is bound to a particular input. A passive observation (a missing
+        # header) is a property of the whole response, and the query string of the URL that
+        # happened to be fetched says nothing about it — naming it as the "affected input" would
+        # point a reader at the wrong thing.
+        if not parameter and kind == "active" and "?" in endpoint:
             first = endpoint.partition("?")[2].split("&", 1)[0]
             parameter = first.split("=", 1)[0].strip()
 

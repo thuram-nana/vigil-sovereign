@@ -1003,7 +1003,11 @@ def build_dossier(
         case_entries = build_case_file(
             label=human_label, run_info=run_info, graded=reports.graded, adapted=reports.adapted,
             proof=proof, signed=signed, fingerprint=fingerprint, generated_at=generated_at,
-            inventory=sorted(set(inventory)), notes=notes, catalogue=cat)
+            inventory=sorted(set(inventory)), notes=notes, catalogue=cat,
+            # With no explicit governance-key home the signer is provisioned INSIDE the run dir, so
+            # each engagement mints its own trust root. That materially weakens what the signature
+            # says about origin, and the reader is entitled to know it.
+            key_is_run_local=not base_dir)
         entries.update(case_entries)
     except Exception as e:  # noqa: BLE001 — a rendering failure must never cost the archive its proof
         notes.append(f"the plain-English case file could not be rendered ({type(e).__name__}: {e}); "
