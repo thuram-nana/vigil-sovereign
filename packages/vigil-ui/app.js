@@ -156,12 +156,26 @@
     // goes to the library to switch job or widen back to all. It shrinks and ellipsises (see
     // components.css) so it can never push the safety state or the primary action off the bar.
     const scopeLabel = s.engagement ? engagementName() : "All engagements";
+    // A VIEW FILTER, not a running job. It reads "Viewing: <job>" (never "active"/"live") so a scoped
+    // view is never mistaken for an engagement that is running, and it carries an inline × to clear the
+    // filter from anywhere — the operator's complaint was a scoped job that looked "active" and could not
+    // be cleared from the top bar.
+    const scopeKids = [V.icon("book"),
+      h("span.txt", null, s.engagement ? ("Viewing: " + scopeLabel) : scopeLabel)];
+    if (s.engagement) {
+      scopeKids.push(h("button.scope-clear", {
+        title: "Clear this view filter — show all engagements again",
+        "aria-label": "Clear view filter, show all engagements",
+        onClick: function (e) { e.preventDefault(); e.stopPropagation(); setEngagement(""); route(); },
+      }, "×"));
+    }
     const scope = h("button.scope-chip" + (s.engagement ? ".on" : ""), {
       title: s.engagement
-        ? ("Every screen is showing " + scopeLabel + " only — click to switch job or widen to all engagements")
-        : "Every screen is showing all engagements — click to pick the job you are working on",
+        ? ("A VIEW FILTER — every screen is showing " + scopeLabel + " only. This is not a running job; "
+          + "click to switch job, or use × to show all engagements.")
+        : "Every screen is showing all engagements — click to pick a job to view",
       onClick: function () { location.hash = "#/library"; },
-    }, [V.icon("book"), h("span.txt", null, scopeLabel)]);
+    }, scopeKids);
     const live = s.killed ? V.pill("Kill-switch", "danger", null)
       : (s.live === "live" ? V.pill("Live", "live", null) : V.pill("Idle", "idle", null));
     const counts = h("div.counts", null, [
@@ -220,7 +234,9 @@
   // was otherwise going to start by hand.
   const OFFENSE_STATUS_URL = "/__vigil/plane/status";
   const OFFENSE_START_URL = "/__vigil/plane/offense/start";
+  const OFFENSE_STOP_URL = "/__vigil/plane/offense/stop";
   const OFFENSE_START_WAIT_MS = 30000;   // how long we watch for it to actually answer before saying so
+  const OFFENSE_STOP_WAIT_MS = 15000;    // …and how long we watch for it to go quiet after a stop
 
   // known:    have we observed the offense side at all yet? Before the first probe we show NOTHING —
   //           an indicator that guesses is worse than no indicator.
@@ -228,7 +244,7 @@
   // canStart: this proxy serves the start route. A 404 means an older `vigil up`, and then the honest
   //           thing is to show the command, not a button that cannot work.
   // busy:     a start we asked for is in flight.
-  const OFFENSE = { known: false, up: false, starting: false, canStart: true, busy: false };
+  const OFFENSE = { known: false, up: false, starting: false, canStart: true, busy: false, stopping: false };
 
   function offenseHeaders() {
     const hh = { "X-Requested-With": "vigil-ui" };
@@ -291,15 +307,32 @@
     if (!OFFENSE.known) {                       // nothing observed yet: occupy no space, claim nothing
       return h("span.offense-chip#offense-chip", { style: { display: "none" } }, "");
     }
+    if (OFFENSE.stopping) {
+      return h("button.offense-chip.working#offense-chip", { disabled: true,
+        title: "Stopping the offense console and API." },
+        [h("span.dot"), h("span.txt", null, "Stopping offense…")]);
+    }
     if (OFFENSE.busy || (OFFENSE.starting && !OFFENSE.up)) {
       return h("button.offense-chip.working#offense-chip", { disabled: true,
         title: "Starting the offense console and API — this takes a few seconds." },
         [h("span.dot"), h("span.txt", null, "Starting offense…")]);
     }
     if (OFFENSE.up) {
+      // Up: a quiet indicator, PLUS the STOP that pairs with the start button — so the offense side can
+      // be brought DOWN from the screen the same way it is brought up. The proxy serving this page owns
+      // the two backends' lifecycle and tears exactly them down (never the cockpit, never itself).
+      // `canStart` gates stop too: a proxy that cannot start the plane cannot stop it, so it shows no
+      // button rather than one that cannot work.
+      const upKids = [h("span.dot"), h("span.txt", null, "Offense up")];
+      if (OFFENSE.canStart) {
+        upKids.push(h("button.oc-stop", {
+          title: "Stop the offense console and API. Findings, reports and proof stay on disk; you can "
+            + "start the offense side again here or with `vigil up`.",
+          onClick: function (e) { e.preventDefault(); e.stopPropagation(); confirmStopOffense(); },
+        }, "Stop"));
+      }
       return h("span.offense-chip.up#offense-chip",
-        { title: "The offense console and API are answering." },
-        [h("span.dot"), h("span.txt", null, "Offense up")]);
+        { title: "The offense console and API are answering." }, upKids);
     }
     if (!OFFENSE.canStart) {                    // honest: no button, because this proxy cannot start it
       return h("span.offense-chip.down#offense-chip",
@@ -391,6 +424,80 @@
     return attempt();
   }
 
+  // ---- the named STOP action -------------------------------------------------
+  // Stopping the offense side shuts down the console + api that serve findings/reports; disruptive enough
+  // to confirm first, reversible enough (start again here or `vigil up`) not to need more than that.
+  function confirmStopOffense() {
+    if (!window.confirm("Stop the offense side?\n\nThe offense console and API will be shut down. Your "
+      + "findings, reports and proof stay on disk — start the offense side again from here (or with "
+      + "`vigil up`) whenever you want. Any assessment still running will be stopped.")) return;
+    stopOffensePlane();
+  }
+  // Single-flight and idempotent, exactly like the start action. Resolves to
+  // { outcome: "stopped" | "already_stopped" | "failed", detail }. Never rejects.
+  let offenseStopping = null;
+  function stopOffensePlane() {
+    if (offenseStopping) return offenseStopping;
+    OFFENSE.stopping = true; paintOffenseChip();
+    offenseStopping = V.postJSON(OFFENSE_STOP_URL, {})     // empty body: no command, no path, no port
+      .then(readStopClaim, readStopFailure)
+      .then(function (res) {
+        OFFENSE.stopping = false; offenseStopping = null;
+        V.toast(res.detail, res.outcome === "failed");
+        paintOffenseChip();
+        scheduleOffensePoll();
+        return res;
+      });
+    return offenseStopping;
+  }
+  function readStopClaim(r) {
+    r = r || {};
+    if (r.error) return { outcome: "failed", detail: "Could not stop the offense side: " + String(r.error) };
+    const claim = String(r.result || "").toLowerCase();
+    if (claim === "already_stopped") {
+      return confirmOffenseDown("already_stopped", "The offense side was already stopped.");
+    }
+    // "stopped" / any other 2xx: the POST is a CLAIM, the status route is the OBSERVATION — report only
+    // what can be SEEN, so a backend that refused to die is never called a clean stop.
+    return confirmOffenseDown("stopped", "The offense side was stopped.");
+  }
+  function readStopFailure(e) {
+    const st = e && e.status;
+    if (st === 404 || st === 501) {
+      return { outcome: "failed",
+        detail: "This build of `vigil up` has no stop action — stop the offense side with `vigil down`." };
+    }
+    if (st === 401 || st === 403) {
+      return { outcome: "failed",
+        detail: "Not authorized to stop the offense side. Reload the page to pick up a current session token." };
+    }
+    if (st === 503) {
+      return { outcome: "failed",
+        detail: "This page's proxy has no plane control — stop the offense side with `vigil down`." };
+    }
+    return { outcome: "failed",
+      detail: "Could not stop the offense side: " + ((e && e.message) || "the proxy did not answer") + "." };
+  }
+  function confirmOffenseDown(outcome, detail) {
+    return waitForOffenseDown(OFFENSE_STOP_WAIT_MS).then(function (down) {
+      if (down) return { outcome: outcome, detail: detail };
+      return { outcome: "failed",
+        detail: "The stop was accepted, but the offense side is still answering after "
+          + Math.round(OFFENSE_STOP_WAIT_MS / 1000) + "s. Stop it with `vigil down` in a terminal." };
+    });
+  }
+  function waitForOffenseDown(ms) {
+    const deadline = Date.now() + ms;
+    function attempt() {
+      return probeOffense().then(function () {
+        if (!OFFENSE.up) return true;
+        if (Date.now() >= deadline) return false;
+        return new Promise(function (res) { setTimeout(res, 1000); }).then(attempt);
+      });
+    }
+    return attempt();
+  }
+
   // A start button with in-place feedback, for a screen (the top-bar chip is its own control). Same
   // single-flight action, same three honest outcomes.
   function offenseStartButton(label) {
@@ -413,7 +520,7 @@
   // is healthy, and completely silent while the tab is hidden.
   let offenseTimer = null;
   function offensePollDelay() {
-    if (OFFENSE.busy || OFFENSE.starting) return 2000;
+    if (OFFENSE.busy || OFFENSE.starting || OFFENSE.stopping) return 2000;
     if (!OFFENSE.known) return 4000;
     return OFFENSE.up ? 20000 : 6000;
   }
@@ -434,6 +541,31 @@
       probeOffense().then(scheduleOffensePoll, scheduleOffensePoll);   // catch up the moment it is looked at
     });
     probeOffense().then(scheduleOffensePoll, scheduleOffensePoll);
+  }
+
+  // ---- new-build notice ------------------------------------------------------
+  // If `vigil up` republishes the bundle while this tab is open, the page keeps running the OLD app.js
+  // (the browser already parsed it). Notice a new build id from /__vigil/plane/version and tell the
+  // operator to reload — the ETag/no-cache + `?v=<build>` cache-busting then serve the fresh bundle. This
+  // is exactly the "I updated it but still see the old UI" gap. Checked on load + whenever the tab is
+  // looked at again; announced once, never nagged.
+  const OFFENSE_VERSION_URL = "/__vigil/plane/version";
+  let _buildNotified = false;
+  function checkBuildVersion() {
+    const mine = (document.body.dataset && document.body.dataset.build) || "";
+    if (!mine || mine === "__VIGIL_BUILD__" || _buildNotified) return;   // unsubstituted placeholder → skip
+    fetch(OFFENSE_VERSION_URL, { headers: offenseHeaders(), credentials: "same-origin", cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d || !d.build || d.build === mine) return;
+        _buildNotified = true;
+        V.toast("A new VIGIL build is available — reload the page to pick it up.", false);
+      })
+      .catch(function () { /* proxy busy / down — try again next time the tab is looked at */ });
+  }
+  function watchBuildVersion() {
+    document.addEventListener("visibilitychange", function () { if (!document.hidden) checkBuildVersion(); });
+    setTimeout(checkBuildVersion, 3000);   // one check shortly after load
   }
 
   function renderNav() {
@@ -6160,7 +6292,7 @@
         }
         return h("tr.click", { onClick: open }, [
           h("td", null, [h("b", null, libName(r)),
-            (isActive ? h("span.pill.sm.live", { style: { marginLeft: "8px" }, title: "every screen is scoped to this job" }, "active") : null),
+            (isActive ? h("span.pill.sm", { style: { marginLeft: "8px" }, title: "every screen is currently filtered to this job — a view filter, not a running job" }, "viewing") : null),
             (r.label ? h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, r.slug) : null),
             (r.on_spine ? null : h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, "not on the spine"))]),
           h("td", null, libWhenCell(r.last_activity)),
@@ -6222,10 +6354,11 @@
   }
 
   function renderLibraryDetail(screen, slug) {
-    // Opening one job — from the list, a bookmark, or a shared link — makes it the active scope. The
-    // name is left alone when this job is already active (the list click knew it; a deep link does not,
-    // and drawLibraryDetail fills it in from the job's own label once it lands).
-    setEngagement(slug);
+    // Viewing one job's detail — from a bookmark, a shared link, a reload, or browser back — does NOT
+    // change the global view filter. Scoping is an EXPLICIT act: the list row's Open (drawLibrary) sets
+    // it, and this detail page offers a "Scope every screen to this job" button. Re-pinning on every
+    // view was exactly why a job the operator only looked at got stuck as the "active" scope with no way
+    // to shake it. drawLibraryDetail fills the name from the job's own label when it lands.
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Engagement Library"),
         h("span.sub", null, "One past job — its runs, and the way back into each one's findings and proof.")]),
@@ -6287,11 +6420,14 @@
         d.has_charter ? V.pill("Charter on file", "ok", null) : V.pill("No charter", "idle", null),
         ks.tripped ? V.pill("Kill-switch TRIPPED", "danger", null) : null,
         roster && roster.on_spine ? V.pill("On the signed spine", "live", null) : null,
-        activeEngagement() === slug ? V.pill("Working on this job", "live", null) : null,
+        activeEngagement() === slug ? V.pill("View filter: this job", "idle", null) : null,
         activeEngagement() === slug
-          ? h("button.btn.sm", { style: { marginLeft: "auto" }, title: "Stop scoping every screen to this job",
+          ? h("button.btn.sm", { style: { marginLeft: "auto" }, title: "Stop filtering every screen to this job",
             onClick: function () { setEngagement(""); location.hash = "#/library"; } }, [V.icon("book"), "All engagements"])
-          : null,
+          : h("button.btn.sm", { style: { marginLeft: "auto" },
+            title: "Filter every screen to this job's runs (a view filter — it changes nothing signed or gated)",
+            onClick: function () { setEngagement(slug, (roster && roster.label) || ""); drawLibraryDetail(slug); } },
+            [V.icon("book"), "Scope every screen to this job"]),
       ]),
       h("div.hint", { style: { marginTop: "8px" } },
         "Live, Findings, Fixes, Report, Proof, Compliance, Assurance and Activity are showing this job's "
@@ -7348,6 +7484,10 @@
     route();
     refreshKeysBadge();           // surface any failing API key in the top bar from first paint
     startSigilHud();              // S2: persistent SIGIL voice/gesture nav channel (survives route changes)
+    watchOffensePlane();          // W0-B: probe the offense plane + keep the Start/Stop chip live. Without
+                                  // this the chip stays `display:none` forever (OFFENSE.known never flips),
+                                  // which is exactly why the Start/Stop control never appeared.
+    watchBuildVersion();          // W0-deploy: notice a republished bundle and offer to reload.
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot); else boot();
 })();
