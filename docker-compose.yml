@@ -72,8 +72,13 @@ services:
     image: vigil/strix-sandbox:local
     profiles: ["strix"]
     build:
-      context: ./vendor/strix/containers
-      dockerfile: Dockerfile
+      # The context is the vendored tool's ROOT, not its containers/ directory. The Dockerfile
+      # copies BOTH `containers/docker-entrypoint.sh` AND `strix/tools/proxy/caido_api.py`, and
+      # those two paths only resolve together from one level up. Pointed at containers/, the build
+      # fails at the entrypoint COPY with "not found" — which is why this image had never been
+      # built on any machine despite the command being documented in three places.
+      context: ./vendor/strix
+      dockerfile: containers/Dockerfile
     entrypoint: ["/bin/true"]          # never meant to `up`; an accidental up exits cleanly
 
 volumes:

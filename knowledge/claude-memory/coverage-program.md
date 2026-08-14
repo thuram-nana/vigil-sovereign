@@ -1,0 +1,48 @@
+---
+name: coverage-program
+description: "CRUCIBLE M1-M6 coverage program — status, architecture, where to add checks"
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 7758e121-f349-47d5-886b-6bb5a1d60e27
+---
+
+The strategic pivot after the 14-wave engine (branch [[crucible-beyond-sota]], merged to main via PR #21): the gap to Burp/Nuclei is **coverage**, not algorithms. A 6-milestone program (M1-M6) fills it while keeping the near-zero-FP "prove-don't-guess" property. Plan lives in the coverage-program section of the approved plan.
+
+**M1 done (branch `coverage-m1`, PR #22):** the coverage ARCHITECTURE.
+- `scanner/fingerprint.py` — tech fingerprinter (73 sigs / 42 techs), exposes `Fingerprint.tokens: set[str]` (tech names ∪ categories) — the gating contract.
+- `scanner/library.py` + `scanner/library_entries/*.json` — checks are DATA now. `LibraryEntry` = payload + OracleSpec (kind: differential|reflection|oob|timing) + `applies_when` predicate. `compile_entry`→runnable Check, `select_entries(entries, tokens)` gates by fingerprint. Predicate grammar: always/tech/category/any/all/not.
+- `scanner/campaign.py` — opt-in `use_library=True` fingerprints the crawl → selects gated entries → compiles → runs alongside built-ins. `ScanReport.fingerprint` + `.library_checks_run`. Crawler `Page` now retains `headers`.
+- `eval/validation.py` + `eval/adapters.py` — comparative benchmark spine: `NormalizedFinding`, `Scoreboard` (precision/recall/f1), `score()`, `CrucibleAdapter`, and Burp/Nuclei/ZAP/sqlmap adapters (skip when tool/env absent). NOT the same as `eval/harness.py` (that's the M2 self-improvement harness — kept separate).
+
+**M2 done (same `coverage-m1` branch / PR #22):** injection/API/XSS breadth. Library **11→100 entries**: 24 SQLi dialects, 29 injection variants (NoSQL/LDAP/XPath/auth-bypass differential; blind cmdi/SSRF/OOB-SQLi/XXE/deser oob), 17 XSS-context (reflection kind + bug_class xss → auto-routes to context-aware oracle, precision-safe), 11 SSTI-per-engine, 8 error-based-SQLi. TWO new oracles in verify/oracles.py: `evaluation_oracle` (SSTI: server EVALUATED the expr — result present, raw absent) and `error_signature_oracle` (error-based: payload-provoked DBMS error absent from benign control). Each is a full slice: OracleKind + adapter builder (`from_evaluation`/`from_error_signature`) + verifier routing + `checks.{EvaluationCheck,ErrorSignatureCheck}` + library kind (`evaluation`/`error_signature`). Added `ldap_injection`/`xpath_injection` routing. Library kinds now: differential/reflection/oob/timing/evaluation/error_signature.
+DEFERRED: request-level checks (GraphQL/JWT/CORS) as library data (they already run in DEFAULT_REQUEST_CHECKS).
+
+**M3 done (branch `coverage-m3` / PR #23):** remote OOB + blind breadth + smuggling. `verify/collaborator.py` = self-hostable OOB relay: `RelayServer` (operator runs on an allowlisted host, authenticated poll) + `RelayClient` (OOBReceiver-shaped: register_token/poll, no-op ctx mgr — drops into the OOB check path). `collaborator serve` CLI; campaign/engage take `oob_relay_url`+`oob_relay_secret` (engage scope-gates the relay host). Unlocks blind-class confirmation on REMOTE targets (was loopback-only). Library **100→142** (+42 blind `oob` entries: SSRF/XXE/deser/JNDI-Log4Shell/cmdi variants). `scanner/smuggling.py` extended: TE-obfuscation/TE.TE/CL.0 variants (same timing+latency-oracle gate) + `detect_h2c_upgrade` (honest capability detection, NOT h2 exploitation — no HPACK in stdlib).
+GOTCHA: `detect()` now sends 11 probes so `test_smuggling.py` runs ~30s (was ~10s). Raw-socket smuggling tests: don't name a Thread method `_handle` (Py3.13 shadow) — use `_serve_conn`.
+
+**M4 done (branch `coverage-m4` / PR #24):** browser/DOM subsystem, VERIFIED with real headless Chromium (it IS available: /usr/bin/chromium). `scanner/cdp.py` = a CDP driver over the scanner's own RFC-6455 WS client (scanner.websocket) — no browser-automation dep. `CdpBrowser`(launch headless w/ --remote-debugging-port=0, read DevToolsActivePort) + `CdpSession`(navigate/evaluate/add_binding/add_init_script/binding_calls/drain_events). `cdp_available()` gates the dynamic path; browser tests are `@pytest.mark.skipif(not cdp_available())`. NEW `OracleKind.DOM_EXECUTION` + `dom_execution_oracle` (fires only when a unique canary reaches a driver-only CDP binding = injected JS EXECUTED — strongest XSS proof). `scanner/browser_xss.py:confirm_dom_xss` drives execution payloads. `scanner/spa_crawler.py` = fetch/XHR endpoint capture (pre-load init-script hook->binding), shadow-DOM piercing, route enum, framework detection (react/angular/vue/svelte/next/nuxt/preact/ember/backbone). GOTCHA: Runtime.addBinding SURVIVES navigation (applies to future contexts); a percent-encoded fragment reaches a hash sink as inert text (encode-aware when testing DOM sinks). NOT yet wired into campaign/engage (browser-XSS as a scan step) — clean follow-on.
+
+Oracle kinds now: differential/reflection/oob/timing/evaluation/error_signature/dom_execution. Every new OracleKind must be added to `scanner/self_improve.py:_skeleton_for` generic map.
+
+**M5 done (branch `coverage-m5` / PR #25):** framework packs + passive breadth + discovery. NEW request-level library support: `signature` OracleSpec kind -> `checks.PathProbeCheck` (a RequestCheck: GET a known path, confirm a distinctive signature via the predicate oracle -> ACHIEVED_STATE). `library.split_checks(entries)->(point,request)`; campaign runs request-level library checks once per host. `compile_library` now SKIPS request-level kinds (returns point checks only) — GOTCHA that broke an M1 test. 20 framework exposure packs (m5_fw_*.json: .git/.env/actuator/wp-json/phpinfo/etc.), library **142->162**, bug_class `exposure`. `scanner/passive.py` grown 6->39 checks (page-hardening gated to HTML so JSON APIs aren't dinged). NEW `scanner/discovery.py`: content discovery (144-path wordlist via injected send), robots/sitemap/OpenAPI/GraphQL parsers, JS endpoint+secret mining (entropy-guarded). M4+M5 modules now exported from scanner/__init__.py. Library kinds: differential/reflection/oob/timing/evaluation/error_signature/signature.
+
+**M6 done (branch `coverage-m6` / PR #26) — PROGRAM COMPLETE.** `scanner/report.py`: ScanReport -> JSON / SARIF 2.1.0 / HTML, findings enriched with remediation+CWE (library lookup by check_id, else per-class map), oracle-confirmed findings flagged re-verifiable. `scan --format json|sarif|html`. Docs in `framework/v2/docs/` (OPERATOR-GUIDE, CHECK-AUTHORING, ARCHITECTURE). `framework/v2/eval/`: `benchmark_app.py` (labeled vuln app, 8 bugs + 3 safe controls), `benchmark_run.py` (+ `benchmark` CLI subcommand), `adapters_ext.py` (Wapiti/Nikto adapters). Fixed a recall gap: OpenRedirectCheck was never in DEFAULT_CHECKS — added it.
+PUBLIC BENCHMARK (docs/BENCHMARK.md, this host has sqlmap/wapiti/nikto; nuclei/zap/burp absent): **crucible precision 1.000 / recall 1.000 / f1 1.000 (8/0/0)**; sqlmap 0 (needs a specific injectable URL, not crawl-from-root); wapiti 0.125 (7 FPs); nikto (6 FPs). The zero-FP column is the differentiator — CRUCIBLE reports only oracle-confirmed findings.
+
+**ALL 6 MILESTONES MERGED (#22-#26).**
+
+**Follow-on (branch `browser-egress-allowlist` / PR #27):**
+1. Remote browser path DONE (the deferred item): `CdpBrowser(allowed_hosts=...)` launches Chromium with `--host-resolver-rules=MAP * ~NOTFOUND,EXCLUDE <hosts>` so off-scope HOSTNAMES fail to resolve (browser can't egress off the charter allowlist). MUST EXCLUDE 127.0.0.1/localhost/::1 or the loopback target is blocked. Chose this over CDP Fetch interception (Fetch.enable stalled sub-resources + broke the execution binding). Wired via campaign `browser_allowed_hosts` + engage (confines to seed host); `engage --browser-xss --spa` now works on remote targets. Limit: IP-literal off-scope refs not resolver-gated.
+2. LFI hardening: NEW `content` library kind -> `checks.ContentSignatureCheck` (inject a traversal, confirm a distinctive FILE-CONTENT signature like `root:x:0:0:` via side_effect — real file read, not marker reflection). 9 traversal/LFI entries (h1_lfi_*.json). Library **162->171**.
+Benchmark expanded to 9 bugs (added path_traversal to eval/benchmark_app.py); CRUCIBLE 9/0/0 (precision 1.000, recall 1.000); wapiti 0.222 (7 FPs); sqlmap/nikto 0. docs/BENCHMARK.md regenerated.
+
+GOTCHA: don't run the full v2 suite in the BACKGROUND while also launching Chromium probes / writing files — resource contention flakes ~38 loopback-server + timing tests. Run it alone.
+Library kinds: differential/reflection/oob/timing/evaluation/error_signature/signature/content.
+Remaining future: request-level library only covers `signature`; DNS-only OOB needs a DNS relay; IP-literal browser egress.
+
+**GOTCHA:** adding an `OracleKind` requires updating `scanner/self_improve.py:_skeleton_for`'s per-kind `generic` dict (now `.get()` with a fallback, so it won't KeyError again). Sweep `grep -rl "OracleKind\." framework/v2 | grep -v tests` for exhaustive maps.
+
+**To add coverage:** drop a JSON entry in `scanner/library_entries/`. Kinds now: differential/reflection/oob/timing/evaluation. STILL not expressible as data: request-level checks (GraphQL/JWT/CORS) and error-based SQLi (needs a DB-error-signature oracle) — that's M2e. XSS-context breadth (M2c) needs the Wave-6 `reflection_context_oracle` wired as a library kind.
+
+Full suite after M2: ~1206 passed, 13 skipped (exit 0). See [[crucible-testing-and-gotchas]]. NOTE: the v2 suite takes ~155s — exceeds the Bash tool's 2-min default; run it in the background and read the output file.

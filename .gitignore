@@ -28,3 +28,8 @@ target/
 # recall-baseline signing PRIVATE keys — the operator holds these out-of-band;
 # ONLY the public authorizer (in the .sig.json) + fingerprint are committed.
 *.privkey
+
+# session working artifacts — never part of a commit
+/scratchpad/
+/conftest_probe.py
+/benchmark-report.md
