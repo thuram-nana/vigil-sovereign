@@ -146,7 +146,7 @@
   function topbar() {
     const seg = h("div.segmented", null, ["all", "offense", "defense"].map(function (p) {
       return h("button" + (app.get().plane === p ? ".on" : ""), { dataset: { plane: p },
-        onClick: function () { app.set({ plane: p }); renderNav(); } }, p[0].toUpperCase() + p.slice(1));
+        onClick: function () { switchPlane(p); } }, p[0].toUpperCase() + p.slice(1));
     }));
     const cmdk = h("div.cmdk", { title: "Command palette (⌘K)", onClick: openPalette },
       [V.icon("search"), "Search or run a command", h("span.kbd", null, "⌘K")]);
@@ -435,18 +435,33 @@
     probeOffense().then(scheduleOffensePoll, scheduleOffensePoll);
   }
 
+  // Which screens a plane offers. Named (not an inline closure) so the plane SWITCHER can reuse it to
+  // avoid stranding the operator on a screen the new plane hides. "all" shows everything; "defense" shows
+  // the defense screen plus the shared MANAGE/LEARN screens; "offense" shows the offense-run screens plus
+  // the shared ones. Home and everything under MANAGE/LEARN are shared and show in every plane.
+  function planeVisible(plane, id) {
+    if (plane === "all") return true;
+    if (id === "defense") return plane === "defense";
+    if (["assess", "live", "findings", "fixes"].indexOf(id) >= 0) return plane === "offense";
+    return true;
+  }
+  // THE FIX for "Offense/Defense won't select — it stays on All". Clicking a plane used to call renderNav()
+  // only, which re-rendered the SIDEBAR but not the TOP BAR — and the segmented control computes its
+  // highlighted (`.on`) button at top-bar render time, so the highlight never moved off All. refreshTopbar()
+  // re-renders both, so the clicked tab actually lights up and the sidebar filters with it.
+  function switchPlane(p) {
+    app.set({ plane: p });
+    refreshTopbar();
+    if (!planeVisible(p, current())) location.hash = "#/home";  // don't leave the operator on a hidden screen
+  }
   function renderNav() {
     const nav = V.$("#nav"); if (!nav) return;
     const plane = app.get().plane;
-    const visible = function (it) {
-      if (plane === "all") return true;
-      if (it.id === "defense") return plane === "defense";
-      if (["assess", "live", "findings", "fixes"].indexOf(it.id) >= 0) return plane === "offense";
-      return true; // home + manage always
-    };
     V.mount(nav, NAV.map(function (grp) {
+      const items = grp.items.filter(function (it) { return planeVisible(plane, it.id); });
+      if (!items.length) return null;   // a plane that hides a whole group shows no orphaned heading
       return [h("div.nav-group.label", null, grp.group),
-        grp.items.filter(visible).map(function (it) { return navItem(it); })];
+        items.map(function (it) { return navItem(it); })];
     }));
   }
   function navItem(it) {
@@ -472,6 +487,13 @@
     ]));
     document.body.appendChild(h("div#drawer", null, [h("div.dh", null, [h("h2#drawer-title", null, "Detail"),
       h("button.iconbtn", { "aria-label": "Close detail panel", onClick: closeDrawer }, V.icon("x"))]), h("div.db#drawer-body")]));
+    // ⌘K / Ctrl-K opens the command palette from anywhere. Registered here in shell(), which runs once at
+    // boot, so the listener is never stacked. The palette's own guard stops a second one opening over it.
+    document.addEventListener("keydown", function (e) {
+      if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey) && !e.altKey) {
+        e.preventDefault(); openPalette();
+      }
+    });
     renderNav();
   }
 
@@ -489,7 +511,65 @@
     document.documentElement.setAttribute("data-theme", next);
     try { localStorage.setItem("vigil-theme", next); } catch (e) {}
   }
-  function openPalette() { V.toast("Command palette is on the roadmap — for now use the sidebar. Start a run from New Assessment."); }
+  // The command palette — a keyboard-first way to reach any screen without hunting the sidebar. It was a
+  // stub toast ("on the roadmap"); this is the real thing. Its entries are the SAME nav model the sidebar
+  // renders (so it can never list a screen that does not exist), plus a couple of in-place actions.
+  function openPalette() {
+    if (document.querySelector(".vmodal")) return;   // never stack a second palette over an open modal
+    const entries = [];
+    NAV.forEach(function (g) {
+      g.items.forEach(function (it) {
+        entries.push({ id: it.id, label: it.label, hint: g.group, icon: it.icon, owner: it.owner,
+          run: function () { location.hash = "#/" + it.id; } });
+      });
+    });
+    entries.push({ id: "__theme", label: "Toggle light / dark theme", hint: "ACTION", icon: "dot",
+      run: toggleTheme });
+
+    let filtered = entries.slice();
+    let sel = 0;
+    const input = h("input.input.palette-input", { type: "text", autocomplete: "off", spellcheck: "false",
+      placeholder: "Search screens and commands…", "aria-label": "Search screens and commands" });
+    const list = h("div.palette-list", { role: "listbox" });
+    const modal = openModal("Go to…", [h("div.palette", null, [input, list])], null, {});
+
+    function matches(item, q) {
+      if (!q) return true;
+      const hay = (item.label + " " + item.id + " " + item.hint).toLowerCase();
+      return q.toLowerCase().split(/\s+/).every(function (t) { return !t || hay.indexOf(t) >= 0; });
+    }
+    function paint() {
+      V.mount(list, filtered.length
+        ? filtered.map(function (item, i) {
+            return h("div.palette-item" + (i === sel ? ".sel" : ""),
+              { role: "option", "aria-selected": i === sel ? "true" : "false",
+                onMousemove: function () { if (sel !== i) { sel = i; paint(); } },
+                onClick: function () { choose(i); } },
+              [V.icon(item.icon || "dot"), h("span.pl", null, item.label),
+               h("span.ph", null, item.hint), item.owner ? h("span.po", null, "owner") : null]);
+          })
+        : [h("div.palette-empty", null, "No matching screen or command.")]);
+      const el = list.children[sel];
+      if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
+    }
+    function choose(i) {
+      const item = filtered[i]; if (!item) return;
+      modal.close();
+      item.run();
+    }
+    input.addEventListener("input", function () {
+      filtered = entries.filter(function (it) { return matches(it, input.value.trim()); });
+      sel = 0; paint();
+    });
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(sel + 1, filtered.length - 1); paint(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(sel - 1, 0); paint(); }
+      else if (e.key === "Enter") { e.preventDefault(); choose(sel); }
+      // Escape and backdrop are handled by openModal.
+    });
+    paint();
+    input.focus();
+  }
 
   // ---- Home screen -----------------------------------------------------------
   async function renderHome(screen) {

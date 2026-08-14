@@ -404,6 +404,20 @@ textarea { min-height: 80px; resize: vertical; }
 .input { background: var(--bg-2); border: 1px solid var(--border-strong); color: var(--text-0);
   border-radius: var(--r-2); padding: 9px 12px; font-size: var(--fs-sm); font-family: inherit; }
 
+/* the command palette (⌘K / the top-bar search) — a keyboard-first jump to any screen or command */
+.palette { display: flex; flex-direction: column; gap: var(--sp-3); min-width: min(560px, 90vw); }
+.palette-input { width: 100%; font-size: var(--fs-md); padding: 11px 14px; }
+.palette-list { display: flex; flex-direction: column; gap: 2px; max-height: 52vh; overflow-y: auto; }
+.palette-item { display: flex; align-items: center; gap: var(--sp-3); padding: 9px 11px; border-radius: var(--r-2);
+  cursor: pointer; color: var(--text-0); border: 1px solid transparent; }
+.palette-item .pl { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.palette-item .ph { color: var(--text-2); font-size: var(--fs-xs); letter-spacing: .04em; }
+.palette-item .po { color: var(--owner); font-size: var(--fs-xs); border: 1px solid var(--owner-line);
+  background: var(--owner-dim); border-radius: var(--r-pill); padding: 1px 7px; }
+.palette-item.sel { background: var(--bg-3); border-color: var(--border-strong); }
+.palette-item.sel .ph { color: var(--text-1); }
+.palette-empty { color: var(--text-1); text-align: center; padding: var(--sp-5); }
+
 /* chat attachments — a chip is a POINTER to material (name, size, file count, progress), never bytes */
 .chip { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; padding: 5px 10px;
   border: 1px solid var(--border-strong); border-radius: var(--r-pill); background: var(--bg-2); font-size: var(--fs-xs); }
