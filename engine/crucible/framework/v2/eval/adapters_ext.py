@@ -60,6 +60,14 @@ def _slug(text: str) -> str:
 # Wapiti category (lowercased) -> normalized bug_class. Unlisted categories fall
 # back to a slug of the category name, so coverage never silently drops a class.
 _WAPITI_CLASS: dict[str, str] = {
+    # Wapiti's REFLECTED xss module — verified against wapiti 3.2.10's own
+    # ``definitions/reflected_xss.py``, which returns exactly this label, and against a live report
+    # from this range. It was missing, so the mainline XSS case fell through to the slug fallback and
+    # imported as ``reflected_cross_site_scripting``: findings survived, but never joined the engine's
+    # canonical ``xss`` class, so wapiti's XSS could not correlate or de-dup with nuclei's or ZAP's on
+    # the same endpoint. NB ``"cross site scripting"`` below is a label wapiti does not emit at all
+    # (its two XSS definitions are "Reflected …" and "Stored …"); it is kept only as a tolerant alias.
+    "reflected cross site scripting": "xss",
     "cross site scripting": "xss",
     "stored cross site scripting": "xss",
     "sql injection": "sql_injection",

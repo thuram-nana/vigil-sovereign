@@ -86,22 +86,73 @@ def test_tool_mode_maps_one_capability_to_its_gated_flag(stub_launch):
     r = actions.launch_assessment({"mode": "tool", "target": "http://127.0.0.1/", "tools": ["recon"]})
     cmd, _ = stub_launch(r["run_id"])
     assert "engage" in cmd and "--recon" in cmd
-    # exactly one capability flag, even if the caller sent more
-    r2 = actions.launch_assessment({"mode": "tool", "target": "http://127.0.0.1/", "tools": ["recon", "sso"]})
-    cmd2, _ = stub_launch(r2["run_id"])
-    assert "--recon" in cmd2 and "--sso" not in cmd2
+    # ...and the launch reports which packs it really applied, so a caller can CONFIRM the request was
+    # honoured instead of assuming it (the same discipline as the `slug` echo on the scoped runs listing).
+    assert r["tools_applied"] == ["recon"]
 
 
-def test_tool_mode_drops_unknown_capability_ids(stub_launch):
-    # a capability id NOT in the whitelist must be DROPPED — never passed through as an argv or a flag
-    # (defends the `_CAP_BY_ID.get` whitelist against a future regression that lets arbitrary ids through).
+def test_tool_mode_refuses_a_second_capability_instead_of_truncating(stub_launch):
+    """A ONE-TOOL run given two capabilities REFUSES; it does not silently keep `tools[:1]`.
+
+    Truncating obeyed half the request and answered ``running`` for the whole of it: the operator picked
+    two things and watched a run they were told had started, in which the second never existed."""
     r = actions.launch_assessment({"mode": "tool", "target": "http://127.0.0.1/",
+                                   "tools": ["recon", "sso"]})
+    assert "error" in r and "exactly one" in r["error"]
+    assert "run_id" not in r                      # nothing spawned, nothing recorded
+    # a one-tool run with NO capability is refused too, rather than starting a run with no tool in it
+    r2 = actions.launch_assessment({"mode": "tool", "target": "http://127.0.0.1/", "tools": []})
+    assert "error" in r2 and "exactly one" in r2["error"]
+
+
+def test_unknown_capability_ids_are_refused_never_silently_dropped(stub_launch):
+    """An id that cannot become a flag REFUSES the launch — it is never dropped on the way to a spawn.
+
+    Two properties, and the second is the one that bit. (a) INJECTION: a bogus id must never reach the
+    argv — the original guarantee, unchanged. (b) HONESTY: dropping it started the run anyway, and in
+    ``tool`` mode the old ``tools[:1]`` then took the UNKNOWN id and threw the operator's valid pick away
+    behind it — so ``["nmap", "browser-xss"]`` launched with no capability flag at all while the screen
+    said ``running``. A run quietly narrower than the one configured, under a report that still looks
+    complete."""
+    r = actions.launch_assessment({"mode": "url", "target": "http://127.0.0.1/",
                                    "tools": ["recon", "totally-unknown", "--approve-offense", "x;rm -rf /"]})
-    cmd, _ = stub_launch(r["run_id"])
-    assert "--recon" in cmd                       # the one known capability still maps to its gated flag
-    joined = " ".join(cmd)
-    for bad in ("totally-unknown", "approve-offense", "rm -rf", "x;rm"):
-        assert bad not in joined, f"unknown/bogus tool id leaked into argv: {bad!r}"
+    assert "error" in r, "an unknown capability id must refuse the launch, not be dropped from it"
+    assert "run_id" not in r                      # (a) nothing spawned ⇒ no argv for it to leak into
+    assert "totally-unknown" in r["error"]        # and it is NAMED, so the operator can correct it
+    # (b) a VALID pick sitting behind an invalid one is never discarded with it
+    r2 = actions.launch_assessment({"mode": "url", "target": "http://127.0.0.1/",
+                                    "tools": ["nmap", "browser-xss"]})
+    assert "error" in r2 and "nmap" in r2["error"] and "run_id" not in r2
+
+
+def test_capability_packs_a_branch_cannot_carry_are_reported_not_dropped(stub_launch, monkeypatch):
+    """Only the ENGAGE branch turns a pack into a flag; every other branch must SAY it carried none.
+
+    ``url`` + loopback routes to the deterministic quick-scan CLI, which has no pack flags and never read
+    ``tools`` at all: five ticked packs produced a run with none of them on its argv, answering
+    ``running``, with nothing anywhere saying the run was narrower than the one just configured. Nothing
+    is passed to that CLI now either — inventing an equivalent would be the console deciding what runs —
+    but the gap is NAMED, in the response and in the run's own meta."""
+    picks = ["recon", "domxss", "browser-xss"]
+    r = actions.launch_assessment({"mode": "url", "target": "http://127.0.0.1:8080/",
+                                   "slug": "loopback", "tools": picks})
+    assert r["status"] == "running"
+    cmd, meta = stub_launch(r["run_id"])
+    assert "scan" in cmd, "a loopback url is the quick-scan branch"
+    for flag in ("--recon", "--domxss", "--browser-xss"):
+        assert flag not in cmd, "the quick-scan CLI takes no pack flags — none may be invented for it"
+    assert r["tools_applied"] == [] and "were NOT applied" in r["tools_note"]
+    assert meta.get("tools_note"), "and it is recorded on the run, so the record keeps the truth"
+
+    # The SAME picks against a non-loopback host really do become flags — proving the note describes a
+    # real branch difference rather than being a blanket disclaimer bolted onto every launch.
+    monkeypatch.setattr(actions, "_has_charter", lambda slug: True)
+    r2 = actions.launch_assessment({"mode": "url", "target": "http://example.com/",
+                                    "slug": "loopback", "tools": picks})
+    cmd2, _ = stub_launch(r2["run_id"])
+    for flag in ("--recon", "--domxss", "--browser-xss"):
+        assert flag in cmd2
+    assert r2["tools_applied"] == picks and not r2.get("tools_note")
 
 
 def test_codebase_run_hands_strix_the_proof_studio_run_dir(tmp_path, monkeypatch):
