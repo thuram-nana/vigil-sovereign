@@ -13,7 +13,10 @@ appears in NONE of: the parsed finding, the minted Observations, the projected n
 serialized world-model (the durable record). A control asserts the secret IS in the raw input and the
 finding IS still graded a real weak-credential — so the test proves masking, not mere dropping.
 
-Offline: no hydra runs; the input is a recorded hydra-9.7 capture.
+Offline: no hydra runs. The input is WRITTEN TO hydra 9.7's output shape, not captured from a live run —
+a distinction this branch insists on elsewhere and must hold itself to. It is faithful to the format the
+parser was built against (and to the captured fixtures in ``test_imports.py``), but an upstream change to
+hydra's success line would break the real reader while this file stayed green.
 """
 
 from __future__ import annotations

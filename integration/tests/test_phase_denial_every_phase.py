@@ -83,14 +83,42 @@ def test_a_builder_tool_is_denied_in_every_phase_it_is_not_registered_for():
     )
 
 
-def test_a_tool_on_no_manifest_is_denied_in_every_phase():
+def test_the_phase_gate_is_what_denies_at_least_some_of_those_cases():
+    """MEASURED DISCRIMINATING POWER, because "9 denials out of 9 attempts" overstated it.
+
+    A review removed the authorization leg entirely and found that 2 of the 9 out-of-phase cases were
+    still denied — by the argv-builder lookup, which runs first. Those two prove nothing about the phase
+    gate. The honest number is 7 of 9, and this pins that the phase manifest is doing real work rather
+    than riding on a denial that would happen anyway: every case counted here is a tool that HAS a
+    builder (so the builder lookup cannot be the thing refusing it) and is out of phase."""
+    discriminating = [
+        (tool, phase) for tool in executor._BUILDERS for phase in ALL_PHASES
+        if phase.value not in set(REAL_VIEW.get(tool, []))
+    ]
+    assert len(discriminating) >= 5, (
+        f"only {len(discriminating)} cases where a BUILDABLE tool is out of phase — the phase gate has "
+        f"little left to prove, which would make the test above mostly decorative")
+    for tool, phase in discriminating:
+        res, fr = _run(tool, phase)
+        assert res.ran is False and not fr.calls, f"{tool} ran out-of-phase in {phase.value}"
+
+
+def test_a_tool_on_no_manifest_is_denied_and_spawns_nothing():
+    """A tool with no argv builder is refused before anything is spawned.
+
+    HONESTLY LABELLED, AFTER A REVIEW SHOWED THE ORIGINAL CLAIM WAS WRONG. This was called
+    "denied in every phase", implying the PHASE gate did the work. It does not: ``execute`` refuses an
+    unknown tool at the builder lookup, which runs BEFORE authorization — proved by deleting the entire
+    authorization leg, after which this still passed. The phase loop was decoration.
+
+    It is still worth asserting (fail-closed on an unknown tool, nothing spawned), so it is kept — under
+    a name that says what it actually shows. The phase gate's real coverage is the test above."""
     unlisted = ["ncat", "socat", "chisel", "totally_unknown_tool_xyz"]
     for tool in unlisted:
         assert tool not in REAL_VIEW, f"{tool} unexpectedly appears in the manifest — pick another"
-        for phase in ALL_PHASES:
-            res, fr = _run(tool, phase)
-            assert res.ran is False and not fr.calls, (
-                f"{tool!r} (on no manifest) was allowed to run in phase {phase.value}")
+        assert tool not in executor._BUILDERS, f"{tool} has a builder — it is no longer 'unknown'"
+        res, fr = _run(tool, ALL_PHASES[0])
+        assert res.ran is False and not fr.calls, f"{tool!r} (unknown tool) was allowed to run"
 
 
 def test_there_are_real_out_of_phase_cases_to_test():

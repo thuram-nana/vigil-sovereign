@@ -87,16 +87,19 @@ def _sticky_grounded(existing_prov: str, winning_prov: str) -> str:
     a fact, so the lead→fact direction the whole model forbids is untouched. When the incoming write
     is ITSELF grounded (a second oracle), the winner stands.
 
-    THE DEMOTION EXCEPTION, AND WHY IT IS NOT OPTIONAL. ``demoted:`` is the marker the veracity
-    firewall writes when a recorded-confirmed finding's RETAINED PROOF DID NOT RE-FIRE. It is the
-    anti-hallucination layer exercising its one authority — it may only ever demote — and it MUST
-    win, or a stale or tampered finding reads back out of the graph as a grounded fact. An earlier
-    version of this function blocked exactly that write, which inverted the firewall: caught by
-    asking whether the rule could freeze a fact that ought to have been demoted, and reproduced
-    directly (an oracle: node re-asserted as demoted: stayed grounded).
+    WHERE THE DEMOTION EXCEPTION ACTUALLY LIVES. ``demoted:`` is the marker the veracity firewall
+    writes when a recorded-confirmed finding's RETAINED PROOF DID NOT RE-FIRE. It is the
+    anti-hallucination layer exercising its one authority — it may only ever demote — and it MUST win,
+    or a stale or tampered finding reads back out of the graph as a grounded fact. An earlier version
+    of this function blocked exactly that write, inverting the firewall.
 
-    So stickiness protects against an ORDINARY non-grounded re-observation, never against a
-    deliberate demotion by the layer that owns demotion."""
+    That is fixed at the CALL SITES (``add_node`` / ``add_edge``), which divert a demoting write before
+    this function is consulted. The ``_is_demotion`` branch below is therefore defensive depth, not the
+    live protection — measured over 27,000 write sequences, it is never entered, because a demotion
+    reaching here as the tiebreak winner implies the existing write was not grounded and the first
+    branch already returned. It is kept so this function is correct in isolation, and labelled so a
+    reader does not mistake it for the guarantee: DELETING THE CALL-SITE CHECKS WOULD RE-INVERT THE
+    FIREWALL even though this branch still looked like protection."""
     if classify_provenance(existing_prov) != GROUNDING_GROUNDED:
         return winning_prov
     if classify_provenance(winning_prov) == GROUNDING_GROUNDED:
