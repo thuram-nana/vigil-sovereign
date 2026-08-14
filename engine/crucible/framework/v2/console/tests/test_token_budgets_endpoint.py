@@ -75,6 +75,9 @@ def test_no_overclaim_every_registered_tool_is_metered():
                 pass
     src = "\n".join(blobs)
     assert src, "could not read any source to check tool metering"
+    # Strip comments so a metering-verb literal that appears only in a COMMENT (e.g. an explanatory
+    # `using_tool("vulnfeed")` note) can never false-pass the guard — a real WIRE must exist in code.
+    src = "\n".join(re.sub(r"#.*$", "", ln) for ln in src.split("\n"))
     verbs = "record|throttle|clamp_output|record_usage|using_tool|tool_scope|current_tool"
     for tool in tb.DEFAULT_TOOLS:
         if tool == "engine":                     # the default bucket, wired via current_tool() (no arg)
