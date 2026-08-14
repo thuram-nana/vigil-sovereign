@@ -17,6 +17,7 @@ What is enforced here:
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -692,10 +693,29 @@ def test_the_firewall_is_not_a_universal_graph_gate() -> None:
     ``worldmodel.graph`` has no admission gate and that admission happens at the WRITERS. If someone wires
     the gate into ``graph`` itself, that bound becomes a stale underclaim — so this test fails and forces
     the docstring to be upgraded rather than left describing a weaker system than the one that ships."""
-    graph = (_ROOT / _V2 / "worldmodel" / "graph.py").read_text(encoding="utf-8")
-    assert "veracity" not in graph and "admit(" not in graph, (
-        "worldmodel/graph.py now references the veracity firewall — the firewall docstring's 'graph has NO "
-        "admission gate' bound is no longer true and must be rewritten UP, not left stale")
+    graph_src = (_ROOT / _V2 / "worldmodel" / "graph.py").read_text(encoding="utf-8")
+    # WIRED, not MENTIONED. This used to assert the substring "veracity" was absent from the file, which
+    # also fired on a COMMENT — graph.py legitimately explains why it must let the firewall's ``demoted:``
+    # marker through the confidence tiebreak, and naming the layer that owns that marker is the clearest
+    # way to say it. The temptation at that point is to rename the comment to dodge the check, which is
+    # precisely the evasion this file exists to catch, so the check reads the CODE instead: an import of
+    # the veracity package, or a call to admit(). A prose reference is not a gate; either of those is.
+    tree = ast.parse(graph_src)
+    wired: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and "veracity" in (node.module or ""):
+            wired.append(f"imports from {node.module}")
+        elif isinstance(node, ast.Import):
+            wired += [f"imports {a.name}" for a in node.names if "veracity" in a.name]
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            if name == "admit":
+                wired.append("calls admit()")
+    assert not wired, (
+        "worldmodel/graph.py now WIRES the veracity firewall (" + "; ".join(wired) + ") — the firewall "
+        "docstring's 'graph has NO admission gate' bound is no longer true and must be rewritten UP, not "
+        "left stale")
     doc = (_ROOT / _FIREWALL).read_text(encoding="utf-8").split('"""')[1].lower()
     assert "no admission gate" in doc, (
         "the firewall docstring must keep stating the bound it actually has — that admission is on the "
