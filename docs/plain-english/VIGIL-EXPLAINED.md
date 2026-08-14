@@ -477,8 +477,18 @@ the missing part rather than by softening the words. The smaller figures this ch
 the way — three tools proven, then six, then nine — were accurate on the day each was written, and the
 progression is left visible on the page rather than tidied into a single confident number, because a
 document that shows its own movement is easier to trust than one that appears to have always been
-right. Where something is built but has not yet been used against a live third-party system, it says
-so.*
+right. A fourth revision, later on 14 August 2026 against version `0e8b2dae`, changed no claim about
+what the system does; it changed how far four of this chapter's own honest caveats are *enforced*
+rather than merely stated. The proving range now runs in the automated build — a fast required check
+on every proposed change, and the full table each night (sections 2.9 and 9.8). The rule that a
+tool's output is a lead and never a fact is now checked as a property against every shape of result
+the system can produce, at the one point they all pass through, rather than one source at a time
+(chapter 4). The no-external-egress limit is now enforced by watching the connections a tool actually
+attempts, not only by inspecting the command line built for it (chapter 8). And the accuracy figures
+are guarded by a check that can block a change, where before they were measured by one that could
+only report (section 9.8). Two faults in the system itself surfaced during that work — both found by
+running things rather than reading them — and both are set down in section 9.8.3. Where something is
+built but has not yet been used against a live third-party system, it says so.*
 
 *Two navigation notes. A full contents list for the set, with a suggested reading order and a note on
 how the briefing was written, is at the end of this chapter (section 11). The set also has front
@@ -2135,9 +2145,10 @@ one six, then nine, and the last one all ten.
 **Do not read that as "the system drives nine tools in the field."** Four limits travel with the
 claim, and chapter 12 sets them out in full. The targets are deliberately vulnerable applications on
 the operator's own machine, so **none of this is a result about anybody's estate**. Everything those
-nine tools report is a lead and never a fact. The exercise needs the local range standing, so it is
-run deliberately by a person rather than on every change — though it does report any builder that
-has no proving result, so a new driver cannot arrive unproven and unnoticed. And two of the nine, the
+nine tools report is a lead and never a fact. A subset of the exercise now runs on every proposed
+change and the whole of it runs each night — until the fourth revision it ran only when a person
+started it, because it needs the local range standing; either way it reports any builder that has no
+proving result, so a new driver cannot arrive unproven and unnoticed. And two of the nine, the
 two destructive ones, cannot be reached by the ordinary route at all as the production wiring stands
 today: the exercise supplies the extra authorisation itself and prints a note saying it had to,
 which is a gap in *reaching* those two drivers rather than a hole in the gate that stopped them. A
@@ -2234,6 +2245,20 @@ automated test, so a future edit that dropped it on any route would fail the bui
 would otherwise send goes to that tool's own publisher and carries nothing whatever about the target,
 and it is written down here rather than left for a reader to find.
 
+**What the fourth revision added here.** The measurement above is a one-off — a person stands the trap
+up and reads it. The fourth revision added the standing version of the same idea: a supervisor that
+watches the actual system calls a tool uses to open a connection or send a packet, and refuses any
+that does not stay on the machine, while the run is happening. Because it watches the system call
+rather than a shared library, it catches even a tool built in a way a library-level trap cannot see.
+It is off unless switched on, and the proving range now runs with it on, so each of those runs now
+carries its own record of what every tool tried to send — a record that, on a loopback-only range, is
+expected to be empty, and the build fails if it is not. It does not retire the sealed-network
+measurement above: the supervisor is a control against a tool's own defaults and a mis-built command
+line, not a sealed cage, so a claim of total silence is still established from the outside by the trap.
+Chapter 8 sets out the supervisor in full, including the one tool it deliberately does not watch, and
+the real gap review found in it — that watching only one kind of connection let an unconnected packet
+out — which was closed.
+
 ##### 9.8.3 The defects found by running things rather than reading them
 
 Not one of the faults below was visible to the system's own automated tests; each was invisible to
@@ -2254,6 +2279,8 @@ that has never looked.
 | Three tools the interface listed as controllable while the engine refused every single call. | A claim of control has to hold at *every* layer. Refusing a tool honestly on one screen while a different component silently blocks it is the same false claim of control, moved one level down. |
 | A capability the operator selected being accepted and then silently discarded — and, in the single-tool mode, an unrecognised selection throwing away the valid one behind it, so the run started with no capability at all. | A request that cannot be honoured must be **refused by name, before anything starts**. The alternative is what happened here: the operator watches a run they believe is doing one thing, and the report looks complete while the work was narrower than they were told. |
 | Whole capability selections dropped on several routes — including the one an operator uses most often, a quick scan of a target on their own machine. | The same lesson at a larger scale. The system now states, both in the run's own permanent record and in what it hands back to the screen, exactly which selections **were not applied**, which were, and why. |
+| **The new no-egress supervisor, switched on, silently disabled the port scanner.** Turning the supervisor on requires stripping a privilege the scanner needs; without it the scanner found **no open ports and exited successfully** — a clean-looking result that meant it had been crippled, produced by the very control added to prevent clean-looking results that mean nothing. | The failure this whole product exists to prevent, produced by a new safeguard the moment it was switched on — and caught only by running the proving range under it, never by reading. The supervisor now **declines to watch that one tool** rather than cripple it, and says so, because a loud refusal beats a silent no-op. A second gap in the same supervisor was found the same way: in its first form it watched only one kind of connection, so an unconnected packet — the ordinary way a name is looked up — left the machine while it recorded nothing. It now watches all three. |
+| **In the automated build, a tool present is not a tool that works.** The sandbox program installed cleanly but could not create the isolation it exists for, because the build's own machines forbid it — so the strongest isolation tests would have quietly **skipped** while the install looked successful. Separately, the web-server scanner the build installed from the system catalogue was a fourteen-year-old version that accepts the modern output flag and silently writes the old format the reader cannot parse. | **A skipped proof and a passing proof are the same colour on a dashboard.** Both were caught because the build now asserts the capability actually works — the isolation can be created, the scanner emits the format the reader consumes — rather than trusting that the package is present. The scanner that cannot be installed cleanly in the fast lane was moved to the nightly run, where a fragile install cannot block a change. |
 
 **What every one of them has in common, and why an agency should weigh it.** They divide into two
 kinds, and neither kind could have been found by reading.
@@ -6574,6 +6601,47 @@ provenance classifier rather than passing through this admission function. So th
 correct summary is: a real, working, widely called layer, not yet a single
 universal gateway. This briefing preserves that distinction rather than smoothing
 it over in either direction.
+
+**What the fourth revision hardened here, on 14 August 2026.** The paragraph above
+names one honest bound — that the shared provenance classifier, not the admission
+desk, is what stands over every write into the internal map. That classifier is now
+held to a much stronger standard than before, in three ways, each a check that fails
+the build rather than a promise in prose.
+
+- **The rule is now a property, not a handful of examples.** Before, that a
+  collector's result could never become a fact on its own was checked one source at
+  a time — a test for this producer, a test for that one — which is coverage by
+  example, and a source added tomorrow was covered by none of them. A single test now
+  drives *every shape* a result can take — every kind of source, both polarities,
+  every confidence — through the one point they all pass into the map, and asserts
+  that none of them lands as a fact, even when the result is deliberately dressed up
+  to look confirmed. Because every collector reaches the map the same way, that one
+  test covers a source nobody has written yet.
+- **No collector can slip a fact in the side door.** A second check reads the source
+  of every collector and refuses any that tries to write a fact-grade label directly,
+  in whatever form — a bare label, a label built from pieces, a label held in a
+  variable. An adversarial reviewer planted exactly such a back door, written the way
+  the system's own code writes these labels; the first version of the check, which
+  looked only for the most obvious spelling, let it through. The check now reads the
+  code's structure rather than its text, and catches the planted door in every form
+  it was tried in.
+- **A confirmed fact is no longer quietly demoted by a louder guess.** A fact the
+  checker confirmed is now *sticky*: a later, more confident re-observation of the
+  same thing can still raise its belief, but it can no longer overwrite the fact's
+  grounding and turn it back into a suspicion. The one exception is the demotion-only
+  firewall itself: when it re-runs a fact's evidence and the evidence does not fire
+  again, its demotion always lands — a stale or tampered fact must be taken down, and
+  nothing, including stickiness, is allowed to protect it. Building the first of these
+  guarantees briefly broke the second; that regression was caught by asking of the new
+  rule the very question it was meant to answer, and both directions are now pinned by
+  tests.
+
+A latent flaw in the classifier itself was found and closed in the same pass. It
+tested a write's fact-grade prefix before it tested the words that mark a write as
+unproven, so a label that carried both — a made-up "confirmed by the checker, which
+merely guessed" — would have been read back as a fact. Nothing in the system writes
+such a label today, but an unsound classifier is a trap laid for a future caller, and
+it is now sound: an unproven marker anywhere in a label defeats a fact-grade prefix.
 
 #### Stage 6 — anyone can check it again, offline
 
@@ -13467,6 +13535,43 @@ and one internal address hoping the checker will pick the good one.
 Anything the guard cannot parse — a malformed address, an impossible port, a name
 that will not resolve — is refused. There is no "best effort" branch.
 
+#### 2.2.1 A deeper check — watching the system calls, not only the command line
+
+The guard just described works by inspecting the command line the engine builds
+before a tool runs. There is now an optional, lower-level way to hold a tool to
+the loopback-only rule as well.
+
+A supervisor can watch the actual system calls a tool makes to open a network
+connection or send a packet — the calls named `connect`, `sendto` and `sendmsg` —
+and refuse any of them whose destination is not the machine itself. This is
+enforcement by *running*: where the command-line guard reasons about the request
+the engine meant to make, this watches the request the tool actually makes.
+
+Because it watches the system call itself rather than a tool's use of a shared
+software library, it also sees a tool whose networking code was compiled straight
+into it — a *statically linked* program, which a library-level shim would miss.
+This was measured: a statically linked scanner opens a name-lookup connection
+merely to print its own version number, and the supervisor stops that call.
+
+Three honest bounds belong beside that:
+
+- **It is off by default** and is switched on deliberately, per run. An ordinary
+  run behaves exactly as it did before.
+- **It is deliberately not placed around the port scanner.** Switching it on for a
+  tool requires giving up an operating-system privilege, and the scanner needs that
+  privilege to work; a scanner run without it would report nothing and look clean —
+  a false all-clear, which is worse than leaving this one tool unwatched. So the
+  scanner keeps its privilege and is held by the other layers instead.
+- **It is a check against a tool's own defaults and a mis-built command line, not a
+  cage for hostile code.** A program written deliberately to slip past it is outside
+  its scope; the isolated sandbox described elsewhere in this chapter remains the
+  separate boundary for that case.
+
+The supervisor was itself caught short during review: an early version policed only
+the `connect` call, which let a tool push a single packet out through an unconnected
+datagram socket without ever calling `connect`. That gap was closed by watching the
+send calls too.
+
 #### 2.3 The network floor: a list of addresses that no charter can unlock
 
 Underneath everything sits a list of internet address ranges that are **always**
@@ -15229,7 +15334,7 @@ In plain terms:
 | Job | What it proves |
 |---|---|
 | Shared integrity core | The signing and record-chaining substrate both halves depend on still behaves identically to its previous version, and still detects tampering. |
-| Offensive engine core | The evidence layer, the licensing system, the verification path, the world model, the confidence scoring, the authority checks, the interface federation and the defensive gate invariants all still hold. |
+| Offensive engine core | The evidence layer, the licensing system, the verification path, the world model, the confidence scoring, the authority checks, the interface federation and the defensive gate invariants all still hold — and, since it was folded in, this job now also re-checks the product's central accuracy claim (see below). |
 | Network gate | The permanently denied address ranges, the filtering proxy's refusals, and the generated firewall rules — the last actually loaded into a real network namespace, not merely rendered as text. |
 | Two-environment boundary | That the sovereign half and the offensive half still cannot be loaded into one process, that the channel between them stays inert, and that the packaging worker still refuses to hold an owner key. |
 | Vendored agent runtime | The parts of the third-party agent this project actually drives. |
@@ -15244,6 +15349,41 @@ database, resolving image fingerprints from a registry — genuinely requires in
 access. The half of those checks that can be done without a connection ("is the committed
 result complete and still meaningful?") is duplicated into the two-environment boundary
 job, so it still runs on a machine with no network.
+
+The accuracy gate deserves singling out, because its status recently changed. The
+product's central accuracy claim — that on its benchmark it finds every planted
+weakness and raises no false alarm (a recall of 1.0 and a precision of 1.0: no
+misses and no false alarms), reproduced byte-for-byte from the committed result and
+its signature checked against a pinned trust root — used to be measured only by a
+job that *ran and reported* but had no power to stop a merge. The cheap, decisive
+part of that measurement now runs inside the offensive-engine-core job, which is
+already required — so an accuracy regression can no longer pass the automated gate
+unnoticed, under the same owner-override caveat noted above that applies to every
+required check. That much is enforced in the code of the required job itself,
+independently of any branch-protection setting — a setting a person with the right
+access can change. The expensive part — the full corpus and the longer soak —
+stays in the separate, non-required job; only the quick, decisive assertions were
+folded into the required one.
+
+Two smaller pieces of the same machinery are worth recording precisely, because
+each is easy to overstate.
+
+**A code-owners file GitHub now actually reads.** A `CODEOWNERS` file — which names
+who owns which parts of the tree — has existed since the offensive engine was
+brought in, but it sat in a subdirectory where GitHub does not look for one, so the
+ownership rule it stated had never applied to a single change. A copy now sits at
+the top of the repository, where GitHub does read it. What it does is narrow, and
+worth stating exactly: it *assigns reviewers*. It holds back a merge only when
+branch protection is also set to require a code owner's review — and that setting
+is not turned on today. So it makes ownership explicit and requests the right
+reviewer; it does not by itself gate a change.
+
+**A script that keeps the required-checks list and the owner-binding in step.** Run
+deliberately by a person after a change has merged, it brings the repository's
+required-checks list and its owner-binding into line with the code. It refuses to
+run until the workflow it would mark required is actually present — because a
+required check that no workflow ever produces would block every future change from
+then on.
 
 ---
 
@@ -21451,6 +21591,37 @@ be false. The list of acceptable answers is closed, so a label nobody has taught
 the gate about refuses rather than admits. Inventing a new word cannot widen the
 arsenal.
 
+**Which tools are driven, and which are deliberately not, is now written down and
+checked.** The full account of the tools the engine drives and the tools it has
+decided not to used to live only in the description of a single past change —
+unreachable from the code, and, when someone finally held it against the code, wrong
+in both directions at once: it claimed twelve further tools while naming eleven, and
+the true number it had not yet driven was fifteen. That account now lives in the
+repository as a dated decision record, and a **required** check reads it against the
+code on every change. It fails the build if a tool the record calls "not yet driven"
+has quietly gained a driver, if the one permanently-refused tool has gained one, or
+if any installed tool is driven by nothing and is named nowhere. The frontier can no
+longer drift from the code in silence.
+
+The three source-code scanners added in the fourth revision — one for
+Python-specific weaknesses, two that hunt for secrets committed into source —
+arrived on the **analyser** route, beside the two deep source analysers already
+there, and for a precise reason. The typed-builder route locks every command onto a
+network target; a source scanner has no network target, only a directory, so forcing
+one onto it would corrupt the very pin that makes that route safe. The right home for
+a tool that reads a directory is the route that already takes a directory.
+
+The clearest case of a tool the system refuses **permanently, by design** is a
+general-purpose networking tool — a raw connector that will open any connection,
+listen on any port, move any bytes. A typed builder for it could only be one of two
+things. Either it is genuinely narrow — in which case it is not that tool any more,
+and the honest move is to build the narrow one. Or it is a thin wrapper that passes
+an operator's arguments straight through — in which case every safety property the
+builder exists to provide is bypassed by construction, because the arguments *are*
+the attack surface. So it is declined on purpose, and the decision is written down
+rather than left implicit. It stays available inside the sealed container for the
+optional agent's own use; the engine simply will not claim to drive it.
+
 Two things deliberately do **not** count as driving a tool, and that boundary is
 what gives the refusal its teeth:
 
@@ -21609,10 +21780,21 @@ a threshold being lowered.
   plumbing — built, ran, read, and told the difference — not that any weakness
   exists anywhere. A finding still requires the system's own fixed test over its
   own evidence, and the exercise says exactly that in its own output.
-- **It is not part of the automated build.** It needs the local range standing,
-  so it is run deliberately by a person rather than on every change. It does
-  report every builder that has no row of its own, so a new driver cannot arrive
-  unproven and unnoticed.
+- **A subset now runs on every proposed change; the whole table runs nightly.**
+  Until the fourth revision this exercise ran only when a person started it, because
+  it needs the local range standing. It is now in the automated build, in two parts.
+  A fast, **required** check on every proposed change drives a subset — the port
+  scanner and both forms of the password-guessing tool, chosen because they install
+  in seconds and because the password-guessing tool carries the one negative control
+  that has to be *proven to have run* rather than merely observed to be quiet. A
+  separate nightly run drives the whole ten-row table. The fast check will not read as
+  the full exercise: it names, in its own verdict, every row it did not attempt, and
+  refuses the unqualified "every driver" wording. Both still report every builder that
+  has no row of its own, so a new driver cannot arrive unproven and unnoticed. (A
+  couple of the tools cannot be installed cleanly in the fast lane — the web-server
+  scanner needs a from-source build for a version whose output the engine can read at
+  all — so they run only in the nightly part, where a fragile install cannot block a
+  change.)
 - **Two of the nine cannot be reached by the ordinary path at all, and the
   exercise says so rather than quietly working around it.** The two destructive
   tools — the database-injection tool and the password-guessing tool — are gated
@@ -24237,16 +24419,24 @@ larger than 2 megabytes are skipped rather than read into memory. The file list 
 before it is used, so two runs over the same tree examine the same files in the same order —
 the same recipe, the same dish.
 
-#### Three layers of reading
+#### The analysers that read the source
 
-The source-review subsystem runs up to three analysers over a supplied code tree and merges
-their output into one report, removing duplicates.
+The source-review subsystem runs a set of analysers over a supplied code tree and merges
+their output into one report, removing duplicates. The first three below read for dangerous
+code paths at increasing depth — the same code read three ways, each deeper than the last.
+Three more read the same tree for two different things: weaknesses specific to Python, and
+credentials accidentally committed into the source. Every one of them, deep or shallow,
+produces a **lead** and nothing stronger, and every one is pointed at a directory of source,
+never at a live target.
 
 | Layer | What it is | Available when | What each finding is worth |
 |---|---|---|---|
 | **Built-in pattern analyser** | A curated list of genuinely dangerous code patterns, matched line by line. Needs nothing installed and is always available. | Always | A lead. The code says why: pattern matching can see that a dangerous instruction *appears* in the file, but it cannot show that untrusted data ever *reaches* it. |
 | **Semgrep, in taint mode** | An industry static-analysis tool run against a rule set shipped with the product, in *taint* mode — meaning it traces untrusted input as it flows through the program to a dangerous destination. | When the `semgrep` program is installed on the analysis machine | A stronger lead: it means untrusted input provably reaches a dangerous point, not merely that a dangerous word appeared. |
 | **Joern** | A heavyweight tool that builds a full graph of the program and runs whole-program, across-function, across-file flow queries. Roughly two gigabytes and requires a Java runtime. | When Joern is provisioned separately on the analysis machine | The deepest available: cross-function flows, and languages the others handle poorly, including C and C++. |
+| **Bandit** | An industry scanner for weaknesses specific to Python — insecure functions and risky patterns the general tools do not specialise in. It reads the source tree; it does not touch a running system. | When the `bandit` program is installed on the analysis machine | A lead. |
+| **gitleaks** | A secret scanner: it reads the source it is pointed at for credentials — passwords, keys, and tokens — committed into the code. | When the `gitleaks` program is installed on the analysis machine | A lead. The value it matched is masked out of the finding — see below. |
+| **trufflehog** | A second secret scanner of the same kind, run with its live-verification step turned off (see below). | When the `trufflehog` program is installed on the analysis machine | A lead, masked the same way. |
 
 A word that recurs in this Part: a **sink** is the dangerous destination — the point in a
 program where data stops being merely data and starts having an effect, such as being run
@@ -24271,6 +24461,46 @@ output, and a hard timeout (five minutes for Semgrep, ten for Joern). Joern is r
 temporary directory so that its large working output never pollutes the repository being
 examined. An analyser that fails mid-run is recorded as skipped with the error; it does not
 abort the whole report.
+
+#### The three added scanners, and how live secrets are handled
+
+Three analysers were added to the set above: **Bandit**, which reads for Python-specific
+weaknesses, and **gitleaks** and **trufflehog**, which read for credentials committed into
+the source. Each reads a directory of source code, not a running system, and — like every
+other tool in this Part — everything it reports is a **lead**, never a fact on its own. Four
+points are worth stating exactly.
+
+- **Why they run as analysers, not as command-builder tools.** The product's other path for
+  driving an external tool — its live command-builder, which points a tool at a running
+  target — locks every command onto a specific network target and fails closed when it has
+  none; that lock is the pin that keeps the path safe. A source scanner has no network
+  target; it has only a directory. Bolting a fake target onto it to satisfy the
+  command-builder would corrupt that safety pin. So a source scanner is driven on the
+  **analyser** contract instead — the same contract the built-in pattern analyser, Semgrep
+  and Joern use, which already takes a directory of source and nothing more.
+
+- **The secret value is masked out of the finding, never recorded.** gitleaks and trufflehog
+  find real, working credentials. The finding keeps the **rule that matched**, the **file**,
+  and the **line** — and masks the secret value out of it. The value is not written into the
+  finding, into the stored record, or into any certificate.
+
+- **trufflehog always runs with its verification step turned off.** Left on, trufflehog's
+  "verify" step calls each secret's own provider over the internet to check whether the
+  credential is still live — which would send the operator's real secret to a third party,
+  exactly the outbound contact the engagement's no-egress rule forbids. So the engine always
+  builds the command with verification disabled. One honest bound on that claim: it is
+  enforced in the command the engine constructs — the disabling flag is always present in the
+  argument list — and has not yet been separately observed at the system-call level for this
+  tool.
+
+- **Confirming a secret is genuinely live is done a different, governed way.** Turning
+  trufflehog's verify off does not leave the system unable to prove a leaked credential is
+  real: its exposed-credential validity checker, described later in this chapter, does that
+  job properly — a gated call whose retained evidence redacts the secret and re-checks
+  offline, and which sends a credential only to that credential type's own confirming
+  address, closing off the trick of pointing confirmation at an attacker-controlled endpoint
+  to launder an arbitrary string into a fact. It covers only the credential types it
+  recognises.
 
 #### What the built-in pattern list actually contains
 
@@ -25208,7 +25438,7 @@ The table below is a summary; the detail behind each cell is in the Part above.
 | **Social-engineering defence** | Nine offline indicators over an inbound message, a weighted score, five risk bands, a recommendation, and a command that can gate a mail pipeline | Machine-learning or AI classifiers on top are described as what a production deployment adds | Any generation of phishing or impersonation content; detection of faked audio or video |
 | **Detection Mirror** | Twelve checks over web access, authentication, and connection logs, each with a benign twin; certificates that re-check offline; downgrade to lead if a certificate fails | Four whole domains (outbound command-and-control, directory/identity, cloud audit, session) are honest placeholders that name the missing data source | Nothing is fabricated for a domain with no log source |
 | **Detection engineering** | Sigma-subset rule evaluation over your own logs; gap report; candidate rules for every miss; ATT&CK mapping; its test suite now runs on every proposed change to the product | — | Any working bypass for a named commercial defence product; any evasion recipe; any claim to model a specific log-and-alert platform |
-| **Source-code review** | Thirteen built-in patterns, each scoped to the languages it applies to, matched across a default walk of fifteen source-file types and always available; fourteen shipped dataflow rules when Semgrep is present; Joern when provisioned; a Python symbol index; conversion of findings into testable questions; permission gate, kill switch, budget; the AI review step's model call now passes a jurisdiction check before any provider software is loaded; its test suite now runs on every proposed change to the product | Semgrep and Joern must be installed by the deployment; absence is reported, never hidden. The symbol index covers Python only. The jurisdiction tier ships **permissive** by default — it is a control the operator sets, not one the customer inherits | Treating a static finding as proof. Static analysis output is a lead by design |
+| **Source-code review** | Thirteen built-in patterns, each scoped to the languages it applies to, matched across a default walk of fifteen source-file types and always available; fourteen shipped dataflow rules when Semgrep is present; Joern when provisioned; Bandit and two committed-secret scanners (gitleaks, trufflehog) when installed, all lead-only and with trufflehog's live-verification flag disabled and the matched value masked out of the finding; a Python symbol index; conversion of findings into testable questions; permission gate, kill switch, budget; the AI review step's model call now passes a jurisdiction check before any provider software is loaded; its test suite now runs on every proposed change to the product | Semgrep, Joern, Bandit, gitleaks and trufflehog must be installed by the deployment; absence is reported, never hidden. The symbol index covers Python only. The jurisdiction tier ships **permissive** by default — it is a control the operator sets, not one the customer inherits | Treating a static finding as proof. Static analysis output is a lead by design |
 | **The agent-driven "scan a codebase" route** | The agent's single route to a command line is held for per-call, single-use, owner-signed approval while its other tools run freely; on by default; since 12 August 2026 a wiring failure halts the run rather than silently leaving that surface ungoverned | Requires Docker; the run happens inside a disposable container and produces no re-checkable web report | Treating the agent's output as anything but leads — the machinery that mints a signed proven fact does not run over it |
 | **Dependency review** | Vulnerable dependencies are proven by the system's own version comparator against a pinned advisory snapshot, and re-check offline | Saying "no vulnerable dependency" — as opposed to "this one is vulnerable" — needs non-pinned constraints resolved and snapshot coverage recorded; named as outstanding work | Trusting any scanner's own vulnerability match |
 | **Fix production** | Propose; apply into a disposable clone; sandbox build; timeout-rejects approval; explicit file staging only; the proposal step's model call — the one carrying real repository source — passes the jurisdiction check, and a refusal degrades to "no proposal" | The leg that raises a real change proposal is off by default and requires multi-signature keys the operator must first provision, plus a repository token — a capability, not a field deployment. The jurisdiction tier ships permissive by default | Applying a fix to a lead. Only proven findings are eligible |

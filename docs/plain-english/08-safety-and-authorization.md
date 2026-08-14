@@ -324,6 +324,43 @@ and one internal address hoping the checker will pick the good one.
 Anything the guard cannot parse — a malformed address, an impossible port, a name
 that will not resolve — is refused. There is no "best effort" branch.
 
+### 2.2.1 A deeper check — watching the system calls, not only the command line
+
+The guard just described works by inspecting the command line the engine builds
+before a tool runs. There is now an optional, lower-level way to hold a tool to
+the loopback-only rule as well.
+
+A supervisor can watch the actual system calls a tool makes to open a network
+connection or send a packet — the calls named `connect`, `sendto` and `sendmsg` —
+and refuse any of them whose destination is not the machine itself. This is
+enforcement by *running*: where the command-line guard reasons about the request
+the engine meant to make, this watches the request the tool actually makes.
+
+Because it watches the system call itself rather than a tool's use of a shared
+software library, it also sees a tool whose networking code was compiled straight
+into it — a *statically linked* program, which a library-level shim would miss.
+This was measured: a statically linked scanner opens a name-lookup connection
+merely to print its own version number, and the supervisor stops that call.
+
+Three honest bounds belong beside that:
+
+- **It is off by default** and is switched on deliberately, per run. An ordinary
+  run behaves exactly as it did before.
+- **It is deliberately not placed around the port scanner.** Switching it on for a
+  tool requires giving up an operating-system privilege, and the scanner needs that
+  privilege to work; a scanner run without it would report nothing and look clean —
+  a false all-clear, which is worse than leaving this one tool unwatched. So the
+  scanner keeps its privilege and is held by the other layers instead.
+- **It is a check against a tool's own defaults and a mis-built command line, not a
+  cage for hostile code.** A program written deliberately to slip past it is outside
+  its scope; the isolated sandbox described elsewhere in this chapter remains the
+  separate boundary for that case.
+
+The supervisor was itself caught short during review: an early version policed only
+the `connect` call, which let a tool push a single packet out through an unconnected
+datagram socket without ever calling `connect`. That gap was closed by watching the
+send calls too.
+
 ### 2.3 The network floor: a list of addresses that no charter can unlock
 
 Underneath everything sits a list of internet address ranges that are **always**
@@ -2086,7 +2123,7 @@ In plain terms:
 | Job | What it proves |
 |---|---|
 | Shared integrity core | The signing and record-chaining substrate both halves depend on still behaves identically to its previous version, and still detects tampering. |
-| Offensive engine core | The evidence layer, the licensing system, the verification path, the world model, the confidence scoring, the authority checks, the interface federation and the defensive gate invariants all still hold. |
+| Offensive engine core | The evidence layer, the licensing system, the verification path, the world model, the confidence scoring, the authority checks, the interface federation and the defensive gate invariants all still hold — and, since it was folded in, this job now also re-checks the product's central accuracy claim (see below). |
 | Network gate | The permanently denied address ranges, the filtering proxy's refusals, and the generated firewall rules — the last actually loaded into a real network namespace, not merely rendered as text. |
 | Two-environment boundary | That the sovereign half and the offensive half still cannot be loaded into one process, that the channel between them stays inert, and that the packaging worker still refuses to hold an owner key. |
 | Vendored agent runtime | The parts of the third-party agent this project actually drives. |
@@ -2101,6 +2138,41 @@ database, resolving image fingerprints from a registry — genuinely requires in
 access. The half of those checks that can be done without a connection ("is the committed
 result complete and still meaningful?") is duplicated into the two-environment boundary
 job, so it still runs on a machine with no network.
+
+The accuracy gate deserves singling out, because its status recently changed. The
+product's central accuracy claim — that on its benchmark it finds every planted
+weakness and raises no false alarm (a recall of 1.0 and a precision of 1.0: no
+misses and no false alarms), reproduced byte-for-byte from the committed result and
+its signature checked against a pinned trust root — used to be measured only by a
+job that *ran and reported* but had no power to stop a merge. The cheap, decisive
+part of that measurement now runs inside the offensive-engine-core job, which is
+already required — so an accuracy regression can no longer pass the automated gate
+unnoticed, under the same owner-override caveat noted above that applies to every
+required check. That much is enforced in the code of the required job itself,
+independently of any branch-protection setting — a setting a person with the right
+access can change. The expensive part — the full corpus and the longer soak —
+stays in the separate, non-required job; only the quick, decisive assertions were
+folded into the required one.
+
+Two smaller pieces of the same machinery are worth recording precisely, because
+each is easy to overstate.
+
+**A code-owners file GitHub now actually reads.** A `CODEOWNERS` file — which names
+who owns which parts of the tree — has existed since the offensive engine was
+brought in, but it sat in a subdirectory where GitHub does not look for one, so the
+ownership rule it stated had never applied to a single change. A copy now sits at
+the top of the repository, where GitHub does read it. What it does is narrow, and
+worth stating exactly: it *assigns reviewers*. It holds back a merge only when
+branch protection is also set to require a code owner's review — and that setting
+is not turned on today. So it makes ownership explicit and requests the right
+reviewer; it does not by itself gate a change.
+
+**A script that keeps the required-checks list and the owner-binding in step.** Run
+deliberately by a person after a change has merged, it brings the repository's
+required-checks list and its owner-binding into line with the code. It refuses to
+run until the workflow it would mark required is actually present — because a
+required check that no workflow ever produces would block every future change from
+then on.
 
 ---
 
