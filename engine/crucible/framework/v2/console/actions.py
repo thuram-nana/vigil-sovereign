@@ -503,6 +503,22 @@ def launch_assessment(body: dict) -> dict:
     if scan_mode not in _SCAN_DEPTH:
         scan_mode = "standard"
     tools = [str(t).strip() for t in (body.get("tools") or []) if str(t).strip()]
+    # A REQUESTED CAPABILITY THAT CANNOT BECOME A FLAG IS A REFUSAL, NEVER A SILENT DROP.
+    # The engage branch below maps each id through `_CAP_BY_ID` and appends only what it recognises, so an
+    # id that is not a capability used to vanish and the run started anyway, reporting `running`. Worse, in
+    # `tool` mode only the FIRST id is used: `["nmap", "browser-xss"]` dropped the unknown one AND threw
+    # away the valid pick behind it, so a "run one tool" run started with no capability flag at all while
+    # the operator watched a run they believed was driving that tool. That is the same shape as the scan
+    # flag that was accepted, defaulted on and ignored — the report looks complete and the work was
+    # narrower than the operator was told. Named here, before anything is spawned.
+    unknown = [t for t in tools if t not in _CAP_BY_ID]
+    if unknown:
+        return {"error": f"unknown capability {', '.join(repr(t) for t in unknown)} — a launch carries "
+                         f"capability PACK ids, not tool binary names. Valid ids: "
+                         f"{', '.join(sorted(_CAP_BY_ID))}."}
+    if mode == "tool" and len(tools) != 1:
+        return {"error": "a one-tool run needs exactly one capability id in `tools` "
+                         f"(got {len(tools)}) — otherwise the run would start with no tool at all."}
     apply_fixes = bool(body.get("apply_fixes", False))
     keyless = bool(body.get("keyless", False))
     model = str(body.get("model", "")).strip()[:64]
@@ -533,6 +549,31 @@ def launch_assessment(body: dict) -> dict:
             "scan_mode": scan_mode, "tools": tools, "apply_fixes": apply_fixes,
             "keyless": keyless, "model": model, "started": time.time(), "session_id": session_id}
 
+    def _unapplied(engine: str, remedy: str) -> dict:
+        """The honest report for a branch that CANNOT carry the capability packs the operator picked.
+
+        Only the ``engage`` branch turns a pack into a flag. Every other branch spawns a different CLI —
+        the loopback quick-scan, the graph-backed bridge, Strix, AEGIS — and each simply never looked at
+        ``tools``. So a run against http://127.0.0.1:8080 with five packs ticked answered ``running``
+        with none of them on its argv, and nothing on screen or in the response said otherwise: the
+        operator was shown a complete-looking run that was narrower than the one they configured.
+
+        Nothing here is passed to the spawn — a pack is a gated flag on a CLI that does not accept it, and
+        inventing an equivalent would be this function deciding what runs. It STATES the gap instead, in
+        the response and in the run's own meta, exactly as ``graph_note`` does when graph-backing is
+        unavailable, so the interface can tell the operator and the record keeps the truth.
+
+        ``remedy`` is per-branch on purpose: "point it at a non-loopback host" is true for the quick-scan
+        and false for Strix, and a remedy that does not work is worse than none — it sends the operator
+        to re-run something that will drop the packs again. ``{}`` when there is nothing to report."""
+        if not tools:
+            return {}
+        picked = ", ".join(_CAP_BY_ID[t]["label"] for t in tools)
+        return {"tools_applied": [], "tools_note":
+                f"{len(tools)} capability pack(s) ({picked}) were NOT applied — {engine} does not take "
+                f"them. They are recorded with the run, but nothing on its command line runs them. "
+                f"{remedy}"}
+
     # ---- codebase → strix (path-validated, headless, Docker pre-flighted) --
     if mode == "codebase":
         p = Path(target).expanduser()
@@ -546,6 +587,8 @@ def launch_assessment(body: dict) -> dict:
             return {"error": f"a codebase run uses the Strix sandbox, which needs Docker — {why}. Start "
                              f"Docker and retry, or give a URL/infra target instead."}
         strix = shutil.which("strix") or "strix"
+        unapplied = _unapplied("a codebase run (Strix chooses its own analysis passes over the source)",
+                               "Capability packs belong to a web/API engagement; a codebase run takes none.")
         mount = bool(body.get("mount", False))
         # --non-interactive: run headless (no TUI, exit on completion). WITHOUT it Strix launches its
         # terminal UI and a background/console spawn hangs forever — the A4a codebase path was broken.
@@ -553,7 +596,7 @@ def launch_assessment(body: dict) -> dict:
         if objective:
             cmd += ["--instruction", objective]
         slug = _slugify(p.name, fallback="codebase")
-        meta = {**base, "slug": slug, "cmd": cmd, "stream": "none", "status": "running"}
+        meta = {**base, **unapplied, "slug": slug, "cmd": cmd, "stream": "none", "status": "running"}
         _write_meta(run_id, **meta)
         # Proof Studio (B5/C1) activation: hand the Strix child THIS run's dir so its proof_sink
         # (vigil_integration.proof.bootstrap.install_from_env) mints + persists oracle-confirmed proofs under
@@ -565,7 +608,8 @@ def launch_assessment(body: dict) -> dict:
         _spawn_background(run_id, rd, cmd, meta, capture_report=False,
                           env_extra={"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug,
                                      "VIGIL_BASE_DIR": os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"})
-        return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "none"}
+        return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "none",
+                **unapplied}
 
     # ---- aegis → the defensive dual (detect over a telemetry/log file) -----
     if mode == "aegis":
@@ -579,10 +623,13 @@ def launch_assessment(body: dict) -> dict:
                 return {"error": f"aegis detect needs a TelemetryEnvelope/log file; not found: {target}"}
             cmd += [str(src)]
         slug = _slugify(body.get("slug") or "aegis", fallback="aegis")
-        meta = {**base, "slug": slug, "cmd": cmd, "stream": "none", "status": "running"}
+        unapplied = _unapplied("an AEGIS defensive run",
+                                   "Capability packs are offensive engage flags; AEGIS takes none.")
+        meta = {**base, **unapplied, "slug": slug, "cmd": cmd, "stream": "none", "status": "running"}
         _write_meta(run_id, **meta)
         _spawn_background(run_id, rd, cmd, meta, capture_report=False)
-        return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "none"}
+        return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "none",
+                **unapplied}
 
     # ---- everything else targets a URL: url / suite / tool ----------------
     host = (urlsplit(target).hostname or "").lower()
@@ -599,12 +646,15 @@ def launch_assessment(body: dict) -> dict:
         gslug = _slugify(body.get("slug") or "loopback", fallback="loopback")
         gcmd = _graph_backed_engage_cmd(target, gslug, session_id, scan_mode)
         if gcmd is not None:
-            meta = {**base, "slug": gslug, "cmd": gcmd, "stream": "none", "status": "running",
+            unapplied = _unapplied("a graph-backed run (the `vigil engage` bridge takes no pack flags)",
+                                       "Re-run it with graph-backed OFF to use them.")
+            meta = {**base, **unapplied, "slug": gslug, "cmd": gcmd, "stream": "none", "status": "running",
                     "engine": "integration-graph", "graph_partition": session_id}
             _write_meta(run_id, **meta)
             _spawn_background(run_id, rd, gcmd, meta, capture_report=False)
             return {"run_id": run_id, "status": "running", "mode": mode, "slug": gslug,
-                    "stream": "none", "engine": "integration-graph", "graph_partition": session_id}
+                    "stream": "none", "engine": "integration-graph", "graph_partition": session_id,
+                    **unapplied}
         base["graph_note"] = ("graph-backed requested but unavailable (needs the `vigil` entrypoint + "
                               "NEO4J_URI + a loopback target); ran the offense engine — session linkage kept")
 
@@ -618,10 +668,14 @@ def launch_assessment(body: dict) -> dict:
         if targeted:
             cmd += ["--targeted"]
         slug = _slugify(body.get("slug") or "loopback", fallback="loopback")
-        meta = {**base, "slug": slug, "cmd": cmd, "stream": "progress", "status": "running"}
+        unapplied = _unapplied("a loopback quick-scan (`framework.v2 scan`, which has no pack flags)",
+                                 "Run a Full engagement suite, or point the assessment at a "
+                                 "non-loopback host, to use them.")
+        meta = {**base, **unapplied, "slug": slug, "cmd": cmd, "stream": "progress", "status": "running"}
         _write_meta(run_id, **meta)
         _spawn_background(run_id, rd, cmd, meta, capture_report=True)
-        return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "progress"}
+        return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "progress",
+                **unapplied}
 
     # url / suite / tool on a URL → the gated `engage` (mirrors onto the blackboard via --spine).
     slug = _slugify(body.get("slug") or host, fallback="engagement")
@@ -635,17 +689,19 @@ def launch_assessment(body: dict) -> dict:
         cmd += ["--autonomous"]
         if scan_mode == "deep":
             cmd += ["--autonomous-cycles", "2"]
-    # capability packs → their real, already-gated engage flags (single source of truth). For a
-    # one-tool assessment exactly one is used; for url/suite the operator's picks are added.
-    chosen = tools[:1] if mode == "tool" else tools
-    for cap_id in chosen:
-        cap = _CAP_BY_ID.get(cap_id)
-        if cap:
-            cmd += [cap["flag"]]
-    meta = {**base, "slug": slug, "cmd": cmd, "stream": "blackboard", "status": "running"}
+    # capability packs → their real, already-gated engage flags (single source of truth). Every id is
+    # known by now (an unrecognised one was refused above, before a run id was ever minted), so this is
+    # the ONE branch where every pack the operator picked really becomes a flag — and `tools_applied`
+    # says which, so a caller can confirm the launch honoured the request instead of assuming it did.
+    # `tool` mode is exactly one id by the check above; the old `tools[:1]` truncation is gone with it.
+    for cap_id in tools:
+        cmd += [_CAP_BY_ID[cap_id]["flag"]]
+    meta = {**base, "tools_applied": list(tools), "slug": slug, "cmd": cmd,
+            "stream": "blackboard", "status": "running"}
     _write_meta(run_id, **meta)
     _spawn_background(run_id, rd, cmd, meta, capture_report=False)
-    return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "blackboard"}
+    return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "blackboard",
+            "tools_applied": list(tools)}
 
 
 def reverify_run(run_id: str) -> dict:
@@ -1475,6 +1531,15 @@ _CTX_MAX_CHARS = 6000
 # one's findings. Kept small — a connected session's findings are non-authoritative background, not the focus.
 _CTX_MAX_CONNECTED = 3
 _CTX_MAX_CONNECTED_FINDINGS = 6
+# A connected session's CHAT TRANSCRIPT (opt-in, ``include_linked_chats``): the operator can link another
+# chat so this one reasons with its history. ``chat.read_session`` is UNBOUNDED on disk, so the fusion is
+# bounded on BOTH axes — messages per linked chat, characters per message, and a TOTAL character budget
+# split fairly across every linked chat (so N linked chats cannot multiply the payload, and no single huge
+# transcript can starve the others). Newest-first, because a truncated tail of an old conversation is worth
+# less than its most recent turns.
+_CTX_MAX_LINKED_CHAT_MSGS = 12
+_CTX_MAX_LINKED_CHAT_MSG_CHARS = 400
+_CTX_MAX_LINKED_CHAT_CHARS = 2000
 
 # Free-text credential shapes to mask before the session context egresses to the model. This is deliberately
 # STRICTER than common.redact's at-rest header/key masking: that layer must not over-mask evidence bodies, but
@@ -1482,6 +1547,21 @@ _CTX_MAX_CONNECTED_FINDINGS = 6
 # for credential shapes too. Each entry is (regex, replacement); a key/value or header form keeps the NAME and
 # masks the VALUE, an opaque vendor token / JWT / PEM block is masked whole. Deterministic + total.
 _CTX_SECRET_SUBS = [
+    # A PEM BLOCK IS MASKED FIRST, before any key/value rule can eat its opening delimiter.
+    # Ordering here is load-bearing, not cosmetic. The kv rule below matches a secret-shaped NAME and then
+    # consumes ONE whitespace-delimited token as the value — which, for `SIGNING_KEY = """-----BEGIN RSA
+    # PRIVATE KEY-----`, is `"""-----BEGIN`. That destroys the anchor this rule needs, and the base64 body
+    # then walks out in the clear WITH a mask sitting on the line, so the leak reads as though it had been
+    # redacted. The more secret-looking the variable name, the more certainly it happened — exactly
+    # backwards. Masking the whole block first makes every assignment shape (python, js template literal,
+    # yaml block scalar, a bare .pem) collapse to the same safe result, and the kv rule then harmlessly
+    # re-masks the placeholder.
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"), MASK),
+    # ...and an UNTERMINATED PEM header (a truncated file, a quoted excerpt) still loses its body: without
+    # this, `-----BEGIN OPENSSH PRIVATE KEY-----\n<body>` with no END marker matches nothing above and the
+    # key material egresses whole. Bounded to end-of-string so it cannot straddle unrelated content.
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?![\s\S]*?-----END [A-Z ]*PRIVATE KEY-----)[\s\S]*"),
+     MASK),
     # AUTH HEADERS: keep the NAME + separator, mask the WHOLE value to end-of-line. A `scheme token` value has
     # TWO tokens (`Bearer <tok>`, `Basic <b64>`), so masking only the first token leaked the credential
     # (red-pen BLOCK — `(\S+)` stopped at the space after `Bearer`). Over-masking here is the SAFE direction.
@@ -1507,7 +1587,7 @@ _CTX_SECRET_SUBS = [
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}"), MASK),
     (re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}"), MASK),
     (re.compile(r"\beyJ[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{4,}"), MASK),   # JWT
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"), MASK),
+    # (the PEM rules ran FIRST — see the top of this list for why the order is load-bearing)
 ]
 
 
@@ -1575,19 +1655,130 @@ def _newest_report_for_session(session_id):
     return None, {}
 
 
-def _session_terminal_context(run_id=None, session_id=None) -> dict:
-    """Assemble a COMPACT, secret-REDACTED snapshot of the session for the terminal chatbot to reason over:
-    the run's findings (FACT/LEAD title + bug_class + surface), recent runs, recent terminal commands, and —
-    when the operator has explicitly CONNECTED other sessions — a fused, origin-tagged summary of those
-    connected sessions' findings (cross-session knowledge fusion, F4). Built ONLY from EXISTING read providers
-    (``api.list_runs`` / ``api.run_report`` / ``api.session_detail`` / ``terminal_history``) — it invents no
-    data and runs nothing. Every string is passed through ``_redact_ctx`` — the load-bearing free-text
-    credential-shape masker (auth headers, URL userinfo, vendor tokens, JWT, PEM, kv secrets) — plus a
-    defense-in-depth ``scrub_log_event`` key-name pass, because this context EGRESSES to the model. Total: any
-    provider failure degrades to an empty section, never a traceback."""
+def _linked_chat_text(rec) -> str:
+    """The one line a linked chat's transcript record contributes, or ``""`` to skip it.
+
+    Ordinary turns contribute their own ``text``. An ATTACHMENT record has no ``text`` at all — it is the
+    small POINTER ``chat._record_for`` writes (name, digest, size, counts; never bytes) — so a plain
+    ``text`` filter drops it, and a chat linked "for deeper context" then arrives with its subject removed:
+    the operator is told BETA draws on ALPHA, and BETA never learns ALPHA has a codebase attached. Silently.
+
+    So an attachment is DECLARED, in one bounded line built only from the pointer's own fields. The
+    boundary the link must not cross is the CONTENT — that lives under the other chat's own
+    ``build_context`` and is never read from here, so declaring the upload cannot widen what egresses by a
+    single byte of the file. Total: a malformed record yields ``""`` rather than raising."""
+    if not isinstance(rec, dict):
+        return ""
+    text = rec.get("text")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    if str(rec.get("role") or "") != "attachment":
+        return ""
+    name = str(rec.get("name") or "").strip()
+    if not name:
+        return ""
+    bits = [f"[attachment: {name[:200]}"]
+    kind = str(rec.get("attachment_kind") or "").strip()[:32]
+    if kind:
+        bits.append(f", {kind}")
+    counts = rec.get("counts") if isinstance(rec.get("counts"), dict) else {}
+    try:
+        n_files = int(counts.get("files") or 0)
+    except (TypeError, ValueError):
+        n_files = 0
+    if n_files:
+        bits.append(f", {n_files} file(s)")
+    try:
+        size = int(rec.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size:
+        bits.append(f", {size} bytes")
+    bits.append(" — its CONTENTS are not shared with this chat]")
+    return "".join(bits)
+
+
+def _linked_chat_summaries(session_id, max_msgs, max_chars) -> dict:
+    """Sibling of ``_finding_summaries`` for the OTHER half of a connected session's knowledge: its CHAT
+    TRANSCRIPT. Reads it through the one existing reader (``chat.read_session``) and returns
+
+        {"session": <origin id>, "authoritative": False, "messages": [...], "included": n, "omitted": k}
+
+    where each message is ``{"session": <origin id>, "role", "text"[, "kind"]}`` — EVERY entry carries its
+    origin session id, and the block is marked non-authoritative exactly as the findings fusion is, so the
+    model can never mistake a linked chat's talk for this session's proven ground.
+
+    Messages are taken NEWEST FIRST and the payload is HARD-bounded on three axes: at most ``max_msgs``
+    messages, ``_CTX_MAX_LINKED_CHAT_MSG_CHARS`` per message, and ``max_chars`` of text in total (the caller
+    passes the REMAINING share of the global budget, so several linked chats cannot multiply the payload).
+    ``included``/``omitted`` report the bound honestly — the model is told how much of the conversation it is
+    NOT seeing rather than being left to assume it saw all of it. Truncated text is marked with an ellipsis.
+
+    The transcript is the operator's own free text, so it egresses only after the caller's mandatory
+    ``scrub_log_event(_redact_ctx(...))`` pass, like every other section. Total: an unsafe/unknown id, an
+    unreadable transcript or a malformed record contributes an EMPTY block, never a traceback."""
+    sid = str(session_id or "").strip()
+    out = {"session": sid, "authoritative": False, "messages": [], "included": 0, "omitted": 0}
+    if not sid or max_msgs <= 0 or max_chars <= 0:
+        return out
+    try:
+        from . import chat  # lazy: chat imports actions at module scope — never import it at ours
+        records = chat.read_session(sid) or []
+    except Exception:  # noqa: BLE001 — unsafe id / unreadable transcript ⇒ contribute nothing
+        return out
+    msgs = [r for r in records if isinstance(r, dict)]
+    msgs = [r for r in msgs if _linked_chat_text(r)]
+    budget = int(max_chars)
+    for rec in reversed(msgs):                       # NEWEST FIRST — the recent turns carry the context
+        if len(out["messages"]) >= max_msgs:
+            break
+        room = min(_CTX_MAX_LINKED_CHAT_MSG_CHARS, budget)
+        if room <= 0:
+            break
+        text = _linked_chat_text(rec)
+        if len(text) > room:
+            text = text[:room] + "…"            # visibly truncated, never silently
+        budget -= len(text)                      # charge what is actually EMITTED (ellipsis included)
+        entry = {"session": sid, "role": str(rec.get("role") or "")[:32], "text": text}
+        kind = str(rec.get("kind") or "")[:32]
+        if kind:
+            entry["kind"] = kind
+        out["messages"].append(entry)
+    out["included"] = len(out["messages"])
+    out["omitted"] = max(0, len(msgs) - out["included"])
+    return out
+
+
+def session_context(run_id=None, session_id=None, *, include_commands: bool = False,
+                    include_linked_chats: bool = True) -> dict:
+    """Assemble a COMPACT, secret-REDACTED snapshot of a session for a model to reason over: the run's
+    findings (FACT/LEAD title + bug_class + surface), recent runs, optionally the recent terminal commands,
+    and — when the operator has explicitly CONNECTED other sessions — a fused, origin-tagged summary of those
+    connected sessions' findings (cross-session knowledge fusion, F4) and, opt-in, their chat transcripts.
+    Built ONLY from EXISTING read providers (``api.list_runs`` / ``api.run_report`` / ``api.session_detail`` /
+    ``terminal_history`` / ``chat.read_session``) — it invents no data and runs nothing. Every string is
+    passed through ``_redact_ctx`` — the load-bearing free-text credential-shape masker (auth headers, URL
+    userinfo, vendor tokens, JWT, PEM, kv secrets) — plus a defense-in-depth ``scrub_log_event`` key-name
+    pass, because this context EGRESSES to the model. Total: any provider failure degrades to an empty
+    section, never a traceback.
+
+    Two consumers, one assembler. The DEFAULTS are the session-neutral flavour — findings, recent runs and
+    the operator-consented cross-session fusion (connected sessions' findings AND their chat transcripts) —
+    so a caller that just asks for ``session_context(session_id=...)`` gets exactly that:
+      * ``include_commands=True`` (the TERMINAL, via ``_session_terminal_context``) — the terminal's own
+        command history is grounding for the terminal router and for nothing else.
+      * ``include_linked_chats=False`` — drops the linked TRANSCRIPTS, keeping the terminal's context byte
+        for byte what it always was.
+    A section that is not requested is ABSENT from the dict, not empty, so the 6000-char prompt cap is never
+    spent on a section nobody asked for."""
     from . import api  # lazy: avoid an actions<->api import cycle
 
-    ctx: dict = {"run_id": None, "findings": [], "recent_runs": [], "recent_commands": [], "connected": []}
+    ctx: dict = {"run_id": None, "findings": [], "recent_runs": []}
+    if include_commands:
+        ctx["recent_commands"] = []
+    ctx["connected"] = []
+    if include_linked_chats:
+        ctx["linked_chat_history"] = []
     try:
         runs = (api.list_runs() or {}).get("runs", []) or []
     except Exception:  # noqa: BLE001 — a read provider hiccup must not break a proposal
@@ -1635,26 +1826,50 @@ def _session_terminal_context(run_id=None, session_id=None) -> dict:
             linked = sessions.connections_of(sid)
         except Exception:  # noqa: BLE001
             linked = []
-        for other in linked[:_CTX_MAX_CONNECTED]:
+        pool = linked[:_CTX_MAX_CONNECTED]
+        chat_budget = _CTX_MAX_LINKED_CHAT_CHARS      # GLOBAL, shared FAIRLY across every linked chat
+        for idx, other in enumerate(pool):
             crun, crep = _newest_report_for_session(other)
-            if not crun:
-                continue
-            fnd = _finding_summaries(crep, _CTX_MAX_CONNECTED_FINDINGS)
-            if fnd:
-                ctx["connected"].append({"session": other, "run_id": crun,
-                                         "authoritative": False, "findings": fnd})
+            if crun:
+                fnd = _finding_summaries(crep, _CTX_MAX_CONNECTED_FINDINGS)
+                if fnd:
+                    ctx["connected"].append({"session": other, "run_id": crun,
+                                             "authoritative": False, "findings": fnd})
+            # A connected CHAT usually has no run report at all — its knowledge IS its transcript. Same
+            # consent gate (``connections_of``), same non-authoritative tagging, same cap on how many
+            # sessions are folded in; a separate, hard character budget because the reader is unbounded.
+            # The budget is split FAIRLY (each chat may take its share of what is LEFT, so one enormous
+            # transcript cannot silently starve the other chats the operator deliberately linked), and any
+            # slack a small chat leaves rolls forward to the next one.
+            if include_linked_chats and chat_budget > 0:
+                share = max(1, chat_budget // max(1, len(pool) - idx))
+                chist = _linked_chat_summaries(other, _CTX_MAX_LINKED_CHAT_MSGS, share)
+                if chist["messages"]:
+                    chat_budget -= sum(len(m.get("text") or "") for m in chist["messages"])
+                    ctx["linked_chat_history"].append(chist)
 
-    try:
-        hist = (terminal_history() or {}).get("records", []) or []
-    except Exception:  # noqa: BLE001
-        hist = []
-    for rec in hist[:_CTX_MAX_COMMANDS]:
-        if isinstance(rec, dict):
-            ctx["recent_commands"].append({"argv": rec.get("argv") or [], "exit_code": rec.get("exit_code")})
+    if include_commands:
+        try:
+            hist = (terminal_history() or {}).get("records", []) or []
+        except Exception:  # noqa: BLE001
+            hist = []
+        for rec in hist[:_CTX_MAX_COMMANDS]:
+            if isinstance(rec, dict):
+                ctx["recent_commands"].append({"argv": rec.get("argv") or [],
+                                               "exit_code": rec.get("exit_code")})
 
     # MANDATORY before this context leaves the host: the load-bearing free-text credential-shape masker
-    # (_redact_ctx), then a defense-in-depth secret-key-name pass (scrub_log_event).
+    # (_redact_ctx), then a defense-in-depth secret-key-name pass (scrub_log_event). EVERY path returns
+    # through this line — there is no way to add a section that skips the redaction.
     return scrub_log_event(_redact_ctx(ctx))
+
+
+def _session_terminal_context(run_id=None, session_id=None) -> dict:
+    """The TERMINAL's flavour of ``session_context``: findings + recent runs + connected-session findings
+    PLUS the terminal's own recent commands, and no linked chat transcripts. Kept as a named entry point
+    because the terminal router is the one consumer that wants the command history."""
+    return session_context(run_id=run_id, session_id=session_id,
+                           include_commands=True, include_linked_chats=False)
 
 
 def _context_prompt_block(ctx) -> str:

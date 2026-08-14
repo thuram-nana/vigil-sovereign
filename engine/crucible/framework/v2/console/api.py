@@ -166,13 +166,25 @@ def _iso_from_epoch(ts: float | None) -> str | None:
     return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat(timespec="seconds")
 
 
+def _run_slug(run: dict[str, Any]) -> str:
+    """The engagement a run BELONGS TO: the slug the run itself recorded in its own ``meta.json``,
+    normalised to a plain string (``""`` = the run recorded no engagement).
+
+    This is the console's ONE definition of run→engagement membership. The library groups on it and
+    the scoped runs listing filters on it, so the two can never drift into two notions of the same
+    thing — and neither can be talked out of it: membership is read from the run's own metadata, so a
+    caller can only ever SELECT among what the runs already recorded, never ASSERT a run into an
+    engagement it does not belong to."""
+    return str(run.get("slug") or "")
+
+
 def _runs_by_slug() -> dict[str, list[dict[str, Any]]]:
     """The console's own runs grouped by the engagement slug RECORDED IN THEIR OWN meta.json (never a
     caller-supplied one), newest first within each engagement. A run with no slug is grouped under
     ``""`` so it is still reachable, never dropped."""
     out: dict[str, list[dict[str, Any]]] = {}
     for r in list_runs().get("runs", []):
-        out.setdefault(str(r.get("slug") or ""), []).append(r)
+        out.setdefault(_run_slug(r), []).append(r)
     return out
 
 
@@ -285,18 +297,32 @@ def _memory_summary() -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
-def list_runs() -> dict[str, Any]:
+def list_runs(slug: str = "") -> dict[str, Any]:
     """Console-launched scan runs, newest first, with their meta + finding count.
 
     Each row also carries the run's HUMAN label (from the presentation-only label side-car — never
     from the run's own artifacts, which stay untouched by a rename) and ISO-8601 forms of its start/
     finish stamps so the library can render a real date and time without re-deriving them per screen.
-    The ``slug`` is the one the run itself recorded in ``meta.json`` — the library groups on it, so
-    engagement membership can never be asserted by a caller."""
+    The ``slug`` on a row is the one the run itself recorded in ``meta.json`` — the library groups on
+    it, so engagement membership can never be asserted by a caller.
+
+    The optional ``slug`` ARGUMENT scopes the listing to ONE engagement — the active-engagement scope
+    the console keeps, so every screen shows the job the operator is working on and nothing else. It
+    is a FILTER over ``_run_slug`` (the engagement each run recorded for itself), never an
+    assignment: it can only select among runs that already record that slug, so scoping stays pure
+    presentation and cannot re-home a run, a finding or a fact. Absent/blank ⇒ every run, exactly the
+    unscoped listing this has always returned. Total and fail-safe: an unknown, unsafe or
+    never-used slug yields an honest EMPTY list — never an error page, and never a silent fallback to
+    the unfiltered list (which is the failure that would show one job's findings under another)."""
     from . import actions
     from . import labels as labels_mod
 
     label_map = _safe(labels_mod.run_labels, default={}) or {}
+    # The ENGAGEMENT's human name, so a run row can be labelled/grouped (and a scope chip named)
+    # without a second round trip. Presentation only — the same side-car as the run label: it NAMES
+    # an engagement, it never decides which one a run belongs to. That stays `_run_slug`, read from
+    # the run's own meta.json.
+    eng_label_map = _safe(labels_mod.engagement_labels, default={}) or {}
 
     def _list() -> list[dict[str, Any]]:
         runs_root = actions.console_dir() / "runs"
@@ -320,6 +346,7 @@ def list_runs() -> dict[str, Any]:
                 # P2 assessment-run fields (absent for legacy loopback scans → sensible defaults):
                 "mode": meta.get("mode", "url"),
                 "slug": meta.get("slug"),
+                "engagement_label": str(eng_label_map.get(str(meta.get("slug") or ""), "") or ""),
                 "objective": meta.get("objective", ""),
                 # how the Live view should tail this run: 'blackboard' (engage --spine), 'progress'
                 # (loopback scan --progress-log), or 'none' (strix/aegis — status only).
@@ -329,7 +356,19 @@ def list_runs() -> dict[str, Any]:
             })
         return out
 
-    return {"runs": _safe(_list, default=[])}
+    runs = _safe(_list, default=[]) or []
+    # ONE bounded scope value, used for both the filter and the echo so the two can never disagree.
+    # 64 is the longest slug the console's own guard accepts (`labels._SAFE_SLUG`), so a longer
+    # request cannot name a real engagement; clipping it keeps the reflected value bounded and can
+    # only ever narrow the match (an over-long request still selects nothing).
+    scope = str(slug or "").strip()[:64]
+    if scope:
+        runs = [r for r in runs if _run_slug(r) == scope]
+    # Echo back the scope the SERVER applied ("" = all engagements). It lets a caller confirm the
+    # filter actually took effect before it tells the operator "nothing yet in THIS engagement" —
+    # an engine that ignored the parameter would answer "" and be caught, rather than quietly
+    # showing another job's work under the current one.
+    return {"runs": runs, "slug": scope}
 
 
 def sessions_list() -> dict[str, Any]:
