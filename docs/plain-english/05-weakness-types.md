@@ -32,6 +32,15 @@ customer's own artificial-intelligence feature is done by a separate component t
 industry's own published list of AI weaknesses, which has 14 categories. Those 14 are *not* part of
 the 85, and the chapter says so again where they appear.
 
+A ninth number does not fit in that table, because it is a breakdown rather than a count, and it is
+probably the most useful thing in this chapter for anyone deciding how much weight to place on a
+particular capability. Of the 38 decision procedures, **3** have been exercised against a real
+third-party system on the public internet, **2** against real infrastructure the system builds and
+destroys for the purpose, **13** against a real program running over a real network connection on the
+testing machine itself, and **20** only against evidence a person wrote by hand. Part 2 sets that out
+procedure by procedure, with the software's own internal name for each one beside it so an auditor can
+reconcile this chapter against the source code line by line.
+
 ---
 
 ## How to read every entry in this chapter
@@ -497,8 +506,12 @@ controls how services inside such a platform talk to each other.
 
 **Honest limits.** These are important and specific.
 
-- All four judge a **captured export**, not a live cluster. An export is a partial, point-in-time
-  snapshot of what was handed to the system.
+- All four judge a **capture**, never the live cluster itself. The tests make no call of their own;
+  they read what was handed to them, which is a partial, point-in-time snapshot. That is a statement
+  about the *test*, not about where the snapshot came from: for the two container-platform access
+  tests, the snapshot has been taken from a genuine running cluster and the resulting verdicts were
+  measured against configurations planted in it (Part 2 sets out that run). What no single capture can
+  do is speak for parts of the cluster it did not include.
 - The benchmark test ignores advisory "warn" results — those become LEADs for human review — and
   refuses to fire when a failure carries no captured value or where the captured value actually shows
   the *secure* setting.
@@ -518,7 +531,11 @@ controls how services inside such a platform talk to each other.
   "near-zero-false-positive fix". That is the engineers' stated design intention, and this briefing
   repeats it as an intention. It is **not** a measured false-alarm rate: no such measurement exists in
   the project, and none is claimed here. What can be checked is the mechanism — the gate above, written
-  out in full, and the list of cases the test refuses to fire on.
+  out in full, and the list of cases the test refuses to fire on. What has since been *demonstrated*,
+  which is a different and weaker thing than a rate, is that on a real cluster the gate held: the
+  namespace default identity bound to the built-in `admin` role, whose real rules genuinely do grant
+  the reading of secrets, was correctly not reported, alongside two other harmless configurations. Four
+  named cases on one cluster is evidence that the mechanism works as described. It is not a statistic.
 - The mesh test proves what the configuration **declares**, not the effective runtime behaviour.
   Policy precedence, namespace and workload selectors, and more specific overriding policies are not
   evaluated. Where a setting is absent and would be inherited from a parent, the system does not
@@ -775,6 +792,25 @@ of these 38. It is supplied to that component from outside rather than being par
 is why Family 15 says a result becomes a proven finding only when *that* component returns a signed
 reference to the evidence. The 38 below are the procedures the main testing engine uses.
 
+The 38 are set out in six groups, and the groups are the same divisions the source code itself uses.
+The counts add up exactly, and are stated here so the sections that follow can be checked against them:
+
+| Group | Count | Where it appears below |
+|---|---:|---|
+| The core, general-purpose set | 15 | immediately below |
+| Defensive tests for AI features and automated abuse | 4 | after the two statistical tests |
+| Request-only parse-proofs | 3 | after those |
+| Posture tests — offline re-derivation over a retained document | 8 | after those |
+| Structural-forgery tests — offline, over one captured artefact | 2 | after those |
+| Live-capture tests — the exploitation-confirmation tier | 6 | last |
+| **Total** | **38** | |
+
+Two further structural facts, both re-derived from the registry for this chapter rather than taken
+from a document. Every one of the 38 is reachable by at least one of the 85 weakness types — there are
+no orphaned procedures sitting unused in the code. And the mapping is far from one-to-one: the
+achieved-state test alone is the confirming procedure for **28** of the 85 types, which is why so many
+entries in Part 1 name it.
+
 ### The core 15 — the general-purpose set
 
 | Test | What it establishes | What it deliberately does not establish |
@@ -847,7 +883,7 @@ is exactly the thing that fools a simpler comparison.
 | Command break-out | A submitted value contains an unambiguous command-execution construct. | Exploitation. |
 | NoSQL operator break-out | A known database query operator was injected as a *key* where a plain value was expected. | Exploitation. The list of recognised operators is curated to exclude legitimate document keys and dual-purpose ones. |
 
-### The ten posture tests — offline re-derivation over a retained document
+### The eight posture tests — offline re-derivation over a retained document
 
 Each of these reads a document the operator supplied or the system captured earlier, and re-derives a
 conclusion from it. **None of them makes any live call.**
@@ -855,15 +891,25 @@ conclusion from it. **None of them makes any live call.**
 | Test | What it establishes | Bounded to |
 |---|---|---|
 | Platform benchmark (Kubernetes) | A control-plane benchmark check hard-failed with a concrete dangerous flag in the captured value. | The parsed export, never the live cluster. Advisory "warn" results become LEADs. |
-| Anonymous role binding (Kubernetes) | An anonymous identity is bound to a dangerous built-in administrative role. | The bindings present in the supplied export. |
-| Permission-rule grant (Kubernetes) | The role's actual rules grant a dangerous capability to an attacker-occupiable identity, with the role-reference link independently re-checked rather than trusted. | Rules that are authoritative — either fetched live from the platform, or a static file with no rule-aggregation directive. Aggregated static rules stay LEADs. |
+| Anonymous role binding (Kubernetes) | An anonymous identity is bound to a dangerous built-in administrative role. | The bindings present in the supplied export or capture. This is the one posture test whose evidence has come from a real cluster: see the live-fire record later in this part. |
 | Cloud achieved state | One cloud control is in an explicitly unsafe state, evaluated in a fixed rule order. | The represented state. An ambiguous attribute is recorded as unknown, never guessed as unsafe. |
 | Service mesh configuration | The mesh configuration declares a permissive state. | What is *declared*, not the effective runtime behaviour. |
 | Pipeline configuration | The automated build instructions contain one of three dangerous constructs: a third-party build step referred to by a movable label rather than a fixed version, so the supplier can silently change what runs; a step that fetches and runs code from an outside contribution while holding secrets that can write to the customer's systems; or a step that pastes text from an outside contribution straight into a command the machine will execute. | The one build-instruction file examined. |
 | Mobile artefact | The application embeds a private key that genuinely loads and is unencrypted. | This single rule. Every other mobile signal remains a LEAD by design. |
 | Email policy | The published domain policy permits spoofing. | Published policy only, never message-level verification. |
 | Identity record | A privileged identity with multi-factor authentication provably absent, or a stale or never-rotated credential. | Strictly typed literal fields in the export. An absent field causes refusal. |
-| Structural token forgery / structural assertion forgery | A captured sign-on token or assertion is forgeable from the artefact alone. | Coarse structural checks only. Checking the signature mathematics itself — which first requires reproducing the document-tidying step described in Family 6 — is out of scope unless the operator opts in by supplying trusted certificates and installing the required library. |
+
+### The two structural-forgery tests — offline, over one captured artefact
+
+These are separated from the posture tests above because they judge a *single captured artefact* — one
+sign-on token, one login assertion — rather than a configuration document, and because the software
+holds them as two distinct procedures with two distinct version numbers, so a result minted by one can
+never be re-checked by the other.
+
+| Test | What it establishes | Bounded to |
+|---|---|---|
+| Structural token forgery | A captured access token is forgeable by anyone holding it: it declares "no signature", its signature is exactly recomputable from a weak or supplied secret, or a signature meant to be checked with a public key verifies when that public key is used as the secret instead. | The token alone, offline, with no traffic sent. A normal token whose key is unknown does not fire. Login assertions in the older enterprise format are deliberately not attempted by this test. |
+| Structural assertion forgery | A captured login assertion is unsigned, or every signature reference in it points at something other than the identity actually being consumed, or it carries the known document-shuffling shape. | Coarse structural checks only. Checking the signature mathematics itself — which first requires reproducing the document-tidying step described in Family 6 — is out of scope unless the operator opts in by supplying trusted certificates and installing the required library. |
 
 ### The six live-capture tests — the exploitation-confirmation tier
 
@@ -878,7 +924,198 @@ evidence with a name no scan produces.
 | Secret validity | An exposed secret authenticated as a real identity, fingerprint-bound to the confirming call, over a verified connection with no proxy and no redirect, at an endpoint on a fixed approved list. | Claims validity, not where the secret came from. Never inspects or stores the secret's contents. |
 | Service-identity impersonation | A short-lived credential was minted **as** a named target identity, and a confirming call at an approved introspection endpoint echoed **that same** identity, fingerprint-bound to the minting. | An echo of a *different* identity does not confirm. A minted-but-unconfirmed credential stays a LEAD. |
 | Escalation primitive | The retained configuration unconditionally permits a named escalation manoeuvre that strictly increases reach, shown by an explicit before-and-after comparison. | Does not establish that anyone executed it. Fails closed on every ambiguity. |
-| Permission-rule verb grant | See the Kubernetes family above. | Whether it will confirm at all depends on *who* holds the dangerous power (Family 10 sets out the gate). Everything outside that narrow gate stays a LEAD. |
+| Permission-rule verb grant | A role binding **and, separately, the role the binding names**, prove a dangerous permission is granted to an identity an attacker could realistically occupy. The link between the two — a binding only names a role; the actual rules live in a different object — is re-checked rather than trusted, exactly and with no tolerance for an empty field. | Rules that are authoritative: fetched live from the platform, or a static file with no rule-aggregation directive (aggregated static rules stay LEADs). Whether it will confirm at all then depends on *who* holds the dangerous power — Family 10 sets out that gate in full, and everything outside it stays a LEAD. |
+
+### The six cloud and container exploitation confirmations
+
+**A word on the arithmetic first, because two groups of six now sit next to each other and they are not
+the same six.** The group immediately above is a grouping of the *software's decision procedures*: the
+six that judge a live capture. The group below is a grouping of *capabilities*: the six cloud and
+container exploitation confirmations, delivered as one body of work. Five of the six appear in the
+table above. The sixth — the name-matching tier of the container-platform access check — is filed with
+the posture tests, because it re-derives its verdict offline from a retained record exactly as they do.
+Conversely, the anonymous-fetch test appears in the table above but is not part of this body of work.
+Both groupings are faithful to the code; they simply cut it along different lines.
+
+What these six have in common is the strength of the claim. They do not ask whether a configuration
+*looks* dangerous. They confirm that a dangerous effect was actually achieved: a credential was taken
+and used, a leaked key still works, one identity acted as another, a permission set really does permit
+an account to give itself more power, an unauthenticated stranger really is bound to administrative
+rights.
+
+Because the claim is so much stronger, each one carries an **anti-laundering gate**: a specific,
+named condition whose whole purpose is to stop a false confirmation being manufactured by pointing the
+system at a server the attacker controls, or by pairing two pieces of evidence that do not belong
+together. The gate is the part a technical evaluator should look at, so it is given its own column.
+
+The container platform accounts for two of the six, because it is checked at two strengths: a
+name-matching tier, which recognises a dangerous built-in role by its name, and a rule-parsing tier,
+which reads what the role actually permits. Family 10 lists both.
+
+| Confirmation | What it establishes | The gate that stops a false confirmation | Fired against something real? |
+|---|---|---|---|
+| **Metadata credential capture** | Cloud machine credentials were retrieved from the internal metadata service *and* proven usable by a successful identity call. | The credential's recorded source address is parsed with a real address parser, and its **host** must be the metadata endpoint. Never a text match — so a look-alike hostname, an address hidden in a query parameter, or a credentials file on disk is not a metadata reach. | **No.** Built, wired end to end and proven against hand-written evidence. There is no live proven fact, and none is claimed. |
+| **Exposed-secret validity** | An exposed secret is still valid, because a confirming call authenticated with it as a real identity. | The confirming call must land on an endpoint on a fixed, per-secret-type approved list, and a fingerprint binds that call to the captured secret. Where the secret came from is deliberately *not* a firing condition: the claim is validity, not provenance. | **Yes — for one of its two secret types only.** See the split immediately below this table. |
+| **Service-identity impersonation** | One account minted a short-lived credential *as* a different named service identity, and an independent check confirmed the new credential really carries that identity. | Entirely on the confirming side: an approved provider introspection endpoint, over a verified encrypted connection with no proxy and no redirect, and the identity echoed back must **equal** the named target. An echo of a *different* identity does not confirm. | **No.** Built and proven against hand-written evidence; live use deferred pending operator-provisioned cloud credentials. |
+| **Escalation primitive** | The retained permission configuration unconditionally permits a specific, named escalation manoeuvre that **strictly increases** what an account can reach. | An explicit before-and-after comparison of two reachability calculations: the target must be reachable after the manoeuvre and provably *not* reachable before it. A condition, an exclusion, an explicit denial, a restricting boundary and a wildcard that does not cover the target each contribute nothing at all. | **Not applicable, permanently and by design.** Performing the escalation is deliberately not part of this capability — a defensive verification test never executes the escalation it describes. This row is not waiting on anything. |
+| **Anonymous privileged binding** (container platform, name-matching tier) | An unauthenticated identity is bound to a dangerous built-in administrative role. | Typed matching on both halves. Something merely *named* like an anonymous account, an anonymous binding to a harmless or custom role, and a locally scoped role that merely happens to be *called* "admin" all fail to fire. | **Yes.** Against a real cluster the system creates and owns — see below. |
+| **Dangerous permission grant** (container platform, rule-parsing tier) | The role's *actual* permission rules grant a dangerous capability to an identity an attacker could occupy. | The subject gate set out in Family 10, plus an exact re-check of the link from the binding to the role object. | **Yes.** Same run. |
+
+**The one split that must not be blurred.** Exposed-secret validity recognises two kinds of secret. The
+**code-hosting access token** kind has been proven against the real provider. The **cloud access key**
+kind has **not**: its collection path and its cryptographically signed confirming call are built and
+proven by their own tests — the request-signing implementation checked against an independent one — but
+have **never** been exercised against a real cloud account. That row still requires a real,
+operator-provisioned key, and **nothing about the proven run transfers to it.**
+
+#### What the two live-fire runs actually did
+
+**The container platform.** A script in the repository pulls a real Kubernetes distribution (k3s
+1.31.5), starts a genuine single-node cluster bound to the testing machine's own internal address,
+plants four access configurations in it — some dangerous, some deliberately harmless — captures what
+the real platform interface returns, adjudicates those real bytes through the production path, and
+destroys the cluster. Five judgements are made over those bytes. The two genuinely dangerous ones are
+confirmed and their certificates re-verify offline; the three harmless ones correctly do not confirm.
+The decisive case is the last of the three: the platform's default identity
+for a namespace, bound to the standard built-in `admin` role — the single most common legitimate
+delegation in Kubernetes, and one whose *real* rules genuinely do grant the reading of secrets. The
+script prints the rules it actually read and requires that case to stay a lead. A naive detector would
+report it as critical on a completely ordinary cluster. Two details show this is a proof rather than a
+demonstration: every expectation is asserted and the script exits with an error on any deviation, and
+it refuses to draw any conclusion at all if the cluster has not finished assembling its built-in roles,
+because an empty role would let the important control pass for the wrong reason — nothing read, rather
+than the gate holding.
+
+**The code-hosting provider.** A second script takes the operator's own credential from their already
+authenticated command-line tool, passes it in through the program's input rather than writing it to
+disk, to a command line or to the environment, and drives the real collection step over the real
+network against the provider's own least-privileged identity endpoint. Four things happen in one run: a
+valid credential is confirmed and its certificate re-verifies offline; a bogus credential *of the same
+shape* is sent live to the same real endpoint and the provider itself answers "unauthorised", so it
+correctly stays a lead — structure is not validity, measured against the real provider rather than
+argued; the same confirmed capture with its confirming endpoint swapped to an attacker-controlled host,
+and again to a look-alike host, is not confirmed, which is the anti-laundering gate doing its work; and
+the same capture with mismatched fingerprints is not confirmed. Both scripts are reproducible by a
+third party on their own machine, which is what makes these claims re-checkable rather than merely
+reported.
+
+**What neither run covered, stated plainly.** The container-platform run captured through the
+platform's ordinary command-line client and fed those bytes to the adjudication step; it did not go
+through the system's own gated sensor for live clusters. That sensor exists and refuses unless the
+platform address it loaded is one the operator declared, but the software library it needs is not
+installed in the environment this briefing was written from. A capability that *discovers* access
+bindings across a whole cluster is not covered either — the script reads objects it planted, by name —
+and neither is a managed cloud provider's control plane. The code-hosting run did drive the real
+production collection step over the real network, which is the stronger of the two, but its permission
+gate and scope gate were stand-ins supplied by the test harness rather than a signed authorisation
+document. The *refusal* paths were genuinely exercised — a tripped emergency stop and a refusing gate
+each correctly produced nothing to adjudicate — so the gate is proven to bite; but no signed
+authorisation was loaded in that run.
+
+**The change that made any of this possible.** Until recently every one of these collection steps
+reached the network through a stand-in used only in testing, which is precisely why no cloud capability
+had ever fired against a real provider. The real network binding now exists, and its governing rule is
+that every fact about the connection is **derived from the connection, never asserted**: encryption
+counts as verified only when the request was encrypted, the connection really carries an encryption
+session, that session yields a certificate that was actually validated, and the checking was genuinely
+switched on; "no proxy was involved" is recorded only when the client can be affirmatively shown unable
+to interpose one; a redirect is *reported* rather than followed; the address of the machine that
+answered is read from the live connection rather than looked up again afterwards, because a second
+lookup can return a different address from the one the bytes came from; and an over-long response is
+recorded as cut short and never parsed, so a truncated identity answer can never reach a test. Every
+one of those fields fails to the value that makes the test **refuse**.
+
+### Which of the 38 have been proved against something real
+
+This is the table to read before placing weight on any single capability. Each of the 38 procedures is
+listed once, with the software's own internal name beside it so the list can be reconciled against the
+source code, and with the **strongest evidence that has ever been put through it**. Four grades are
+used, in descending order of what they demonstrate:
+
+| Grade | Means |
+|---|---|
+| **Outside system** | The procedure has judged bytes produced by a real third-party system on the public internet. |
+| **Own infrastructure** | It has judged bytes produced by real infrastructure the system itself builds, uses and destroys. |
+| **Real local process** | It has judged bytes produced by a real program over a real network connection on the testing machine — a real browser, a real compiled binary, a real encrypted handshake, a real server. |
+| **Fixtures only** | It has only ever judged evidence a person wrote by hand. |
+
+A grade is a statement about *evidence*, not about quality. A fixture-only procedure is not
+unreviewed — every one is covered by tests, including tests of the cases it must refuse — but nothing
+outside this project has yet been put through it.
+
+How the grades below were established: each of the thirteen "real local process" grades was re-checked
+while this chapter was being written, by running the harness that earns it on this machine — the real
+browser, the real compiled crashing program, the real encrypted handshake, the real port-scanning tool,
+the real callback round trip, the real in-line gateway, the labelled application. The three
+outside-system and two own-infrastructure grades rest on recorded runs and on the scripts that produced
+them. Those scripts are in the repository and a reader can run them, given the prerequisites each one
+states: a container runtime for the cluster, and an authenticated account with the provider for the
+credential.
+
+| Test, as this chapter names it | The software's own name | Group | Strongest evidence to date |
+|---|---|---|---|
+| Response differencing | `differential_response` | core | **Outside system** — a public vendor-run test site on the internet |
+| Achieved state | `achieved_state` | core | **Outside system** — the same run |
+| Secret validity | `secret_credential_validity` | live capture | **Outside system** — the real code-hosting provider (one of its two secret types) |
+| Anonymous role binding | `k8s_workload_posture` | posture | **Own infrastructure** — a real Kubernetes cluster the system creates and destroys |
+| Permission-rule verb grant | `k8s_rbac_verb_grant` | live capture | **Own infrastructure** — the same cluster |
+| Marker reached a sink | `side_effect` | core | Real local process — the labelled test application over a real local connection |
+| Error signature | `error_signature` | core | Real local process — the same application |
+| Evaluation | `evaluation` | core | Real local process — the same application |
+| Executable-position reflection | `reflection_context` | core | Real local process — the same application |
+| Out-of-band callback | `oob_callback` | core | Real local process — a genuine callback round trip, which correctly does not fire against a wrong key or a fabricated contact |
+| Memory-safety crash marker | `sanitizer_signal` | core | Real local process — a C program the system compiles itself and runs on a crashing input |
+| Browser execution | `dom_execution` | core | Real local process — a real headless browser driven against a local page; the safely written twin produces nothing |
+| Connection handshake | `service_reachability` | core | Real local process — a real local listener, and the real system port-scanning tool run through the gated runner |
+| Encryption weakness | `tls_weakness` | core | Real local process — a real encrypted handshake |
+| Permission path | `policy_path` | core | Real local process — the real cloud programming library against an in-process simulator (see the caveat below) |
+| Cloud achieved state | `cloud_posture` | posture | Real local process — the same simulator (see the caveat below) |
+| Anonymous fetch | `active_exposure` | live capture | Real local process — a real local server and a genuine credential-free request |
+| SQL break-out | `sql_injection_breakout` | request-only | Real local process — the in-line protective gateway over real local connections |
+| Statistical timing test | `timing` | core | Fixtures only |
+| Statistical yes/no probing | `boolean_inference` | core | Fixtures only |
+| Version range membership | `version_range` | core | Fixtures only |
+| Prompt-injection differential | `prompt_injection` | defensive | Fixtures only |
+| Canary disclosure | `system_prompt_disclosure` | defensive | Fixtures only |
+| Honeypot fetch | `automated_access` | defensive | Fixtures only |
+| Credential stuffing | `credential_stuffing` | defensive | Fixtures only |
+| Command break-out | `command_injection_breakout` | request-only | Fixtures only |
+| NoSQL operator break-out | `nosql_injection_breakout` | request-only | Fixtures only |
+| Platform benchmark | `k8s_posture` | posture | Fixtures only |
+| Service mesh configuration | `mesh_posture` | posture | Fixtures only |
+| Pipeline configuration | `cicd_posture` | posture | Fixtures only |
+| Mobile artefact | `mobile_posture` | posture | Fixtures only |
+| Email policy | `email_auth_posture` | posture | Fixtures only |
+| Identity record | `identity_posture` | posture | Fixtures only |
+| Structural token forgery | `sso_assertion_forgery` | forgery | Fixtures only |
+| Structural assertion forgery | `saml_structural_forgery` | forgery | Fixtures only |
+| Metadata credential capture | `imds_credential_capture` | live capture | Fixtures only |
+| Service-identity impersonation | `gcp_sa_impersonation` | live capture | Fixtures only |
+| Escalation primitive | `iam_escalation_primitive` | live capture | Fixtures only — and permanently so by design, as explained above |
+
+**The totals: 3 outside systems, 2 own infrastructure, 13 real local processes, 20 fixtures only.**
+They sum to 38. If the question asked is instead "how many have ever judged bytes from a real network
+connection of any kind", the answer is 18 — the thirteen local ones, plus all five graded above them.
+Response differencing and achieved state were exercised locally as well as externally; exposed-secret
+validity ran over a real connection to the code-hosting provider; and the two Kubernetes ones read from
+a real cluster's own control interface over a real connection.
+
+**The caveat a sceptical evaluator will find, volunteered here.** Two of the thirteen — the cloud
+permission path and the cloud achieved state — earn that grade through an *in-process simulator* of a
+cloud provider. That is materially better than a hand-written file, because it drives the real cloud
+programming library along its real code path and returns real response shapes, including the
+deliberately adversarial cases the test seeds (an access-control setting that is overridden and so must
+*not* count, a permission narrowed by a condition and so must *not* count). It is also materially
+weaker than a real cloud account, because nothing leaves the machine. A reader who prefers not to
+credit an in-process simulator should move those two down, making the totals 3 / 2 / 11 / 22 and the
+figure in the paragraph above 16. Both conventions are honest; this chapter states which one it used.
+
+**And the one number behind the "real local process" grade for the web tests.** The labelled
+application referred to above plants eleven weaknesses of known kinds and ships five deliberately safe
+look-alikes that must never be reported. Re-run on the machine this chapter was written on, the system
+found all eleven, reported none of the five, and produced no other findings: eleven correct, none
+missed, no false alarms. That is a soundness result on one small corpus, not a claim about coverage of
+the world.
 
 ---
 
@@ -1070,9 +1307,12 @@ clean.
 
 ### The six windows whose negative is deliberately not targeted
 
-Six evidence windows (covering five capability areas — the container-platform permission area
-contributes two of the six) explicitly record that a proven negative is *not* their
-goal, with a written argument. The argument is the same in each case and is worth stating in plain
+Six evidence windows explicitly record that a proven negative is *not* their goal, with a written
+argument. They are exactly the six cloud and container exploitation confirmations set out at the end of
+Part 2 — windows 21 to 26 in the table above, though listed there in a different order. That is not a
+coincidence: the reason they cannot state a negative is the same reason they can state such a strong
+positive. The
+argument is the same in each case and is worth stating in plain
 terms: these are confirmations of an **achieved effect** over a single, scoped capture. Proving the
 *absence* of a capturable credential, a valid secret, an impersonation path, a dangerous binding, or
 an escalation path is a fundamentally different capability — it requires an enumeration of the whole
@@ -1160,21 +1400,25 @@ fails closed and is never certified as fixed.
 
 This section exists because of the project's own written rule: a capability may never be abandoned by
 quietly narrowing the claim, and equally, a claim may never run ahead of what has actually been done.
-An agency reading this should be able to tell the two apart at a glance.
+An agency reading this should be able to tell the two apart at a glance. The procedure-by-procedure
+version of the same question — which of the 38 decision procedures has ever judged evidence produced by
+a real system, and how real that system was — is the graded table at the end of Part 2.
 
 | Capability | Honest status |
 |---|---|
-| The core 15 tests against a live web target | **Fully working end to end.** The system stands up a real, deliberately vulnerable application on the local machine and confirms findings against it. Pointed at a safely written twin of the same application, it correctly returns nothing — a shipped negative control demonstrating the confirming authority does not simply rubber-stamp. |
-| Service reachability, encryption weakness, version-range membership and the web achieved-state windows | **Working against real captures**, and the first two are among the six windows that may also state a proven negative. |
+| The core 15 tests against a live web target | **Fully working end to end.** The system stands up a real, deliberately vulnerable application on the local machine and confirms findings against it. Pointed at a safely written twin of the same application, it correctly returns nothing — a shipped negative control demonstrating the confirming authority does not simply rubber-stamp. Precisely, twelve of the fifteen have judged material a real running system produced; the graded table at the end of Part 2 names the other three, and the row below covers one of them. |
+| Service reachability, encryption weakness and the web achieved-state windows | **Working against real captures**, and the first two are among the six windows that may also state a proven negative. |
+| Version-range membership | **Built, and able to state a proven finding** — but the material it judges is a list of installed components the operator supplies rather than something captured from a live target, and every run so far has judged a sample list. It is one of the three general-purpose windows that has never judged material a real running system produced. |
 | Cloud metadata credential capture | **Built and proven offline. Real-network live fire is deliberately deferred**, pending an operator-provisioned laboratory credential. The collection step, the evidence window, the verdict route, the certificate issuance and the world-model projection are all built and proven against fixtures. In the project's own words: *there is no live proven fact yet.* |
-| Exposed-secret validity | Same position: producer, verdict and certificate wiring **complete and proven offline**; live fire deferred pending an operator-provisioned credential. |
+| Exposed-secret validity | **Split, and the split matters.** For **code-hosting access tokens: proven against the real provider.** The real collection step ran over the real network against the provider's own identity endpoint; the valid credential was confirmed and its certificate re-verifies offline, while three controls in the same run correctly did not confirm — a bogus credential of the same shape, sent live to the same real endpoint and rejected by the provider itself; the same capture with its confirming endpoint pointed at an attacker-controlled host and at a look-alike host; and the same capture with mismatched fingerprints. For **cloud access keys: not proven.** That path and its cryptographically signed confirming call are built and proven by their own tests, but have never touched a real cloud account, and nothing from the proven run transfers to them. Two limits on the proven run: its permission and scope gates were harness-supplied stand-ins rather than a signed authorisation document (the *refusal* paths were genuinely exercised), and the capability validates a credential the operator supplies — it does not go looking for exposed secrets. |
 | Cloud service-identity impersonation | Same position: **offline-wired, live fire deferred** pending operator-provisioned cloud credentials. |
+| The real network binding underneath the cloud capabilities | **Newly built, and the reason the two proven runs above were possible at all.** Until it existed, every one of these collection steps reached the network through a stand-in used only in testing — which is exactly why no cloud capability had ever fired against a real provider. Its rule is that every property of the connection is derived from the connection rather than asserted, and every property fails to the value that makes the confirming test refuse. Set out in Part 2. |
 | Kubernetes permission tests (both tiers) | **No longer deferred: proven against a real Kubernetes cluster.** A repository script stands up a genuine single-node cluster (k3s 1.31.5, in a container on the machine's own internal address) that the system creates, owns and destroys; plants dangerous and benign access rules; captures what the real Kubernetes interface returns; and adjudicates those bytes through the production path. The anonymous-caller-bound-to-administrator case is confirmed and its certificate re-verifies offline; the benign cases — including the namespace default identity bound to the built-in `admin` role, whose real rules *do* grant secret reads — correctly stay leads. The script asserts every expectation and exits non-zero on any deviation, and a third party can re-run it. **Not covered by that run:** a scope-gated *enumeration* capability that discovers bindings across a cluster (the script reads the objects it planted, by name), and a managed provider's control plane (EKS, GKE, AKS). |
 | Cloud escalation primitive | Pure offline re-derivation over the operator's own retained policy documents. Live fire is **deliberately not part of this capability at all** — a defensive verification test never executes the escalation it describes. |
 | The cryptographic escalation of the sign-on assertion test | **Dormant unless** the operator supplies trusted identity-provider certificates *and* the required library is installed. Checking the signature mathematics itself, which requires reproducing the document-tidying step described in Family 6, is explicitly out of scope. |
 | Offensively testing a customer's own AI feature (Family 15) | **Built and proven by its own tests; never yet run for real here.** The category table, the routing that keeps an AI judge's opinion from ever becoming a fact, the boundary that runs the outside tool as a separate program, and the fail-closed behaviour are all in place. The four AI red-teaming tools themselves are **absent from this environment and could not be installed, because the machine has no route to the internet.** No proven finding has been produced from them here. Live use is deferred until an operator provisions the tools. |
 | The relay needed to confirm invisible weaknesses against a **remote** target | **Built, with its own command to run it, and gated**: the engagement runner refuses a relay whose address is not on the authorisation document. Standing one up is the operator's action, on a host they own. Without it, the four callback-based checks are skipped against a remote target — and reported as skipped, never as clean. |
-| The claim-checking layer that re-runs every proof a claim cites | **Built and in real use, but not yet the single checkpoint every claim crosses.** It is called at genuine points in the running system: when findings are written into the system's internal map of the target, when a report is generated, when the defensive side admits a result, and when the reviewing components check an agent's work. What it is **not**, today, is one universal gate through which every claim in the system must pass — the internal map's own admission check reaches the same conclusion by a shared route rather than by calling this layer. It can only ever take a claim *down*; it can never promote one the confirming test refused. A note for reviewers reading the source alongside this briefing: the module's own opening comment still describes it as having no callers yet, and that comment is out of date — the callers exist. |
+| The claim-checking layer that re-runs every proof a claim cites | **Built and in real use, but not yet the single checkpoint every claim crosses.** It is called at genuine points in the running system: when findings are written into the system's internal map of the target, when a report is generated, when the defensive side admits a result, and when the reviewing components check an agent's work. What it is **not**, today, is one universal gate through which every claim in the system must pass — the internal map's own admission check reaches the same conclusion by a shared route rather than by calling this layer. It can only ever take a claim *down*; it can never promote one the confirming test refused. A note for reviewers reading the source alongside this briefing: the module's opening comment used to describe it as having no callers yet; that has been corrected, and an automated test now fails the build both if the retired phrasing returns and if a real caller is dropped from the list the comment keeps. |
 | Staying logged in while testing an application behind a login | **Built and working inside the testing engine**: it holds the session, notices when it has been dropped, logs in again and repeats the request. The honest gap is not in the capability but in how an operator reaches it — in the version read for this briefing there is no field for a target application's username and password on the assessment wizard or on the command that launches an engagement, so it is configured in the engine directly. |
 | The two measurements that are not among the 85 — session-token predictability and exposure to future quantum decryption | **Built, deterministic and reported.** Neither is judged by one of the 38 decision procedures, so neither produces a proven finding. Both are reported as leads with their own stated boundaries, which are set out in families 3 and 8. This is a deliberate classification, not an oversight. |
 | The build-and-release safeguards on the system's own supply chain | **Delivered and merged into the main line of the repository**, on the day this chapter was written: fingerprinted dependency locks proven to install under fingerprint checking, container images pinned by content rather than by a movable label, an ingredients list per environment, and a vulnerability gate that blocks on CRITICAL and has a negative control proving it can fail. Set out in full in Family 11. This is a statement about how the system is built, not a test performed against a customer. |
@@ -1265,11 +1509,29 @@ means the library can grow without changing the engine. Their distribution acros
 | **Total** | **172** |
 
 Within those families the coverage includes database-engine-specific variants for five major database
-products, eleven distinct page-template engines, both Windows and Unix command variants, obfuscated
-forms of the widely exploited Java logging vulnerability, and twenty framework-exposure paths covering
+products, ten named page-template engines plus one engine-agnostic entry that is always tried, both
+Windows and Unix command variants, obfuscated forms of the widely exploited Java logging
+vulnerability, and twenty framework-exposure paths covering
 source-control directories, environment files, diagnostic and management endpoints, search and
 container registries, content-management user listings, interface specification documents, and
 application log and route files.
+
+Two things govern when a library entry actually fires. Each entry carries a condition describing the
+technology it applies to, so an attack written for one database product is not fired at a different
+one; and every entry is judged by the same automatic decision procedures as the built-in checks, so
+adding to the library widens what is *looked for* without changing what may be *proved*.
+
+**An honest note about when those 172 were actually used.** The library is switched on per run: an
+assessment either uses the built-in checks alone, or the built-in checks plus the library. Until this
+was corrected, an assessment launched from the system's own interface accepted the instruction to use
+the library and then silently discarded it — the setting appeared exactly once in the file, in the list
+of things the function accepted, and was never read again. Nothing failed, no error appeared, and the
+resulting report looked entirely reasonable; it was simply drawn from a narrower set of attacks than a
+reader would assume. The interface now passes the instruction through. It is recorded here rather than
+quietly fixed because it is precisely the failure this chapter's own discipline exists to catch: a gap
+in coverage is invisible in a result. That is the same argument Part 4 makes about a silent smoke
+detector, and it is why coverage has to be *recorded* rather than inferred from the absence of
+findings.
 
 **The third inventory: many variations of one attack, triaged automatically.** The checks above each
 send a *fixed* test input for a given weakness. There is a second axis to any real assessment: sending

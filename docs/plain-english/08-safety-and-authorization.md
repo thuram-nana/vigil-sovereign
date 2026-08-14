@@ -184,14 +184,18 @@ specific account, project, subscription, or cluster. The rules the code enforces
 
 **Where this stands in practice.** This gate, and the six cloud and
 container-cluster confirmations that sit behind it, are built and wired end to
-end. The two container-cluster (Kubernetes) ones are proven against a real
-Kubernetes cluster the system stands up, owns and destroys itself. The four cloud
-ones are proven offline against fixed sample evidence and have **not** been run
-against a live cloud account belonging to a third party. That step needs two
-things from the customer: their own cloud credentials, and their account named in
-the cloud-scope block of a signed charter. Until both exist, the safe answer the
-gate gives is "not authorised", which is the correct one. Item 11 in section 14
-states this in full.
+end. Three of the six have been fired at something real, and the three are not of
+equal weight: the two container-cluster (Kubernetes) ones against a real Kubernetes
+cluster the system stands up, owns and destroys itself, which is real infrastructure
+but the project's own; and the GitHub half of the exposed-secret check against the
+real GitHub service, the only one of the six to have judged material from a real
+outside system. The rest — including that check's Amazon
+Web Services half — are proven offline against fixed sample evidence and have
+**not** been run against a live cloud account belonging to a third party. That step
+needs two things from the customer: their own cloud credentials, and their account
+named in the cloud-scope block of a signed charter. Until both exist, the safe
+answer the gate gives is "not authorised", which is the correct one. Item 11 in
+section 14 states this in full.
 
 ### 1.5 A record of who used the tool is created *before* anything runs
 
@@ -515,54 +519,306 @@ points to the charter scope and the network block list as the controls that cove
 those. So even a fully wired categorical block would not stop a government system
 being reached by its number rather than its name.
 
+### 2.6 The whole gate chain, in order
+
+Section 2.1 described one gate. It is not the only one, and the honest picture is
+that there is no single gate at all. There are four distinct chains for four
+distinct kinds of action, plus the network boundary underneath all of them and a
+separate check on the system's own model calls. Anyone who merges them into one
+will end up with a picture an engineer can falsify, so they are set out here
+together.
+
+**A request the engine sends to a target — five gates, in this order.**
+
+| # | Gate | Refuses when |
+|---:|---|---|
+| 1 | Authority and emergency stop | The engagement is halted, expired, out of scope, destructive without permission, or out of budget — the six checks of section 2.1, run before any traffic so that a stop takes effect at the very next action. |
+| 2 | Scope | The target is not in the signed charter. The refusal is counted as well as recorded. |
+| 3 | Destructive confirmation | The request is classified destructive and the operator declines — **or does not answer in time**. |
+| 4 | Budget | The engagement's request budget is exhausted. |
+| 5 | Rate limit | It never refuses. It waits, for as long as the posture in section 7.1 requires. |
+
+Three details inside gate 1 are worth having. The emergency stop is re-read from
+disk on **every** action and works on its own, without a full authorisation
+document behind it. The other five checks of section 2.1 run only when a signed
+authorisation is actually loaded. And that is not a way to slip past them: if a
+signed authorisation was *expected* — because automatic loading was requested and
+a trust anchor was pinned — but none could be loaded or verified, the action is
+refused outright, on the stated reasoning that the whole chain of time bounds,
+action limits and destructive constraints must never silently switch itself off.
+
+The order is described in the code as load-bearing, and both of the engine's
+request paths call the same function to run it. The reason is stated plainly: a
+new confirmation mode must not be able to become a hole in the safety stack by
+acquiring its own copy of the sequence.
+
+The same chain is re-run on every **redirect**. A web server can answer a request
+by saying "go and ask this other address instead", and without a second check an
+in-scope address could bounce the tool onto an out-of-scope one — an internal
+service, a third party, or the cloud metadata address of section 2.3. The code
+names that gap and closes it: every hop is gated exactly as the first request was.
+
+**A registered tool or sensor — five gates.**
+
+| # | Gate | Note |
+|---:|---|---|
+| 1 | Emergency stop | Checked first, as everywhere. |
+| 2 | Licence | Against the capability the tool itself declares — the entitlement system of section 3.2. |
+| 3 | Charter scope | Only when the tool names a concrete host. It reads two conventional field names, so a *sensor* that gathers from a host is scope-checked exactly as an attacking tool is. |
+| 4 | Destructive confirmation | |
+| 5 | Outbound address list | Only when the tool declares which hosts it will reach. |
+
+Two properties here are worth stating on their own. Every gate is fail-closed: a
+refusal, **or an error inside a gate**, refuses the invocation and the tool never
+runs. And the intention is written to the permanent record **before** the gates
+run, so a call that was refused appears on the record alongside the ones that
+succeeded.
+
+**The composed decision that both halves of the system share — three conditions,
+all of which must hold.** This is the piece of code the project calls its gate of
+record. It lives in the neutral shared core, so the sovereign half and the
+offensive half use the same one rather than two that could drift.
+
+| # | Condition | Refuses when |
+|---:|---|---|
+| 1 | The engagement authority | Anything in the six checks of section 2.1 says no. It is checked first because its emergency-stop step is the absolute stop. |
+| 2 | The danger tier | The classifier's outcome is anything other than an explicit `auto`. |
+| 3 | The multi-party quorum, for destructive actions only | There is no quorum, or no destruction gate was wired at all, or the gate errored. |
+
+Four refusal behaviours in that composition are pinned by tests, and each closes a
+specific way a safety check quietly stops working:
+
+- A condition that throws an error is a refusal, never a caught-and-continued
+  pass.
+- The destructive condition is checked for the value *exactly* true, not merely
+  for something true-ish. A buggy or hostile gate returning the text "no", or the
+  number 1, cannot open an irreversible action.
+- An *unrecognised* tier outcome is a refusal. Only the literal word `auto` opens
+  the gate, so a future outcome added by a later change can never silently allow.
+- A destructive action with no destruction gate wired at all is a refusal, not a
+  fall-through.
+
+**A cloud or container-cluster capture — two gates, before any network traffic at
+all.** These are the six confirmations described in section 1.4.
+
+| # | Gate | Effect of a refusal |
+|---:|---|---|
+| 1 | The danger-tier authorisation, plus the emergency stop | Returns a **refused** result and **no capture**. |
+| 2 | The cloud scope check of section 1.4 | The same. |
+
+The design note is the point, and it is short: a refusal produces nothing to
+adjudicate, so there is nothing to launder. No network call is even constructed,
+let alone sent, until both gates have passed.
+
+**Underneath all four chains** sits the network boundary of sections 2.3 and 2.4 —
+the permanently denied address ranges that no charter can unlock, the host
+firewall that drops packets without reading words, and the filtering proxy outside
+the sandbox's control.
+
+**Alongside all four** sits one further check that is not about the target at all:
+the sovereignty gate on the system's own model calls, described in section 3.3. It
+governs where the system's reasoning happens rather than what it may attack, and
+it refuses before a model client is constructed.
+
 ---
 
 ## 3. Permission tiers: sorting actions by how much damage they could do
 
 Every action the AI wants to take is classified into one of four danger levels
-before anything else happens. The classifier is a small, fast, AI-free program.
+before anything else happens. The classifier is a small, fast, AI-free program. It
+reads the *name* of the action and nothing else — not the target, not the
+arguments, and none of the text the AI wrote to justify it.
 
-| Tier | What it covers | What happens |
-|---|---|---|
-| **A0** | Observing and answering only, and only for a fixed list of known-safe words: read, search, query, get, list, status, view, inspect, and similar. | Runs automatically. |
-| **A1** | Reversible internal changes: draft, note, report, commit, branch, tag. | Runs automatically, and is recorded. |
-| **A2** | Anything visible outside the system: send, email, publish, post, upload, export, download, sync, and bulk movement of data. | **Queued for a human to approve.** |
-| **A3** | Destructive actions, financial operations, key and restore operations — **and any action touching dangerous material at all**: secrets, credentials, tokens, keys, identity and access policies, firewall rules, roles, grants, and anything named production, root, admin, or vault. | **Explicit approval required.** Never automatic. |
+| Tier | What it covers | What it permits | What it requires |
+|---|---|---|---|
+| **A0** | Observing and answering only, and only for a fixed list of known-safe words: read, search, query, get, list, status, view, inspect, and similar. | Runs immediately, without being queued. | Nothing beyond the name matching the safe list. |
+| **A1** | Reversible internal changes: draft, note, report, commit, branch, tag. | Runs immediately, and is recorded. | Nothing beyond the classification — but on the offensive side the minimum tier described in 3.1 lifts every tool above this, so nothing offensive ever runs at A1. |
+| **A2** | Anything visible outside the system: send, email, publish, post, upload, export, download, sync, and bulk movement of data. | Does not run until a human approves. | An approval — by default a signed, single-use permission slip for that one action (section 4.2). |
+| **A3** | Destructive actions, financial operations, key and restore operations — **and any action touching dangerous material at all**: secrets, credentials, tokens, keys, identity and access policies, firewall rules, roles, grants, and anything named production, root, admin, or vault. | Never runs automatically, under any setting. | The same explicit, per-action authorisation, and — where the action is irreversible — the multi-party quorum of section 5. |
 
-Four design decisions in this classifier deserve attention:
+The program has three names for those outcomes rather than four: `auto` covers
+both A0 and A1, `queued` is A2, and `explicit-required` is A3.
+
+### The complete vocabulary
+
+The classifier is a dictionary, and the whole dictionary is short enough to print.
+None of the lists below is a sample. These are all the words there are, and a name
+matching none of them is treated as maximally dangerous. The counts were taken
+from the source.
+
+**A3 — seventy-five words.** Any one of them, anywhere in the name, makes the
+action A3. They fall into five groups.
+
+| Group | How many | The words |
+|---|---:|---|
+| Destructive verbs | 28 | push, deploy, delete, destroy, drop, remove, purge, wipe, truncate, overwrite, erase, format, kill, shutdown, reboot, reset, disable, enable, override, force, sudo, exec, eval, chmod, chown, patch, install, uninstall |
+| Cryptography and reversal | 6 | encrypt, decrypt, restore, revert, rollback, recover |
+| Money | 12 | spend, purchase, pay, payment, transaction, transfer, refund, invoice, allocate, budget, release, sign |
+| Dangerous material, whatever the verb | 24 | secret, secrets, credential, credentials, token, tokens, key, keys, iam, policy, firewall, acl, role, grant, revoke, rotate, escalate, infra, prod, production, env, master, root, admin |
+| Secret stores | 5 | vault, keyring, keychain, keystore, hsm |
+
+Note what the fourth and fifth groups do. Most of those words are *nouns* — the
+material itself rather than an action on it — and they make an action A3 no matter
+what is being done to them. "Read the secrets" is not a read. "Get the budget" is
+not a get. "Read the vault" is not a read. The code's own test file pins exactly
+those three cases, along with `credentials.get` and `keyring.get`.
+
+**A2 — twenty words.** send, email, smtp, publish, post, message, outbound,
+webhook, sms, notify, share, upload, invite, calendar, tweet, dm, export, dump,
+download, sync.
+
+Two of them deserve a note. `export` and `dump` sit here because bulk movement of
+a private store out of the system has to be seen by a person, even though nothing
+is destroyed by it.
+
+**A1 — twelve words.** write, note, brief, report, draft, alert, consolidate,
+commit, branch, annotate, tag, label.
+
+One word is deliberately *absent* and the code explains why: `snapshot`. Taking a
+snapshot sounds harmless, but restoring one silently reverts the system's state.
+So `restore` is A3, and a bare snapshot-create is left to fall through to A3
+rather than risk it running by itself.
+
+**A0 — seventeen safe verbs, plus eight exact names.** The verbs: read, search,
+query, get, list, status, recall, observe, answer, view, show, find, frame, peek,
+describe, inspect, lookup.
+
+They are verbs only, never nouns, and the code states the reason: a safe *noun* on
+this list would let "encrypt the memory store" reach the automatic tier because
+the target happened to be a harmless one.
+
+The eight exact names are read-only memory tools written out literally rather than
+recognised by verb: `memory.search`, `graph.query`, `ingest.status`,
+`graph.entity`, `episodic.range`, `threads.open`, `commitments.due`,
+`contradictions.pending`. The first three would reach A0 on their verb anyway. The
+other five contain no safe verb at all, and without the literal listing they would
+fall to A3 — which shows the direction the design errs in even for its own
+housekeeping tools.
+
+**Seven exact names for gesture control.** Where the system is permitted to drive
+a mouse and keyboard on the operator's own machine, there is no honest verb for
+"inject input", so seven names are listed literally: four pointer actions — move,
+click, scroll and drag — at A1, and three at A2, namely typing, key combinations,
+and launching an application. These are checked *after* the danger pass, so
+`hid.pointer.delete` is already A3 before the list is consulted. And the ordinary
+words `move`, `type` and `click` are deliberately kept out of the dictionary
+altogether, so `file.move` and `data.type` still fall to A3.
+
+### The order the classifier works in
+
+The order is the design, so it is worth setting out step by step.
+
+1. Split the name into whole words — on full stops, underscores, hyphens,
+   slashes, spaces, and on four invisible control characters — then lowercase it.
+2. No words at all? A3.
+3. Any A3 word? A3. This is checked before everything else.
+4. Any A2 word? A2.
+5. Any A1 word? A1.
+6. An exact gesture name? A1 or A2, as listed above.
+7. An exact safe tool name, or any A0 verb? A0.
+8. Anything else whatsoever? A3.
+
+Four design decisions inside that sequence deserve attention:
 
 - **Danger is checked first.** An action touching a credential is A3 no matter how
   innocent the verb is. "Read the vault" is not a read; it is A3.
 - **Anything unknown falls to A3.** The classifier uses a *positive* list of safe
   words. It does not try to list dangerous words and let everything else through.
   An unrecognised action, an empty one, or one it cannot parse is treated as
-  maximally dangerous.
+  maximally dangerous. This is the single most important property in the section:
+  the absence of danger is not sufficient for automatic execution. A name has to
+  be positively recognised as safe, or it is treated as maximally dangerous.
 - **Matching is by whole word, never by fragment.** The action name is split on
   punctuation and spaces before matching, so `overwrite` is not mistaken for
   `write` and `forget` is not mistaken for `get`.
 - **Hidden control characters cannot smuggle anything past.** The splitting also
   breaks on the invisible separator characters, so an action name with a dangerous
-  word hidden behind one of them still classifies as A3.
+  word hidden behind one of them still classifies as A3. Both copies of the
+  classifier carry the same short argument for why extra splitting is always safe:
+  every word in the dictionary is itself free of separators, so splitting more
+  aggressively can only ever *expose* a dangerous word, never break one in half
+  and hide it.
+
+### What a refusal looks like
+
+The gate that consumes the tier returns one of exactly three outcomes, and the
+difference between them matters to an operator reading a log.
+
+| Outcome | When | What happens |
+|---|---|---|
+| `auto` | The tier is at or below both the automatic bar (A1) and the ceiling in force | The call runs. |
+| `queue` | The tier is A2 or above, or above the ceiling | The call stops and waits for a person. A valid, single-use, owner-signed slip for this exact call lets it run once. With no signing authority provisioned, or no slip inside the time window, it is blocked. |
+| `deny` | An empty name, or a name on a hard block list | An error is raised at once. It never runs, and it never even queues. |
+
+Every branch fails toward refusal. A classifier that returns something the gate
+does not recognise is treated as A3. A floor value the gate does not recognise is
+treated as A3. The optional version of the classifier that runs the sovereign
+kernel as a separate program treats a missing program, a timeout, a non-zero exit
+and unreadable output all as A3 — and it refuses to run a bare `sigil-kernel`
+name found on the system's search path at all, on the stated reasoning that an
+attacker who placed a program of that name there would then be the one deciding
+the tiers. An approval step that throws an error is a block, not a pass.
+
+### The one file that can change a tier, and the direction it can move it
+
+The sovereign kernel reads a plain-text file of per-tool overrides
+(`~/.sigil/warden/tools.json`), so an owner can mark a particular tool as more
+sensitive than its name suggests. That file is unsigned, and anything able to
+write files on the machine could edit it.
+
+It is safe anyway, because the override is **raise-only**: the effective tier is
+the *higher* of the pin and the inferred tier. An attacker who pins the
+code-push tool down to the automatic tier still gets A3, and the code's own test
+asserts exactly that. Two keys differing only in capitalisation resolve to the
+higher of the two rather than to whichever the program happened to read last. A
+malformed or missing file is ignored, and inference governs alone.
+
+The code records the matching limit honestly rather than hiding it: because the
+file is unsigned, *lowering* a tier is not available through it at all. Legitimate
+de-escalation would need a signed mechanism, and none exists.
 
 There is a second version of this classifier written in a different programming
 language, used by the personal/sovereign half of the system. The two are kept
 identical by testing both against a shared set of reference cases, so they cannot
 silently drift apart and start disagreeing about what is dangerous.
 
+Deciding is only half of what the sovereign kernel does. After the caller has run
+or blocked the tool, the kernel appends a signed, chained record of what happened
+— the agent, the tool, a fingerprint of the arguments, the tier, the decision, the
+approver, a fingerprint of the result, and the time. Its own header states the
+boundary: it "never executes tools itself; it decides and it records". Section 9
+covers what that record is worth.
+
 ### 3.1 The rule that makes offensive tools safe
 
 On the offensive side, two additional rules apply on top of the tiers.
 
 **A ceiling.** The automatic-approval ceiling for offensive work defaults to
-**A1**. Since every offensive tool classifies at A2 or above, the practical
-consequence is that **an autonomous agent can never fire an offensive tool by
-itself.** It always queues for a human.
+**A1**. Since the floor described next lifts every offensive tool to A2 or above,
+the two settings together mean that **an autonomous agent can never fire an
+offensive tool by itself.** It always queues for a human.
 
 **A floor that only ever raises.** A separate guard imposes a minimum tier
 (default A2) on offensive tools, and it is written so that it can only ever move
 a tool *up* the danger scale, never down. The reason is concrete: an offensive
-action with a read-shaped name, such as `http.get`, would otherwise classify as
-A0 and run automatically.
+action with a read-shaped name, such as `http.get`, `dns.query` or `port.list`,
+contains a safe verb and would otherwise classify as A0 and run automatically.
+
+So three separate mechanisms can move an action's tier, and all three are
+one-directional. The override file raises. The floor raises. The ceiling caps what
+may run without a person. Nothing in the system lowers a tier.
+
+**Which classifier actually runs during an engagement.** The offensive side does
+not call the sovereign kernel program for this. It uses a small function inside
+its own process, and the honest description is this. The *dangerous* half is not
+local: it imports the shared classifier and asks it the single question "does this
+name carry one of the seventy-five dangerous words?", so a dangerous name can
+never be rated differently on the two sides of the system. The *benign* half is
+local and deliberately coarse — a curated list of eight danger-free
+reconnaissance tool names (`nmap`, `httpx`, `nuclei`, `ffuf`, `curl`,
+`subfinder`, `gau`, `katana`) rates A1, and every other name rates A2. Since the
+floor and ceiling then decide the outcome, the only thing the local half changes
+in practice is the label written into the record.
 
 There is also a **tool-to-phase manifest**: each tool is listed against the phases
 of work in which it may be used at all, and a tool not listed for the current
@@ -668,6 +924,95 @@ the request-replay tool, and the defensive gateway's active-blocking mode. Where
 the licence is absent in a governed deployment, the defensive side says so on the
 screen — it reports itself as downgraded rather than pretending to block.
 
+### 3.3 A third ladder: where the system's own thinking is allowed to happen
+
+The two ladders above govern what the system may do. A third governs something an
+agency will care about at least as much: **where the system's own reasoning
+physically takes place, and therefore where the customer's data goes.**
+
+The reasoning inside this system is done by a large language model. Some models
+run on the operator's own machine. Others run on somebody else's computers,
+reached over the internet, which means that whatever is put in front of them —
+including details of the customer's systems and their weaknesses — leaves the
+building. That is a sovereignty question rather than an authorisation one, and it
+has its own separate ladder with its own separate refusal.
+
+The operator picks one of four tiers by setting a single environment value.
+
+| Tier | What it permits | What it refuses |
+|---|---|---|
+| **AIR_GAPPED** | Local models only. | Every cloud model, refused **at construction** — before a client object is built, before the vendor's software library is even loaded, and therefore before anything could be sent. |
+| **SOVEREIGN_CLOUD** | Local models, plus cloud models running on jurisdictionally bounded infrastructure where the operator chooses the region. | The direct consumer model interfaces. |
+| **TRUSTED_CLOUD** | The above, plus a frontier model offering under a zero-data-retention contract. | The direct consumer model interfaces, still. |
+| **PERMISSIVE** | Everything. | Nothing. This is the development default. |
+
+The ladder exists in four rungs rather than as an on/off switch for a reason the
+code states: most government workloads need *jurisdictional* sovereignty — data
+residency, regional infrastructure, contractual handling — rather than pure local
+operation, and forcing that choice to be binary would push it underground.
+
+**Every model the system knows about is placed on the ladder by name.** There are
+thirteen, and this list is exhaustive:
+
+| Class | The models in it | Permitted from |
+|---|---|---|
+| Local — runs on the operator's own machine, no network egress | Ollama, vLLM, llama.cpp, TGI, a generic self-hosted endpoint, and a dry-run stub with no network at all | AIR_GAPPED upward |
+| Jurisdictionally bounded cloud | Amazon Bedrock, Google Vertex AI, Mistral's platform | SOVEREIGN_CLOUD upward |
+| Contractually bounded cloud | The zero-data-retention Anthropic offering | TRUSTED_CLOUD upward |
+| Ordinary cloud, with no special data-handling agreement | The direct Anthropic interface, the Claude Code interface, and a bring-your-own Azure OpenAI resource | PERMISSIVE only |
+
+**It fails closed in four separate places**, and this is a good worked example of
+the house style:
+
+- **An unrecognised tier name resolves to AIR_GAPPED**, the strictest one — not to
+  the most permissive, and not to an error. A typo in the setting tightens the
+  system rather than loosening it.
+- **An unrecognised model name is classified as ordinary cloud**, so it is refused
+  under every sovereign tier. A model the policy has never heard of does not get
+  the benefit of the doubt.
+- **If the policy code itself cannot be loaded** by the process making the call,
+  and any sovereign tier is configured, the call is refused — the stated reasoning
+  being that the process cannot prove the egress is permitted, so it must not
+  perform it. If no tier is configured at all, the policy would have resolved to
+  PERMISSIVE anyway, so behaviour is unchanged. The code names the property
+  directly: this can over-refuse, and it can never under-refuse.
+- **If the gate itself throws an error**, that is a refusal, never a permission.
+
+One further detail is the difference between a control and a gesture. The refusal
+is delivered by *returning the safest available action* rather than by crashing,
+so that the reasoning loop stays intact and the operator gets an explanation. The
+enforcement is still real, and the source says so in one sentence: the client is
+never constructed, the vendor's software library is never imported, and nothing
+leaves the host.
+
+**The zero-data-retention step is an attestation, not a proof.** Moving a direct
+model interface out of the ordinary-cloud class and into the contractually bounded
+one is done by the operator setting a flag that says "this key is covered by a
+zero-data-retention agreement". The code labels it an attestation in as many
+words. The system cannot check the contract. It records the operator's claim and
+behaves accordingly.
+
+**There is an optional seal.** By default the tier is re-read from the environment
+on each call, which is convenient while developing but means a change made
+part-way through a long-running process takes effect immediately. Setting a
+further value latches the tier once for the lifetime of the process, so a later
+change cannot relax it mid-engagement. The seal can only ever pin the tier; it can
+never loosen it.
+
+**Where the check is made.** Four places in the system construct a model client,
+and all four consult the same policy first: the reasoning step behind a live
+engagement, the automated code-fix component, the console's chat-style terminal,
+and the engine's own model-backend factory. That last one places the check before
+the import, so under a strict tier the system never even loads the cloud vendors'
+software in order to probe whether it is available.
+
+**The honest limit, and it is the same shape as the licensing one in 3.2.** With
+nothing configured, the default tier is **PERMISSIVE**, which the code itself
+describes as equivalent to no policy enforcement. A freshly installed system does
+not restrict where its reasoning happens. Choosing a tier is a deployment act, and
+an agency should treat it as part of accepting the system rather than as optional
+tuning. Item 16 of section 14 records this.
+
 ---
 
 ## 4. The approval queue: where a human says yes
@@ -756,6 +1101,51 @@ default**: no opt-in is required, and a queued shell command runs only once the
 owner has signed a single-use permission slip for that exact command. Every other
 tool inside that agent's sandbox runs automatically; the shell is the chokepoint.
 
+**Exactly two names are gated, and the choice is deliberate.** The gate does not
+use the general danger classifier of section 3 here. It uses a two-line rule: the
+two names that start a command and feed a running one — `exec_command` and
+`write_stdin` — are treated as the most dangerous tier, and every other name the
+agent can call is treated as the safest. The reason is stated in the code and is
+worth understanding, because it is a design choice rather than an omission. Every
+command-line invocation the agent makes flows through `exec_command`, and
+`write_stdin` types into a process an earlier `exec_command` already started. So
+gating those two gates *all arbitrary execution*, while the agent's other tools
+keep working and the agent remains functional. Applying the general offensive
+classifier instead would rate almost every name as needing approval, which under
+an always-on gate would stop the agent doing anything at all.
+
+**What that leaves running automatically.** Naming those tools is more honest than
+calling them "benign". Besides the shell, the vendored agent's tree holds twelve
+other tool families. Eleven of them are things the agent calls by name, and every
+one of those runs without an approval under this gate: private reasoning, notes, a
+to-do list, web search, file patching, reporting, image viewing, skill loading, a
+finish signal, spawning and co-ordinating sub-agents, and six tools over the
+intercepting web proxy — listing captured requests, viewing one, replaying one,
+listing the site map, viewing an entry in it, and reading the proxy's own scope
+rules.
+
+The twelfth is browser automation, and it is the interesting one, because it is
+**not** an exception that slips past. It is not a named tool at all. It is a
+command-line program installed in the sandbox, and the agent drives it through
+`exec_command` — so every browser action the agent takes queues for approval like
+any other command.
+
+The replay tool is the one to look at hardest, since it re-sends a captured
+request. It is an ordinary function call rather than a command, so this gate does
+not see it. Something else bounds it: the gate deliberately judges a tool by its
+**class and name, never by its target**, because deciding what a request may reach
+is the job of the network boundary in sections 2.3 and 2.4. A replayed request
+still has to get past the firewall and the filtering proxy, and those do not care
+which tool sent it.
+
+**The gate's own settings.** For this one surface the minimum tier is set to the
+lowest value and the automatic ceiling to A1, which is what allows the agent's
+other tools to run while the two shell names — rated at the top tier — land above
+the ceiling and queue. The permission slip the owner signs is bound to the actual
+arguments of the actual call, not to the static definition of the tool, so what
+the owner sees and signs for is the real command. An earlier version bound a
+constant here; that was found by the project's own adversarial review and fixed.
+
 **How the gate behaves when it cannot be attached: it fails closed.** This was
 until recently the one place in this briefing where a safety property was weaker
 than a plain reading would suggest. It no longer is, and the change is worth
@@ -786,7 +1176,11 @@ operator would use to run without the gate on purpose. There are therefore exact
    case.
 
 Any third outcome — a broken installation, a version mismatch, a bug introduced by a
-future change — now stops the run instead of proceeding without the gate.
+future change — now stops the run instead of proceeding without the gate. The
+narrowing is visible in the code at the point where the gate is attached: the only
+failure still tolerated there is the specific one that means "this project's
+package is not installed at all", which is case 2 above. Every other failure
+travels up and stops the run.
 
 So the claim can be made in its strong form: **turning the gate off is a deliberate
 and visible act, and so is running without it; neither happens silently.** The gate
@@ -1593,7 +1987,7 @@ fails the build rather than producing a confident-looking, wrong bill of materia
   yet everywhere.** A build step borrowed from a third party runs with the project's
   build credentials, so a moving label pointing at that borrowed step is a real risk.
   In the supply-chain job every such step is pinned to an exact commit identifier, and
-  an automated test enforces it. **The eight pre-existing build jobs still refer to
+  an automated test enforces it. **Every job in the main pipeline still refers to
   those helpers by moving label.** The project states this scope limit in its own test
   and records converting the rest as its first follow-up: a wrong identifier fails
   every job in the repository at once, so it was kept out of the change that
@@ -1758,9 +2152,9 @@ relevant to safety and control.
     application on the operator's own machine, plus a vendor-published practice
     target on the public internet.** The project states in its own words that this
     is "proven on a local target, not proven in the field".
-11. **The four cloud confirmations have not been fired at a live third-party
-    account, and that is waiting on the customer. The two container-cluster ones
-    have been fired, at a real cluster.** All six are built and wired end to end:
+11. **Three of the six cloud and container-cluster confirmations have been fired at
+    something real; the rest are waiting on the customer.** All six are built and
+    wired end to end:
     capturing a credential from a cloud server's metadata service, checking whether
     an exposed secret is actually valid, impersonating a cloud service account,
     escalating permissions through an access-policy weakness, and both tiers of
@@ -1772,8 +2166,14 @@ relevant to safety and control.
     the dangerous binding is confirmed and its certificate re-verifies offline,
     while benign bindings in the same cluster are correctly left as leads. What
     that run does not cover is discovering bindings across a whole cluster, and a
-    managed provider's control plane (Amazon EKS, Google GKE, Azure AKS). For the
-    four cloud confirmations the evidence is fixed sample evidence, and what has
+    managed provider's control plane (Amazon EKS, Google GKE, Azure AKS). The third
+    is the exposed-secret check, and it splits: its **GitHub half** has been run
+    against the real GitHub service, using the operator's own credential against
+    GitHub's own least-privileged identity endpoint, with the certificate
+    re-verifying offline and a live bogus credential of the same shape correctly
+    left as a lead; its **Amazon Web Services half has never touched real Amazon
+    infrastructure**, and nothing from the GitHub run transfers to it. For the
+    remaining confirmations the evidence is fixed sample evidence, and what has
     not happened is the act of pointing them at a live cloud account belonging to a
     third party, because that requires the customer to provide their own cloud
     credentials and to name the account in the signed charter's cloud-scope block.
@@ -1793,6 +2193,13 @@ relevant to safety and control.
 15. **No independent third-party security assessment of this system exists.** The
     project names this as one of its irreducible gaps, prepares an audit package
     for one, and states plainly that it cannot itself be the third party.
+16. **The sovereignty tier that governs where the system's own reasoning happens
+    defaults to unrestricted.** The four-tier ladder in section 3.3 is real,
+    enforced at four separate places, and fails closed in four separate ways —
+    but with nothing configured it resolves to the tier the code itself describes
+    as equivalent to no enforcement. Choosing a tier is a deployment act. This is
+    the same shape of caveat as item 3, and an agency should check both on the
+    machine it is accepting rather than assume either.
 
 ---
 
@@ -1823,6 +2230,16 @@ be run.
   named power with a yes or no beside it. On an unprovisioned machine it will say,
   in as many words, that the deployment is ungoverned — which is the honest answer
   and the one worth checking first.
+- **Ask the system where it is allowed to think.** The engine's `status` command
+  prints a governance block: the sovereignty tier in force, whether that tier has
+  been latched immutable for the process, and the licensing state beside it. On an
+  unconfigured machine it prints the unrestricted tier and an unenforced licence,
+  which are the two facts sections 3.3 and 3.2 say to expect.
+- **Read the danger dictionary.** The whole tier classifier is one short source
+  file of word lists, reproduced in full in section 3. Count the words yourself.
+  Then check that the second copy, written in a different programming language for
+  the other half of the system, matches it — both are tested against one shared
+  file of reference cases, which is also readable.
 - **Trace the categorical block yourself.** Search the whole repository for the
   name of the government/military block. Outside the module and its own test file
   you will find two lines that make it importable and nothing that calls it. This
@@ -1830,8 +2247,12 @@ be run.
   and it takes one search to confirm.
 - **Confirm the vendored agent's shell gate actually attached.** Run a shell
   command through that agent on the deployed machine and check that it appears in
-  the approval queue. If it runs without appearing, the gate did not attach — and
-  nothing would have told you.
+  the approval queue. Since the attachment was made fail-closed (§4.5), a wiring
+  failure stops the run with an error naming the gate rather than proceeding
+  ungated — so a run that completes without any command reaching the queue means
+  either that the explicit opt-out setting is in force or that the vendored tool is
+  being run outside this system. Check which; both are deliberate, and neither
+  should be a surprise on a governed deployment.
 - **Read the ingredients list.** The two lock files are plain text, one line per
   component, each with an exact version and a fingerprint. The build's own policy
   document states the threshold, the current scan result, and every exception with

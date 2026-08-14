@@ -199,6 +199,36 @@ purpose is to accept code — paste bins, developer question-and-answer sites, b
 legitimately carry attack syntax as ordinary user content. The guide says plainly: run
 those in watch-only mode and review before enforcing.
 
+### Why growing the offensive engine cannot change what the firewall blocks
+
+The reuse described above raises the obvious opposite worry. The offensive engine keeps
+growing: a run of new confirmations for cloud and Kubernetes attacks was completed on
+12 August 2026. If the defensive side runs the offensive side's checkers, does the firewall
+quietly start blocking more things every time the offensive side learns a new trick?
+
+It does not, and the arrangement that prevents it is structural rather than a promise of
+care.
+
+When a finding arrives carrying a weakness category the system does not recognise, it is
+tested against a **fallback** set of checkers. That fallback set is **frozen**: it is the
+fifteen checkers that existed before the defensive and cloud families were added, and it is
+deliberately *not* derived from the full list. Had it been derived, every later addition
+would have quietly widened the set that every unrecognised finding is tested against. The
+other twenty-three checkers — the four inward-facing detections, the three request-only
+break-out judgements, the eight configuration-posture checks, the two document-forgery
+checks and the six live-capture checks — are reachable **only** through their own explicit
+category entry, and every one of those entries is keyed on a kind of evidence an ordinary
+web scan never produces.
+
+Two tests hold this in place, and they are deliberately different in kind so that one
+refactoring cannot defeat both. One asserts the arithmetic. The other **writes out the
+fifteen permitted names by hand**, so a drift fails the build with an explicit list of what
+moved rather than against a set the test itself recomputed. The same file also pins the
+benchmark result as a fixed row — eleven true findings, no false alarms, no misses — so an
+addition that shifted the engine's measured behaviour by even one finding would fail before
+it could be merged. That file was amended, visibly and by hand, for each new checker added
+in August. The fifteen did not move, and the benchmark row did not move.
+
 ### What AEGIS deliberately refuses to block, and why that is a feature
 
 Three attack families are deliberately kept off the blocking path, each for a stated
@@ -537,8 +567,23 @@ both and they have different trust properties.
 | What its output is worth | Leads, by design. A single deep-analysis finding can be turned into a testable question for the running system. | Leads. The deployment guide says it in one line — *"strix output is **leads, not FACTs**"* — and explains why: the machinery that turns a finding into a signed proven fact does not run over this agent's output at all. |
 | What you get at the end | A merged, de-duplicated report, plus which analysers ran and which were skipped and why. | A report produced inside the agent's own sandbox. The interface says so on screen: a codebase run produces no re-checkable web report of the kind a live web assessment produces. |
 
-Two further facts about the wizard route, both verified in the code:
+Three further facts about the wizard route, all verified in the code:
 
+- **The agent's ability to run arbitrary commands is governed, and since 12 August 2026 that
+  governance fails closed.** The agent has exactly one route to a command line, and the
+  product's authorisation layer classifies that one route — and only that one — as maximally
+  dangerous, so each invocation of it stops and waits for a single-use, owner-signed approval
+  covering that exact call. If no approval authority has been set up at all, the call is
+  blocked rather than allowed through. Every other tool the agent has (thinking, notes, web
+  search, patch application, reporting) is left to run freely, so the agent stays useful while
+  its shell is held. This is on by default for any governed run. What changed in August is the
+  failure behaviour: the wiring code previously caught *any* error while attaching the
+  governor and carried on with the agent ungoverned, on the reasoning that a wiring fault
+  must never stop a scan. Its replacement states the problem in its own words — the effect
+  was "an UNGATED shell with NO signal to the operator — an accident, not a decision, and
+  indistinguishable from a healthy governed run." A wiring failure now halts the run. There
+  remains exactly one way to run ungoverned: a single named setting an operator has to switch
+  off deliberately, which leaves a visible, auditable record of the choice.
 - The interface **pre-checks for Docker before launching** — it looks for the Docker command
   and asks the Docker service whether it is alive, with an eight-second limit — and returns
   a plain error naming the reason rather than hanging. It also runs the agent in headless
@@ -730,6 +775,31 @@ The safety rails on the loop are real and worth listing:
 - There is a hard budget on model calls (default five), because each one costs real time and
   money.
 - **The loop sends no traffic to any target.** It reads source and reasons about it.
+- **Since 13 August 2026, a jurisdiction setting decides whether the model call may leave the
+  machine at all** — and it is decided *before* the AI provider's software is even loaded.
+
+That last rail deserves its own paragraph, because for an organisation with data-residency
+obligations it is the one that matters most about source review: this step is the point at
+which a customer's actual program text would be sent to an AI model.
+
+The product carries four **sovereignty tiers**, an operator setting that says where a model
+call is allowed to go. *Air-gapped* permits locally-run models only. *Sovereign cloud* adds
+model services that run inside a defined legal jurisdiction. *Trusted cloud* additionally
+allows a hosted service that contractually retains no data, and only on an explicit operator
+attestation. *Permissive* allows anything. The tier is consulted at the moment the system
+chooses which model to talk to, before the provider's software library is imported and
+before any client is built, so under a strict tier nothing is constructed, nothing is
+imported, and nothing leaves the host. Across the places where a model is called, four
+separate failure paths all resolve to refusal: an unrecognised tier name resolves to the
+*strictest* tier; an unrecognised model service is treated as ordinary public cloud and
+refused under every strict tier; a policy that cannot be read at all refuses whenever a tier
+is configured; and an error raised inside the check itself is a refusal, never a permission.
+There is an optional latch that fixes the tier for the life of the process, so a later
+change to the machine's settings cannot loosen it mid-run.
+
+**The honest qualification: the shipped default is permissive.** With no tier configured, the
+deployment behaves as it always did. This is a control an operator turns on, not a property
+a customer gets by installing the product, and an evaluator should ask to see it set.
 
 ### Where the source-review output goes
 
@@ -792,13 +862,45 @@ delivered software. Four pieces, in plain words:
   vulnerability?" without needing VIGIL's cooperation.
 - **A release gate blocks on a critical vulnerability.** Before a change can be accepted, an
   automated step scans those locked dependency lists. If it finds a vulnerability rated
-  CRITICAL, the change is refused rather than flagged for later. The gate carries a self-test
-  that deliberately fires it, so a silently broken gate cannot pass as a clean one.
+  CRITICAL, the change is refused rather than flagged for later. Vulnerabilities rated HIGH
+  are reported in full but do not block — the policy is written down and the reason given: a
+  gate whose exception list has to grow without limit to stay green stops meaning anything.
+  There are, at the time of writing, **no exceptions on that list at all**, and every future
+  entry is required by a test to carry a written justification, a named reason from a fixed
+  set, and the condition that should end it. The gate carries a self-test that deliberately
+  fires it, so a silently broken gate cannot pass as a clean one.
 
 **Status, stated plainly.** All four exist in the released software today. They were accepted
 into the released version on 12 August 2026, and the automated build gate now runs against
 every proposed change. Chapter 6 gives the detail and the honest account of what these
 safeguards do *not* prove.
+
+Three further points landed alongside them and belong here, because they are what makes the
+above enforceable rather than merely present.
+
+- **A known-vulnerable cryptography library was replaced, in both halves of the product.**
+  The outside library that performs every signature and every encryption operation on the
+  Python side of the system was moved past a published high-severity vulnerability; the change
+  was accepted on 12 August 2026, in the offensive engine, the shared core and the sovereign
+  half alike. A security product that lags its own cryptography library is in no position to
+  lecture anyone about dependencies.
+- **The gate is a required check, not an advisory one.** The repository's main branch is
+  protected, and nine automated checks — including the supply-chain gate — must pass before a
+  change can be merged. Rewriting or deleting the branch's history is disabled. Three honest
+  gaps go with that, and an evaluator should be told them rather than left to find them:
+  repository administrators are **exempt** from the required checks; independent review of a
+  change by a second person is **not** required by the configuration; and commit signatures
+  are **not** required. The checks are real; the human process around them rests on the
+  operator's own discipline.
+- **The two subsystems described in this chapter are now covered by those checks.** Until
+  13 August 2026, eight areas of the codebase had test suites that were never run by the
+  automated build — among them the source-analysis subsystem described in this Part and the
+  detection-engineering subsystem described in Part 1. Both now run on every proposed change.
+  The way that was done is itself the point: a test path that matches no files at all leaves
+  the build green and the log looking like coverage, so the build first runs each newly added
+  path in a mode that only *collects* tests, treats "collected nothing" and "path does not
+  exist" as hard errors, and prints the count each path actually contributed. Coverage that
+  cannot be counted is not claimed.
 
 ---
 
@@ -840,6 +942,17 @@ open-source component this was adapted from originally did.
   explicit approval applies an edit.
 - **It never stages everything.** Only explicit, path-validated files are committed. A
   wildcard path is refused, and an empty set of edits never raises a change proposal.
+
+A third property was added on 13 August 2026, and it matters to any organisation that cannot
+let its source code leave its own premises. The step that comes before the ladder — proposing
+the fix in the first place — is a call to an AI model, and what that call carries is **real
+source text from the organisation's own repository**. It now passes the same jurisdiction
+check described in Part 2: the sovereignty tier is consulted before the model provider's
+software is loaded and before any client is built, so under a strict tier no client exists and
+nothing leaves the machine. A refusal degrades to "no proposal" — exactly as a missing key to
+the model service already did — rather than to an unguarded call, so the loop still finishes
+cleanly and never patches on a refusal. The same honest qualification carries over: the
+shipped default is permissive, so this is a control an operator sets.
 
 Every action is recorded with the sensitive arguments scrubbed out, so no credential ever
 reaches the audit trail, and stage numbering comes from a counter rather than a clock, so
@@ -984,22 +1097,96 @@ the discipline: when it runs over an encrypted connection it *records in the fin
 that the other end's identity was not validated, and it refuses to call the result a
 confirmed session hijack without a genuine authenticated session.
 
-**Elsewhere, validation is required rather than disabled.** One of the cloud capabilities
-described in other chapters proves that a credential was taken from a cloud machine's own
-credential service *and that the credential really worked*. The step that collects that
-evidence must report that certificate checking was on, that nothing sat in the middle of
-the connection, and that no redirection was followed — and the checker that judges the
-result **requires** all three before it will confirm anything. Evidence gathered over a
-sloppy connection cannot become a proven fact. The two settings are opposites for good
-reasons, and both are written down.
+**Elsewhere, validation is required rather than disabled.** One family of cloud capabilities
+described in other chapters proves that a credential really worked — that it was accepted by
+the provider as a live identity. The step that collects that evidence must report that
+certificate checking was on, that nothing sat in the middle of the connection, and that no
+redirection was followed — and the checker that judges the result **requires** all three
+before it will confirm anything. Evidence gathered over a sloppy connection cannot become a
+proven fact. The two settings are opposites for good reasons, and both are written down.
 
-The honest status of that cloud capability, in the same words the rest of this briefing
-uses: the detection logic, the evidence handling, the certificates and the safety gates are
-**built and proven against recorded sample data**. What remains deferred is the act of
-pointing them at a live third-party cloud account, and that waits on the customer supplying
-their own cloud credentials — a thing only the account holder can supply, and which the
-system is deliberately built not to obtain any other way. Calling it unfinished understates
-the system; calling it field-proven in a customer's cloud overstates it.
+### The real network binding, and the first run against a real outside provider
+
+That requirement was enforced from the day it was written, but until 13 August 2026 it had
+never been exercised, because **the only things that had ever supplied those connection facts
+were stand-ins written for the tests**. The code that actually makes such a request — the piece
+that joins these cloud capabilities to a real network — did not exist. The module that closes
+the gap says so in its own opening lines: that absence is "exactly why no [cloud] runner had
+ever fired against a real provider."
+
+The rule the new code holds itself to is one sentence: **every connection fact is derived from
+the connection, never asserted.** Concretely:
+
+- "Certificate checking was on" is recorded only when the request was over HTTPS, the
+  connection genuinely carries an encrypted session, that session yields a peer certificate at
+  all (which it does not unless the chain was validated), and the client's own settings are
+  genuinely in verifying mode. Any step that cannot be established records the negative.
+- "Nothing sat in the middle" is recorded only when the client can be *affirmatively shown*
+  unable to route through an intermediary — it was built ignoring the machine's ambient proxy
+  settings and carries no intermediary of its own. If that cannot be shown, the record says an
+  intermediary was possible, which is the answer that makes the checker refuse.
+- "No redirection was followed" is guaranteed by construction: the client does not follow
+  redirections, so a redirect is *reported* rather than obeyed.
+- The other end's address is read **from the live socket carrying the response**, not looked up
+  again afterwards. A later lookup can return a different address from the one the bytes
+  actually came from, which would be evidence about the wrong thing.
+- The response is read up to a fixed limit. A response over that limit is marked truncated and
+  is **not** parsed, so a partial — and therefore unsound — identity answer can never reach a
+  checker.
+
+The discipline is that **no field ever falls back to the permissive value**. A missing
+connection, an error while inspecting it, an unencrypted address, an over-long response: each
+degrades to the value that makes the checker refuse, never to the one that lets it confirm.
+
+**And one of these capabilities has now been exercised against a real third party.** On
+13 August 2026 the exposed-credential capability — "this leaked secret is not merely
+well-formed, it is *valid*" — was run against the real GitHub API. Four things happened in the
+same run, and the three that did *not* confirm are the ones worth reading:
+
+| What was tried | What happened |
+|---|---|
+| The operator's own genuine credential, against the operator's own least-privileged identity address | **Confirmed**, and the signed certificate re-checks offline |
+| A bogus credential of the same *shape*, sent live to the same real address | GitHub itself answered "unauthorised" — correctly left an unproven lead. Structure is not validity, and here that is measured against the real provider rather than assumed |
+| The same confirmed capture, with the address that would confirm it swapped for an attacker's host, and again for a near-identical lookalike name | Not confirmed. If any address could confirm a secret, anyone who controlled an address could manufacture facts. The collecting step separately refuses to send a live credential anywhere but that credential type's own confirming address, so the credential is protected as well as the verdict |
+| The same capture where the credential and the confirming call carry *different* fingerprints — "some other secret authenticated" | Not confirmed |
+
+The credential was piped into the harness on standard input from the operator's own logged-in
+session. It is never written to a file, never placed where a process listing would show it, and
+never put into the environment; the harness asserts it appears in neither the capture, nor the
+evidence, nor the signed certificate. The harness asserts every one of its expectations and
+exits with a failure code on any deviation, and a third party can re-run it on their own
+machine with their own account. That last property is what makes this a re-checkable claim
+rather than a demonstration.
+
+The same run also exercised the two gates that sit in front of any such capture, in the
+direction that matters: with the stop switch tripped, and again with the target ruled out of
+scope, the run **refused and produced no capture at all**. That is the design point stated in
+the source — a refusal leaves nothing to adjudicate, so there is nothing that could later be
+laundered into a fact.
+
+**What that run does not cover, stated exactly.**
+
+- **Only the GitHub row.** The Amazon Web Services row of the same capability is built and
+  unit-tested — its request-signing code was checked against Amazon's own independent
+  implementation — but has **never** been exercised against real AWS. It still needs a real,
+  operator-provided access key, and **nothing about the GitHub run transfers to it.**
+- **Not credential types outside the two it recognises**, and **not a hunt for exposed
+  credentials** across a customer's estate: the harness validates a credential the operator
+  handed it, it does not go looking for one.
+- **The two gates were harness-supplied stand-ins, not a signed engagement charter.** The
+  permitting and scope objects in that run were written into the harness, and the harness says
+  so in its own comments. Their *refusing* behaviour was genuinely exercised, as just
+  described, so the seam is proven to bite — but a signed charter was not loaded, and nobody
+  should read this run as proving the charter machinery end to end.
+
+The sibling capability — proving a credential was taken from a cloud machine's own credential
+service — remains where the rest of this briefing places it: the detection logic, the evidence
+handling, the certificates and the safety gates are **built and proven against recorded sample
+data**, and it now has a real network binding underneath it, but it has **not** been pointed at
+a live cloud account. That waits on the customer supplying their own cloud credentials — a
+thing only the account holder can supply, and which the system is deliberately built not to
+obtain any other way. Calling it unfinished understates the system; calling it field-proven in
+a customer's cloud overstates it.
 
 ### An identity that survives certificate renewal
 
@@ -1269,8 +1456,18 @@ Everything else is excluded, each with a written reason:
 | Memory-error sanitiser signals | One sub-case — a thread data race detected at run time — is not reliably reproducible, so the whole family is excluded as unaudited rather than partly trusted. |
 | Version range, privilege path, all posture families, single-sign-on forgery, automated access | These are offline or configuration judgements, not a live re-test with a freshness marker. They are outside this mode's scope. |
 | Service reachability, active exposure, TLS weakness | Connection-level classes whose liveness control has not been soundly defined yet. Excluded until it is. |
+| The cloud and Kubernetes achieved-effect families — metadata-credential capture, exposed-credential validity, service-account impersonation, permission escalation, Kubernetes permission grant, anonymous reachability | No family-specific reason is written for these, and that is the honest description: they are simply not on the closed allow-list, so they land in the same catch-all refusal as anything unaudited, and the code returns its generic "not a sound negative" note. A sound rule for "this credential no longer works" or "that permission grant is gone" is a separate piece of reasoning nobody has done. |
 | Races, timing desynchronisation, request smuggling | Genuinely non-reproducible phenomena: a real vulnerability may simply not manifest on a given attempt, so "silent across N attempts" is unsound. |
 | Any unrecognised family | Fail-closed. |
+
+The cloud and Kubernetes row is worth pausing on, because it shows the allow-list working in
+the direction that costs the vendor something. Six confirmations for cloud and Kubernetes
+attacks were added to the offensive engine on 12 August 2026. **Not one of them was added to
+this allow-list**, so not one of them can currently produce a "the fix worked" verdict from
+silence — checked directly for this chapter, family by family. The allow-list is closed, so
+the new families fell straight through to the refusal branch, which is what fail-closed means
+when it is real rather than decorative. A vendor optimising for the demonstration would have
+widened the list; widening it would have been a claim nobody had earned.
 
 Two further conditions are written into the code as load-bearing and must not be relaxed:
 the differential-response family qualifies **only** because no certifiable class currently
@@ -1377,17 +1574,19 @@ The table below is a summary; the detail behind each cell is in the Part above.
 
 | Area | Fully working today | Built, awaiting something from the customer or the world | Deliberately not attempted |
 |---|---|---|---|
-| **Defensive firewall (AEGIS)** | Watch-only and enforcing modes; seven proof-backed inline block classes; graduated soft responses; certificates that re-check offline; kill switch; three integration routes with a stated detection set each | Enforcement in a governed deployment needs the internal blocking permission granted, otherwise it downgrades to watch-only and says so | Blocking server-side request forgery, XML external entity attacks, or error-based database injection inline — each needs out-of-band confirmation a single response cannot supply |
+| **Defensive firewall (AEGIS)** | Watch-only and enforcing modes; seven proof-backed inline block classes; graduated soft responses; certificates that re-check offline; kill switch; three integration routes with a stated detection set each; a frozen fifteen-checker fallback and two name-pinned build tests, so growing the offensive engine provably cannot change what the firewall blocks | Enforcement in a governed deployment needs the internal blocking permission granted, otherwise it downgrades to watch-only and says so | Blocking server-side request forgery, XML external entity attacks, or error-based database injection inline — each needs out-of-band confirmation a single response cannot supply |
 | **Inward-facing detections** | Four — prompt-instruction leakage, prompt injection, automated access, credential stuffing — each with a stated false-positive control. Three of the four need the route where the application hands over its own records; automated access also runs inline, once a decoy address is seeded | — | Detecting "human-mimicking bots", single-input evasion, and membership inference. These are documented as permanently lead-only |
 | **Social-engineering defence** | Nine offline indicators over an inbound message, a weighted score, five risk bands, a recommendation, and a command that can gate a mail pipeline | Machine-learning or AI classifiers on top are described as what a production deployment adds | Any generation of phishing or impersonation content; detection of faked audio or video |
 | **Detection Mirror** | Twelve checks over web access, authentication, and connection logs, each with a benign twin; certificates that re-check offline; downgrade to lead if a certificate fails | Four whole domains (outbound command-and-control, directory/identity, cloud audit, session) are honest placeholders that name the missing data source | Nothing is fabricated for a domain with no log source |
-| **Detection engineering** | Sigma-subset rule evaluation over your own logs; gap report; candidate rules for every miss; ATT&CK mapping | — | Any working bypass for a named commercial defence product; any evasion recipe; any claim to model a specific log-and-alert platform |
-| **Source-code review** | Thirteen built-in patterns, each scoped to the languages it applies to, matched across a default walk of fifteen source-file types and always available; fourteen shipped dataflow rules when Semgrep is present; Joern when provisioned; a Python symbol index; conversion of findings into testable questions; permission gate, kill switch, budget | Semgrep and Joern must be installed by the deployment; absence is reported, never hidden. The symbol index covers Python only | Treating a static finding as proof. Static analysis output is a lead by design |
+| **Detection engineering** | Sigma-subset rule evaluation over your own logs; gap report; candidate rules for every miss; ATT&CK mapping; its test suite now runs on every proposed change to the product | — | Any working bypass for a named commercial defence product; any evasion recipe; any claim to model a specific log-and-alert platform |
+| **Source-code review** | Thirteen built-in patterns, each scoped to the languages it applies to, matched across a default walk of fifteen source-file types and always available; fourteen shipped dataflow rules when Semgrep is present; Joern when provisioned; a Python symbol index; conversion of findings into testable questions; permission gate, kill switch, budget; the AI review step's model call now passes a jurisdiction check before any provider software is loaded; its test suite now runs on every proposed change to the product | Semgrep and Joern must be installed by the deployment; absence is reported, never hidden. The symbol index covers Python only. The jurisdiction tier ships **permissive** by default — it is a control the operator sets, not one the customer inherits | Treating a static finding as proof. Static analysis output is a lead by design |
+| **The agent-driven "scan a codebase" route** | The agent's single route to a command line is held for per-call, single-use, owner-signed approval while its other tools run freely; on by default; since 12 August 2026 a wiring failure halts the run rather than silently leaving that surface ungoverned | Requires Docker; the run happens inside a disposable container and produces no re-checkable web report | Treating the agent's output as anything but leads — the machinery that mints a signed proven fact does not run over it |
 | **Dependency review** | Vulnerable dependencies are proven by the system's own version comparator against a pinned advisory snapshot, and re-check offline | Saying "no vulnerable dependency" — as opposed to "this one is vulnerable" — needs non-pinned constraints resolved and snapshot coverage recorded; named as outstanding work | Trusting any scanner's own vulnerability match |
-| **Fix production** | Propose; apply into a disposable clone; sandbox build; timeout-rejects approval; explicit file staging only | The leg that raises a real change proposal is off by default and requires multi-signature keys the operator must first provision, plus a repository token — a capability, not a field deployment | Applying a fix to a lead. Only proven findings are eligible |
+| **Fix production** | Propose; apply into a disposable clone; sandbox build; timeout-rejects approval; explicit file staging only; the proposal step's model call — the one carrying real repository source — passes the jurisdiction check, and a refusal degrades to "no proposal" | The leg that raises a real change proposal is off by default and requires multi-signature keys the operator must first provision, plus a repository token — a capability, not a field deployment. The jurisdiction tier ships permissive by default | Applying a fix to a lead. Only proven findings are eligible |
 | **TLS and certificates** | Own gated handshake; four deprecated protocols and fourteen weak-cipher markers; broken-hash and undersized-key certificate checks; observed-key fingerprint; quantum-exposure classification; offline re-check; one of only six routes permitted to say CLEAN | Session-bound evidence with a notary co-signature is built and tested, but needs a handshake-participating toolchain and an independent notary operator before it proves producer-unforgeability | Enumerating every legacy cipher a server might accept if asked differently — the limit is registered, not hidden |
+| **Connection provenance for cloud credential checks** | A real network binding that derives every connection fact from the connection itself and never from an assertion, with every unestablishable fact defaulting to refusal; exercised against the real GitHub API on 13 August 2026, including live negative controls and an anti-laundering control, with the certificate re-checking offline | The Amazon Web Services row of the same capability is built and unit-tested but has **never** been run against real AWS, and nothing from the GitHub run transfers to it; the metadata-credential capability likewise awaits an operator-provided cloud credential | Obtaining a customer's cloud credentials by any route other than the customer handing them over |
 | **Network manners** | Recognisable identifying header forced on, including through the manual replay tool; posture-based pacing; six gates per request; permanently forbidden address ranges; resolve-once-and-pin; certificate checking left on for the system's own outbound calls | — | Stealth, identity rotation, traffic shaping to evade detection. The system is built to be found in your logs |
-| **Fix verification** | Four signed answers; controls for liveness, freshness, positive control and repetition; a 13-family allow-list with every exclusion reasoned; a remediation certificate cross-bound to the original proof; a stand-alone third-party verifier needing no product code | Continuous re-proof ships as a one-shot runner plus scheduled-job definitions; it becomes an operating property once the schedule is enabled on a host | Claiming a remediation at the higher freshness level. Once the vulnerable path is removed nothing can travel through it, so the system caps lower and returns INCONCLUSIVE to anyone demanding more |
+| **Fix verification** | Four signed answers; controls for liveness, freshness, positive control and repetition; a 13-family allow-list with every exclusion reasoned; a remediation certificate cross-bound to the original proof; a stand-alone third-party verifier needing no product code | Continuous re-proof ships as a one-shot runner plus scheduled-job definitions; it becomes an operating property once the schedule is enabled on a host. A sound "it stopped working" rule for the new cloud and Kubernetes families has not been written, so they cannot be certified this way | Claiming a remediation at the higher freshness level. Once the vulnerable path is removed nothing can travel through it, so the system caps lower and returns INCONCLUSIVE to anyone demanding more. Widening the allow-list to cover the six confirmations added in August — none was added, and the closed list refused them |
 
 The single sentence that connects all four subjects in this chapter: **nothing here asks you
 to trust the tool.** A block, a detection, a fix, and a "this is now safe" claim each arrive

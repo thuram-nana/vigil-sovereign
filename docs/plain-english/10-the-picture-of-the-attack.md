@@ -1,4 +1,4 @@
-# The Knowledge Graph: Building A Picture Of The Target
+# The Target Knowledge Graph: Building A Picture Of The Attack
 
 ## 1. Why the system draws a map at all
 
@@ -447,10 +447,13 @@ contents.
 ### 6.4 The six cloud and Kubernetes confirmations
 
 The system also models the achieved effect of six cloud and container-platform
-confirmations. All six are wired end to end. The four **cloud** ones are proven
-offline against **recorded sample data standing in for the real thing** — evidence
-files written to the exact shape a real cloud account produces, kept on file and
-replayed through the same checks whenever anybody wants to see the proof again. The
+confirmations. All six are wired end to end. Of the four **cloud** ones, the GitHub
+half of exposed-secret validity is proven against the **real GitHub service**, driven
+by a repository script over a real network connection. The other three, and that same
+capability's Amazon Web Services half, are proven offline against **recorded sample
+data standing in for the real thing** — evidence files written to the exact shape a
+real cloud account produces, kept on file and replayed through the same checks
+whenever anybody wants to see the proof again. The
 two **Kubernetes** ones are proven against a **real cluster**: a repository script
 stands up a genuine single-node cluster that the system creates, owns and destroys,
 plants known-dangerous and known-benign access rules in it, and adjudicates what the
@@ -699,8 +702,12 @@ are untouched. It can add routes; it can never remove or alter a finding.
 One point of honesty to carry forward. The mechanism described in this section is
 built and tested. What it can actually *surface* on a live customer estate depends
 on the cloud and Kubernetes confirmations that feed it, and their live-fire status
-is stated plainly in section 17: the two Kubernetes ones are proven against a real
-cluster the system stands up itself, and the four cloud ones are proven against
+is stated plainly in section 17: three of the six have been fired at something real
+— the two Kubernetes ones against a real cluster the system stands up, owns and
+destroys itself, which is the project's own infrastructure rather than a third
+party's, and the GitHub half of the exposed-secret check against the real GitHub
+service, the only one of the six to have judged material from a real outside system
+— while the rest, including that check's Amazon Web Services half, are proven against
 recorded sample data standing in for a real cloud account, with pointing them at a
 live third-party cloud account still waiting on the customer supplying their own
 credentials.
@@ -1136,11 +1143,19 @@ warning rather than silently producing an empty analysis.
 
 ---
 
-## 14. Four different pictures of the same work, named honestly
+## 14. Five different pictures, named honestly
 
 The word "graph" appears in more than one place in this system, and it would be easy
 to conflate them. They are distinct components with different sources and different
 jobs.[^5]
+
+Four of them are views of the same work: one engagement, against a target the owner
+has been authorised to test. Those four are set out immediately below. The fifth is
+not a view of that work at all — it sits on the sovereign side of the wall, its
+subject is the owner rather than a target, and it is described at the end of this
+section. **Merging the fifth with the other four is the most misleading mistake a
+reader of this chapter could make**, which is why it is named here rather than left
+to be met four chapters later.
 
 | | What it is | What it answers |
 |---|---|---|
@@ -1195,6 +1210,91 @@ The code's own phrase for this is that it "never fakes a connection".
 
 **The built-in store is the default and requires no external database.** Nothing in
 this chapter depends on the external one.
+
+**The fifth picture, and the one that must never be merged with the others.**
+Everything above is a view of an engagement. There is one more graph in this system,
+and it is not a view of an engagement at all. It belongs to the sovereign side — the
+half of the system that runs the owner's own affairs and performs no offensive work —
+and it is that half's memory.[^6]
+
+Its subject is the owner. It holds the projects the owner works in, the working
+sessions they have had, the documents they have kept, and the code commits they have
+made, together with which project each of those belongs to. That is the whole of it.
+**Nothing on it is a machine, an address, a credential, a defensive control, a
+weakness or an attacker.** It has no routes, no chokepoints, no blast radius and no
+crown jewels, because it is not a map of anywhere an intruder could stand. The traffic
+does not run the other way either: nothing about the owner's own working history
+appears on the attack map this chapter describes.
+
+| | The attack map — this chapter | The owner's record — chapter 14 |
+|---|---|---|
+| **Whose estate it describes** | Someone else's, under a signed charter | The owner's own |
+| **What it is built from** | The signed record of one engagement | The sovereign side's own signed journal |
+| **What is on it** | Machines, services, identities, credentials, defensive controls, confirmed weaknesses | Projects, working sessions, documents, code commits |
+| **What a connection means** | Reachability and trust — who can get to what | Containment — which project a thing belongs to |
+| **How sure it is** | Every entry carries one of the four grounding labels of section 3.1, and a belief that can fall | Every entry is derived mechanically; there is no belief number on it at all |
+| **The question it answers** | *What is reachable, and what would it cost us?* | *What has the owner already done, and where is it written down?* |
+| **Where it runs** | Inside the offensive engine | Inside the sovereign side — a different process, a different place on disk |
+
+**The difference in the trust rules is sharper than the difference in the contents.**
+The attack map is deliberately permissive about what it will hold. It admits entries
+at all four grounding labels of section 3.1, including entries an
+artificial-intelligence component merely suggested, and its honesty comes from
+labelling them and from refusing to let a poorly grounded entry carry weight it has
+not earned.
+
+The owner's record works the other way round. Its structural layer admits only what
+can be derived mechanically from the signed journal: read the journal in order, count
+what is there, write down what was counted. There is no extraction step and no
+judgement — and so there is nothing for a belief number to measure. Richer entries
+have been designed and are deliberately left out: people, organisations, decisions,
+commitments, and the relation of one record contradicting another are, in the code's
+own words, *"intentionally absent until a grounded producer exists for them"* — that
+is, until something exists that can produce them with a proof attached. A briefing
+usually has to explain why a component is thinner than its design document. Here the
+thinness *is* the design, and the missing rows are a refusal rather than a backlog.
+
+**What the two share is discipline, and it is the same discipline.** Both are one-way
+projections from a signed record. Neither is a source of truth. Both can be discarded
+and rebuilt from the record they came from. Both make every entry cite the exact
+record entry that produced it — by position and by fingerprint — so any answer can be
+walked back to tamper-evident memory. On the owner's side there is one honest
+exception, set out in full in chapter 14: the project entry is a tally over the things
+inside it rather than something any single record minted, so it carries no citation of
+its own and is walked back through the sessions, documents and commits it contains.
+Both refuse to fabricate: asked about a name it
+does not hold, the owner's record replies that it has no entry matching that name,
+rather than composing one. And neither can authorise anything. The owner's record is
+opened for reading only; a statement that would write to it is refused twice over,
+once by an explicit check on the request and once because the connection itself was
+opened read-only; and no gate, no approval and no permission decision anywhere in the
+system consults it.
+
+**They never meet.** The two halves run as separate operating-system processes out of
+separate installed environments, and the offensive engine is simply not present in the
+personal one — which is why the separation does not rest on anyone remembering to
+enforce it. On top of that absence sits a guard, and chapter 14 gives its honest
+measure: as each of the personal side's main subsystems loads, it scans what is already
+in memory and refuses to continue if anything offensive is there — in the words of the
+error it raises, a "sovereignty violation". Two limits belong with it. The guard is
+fitted to those main subsystems one by one rather than to the personal side as a whole,
+and the memory graph this section describes is not one of the places it is fitted. And
+it looks at what is loaded at that moment, so it catches offensive code already present
+rather than code arriving later. The guard is the smoke alarm; the wall is the absence
+and the process boundary. There is therefore no path by which the attack map could read
+the owner's private history, and none by which the owner's history could acquire a
+target's.
+
+**Honest status.** The owner's record graph is live on the machine examined for this
+briefing: a built copy exists, derived from the sovereign journal, and it records how
+far through that journal it had read, so a reader can tell whether it is current or
+has fallen behind. Its derivation step is covered by a test that replays the same
+journal twice and requires the two results to be identical. Rebuilding it is a command
+the owner runs, not a background service: it refreshes when asked, and the interface
+reports the gap between the picture and the journal rather than hiding it. Chapter 14
+gives the full account of that side — what it is made of, what the nightly
+consolidation pass does with it, and what it is allowed to say. This section exists
+only so that a reader of *this* chapter never merges the two.
 
 ---
 
@@ -1360,8 +1460,9 @@ central claim, and a national agency reader must never be misled about them.
   and the engagement is byte-for-byte what it was before. A failure inside it can
   never alter a finding or a verdict. What it can actually *surface* on a live
   customer estate depends on the cloud and Kubernetes confirmations listed below,
-  whose own live-fire status — proven for Kubernetes, still pending for cloud — is
-  stated there.
+  whose own live-fire status — proven for Kubernetes and for the GitHub half of the
+  exposed-secret check, still pending for the rest of the cloud work — is stated
+  there.
 - Crown jewels, the optional worth file and its safe fallback, blast radius,
   chokepoint detection including exact single-point-of-failure detection,
   value-weighted ranking, and the counterfactual.
@@ -1373,8 +1474,9 @@ central claim, and a national agency reader must never be misled about them.
   cross-engagement memory store, and the append-only shortening of the
   reasoning-chain record described in section 14.
 
-**Kubernetes proven against a real cluster; cloud live fire against third-party
-accounts still pending, by design.** The six cloud and Kubernetes confirmations
+**Three of the six fired at something real — one at an outside system, two at the
+project's own infrastructure; live fire against a
+third-party cloud account still pending for the rest, by design.** The six cloud and Kubernetes confirmations
 described in section 6.4 — metadata credential capture, exposed-secret validity,
 Google Cloud service-account impersonation, cloud permission escalation, and both
 tiers of Kubernetes permission checking — are wired end to end. For each of them the
@@ -1392,12 +1494,26 @@ role whose real rules do grant secret reads, correctly stay leads. What that run
 not cover is a scope-gated *enumeration* capability discovering bindings across a
 cluster, and a managed provider's control plane (Amazon EKS, Google GKE, Azure AKS).
 
-For the **four cloud** confirmations the proof is offline, against recorded sample
+A third has since joined them, and it splits inside itself. **Exposed-secret
+validity** recognises two kinds of leaked credential. Its **GitHub half is proven
+against the real GitHub service** — a second repository script drives the real,
+permission-gated component over a real network connection, using the operator's own
+credential against GitHub's own least-privileged identity endpoint; the credential is
+confirmed, the certificate re-verifies offline, and a bogus credential of the same
+shape sent live to the same real address is rejected by GitHub itself and correctly
+stays a lead. Its **Amazon Web Services half is not proven at all**: built,
+unit-tested, never exercised against real Amazon infrastructure, still needing an
+access key only the account owner can issue, and **nothing from the GitHub run
+transfers to it.**
+
+For the **remaining cloud** confirmations — metadata credential capture, Google
+Cloud service-account impersonation, cloud permission escalation, and that Amazon
+half — the proof is offline, against recorded sample
 data standing in for the real thing — evidence files written to the exact shape a
 real cloud account produces, and, to say it once more plainly, written for the
 purpose rather than harvested from anybody's live cloud account.
 
-What remains outstanding is a single, specific, operational thing: **pointing the
+What remains outstanding is a single, specific, operational thing: **pointing those
 cloud confirmations at a live third-party cloud account.** That waits on the customer
 supplying their own credentials. The system's own machine-readable capability
 registry records no engineering work outstanding against them; the remaining deferral
@@ -1426,9 +1542,10 @@ report is rendered, when a finding is written onto this map, at the end of an
 engagement, by the reviewing components, and by the defensive gateway before it
 issues a certificate. It is **not** a single checkpoint that every claim in the
 system crosses; in particular, individual writes to this map are classified by the
-shared grounding rule rather than routed through it. Section 12.4 also records that
-the written note inside that component's own source file still understates its use
-and should be corrected at source.
+shared grounding rule rather than routed through it. The written note inside that
+component's own source file used to understate its use; it has since been corrected,
+and an automated test now fails the build both if the retired "no callers" phrasing
+returns and if a genuine caller is dropped from the list that note keeps.
 
 ---
 
@@ -1506,7 +1623,17 @@ uniform model rather than raising.
 
 [^5]: The four live at `engine/crucible/framework/v2/worldmodel/` (the asset map),
 `integration/vigil_integration/graph/` (the attack-chain view),
-`integration/vigil_integration/graph/store.py` (the per-job partition) and
+`engine/crucible/framework/v2/graph/` (the per-job partition — in the engine, not
+beside the attack-chain view) and
 `integration/vigil_integration/chainast/` (the reasoning-chain structure). The
 second route search of section 7.4 is `framework/v2/scanner/lateral.py`, called
 from `framework/v2/engage.py`.
+
+[^6]: The fifth picture — the sovereign side's own graph — lives at
+`apps/sigil/sigil/graph/`: the node and edge definitions in `graph/schema.py`, the
+replay-into-a-fresh-copy-and-swap rebuild in `graph/rebuild.py`, and the read-only
+query layer in `graph/query.py`. The determinism and provenance test is
+`apps/sigil/tests/test_graph.py`. The refusal to load offensive code into a sovereign
+process is `assert_no_offense` in `apps/sigil/sigil/reuse/`; a checker should expect to
+find it called from the personal side's main subsystems and not from `graph/`, which is
+the limit stated above.

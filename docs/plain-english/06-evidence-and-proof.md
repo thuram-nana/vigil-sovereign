@@ -24,7 +24,8 @@ This chapter explains, in ordinary language, how that works in practice. It cove
 
 1. What "evidence" actually means here, and how it is captured and stored.
 2. How evidence is sealed so that tampering is detectable.
-3. What a **finding report** contains for a human reader.
+3. What a **finding report** contains for a human reader, and what is inside the
+   downloadable **case file** an operator hands to somebody else.
 4. What an **evidence certificate** is, and the four independent things it proves.
 5. How a completely independent third party — with no access to this system, no
    internet connection, and no reason to trust the operator — can confirm a result on
@@ -126,10 +127,13 @@ kinds of automatic test** and a vocabulary of **85 named weakness classes**, eac
 to the specific tests that are allowed to confirm it.[^rev]
 
 [^rev]: Software is identified by a short code for the exact snapshot of the source it was
-built from. Sections 1 to 11 were read at snapshot `1487e03a`. Section 12 describes work
+built from. Sections 1 to 11 were first read at snapshot `1487e03a`. Section 12 describes work
 that reached the released software while this chapter was being written, and was read at
-snapshots `dc2994d6` and `ff790b80`. They are recorded so that a reader can re-derive
-every count in this chapter from exactly the same source the author used.
+snapshots `dc2994d6` and `ff790b80`. **This revision — the rebuilt case file in section 6.2,
+the two worked examples in section 4.4, the statement of what a signature does and does not
+establish in section 3.3, and the corrections to section 11 — was read at snapshot
+`05b81e9f`.** They are recorded so that a reader can re-derive every count in this chapter
+from exactly the same source the author used.
 
 **One term used constantly below: an "evidence branch".** The project's own word for a
 single, named route by which a particular kind of claim is allowed to be proved — in
@@ -355,6 +359,50 @@ Three further properties:
   forgery technique, and the fix came out of a deliberately adversarial internal review
   that went four levels deep.
 
+#### What a signature establishes, and what it does not
+
+This is the distinction most often lost when a signed document reaches a non-specialist
+reader, so it is worth stating flatly.
+
+A valid signature establishes exactly two things:
+
+1. **Integrity.** The signed bytes are the bytes that were signed. Alter one character
+   anywhere and the check fails.
+2. **Possession of a key.** Whoever produced the signature held the private half of a public
+   key listed in the trust root, and enough *distinct* holders did so to meet the threshold.
+
+It establishes **nothing at all about who that was**. A key is a number. Nothing inside the
+mathematics ties a number to an organisation, a person, or a legal entity. That link is
+supplied entirely from outside the cryptography — by the out-of-band fingerprint comparison
+described in section 7.2 — and then only to the extent that the party you asked for the
+fingerprint really is the party you meant to ask.
+
+The system says this in its own words rather than leaving a reader to infer it. The
+verification document inside every signed pack carries a section headed *"What the signature
+does and does not establish"*, which states that a valid signature shows the pack has not been
+altered since it was sealed and that whoever sealed it held the private key behind the printed
+fingerprint — and that it "does **not**, by itself, tell you who that was."
+
+**One caveat specific to how packs are produced today, because it materially changes what a
+signature is worth.** The signing authority for a downloadable pack is resolved from a
+governance-key location supplied by whoever asked for the pack. When no such location is
+given, the authority is provisioned *inside the run's own working directory*, so every
+engagement mints its own trust root and prints its own fingerprint. The pack detects that case
+and prints an extra warning of its own: the fingerprint identifies *this* pack's signer; it is
+not a standing identity against which future packs can be checked; ask the sender to publish a
+fingerprint for each pack and compare each one. **A dossier downloaded from the operator's own
+interface is built this way today** — the interface passes no governance-key location — so
+those packs carry the caveat. A pack built from the command line with an explicit key location
+does not. The project's own internal review names the change that would settle it: have the
+interface pass one stable operator key location, so that a single trust root signs every pack
+and the out-of-band fingerprint becomes something an organisation publishes **once**. Its
+summary of the difference is exact — it is "the difference between *integrity only* and
+*provably from this operator*."
+
+Finally, and separately from origin: a signature says nothing whatever about whether the
+*verdict* is correct. A signer can be perfectly authentic and still be wrong, or lying. That
+is what check 4 in the next section exists for, and section 8.2 returns to it.
+
 ### 3.4 The chain: you cannot quietly delete a finding
 
 An individual sealed certificate proves that *that* finding was not altered. It does not,
@@ -488,6 +536,144 @@ rather than a re-implementation:
 5. **Claim-grounding.** The test that fired must be a valid confirmer *for the class being
    claimed*. This is the step that defeats relabelling.
 
+### 4.4 Two worked examples: real evidence, re-checked
+
+The four checks are easier to weigh when they have been applied to evidence that came out of
+a real system rather than out of a fixture somebody wrote by hand — in one of the two cases
+below a real outside service, in the other real infrastructure the project stands up and
+destroys itself. Two such runs
+exist in the repository. Both are scripts a third party can run on their own machine. They
+are described here as worked examples of the *re-checking*; what they do and do not establish
+as capability claims is the subject of section 11.
+
+Three points apply to both.
+
+- **Neither runs in the automated build**, deliberately. There are no credentials in the
+  build environment, and — in the project's own reasoning — a live-fire that fabricates a
+  result when it cannot actually run is worse than no live-fire at all. The GitHub script
+  detects a missing or unauthenticated command-line tool and skips cleanly rather than
+  reporting anything.
+- **Every expectation is asserted and a deviation exits with an error.** Both harnesses say
+  the same thing in their own comments: a live-fire script that only prints and never fails
+  is a demonstration, not a proof.
+- **The controls are the point.** In each run, the arrangements that *must not* be confirmed
+  are exercised through the identical production path as the one that must. A detector that
+  only ever says "found something" establishes nothing.
+
+One shared point of precision about the four checks. Neither of these certificates carries a
+manifest of raw files, so check 3 — artifact integrity — has nothing to check in these two
+cases and is satisfied vacuously. That is not a loophole. A certificate that *claims* raw
+files, verified in a place where those files are not available, fails closed and is reported
+unsound; it never passes on the strength of the other three.
+
+#### Kubernetes: a real cluster the system creates, owns and destroys
+
+*Kubernetes* is the industry-standard software for running application containers across a
+fleet of machines; *RBAC* is its permission system, expressed as named roles granted to
+identities.
+
+A script in the repository (`tools/livefire/k8s_rbac_livefire.sh`) starts a genuine
+single-node Kubernetes cluster — k3s version 1.31.5, in a container, reachable only on the
+machine's own internal address — plants four access rules in it, captures what the real
+Kubernetes interface returns for each, feeds those real bytes to the same code that runs in
+an ordinary assessment, and then destroys the cluster. It never touches infrastructure it
+does not own, which is precisely why anybody can repeat it without borrowing an account.
+
+Five adjudications are made over the captured bytes:
+
+| What was planted in the real cluster | Result | Why that result matters |
+|---|---|---|
+| The anonymous, unauthenticated user bound to the full administrative role | **Confirmed**, and its signed certificate **re-verified offline** | The genuine problem: anyone at all is an administrator |
+| The anonymous user bound to the harmless built-in read-only role | Not confirmed | Being anonymous is not by itself dangerous |
+| A named user bound to the full administrative role | Not confirmed | A real administrator is not a finding |
+| The anonymous user bound to the full administrative role, judged this time by reading the role's **own rules** rather than matching its name | **Confirmed**, and its certificate **re-verified offline** | Rules are parsed, not names matched |
+| The namespace's default identity bound to the built-in `admin` role inside one namespace | Not confirmed | The control that matters — see below |
+
+The last row is the whole argument. On this cluster the built-in `admin` role genuinely
+grants read access to secrets, and the harness prints the permission list it actually read
+rather than asserting it. "Let this application own its own namespace" is the single most
+common legitimate delegation in Kubernetes. A detector without a subject test would flag it
+as critical on a completely ordinary cluster, and would be wrong.
+
+One further detail shows the harness is a proof rather than a demonstration. Kubernetes
+assembles the permissions of its built-in roles a few seconds after a cluster starts. If that
+assembly has not finished, the role reads as empty — and an empty role would make the control
+above pass *for the wrong reason*, because nothing was read rather than because the gate held.
+The harness detects that state and **refuses to draw any conclusion**, exiting with an error
+and telling the operator to re-run.
+
+**What this run did not exercise.** The capture was taken with the ordinary Kubernetes
+command-line tool inside the script, and handed to the adjudication code directly. It did not
+travel through the permission-gated live sensor, whose own client library is not installed on
+the machine used for this briefing. Nor did it cover discovery of access rules across a whole
+cluster — the script reads the objects it planted, by name — or a managed provider's control
+plane (Amazon EKS, Google GKE, Azure AKS), which is the same interface reached by a different
+access path.
+
+#### GitHub: a real third-party provider on the public internet
+
+The second run (`tools/livefire/secret_github_livefire.sh`) is the stronger of the two,
+because it drove the **real production component over a real network connection to a real
+third-party service** — `api.github.com`. That matters beyond this one capability: until the
+network binding underneath it was written, every one of these components reached the network
+through a stand-in used only in testing, which is why none of them had ever fired against a
+real provider.
+
+The capability being exercised is: *an exposed credential found lying around is a currently
+working one*, established by making one call that the credential itself authenticates.
+
+The arrangement is deliberately narrow and self-limiting. The credential is the operator's
+own, obtained from their own command-line tool and piped straight into the harness on the
+standard input — never written to a file, never placed in a command line where another user
+of the machine could read it, never put into the environment. The call made with it is
+GitHub's own identity endpoint, the least-privileged call the interface offers: it reads who
+you are and changes nothing.
+
+The run asserts each of the following about the real connection, and fails if any is untrue:
+
+- the confirming call really returned a success status from GitHub;
+- a peer address was recorded from the live socket that carried the response, rather than
+  looked up again afterwards;
+- encryption was genuinely verified on that connection;
+- no intermediary was interposed and no redirection was followed;
+- the endpoint reached was GitHub's own identity address;
+- the credential and the confirming call carry the same one-way fingerprint, binding the call
+  to the exact credential that was captured;
+- and the credential itself appears **nowhere** in the retained capture, nowhere in the
+  retained evidence the test judged, and nowhere in the signed certificate.
+
+The valid credential was confirmed, and **its signed certificate re-verified offline**.
+
+Four things in the same run were correctly *not* confirmed, and they are the substance of the
+exercise:
+
+| Control | Outcome |
+|---|---|
+| A bogus credential of the correct *shape*, sent **live** to the same real endpoint | GitHub itself rejected it. Correctly left a lead — structure is not validity, measured against the real provider rather than argued |
+| The same confirmed capture, with the confirming call relabelled as having gone to an attacker-controlled address | Not confirmed. This is the anti-laundering rule: if any address could confirm a credential, anyone who controlled one could manufacture facts |
+| The same again, with an address that merely *looks* like GitHub's by adding a suffix | Not confirmed |
+| The same capture with the credential and the confirming call carrying **different** fingerprints — the "some other secret authenticated" case | Not confirmed |
+
+Two further legs exercise the safety gates on the same live path: with the emergency stop
+tripped, and with the scope check refusing, the run stops **before any network call is made
+at all** and produces no capture. A refusal that produces nothing leaves nothing to launder.
+Separately, the component's own outbound restriction refuses to send the live credential to
+an address outside its permitted list in the first place, so the laundering control did not
+have to be demonstrated by actually sending anybody's credential anywhere.
+
+**What this run did not exercise, stated exactly.** It proves the GitHub row of that
+capability and nothing else; the harness prints that conclusion itself at the end. The
+Amazon Web Services row of the same capability is built and unit-tested — its request signing
+was checked against an independent implementation — but has **never** been exercised against
+real AWS, still requires a real access key that an operator would have to provide, and
+**nothing about the GitHub run transfers to it**. Two further gaps are recorded in the
+project's own register: credential types outside the two the recogniser knows, and a
+component that would *discover* exposed credentials across an authorised surface — this
+harness validates a credential the operator supplied, it does not hunt for one. Finally, the
+permission check and the scope check in that run were stand-ins supplied by the harness
+rather than a signed authorisation document. Their *refusal* paths were genuinely exercised,
+so the gate is proved to bite; but no signed engagement charter was loaded in that run.
+
 ---
 
 ## 5. What a finding report contains for a human reader
@@ -592,7 +778,11 @@ visible rather than buried. The relevant screens:
   this view sends nothing to the system under test.
 - **Client Report.** Described in the interface as "A LIVE, always-current report: every
   finding is re-verified OFFLINE on load, so a FACT is a re-checkable certificate — not a
-  stale PDF, and not the AI's word." One button downloads the complete dossier.
+  stale PDF, and not the AI's word." One button downloads the complete case file described in
+  section 6.2. The pack is titled with whatever human name the operator gave the engagement in
+  the interface — "Acme, Q3 external review" rather than a machine identifier — which is stored
+  in a side-car file of its own, reaches no certificate, no retained evidence and no manifest,
+  and can therefore be changed as often as the operator likes without touching a single proof.
 - **Proof Studio.** Exports a client-verifiable bundle. On success it displays the bundle
   location, the trust-root fingerprint with the instruction to publish it through a
   separate channel, and the exact command a third party runs to verify offline.
@@ -622,7 +812,7 @@ centre — need structured data rather than prose. The following are produced.
 | Proof bundle | A directory | The signed certificates plus chain and signed head, the public trust root, the re-verifiable report, and the raw captured bytes. This is the package a third party verifies. |
 | Proof-Carrying Finding certificates | A data file per finding, with a published description of its exact layout | The portable per-finding format. Its published layout descriptions are generated from the real code, not written by hand, so the specification cannot drift away from what the software actually produces. |
 | A signed statement in the industry's own formats | Three published standards used together — see below | Lets other organisations' software-inventory tools read a finding from this system without special handling. A confirmed finding is recorded as "affected"; an unconfirmed lead is recorded as "under investigation" and is **never** asserted as "affected". |
-| Run dossier | A single `.zip` archive | Everything a run produced, in one tamper-evident archive. Detailed below. |
+| Run dossier (the case file) | A single `.zip` archive | Everything a run produced, in one tamper-evident archive, together with nine numbered plain-language documents written for a reader with no technical background. Detailed below. |
 | Drift record | JSON | The difference in the proven-fact set between two runs. |
 | Coverage certificate | Signed JSON | What was actually exercised. See section 9. |
 | Posture certificate | Signed JSON | The clean result. See section 9. |
@@ -647,26 +837,156 @@ materials) is a machine-readable ingredients list for a piece of software, and
 **CycloneDX** is one of the two widely used published formats for writing one. Both are
 returned to in section 12.
 
-### 6.2 The one-click dossier
+### 6.2 The one-click case file
 
 The dossier is designed for the moment an operator has to hand the whole engagement to
-somebody else. It is a single self-contained `.zip` containing, where present:
+somebody else. It is a single self-contained `.zip`.
 
-- the three human reports;
-- the structured data export and the build-system export described above;
-- the complete offline-verifiable proof bundle;
-- the engagement log, with secrets scrubbed;
-- the transcript of any commands run through the governed terminal, redacted at source
-  and scrubbed again;
-- the governance-signed record chain;
-- any drift record;
-- a readable `index.html` summarising exactly what the run produced;
-- a `README.md`;
-- a `MANIFEST.json` listing every entry with its fingerprint;
-- and, when a governance signer is available, a `MANIFEST.sig.json` (a threshold
-  signature over the manifest bytes) and a `TRUST-ROOT-FINGERPRINT.txt`.
+**It was rebuilt in the version read for this revision, and the rebuild is the most
+consequential change to it.** Before the rebuild the archive already proved things — it held
+the engineering reports, the machine-readable exports and the cryptographic proof bundle —
+but it did not *explain* them. The new module's own assessment of that state is worth quoting:
+a machine-readable export and a cryptographic proof bundle are "exactly the right evidence and
+exactly the wrong reading material for the people a dossier is usually handed to — a
+regulator, an auditor, a government official, a client executive." The rebuild adds the part
+those readers actually read: **nine numbered plain-language documents at the top level of the
+archive**, numbered so that the reading order is obvious from the file names alone.
 
-Four properties make it usable as an evidential artifact:
+Three rules are written into the code and run through all nine:
+
+- **Meaning before mechanism.** Every section opens with what something means for the
+  organisation, and only then describes how it works.
+- **Say the limits out loud.** A proven finding states what it proves *and* what it does not.
+  A section on what was tested is followed immediately by what was not. The absence of a
+  finding is never allowed to read as evidence of safety.
+- **Never assert what was not measured.** Times, counts and settings come from what the run
+  actually recorded. Where a value was not recorded, the document prints "not recorded"
+  rather than filling the gap.
+
+All nine are written on every build, even when a document has nothing to report, on the
+stated reasoning that a document saying "none" is information whereas a missing document is a
+gap the reader has to wonder about. If the plain-language rendering fails for any reason, the
+archive still ships with the machine records and the proof bundle intact, and a note in the
+archive records that the case file could not be rendered — the readable half can never cost
+the archive its proof.
+
+#### The nine numbered documents
+
+| File | What it contains |
+|---|---|
+| `00-START-HERE.html` | The one page to open. The essentials of the engagement (what was examined, when it started and finished, how long it took, when the pack was produced, the internal reference, whether it is signed); a three-way count of what was found; an explicit panel headed *what this pack does not say*; the reading order for everything else; the three checks a recipient can run; the fingerprint of the signing authority where one exists; and a table listing **every single file in the archive** with a one-sentence explanation of what it is. |
+| `01-executive-summary.md` | What was done, what was found, what it means for the organisation, and what to do first. It defines the three grades of finding *before* giving any number, states what the pack does not tell you, and closes with "how much you can trust this document" — which says plainly whether a re-checkable evidence bundle is included and whether the pack is signed. |
+| `02-approach-and-scope.md` | How the work was done. The standard of proof in four numbered steps; exactly what was examined, with the recorded counts of pages explored, inputs examined and test requests sent; the instruction that was run, reproduced verbatim so the work can be repeated; and then **what was NOT examined**, split into limits imposed by the settings that were used and limits inherent in that kind of examination. The closing line of that section is the point of it: "The correct reading of a clean result in any of these areas is *not examined*, not *found to be safe*." |
+| `03-findings.md` | Every proven finding, in plain language. Each entry answers the same six questions: what it is, why it matters here, how it was proved, what it does **not** prove, what to do, and how to check the fix worked. Each also separates the general description of the category from what was actually established on this system, with a note saying in terms that the two are different. |
+| `04-leads.md` | What was observed or suspected but not proven, kept apart so it cannot be overstated — split into *observed but not exploited* (seen directly in the system's own replies; the observation is reliable, no consequence is claimed) and *suspected, not proven* (a question, not a conclusion). |
+| `05-what-was-looked-for.md` | The catalogue: every weakness category the engine is able to confirm, with this engagement's position against each. Described further below. |
+| `06-what-to-do.md` | The recommended order of work in four stages — fix what was proven, close the observed gaps, resolve what is unproven, then confirm and re-examine — with the reasoning behind the ordering stated so it can be checked or overruled. Only proven findings enter the priority order. |
+| `07-verify-it-yourself.md` | The three checks, with the exact commands and what a pass and a failure look like. Described further below. |
+| `08-glossary.md` | Every technical term used anywhere in the pack, in alphabetical order, explained without assuming a technical background. Twenty-nine standing entries, plus one generated entry for each automatic test this particular run used, so the promise holds for *this* pack rather than in general. An entry that would point at a file the archive does not contain is dropped rather than left dangling. |
+
+**The catalogue document is worth singling out**, because it is what lets a reader judge what
+the *silence* means. Three findings out of three categories examined is a very different
+document from three out of ninety, and the findings alone do not distinguish them. The
+catalogue lists all **85** weakness categories the engine can confirm, grouped into fourteen
+families (with a fifteenth catch-all so nothing is dropped for want of a family), naming for
+each the deterministic checks able to confirm it and the published control frameworks a
+weakness of that category would implicate. It is generated from the engine's own registry
+when the pack is built, not written by hand, so it cannot quietly overstate what the engine
+can do.
+
+Its status column has exactly three values — *confirmed*, *reported but not confirmed*, and
+*not recorded* — and **there is deliberately no "examined and found clean" state**. The
+reason is stated in the code: a scan writes what it found, not the list of checks it
+attempted, so inferring "examined and clean" from the absence of a finding would convert a
+gap in the record into an assurance, which the module calls "the single most dangerous thing
+a security document can do". The specific engineering that would close that gap is named
+rather than left vague: the scan would have to write out the set of checks it attempted
+alongside the findings it already writes.
+
+#### Everything else in the archive
+
+The archive is not only the case file. The following table is the complete set of entries the
+build knows how to produce, drawn from the code that explains them, so that nothing in a
+delivered pack is unaccounted for. Entries marked *conditional* appear only when the run
+produced the underlying material.
+
+| Entry | What it is | Always present? |
+|---|---|---|
+| `index.html` | The same case summarised on one technical page for a security engineer. The numbered documents cover the same ground. | Yes |
+| `README.md` | A short technical description of the archive, for whoever receives the file itself. | Yes |
+| `MANIFEST.json` | The list of every file in the pack with its fingerprint. Check 1 uses it. | Yes |
+| `MANIFEST.sig.json` | The threshold signature over that list. Check 2 uses it. | Conditional — only when a governance signer was resolvable |
+| `TRUST-ROOT-FINGERPRINT.txt` | The fingerprint of the signing authority, for the separate-channel comparison. | Conditional — same |
+| `reports/executive.md`, `reports/technical.md`, `reports/remediation-roadmap.md` | The engineering reports described in section 5.2, for the technical team that will make the changes. | Conditional — when the renderers produced them |
+| `appendix/report.json` | The examination's own machine-readable record of every finding: the source the written documents were produced from. | Conditional |
+| `appendix/report.sarif` | The same findings in SARIF, the standard format other security tooling loads automatically. | Conditional |
+| `appendix/catalogue.json` | The machine-readable form of the category catalogue, with the full standards mapping for every category. | Yes, whenever the catalogue could be built |
+| `proof-bundle/reverifiable.json` | The retained evidence for each proven finding, in the form the open-source verifier reads. | Conditional — only when something was proven |
+| `proof-bundle/evidence-bundle.json` | The sealed record of each proof, with its digital signature. | Conditional |
+| `proof-bundle/trust-root.json` | The public keys entitled to sign, and how many must sign. | Conditional |
+| `proof-bundle/TRUST-ROOT-FINGERPRINT.txt` | The fingerprint of those keys. | Conditional |
+| `proof-bundle/README.md` | Technical notes accompanying the evidence bundle. | Conditional |
+| `proof-bundle/HOW-TO-VERIFY.md` | The engineer-facing version of check 3. | Conditional |
+| `proof-bundle/evidence/…` | The raw captured requests and replies — the bytes the automatic checks re-examine, kept exactly as recorded. | Conditional |
+| `logs/engagement-log.jsonl` | The engine's own activity log for the examination, with passwords and keys removed. | Conditional |
+| `logs/terminal-transcript.jsonl` | A signed record of commands the operator ran by hand through the governed terminal, redacted at source and scrubbed again. | Conditional |
+| `spine/…` | The tamper-evident event record in which each entry is cryptographically linked to the one before it. | Conditional |
+| `drift/drift.json` | The record of changes detected in the examined system between examinations. | Conditional |
+
+Any entry not on that list still gets an explanation on the front page, generated from the
+folder it sits in, with a final fallback for a file at the top level — so the promise that
+every file in the archive is accounted for holds by construction rather than by having
+remembered every name. The project enforces it with a test that builds a real archive and
+fails if any entry is missing from the front page, and with a second test that mints a proof
+bundle first, so the first test cannot pass merely because the common case happens to be
+covered. A companion test fails the build if any document points at a file the archive does
+not contain.
+
+#### The three checks the recipient runs
+
+`07-verify-it-yourself.md` sets out three checks and is explicit that they are independent —
+one can pass while another fails, and each failure means something different. None of them
+contacts the examined system and none needs an internet connection.
+
+| Check | The question it answers | What a pass does **not** mean |
+|---|---|---|
+| **1. Contents** | Has anything in this pack been altered since it was produced? Recompute every fingerprint in `MANIFEST.json` and compare. | Only that the pack is internally consistent. Somebody who altered a file could have rewritten the list to match. That is what check 2 is for. |
+| **2. Signature** | Is the pack sealed, and does the seal belong to a key the sender has independently vouched for? | See section 3.3: it establishes integrity and possession of a key, not identity. The document says so in those terms, and prints the separate-channel step as the one that must not be skipped. |
+| **3. Proof** | Do the findings actually follow from the retained evidence? Re-derive every proven finding on your own machine. | Nothing about the system's condition today. It re-checks evidence captured during the examination window, so it will keep passing after the weaknesses are fixed. Only a fresh examination answers that, and the document says so. |
+
+The commands for checks 1 and 2 are printed in full in the document and are short enough to
+read in a minute. Check 1 uses nothing but Python's own standard library; check 2 additionally
+needs one widely used cryptography package, and the document says so and gives the one-line
+installation command. The document closes by pointing out that all three can be handed to any
+competent technical person, "including one with no connection to this organisation and no
+access to its systems" — which is the reason the evidence is packaged this way at all.
+
+Where the pack is unsigned, check 2's section does not go quiet; it states positively that no
+signing key was available, that check 1 still detects alteration, and that nothing in the pack
+can establish who produced it.
+
+**One correction this chapter must make against the pack's own text.** Both the front page and
+the verification document describe check 3 as running "the checking program" that travels
+"inside `proof-bundle/`". That is not accurate, and a reader should not be surprised at the
+point of use. The evidence bundle contains the sealed certificates, the retained evidence, the
+raw captured bytes, the public keys, their fingerprint, and two explanatory documents — and no
+verifying program. The command the document prints is the open-source verifier's own command,
+which the recipient must obtain separately, exactly as section 7.4 of this chapter describes
+for every other route to the reproduction step. The evidence bundle's own longer-standing
+`README.md` states this correctly: what the recipient trusts is "the operator's governance
+public key … and the open-source `framework.v2` verifier, which you obtain and audit
+separately." Nothing about the *strength* of check 3 changes — obtaining and auditing an
+open-source verifier once is the ordinary cost, and it is what removes dependence on the
+signer's honesty. What changes is only the expectation of convenience, and the plain-language
+documents are, on this one point, ahead of what the archive ships. The project's own internal
+review of the case file already names the fix — copy the existing standalone verifier, the one
+described in section 7.3 that imports none of this system's code and proves it, into the
+evidence bundle beside the two documents already there — and observes that until it is done,
+"the auditor is told to install VIGIL's own engine: defensible, but not *verify without my
+system*." This chapter states the position as it stands rather than reproducing the pack's
+wording.
+
+#### The properties that make it usable as an evidential artifact
 
 1. **Tamper-evident.** Flip any byte in any entry and the manifest check fails. Re-sign
    the whole thing under a different key and the fingerprint pin (section 7.2) refuses.
@@ -678,6 +998,21 @@ Four properties make it usable as an evidential artifact:
    its artifact rather than escaping the archive.
 4. **Deterministic.** Sorted entries, a fixed archive timestamp, and no clock in the
    fingerprinted content. Two builds over the same inputs produce identical manifest fingerprints.
+5. **Self-consistent about what it contains.** A pack with no proof bundle does not advertise
+   one anywhere. This is enforced rather than reviewed: a test builds an archive with findings
+   but no bundle and fails if any document promises one, and a companion test proves the
+   detector is not vacuous by checking that the claim *is* made when a bundle really is
+   present.
+6. **Presentation is separated from proof.** A run can be given a human name — "a Ministry of
+   Health Q3 external review" rather than a machine identifier — and that name appears on the
+   front page and in the summary of a pack built afterwards. It is confined to the readable
+   documents: it never reaches a certificate, the sealed proof bundle, or any claim made about
+   a finding. It is not therefore invisible to the archive's own integrity: the list of hashes
+   covers every document in the pack, titles included, as it must, and is re-signed on each
+   build. The property that matters is pinned by a test that changes the stored name between
+   two builds of the same run and re-verifies the proof bundle from the outside both times:
+   sound both times, with identical chain fingerprints. **Renaming therefore cannot invalidate
+   a proof** — it can only change how a freshly built pack reads.
 
 A run with no proven fact carries no proof bundle, and the dossier says so plainly. A lead
 is a lead.
@@ -814,7 +1149,14 @@ So the honest summary of what a third party can establish alone is:
 
 ### 7.5 The external-audit package
 
-For a formal audit there is a purpose-built package containing:
+This is a **different artifact from the case file of section 6.2**, and the distinction is worth
+keeping. The case file is the whole engagement packaged for a recipient — reports, machine records,
+logs and proofs, with the plain-language documents on top. The audit package is narrower and
+purpose-built for a formal audit: the proofs, the evidence they bind to, the scope they were
+bounded by, and the standalone checking program, with nothing else in the way. An organisation may
+be handed either, or both.
+
+For a formal audit the package contains:
 
 - the signed certificates with the chain and signed head;
 - the retained evidence that the binding check re-fingerprints and compares against;
@@ -1423,15 +1765,23 @@ operations as well as to findings:
 ## 11. Honest status: what is working, what is proven offline, and what is deferred
 
 The heading is deliberately flat, because the honest position is mixed and a reader skimming
-headings should not take away a stronger claim than the text supports — or a weaker one. **None of
-the four cloud confirmations described below has been pointed at a live third-party cloud account.
-The two container-platform ones have been run against a real Kubernetes cluster: one the system
-creates and owns, rather than one belonging to anybody else.** All six are built and wired end to
-end. Of the four cloud ones, proven against recorded sample data, three wait on a customer supplying
-credentials to their own account, while the fourth deliberately never carries out the action it
-detects, which 11.1 explains. The web-facing tests, the signing and certificate machinery, and the
-packaging are a different matter entirely, and the table below says which is which, one line at a
-time.
+headings should not take away a stronger claim than the text supports — or a weaker one. All six of
+the cloud and container-platform confirmations are built and wired end to end. Where each one has
+actually been fired differs, and the difference is the whole point of this section:
+
+- **The two container-platform ones have been run against a real Kubernetes cluster** — one the
+  system creates, owns and destroys, rather than one belonging to anybody else.
+- **One row of one cloud capability has been fired at a real third-party service on the public
+  internet**: the GitHub row of the exposed-credential check, against `api.github.com`. Its Amazon
+  Web Services row has not, and nothing from the GitHub run transfers to it.
+- **The remaining three cloud confirmations have not been pointed at a live third-party cloud
+  account.** Two of them — taking a credential from a cloud machine's own credential service, and
+  Google Cloud identity impersonation — wait on a customer supplying credentials to their own
+  account. The third, the permission-escalation check, deliberately never carries out the action
+  it detects, which 11.1 explains.
+
+The web-facing tests, the signing and certificate machinery, and the packaging are a different
+matter entirely, and the table below says which is which, one line at a time.
 
 The project maintains an explicit ledger distinguishing three states: fully working end to end;
 built and proven offline but not yet exercised against a live third-party system; and deliberately
@@ -1465,8 +1815,11 @@ setting looked wrong:
 
 Each has its own deterministic offline test plus a capture-and-admission component owned by this
 system. All six are wired end to end. The **two Kubernetes** confirmations (5 and 6 above) are proven
-against a **real Kubernetes cluster**; the **four cloud** ones are proven offline against **recorded
-sample data standing in for the real thing**.
+against a **real Kubernetes cluster**. Of the **four cloud** ones, number 2 has one row proven
+against a **real third-party provider** and one row proven only offline; numbers 1, 3 and 4 are
+proven offline against **recorded sample data standing in for the real thing**. Both live-fire runs
+are described as worked examples in section 4.4; this section states what they do and do not settle
+as capability claims.
 
 **Kubernetes, stated exactly.** A script in the repository stands up a real single-node cluster — k3s
 version 1.31.5, in a container reachable only on the machine's own internal address — which the system
@@ -1485,11 +1838,26 @@ rules across a whole cluster (the script reads the objects it planted, by name),
 provider's control plane** — Amazon EKS, Google GKE, Azure AKS — which is the same interface reached by
 a different access path.
 
-What remains outstanding for the four **cloud** confirmations is **use against a real third-party cloud
-account**, which waits on the customer supplying their own cloud credentials. The detection logic, the
-evidence handling, the certificates and the safety gates are all built and proven. Only the act of
-pointing them at a live third-party account is pending, and that is by design: this system does not
-acquire other people's cloud credentials for itself.
+**The exposed-credential check, stated exactly, because it is the one that splits.** This capability
+recognises two kinds of leaked credential. Its **GitHub row is live-fire proven against the real
+`api.github.com`**: a second repository script drives the real permission-gated component over the
+real network connection, using the operator's own credential against the operator's own
+least-privileged identity endpoint, confirms the credential and re-verifies the resulting certificate
+offline — while a bogus credential of the same shape, sent live to the same real endpoint, is
+rejected by GitHub itself and correctly left a lead. Section 4.4 sets out the run and its four
+controls. **Its Amazon Web Services row is not.** That row's dispatch and its signed confirming call
+are built and unit-tested — the request signing checked against an independent implementation — but
+have never been exercised against real AWS, still require a real access key an operator would have to
+provide, and **nothing about the GitHub run transfers to them.** The project's own register says this
+in those terms, and so does the harness, in its closing line.
+
+What remains outstanding for the other two **cloud** confirmations — taking a credential from a
+cloud machine's own credential service, and Google Cloud identity impersonation — is **use against a
+real third-party cloud account**, which waits on the customer supplying their own cloud credentials.
+The detection logic, the evidence handling, the certificates and the safety gates are all built and
+proven. Only the act of pointing them at a live third-party account is pending, and that is by
+design: this system does not acquire other people's cloud credentials for itself. The permission-
+escalation check is different again, and the second bullet below explains why.
 
 Two consequences a procurement or oversight reader should take from that:
 
@@ -1515,14 +1883,15 @@ assessment that reads an imported inventory rather than the live account.
 | The core automatic tests against a live web target | **Working end to end.** The test harness stands up a real vulnerable application on the local machine and confirms findings against it. Pointed at a safe twin of the same application, it returns nothing — a shipped negative control proving the authority does not rubber-stamp. |
 | Network reachability, encryption weakness, vulnerable dependency, and the web achieved-state windows | **Fact-capable against real captures**; reachability and TLS are also clean-capable. |
 | Signing, certificates, chain, and offline re-verification | **Working.** Exercised by the standalone conformance test in an environment where none of this software is importable. |
-| The dossier, proof bundle, and audit package | **Working**, including the honest unsigned labelling when no governance signer is available. |
+| The dossier, proof bundle, and audit package | **Working**, including the honest unsigned labelling when no governance signer is available. The archive now carries the nine numbered plain-language documents described in section 6.2, and a test suite pins the promises it makes about itself: every document present, every file in the archive accounted for on the front page, no document pointing at a file the archive does not contain, no claim of an evidence bundle when none is embedded, and two builds over the same inputs producing identical output. |
+| The network binding underneath the cloud and credential capabilities | **Working, and new in the version read for this revision.** Until it was written, every one of those components reached the network through a stand-in used only in testing — which is exactly why none of them had ever fired against a real provider. Each fact it reports about a connection is **derived from that connection rather than asserted**: encryption counts as verified only when the connection really produced a validated certificate; "no intermediary" is recorded only when the client can be shown affirmatively unable to have one; a redirection is *reported* rather than followed; the peer address is read from the live socket rather than looked up again afterwards; and an over-long reply is marked truncated and never parsed. Every one of those fails to the value that makes the automatic test **refuse**, never to the one that lets it fire. |
 | Taking a credential from a cloud machine's own credential service | **Built and proven offline against recorded sample data; not yet fired at a live third-party cloud account**, which waits on the customer supplying a laboratory credential of their own. Every part is built: the component that runs it, the observation window, the admission route, the certificate, and the entry on the system's internal map. In the project's own words: "There is no live FACT yet." |
-| Confirming an exposed secret is a currently working credential | Same: **complete and proven offline against recorded sample data; live use deferred** on a credential the customer supplies. |
+| Confirming an exposed secret is a currently working credential | **Split, and the split must not be blurred.** The **GitHub row is live-fire proven against the real `api.github.com`** — the real permission-gated component over the real network connection, using the operator's own credential against the operator's own identity endpoint; the credential confirmed, its certificate re-verified offline, and a live bogus credential of the same shape rejected by GitHub itself and left a lead. The **Amazon Web Services row is built and unit-proven but has never touched real AWS**; it still requires an access key the operator supplies, and nothing from the GitHub run transfers to it. Not covered by either: credential types outside the two the recogniser knows, and any component that would *discover* exposed credentials rather than validate one the operator supplied. |
 | Google Cloud identity impersonation | Same: **built and wired offline; live use deferred** on credentials the customer supplies. |
 | Container-platform role-binding and verb-grant confirmation (both tiers) | **Proven against a real Kubernetes cluster**, not only offline: a repository script stands up a genuine single-node cluster the system owns and destroys, plants dangerous and benign access rules, and adjudicates the real API responses through the production path — the dangerous binding confirmed with a certificate that re-verifies offline, the benign ones (including the namespace default identity bound to the built-in `admin` role, whose real rules do grant secret reads) correctly left as leads. Not covered by that run: enumeration of bindings across a cluster, and a managed provider's control plane (EKS, GKE, AKS). |
 | Proving an identity can escalate its own permissions | A pure offline re-derivation over the operator's own retained permissions document, which **deliberately never performs the escalation** — a defensive verification test does not carry out the attack it is detecting. This one is not "awaiting live use"; not firing it is the design. |
 | The stronger single-sign-on signature check | **Dormant** unless the operator supplies trusted identity-provider certificates and an optional library is available. The full, notoriously intricate rules for reducing a signed identity document to a single agreed byte-for-byte form before checking its signature are explicitly out of scope, and the chapter on identity says so too. |
-| The general-purpose claim firewall | Its own documentation states it is currently the **primitive**, exercised by its tests, with runtime wiring phased in. It is **not today a universal gate that every claim in the system crosses.** The report layer *does* route every finding through it at render time. |
+| The general-purpose claim firewall | **In real production use, and honestly bounded.** Its own documentation used to describe it as a primitive exercised only by its tests; that phrasing has been retired, and an automated test now fails the build both if it returns and if a genuine caller is dropped from the list the documentation keeps. It is **not today a universal gate that every claim in the system crosses** — writes into the internal map of the target reach the same judgement by a different route — and the documentation states that bound itself, machine-checked in the other direction too. The report layer *does* route every finding through it at render time. |
 | Independent witnesses and external time anchoring | Transport and protocol **working**; genuine independence of the witnesses is a **deployment trust assumption** the code cannot prove, and is recorded as an open item. |
 | Keys sealed at rest to hardware | **Working** where a Trusted Platform Module is present; the deployment guide is explicit that without one, keys are plaintext at rest, that this is acceptable on a trusted single-user machine and not on a shared host, and that the bootstrap prints a loud warning rather than silently degrading. |
 
@@ -1570,12 +1939,13 @@ those four checks without taking anybody's word for them.
 Three boundaries belong in this same place rather than further down, so that nobody reads the five
 subsections as a claim of completeness:
 
-1. **The eight older build jobs still install loose version ranges rather than the fixed lists.**
-   So the fixed lists are *checked* on every proposed change, but they are not yet what those older
-   jobs *test against*. Converting them is named as the next follow-up and was deliberately kept out
-   of this change rather than smuggled into it.
-2. **Only the new gate's own external build steps are pinned to exact versions.** The eight older
-   jobs still refer to theirs by a movable label. Same reason.
+1. **Every job in the main pipeline that installs dependencies still installs loose version ranges
+   rather than the fixed lists** — eight of the eleven jobs do so. The fixed lists are therefore
+   *checked* on every proposed change, but they are not yet what those jobs *test against*.
+   Converting them is named as the next follow-up and was deliberately kept out of this change
+   rather than smuggled into it.
+2. **Only the new gate's own external build steps are pinned to exact versions.** Every other job
+   still refers to its borrowed steps by a movable label. Same reason.
 3. **The vulnerability gate blocks on the most severe class of finding, and had none to block on the
    day it landed.** It did report eight findings of the next severity down, across three packages,
    all advisory and none suppressed. The project's own document singles out one of them as "a real,
@@ -1752,8 +2122,8 @@ the new gate, every one of them is pinned to an exact, immutable version identif
 movable label, with the human-readable version left beside it as a comment, and a test asserts this
 stays true.
 
-The boundary, repeated from the status note above: **this applies to the new gate only.** The eight
-older build jobs still refer to their external steps by movable label. Converting them is a separate
+The boundary, repeated from the status note above: **this applies to the new gate only.** Every
+other build job still refers to its external steps by movable label. Converting them is a separate
 change with a wider blast radius — one wrong identifier and every job in the repository fails at once
 — and it was deliberately kept out rather than smuggled in.
 
@@ -1762,9 +2132,9 @@ change with a wider blast radius — one wrong identifier and every job in the r
 The project's own document includes a section titled "what this does not prove", which is the correct
 instinct. Reproduced in substance:
 
-- **The eight older build jobs still install loose version ranges** rather than the fixed lists. So
-  the lists are *checked* on every proposed change but are not yet what those jobs *test against*.
-  Named as the next follow-up.
+- **Every build job that installs dependencies still installs loose version ranges** rather than the
+  fixed lists — eight of the eleven. So the lists are *checked* on every proposed change but are not
+  yet what those jobs *test against*. Named as the next follow-up.
 - **Software ecosystems other than Python** present in the tree are scanned for vulnerabilities but
   are not regenerated or fingerprint-verified by this gate; they are somebody else's artifacts.
 - **Fingerprints prove a file did not change between being chosen and being installed. They do not
@@ -1811,7 +2181,10 @@ direction. A reader should not read a claim about one as a claim about the other
 ## 13. A reviewer's checklist
 
 If you are handed a result from this system and asked to form an independent view, this is the
-procedure:
+procedure. If what you were handed is the case file described in section 6.2, its own
+`07-verify-it-yourself.md` already contains steps 1 to 4 below with the exact commands filled in,
+and `00-START-HERE.html` lists every file in the archive; you can work from those and use this list
+as a cross-check.
 
 1. **Obtain the trust-root fingerprint from the operator through a channel independent of the
    package** — their published register, a contractual annex, a separately signed communication.
@@ -1859,6 +2232,21 @@ procedure:
   that removing, adding, reordering, or substituting an older report is detectable.
 - A certificate is sound only if **all four** of authenticity, binding, artifact integrity, and
   reproduction hold.
+- A signature establishes **integrity and possession of a key — never identity**. Nothing in the
+  mathematics ties a key to an organisation; that link comes from comparing a fingerprint obtained
+  through a separate channel, and only holds to the extent the party asked is the party meant. The
+  packs say so themselves, and a pack whose signing key was minted inside the engagement's own
+  working directory prints an extra warning that its fingerprint identifies that pack's signer and
+  is not a standing identity.
+- The downloadable **case file** now carries nine numbered plain-language documents alongside the
+  machine records and the proof bundle, a front page that accounts for **every file in the
+  archive**, a catalogue of all 85 weakness categories the engine can confirm with this
+  engagement's position against each — and no "examined and found clean" state, because the run
+  record does not support one. Three checks are set out with their exact commands, and each is
+  stated with what a pass does *not* mean. A third party can run all three offline and with no
+  access to the operator's systems: checks 1 and 2 need nothing beyond the pack itself, and check
+  3 additionally needs the open-source verifier, obtained separately — which the pack's own
+  wording currently understates, and section 6.2 corrects.
 - A **completely independent third party**, offline, with none of this software installed, can
   establish authenticity, binding, integrity, chain and anti-rollback using a standalone verifier
   built from a published specification — provided they pin the trust-root fingerprint obtained out
@@ -1890,21 +2278,25 @@ procedure:
   cluster** the system stands up, owns and destroys itself — the dangerous binding confirmed with a
   certificate that re-verifies offline, the benign ones in the same cluster correctly left as leads
   — with cluster-wide discovery of bindings and a managed provider's control plane (Amazon EKS,
-  Google GKE, Azure AKS) outside what that run shows. The four cloud ones are proven offline against
-  recorded sample data standing in for the real thing, and **three of them await use against a real
-  third-party cloud account**, which waits on the customer supplying credentials to their own
-  account — the detection logic, evidence handling, certificates and safety gates are all built and
-  proven, and only the act of pointing them at a live outside account is pending. The fourth, the
-  permission-escalation check, deliberately never carries out the escalation at all; that is a
-  design decision rather than a gap. **None of the six can fire during an ordinary scan**, by two
-  independent mechanisms. Other capabilities are similarly labelled as
-  built-but-not-yet-used-against-a-live-outside-system in the registry, in the code, and in this
-  chapter.
+  Google GKE, Azure AKS) outside what that run shows. Of the four cloud ones, the **GitHub row of
+  the exposed-credential check is proven against the real `api.github.com`** — confirmed, its
+  certificate re-verified offline, and a live bogus credential of the same shape rejected by GitHub
+  itself and left a lead — while **the Amazon Web Services row of that same check has never touched
+  real AWS and nothing from the GitHub run transfers to it.** Two more are proven offline against
+  recorded sample data and **await use against a real third-party cloud account**, which waits on
+  the customer supplying credentials to their own account; the detection logic, evidence handling,
+  certificates and safety gates are all built and proven, and only the act of pointing them at a
+  live outside account is pending. The fourth, the permission-escalation check, deliberately never
+  carries out the escalation at all; that is a design decision rather than a gap. Both live-fire
+  runs are set out as worked examples in section 4.4, including what each did **not** exercise.
+  **None of the six can fire during an ordinary scan**, by two independent mechanisms. Other
+  capabilities are similarly labelled as built-but-not-yet-used-against-a-live-outside-system in the
+  registry, in the code, and in this chapter.
 - The system's **own build** is hardened on the same principle: starting images pinned by content
   rather than by a movable name, packages pinned to exact files by cryptographic fingerprint, a
   generated bill of materials cross-checked against that fixed list, and a vulnerability gate that
   blocks a change on a CRITICAL finding while reporting HIGH in full — with a planted-vulnerability
   self-test proving the gate is capable of firing. **That work is part of the released software**,
   accepted into it on the day this chapter was written. Section 12 gives the boundaries that still
-  apply — chiefly that eight older build jobs have not yet been converted onto the fixed dependency
+  apply — chiefly that the other build jobs have not yet been converted onto the fixed dependency
   lists — and the commands to re-check every claim in it independently.

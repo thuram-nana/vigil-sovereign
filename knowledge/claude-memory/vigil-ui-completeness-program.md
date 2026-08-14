@@ -1,0 +1,22 @@
+---
+name: vigil-ui-completeness-program
+description: "\"100% controllable from the front\" program — every feature gets an on-screen control; env panel, docker bring-up, action buttons, agent promotions"
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 7758e121-f349-47d5-886b-6bb5a1d60e27
+  modified: 2026-08-12T13:32:30.305Z
+---
+
+Operator mandate (2026-08, repo `thuram-nana/vigil-sovereign`): "every single feature should have a UI control on screen so everything is handled in front." Delivered as a sequence of one-PR-each slices (build → red-pen where security-affecting → 7-check CI → `gh pr merge --merge --admin --delete-branch`).
+
+**Merged this program:** A7 gateway hardening (#272) + universal env-var panel (#273) + docker Dockerfile/`vigil services up` create-if-absent (#274) + crash-proof `vigil up` (#275) + full-service bring-up + `vigil doctor` (#276) + MCP Servers screen (#277) + System & Services screen (#278) + **action controls**: gated "bring up services" button (#279), **live soundness-benchmark button** (#280 — runs the same 11|0|0 the gate runs, in-process, FIXED argv), **Brain planner projection + OFFLINE intel** (#281 — intel NEVER passes `--live`, so the button structurally cannot egress; live collection stays charter-gated), **agent promotions view + owner-signed grant/revoke** (#282), **Posture/Assurance refresh + re-verify + export** (#283, pure-UI client-side).
+
+**Key architecture facts (verify before reuse):**
+- Offense console actions live in `engine/crucible/framework/v2/console/{actions.py,server.py,api.py}`; POST actions are gated in `do_POST` by `_same_origin_as_console()` (CSRF/DNS-rebind) THEN `if path == "/api/x": self._json(actions.y(body))`. Read routes are in `_EXACT_ROUTES`/prefix routes → `api.py` `_safe`-wrapped providers.
+- The UI is `packages/vigil-ui/app.js` (+ `ui.js`): `h()`/`V.card`/`V.tile(k,v,foot,footClass)` (4th arg is a CSS class: ok/up/warn/danger/down — NOT a color) / `V.pill` / `V.getJSON(OFF(...))`/`V.postJSON` / `OFF()`/`SOV()`. `icon()` keys are a FIXED set (home/assess/live/find/fixes/shield/brain/gear/key/search/bolt/check/x/dot/play/book/info) — **no `alert`** (falls back to a dot; use `x`). `--bad-line` is used but may be undefined (harmless).
+- Any new SCREEN must be added to `knowledge/system-map/screens.yaml` → regen `system-map.json` (`tools/system-map/generate.py --write`) so NAV == route() (`--check` gate, in P7). An action button on an EXISTING screen adds no screen → system-map unaffected. Currently 28 screens.
+- Spawning offense CLIs from a console action: `[sys.executable, "-m", "framework.v2", <verb>, ...]` with `cwd=Path(__file__).resolve().parents[3]` (the dir holding `framework/` — anchor on the RUNNING module, NOT `paths.crucible_root()`, which `CRUCIBLE_ROOT` can redirect to a vendored copy at `/home/kali/Music/PENTEST/crucible`). ALWAYS pass `timeout=`; catch `TimeoutExpired` (an `Exception` subclass) fail-soft; coerce a non-dict body to `{}` (`_read_body` returns any JSON value).
+- Sovereign plane already ~95% UI-wired via the owner-signed `/api/action` broker (approve/deny/kill/release/promote/revoke/enable_*/disable_*/queue_learn/start_learn/set_*); snapshot in `apps/sigil/sigil/dashboard.py`. The Safety screen (`renderSafety`) is the sovereign control panel. New apps/sigil tests must be ADDED to the P7 CI file list in `.github/workflows/ci.yml` (fixed list, not a glob).
+
+**Lessons this program (reinforced [[vigil-truthenovation-program]]):** the independent red-pen caught a REAL defect on nearly every security-affecting slice my green tests + inline review missed — an unbounded docker subprocess self-DoS (#279), and on #282 TWO self-falsifying claims (state_all not mirroring is_promoted's NO_PROMOTION denylist = a "mint gate must be mirrored at the read surface" violation; a refused promote reading as a success toast because the broker returned ok:false with no error). Always run the action for real with a HOSTILE body (the #280/#281 red-pens did — proved no injection/egress). Fix at the SOURCE (broker error) not the shared UI helper when other callers use ok:false meaningfully (check_secret). See [[vigil-lww-governance-replay-gap]] (pre-existing HIGH surfaced but out-of-scope). `test_cdp` (CRUCIBLE core) + `test_typed_ask_survives_a_voice_disable` (P7) fail LOCALLY on sandbox socket/headless-browser blocks but pass on GitHub runners — verify a failure reproduces on unmodified main before blaming your change.

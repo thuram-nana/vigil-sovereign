@@ -1,16 +1,33 @@
 # What This System Is, And The Problem It Solves
 
-*Chapter 1 of the VIGIL briefing — a set of thirteen chapters written for a senior reader with no
+*Chapter 1 of the VIGIL briefing — a set of fourteen chapters written for a senior reader with no
 software background. Every statement in this chapter was checked against the working code. The
 chapters were written against the repository as it stood at version `1487e03a` on 12 August 2026;
 this chapter was then revised against version `dc2994d6` the same day, which is the version that
-includes the build-and-release safeguards described in section 9.4. Where something is built but has
-not yet been used against a live third-party system, it says so.*
+includes the build-and-release safeguards described in section 9.4. It was revised a second time on
+13 August 2026 against version `05b81e9f`, which is the version described from here on. That second
+revision changed the status picture and nothing else of substance: a second result against a real
+outside system (section 9.3), an honest count of how strong the evidence behind each checker actually
+is (section 9.2), the plain-language case file now built into the delivered archive (section 7.1),
+and two further refusals that landed alongside them (sections 8.2 and 8.3). A third revision, running
+into 14 August 2026, added a permanent **proving range** on the operator's own machine, described in
+section 2.9, on which the system's instruments are made to demonstrate that they can stay silent as
+well as speak; and an honest account, in section 9.8, of how far the system's control over its
+outside tools has actually been proven. That account began considerably weaker than the interface was
+reporting. It now stands at **ten proving results across nine tools, every one of them passing** — the
+tenth added when the password-guessing tool was finally made to attack a real login form rather than
+only the simpler challenge a browser answers on the user's behalf. Every gap was closed by building
+the missing part rather than by softening the words. The smaller figures this chapter carried along
+the way — three tools proven, then six, then nine — were accurate on the day each was written, and the
+progression is left visible on the page rather than tidied into a single confident number, because a
+document that shows its own movement is easier to trust than one that appears to have always been
+right. Where something is built but has not yet been used against a live third-party system, it says
+so.*
 
 *Two navigation notes. A full contents list for the set, with a suggested reading order and a note on
 how the briefing was written, is at the end of this chapter (section 11). The set also has front
 matter — `00-index.md`, "How To Read This Briefing" — which carries the same contents list, a
-consolidated glossary, and a single master status table covering all thirteen chapters at once. A
+consolidated glossary, and a single master status table covering all fourteen chapters at once. A
 reader who wants one page rather than one chapter should start there.*
 
 ---
@@ -83,12 +100,54 @@ credentials it was not given.
 **Status, stated plainly.** The core proving machinery is built and has been run from end to end. The
 six cloud and Kubernetes exploitation confirmations are complete and are part of the released
 software. ("Kubernetes" is the standard system for running and coordinating large numbers of
-software containers; it is the control layer under most modern cloud deployments.) The two
-Kubernetes ones
-have been proven against a real Kubernetes cluster that the system stands up, owns and destroys
-itself. The four cloud ones have been proven against saved evidence with no internet connection, and
-what remains for those four is the act of pointing them at a live third-party cloud account, which
-waits on that customer's own credentials, by design.
+software containers; it is the control layer under most modern cloud deployments.) **Three of the six
+have now been fired at something real rather than at saved evidence, and the three are not of equal
+weight.** The two Kubernetes ones have been proven against a real Kubernetes cluster that the system
+stands up, owns and destroys itself — real infrastructure, but the project's own, not a third party's
+estate. The third — proving that an exposed secret is a *currently valid, working*
+credential — is the only one of the six to have judged material from a real outside system: it has
+been proven against the real GitHub service, using the operator's own credential,
+for the one type of credential that test covers; the same capability's Amazon Web Services half is
+built but has never been pointed at real Amazon infrastructure, and nothing about the GitHub result
+carries across to it. The remaining confirmations have been proven against saved evidence with no
+internet connection, and what remains for them is the act of pointing them at a live third-party
+cloud account, which waits on that customer's own credentials, by design. One of those remaining
+confirmations is a deliberate permanent exception: the identity privilege-escalation one never
+carries out the escalation it is establishing, so what it awaits is a real set of permission rules to
+read, not a live attack. Section 9.3 sets all of this out capability by capability.
+
+Across the system as a whole the honest count is this. Of the 38 kinds of checker, **3** have been
+run over material that a real outside system produced, **2** over material from real infrastructure
+the system creates and destroys itself, **13** over material a real program on the system's own
+machine produced, and **20** only over saved sample material. Section 9.2 sets that count out in
+full, including the one place where a stricter reader would reasonably move two of them and make the
+figures 3, 2, 11 and 22.
+
+**How the instruments themselves are checked, and what that exposed.** A detector that only ever says
+"found something" is worthless, so every test the system relies on must also be shown to stay
+**silent** where the weakness is absent. The system now has a permanent place to demonstrate that: six
+deliberately vulnerable applications running on the operator's own machine — the five published ones
+pinned by their exact contents, so none can change underneath a result — five of them shown to hold
+the weakness by putting a harmless request beside an attacking one, and the sixth honestly recorded as
+**not probed** rather than credited with a weakness nobody demonstrated. Section 2.9 describes it, and
+it matters beyond its own subject, because running things rather than inspecting them found a series
+of faults that had been invisible for months. A scanner whose output the system could not read, so
+every scan silently produced nothing. A tool that re-reported a real weakness against a hardened
+control and thereby manufactured a **false positive**. A web scanner that, pointed at a plain web
+address, examined only the page it started on and returned a clean report identical to the sound
+control's — a clean report that meant "I did not look", which is the worst thing a security tool can
+produce. A tool that was disguising itself as a different random browser on every request, in a system
+whose entire promise is that the operator can find its traffic in their own records. A scanner
+reaching out to two different outsiders — one for results, one to fetch a database — and the safeguard
+written to stop it, which the tool's own vocabulary defeated. And a tool called by one fixed program
+name, so a machine that installs it under one of its other names would have been told the tool was
+usable and then failed. Section 9.8 lists all of it. It also states the honest position on the
+system's control of its own outside tools: nine tools can have a command line built for them, and the
+**ten proving results over those nine now all pass** — the password-guessing tool has two, because
+attacking a real login form and answering a browser's own challenge share almost nothing. That is a
+statement about the instruments, not about anybody's estate, and seven of the ten reached it only
+after the faults in section 9.8 were found and fixed.
+
 Safeguards over the system's own build and release — pinning exactly which third-party software the
 system is built from, and blocking a build that pulls in a critical known vulnerability — were folded
 into the released software during the day this was written; section 9.4 gives the exact position,
@@ -100,9 +159,9 @@ section 9, and none is presented as a completed field deployment.
 - **Licensing.** The licence shipped with this software excludes government and public-sector use
   from its free terms. Any use by, for, on behalf of, or funded by a government body requires a
   separate commercial licence from the copyright holder. This is a commercial matter, not a technical
-  one, and it is the first thing a procurement reader should settle. Note that chapter 12 — the
-  chapter that lists what an operator needs in order to run the system — does not repeat this point;
-  section 6.1 below is where it lives.
+  one, and it is the first thing a procurement reader should settle. Section 6.1 below sets it out in
+  full; chapter 12, the chapter that lists what an operator needs in order to run the system, now
+  states it as well, at the head of both its requirements section and its one-page checklist.
 - **A built-in refusal to test government hosts.** The software ships with a component designed to
   refuse `.gov`, `.mil`, `.edu` and `.int` addresses outright. Section 6.2 states exactly what it is,
   what an agency would have to change to test its own estate, and — importantly — the honest finding
@@ -410,10 +469,16 @@ of the target are graded by a shared labelling function instead. So the honest d
 several real checkpoints, including report generation — not one universal choke point". It should not
 be described as the latter.
 
-A reader comparing chapters should know that the component's own source file still carries an
-out-of-date note calling itself "caller-less" and "exercised only by its tests". That note is stale;
-the call sites above are real and were read directly. Chapters 4 and 6 of this briefing describe the
-position correctly. Stages 1, 2, 3, 5 and 6 above involve no such qualification.
+A reader comparing chapters should know that this position was, until recently, misdescribed by the
+component's own source file, which carried an out-of-date note calling itself "caller-less" and
+"exercised only by its tests" long after real parts of the running system had been connected to it.
+That note has since been corrected, and an automatic test now fails the build if such a phrase
+reappears while the component does have real callers — and, in the other direction, if a module that
+does call it is dropped from the list. The project treats a note that outlives its phase as the same
+class of defect as an overclaim, because it understates what is true. If an older copy of this
+briefing, or of a companion chapter, still repeats the "caller-less" note, that copy is behind.
+Chapters 4 and 6 of this briefing describe the position correctly. Stages 1, 2, 3, 5 and 6 above
+involve no such qualification.
 
 ### 2.8 The four words
 
@@ -443,6 +508,104 @@ software, is *provenance*: simply the record of a thing's origin, like the owner
 to a painting.) If that origin is the AI itself, the finding is demoted to a LEAD *even if a checker
 fires over it* — because evidence shaped by the AI is an AI-influenced route to a fact. Only evidence
 captured by the system's own governed execution path qualifies.
+
+### 2.9 The control that must stay silent — and the proving range it runs on
+
+Everything above concerns what happens when a checker fires. The harder question is what happens when
+it does not, and it is the question most security products never answer about themselves.
+
+**A detector that only ever says "found something" is worthless.** It cannot be told apart from a
+detector that says "found something" no matter where it is pointed — and there is exactly one
+experiment that tells them apart: point the same detector at a place where the weakness is *absent*
+and require it to stay quiet. That experiment has a name, and it is worth a government reader
+learning it, because it is the single question that separates a measuring instrument from a rubber
+stamp. It is called a **negative control**.
+
+The logic is the logic of a laboratory blank. A laboratory that only ever tested real samples, and
+reported a positive on every one, would be believed until the day somebody sent it a tube of
+distilled water. So a serious laboratory runs the blank alongside the sample, every time. The blank
+is not paperwork. **The blank is what makes the positive mean anything.**
+
+This system applies the rule in both directions, and both are worth naming, because they answer
+different questions:
+
+| The control | The question it answers |
+|---|---|
+| A **positive** control — a twin known to be weak, which the test must flag | Was the instrument working at all? |
+| A **negative** control — a twin known to be sound, which the test must leave alone | Is the instrument reacting to the weakness, or to everything? |
+
+There is a third condition, easy to overlook, which does most of the real work. **Silence only counts
+as evidence when the instrument can be shown to have been running while it stayed silent.** A scanner
+that never reached the sound twin also reports nothing, and reports it in identical words. So each
+control run must additionally demonstrate that it was alive: that the scanner still found the
+harmless things it was always going to find, still explored the site, still tested the field it was
+asked to test. Silence from a working instrument is a result. Silence from a dead one is the absence
+of a result, and nothing in the output distinguishes the two.
+
+That third condition is not a theoretical nicety, and section 9.8 records the day it stopped being
+one. Pointed at a plain web address, one of the web scanners crawled the site, found the page where
+the weakness lived, and then attacked only the page it had started on — sending not a single request
+at the parameter that actually carried the flaw. It returned a report identical to the sound
+control's. **A clean report that means "I did not look" is the worst output a security tool can
+produce**, because it is indistinguishable, to everyone downstream, from the one output the whole
+product exists to earn: a clean report that means "I looked, and there is nothing there."
+
+**Where those controls are run.** The operator's own machine now carries a permanent **proving range**
+built for this purpose. It consists of six deliberately vulnerable applications — programs written and
+published to be attacked, so that testing tools can be measured against a known answer. Five of the
+six are published openly by their authors for exactly that purpose and are widely used for training
+and tool evaluation: OWASP Juice Shop, the Damn Vulnerable Web Application, OWASP WebGoat, OWASP
+Mutillidae, and a deliberately vulnerable programming interface called VAmPI. The sixth is this
+project's own small target. Four properties matter, and each is the sort of thing an agency should
+look for before believing any measurement:
+
+- **Everything runs locally, on the operator's own machine.** Nothing belonging to anyone else is
+  touched, and no public practice site on the internet is contacted. The written authorisation for
+  this work names each application individually.
+- **Each of the five published applications is pinned by content digest** — that is, by a fingerprint
+  of its exact contents rather than by a name. A name is a movable label: whoever publishes the
+  application can point it at different contents tomorrow, and every result ever measured against it
+  silently stops being reproducible, with nothing for anyone to notice. A fingerprint cannot move —
+  either what arrives matches it or the range refuses to start, and a starting check confirms that no
+  entry has been added without one. The sixth needs no fingerprint: it is a small program held in
+  this project's own repository, where its exact contents are already a matter of record.
+- **The confinement is built in rather than remembered** — it holds by construction rather than by
+  convention. The file that records the range **cannot express a host address** at all; only one piece
+  of code turns a range entry into a running application, and it writes the machine's own internal
+  address in itself. After start-up the confinement is re-read from the container system's own view,
+  then from the machine's list of listening connections — and then *measured*: the range tries to
+  reach the application from the machine's outward-facing address and requires the attempt to be
+  **refused**. A confinement one has only read about is a claim. A connection that is refused is a
+  measurement.
+- **Each application is verified by difference, never by assertion.** The range does not ask an
+  application whether it is vulnerable. It sends a harmless request and an attacking one and compares
+  the two answers. On one of the applications the ordinary search returns 46 products and the attacked
+  search returns 56 — the same 46, plus 10 the application deliberately conceals. That difference is
+  the evidence. "The reply contained the word *error*" is not.
+
+**And one of the six reports that it was not probed.** One application keeps its weaknesses behind a
+per-lesson state that only exists after a user registers and starts that lesson, so no single
+unauthenticated request could establish anything about them. The range therefore brings it up, confirms
+it answers, and says in as many words that it has **not** demonstrated a weakness in it. That is not a
+loose end: the range's own consistency check refuses a target that has neither a probe nor a written
+reason for having none, so "not probed" cannot be arrived at silently. **An honest "not probed" is
+worth more than a weakness nobody demonstrated**, and this briefing would rather report the awkward
+row than a tidier one.
+
+The same discipline is applied to the tools that read source code rather than network traffic. For
+those, the range generates two bodies of code: one seeded with deliberate weaknesses and fabricated
+credentials in the shapes such tools look for, and a **clean twin** — the same application written
+safely, with no credentials in it at all. Anything reported against the twin is, by construction, a
+false alarm. Both bodies of code carry a recorded fingerprint that is re-checked every time they are
+generated, so an edit to the generator cannot quietly change the material a tool was scored against.
+
+**What the range does and does not establish, stated plainly.** It establishes that the system's
+instruments work: that a tool really runs, really finds the planted weakness, that the system can
+really read what the tool returned, and that the same tool stays quiet on sound material while
+demonstrably still running. It establishes nothing whatever about any customer's systems. And nothing
+a third-party tool reports on the range is a fact in this system's sense — those results enter as
+leads, exactly as they would in a real job, and only a checker over first-party evidence mints a fact.
+Section 9.8 gives the honest status of that work, including how much of it is finished.
 
 ---
 
@@ -712,11 +875,12 @@ files themselves (`LICENSE` and `LICENSE-COMMERCIAL.md` in the repository), and 
 is a commercial matter to settle with the copyright holder, not a technical one.
 
 **Where else to look.** Chapter 12 is the chapter a buyer would naturally read to build a shopping
-list of what is needed to run the system: hardware, credentials, external tools, and so on. It does
-**not** mention licensing. Within the thirteen chapters, this section is the only place the licensing
-position is stated; the set's front matter (`00-index.md`, section 9.1) repeats it for the same
-reason. A procurement reader should carry it forward into any requirements list themselves, because
-no chapter will do it for them.
+list of what is needed to run the system: hardware, credentials, external tools, and so on. It now
+covers the licensing position too, in its section 2.1 and again in its one-page checklist, where it
+is placed **before** everything else on the grounds that it is a conversation to start early rather
+than a formality to tidy up later. So a procurement reader will meet this point in both places; the
+set's front matter (`00-index.md`, section 9.1) states it a third time. Earlier drafts of this
+chapter said chapter 12 was silent on licensing. That was true when written and is no longer.
 
 ### 6.2 A built-in refusal to test government hosts — and what an agency would have to change
 
@@ -802,6 +966,17 @@ A completed engagement can be packaged into a single archive file with one comma
 code that builds it, that archive contains:
 
 - **Three written reports** (below).
+- **A plain-language case file**: nine documents, numbered so that the reading order is obvious from
+  the file names alone — a start-here page, an executive summary, the approach and scope (including
+  what was *not* examined), the proven findings, the unproven leads, the catalogue of what the system
+  can confirm and where this run stood against it, what to do about the findings, how to verify the
+  package yourself, and a glossary. These are built from the same graded findings as the three
+  reports below, so the two cannot disagree about what was proven. Three rules are written into the
+  code that produces them: meaning before mechanism; state the limits out loud; and never assert what
+  was not measured — where a value was not recorded, the documents say "not recorded" rather than
+  filling the gap. If that rendering fails for any reason, the archive still carries its machine
+  records and its proof, and notes plainly that the case file is missing rather than shipping the gap
+  in silence.
 - **Machine-readable exports** of the findings, in two standard formats (JSON, and SARIF — a format
   that software-development tools can read directly, so findings can be loaded straight into an
   engineering team's own systems).
@@ -891,6 +1066,7 @@ protect.
 | The system never makes itself reachable from the public internet. A deployment placed behind a public web address without an access key is refused outright. | The deployment guard, and the interface's rule of listening only on the address the machine uses to talk to itself. |
 | The checker that tests whether a cloud identity could grant itself more power deliberately never *performs* that escalation. It re-derives the answer from the saved configuration instead. | That evidence source's own design note: a defensive verification checker never executes the attack it is verifying. |
 | Attempting to slip past a customer's own protective filters is off by default, must be switched on for a specific engagement, is capped in volume, runs through the governed execution path, and is framed as a way to demonstrate that a filter *can* be bypassed — not as a weapon for going further. Getting past the filter is not itself a finding unless a checker then fires. | The evasion module's own documentation. |
+| The autonomous testing agent's ability to run arbitrary commands is governed by a permission check that is on by default and cannot be skipped by accident. If that check cannot be connected for any reason, the run **stops** rather than continuing ungoverned. There is exactly one way to run without it, and it is a deliberate, visible setting the operator has to set on purpose. | The gate on the agent's command shell. Its own code records why this was changed: the previous version quietly carried on when the gate failed to connect, which produced an ungoverned command shell with no signal at all to the operator — in its own words, "an accident, not a decision, and indistinguishable from a healthy governed run". |
 
 ### 8.3 Refusals that protect the operator
 
@@ -903,6 +1079,7 @@ protect.
 | Signing keys are used for signing only when the system is first set up. The running system only ever *checks* signatures; it does not hold the means to create new ones. | The cryptography module's stated split. |
 | The system does not obtain credentials it was not given. For cloud testing, access exists only because the account owner supplied it. | The design of the cloud capabilities — and the direct reason testing against live third-party accounts is deferred. |
 | Where a component is missing, the system says so rather than simulating it. A required tool that is present but is actually a different program of the same name is reported as such, not as installed; an optional database that is not running causes its output to be left out with a clear message. | The tool registry and the database connector, whose code comment states that it never fakes a connection. |
+| Where the system is allowed to send its reasoning is governed by a sovereignty setting with four levels, consulted **before** any connection to an AI model is built. At the most restrictive level nothing leaves the machine: only models running locally may be used, the connection is refused before it is created, and the AI vendor's software is never even loaded. The middle levels permit only providers within a stated jurisdiction, and then — on an explicit written declaration by the operator — a service contracted not to retain data. An unrecognised level name, an unrecognised model service, a policy that cannot be loaded, or a failure inside the check itself each resolve to a refusal, never to permission. The level can also be locked at start-up, so that a later change to the machine's settings cannot loosen it part-way through a job. | The model-egress gate and the sovereignty policy. **One thing an operator must know:** when nothing is configured, the level in force is the most permissive one — it is the development default. A deployment that requires sovereignty has to set it, and should lock it. |
 
 ---
 
@@ -938,17 +1115,41 @@ than quietly tidying it away, is what the project's own rules require.
 
 - The core proving pipeline: propose, capture, check automatically, admit, sign, re-verify with no
   internet connection.
-- The 15 general-purpose checker types against a live web target. (These 15 are the frozen fallback
-  set described in section 2.3. They are not the same thing as the 11 standard opening checks that
-  chapter 3 describes a run as always performing — that is a different list, of tests to *try*, not of
-  checkers that confirm.) The project ships a negative control for this: pointed at a deliberately
-  *safe* version of the same application, the confirmation step returns nothing — demonstrating that
-  the confirming authority does not rubber-stamp.
-- Network reachability, encryption weakness, software-version-in-advisory-range, and the web
-  achieved-state checks against real captures.
+- The 15 general-purpose checker types. (These 15 are the frozen fallback set described in section
+  2.3. They are not the same thing as the 11 standard opening checks that chapter 3 describes a run
+  as always performing — that is a different list, of tests to *try*, not of checkers that confirm.)
+  Twelve of the fifteen have been run over material that a real running system produced. The other
+  three have only ever been run over saved sample material: the two that reach their verdict by
+  statistics rather than by direct observation, and the one that checks whether an installed version
+  falls inside a published advisory's affected range. Section 9.2 gives the equivalent count for all
+  38 checker types, and names the one of these twelve where a stricter reader would reasonably
+  disagree — a cloud checker exercised against a simulator rather than a real cloud account. The
+  project ships a negative control for this: pointed at a deliberately *safe*
+  version of the same application, the confirmation step returns nothing — demonstrating that the
+  confirming authority does not rubber-stamp.
+- Network reachability, encryption weakness and the web achieved-state checks against real
+  captures. The version-in-advisory-range check is deliberately not in that list: it is one of the
+  three named above, and while it is fully built and able to state a proven finding, the material it
+  judges is a list of installed components the operator supplies, and every run so far has judged a
+  sample list.
 - The permission gates; the signed record that can be added to but never quietly edited; the usage
   record and the ability to replay it; the dossier; and the route by which a recipient re-checks
   everything without an internet connection.
+- The proving range described in section 2.9: six deliberately vulnerable applications on the
+  operator's own machine, five of them pinned by content fingerprint, five of them shown to hold their
+  weakness by comparing a harmless request with an attacking one — and the sixth honestly reported as
+  not probed. Its purpose is to make the system's *instruments* demonstrate that they stay silent where
+  there is nothing to find. It proves nothing about any customer's systems, and nothing it produces is
+  a fact in this system's sense.
+- **Ten proving results across the nine outside tools whose command lines the engine composes itself,
+  every one of them passing** on that range: the engine built the command, the tool ran against a live
+  target, an engine reader turned what came back into the system's own record, the planted weakness was
+  reported where it was planted, and the same driver stayed silent on a sound control that was
+  demonstrably still being tested. Nine tools and ten results because the password-guessing tool has
+  one for each of the two quite different kinds of login it can attack, the second of them a real login
+  form. Section 9.8 gives the honest bounds: it is a statement about the instruments and not about
+  anybody's estate, everything those tools report remains a lead, and two of the nine cannot be reached
+  by the ordinary route as the production wiring stands today.
 - A signed, reproducible benchmark run on the project's own machine on 4 August 2026. On a
   purpose-built application with 11 planted weaknesses and 5 deliberately safe controls, the engine
   reported 11 true positives, 0 false positives and 0 misses; the three comparison tools scored 0, 2
@@ -970,8 +1171,61 @@ producing two automatically confirmed findings, re-verified offline two out of t
 deliberately altered byte correctly rejected. That record is reported in the project's own
 documentation; I read the claim, not the run.
 
-### 9.3 Cloud and Kubernetes exploitation: complete; Kubernetes proven against a real cluster,
-cloud awaiting the customer's credentials
+Two further live exercises have since been added, and both differ from that
+record in a way that matters: each is a script kept in the repository, which a sceptic can run for
+themselves, rather than an account of a past run that has to be taken on trust. They differ from each
+other too, and the difference is the whole point of the grades below. One stands up a real Kubernetes
+cluster — infrastructure the project itself builds and destroys — and puts what that cluster returns
+through the whole path. The other reaches a genuinely outside system: it uses the operator's own
+GitHub credential against the real GitHub service. Both are described in section 9.3.
+Neither is run as part of the automatic tests, and that is deliberate: there are no credentials
+there, and a live test that invents a result when it cannot actually run is worse than no live test
+at all. Each script instead insists on every one of its expectations and stops with an error if any
+of them fails.
+
+**The honest count, checker by checker.** The sharpest question to ask about a system like this is
+not "how many things can it check for" but "how much of that has ever been tried against something
+real". Each of the 38 checker types is counted below exactly once, at the strongest evidence it has
+ever been run over, so the four figures add up to 38.
+
+| How strong the evidence behind it is | Count | Which ones |
+|---|---|---|
+| Run over material a **real outside system** produced | **3** | Two general-purpose web checkers — one that compares how a system answers a true statement against a false one, one that establishes that a state which should have been unreachable was reached — from the external run recorded above; plus the exposed-secret validity checker, from the GitHub script. |
+| Run over material from **real infrastructure the system creates and owns** | **2** | The two Kubernetes access-control checkers, against the real cluster described in section 9.3. |
+| Run over material a **real program on this machine** produced — a real network connection, a real web browser, a real compiled program | **13** | Listed individually in chapter 5. |
+| Run only over **saved sample material** | **20** | Listed individually in chapter 5. |
+
+Four qualifications, because a bare count invites two opposite misreadings.
+
+- **The last row is not twenty blind spots.** Two of the twenty judge the *request the system sent*
+  rather than the answer that came back, so a real connection would add nothing to what they prove.
+  Six re-derive a configuration file offline and make no network call at all by design; for those,
+  "saved sample material" and "a real export from a real customer" differ only in who wrote the file.
+  Two reach their verdict by statistics rather than by observation, so what matters is whether the
+  procedure is correct — and the saved material exercises the cases where it must *refuse*. One more,
+  the identity privilege-escalation checker, will never move, because it never performs the
+  escalation it is verifying and so has no live form to await; section 9.3 explains that position.
+  That leaves nine which genuinely await either a real capture or a real deployment to run over: two
+  cloud confirmations waiting on a customer's credentials, the two that prove a login credential is
+  forgeable from a captured artefact offline, the four defensive checkers that judge an operator's
+  own application and its records, and the check that an installed version falls inside a published
+  advisory's affected range. Chapter 5 grades all 38 individually and reaches the same four totals
+  by its own route.
+- **Two of the thirteen deserve an asterisk.** They were exercised against a cloud simulator that
+  runs inside the same program rather than against a real cloud provider. That is materially better
+  than a hand-written file — it drives the real cloud-provider code path and the real shapes of
+  answer, including deliberately misleading cases — and materially weaker than a real account. A
+  reader who declines to credit a simulator should read the four figures as **3, 2, 11 and 22**. This
+  briefing credits it, and states the convention here rather than leaving it buried.
+- **The three in the top row are not equally strong.** Two of them rest on the run recorded in the
+  project's own documentation, which this briefing read as a claim rather than watched. The third,
+  the GitHub one, is a script anyone can run against their own account. That is the higher standard,
+  and it is the one the project should be held to for the rest.
+- **A count of evidence strength is not a count of coverage.** These figures say how firmly each
+  checker has been exercised. They say nothing about how much of a given customer's estate a run
+  would reach — that is what the coverage certificate in section 3.4 is for.
+
+### 9.3 Cloud and Kubernetes exploitation: complete; three fired at something real, the rest awaiting the customer's credentials
 
 Six capabilities covering cloud and Kubernetes exploitation are **complete and part of the released
 software**. (Kubernetes, as noted in the short version above, is the standard system for running and
@@ -989,14 +1243,18 @@ deployments.) They are:
 
 All six are connected from end to end: the detection logic, the evidence handling, the verdict
 routing, the certificates, the entry in the permanent record and the safety gates are all built and
-registered. The two Kubernetes confirmations have been proven against a **real Kubernetes cluster**;
-the four cloud ones are proven against recorded sample data with no internet connection. None of them
-carries any recorded engineering gap — and under this repository's own enforcement rule, a gap between
-what a capability does today and what it must eventually do *must* name the concrete work that closes
-it, or an automated test fails. All six record no such work outstanding.
+registered. Three of the six have now been fired at something real, and the three are not of equal
+weight: the two Kubernetes ones against a **real Kubernetes cluster the system stands up, owns and
+destroys itself** — real infrastructure, but the project's own rather than a third party's estate —
+and exposed-secret validity against the **real GitHub service**, which is the only one of the six to
+have judged material produced by a real outside system. The rest are proven against recorded sample
+data with no internet connection. None of the
+six carries any recorded engineering gap — and under this repository's own enforcement rule, a gap
+between what a capability does today and what it must eventually do *must* name the concrete work
+that closes it, or an automated test fails. All six record no such work outstanding.
 
-**The two Kubernetes confirmations are no longer waiting. The four cloud ones are.** That
-distinction is recent, so it is set out precisely rather than summarised.
+**Three of the six are no longer waiting. The rest are.** That distinction is recent, and one of the
+three is true of only part of its capability, so it is set out precisely rather than summarised.
 
 *Kubernetes.* Both tiers are now proven against a **real Kubernetes cluster** rather than against
 recorded sample data. A script in the repository stands up a genuine single-node cluster — k3s version
@@ -1015,24 +1273,60 @@ of them fails, so it is a proof rather than a demonstration — and because the 
 rather than borrowed, a customer, an auditor or a sceptic can re-run the whole thing on their own
 machine and watch it happen.
 
-Two things that run does **not** cover, stated so the claim is not read wider than it is. First, the
+Three things that run does **not** cover, stated so the claim is not read wider than it is. First, the
 script reads the objects it planted, by name; it does not exercise a scope-gated **enumeration**
 capability that discovers access rules across a whole cluster under authorisation. Second, the cluster
 is one the system stood up itself, so a **managed provider's control plane** — Amazon EKS, Google GKE,
 Azure AKS — is not exercised: the same Kubernetes interface, reached by a different access path.
+Third, the evidence was captured with the standard Kubernetes command-line tool and handed to the
+checking path, rather than collected by the system's own permission-gated collector. That collector
+exists, is restricted, and refuses outright unless the cluster it actually connected to is one the
+operator declared in writing — but the software library it needs is not installed on this machine, so
+it was not the thing exercised here.
 
-*Cloud.* For the four cloud confirmations, what remains deferred is still the act of pointing them at
-a live third-party cloud account. That waits on the customer supplying their own cloud credentials. It
-is a deliberate design position, not an unfinished feature: a credential is a thing only the account
-owner can supply, and the system is built not to obtain one any other way.
+*Exposed-secret validity.* This capability answers a question that matters more than it sounds: a
+secret found lying about in a file, a page or a code repository *looks* alarming, but the only
+question that counts is whether it still works. The capability has now been proven against the real
+GitHub service. A script in the repository takes the operator's own GitHub credential from the
+standard GitHub command-line tool, passes it straight into the harness without ever writing it to a
+file, placing it where the machine's process list would show it, or putting it in the environment,
+and drives the real, permission-gated production component over the real network against GitHub's own
+least-privileged identity endpoint — the call that reads who you are and changes nothing. The valid
+credential is confirmed from a genuine reply by the real service, and the signed certificate
+re-verifies offline. Three controls in the same run are correctly *not* confirmed, and they are the
+point of the exercise rather than a footnote: a fake credential of the same *shape*, sent live to the
+same real endpoint, which GitHub itself rejects — establishing against the real provider that looking
+like a credential is not the same as being one; the same confirmed capture with its confirming
+address swapped for an attacker-controlled host, and for a look-alike address, which must not be
+allowed to manufacture a fact; and the same capture where the credential and the confirming call no
+longer refer to the same secret. The permission gates are exercised on the same live path too: with
+the emergency stop tripped, and with the target outside the authorised scope, the run halts before
+any network call is made at all.
 
-The honest sentence, which should not be softened in either direction: *for the four cloud
+Two limits on that result, and the first must not be blurred. **Only the GitHub half of this
+capability is proven live.** The same capability's Amazon Web Services half — recognising an Amazon
+access key and confirming it against Amazon's own identity service — is built, and its
+request-signing code is checked against Amazon's own independent implementation, but it has **never**
+been run against real Amazon infrastructure. It still needs a real access key that only the account
+owner can supply, and nothing about the GitHub run transfers to it. Second, this capability
+*validates* a credential the operator supplied; it does not go hunting for exposed secrets across a
+customer's estate. That is a different capability and it is not covered here.
+
+*The rest.* For the remaining cloud confirmations — the metadata-credential capture and the Google
+service-account impersonation — what remains deferred is still the act of pointing them at a live
+third-party cloud account. That waits on the customer supplying their own cloud credentials. It is a
+deliberate design position, not an unfinished feature: a credential is a thing only the account owner
+can supply, and the system is built not to obtain one any other way.
+
+The honest sentence, which should not be softened in either direction: *for the remaining cloud
 confirmations the logic, the evidence handling, the certificates and the safety gates are built and
 proven against recorded sample data, and pointing them at a live third-party cloud account awaits that
 customer's own credentials; for the two Kubernetes confirmations the same machinery has been run
-against a real cluster and held.* Describing any of the six as "unfinished" understates the system.
-Describing the cloud ones as "field-proven in customer clouds"
-overstates it.
+against a real cluster and held; and for exposed-secret validity it has been run against a real
+outside provider and held, for one of the two kinds of credential it recognises.* Describing any of
+the six as "unfinished" understates the system. Describing the remaining cloud ones as "field-proven
+in customer clouds" overstates it. Describing exposed-secret validity as live-proven without naming
+which half overstates it too.
 
 Four properties of these six capabilities are worth stating for a security-conscious reader, because
 they are what makes the deferral safe rather than merely pending:
@@ -1051,14 +1345,25 @@ they are what makes the deferral safe rather than merely pending:
   authorise everyone's account. A wildcard or blank entry authorises nothing.
 - **The transport must prove where it went.** The checker requires evidence of which address each
   call actually reached, that encryption was verified, and that no proxy or redirect intervened. A
-  hand-written record can never become a fact.
+  hand-written record can never become a fact. Until the work described in this section, those facts
+  about the connection could only ever be supplied by a stand-in used in testing — which is the
+  precise reason no cloud capability had ever fired against a real provider. There is now a real
+  network binding, and its single rule is that every one of those facts is *derived from the
+  connection* rather than asserted: encryption counts as verified only when the connection really
+  carries a validated certificate; "no proxy" is recorded only when the software can positively
+  demonstrate it could not have used one; a redirect is reported rather than followed; the address is
+  read from the live connection while the answer is still arriving, rather than looked up again
+  afterwards; and an over-long reply is marked as cut short and never interpreted, so a truncated —
+  and therefore unsound — answer can never reach a checker. Each of those, when it cannot be
+  established, takes the value that makes the checker **refuse**.
 
 One of the six must be described differently, and this distinction matters. The **identity privilege
 escalation** capability is offline **by design, permanently**. It re-derives the escalation from the
 operator's own retained configuration and compares what the identity could reach before and after. It
 never executes the escalation, and never will — the project's stated principle is that a defensive
 verification tool does not perform the attack it is verifying. It is not awaiting live fire in the
-sense the three remaining cloud confirmations are: not performing the action *is* the design.
+sense the cloud confirmations still awaiting a customer's credentials are: not performing the action
+*is* the design.
 
 **But one clause must be added, or a reader will take that too far.** This capability still needs a
 real capture of a real account's permission rules to work on. That capture comes from the customer's
@@ -1173,7 +1478,8 @@ result, and each names what it is waiting for.
 
 | Capability | Waiting on |
 |---|---|
-| Collecting the security configuration of cloud accounts (AWS, Azure, Google Cloud) and Kubernetes clusters | Read-only credentials that only the account owner can supply. |
+| Confirming that an exposed **Amazon Web Services** access key is a valid, working credential — the other half of the capability whose GitHub half is proven live in section 9.3 | A real access key that only the account owner can supply. The code is built and its request-signing is checked against Amazon's own independent implementation, but it has never been run against real Amazon infrastructure. |
+| Collecting the security configuration of cloud accounts (AWS, Azure, Google Cloud) and Kubernetes clusters | Read-only credentials that only the account owner can supply. For Kubernetes there is a second prerequisite: the permission-gated collector needs a software library that is not installed on the machine this briefing was written on, which is why the live cluster run in section 9.3 captured its evidence with the standard command-line tool instead. |
 | The part of the automatic-fix feature that proposes an actual change to a customer's code | The operator setting up the several signing keys required, and an access token for the code-hosting service. |
 | Treating the output of AI red-teaming tools as a source of fact | Those tools are not present in this environment and could not be installed, because the environment has no network access. |
 | A live external graph database and a live telemetry collector — two optional external services | The services themselves being set up and running. The equivalent local store, which keeps the same data in files on the machine, is built and works; asking for the external one when it is absent produces a clear error rather than quietly falling back. |
@@ -1233,6 +1539,297 @@ fabricated answer.
   matches the description, and the project says so. Each proof ships with a deliberately broken twin
   that the proof-checker must report as failing, so the check cannot be passing for empty reasons.
 
+### 9.8 The outside tools: how far control over them is actually proven
+
+Alongside its own checkers, the system drives a set of well-known outside security tools. This section
+gives the honest position on that, because the honest position turned out to be materially weaker than
+what the system's own interface was reporting — and because the way that was discovered is itself the
+most useful thing in the section.
+
+**The tools are now present, and were verified by running them.** Thirteen tools sit on the operator's
+own machine, and the last three of them arrived on the day of this revision. **Twelve** were confirmed
+by launching them and reading the version each printed, rather than by observing that a file of that
+name exists — a distinction that matters more than it sounds, because on this kind of machine a
+different program of the same name commonly occupies the one an operator expects, and the system now
+steps past such an impostor to find the genuine tool rather than declaring the tool unusable. The
+thirteenth is a graphical program the system deliberately never launches merely to read a version, so
+its presence is established by resolving the program itself.
+
+Separately, the system ships a **sealed working environment** — a pre-packaged operating environment,
+of the kind described in section 8.2, in which the vendored third-party agent runs its jobs — carrying
+a further twenty-four tools. **That environment had never been built**, and the instruction the project
+published for building it could not have produced it on any machine. It has now been **built for the
+first time**, and all twenty-four tools inside it were confirmed present by running each one. Getting
+there required fixing two faults in the build itself, and both are worth recording because neither
+could have been found by reading:
+
+- **The published build command could never have worked.** It was recorded in three separate places
+  and named the wrong starting folder — the *build context*, meaning the set of files the build is
+  allowed to see — so it failed partway through on a file it could not find. Nobody had ever run it.
+- **One step of the build resolved a tool version over the network at build time**, asking the
+  internet which release was newest while the build was running. That had two consequences. It made
+  two builds a day apart produce different contents, which defeats the point of pinning everything
+  else, as section 9.4 describes; and, because the request carried no credentials, it ran into the
+  publisher's hourly limit for anonymous requests, came back empty, turned the download that followed
+  it into a not-found error, and killed the build two-thirds of the way through — with a message that
+  named the download rather than the limit that caused it. The version is now written down in the
+  recipe and is changed deliberately.
+
+**How the system says it drives a tool, and the three it was refusing wrongly.** The screen that lists
+the tools applies a deliberate rule: a tool is admitted to the working set only if the system has some
+way of actually driving it, and one it cannot drive is refused with a stated reason rather than listed
+as available. The rule was right; its knowledge was incomplete. It knew of only two ways a tool could
+be driven — from a written command-line playbook the AI reads, and from a typed argument builder the
+engine composes itself — and reported both of them under one label. The engine in fact drives tools
+three further ways as well: through a **sensor**, through a **source-code analyser**, and through the
+**headless browser** it uses to confirm weaknesses that appear only once a page has run.
+
+The consequence was that **three tools the engine visibly launches during ordinary work were being
+refused as undrivable** — the one that captures network traffic, the one that performs deep analysis
+of source code, and the browser — because an engine-side driver was the only route each of them had.
+The screen now recognises every route, and — the improvement that matters most to a reader — it states
+**how each tool is driven** under four labels rather than merely stating that it is driven. A tool the
+engine launches itself as part of a scan is a different kind of control from a tool whose command line
+the AI composes from written instructions, and an operator deserves to see which of the two they have.
+The lists behind those labels are not maintained by hand: an automatic check reads the real source of
+each driver and fails the build if a tool has been added to one and forgotten here.
+
+**The tool that would have failed on somebody else's machine.** A related fault sat one level below
+that screen, and it is worth setting out because it is the kind that never shows up on the machine it
+was written on. Some security tools install under more than one program name: the version packaged by
+one operating system uses one name, the version published by the tool's own authors uses another. The
+system keeps a catalogue recording, for each tool, every name it is known to install under — and the
+screen that reports which tools are present resolves through that catalogue correctly. Two of the
+command builders did not. They called the tool by a single fixed name. On the machine this was written
+on that name happened to be right, so everything looked well; on a machine where the operator had
+installed the same tool from its authors instead, the screen would have reported the tool present and
+controllable and every attempt to run it would have failed to start. The two builders now resolve
+through the recorded names, record in the permanent run record which of the names actually ran, and
+refuse — naming every name they tried — when none is installed. And because the fault had already
+occurred once and been fixed in a way too narrow to catch its second occurrence one builder away, the
+guard was rewritten to cover the whole class: **an automatic check now compares every builder's
+invocation against the catalogue and fails the build on any disagreement** — a tool that exists today,
+or one added tomorrow.
+
+**The part to be most careful about: how much of this is actually proven.** Nine of the tools have a
+**typed command builder** — code inside the engine that constructs and validates that tool's command
+line itself, rather than letting the AI write it. A builder that produces a plausible-looking command
+line proves nothing at all, so the standard applied here is deliberately severe. Five things must all
+hold, and a result is refused if any one of them is missing:
+
+| The condition | Why it is there |
+|---|---|
+| **The engine builds the command**, not the exercise | An exercise that writes its own command line is testing itself |
+| **The tool actually runs** against a live target and returns real output | The commonest failure in this whole area is a driver that has never once been run |
+| **That output is read back into the engine's own record** | A tool whose output nothing in the system can read has not been driven end to end, however well it ran |
+| **The planted weakness is reported where it was planted** | Otherwise the run proves only that the tool executed |
+| **The same driver stays silent on a sound control that is demonstrably still being tested** | The negative control, plus the liveness condition from section 2.9 — silence from a dead instrument is not evidence |
+
+**Where the nine stood at the start of the day**, because the distance travelled is the part worth
+knowing and because the starting position was materially weaker than the interface implied:
+
+| Of the nine tools with a typed command builder | Count | The position that morning |
+|---|---|---|
+| Proven all the way through against a live target | **3** | The port scanner, the template-driven vulnerability scanner, and the injection confirmation tool. These met every condition above, negative control included. |
+| Had **no way for the system to read their output at all** | **3** | The engine could build the command and launch the tool — and then discarded every byte it returned. The tool ran, the run appeared to succeed, and nothing whatever reached the system. |
+| Had **never been executed** | **3** | These three were listed by the interface as controllable while the engine's own permission manifest — the list that decides which tools may run in each phase of a job — did not name them at all, so every attempt to call them was refused. They shipped unreachable. |
+
+**Where they stand now: ten proving results across the nine tools, and every one of them passes.**
+Readers were written for the first three, from the output the real programs actually emit rather than
+from their documentation; the second three were given a route through the permission manifest and a
+proving result of their own. The last run of the exercise on this machine drove every one, each
+against the weak target and then against the sound control, and every expectation held.
+
+**Ten results and nine tools, because one tool needed two.** The password-guessing tool can attack two
+quite different kinds of login, and inside the tool they share almost no machinery. One is the plain
+challenge a browser answers on the user's behalf — the small grey box that appears before a page
+loads. The other is an ordinary login form on a web page, which is what practically every real service
+actually uses, and which requires the tool to submit the form, read the page that comes back, and
+decide from its wording whether the password worked. For a long while only the first of the two had a
+control to be tested against, so the table showed one confident green line for a tool that had never
+been shown to work against the commoner and harder of its two jobs. The capability had been built and
+tested against a saved copy of the tool's own output long before it met a real form. **Testing what a
+command line looks like is how a driver that has never worked gets shipped.** It now has a result of
+its own: a real login form on a control server, a real password recovered from it, and — on the
+hardened twin — the same attack completing and recovering nothing.
+
+That second result required an extra safeguard worth describing, because it is the sharpest instance
+in this chapter of the third condition in section 2.9. Measured on this machine, the password-guessing
+tool attacking a twin whose login page had been *removed altogether* prints exactly the same console
+output as a correct negative control: the module engaged, the attack completed, no password found, no
+error of any kind. Its own reporting cannot tell "I tried every password and none worked" apart from
+"I never reached a login page." So the control server is asked instead. It counts what actually
+arrived, and the result holds only if the login form processed every password the attacker offered,
+including the one that cracks the weak twin, and refused all of them. **Only the target knows whether
+it was ever asked to check a password.**
+
+Both of that tool's results carry one further check, which is worth naming because it concerns
+something an agency will care about independently: **a password the tool recovers must not end up in
+what the system keeps.** The tool cracks a real password and prints it, and that raw printout is the
+material a checker would examine, so it stays as it is. But the two things the system *retains* — the
+observations it derives and the signed record of the run — are searched, on every one of the four
+runs, for the credentials the exercise handed the tool. If the search cannot be performed conclusively
+— because the captured output was truncated, say — the result fails rather than passes. An invariant
+that cannot be checked is not an invariant that holds.
+
+The intermediate states are worth recording because each step was a real fault found and fixed rather
+than a threshold lowered: the first run of the exercise proved one driver, a later one three, a later
+one six, then nine, and the last one all ten.
+
+**Do not read that as "the system drives nine tools in the field."** Four limits travel with the
+claim, and chapter 12 sets them out in full. The targets are deliberately vulnerable applications on
+the operator's own machine, so **none of this is a result about anybody's estate**. Everything those
+nine tools report is a lead and never a fact. The exercise needs the local range standing, so it is
+run deliberately by a person rather than on every change — though it does report any builder that
+has no proving result, so a new driver cannot arrive unproven and unnoticed. And two of the nine, the
+two destructive ones, cannot be reached by the ordinary route at all as the production wiring stands
+today: the exercise supplies the extra authorisation itself and prints a note saying it had to,
+which is a gap in *reaching* those two drivers rather than a hole in the gate that stopped them. A
+reader who wants the number for themselves can obtain it directly: the proving exercise asserts
+every one of its expectations and stops with an error the moment reality stops matching the claim.
+Section 11.1 says how to run it.
+
+#### 9.8.1 The safeguard that was itself wrong — the strongest argument in this document
+
+One of the findings belongs on its own, because it is not a fault in a tool. It is a fault in a
+*safeguard*, and it is the clearest demonstration in this briefing of why a system should check its own
+claims by running them rather than by reading them.
+
+The written authorisation governing all of this work carries a hard limit: **nothing may leave the
+machine**. No tool, no name lookup, no callback. Everything is local; that is the entire point of a
+range on the operator's own hardware.
+
+One of the web-application scanners broke that limit by default, and nobody had noticed because it
+took no decision to do so. Left to pick its own set of tests, it ran one that asks an **outside
+service — a web address belonging to the tool's own authors** — to report back what it had seen.
+Every scan, against every target, was quietly talking to a third party.
+
+Removing that one test was not enough, and the second discovery is the useful one. A different test
+in the same default set reaches a **different outside address, for an entirely different reason**: it
+wants a reference database of technology signatures, finds no copy stored locally, and downloads one.
+It is nobody's idea of a test that phones home. It waits for no callback and needs no accomplice. It
+simply fetches a file from a stranger's server, on its own initiative, on every run.
+
+So the system was given a guard: a list of the tests that must never be run. **And that guard was
+itself unsound.** The setting it policed is not a list of test names. It is a small language, and it
+also accepts **group names** — ordinary words such as "all" and "common" — which the tool expands into
+sets of tests by itself. Measured against the installed version: asking for "all" produces thirty-six
+tests, including all three of the forbidden ones; asking for "common" produces sixteen, including one
+of them. Both are perfectly ordinary words. Neither matched anything on the list of forbidden names.
+**The entire prohibition could have been reopened with three letters**, while the test written to
+prevent exactly that went on passing, because it had only ever tried the literal names.
+
+The guard is now the other way round: a list of what is **allowed**. Every test on it has been read
+individually and confirmed to attack only the target it was pointed at, with no outside party
+involved anywhere. Everything else is refused outright — a group name, an unfamiliar test, or a test
+that a future version of the tool has not yet invented.
+
+**The general lesson, which a reader will meet again in other systems: a list of forbidden things is
+not a guard when the vocabulary belongs to somebody else.** The tool decides what its own words mean,
+and it can add new ones in any release. A list of permitted things is a guard, because an unfamiliar
+word fails it by default rather than passing through it.
+
+One honest cost of that choice is worth recording, because the project paid it within hours. The
+refusal is **total**: one unrecognised word cancels the whole request rather than narrowing it. So a
+*safe* test accidentally left off the permitted list is a defect too, not a cautious default. Exactly
+that happened — one ordinary test was omitted, and a scanner that had been proven end to end went
+straight to a flat refusal, whose stated reason named the arguments rather than the list that had
+rejected them. The test was read, confirmed to contact nobody, and added.
+
+#### 9.8.2 Measurement, not assertion: how "nothing leaves the machine" was established
+
+"Nothing leaves the machine" is precisely the kind of claim this briefing will not make by
+inspection, and the reason is the whole subject of this section: both of the contacts above were
+behaviour the tools chose for themselves, so neither appeared anywhere in the system's own
+instructions for a reviewer to find.
+
+So it was measured. The engine's own commands were run inside an **isolated network in which the only
+route off the machine's own internal address leads nowhere at all**, with every packet recorded on the
+way. Anything a tool tried to send to the outside world had nowhere to go and was captured.
+
+A trap that catches nothing is worth exactly as much as a detector that only ever fires, so the trap
+was itself controlled *before* it was believed: it was pointed at two occasions where a leak was known
+to be present, and required to see each one. It did.
+
+| The two deliberate leaks | What each one establishes |
+|---|---|
+| An ordinary look-up of a name on the internet, made on purpose. The trap recorded **exactly the two enquiries such a look-up makes**, and nothing else. | The trap can see the smallest thing anyone would want it to see, and it does not invent traffic that was never sent. Both halves matter: a trap that over-counts is as useless as one that misses. |
+| A scan run with **one of the guards deliberately taken out**. One web scanner ships a test that drives a **real browser**, and the browser, on starting, looks up an address belonging to its own vendor: **sixteen such lookups in a single forty-one-second scan.** | The scanner's own two quieten-down settings do not cover this and were never going to: they suppress the *tool* contacting its authors, and a browser contacting its vendor is a different thing entirely. The browser is now pointed at a program location that cannot exist, so none starts. Repeated with the guard back in place: **zero packets left the machine**, the scan still reported the weakness it was there to find, and the only thing lost was one test that could not have run under this authorisation at all. |
+
+Only then was the trap's silence worth anything — and the trap then caught something **nobody was
+looking for**. A second tool runs a built-in **check for a newer version of itself** before it has sent
+a single packet at the target: it contacts two outside services, which cost four name look-ups per run
+on a machine that remembers previous answers and six on one that does not. Switch on the command-line
+setting that suppresses that check and the count is zero. That setting had been carried as a matter of
+tidiness; it is **load-bearing rather than cosmetic**, and this is how that was established rather than
+assumed.
+
+Every figure above comes from that measurement rather than from anything written in the software, so a
+reader checking them should re-run the measurement rather than search the code for the numbers. Two
+limits belong with the result and none should be trimmed. The trap is an exercise a person runs, not
+part of the automated build; what the build checks is narrower and more durable — that the exact
+commands still carry those settings, **now pinned for every one of the three tools concerned**, the
+last of the three having gone unpinned until this was written. The measurement was made on this machine
+against these versions of these tools, and a new version can acquire a new outbound habit, so the only
+way to know is to measure again. As for the tool whose version check the trap caught unlooked-for: the
+suppressing setting now travels on **all three of its routes into the engine** — the typed command
+builder, the scanning component, and the template runner — and each of the three is pinned by its own
+automated test, so a future edit that dropped it on any route would fail the build. The traffic it
+would otherwise send goes to that tool's own publisher and carries nothing whatever about the target,
+and it is written down here rather than left for a reader to find.
+
+#### 9.8.3 The defects found by running things rather than reading them
+
+Not one of the faults below was visible to the system's own automated tests; each was invisible to
+unit tests that examined the *shape* of a command rather than what happened when it was issued, and
+each was found by running the thing. They are set out as a credibility asset rather than as an
+embarrassment: a project that finds these and prints them is in a materially better position than one
+that has never looked.
+
+| What was found | What it teaches |
+|---|---|
+| A scanner whose output the system could not read. Every scan produced no observations at all, while the run reported success. | **A command that looks correct is not a working tool.** The command line was well-formed; it simply asked the tool for its human-readable output while the reader expected the machine-readable form. |
+| A tool that **re-reported a confirmed weakness** from one application against a *different, hardened* one, thereby **manufacturing a false positive**. The tool keeps a stored session filed under the machine's name; on this machine every practice application shares one name, so a genuine result about one was resumed from that stored session and re-served as a result about another. | A result that is a replay of stored state is not a measurement in *either* direction. It is at once a false alarm about the sound target and a fabricated confirmation about it, and nothing in the output says so. This is exactly the failure a negative control exists to catch — and it is what caught it. |
+| A scanner that opened a network listener on a port already in use, exited about ten seconds later, and wrote no report. The system reported that the scan had found nothing. | **A silent no-op is indistinguishable from a clean result**, which is the single confusion this whole product exists to prevent. The operator was told there was nothing there, when the truth was that nothing had been looked at. |
+| **A scanner that only ever examined its starting point.** Given a plain web address, it crawled the site, found the page carrying the weakness — and then attacked only the page it had been handed, sending **not one request** at the parameter where the flaw actually was. It returned a clean report identical to the sound control's. Given the full address *including* the parameter, the very same command found the injection. Multiplying its time budget fivefold changed nothing: the limit was structural, not temporal. | **The worst output a security tool can produce is a clean report that means "I did not look"**, because nothing downstream can tell it apart from the one output the product exists to earn. The scanner is now driven by an explicit scan plan — crawl first, then attack **everything the crawl found** rather than the one page it started from. On the same target and the same budget the observations rose from none of that kind to fifteen, including both an injection of script and an injection of database instructions. It also now **fails loudly** when it cannot reach the target at all, rather than producing an empty report that reads as clean. |
+| **A tool impersonating a different random browser on every request** — a setting it turns on by itself, which nobody had written down anywhere. | This is the exact inversion of what the system promises. An authorised test must be **correlatable**: the operator has to be able to look through their own records afterwards and pick out precisely which traffic was the test's. A tool quietly behaving like an evader, inside a system whose whole claim is that it is authorised and auditable, is a defect even though it breaks no rule and trips no gate. It now identifies itself by name on every request, with the same identity the rest of the engine uses, so a defender sees one consistent actor instead of a crowd of invented visitors. **The system is auditable precisely because it does not hide.** |
+| **A tool contacting outsiders, twice over — and the safeguard against it defeated by the tool's own vocabulary.** Set out in full in section 9.8.1 above. | **A list of forbidden things is not a guard when the vocabulary belongs to somebody else.** The permitted list replaced it. |
+| **A tool invoked by one fixed program name** while the system's own catalogue records the other names it installs under. The screen therefore reported it usable on a machine where every run of it would have failed to start. | A claim about a tool has to be true on *somebody else's* machine, not just on the one it was written on. This had already happened once and been fixed too narrowly to catch its recurrence one component away, so the guard now covers the whole class: any tool whose invocation disagrees with the catalogue fails the build. |
+| Three tools the interface listed as controllable while the engine refused every single call. | A claim of control has to hold at *every* layer. Refusing a tool honestly on one screen while a different component silently blocks it is the same false claim of control, moved one level down. |
+| A capability the operator selected being accepted and then silently discarded — and, in the single-tool mode, an unrecognised selection throwing away the valid one behind it, so the run started with no capability at all. | A request that cannot be honoured must be **refused by name, before anything starts**. The alternative is what happened here: the operator watches a run they believe is doing one thing, and the report looks complete while the work was narrower than they were told. |
+| Whole capability selections dropped on several routes — including the one an operator uses most often, a quick scan of a target on their own machine. | The same lesson at a larger scale. The system now states, both in the run's own permanent record and in what it hands back to the screen, exactly which selections **were not applied**, which were, and why. |
+
+**What every one of them has in common, and why an agency should weigh it.** They divide into two
+kinds, and neither kind could have been found by reading.
+
+Several were **defaults** — behaviour the tool chose for itself, which therefore appeared nowhere in
+this system's own instructions to be read at all. The random browser identity, the two outside
+contacts, and the scanner that attacked only the page it was handed are all of that kind: nobody wrote
+them, nobody chose them, and no amount of reviewing the commands the system issues would have shown
+them, because they are not in those commands.
+
+The rest were **assumptions that happened to be true on the machine they were written on** — a program
+name that was right here and wrong elsewhere, a stored session that collides only when every target
+shares one address, an output format the reader expected and the command never asked for. Each is
+correct in exactly the environment it was authored in, which is precisely the environment its author
+tests in.
+
+**Both kinds are invisible to inspection and visible only to execution**, which is why every automated
+test passed over them and why they surfaced within hours once the tools were actually run against
+targets with known answers. A reader assessing any security product should ask of it the question this
+exercise asked here: not "what does the documentation say the tool does", but **"what happened the
+last time somebody ran it and checked?"** The number of faults matters far less than whether the
+question was ever asked — and whether the answers were printed or quietly corrected.
+
+**Two things this work does not change**, stated so the section is not read more widely than it
+deserves. First, the count of checkers in section 9.2 is untouched: nothing an outside tool reports is
+a fact in this system — on the proving range or anywhere else. Such results enter as leads at
+deliberately low confidence, and only a checker over first-party evidence mints a fact. That is
+precisely why weak control over the tools was an honesty problem rather than a soundness one: no false
+finding could have reached a report through this route, but the interface was describing a capability
+the engine did not have. Second, none of this is evidence about any customer's estate. It is evidence
+about the instruments.
+
 ---
 
 ## 10. Why this design is worth the cost
@@ -1287,6 +1884,22 @@ table below says how.
 | The registry rules are enforced at run time | A dedicated test file runs on every code change. Its own limits are documented: it validates the declarations and the admission behaviour; it does **not** prove that every path through the system routes via admission. That last property rests on adversarial human review and is marked as such. |
 | The categorical refusal list has no connection to the live path (section 6.2) | Search the repository for `assert_not_hard_blocked` and observe that the only references are its own definition, its tests, and documentation. |
 | The anti-hallucination component *is* used at real points (section 2.7) | Search the code for `admit_finding` and `admit_for_report` and read the places that call them. |
+| The Kubernetes result against a real cluster (section 9.3) | Run `tools/livefire/k8s_rbac_livefire.sh`. It needs the container software Docker, downloads a real Kubernetes distribution, prints the cluster's real version and every expectation it checks, and exits with an error if any of them fails. |
+| The GitHub result against the real provider, and the fact that only half of that capability is proven (section 9.3) | Run `tools/livefire/secret_github_livefire.sh` with your own GitHub account signed in; it skips cleanly and says so if you are not signed in. Its own opening comment states, unprompted, which half it does not cover. |
+| Which capabilities have been fired at something real and which have not (section 9.2) | Read the `limitation` field of each entry in `docs/capability-matrix/evidence-branches.json`. Each one states in its own words what has and has not been exercised live, including the split between the GitHub and Amazon halves. |
+| Neither live result is run by the automatic tests (section 9.2) | Read the same two scripts' opening comments, which state the reason: there are no credentials in the automated environment, and a live test that fabricates a result when it cannot run is worse than none. |
+| The most permissive sovereignty level is the one in force by default (section 8.3) | Read the function that resolves the level from the machine's settings in `engine/crucible/framework/v2/kernel/sovereignty.py`: with nothing configured it returns the permissive level, and with an unrecognised name it returns the strictest. |
+| The nine documents in the case file, and what happens if they cannot be produced (section 7.1) | Read the list at the top of `engine/crucible/framework/v2/report/case_file.py`, then the point in `report/dossier.py` where it is built into the archive and the note recorded if it fails. |
+| The proving range: six applications, five pinned by content fingerprint, one honestly not probed (section 2.9) | Read `tools/livefire/range_targets.json`, then run `tools/livefire/range.sh up all` and `tools/livefire/range.sh verify`. The verify step prints, for each application, the harmless request beside the attacking one and the difference between them, and prints `NOT PROBED` with its written reason for the one that is not probed. |
+| That the range's confinement is enforced rather than remembered (section 2.9) | Read the four assertions in `tools/livefire/range_targets.py` — the file cannot express an address, and the binding is re-read from the container system, then from the machine's listening sockets, then measured by requiring a connection from the machine's outward-facing address to be refused. |
+| That a target without a weakness probe must carry a written reason (section 2.9) | Run `python3 tools/livefire/range_targets.py check`, then delete the explanatory note from the manifest entry and run it again. |
+| The clean twin used to score source-code tools, and its recorded fingerprint (section 2.9) | Run `tools/livefire/range.sh up src`; it regenerates both bodies of code and fails if either fingerprint no longer matches the one recorded in the manifest. |
+| The ten proving results over the nine typed command builders (section 9.8) | Run `tools/livefire/tool_drivers_livefire.sh`. It drives each one through the engine's own executor twice — once against the weak target, once against the sound control — and prints, per result, whether it ran, whether an engine reader could parse its output, and whether it stayed silent on the control. It exits with an error the moment an expectation fails, and it reports any builder that has no proving result at all. |
+| That the password-guessing tool is proven against a real login form, not only against a browser's own challenge (section 9.8) | The same exercise. Two of its ten results name that tool, one per kind of login. The form result additionally reads the control server's own counters, so its silence is confirmed by what the target saw rather than only by what the tool printed. |
+| That the guard on the scanner's tests is a permitted list rather than a forbidden one (section 9.8.1) | Read `integration/tests/test_wapiti_no_egress.py`. It asks for the group names "all" and "common" and requires the whole request to be refused; reverting the guard to a list of forbidden names makes that test fail while everything else stays green. |
+| That every tool is invoked under a name the catalogue records (section 9.8) | Read `integration/tests/test_builder_binary_resolution.py`. It derives the check from the catalogue itself, so it covers tools added in future, and it carries its own controls that fail if the check has quietly stopped reading anything. |
+| The four ways the system can drive a tool, and the three that were wrongly refused (section 9.8) | Read `engine/crucible/framework/v2/tools/profile.py`; the drift-guard tests beside it read the real source of each driver and fail the build if the lists disagree. |
+| The twenty-four tools in the sealed working environment (section 9.8) | Build it with `docker compose --profile strix build strix-sandbox`, then run each name in `SANDBOX_TOOLS` in `engine/crucible/framework/v2/tools/registry.py` inside the image. |
 
 Two rows in that table are unfavourable to the product. They are included because the project's
 governing rule is that a claim must be true today, and where a claim is not yet true the gap must be
@@ -1295,12 +1908,12 @@ system whose value rests on not overstating cannot itself overstate.
 
 ### 11.2 The rest of the briefing
 
-This chapter is one of thirteen. It is the entry point; the others go deeper on a single subject
+This chapter is one of fourteen. It is the entry point; the others go deeper on a single subject
 each and can be read in any order.
 
 | Chapter | Subject | What it answers |
 |---|---|---|
-| **1** *(this one)* | What this is, and the problem it solves | Why the system exists, the one central idea, the licensing and government-host conditions, and the honest status of everything. |
+| **1** *(this one)* | What this is, and the problem it solves | Why the system exists, the one central idea, why a detector must be shown to stay silent as well as to speak, the licensing and government-host conditions, and the honest status of everything. |
 | **2** | The parts of the system, and how they fit together | What CRUCIBLE, AEGIS, SIGIL, STRIX, the gateway and the shared core each are; the wall between the offensive and personal halves; what runs where. |
 | **3** | How a security assessment runs, from start to finish | The eleven stages of a job, from the written authorisation through discovery, testing, confirmation and reporting to re-testing after the fix. |
 | **4** | Leads and facts: how the system decides something is real | The single most important distinction in the product, examined closely: the four verdicts, the journey of a claim, and exactly what this approach cannot do. |
@@ -1308,11 +1921,12 @@ each and can be read in any order.
 | **6** | Evidence: how it is collected, shown, and independently re-checked | What counts as evidence, how it is sealed, the four checks a certificate must pass, and how to hand a package to an independent third party. |
 | **7** | Signatures and keys: who vouches for a result | What a digital signature is, what exactly gets signed, who holds which key, the trust root, and rotation and revocation. |
 | **8** | Safety, authorisation, and what the system refuses to do | The written authorisation, scope enforcement, permission tiers, approvals, the emergency stop, and the audit trail. **The authoritative account of the government-host refusal discussed in section 6.2 is here, in its section 2.5.** |
-| **9** | Every screen, and how an operator uses it | A tour of all 28 screens of the interface, plus the command line and the other three interfaces. |
-| **10** | The knowledge graph: building a picture of the target | How the system assembles a map of an estate, works out chains of attack, and identifies the single fixes that break the most attacks. |
+| **9** | Every screen, and how an operator uses it | A tour of all 29 screens of the interface, plus the command line and the other three interfaces. |
+| **10** | The target knowledge graph: building a picture of the attack | How the system assembles a map of an estate, works out chains of attack, and identifies the single fixes that break the most attacks. It is called the *target* knowledge graph because there are three different maps in this system, and chapter 14 describes a second one. |
 | **11** | The automated assistants, and how the system improves | Every AI agent, its job and its hard limits; how the system learns; and the strict bounds on what learning is allowed to change. |
-| **12** | The tools it uses, and what you need to run it | The catalogue of external tools, the credentials and keys an operator must supply, and the practical prerequisites. Note that it does **not** cover licensing; section 6.1 above is the only chapter section that does. |
+| **12** | The tools it uses, and what you need to run it | The catalogue of external tools, the credentials and keys an operator must supply, and the practical prerequisites — including the licensing position, which its section 2.1 now covers in full alongside section 6.1 above. |
 | **13** | The defensive side, source-code review, and network handling | What AEGIS proves from a customer's own logs, how source code is reviewed, encrypted connections and certificates, and how a fix is proven to have worked. |
+| **14** | The sovereign side, in full | The other half of the product: the part that holds the owner's key, keeps the owner's memory as a tamper-evident record, governs the offensive engine, and contains no attacking capability at all. Voice, gesture, the phone companion, the memory server, and an honest account of which of those is actually running. |
 
 **A suggested route for a reader with limited time.** Roughly a two-hour read, covering the argument,
 the guarantees and the limits, in this order:
@@ -1330,7 +1944,11 @@ the guarantees and the limits, in this order:
   proceeds.
 - **What can it actually find?** Chapter 5 for the full catalogue, chapter 10 for how individual
   findings are assembled into a picture of an estate.
+- **How do you know its instruments work at all?** Section 2.9 above, on negative controls and the
+  proving range, then section 9.8 on how far its control over the outside tools has been proven.
 - **Who vouches for a result, and what if a key is lost?** Chapter 7.
 - **How much of this is the AI, and what is it allowed to do?** Chapter 11.
 - **What does an operator see and press?** Chapter 9.
 - **What does it do for defence, for source code, and for encrypted connections?** Chapter 13.
+- **What is the other half of the product — the part that holds the key rather than the one that
+  attacks?** Chapter 14.

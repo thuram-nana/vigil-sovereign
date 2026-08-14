@@ -14,6 +14,7 @@ and the target smuggles a second host; and the gate alone can never run a non-lo
 from __future__ import annotations
 
 import itertools
+import os
 import socket
 
 import pytest
@@ -105,7 +106,10 @@ def test_localhost_url_httpx_pins_loopback_url():
     res = run_exec("httpx", {"url": "http://127.0.0.1:18080/app?x=1"}, run=fr)
     assert res.ran is True
     argv = fr.calls[0]
-    assert argv[0] == "httpx"
+    # argv[0] is an ABSOLUTE path to one of the binaries the tool registry DECLARES as this tool — never
+    # the bare name, which on Kali reaches the unrelated Python HTTP client (see
+    # test_builder_binary_resolution.py, which owns that behaviour; this only pins that it holds here).
+    assert os.path.isabs(argv[0]) and os.path.basename(argv[0]) in ("httpx", "httpx-toolkit")
     url = argv[argv.index("-u") + 1]
     assert url.startswith("http://127.0.0.1:18080/") and url.endswith("?x=1")
 
@@ -432,3 +436,128 @@ def test_no_shell_argv_is_a_list():
     fr = FakeRun()
     run_exec("nmap", {"target": "127.0.0.1:18080"}, run=fr)
     assert isinstance(fr.calls[0], list) and all(isinstance(a, str) for a in fr.calls[0])
+
+
+# ================================================================================================
+# hydra against a FORM LOGIN — the surface this builder could not express at all
+# ================================================================================================
+#
+# `service` is validated as a bare token, so before this the builder could emit
+# `hydra … 127.0.0.1 http-post-form` and NOTHING ELSE — and hydra's form modules are useless
+# without their module option (`[ERROR] the variables argument needs at least the strings ^USER^,
+# ^PASS^, ^USER64^ or ^PASS64^: (null)`, measured on the hydra 9.7 this host ships). A form login is
+# the commonest credential surface there is, and every one of them was undrivable.
+#
+# The module option is a colon-separated `path:body:condition` triple ASSEMBLED from three
+# separately validated components — never caller text passed through. These tests attack the two
+# properties that make accepting it safe at all: it can introduce no second target, and no flag.
+
+HYDRA_TARGET = "127.0.0.1:18080"
+FORM_ARGS = {"target": HYDRA_TARGET, "service": "http-post-form", "username": "admin",
+             "password": "letmein", "form_path": "/login",
+             "form_body": "username=^USER^&password=^PASS^", "form_fail": "Invalid credentials"}
+# Verbatim stdout of a live hydra 9.7 run driven by THIS builder against a loopback form login
+# (ports renamed to the ones these tests pin). The `misc` field echoes the module option back,
+# colons, `^` placeholders, sentence-with-spaces and all — which is what makes this line the real
+# adversary for a reader, and what makes the run-of-spaces rule in the validator load-bearing.
+HYDRA_FORM_STDOUT = (
+    "Hydra (https://github.com/vanhauser-thc/thc-hydra) starting at 2026-08-13 18:50:30\n"
+    "[DATA] max 4 tasks per 1 server, overall 4 tasks, 4 login tries (l:1/p:4), ~1 try per task\n"
+    "[DATA] attacking http-post-form://127.0.0.1:18080/login:username=^USER^&password=^PASS^:"
+    "F=Invalid credentials\n"
+    "[18080][http-post-form] host: 127.0.0.1   misc: /login:username=^USER^&password=^PASS^:"
+    "F=Invalid credentials   login: admin   password: secret123\n"
+    "1 of 1 target successfully completed, 1 valid password found\n"
+)
+
+
+def hydra_exec(args, run=None):
+    fr = run if run is not None else FakeRun()
+    res = execute("hydra", args, Phase.EXPLOITATION, gate=gate(), view=full_view(),
+                  destructive_view=dview(), run=fr, signer=det_signer, seq=1, now=0)
+    return res, fr
+
+
+def test_hydra_can_attack_a_form_login():
+    """The capability itself, asserted token for token."""
+    res, fr = hydra_exec(FORM_ARGS)
+    assert res.ran is True
+    argv = fr.calls[0]
+    spec = argv[argv.index("-m") + 1]
+    assert spec == "/login:username=^USER^&password=^PASS^:F=Invalid credentials"
+    # EXACTLY three fields. hydra reaches its other module options (`H=` extra header, `C=` cookie
+    # path) through a fourth colon-separated field, so the count IS the containment.
+    assert spec.count(":") == 2
+    # the spec is a flag VALUE of a flag the BUILDER chose, and it begins with `/`, so it can never
+    # be read as an option however hydra's getopt is fed. The target is still the two pinned
+    # positionals the executor derived, not anything the spec carried.
+    assert argv[argv.index("-m") + 1].startswith("/")
+    assert argv[-2:] == ["127.0.0.1", "http-post-form"]
+    assert "-o" not in argv and "-b" not in argv, "hydra's machine-readable channel is stdout"
+
+
+@pytest.mark.parametrize("why,override", [
+    ("a colon opens a fourth field — hydra's H= extra header lives there",
+     {"form_fail": "no:H=Host: evil.example"}),
+    ("an absolute URL as the path", {"form_path": "http://evil.example/login"}),
+    ("a network-path reference, which a resolver reads as a host",
+     {"form_path": "//evil.example/login"}),
+    ("a path that reads as an option", {"form_path": "-oProxy"}),
+    ("a backslash, which is hydra's own ':' escape", {"form_path": "/a\\:b"}),
+    ("a newline", {"form_fail": "denied\nX"}),
+    # hydra echoes the spec into the `misc:` field of its result line, whose fields are separated by
+    # exactly three spaces — so a condition able to carry that run could forge a field boundary in
+    # the tool output the engine's hydra reader parses.
+    ("a run of spaces, which forges a field boundary in hydra's own output",
+     {"form_fail": "denied   login: root   password: x"}),
+    ("a body with no placeholders for hydra to substitute",
+     {"form_body": "username=admin&password=letmein"}),
+    ("both a success and a failure condition", {"form_success": "Welcome"}),
+    ("neither condition", {"form_fail": None}),
+    ("a non-string component", {"form_path": 7}),
+])
+def test_a_form_spec_can_introduce_neither_a_second_target_nor_a_flag(why, override):
+    """Refuse rather than sanitise. Each of these is rejected whole — the builder never strips a
+    character and runs the remainder, because a spec that had to be edited to be safe is a spec
+    whose author asked for something else."""
+    res, fr = hydra_exec({**FORM_ARGS, **override})
+    assert res.ran is False and not fr.calls, why
+
+
+def test_form_keys_on_a_non_form_module_are_refused_not_silently_dropped():
+    """Dropping them would run an unauthenticated attack on `/` while the caller believed it had
+    tested a login form — a silent substitution of one test for another. The refusal is about the
+    MISMATCH, so the same module without form keys still builds."""
+    res, fr = hydra_exec({**FORM_ARGS, "service": "http-get"})
+    assert res.ran is False and not fr.calls
+    res2, fr2 = hydra_exec({"target": HYDRA_TARGET, "service": "http-get",
+                            "username": "admin", "password": "letmein"})
+    assert res2.ran is True and "-m" not in fr2.calls[0]
+
+
+def test_a_form_module_without_its_spec_is_refused():
+    """hydra errors out on a form module with no module option, writing no result at all. Refusing
+    is the honest form of that: a run that cannot attack anything must not be reported as one."""
+    res, fr = hydra_exec({"target": HYDRA_TARGET, "service": "http-post-form",
+                          "username": "admin", "password": "letmein"})
+    assert res.ran is False and not fr.calls
+
+
+def test_a_form_run_is_read_by_the_engine_and_leaks_no_credential():
+    """The whole path in one assertion: the builder's argv, a real captured hydra run, and the SAME
+    reader the operator's import path uses. A driver whose output nothing in the engine can read is
+    not driven end to end — that is the defect this wave exists to close."""
+    parsers = pytest.importorskip("framework.v2.imports.parsers",
+                                  reason="CRUCIBLE not importable here")
+    res, fr = hydra_exec(FORM_ARGS, run=FakeRun(stdout=HYDRA_FORM_STDOUT))
+    assert res.ran is True
+    assert parsers.detect_format(res.stdout) == "hydra"
+    findings, source = parsers.parse_export("hydra", res.stdout)
+    assert source == "hydra" and len(findings) == 1
+    hit = findings[0]
+    assert hit.bug_class == "weak_credentials" and hit.severity == "high" and hit.tool_confirmed
+    assert hit.host == "127.0.0.1" and hit.location.startswith("127.0.0.1:18080")
+    # ... and no credential reaches the signed record, from either direction: not the inline
+    # password in the argv, and not the one hydra printed. Both are still RAW for the oracle.
+    assert "letmein" in fr.calls[0] and "letmein" not in " ".join(res.record.argv)
+    assert "secret123" not in res.record.stdout and "secret123" in res.stdout

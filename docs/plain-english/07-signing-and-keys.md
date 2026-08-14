@@ -30,8 +30,21 @@ running it rather than by the software.
 If you are assessing a live installation rather than reading for background, turn first to
 **section 13**. It is a short numbered list of the questions the software cannot answer for
 you, because the answers are facts about a particular installation and the people running it,
-not facts about code. Section 4 carries the full inventory of every key in one table — where
-each one sits, who can read it, what it vouches for, and what breaks if it is lost.
+not facts about code. **Section 4** carries the full inventory of every key in one table — where
+each one sits, who can read it, what it vouches for, and what breaks if it is lost — followed by
+a second table saying, for each signed thing, exactly what an outsider needs and what performs
+the check. **Appendix A** lists every purpose label in the source exhaustively, so the claims in
+this chapter can be checked against the code rather than against a summary.
+
+One part of this chapter describes work delivered in the current release and is worth flagging at
+the front, because it corrects a belief a reader would reasonably have formed from everything
+above: **a genuine signature was not, on its own, enough**. The owner's decisions about what the
+system may do are stored as signed entries in an append-only record, and an old, genuinely signed
+entry could be added to that record a second time to resurrect a permission the owner had since
+withdrawn — a revoked phone re-armed as an approver, a halted system un-halted. Nothing was
+forged; the replayed entry carried the owner's real signature. The guard that closes this, and
+the reasoning behind why only one direction of each decision is guarded, is at the end of
+**section 11**, under "Replaying a single signed permission".
 
 ---
 
@@ -132,11 +145,28 @@ below it cannot fail and its green tick therefore means nothing.
 — rated high — in the very signature library this chapter rests on. The project's own version
 ceiling forbade taking the fix, so the gate reported it as advisory and it was written down as
 follow-up work rather than quietly ignored. Raising that ceiling and moving every declaration
-onto the fixed release was then done as its own separate change, which is being delivered now.
-The same run recorded no critical findings and eight high ones, most of them inside the
-third-party agent that this project keeps a copy of rather than in its own code. That is the
-honest shape of the control: **critical stops the line; high is surfaced, tracked and fixed
-deliberately, not suppressed.**
+onto the fixed release was then done as its own separate change, and **that change has now
+landed.** Every first-party declaration of the signature library names the fixed release: the
+engine's requirement, the shared core's, the sovereign side's pinned version, and the input to
+the sovereign lock file. The same run recorded no critical findings and eight high ones, most of
+them inside the third-party agent that this project keeps a copy of rather than in its own code.
+That is the honest shape of the control: **critical stops the line; high is surfaced, tracked and
+fixed deliberately, not suppressed.**
+
+Two qualifications on that, because a briefing that claimed the flaw was simply "gone" would be
+overstating it.
+
+- **The copy of the third-party agent still lags.** The project's own supply-chain document
+  records that the vendored agent's lock file still names an older release of the signature
+  library, along with two other advisory findings. That copy is not what signs anything in this
+  chapter — the signing paths use the first-party declarations — but it is in the tree, and the
+  gate reports it every run rather than hiding it.
+- **A declaration is not an installation.** I checked the two virtual environments on the machine
+  this was written on. The offensive one has the fixed release installed. The sovereign one still
+  had the previous release installed at the time of writing. That is a property of one machine
+  that has not been rebuilt since the change, not of the code — but it is exactly the kind of gap
+  an assessor should check on the host in front of them rather than infer from a requirements
+  file.
 
 ---
 
@@ -147,19 +177,27 @@ that someone might later have to rely on.
 
 | Signed object | What it is, in plain words |
 |---|---|
+| **The engagement authority** | The signed charter that arms a run at all: which hosts are in scope, from when until when, whether destructive actions are permitted, and how many actions the run may take. A run refuses to start on an unsigned or altered one. This is the document that turns "the software is installed" into "the software is permitted to act here". |
 | **Evidence certificate** | One per confirmed weakness. It carries the fingerprint of the exact evidence collected, which automatic test confirmed it, the list of raw files kept, and a plain-language note on how to re-check it. |
 | **Chained record entries and the signed "head"** | The running log of certificates, plus a signed summary that fixes how many entries exist and what the last one was. This is what makes silently rewriting history detectable. |
 | **Usage ledger** | Who ran the tool, when, and what they pointed it at. Every entry is signed and linked to the one before it. |
 | **Execution records** | Every command run through the governed local terminal or the sandbox produces a signed, secret-scrubbed record of what ran. |
-| **Transparency checkpoints and witness counter-signatures** | A public summary of the log's state at a moment in time, and other parties' counter-signatures on it. |
-| **Remediation certificates** | The signed statement that a previously proven weakness is now fixed, re-derived by running the original test again and requiring it to stay silent. |
+| **Permission-kernel action records** | On the owner's side, every single tool invocation the permission kernel decides about — the time, the tool, a fingerprint of its arguments, the permission tier, the decision, who approved, and a fingerprint of the result — written as a record that is both individually signed and chained to the one before it. Section 10 describes the chaining. |
+| **Governance events** | The owner's signed decisions about what the system itself may do, written onto the owner's own record: tripping and clearing the emergency stop, granting and withdrawing an agent's permission to act without asking, switching a physical capability such as gesture or voice control on and off, authorising and revoking a phone as an approver, a host advertising what it is capable of, and opening or closing the sovereign gate the offensive side is designed to pass before it acts. These are the records section 11 describes the replay guard for. Two of them — the host advertisement and that sovereign gate — are record types with no production writer yet; both are noted where they appear below. |
+| **Device request envelopes** | Every request the owner's phone makes to the desktop, and every approval it gives, signed by the phone's own key. There is no shared password on the wire: the signature *is* the authentication. |
+| **Transparency checkpoints and witness counter-signatures** | A public summary of the log's state at a moment in time, and other parties' counter-signatures on it. Three separate signed forms exist and are deliberately kept apart: a producer's signed submission asking a witness to counter-sign, a witness's plain counter-signature, and a witness's counter-signature that also commits to the time it saw the summary. |
+| **Remediation certificates** | The signed statement that a previously proven weakness is now fixed, re-derived by running the original test again and requiring it to stay silent. Three related signed objects sit around it: the fix statement itself, a re-proof certificate produced each time the check is repeated, and a signed freshness challenge that stops an old re-proof being passed off as a recent one. |
 | **Posture certificates** | The signed statement that, over a specific bounded surface, an applicable test had a live channel and did *not* fire. |
 | **Authority-envelope certificates** | The signed statement that the automated operator stayed inside its authorised bounds. |
 | **Owner delegations** | The owner's signed statement that a particular working key is allowed to act in a particular role, for a particular scope, until a particular time. |
 | **Per-action approval tokens** | The owner's signed permission for one specific queued action. |
 | **Destruction authorisations** | The multi-party signed permission for one specific irreversible action. |
-| **Identity attestations and capabilities** | The owner's signed statement of what counts as "the real target", and a signed, narrowable permission slip letting an outside auditor re-run a check legally. |
+| **Identity attestations and capabilities** | The owner's signed statement of what counts as "the real target", and a signed, narrowable permission slip letting an outside auditor re-run a check legally. A third signed object in the same family proves that whoever presents such a slip really is its holder, rather than someone who copied it. |
 | **Detection certificates** | Signed results from the defensive side of the system. |
+| **Call-back receipts** | Some weaknesses can only be shown by making the target reach out to a listener the system controls. When that happens the listener signs a receipt for the connection it received, so the fact that the target called out is provable later from the receipt rather than from an assertion. |
+| **Channel-binding co-signatures** | A separate party's signature tying a captured response to one specific encrypted session, so that a reader does not have to take the producer's word that the target sent those bytes. Section 11 states honestly what this does and does not currently establish. |
+| **The anti-rollback floor and the witness roster** | Two small owner-signed control files: the high-water mark of how far the record has ever got (section 11), and the list of outside witnesses the owner accepts. |
+| **Self-improvement proposals** | When the system proposes a change to its own code, the approval that lets that change merge is a signature over the proposal's content — its target, the change type, and a fingerprint of the patch. Because the signature covers the content and not the whole document, a later status or timestamp change does not invalidate it, and an approval cannot be moved onto a different proposal. |
 | **Dossier manifests** | The list of file fingerprints inside a downloadable evidence package. |
 | **Supply-chain statements** | Signed machine-readable statements about whether a known published flaw in some third-party component actually affects this software. They use two open formats built for that job: **OpenVEX** (short for "Vulnerability Exploitability eXchange" — an agreed way of publishing "this published flaw does / does not actually affect our product"), carried inside a **SCITT**-style signed statement ("Supply Chain Integrity, Transparency and Trust", an internet-standards effort for signed, independently checkable supply-chain claims). One part of the standard's compact binary encoding is deliberately not built; section 11 says so. These statements are about *published flaws in components*; the separate safeguards that control what the software is built from in the first place are in section 1. |
 | **Capability grants** (the code calls them "entitlements") | A signed permission slip saying which of the system's more dangerous capabilities a particular institution may run, on which machines, from which date until which date, and — if the issuer chooses to narrow it that far — under which named operator. Inside the level granted, the issuer may also list a shorter set of specific capabilities, so a grant can be cut to the minimum a job needs. It is signed by the authorised signers named in the deployment's trust list, meeting whatever number that list requires — several signers, not one, in a properly separated deployment. Section 4 explains the whole arrangement and says who holds those keys; section 6 covers what happens if they are lost. |
@@ -171,9 +209,11 @@ A seal that just says "approved" is dangerous. If the same seal is used on passp
 cheques, an approved passport becomes an approved cheque.
 
 The system avoids this by mixing a short fixed **purpose label** into the bytes before
-signing. A signature made for one purpose mathematically cannot verify as another. These
-labels are held in one shared registry so that no two parts of the system can drift into using
-the same label by accident. Ten document types have their own label today:
+signing. A signature made for one purpose mathematically cannot verify as another.
+
+Ten of these labels — the ones that cross the boundary between the two halves of the system, and
+so must never drift into two spellings — are held in **one shared registry**, so that two parts
+of the system cannot independently invent the same label. Those ten are:
 
 - evidence certificates and the signed summaries that cap the record,
 - the owner-side anti-rollback floor (section 11 explains what that is),
@@ -186,15 +226,34 @@ the same label by accident. Ten document types have their own label today:
 - a narrowing of an existing permission slip,
 - proof that the holder of a permission slip really is its holder.
 
-The exact machine-readable label text for each of these is in Appendix A, for an assessor who
-wants to check the code against this list. A general reader does not need it.
+**The shared registry is not the whole population.** Counting every purpose label actually
+present in the source, there are **twenty-four distinct signing labels** and two further labels
+used to separate fingerprints rather than signatures. The other fourteen signing labels are
+declared next to the code that uses them, and each carries a comment naming what it must not be
+confusable with. Appendix A lists all twenty-six exhaustively, with the exact machine-readable
+text of each, so an assessor can check the code against this chapter rather than against a
+sample. A general reader does not need that table; the property it establishes is the whole
+point, and it is one sentence long: *no signature in this system can be lifted out of the
+purpose it was made for.*
 
-The same registry is honest about the places where this labelling is *not* yet applied. The
-offence-side engagement log and the usage ledger sign a plain fingerprint with no purpose
-label; they are kept apart by the fact that the fingerprints of different content are
-different, not by a label. The registry's own notes call a per-purpose label on each of those
-"the natural next hardening". That is an accurate description of a gap, written down by the
-people who built it.
+**Where the labelling is not applied, and what is used instead.** The shared registry is honest
+about this in its own notes rather than leaving it to be discovered. Three surfaces sign
+without a purpose label:
+
+- the offensive engagement log and the usage ledger each sign a plain content fingerprint — a
+  fixed-length string of hexadecimal digits — so what keeps them apart is that the fingerprints of
+  different content are different, not a label;
+- the owner-side governance events sign a canonical rendering of a small structured object,
+  which is a different *shape* from a fingerprint string and therefore cannot be confused with
+  one, but is not separated from other structured objects by a label.
+
+I found one further case the registry does not mention: the manifest inside a downloadable
+evidence package is signed over its own raw bytes, with no purpose label. In practice those bytes
+are a distinctively formatted structured document that no other signing path produces, so the
+same shape argument applies — but it is one more place where separation rests on shape rather
+than on an explicit label. The registry's own notes call adding a per-purpose label to these
+surfaces "the natural next hardening". That is an accurate description of a gap, written down by
+the people who built it.
 
 ---
 
@@ -446,12 +505,17 @@ account that created it open, and which is encrypted at rest once the hardware v
 |---|---|---|---|---|
 | **Owner key** (the root of everything) | Owner-only file under the owner's home directory on the sovereign side (`~/.sigil/spine/keys/`) | The owner's own account on that one machine | Approvals, delegations to every other key, the owner-side record's summary and its anti-rollback floor, governance decisions | The most serious loss. Nothing already signed becomes invalid, but no new delegation or approval can be signed until a new owner key is created — and every party who pinned the old owner key must be given the new one. Recoverable only from the encrypted off-box backup (section 6). |
 | **Record data key** | Owner-only file beside the owner key | The owner's account | Nothing — it is an encryption key, not a signing key. It scrambles the contents of the owner-side record. | The stored record cannot be read back. Included in the off-box backup. |
+| **Permission-kernel key** | A file beside the permission kernel's own action log, under the owner's home directory (`~/.sigil/warden/keys`). Created automatically the first time the kernel opens | The account the kernel runs as | Every action record the permission kernel writes — one per tool invocation — and the signed summary that fixes the log's length | The existing action log can no longer be verified. It is **not** in the off-box backup, so treat the action log as a local audit trail rather than as recoverable evidence. Nothing already published elsewhere is affected. |
+| **Device keys** (the owner's phone, and any other approving device) | On the device itself. The device generates its own key and **never holds the owner key** | Each device separately | Each request that device makes to the desktop, and each approval it gives to a queued action | That device can no longer request or approve anything. The owner revokes it and pairs a replacement. Nothing else is affected. A revocation must itself be owner-signed, but once signed it carries no freshness requirement of any kind, so a lost phone can always be disarmed (section 11). |
 | **Engagement-record key** (called the "spine" key in code) | Owner-only file in the working directory of the offensive engine (`offense-spine.key`) | The account running the offensive engine | The running log of an engagement, the record of every command executed, and defensive detection certificates | The existing engagement log cannot be continued: a new key does not verify the earlier lines of the same log file. Start a fresh engagement and re-issue the owner delegation (section 6). |
 | **Governance key** | Owner-only file in the same working directory (`offense-governance.key`) | The account running the offensive engine | Evidence certificates for confirmed weaknesses, and the engagement's authority record | Already-issued certificates still verify (they are checked against the public half, which travels with the evidence). New certificates need a new key plus a new owner delegation. |
 | **Operator key** | Owner-only file under `~/.vigil/attestation/` | The account running the offensive engine | The usage ledger: who ran the tool, when, against what | The existing usage ledger cannot be extended by the new key. Past entries still verify against the retained public half. |
 | **Approval signing key** | Not stored at all. Printed once when created; the operator keeps it and supplies it through an environment variable (`VIGIL_APPROVAL_OWNER_KEY`) | Whoever the operator gave it to | One queued action at a time | Re-run the provisioning command with the override flag. This rotates the key and voids any approvals signed by the old one. |
 | **Irreversible-action signing keys** (owner plus co-signers) | Not stored. Printed once at creation; the owner's copy is supplied through an environment variable (`VIGIL_DESTRUCTION_OWNER_KEY`), co-signers keep theirs on their own machines | Each holder separately | One irreversible action at a time; several holders must sign | Re-run provisioning and distribute a fresh set. Nothing already done is affected — these authorise a single action each and are single-use. |
 | **Self-witness key for the continuous re-checking log** | Owner-only file in the offensive working directory (`reprove-witness.key`) | The account running that service | Its own counter-signatures on the continuous re-proof log | That log's continuity claim restarts from the new key. |
+| **Witness keys** (one per outside witness) | On each witness's own machine, in an owner-only file it creates on first run and then keeps. A witness that minted a fresh key per request would be worthless, so persistence is deliberate | Each witness operator separately | That witness's counter-signature that a new published summary genuinely continues the previous one it saw — and, in the timed form, the time at which it saw it | That witness drops out of the quorum. If enough drop out that the required number can no longer be met, no new summary can be witnessed until replacements are enrolled. Past counter-signatures still verify. |
+| **Producer submission key** | The producing side, alongside its other working keys | The account running the producer | The producer's own signature on a request asking a witness to counter-sign. It exists so a witness can tell a genuine submission from anything else that reaches its network port, and refuse the rest at the door | New submissions are refused by any witness that pinned the old key, until the new key is distributed. Nothing already witnessed is affected. |
+| **Notary key** | On a notary's machine | The notary operator | A co-signature tying a captured response to one specific encrypted session — the mechanism that is meant to let a reader stop trusting the producer's report of the wire | The independent leg of that evidence is lost; the rest of the evidence package is unaffected. Section 11 states honestly that today the shipped notary is software this system runs, so this key does not yet establish independence. |
 | **Capability-grant signing keys** ("authorisers") | Deliberately **not** on any machine that runs the system. The project's own guidance calls them "the institution's crown jewels" and says they belong on a separate issuing machine, ideally inside a dedicated sealed key device that performs signatures without ever revealing the key | The issuing institution only | Capability grants and revocation lists (section 2) | New grants cannot be issued until enough authorisers are restored or replaced, and the trust list on each deployment has to be re-provisioned. Existing unexpired grants keep working. |
 | **Capability trust list** (public, not a secret — listed here because losing it matters) | A small file in the deployment's own permission folder, which can be pointed at a read-only mount or a separately protected path | Written by the operator at set-up; readable by the account running the engine | Nothing. It is the list of authorisers the deployment recognises, and the number of them that must agree. Everything else about capability grants is measured against it | Deleting it does not break any signature — but it switches capability enforcement **off** unless the deployment's enforcement setting is explicitly pinned on. Re-install it from the institution's copy. A damaged file, unlike a missing one, denies every gated function. |
 | **Sealed master key** (the key that encrypts all the above at rest) | Never on disk in usable form. Sealed inside the machine's hardware security chip; only two scrambled files, useless anywhere else, sit on disk | Nobody — it can only be used, on that one machine, through the chip | Nothing. It is an encryption key. | Everything it sealed becomes unreadable on that machine (that is the point). Recovery is from the off-box backup, which is encrypted under a passphrase instead. See section 6. |
@@ -466,6 +530,65 @@ Two observations worth drawing out of that table:
 - **Only two keys have no recovery path other than the off-box backup**: the owner key and the
   master key that seals things to one machine. Everything else can be regenerated and
   re-blessed by the owner.
+- **The backup does not cover everything, and the table shows which.** The permission kernel's
+  own key — the one signing the log of every tool invocation — is not in it, and neither are the
+  three offensive working keys. Losing any of those costs the continuity of a local log, not any
+  published evidence. Section 6.2 states the boundary in full.
+
+### Every stored secret is sealed under its own purpose
+
+Section 5 explains that one master key wraps everything held at rest. That is not the whole
+arrangement. Each stored secret is also bound, at the moment it is sealed, to a short label
+naming *which* secret it is. The label is folded into the mathematics of the sealing, so a blob
+sealed as one thing cannot be opened as another even with the correct master key. An attacker who
+could swap two files on disk therefore cannot make the system read the operator's key where it
+expects the governance key; the swap simply fails to open.
+
+Nine such labels exist in the source, one for each thing the system holds at rest:
+
+| Sealed item | Kept where |
+|---|---|
+| The owner private key | Sovereign side |
+| The key that encrypts the owner-side record | Sovereign side |
+| Individual fields inside that record | Sovereign side |
+| Service credentials such as an API key | Sovereign side |
+| The whole encrypted off-machine backup | Wherever the operator puts it |
+| The offensive engagement-record key | Offensive side |
+| The offensive governance key | Offensive side |
+| The operator key | Offensive side |
+| The self-witness key for the continuous re-checking log | Offensive side |
+
+The comments in the source say why each label is distinct in almost identical words each time:
+"a blob sealed here can never be opened as another secret". It is the same discipline as the
+purpose labels on signatures in section 2, applied to storage instead of to signing.
+
+### How an outsider checks each signed thing
+
+The point of all of this is that someone who does not work for the operator can check the claims.
+The table below says, for each signed object, what an outside checker needs and what performs the
+check. "Public keys only" means no private key of any kind is required.
+
+| Signed object | What an outsider needs | What performs the check |
+|---|---|---|
+| Evidence certificate | The evidence package, the trust-root fingerprint received separately (section 9), and public keys only | The standalone checker `verify_pcf.py`, which imports none of this system's code. Or the system's own `verify_certificate`, which additionally re-runs the original test |
+| Chained record entries and the signed head | The saved chain files and public keys only | The same standalone checker, or the system's own bundle verifier |
+| Owner-side personal record | The record files and the owner public key | The sovereign side's own `sigil verify` |
+| Offensive engagement record | The saved record, the owner public key, and the owner-signed delegation naming the working key | `vigil verify`, which derives the key it trusts from the delegation rather than being handed one |
+| Engine reasoning chain | Two small saved files plus the owner-signed delegation | The same command's blackboard check, which reads only those files and public keys — no database, no engine |
+| Usage ledger | The ledger file and the retained operator public key | `vigil verify-ledger`. Honestly noted: this one is **not** tied back to the owner today |
+| Continuous re-proof log | The log, its signed summary, and trust anchors the checker pins itself | Its own verifier. Also not owner-tied today; the anchors must be supplied out of band |
+| Remediation and re-proof certificates | The fix-lifecycle package and public keys only | The standalone checker `verify_vf.py`, again importing none of this system's code |
+| Permission-kernel action records | The action log and the kernel's recorded public key | The kernel's own verify routine |
+| Transparency checkpoints | The published summaries and each witness's public key | `verify_witnessed` for "a quorum signed", and a separate `verify_split_view_resistant` for the stronger claim — deliberately two functions, so a caller must state which claim it is making |
+| Channel-binding co-signature | The captured response and the notary public key, pinned out of band | `verify_channel_binding_evidence` |
+| Capability grants and revocation lists | The grant, the list, and the deployment's trust list | The engine's own gate, which runs the checks in the fixed order given earlier in this section |
+| Dossier manifest | The downloaded package | Recompute each file's fingerprint against the manifest, then check the signatures against the trust root the package carries — and compare that trust root's fingerprint against the one received separately |
+
+**The one thing no standalone checker does** is re-run the original automatic test. That needs the
+test's own code, which lives inside the engine. So an outsider working with the standalone
+checkers alone establishes origin, integrity, binding and chain continuity; reproducing the
+finding itself requires the software. Both standalone files say this in their own opening
+comments rather than letting a reader assume otherwise.
 
 ---
 
@@ -630,6 +753,9 @@ Three honest limits on the backup:
 | **The owner key**, with a backup available | Everything already signed still verifies | Restore the backup onto the replacement machine, then run the verification command against the restored copy to confirm the recovered owner signature. |
 | **The owner key**, with no backup | Everything already signed still verifies, forever, against the old public key | There is no recovery path. A new owner identity must be created; every party who pinned the old owner key must be given the new one out of band; and every delegation must be re-issued. Be aware of one sharp edge: the software does not treat a missing owner key as an error — the next owner-signing command simply creates a new one. Nothing announces "the owner key is gone", so an operator can rotate their own trust root by accident. Keeping the backup is the guard against this. |
 | **The machine, or the TPM chip in it** | Everything already published still verifies | The sealed copies on that disk are permanently unreadable, by design. Restore the off-box backup onto the new machine. Without a backup, the record and the owner key are gone; published evidence is unaffected. |
+| **The permission kernel's own key** | Everything already published elsewhere still verifies | The kernel creates a fresh one automatically the next time it opens. The existing action log cannot be verified under it, and there is no backup — that log is a local audit trail. If it matters to you as evidence, archive it before this can happen, and note the log's length and last fingerprint somewhere outside the machine. |
+| **A device key** (a lost or stolen phone) | Everything else is unaffected | Revoke the device on the owner's side, then pair a replacement. The revocation is honoured from the moment it is written; the desktop bridge recomputes the authorised set on every single request rather than caching it, so a revoke bites immediately rather than at the next restart. |
+| **A witness key** | Every counter-signature that witness already gave still verifies | Enrol a replacement witness and re-publish the roster. If losses take the set below the required number, no new summary can be witnessed until that is fixed — which is the intended behaviour of a several-must-sign scheme. |
 | **The engagement-record key** | Everything already signed still verifies | Generate a fresh one (it is created automatically when absent), export its public half, and have the owner re-issue the delegation. Do not try to continue the old engagement's log with a new key — the earlier lines of that file will not verify under it. Start a new engagement. |
 | **The governance key** | Every previously issued evidence certificate still verifies | Generate a fresh one, export its public half, have the owner re-issue the delegation, and publish the new key-list fingerprint alongside the old one. |
 | **An approval or irreversible-action signing key** | Nothing already done is affected | Re-run the relevant provisioning command and distribute the new keys. Approvals signed by the old key stop being accepted; that is the intended effect. |
@@ -994,6 +1120,12 @@ inconvenient finding was recorded. They replace today's log with the older, shor
 signed version and replace today's summary with the older, genuinely signed summary. Every
 signature checks out. The record has been silently rewound.
 
+The same weakness has a second, sharper form: instead of rewinding the whole record, replay one
+old signed *permission* into an otherwise honest record. That form, and the guard added for it,
+are covered at the end of this section under "Replaying a single signed permission". A reader
+short of time should go there first, because it is the form that affects who is allowed to do
+what, rather than what is on file.
+
 ### Defence one: a durable floor
 
 The system keeps a small **high-water floor** file recording the highest state the record has
@@ -1126,6 +1258,135 @@ tension. The safe reading, and the one consistent with both, is: **the mechanism
 independence it would provide is not established until a third-party authority is
 configured.**
 
+### Replaying a single signed permission
+
+Everything above concerns the *record* being rewound. This concerns a *permission* being
+resurrected, and it is the more consequential of the two, because it changes what the system is
+allowed to do rather than what it has written down. It was closed by a change delivered in this
+release.
+
+**How the owner's decisions are stored.** The owner's side does not keep a settings file saying
+what is currently switched on. It keeps an append-only record, and each of the owner's decisions
+is a signed entry in it. To find out whether the emergency stop is currently tripped, or whether a
+particular agent is currently allowed to act without asking, the system reads that record from the
+beginning and applies each verified entry in turn. The last valid entry wins. This is the right
+design: there is no separate settings file for an attacker to edit, every decision is signed, and
+the whole history of who allowed what and when is preserved and tamper-evident.
+
+**Why a genuine signature was not enough.** A signature answers "who wrote this". It does not
+answer "when does this count" or "how many times does this count". Consider the sequence a
+security officer would expect to be safe:
+
+1. The owner authorises the phone as an approver. That is a genuine, owner-signed entry.
+2. Months later, the phone is lost. The owner revokes it. That is another genuine, owner-signed
+   entry, and after it the phone approves nothing.
+
+Now suppose someone who can append to that record — not forge a signature, merely add a line —
+kept a copy of step 1. They append those exact bytes again, unchanged. Every check the system had
+passes. The signature is real, because it *is* the owner's real signature. The record's internal
+chain of fingerprints extends cleanly, because a genuine new line has genuinely been added. And
+the reading rule says the last valid entry wins — so the phone is authorised again.
+
+Three plausible-sounding fixes do not work, and the source explains each:
+
+- **Refusing a signature seen before** fails, because the signature method used here is
+  deterministic. If the owner legitimately grants, revokes, and grants again, the second genuine
+  grant produces byte-for-byte the same signature as the first. A duplicate filter would swallow a
+  real decision.
+- **Using the entry's position in the record** fails, because the position is assigned when the
+  line is appended, after signing. A replayed line simply receives a fresh, higher position.
+- **Reading a clock inside the checking code** fails for a subtler reason. A timestamp the
+  checking module generates itself is a timestamp an attacker replaying that module's own output
+  can rely on. The authority over "when" has to sit with whoever holds the owner key.
+
+**What was changed.** Each of these decisions now carries an issue time *inside the signed part*
+of the entry — not beside it, where it could be re-stamped without breaking the signature. And the
+reading rule now keeps a high-water mark: for each thing being decided about, it remembers the
+highest issue time it has ever honoured. An entry counts only if its issue time is strictly higher
+than that mark, and honouring one raises the mark past it, so an entry cannot even be replayed
+against itself.
+
+The issue time is supplied by whoever holds the owner key, not read by the module. On the command
+line, the operator's own terminal stamps it. In the web interface, the *server* stamps it, and the
+source says exactly why it is not taken from the browser: a caller-chosen value could be set
+absurdly far in the future, which would pin the high-water mark so high that the owner could never
+issue a real decision again, or absurdly low, which would render the guard useless.
+
+**Which decisions are covered.** Five kinds of record gained the guard in this change. A sixth —
+the sovereign gate the offensive side is designed to pass before it acts — already had it, and was
+the pattern the other five were built to match. That sixth carries the same honest note as the host
+advertisement above: it is built, tested and guarded, and it has no caller in the shipped commands
+or interfaces, so it is a record type the system knows how to write and read safely and does not
+write in normal operation. Chapter 14 sets out what the offensive side does pass instead.
+
+| Decision record | What a replay would have resurrected |
+|---|---|
+| Clearing the emergency stop | A halted system, un-halted |
+| Granting an agent permission to act without asking | A withdrawn permission, restored |
+| Switching a physical capability on — gesture control, voice control, or the drafting of proposed lessons | A capability the owner had switched off, back on |
+| Authorising a device as an approver | A lost, stolen or sold phone, re-armed as a full approver |
+| A host advertising what it is capable of | Capabilities a machine had truthfully given up — including the ability to drive keyboard and mouse input, and to stream a camera — reinstated |
+
+The device row is the one to lead with in a briefing. That single list of authorised devices is
+what six separate parts of the system consult before accepting an approval — the source names
+them: the approval queue itself, the gesture remote-arm path, the desktop bridge, the automated
+actor gate, the operator gate, and the outbound-data gate. Reading the tree I found a seventh, the
+gate on accepting a proposed lesson into the system's own knowledge. One replayed line would have
+re-armed a revoked phone across all of them at once.
+
+**Only the dangerous direction is guarded, and that is deliberate.** Tripping the emergency stop,
+withdrawing an agent's permission, switching a capability off, and revoking a device are the
+*safe* directions. Those carry a fixed issue time and are subject to no freshness test at all.
+Two of them go further and are honoured even without a valid signature — tripping the emergency
+stop, and switching a capability off — on the same reasoning: a forged halt is at worst a
+nuisance, while a halt that fails to land is a real loss of control. The other two, withdrawing an
+agent's permission and revoking a device, do still require the owner's signature; the source notes
+that difference rather than treating the four as one rule. The reasoning behind all of this is
+worth stating plainly to an official, because it looks
+at first like an omission: if a revocation had to be fresher than everything before it, then a
+revocation issued from a machine with a lagging clock would be silently ignored — and a security
+control that can fail to switch something *off* is far worse than one that can be replayed to
+switch something off twice. Replaying a revocation merely revokes an already-revoked thing.
+Guarding a fail-safe direction would convert it into a fail-open one.
+
+One row does not follow that pattern, and the source explains why: a host advertising its own
+capabilities has no safe direction, because an advertisement is the only kind of entry there is.
+So every advertisement is checked for freshness.
+
+Two honest notes on that last row. First, the guard is real code with real tests, but the
+advertisement function has **no caller in the shipped commands or interfaces** — the only callers
+anywhere in the source are its own tests. So it is a record type the system knows how
+to write and how to read safely, and does not currently write in normal operation. Second, the
+capabilities it would resurrect are not trivial ones: they include the ability to drive keyboard
+and mouse input on a machine, and to stream its camera. Guarding the record before it has a
+production writer is the right order to do things in, and it should be described that way rather
+than as a defence in daily use.
+
+**Fail-closed against a signed but nonsensical value.** The owner can sign any number, including a
+malformed or infinite one. The parser that reads the issue time treats anything unparseable, and
+anything not a finite number, as the lowest possible value. The source names the specific danger
+this avoids, and it is a good illustration of how a guard can be turned into its opposite: a
+"not-a-number" value stored as the high-water mark would make every subsequent comparison against
+it false, so *every* later replay would be accepted. An infinite value would do the reverse and
+permanently brick the ability to issue a real decision. Both are mapped to the bottom instead, so
+such an entry is honoured at most once and then blocks its own replay.
+
+**One detail that shows the guard was checked against the rest of the system.** There is separate,
+partly-built work to *prune* the record — archiving old entries away and replacing them with a
+folded summary of what they established, so the file does not grow without bound. That summary now
+carries the high-water marks. Had it not, the first prune would have reset every mark to zero and
+made every archived permission replayable again: the guard would have been silently undone by
+unrelated housekeeping. The comment saying so appears at each of the five sites. Worth noting for
+accuracy: the pruning machinery is present but the shipped version prunes nothing, so this is a
+gap closed before it could open rather than one closed after the fact.
+
+**Status.** Built and covered by its own test suite, which I ran: 67 tests, all passing. The
+guard is enforced in the reading path, which is the path every decision goes through, so it is
+active for any deployment running this version. What it protects against is an attacker who can
+*append* to the owner's record — for instance a compromised component with write access to it —
+not one who has the owner's private key. Someone holding the owner key does not need to replay
+anything; they can sign a fresh decision.
+
 ### Deferred by name
 
 Anchoring a checkpoint fingerprint into the Bitcoin blockchain via OpenTimestamps is designed
@@ -1141,19 +1402,21 @@ governance root plus witnesses, which the project describes in-repo as stronger.
 |---|---|
 | Ed25519 signing and verification through a standard maintained library | **Fully working.** |
 | Rejection of weak and non-standard public keys | **Fully working**, with a documented adversarial-review origin. |
-| Purpose labels preventing a signature being reused across contexts | **Working** for the ten labelled document types; explicitly **not yet applied** to the offensive engagement record and usage ledger, which the registry names as the next hardening. |
+| Purpose labels preventing a signature being reused across contexts | **Working** for twenty-four distinct signing purposes, ten of them held in a shared registry and the rest declared beside the code that uses them (Appendix A lists all of them). Explicitly **not applied** to three surfaces — the offensive engagement record, the usage ledger and the owner-side governance events — which the registry names as the next hardening, plus the evidence-package manifest, which it does not name. On all four, separation rests on the shape of what is signed rather than on a label. |
+| Anti-replay guard on the owner's signed decisions | **Working**, delivered in this release. Five kinds of decision record gained an issue time inside the signed part and a per-item high-water mark; a sixth already had one. Only the dangerous direction is guarded, deliberately. Covered by its own test suite, which I ran: 67 tests, all passing. It defends against an attacker who can append to the owner's record, not against one holding the owner's private key. |
+| Permission-kernel action log: every tool invocation individually signed and chained | **Working.** Present and populated on the machine this was written on. Its key is **not** included in the off-box backup, so treat the action log as a local audit trail rather than as recoverable evidence. |
 | Evidence certificates: authenticity, binding, file integrity, reproduction, claim grounding, known shape | **Fully working.** |
-| Chained record with signed head; detection of deletion, reorder, alteration, truncation, suppression, injection | **Fully working.** |
+| Chained record with signed head; detection of deletion, reorder, alteration, truncation, suppression, injection | **Fully working as a mechanism.** Not exercised on the owner's own record here: on the machine this was written on the chain links cleanly over sixteen entries, but nothing has signed a head, so on that host growth and truncation are not yet distinguishable. Signing one is a single operator command. |
 | Standalone offline checkers with no dependency on this system | **Fully working**, with the honest exception that they cannot re-run the original test. |
 | Out-of-band trust-root pinning, refusing a self-supplied trust root | **Fully working**, including a deliberately non-green "unpinned" state in the interface. |
 | Owner delegation ceremony tying working keys back to the owner | **Working**, with a human step (authenticating the identity file) that is stated, not hidden. |
 | Per-action owner approval: action-bound, key-pinned, time-bounded, single-use | **Fully working.** |
 | Several-must-approve gate for irreversible actions | **Built and tested; not yet fired in the field.** Live use awaits operator-provisioned quorum keys and a repository token. |
-| Encryption of keys at rest under a hardware-sealed master key | **Working where a TPM is present and set up**; falls back to owner-only unencrypted files with a loud warning where it is not. Not verified on any specific deployment host. |
+| Encryption of keys at rest under a hardware-sealed master key | **Built and fail-closed. Not active on the machine this was written on.** The TPM chip is present, but the standard command-line tools that reach it are not installed, so no master key has been provisioned and no sealed store exists. The owner private key on that host is 44 bytes of plaintext behind file permissions only — owner-read-only, in an owner-only directory. This is exactly the posture the code documents as the default before the vault is set up, and it reports the unsealed state rather than hiding it. Nothing here is a defect in the software; it is a one-time operator setup step that has not been performed on this host. **Do not describe at-rest encryption as active in this deployment.** |
 | Signed, host-bound, expiring capability grants gating the most dangerous functions | **Working**, and honestly bounded: enforcement switches on once a deployment provisions a trust list of authorised signers. With no trust list provisioned the deployment is "ungoverned" — the baseline runs, gated functions are permitted, and every such grant is logged as a warning. A government deployment should provision the trust list; an assessor should check that it has. |
 | Binding a capability grant to particular machines, and optionally to a named operator | **Working.** A gated function is refused when the running machine cannot present an identifier the grant was bound to. The software does not itself measure the hardware: it consumes an attested identity the deployment supplies, and falls back to the machine's installation identifier or, weakest, its hostname. How strong that binding really is depends on which of the three a deployment relies on. |
 | Withdrawing a capability grant before it expires | **Working** — a signed revocation list, protected against an older list being replayed over a newer one, and a grant may be issued so that a missing list denies it outright. Two honest limits: the issuing institution must deliver the new list to the deployment (nothing fetches it), and the decision is re-evaluated when the software next starts, not mid-run. |
-| Build and release safeguards: exact-version and fingerprint locking of every third-party package, content-pinned base images, a generated parts list checked back against the lock, and a gate that blocks on critical published flaws | **Working and part of the released software**, enforced automatically on every proposed change, with a deliberately planted failing case run first to prove the gate can still refuse. Honestly bounded: it blocks on **critical** findings only. High findings are reported and tracked rather than suppressed — including one in this chapter's own signature library, whose fix is being delivered now. |
+| Build and release safeguards: exact-version and fingerprint locking of every third-party package, content-pinned base images, a generated parts list checked back against the lock, and a gate that blocks on critical published flaws | **Working and part of the released software**, enforced automatically on every proposed change, with a deliberately planted failing case run first to prove the gate can still refuse. Honestly bounded: it blocks on **critical** findings only. High findings are reported and tracked rather than suppressed — including one in this chapter's own signature library, whose fix **has now been delivered** across every first-party declaration. Two residuals, both stated rather than smoothed over: the vendored copy of the third-party agent still names an older release, and on the machine this was written on the sovereign virtual environment had not yet been rebuilt onto the fixed one. |
 | Encrypted, signed, off-machine backup of the owner key and the owner-side record | **Working**, verified before anything is written on restore. It is a manual command — **nothing schedules it**. |
 | Key escrow or a vendor-held recovery copy | **Does not exist, by design.** The backup and its passphrase are the only recovery path. |
 | Documented replacement procedure for each key | **Supported by the commands described in section 6.4**; the owner key has no rotation command and is replaced by re-issuing every delegation from a new identity. |
@@ -1212,7 +1475,28 @@ a deployment rather than about code:
 15. **Ask separately about the build.** Which version of the signature library is installed
     here; does your build refuse a change that carries a critical published flaw; and can you
     show a run where that gate actually refused something? A gate that has never refused
-    anything and a gate that cannot refuse anything look identical from the outside.
+    anything and a gate that cannot refuse anything look identical from the outside. Ask for the
+    *installed* version on this host, not the version named in a requirements file — the two can
+    differ on a machine that has not been rebuilt, and on the machine this chapter was written on
+    they did.
+16. **Who or what can append to the owner's record, other than the owner?** The replay guard of
+    section 11 exists because appending is a weaker capability than signing, and a genuine
+    signature does not on its own establish that an entry still counts. Ask which components hold
+    write access to that record, and treat each of them as part of the trusted base.
+17. **Are the clocks on the machines that issue owner decisions correct and monotonic?** The
+    freshness value that makes the replay guard work is supplied by whoever holds the owner key,
+    from that machine's clock. A clock that jumps backwards on the issuing machine will cause a
+    legitimate later decision to be refused as stale until the clock catches up. This is a
+    fail-safe direction — a refusal, not a false approval — but an operator should know it can
+    happen, and should not be surprised into thinking the system is broken.
+18. **Is your permission-kernel action log part of your backup and retention plan?** It is
+    individually signed and chained, and it is the record of every tool invocation. It is
+    deliberately *not* in the encrypted off-box backup, so if it matters to you as evidence, you
+    have to archive it yourself.
+19. **Where does the evidence for a completed engagement live once the engagement is over?** The
+    off-box backup covers the owner's side. Finished evidence packages are ordinary files and are
+    the operator's to archive, the way any other case record would be. Ask to see where they go
+    and how long they are kept.
 
 ---
 
@@ -1220,8 +1504,14 @@ a deployment rather than about code:
 
 Section 2 explains why every signature carries a short fixed label naming what it is for, so
 that a signature made for one purpose can never be accepted as another. A general reader does
-not need this table. It is here so that an assessor can check the list in section 2 against the
-code, where these labels are held in one shared registry.
+not need these tables. They are here so that an assessor can check the claims in section 2
+against the code, exhaustively rather than against a sample. Every label below was read out of
+the source; none is inferred from documentation.
+
+### A.1 The ten held in the shared registry
+
+These are the labels that cross the boundary between the two halves of the system, and are
+therefore kept in one place so the two halves cannot drift into two spellings of one purpose.
 
 | Purpose label in the code | What it seals |
 |---|---|
@@ -1236,7 +1526,64 @@ code, where these labels are held in one shared registry.
 | `vigil-capability-attenuation-v1` | A narrowing of an existing permission slip |
 | `vigil-capability-wielder-pop-v1` | Proof that the holder of a permission slip really is its holder |
 
-The registry also records, in the same place, the two records that carry **no** such label
-today — the offensive engagement record and the usage ledger — and calls adding one "the
-natural next hardening". Section 2 states that gap in the body text rather than leaving it to
-this appendix.
+### A.2 The fourteen declared beside the code that uses them
+
+Each of these is declared next to its own use, and each carries a comment naming what it must
+not be confusable with.
+
+| Purpose label in the code | What it seals |
+|---|---|
+| `crucible-authority-v1` | The signed engagement authority — scope, dates, budget, whether destructive actions are permitted |
+| `crucible-entitlement-v1` | A capability grant: which of the dangerous functions an institution may run, on which machines, until when |
+| `crucible-revocation-v1` | The signed list of capability grants that have been withdrawn |
+| `crucible-proposal-v1` | An approval of a proposed change to the system's own code, signed over the proposal's content |
+| `vigil-peraction-approval-v1` | The owner's permission for one specific queued action |
+| `vigil-oob-receipt-v1` | A receipt for a connection the target made to a listener the system controls |
+| `vigil-zktls-channel-binding-v1` | A notary's co-signature tying captured bytes to one encrypted session |
+| `vigil-authority-envelope-v1` | The statement that the automated operator stayed inside its bounds |
+| `vigil-remediation-cert-v2` | The certificate that a proven weakness is now fixed |
+| `vigil-remediation-prove-cert-v1` | One re-proof that the fix still holds |
+| `vigil-remediation-freshness-challenge-v1` | The challenge that stops an old re-proof being passed off as recent |
+| `vigil-attestation-witness-time-v1` | A witness counter-signature that also commits to the time it observed the summary — deliberately distinct from the plain counter-signature above, so a timeless one can never be presented as a timed one |
+| `vigil-witness-producer-submit-v1` | The producer's own signature on a request asking a witness to counter-sign |
+| `vigil-remediation-v1` | The fix oracle's signed statement that the original test stayed silent against the patched build |
+
+### A.3 Two further labels that separate fingerprints rather than signatures
+
+These are not signing labels. They are mixed into a fingerprint so that the result is not a bare
+hash of a secret — a bare hash of a low-entropy secret could be confirmed by guessing — and so
+that fingerprints belonging to two different capabilities can never collide even for identical
+input.
+
+| Label in the code | What it separates |
+|---|---|
+| `vigil.e1.imds.credential-fingerprint.v1` | The fingerprint binding a captured cloud instance credential to the call that proved it usable |
+| `vigil.e5.secret.credential-fingerprint.v1` | The fingerprint binding a captured exposed secret to the call that proved it valid |
+
+### A.4 The at-rest sealing labels
+
+Section 4 explains that each stored secret is bound to a label naming which secret it is, so a
+blob sealed as one thing cannot be opened as another. All sealing shares one outer domain,
+`vigil-core/sealing/v1`, with these nine per-item labels folded in beneath it.
+
+| Label in the code | What it binds |
+|---|---|
+| `sigil/owner.priv` | The owner private key |
+| `sigil/spine.dek` | The key that encrypts the owner-side record |
+| `sigil/spine-field/v1` | Individual fields inside that record |
+| `sigil/secrets.kv` | Service credentials, such as an API key |
+| `sigil/backup/v1` | The encrypted off-machine backup |
+| `vigil/offense-spine.key` | The offensive engagement-record key |
+| `vigil/offense-governance.key` | The offensive governance key |
+| `vigil/operator.key` | The operator key behind the usage ledger |
+| `vigil-reprove-self-witness-v1` | The self-witness key for the continuous re-checking log |
+
+### A.5 What carries no label
+
+For completeness, the four signing surfaces that carry no purpose label, restating section 2:
+the offensive engagement record, the usage ledger, the owner-side governance events, and the
+manifest inside a downloadable evidence package. The first three are named as a gap by the
+registry itself, which calls closing them "the natural next hardening". The fourth I found by
+reading the code and did not find named anywhere as a gap. On all four, what keeps signatures
+apart is the shape of what is signed — a fixed-length fingerprint string, or a structured object
+of a particular form — rather than an explicit label.

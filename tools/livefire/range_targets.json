@@ -1,0 +1,133 @@
+{
+  "schema": 1,
+  "_comment": [
+    "THE VIGIL LOOPBACK RANGE — the one place target facts are written down.",
+    "",
+    "Both halves of the range read this file: tools/livefire/range.sh drives docker from it, and",
+    "tools/livefire/range_targets.py exposes it to the Python harness. Neither hardcodes a port, an",
+    "image or a probe, so the shell and the harness cannot drift apart — a port changed here changes",
+    "in both at once, and there is no second copy to forget.",
+    "",
+    "LOOPBACK. No entry names a host address, and none can: ports are plain integers, and the only",
+    "code that turns them into a docker publish flag hardcodes 127.0.0.1 (range_targets.py,",
+    "publish_args). The binding is then re-asserted from docker's own view of the container and from",
+    "the host's listening sockets after start. See the charter's hard limits.",
+    "",
+    "PINNING. Every image carries tag AND digest. A tag is a mutable pointer; a range whose targets",
+    "can be retagged underneath it makes every result it produced unreproducible. Digests below were",
+    "resolved on 2026-08-13 and verified against the local daemon's RepoDigests. Re-resolve with:",
+    "  docker pull IMAGE:TAG && docker inspect --format '{{index .RepoDigests 0}}' IMAGE:TAG",
+    "matching the convention in infra/supply-chain/ and vendor/strix/containers/Dockerfile."
+  ],
+
+  "loopback_host": "127.0.0.1",
+  "container_prefix": "vigil-range-",
+  "container_label": "vigil.range=1",
+  "network": "vigil-range",
+
+  "targets": {
+    "vulnapp": {
+      "kind": "process",
+      "title": "VIGIL loopback vulnapp (stdlib, no image)",
+      "script": "infra/loopback/vulnapp.py",
+      "ports": [{ "name": "http", "host": 19006, "container": 19006 }],
+      "ready": { "port": "http", "path": "/", "status": 200, "marker": "VIGIL loopback target" },
+      "seed": null,
+      "weakness_probe": "vulnapp_sqli_differential",
+      "credentials": null,
+      "notes": "The repository's own target. No docker, no pull — useful when the point is to test a driver rather than an image."
+    },
+
+    "juice": {
+      "kind": "container",
+      "title": "OWASP Juice Shop",
+      "image": "bkimminich/juice-shop:v20.2.0@sha256:8739101ade29358abb5469ee66ae78e582c97ed0a5543a4ad102e5fa5193526b",
+      "ports": [{ "name": "http", "host": 19000, "container": 3000 }],
+      "ready": {
+        "port": "http",
+        "path": "/rest/admin/application-version",
+        "status": 200,
+        "marker": "\"version\":\"20.2.0\""
+      },
+      "seed": null,
+      "weakness_probe": "juice_sqli_differential",
+      "credentials": null,
+      "notes": "The readiness marker asserts the version the digest is supposed to deliver, so a mis-pinned or substituted image fails to come up rather than quietly serving something else."
+    },
+
+    "dvwa": {
+      "kind": "container",
+      "title": "Damn Vulnerable Web Application",
+      "image": "vulnerables/web-dvwa:latest@sha256:dae203fe11646a86937bf04db0079adef295f426da68a92b40e3b181f337daa7",
+      "ports": [{ "name": "http", "host": 19001, "container": 80 }],
+      "ready": {
+        "port": "http",
+        "path": "/login.php",
+        "status": 200,
+        "marker": "Damn Vulnerable Web Application"
+      },
+      "seed": "dvwa_setup",
+      "weakness_probe": "dvwa_sqli_differential",
+      "credentials": { "username": "admin", "password": "password" },
+      "notes": "Ships with an empty database: every login redirects to setup.php until the schema is created, so the seed is what makes this a target rather than a setup page. Security level defaults to 'low' in this image, and DVWA reads it from the 'security' cookie, so a driver should send 'security=low' alongside its session cookie."
+    },
+
+    "webgoat": {
+      "kind": "container",
+      "title": "OWASP WebGoat (+ WebWolf)",
+      "image": "webgoat/webgoat:v2025.3@sha256:3101bd9e7bcfe122d7ef91e690ef3720de36cc4e86b3d06763a1ddf2e2751a4b",
+      "ports": [
+        { "name": "http", "host": 19002, "container": 8080 },
+        { "name": "webwolf", "host": 19003, "container": 9090 }
+      ],
+      "ready": { "port": "http", "path": "/WebGoat/login", "status": 200, "marker": "WebGoat" },
+      "seed": null,
+      "weakness_probe": null,
+      "weakness_probe_note": "Not probed. WebGoat's weaknesses live behind per-lesson state that only exists after registering a user and starting that lesson, so any single unauthenticated request would prove nothing about them. The range brings WebGoat up and asserts it answers; it does not claim to have demonstrated a weakness in it.",
+      "credentials": null,
+      "notes": "Serves on two ports: WebGoat itself and the WebWolf companion (at /WebWolf). The image's own entrypoint passes --server.address 0.0.0.0, which is the address INSIDE the container's own namespace; the host publish is loopback-only and is asserted after start."
+    },
+
+    "mutillidae": {
+      "kind": "container",
+      "title": "OWASP Mutillidae II (NOWASP)",
+      "image": "citizenstig/nowasp:latest@sha256:8bf6f283163bbc269ccfff513e4a06776325cb4957f683df9edd4ab98c6966de",
+      "ports": [{ "name": "http", "host": 19004, "container": 80 }],
+      "ready": { "port": "http", "path": "/index.php", "status": 200, "marker": "Mutillidae" },
+      "seed": "mutillidae_setup",
+      "weakness_probe": "mutillidae_sqli_error",
+      "credentials": null,
+      "notes": "Redirects every request to database-offline.php until its schema is built, so the seed is required before it is a target at all."
+    },
+
+    "vampi": {
+      "kind": "container",
+      "title": "VAmPI — vulnerable REST API",
+      "image": "erev0s/vampi:latest@sha256:0a5a224b6e14ae7da6a6ea265178ff71286ff903aec74adee98f660bb0e4ca12",
+      "ports": [{ "name": "http", "host": 19005, "container": 5000 }],
+      "ready": { "port": "http", "path": "/", "status": 200, "marker": "VAmPI" },
+      "seed": "vampi_createdb",
+      "weakness_probe": "vampi_debug_exposure",
+      "credentials": null,
+      "notes": "Answers immediately but with an empty user table; the seed populates it. A JSON API, so it is the target to point API-shaped tool drivers at."
+    }
+  },
+
+  "source_range": {
+    "generator": "tools/livefire/range_source.py",
+    "trees": {
+      "vulnerable": {
+        "fingerprint": "d8ea567add907f6008ad5e6e364e5cfb884c2323f0a09495df4ffea3c60e59f4",
+        "expect": "findings",
+        "note": "Deliberate weakness patterns (CWE-89/78/95/22/502/327/338/208/120/242/79) plus fabricated credentials in the shapes secret scanners match."
+      },
+      "clean": {
+        "fingerprint": "b31e49023acb2be7e4659fcb8be7594881ede82be48757e09fda04c4f0ca94df",
+        "expect": "silence",
+        "note": "The negative control. The same application written safely, with no credentials at all. Anything reported here is a false positive."
+      }
+    },
+    "fingerprint_note": "Content id = SHA-256 over path\\0mode\\0sha256(bytes) for every file, sorted. Re-checked on every generation, so an edit to the generator cannot silently change the corpus that tool drivers were scored against. If you intend to change it, re-record with: python3 tools/livefire/range_source.py --fingerprint",
+    "trufflehog_note": "Run secret scanners with verification DISABLED (trufflehog --no-verification). The planted credentials are fabricated, so verification would only produce external network calls — which the loopback charter forbids — and unverified results anyway."
+  }
+}

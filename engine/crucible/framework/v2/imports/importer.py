@@ -30,6 +30,12 @@ _SOURCE_KIND = {
     "sqlmap": IntelSourceKind.WEB_SCANNER,
     "nikto": IntelSourceKind.WEB_SCANNER,
     "wapiti": IntelSourceKind.WEB_SCANNER,
+    # The three live-executor tools. Listed EXPLICITLY rather than left to the WEB_SCANNER default
+    # below: this table is where a reader's reliability profile is chosen, and a profile arrived at
+    # by falling off the end of a dict is a profile nobody decided.
+    "ffuf": IntelSourceKind.WEB_SCANNER,
+    "httpx": IntelSourceKind.WEB_SCANNER,
+    "hydra": IntelSourceKind.WEB_SCANNER,
     # SARIF is a neutral interchange format from ANY tool (DAST or SAST) — an operator-supplied export.
     "sarif": IntelSourceKind.OPERATOR_INGEST,
     "generic": IntelSourceKind.OPERATOR_INGEST,

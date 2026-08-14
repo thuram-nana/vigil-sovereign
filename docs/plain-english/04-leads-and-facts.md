@@ -618,10 +618,12 @@ labelled analyst commentary. The design principle is stated in the code: the
 operator loses framing, never information.
 
 **An honest note about how widely this layer is applied.** This component was
-originally written as a standalone building block, and a comment inside it still
-says it is only exercised by its own tests. **That comment is now out of date**,
-and this briefing states what is actually true in the code rather than what the
-comment says. The layer has real call sites today, including:
+originally written as a standalone building block, and a comment inside it used to
+say it was only exercised by its own tests. **That comment has been corrected**, and
+an automated test now fails the build in both directions — if the retired "no
+callers" phrasing comes back while the callers exist, and equally if a module that
+does call the layer is dropped from the list the comment keeps. The layer has real
+call sites today, including:
 
 - every confirmed finding during a live engagement run, checked against the
   system's accumulated picture of the target;
@@ -1340,8 +1342,8 @@ window by window alongside the named work that would change it.
 layer with real call sites — the engagement run, report generation, the defensive
 pipeline, the grounding critic, the refusal component and an agent tool — but it
 is not the single point through which every claim in the system passes. Section 4,
-stage 5 gives the detail, including the fact that the module's own internal
-comment understates its current use.
+stage 5 gives the detail, including the automated test that stops the module's own
+internal comment from ever again understating — or overstating — its current use.
 
 **Re-execution proves a binding, not the world — and there is in-house work aimed
 directly at that.** This limit needs stating carefully, because it is the one the
@@ -1397,10 +1399,12 @@ So the limit as stated stands today. But it is treated by the project as a targe
 to be closed, not as a permanent excuse, and a reader should ask about progress on
 it rather than assume it is unattended.
 
-**The four cloud exploitation capabilities are built and proven offline but have
-not yet been fired at a live third-party account. The two cluster ones have now
-been proven against a real cluster.** This is the most important honesty statement
-in the chapter, and it is stated the way the project's own records state it.
+**Three of the six cloud and cluster exploitation capabilities have now been fired
+at something real — one of them at a genuinely outside system, the other two at
+infrastructure the project stands up and destroys itself. The rest are built and
+proven offline but have not yet been fired at a live third-party account.** This is the most important honesty
+statement in the chapter, and it is stated the way the project's own records state
+it.
 
 Six confirmation capabilities cover this ground: capturing a cloud
 instance-metadata credential; confirming that an exposed secret is still valid;
@@ -1411,28 +1415,47 @@ are complete and wired end to end**: the component that performs the capture, th
 evidence route, the admission rules, the certificate minting, and the writing into
 the system's internal map.
 
-The four cloud ones are proven using recorded sample data standing in for a real
-cloud account, and their proofs re-verify offline like any other. The two cluster
-ones are proven against a **real Kubernetes cluster**: a repository script stands
-up a genuine single-node cluster the system creates, owns and destroys, plants
-known-dangerous *and* known-benign permission arrangements in it, captures what the
-real cluster interface returns, and adjudicates those bytes through the ordinary
-production path — the anonymous privileged attachment confirmed with a certificate
-that re-verifies offline, and the benign arrangements in the same cluster correctly
-left as leads. What that run does not cover is a scope-gated capability that
-*enumerates* permission arrangements across a whole cluster, and a managed
-provider's control plane such as Amazon EKS, Google GKE or Azure AKS.
+The two cluster ones are proven against a **real Kubernetes cluster**: a repository
+script stands up a genuine single-node cluster the system creates, owns and
+destroys, plants known-dangerous *and* known-benign permission arrangements in it,
+captures what the real cluster interface returns, and adjudicates those bytes
+through the ordinary production path — the anonymous privileged attachment confirmed
+with a certificate that re-verifies offline, and the benign arrangements in the same
+cluster correctly left as leads. What that run does not cover is a scope-gated
+capability that *enumerates* permission arrangements across a whole cluster, and a
+managed provider's control plane such as Amazon EKS, Google GKE or Azure AKS.
 
-What remains deferred for three of them is the act of **pointing them at a live
-third-party cloud account**. That waits on the customer supplying their own
-credentials — a laboratory cloud credential. The detection logic, the evidence
-handling, the certificates and the safety gates are all built and proven; only the
-live firing is pending, by design. The project's own note is unambiguous, and this
-chapter repeats rather than softens it: there is no live fact yet for those
-capabilities. Under the project's own enforcement rule — that any gap between
-current and intended capability must name the engineering work that closes it, or a
-test fails — none of these six carries any named engineering gap. The remaining
-deferral is operational, not technical.
+The third capability proven against something real is **confirming that an exposed
+secret is still valid**, and it splits inside itself in a way that must not be
+blurred. Its **GitHub half is proven against the real GitHub service**: a second
+repository script drives the real, permission-gated component over a real network
+connection, using the operator's own credential against GitHub's own
+least-privileged identity endpoint, and the certificate re-verifies offline. Three
+controls in the same run correctly do *not* confirm — a bogus credential of the
+same shape, sent live to the same real address and rejected by GitHub itself; the
+same capture with its confirming address swapped for an attacker-controlled host
+and for a look-alike; and a capture whose credential and confirming call carry
+different fingerprints. Its **Amazon Web Services half is not proven at all**: it is
+built and unit-tested, its request-signing checked against Amazon's own independent
+implementation, but it has never been exercised against real Amazon infrastructure,
+it still needs an access key only the account owner can issue, and nothing from the
+GitHub run transfers to it.
+
+The remaining cloud confirmations — the metadata-credential capture, the Google
+service-account impersonation, the Amazon half just described, and the
+permission-escalation re-derivation — are proven using recorded sample data standing
+in for a real cloud account, and their proofs re-verify offline like any other.
+
+What remains deferred for them is the act of **pointing them at a live third-party
+cloud account**. That waits on the customer supplying their own credentials — a
+laboratory cloud credential. The detection logic, the evidence handling, the
+certificates and the safety gates are all built and proven; only the live firing is
+pending, by design. The project's own note is unambiguous, and this chapter repeats
+rather than softens it: there is no live fact yet for those capabilities. Under the
+project's own enforcement rule — that any gap between current and intended capability
+must name the engineering work that closes it, or a test fails — none of these six
+carries any named engineering gap. The remaining deferral is operational, not
+technical.
 
 The permission-escalation capability must be described differently and is not
 "awaiting live fire". It is a deliberate offline re-derivation over the customer's
@@ -1509,13 +1532,18 @@ scope.
     does not prove that the evidence reflects the live target. The countermeasure
     for that is built as a working mechanism, but its independent witness is the
     system's own software today, not an outside party.
-  - The four cloud exploitation capabilities are complete, wired end to end and
-    proven offline against recorded sample data, but have not yet been fired at a
-    live third-party account. That waits on a customer supplying their own cloud
-    credentials. The two cluster ones are no longer in that position: they are
-    proven against a real Kubernetes cluster the system stands up, owns and
-    destroys itself. None of the six carries any outstanding engineering work; the
-    remaining deferral is operational, not technical.
+  - Three of the six cloud and cluster exploitation capabilities have been fired at
+    something real, and the three are not of equal weight: the two cluster ones
+    against a real Kubernetes cluster the system stands up, owns and destroys
+    itself, which is real infrastructure but the project's own; and the **GitHub
+    half** of the exposed-secret check against the real GitHub service, the only one
+    of the six to have judged material from a real outside system. The rest — including the
+    **Amazon half** of that same check, to which nothing from the GitHub run
+    transfers — are complete, wired end to end and proven offline against recorded
+    sample data, but have not yet been fired at a live third-party account. That
+    waits on a customer supplying their own cloud credentials. None of the six
+    carries any outstanding engineering work; the remaining deferral is
+    operational, not technical.
   - The demotion-only firewall is a working layer with real call sites rather than
     a single universal gateway.
 
@@ -1564,4 +1592,7 @@ written, because that work reached the released version on 12 August 2026.
 *Version reference for a technical reviewer: the main body was read at revision
 `1487e03a` of the source code; section 9.2 was re-checked at revision `dc2994d6`,
 the point at which the build-and-release safeguards became part of the released
-software.*
+software. Section 10 was revised again on 13 August 2026 at revision `05b81e9f`,
+which is the version in which the exposed-secret check's GitHub half became proven
+against a real outside provider, and in which the claim-checking layer's own
+internal comment was corrected and pinned by an automated test.*

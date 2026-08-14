@@ -104,7 +104,6 @@ _CTYPES = {
 _EXACT_ROUTES = {
     "/api/status": api.status_data,
     "/api/engagements": api.list_engagements,
-    "/api/runs": api.list_runs,
     "/api/sessions": api.sessions_list,
     "/api/benchmark": api.benchmark_data,
     "/api/memory": api.memory_data,
@@ -122,6 +121,16 @@ _EXACT_ROUTES = {
     "/api/governance": api.governance_data,     # Governance & Gate audit: READ-ONLY posture + m-of-n destruction quorum
     "/api/mcp": api.mcp_data,                    # MCP: the gated capabilities exposed over the stdio MCP server (read-only)
     "/api/services": api.services_data,          # System: readiness (venvs/dirs/ports/binaries) + docker-service state (read-only)
+}
+
+# Read-only GET routes that take ONE optional `?slug=` ENGAGEMENT SCOPE: exact path -> provider
+# taking that slug. This is the console's active-engagement scope (the operator's current job), and it
+# is a FILTER, not an assertion: the provider selects among the engagement each run RECORDED FOR
+# ITSELF, so a caller can never claim a run into an engagement it does not belong to. An absent/blank
+# `?slug=` is the unscoped listing, byte-identical to the zero-arg call these routes had before; an
+# unknown slug is an honest empty list, never an error and never the unfiltered list.
+_SCOPED_ROUTES = {
+    "/api/runs": api.list_runs,
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
@@ -149,6 +158,24 @@ _PREFIX_ROUTES = {
     "/api/proof/": api.proof_list,
     "/api/remediate/": api.remediate_plan,
     "/api/toolresearch/": api.tool_research_data,
+}
+
+# CHUNKED-UPLOAD POST routes: exact path -> the chat handler taking the JSON body.
+# The console's POST body cap is 1 MiB and is NOT raised, so a zip / file / image arrives in pieces:
+# begin (open an upload) → chunk × N (a base64 slice each, bounded well inside the cap) → finish (assemble,
+# digest, extract, return the manifest). These are dispatched inside `do_POST` AFTER the same same-origin
+# conjunction + session token every other POST passes — there is no second, weaker path — and they use the
+# DRAINING body reader, so an oversize chunk is a clean 400 instead of a silently-empty body.
+_CHAT_ATTACH_POST = {
+    "/api/chat/attach/begin": chat.attach_begin,
+    "/api/chat/attach/chunk": chat.attach_chunk,
+    "/api/chat/attach/finish": chat.attach_finish,
+    # `abort` drops an upload still in flight. `remove` takes a FINISHED attachment back off the chat,
+    # and it is a real deletion rather than a list edit: a chat turn reasons over everything the chat
+    # still holds, so an attachment the operator removed from the screen but that the store kept would
+    # keep going to the model on every later turn while the interface said it was gone.
+    "/api/chat/attach/abort": chat.attach_abort,
+    "/api/chat/attach/remove": chat.attach_remove,
 }
 
 
@@ -323,6 +350,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/chat/session/"):
                 self._json(chat.get_session(path[len("/api/chat/session/"):].strip("/")))
                 return
+            if path == "/api/chat/attachments":
+                # One chat's finished attachment MANIFESTS (name/digest/size/kind/counts — pointers, never
+                # bytes) plus the gated-scan offer when an extracted codebase is present. Read-only; the
+                # token + Host checks above already gated it. An unsafe chat id raises ValueError → 404.
+                q = parse_qs(parts.query)
+                self._json(chat.attachments_list((q.get("chat_id") or [""])[0]))
+                return
             if path == "/api/aegis/verdicts":
                 # the live Defense verdict feed — tail the managed gateway's browser-safe verdicts JSONL
                 # (oracle-context already stripped at the sink). EventTailer is robust to a missing file.
@@ -337,6 +371,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # builds here — building is the CSRF-guarded POST /api/dossier/<run>/build. A bad run id
                 # raises ValueError in dossier_path/run_dir → caught below → 404.
                 self._download_dossier(path[len("/api/dossier/"):-len(".zip")].strip("/"))
+                return
+            # Scoped routes are matched BEFORE the zero-arg exact table, so re-listing one of them
+            # there by accident could never silently drop the engagement scope back to "all".
+            if path in _SCOPED_ROUTES:
+                # `?slug=` scopes the listing to the active engagement; anything else in the query is
+                # ignored, and a repeated slug takes the first value (one scope, never a set).
+                q = parse_qs(parts.query)
+                self._json(_SCOPED_ROUTES[path]((q.get("slug") or [""])[0]))
                 return
             if path in _EXACT_ROUTES:
                 self._json(_EXACT_ROUTES[path]())
@@ -385,6 +427,41 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return json.loads(raw or b"{}")
         except Exception:
             return {}
+
+    def _read_json_body(self) -> tuple[dict | None, str]:
+        """Read + parse a bounded JSON object body, returning ``(obj, error)`` — the DRAINING reader from
+        ``framework.v2.api.server``, adopted here for the chunked-upload routes.
+
+        Why these routes need it and ``_read_body`` will not do: ``_read_body`` maps EVERY failure —
+        including an oversize body — to ``{}``, so a client that slices its chunks too large would see its
+        upload silently treated as an empty request instead of being told the chunk is too big. Here an
+        oversize body is DRAINED (a bounded amount, discarded, never buffered) so the client gets a clean
+        4xx rather than a connection reset, and every failure carries a reason. The 1 MiB cap itself is
+        UNCHANGED — this reports it honestly, it does not raise it."""
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+        except (TypeError, ValueError):
+            return None, "invalid Content-Length"
+        if n < 0:
+            return None, "invalid Content-Length"
+        if n > _MAX_CONSOLE_BODY:
+            # Bounded drain so a lying Content-Length cannot loop us.
+            remaining = min(n, _MAX_CONSOLE_BODY * 4)
+            while remaining > 0:
+                chunk = self.rfile.read(min(65536, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+            return None, (f"body exceeds {_MAX_CONSOLE_BODY} bytes — slice the file into smaller chunks "
+                          f"(the upload is chunked for exactly this reason)")
+        raw = self.rfile.read(n) if n else b""
+        try:
+            obj = json.loads(raw or b"{}")
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            return None, f"malformed JSON body: {e}"
+        if not isinstance(obj, dict):
+            return None, "JSON body must be an object"
+        return obj, ""
 
     def _host_is_console(self) -> tuple[bool, str]:
         """A9: the DNS-rebinding defense for READ routes (GET/SSE) — and the Host/Origin half of the POST
@@ -461,6 +538,22 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._json({"error": f"cross-site POST refused ({why})"}, status=403)
             return
         path = urlsplit(self.path).path
+        if path in _CHAT_ATTACH_POST:
+            # Chunked attachment upload. Same auth as every other POST (checked above); the only difference
+            # is the body reader — an oversize chunk must be an honest error, not an empty dict.
+            attach_body, why_body = self._read_json_body()
+            if why_body:
+                self._json({"error": why_body}, status=400)
+                return
+            try:
+                self._json(_CHAT_ATTACH_POST[path](attach_body or {}))
+            except ValueError as e:      # unsafe chat / upload id → honest 404, consistent with the rest
+                self._json({"error": str(e)}, status=404)
+            except BrokenPipeError:
+                return
+            except Exception as e:  # noqa: BLE001
+                self._json({"error": f"{type(e).__name__}: {e}"}, status=500)
+            return
         body = self._read_body()
         try:
             if path == "/api/launch/assessment":
@@ -644,7 +737,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path == "/api/chat/send":
                 # the operator chatbot turn — a natural-language front door to the SAME gated launcher.
                 # CSRF/rebind-gated above; launches only via actions.launch_assessment (scope/charter/gate
-                # enforced there), persists the transcript, and mints no facts.
+                # enforced there), persists the transcript, and mints no facts. A turn with no launchable
+                # target now REASONS over the chat's attachments + connected chats (sovereignty-gated model
+                # egress inside chat._reason) — that answer is a LEAD, and the reply carries the gated
+                # scan_offer for the same files; the chat still starts nothing itself.
                 self._json(chat.chat_send(body))
                 return
             if path == "/api/aegis/setup":

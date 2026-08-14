@@ -13,7 +13,95 @@
   const SOV = function (p) { return CFG.api.sovereign + p; };
   const OFF = function (p) { return CFG.api.offense + p; };
 
-  const app = V.store({ plane: "all", nav: [], counts: { agents: 0, tools: 0, findings: 0 }, live: "idle", waiting: 0, killed: false });
+  const app = V.store({ plane: "all", nav: [], counts: { agents: 0, tools: 0, findings: 0 }, live: "idle", waiting: 0, killed: false,
+    engagement: "", engagementName: "" });
+
+  // ---- the ACTIVE ENGAGEMENT: the job the operator is working on right now ----
+  // Every screen lists that job's runs and nothing else, so starting a new job leaves a clean desk
+  // without deleting anything. This is PRESENTATION, exactly like the human name a job carries: it
+  // scopes what is LISTED, and changes nothing about what is signed, gated, or adjudicated. An empty
+  // scope means "all engagements" — byte-identical to the behaviour before scoping existed — so no
+  // past job is ever unreachable. Persisted, so it survives a refresh and a restart of the console.
+  const ENGAGEMENT_KEY = "vigil.engagement";             // the machine identity (slug) — the scope itself
+  const ENGAGEMENT_NAME_KEY = "vigil.engagement.name";   // its human name — for the top-bar chip only
+
+  function activeEngagement() { return app.get().engagement || ""; }
+  // What to CALL the active job: its human name if we know one, else its machine identity (which is
+  // always honest — it is what the run itself recorded).
+  function engagementName() { return app.get().engagementName || activeEngagement(); }
+
+  // Switch (or clear) the scope. This is the ONLY writer, so the store, localStorage and the chip can
+  // never disagree. `name` is optional: omit it and a re-scope to the SAME job keeps the name we
+  // already have (a caller that knows only the slug must not blank it).
+  function setEngagement(slug, name) {
+    const next = String(slug || "");
+    const s = app.get();
+    const nm = !next ? "" : (name == null ? (s.engagement === next ? (s.engagementName || "") : "") : String(name));
+    if (s.engagement === next && s.engagementName === nm) return;
+    app.set({ engagement: next, engagementName: nm });
+    try {
+      if (!next) { localStorage.removeItem(ENGAGEMENT_KEY); localStorage.removeItem(ENGAGEMENT_NAME_KEY); }
+      else {
+        localStorage.setItem(ENGAGEMENT_KEY, next);
+        if (nm) localStorage.setItem(ENGAGEMENT_NAME_KEY, nm); else localStorage.removeItem(ENGAGEMENT_NAME_KEY);
+      }
+    } catch (e) { /* storage disabled (private mode): the scope still holds for this session */ }
+    refreshTopbar();
+  }
+  // A better name for the job ALREADY in scope, learned from a list that carries labels. It never
+  // changes WHICH job is active — only what the chip calls it.
+  function noteEngagementName(slug, name) {
+    const nm = String(name || "");
+    if (!nm || !slug || slug !== activeEngagement() || nm === app.get().engagementName) return;
+    setEngagement(slug, nm);
+  }
+
+  // The runs endpoint, scoped. `?slug=` is a FILTER the server applies against the engagement each run
+  // RECORDED IN ITS OWN meta.json: a caller can only ever SELECT among runs that already say they
+  // belong to that job — it can never assert one into it.
+  function runsURL() {
+    const slug = activeEngagement();
+    return OFF("/api/runs" + (slug ? ("?slug=" + encodeURIComponent(slug)) : ""));
+  }
+  // Read the run list out of that response. The server has already filtered; the identical comparison
+  // is made here against each run's OWN recorded slug, so a console talking to a backend that does not
+  // know the parameter still shows exactly what its chip claims. Narrowing only — this can no more
+  // re-home a run than the server filter can.
+  function runsOf(d) {
+    const list = (d && d.runs) || [];
+    const slug = activeEngagement();
+    if (!slug) return list;
+    const mine = list.filter(function (r) { return r && r.slug === slug; });
+    if (mine.length) noteEngagementName(slug, mine[0].engagement_label);
+    return mine;
+  }
+
+  // ---- honest empty states for a SCOPED screen (never a bare blank panel) ----
+  // A clean desk and a broken screen look identical unless the screen says which it is. So: name the
+  // scope, say why it is empty, and always offer the way back out to every engagement — an operator
+  // who thinks their work was deleted stops trusting the tool.
+  function newAssessBtn() {
+    return h("button.btn.primary", { onClick: function () { location.hash = "#/assess"; } }, [V.icon("bolt"), "New Assessment"]);
+  }
+  function widenBtn() {
+    return h("button.btn", { onClick: function () { setEngagement(""); route(); } }, [V.icon("book"), "Show all engagements"]);
+  }
+  function scopedEmpty(noun, why, extra) {
+    return h("div.empty", null, [
+      h("div.big", null, "No " + noun + " yet in this engagement"),
+      h("p", null, (why || "Nothing has been recorded under this job yet.")
+        + " You are looking at " + engagementName() + " only — every other job is still on disk, just out of scope."),
+      h("div.row-flex", { style: { gap: "8px", marginTop: "16px", flexWrap: "wrap", justifyContent: "center" } },
+        (extra || []).concat([widenBtn()])),
+    ]);
+  }
+  // A deep link (a bookmark, a link from the library or a chat) can name a run belonging to a DIFFERENT
+  // job than the one in scope. Say so, rather than silently showing a neighbour's run in its place.
+  function otherEngagementNote(runId) {
+    return h("div.legend", { style: { marginBottom: "12px" } }, [V.icon("info"),
+      h("span", null, "The run you opened (" + runId + ") is not part of " + engagementName() + ", so it is not listed here."),
+      h("button.btn.sm", { style: { marginLeft: "auto" }, onClick: function () { setEngagement(""); route(); } }, "Show all engagements")]);
+  }
 
   // -- navigation model (every capability has a home; P1 marks not-yet-built) --
   const NAV = [
@@ -63,6 +151,16 @@
     const cmdk = h("div.cmdk", { title: "Command palette (⌘K)", onClick: openPalette },
       [V.icon("search"), "Search or run a command", h("span.kbd", null, "⌘K")]);
     const s = app.get();
+    // WHICH JOB every screen is showing. Always visible, always the truth about the scope; clicking it
+    // goes to the library to switch job or widen back to all. It shrinks and ellipsises (see
+    // components.css) so it can never push the safety state or the primary action off the bar.
+    const scopeLabel = s.engagement ? engagementName() : "All engagements";
+    const scope = h("button.scope-chip" + (s.engagement ? ".on" : ""), {
+      title: s.engagement
+        ? ("Every screen is showing " + scopeLabel + " only — click to switch job or widen to all engagements")
+        : "Every screen is showing all engagements — click to pick the job you are working on",
+      onClick: function () { location.hash = "#/library"; },
+    }, [V.icon("book"), h("span.txt", null, scopeLabel)]);
     const live = s.killed ? V.pill("Kill-switch", "danger", null)
       : (s.live === "live" ? V.pill("Live", "live", null) : V.pill("Idle", "idle", null));
     const counts = h("div.counts", null, [
@@ -80,7 +178,7 @@
     // API-key failure badge — hidden until a live probe reports a failing key (populated by refreshKeysBadge)
     const keysBadge = h("button.safety.tripped#keys-badge", { style: { display: "none" },
       title: "One or more API keys are failing", onClick: function () { location.hash = "#/apikeys"; } }, "");
-    return h("div#topbar", null, [seg, cmdk, h("div.spacer"), counts, live, keysBadge, safety, themeBtn, cta]);
+    return h("div#topbar", null, [seg, scope, cmdk, h("div.spacer"), counts, live, keysBadge, safety, themeBtn, cta]);
   }
 
   // Poll the redacted settings status for the failing-key count and show/hide the top-bar badge. Cheap +
@@ -94,6 +192,242 @@
         el.style.display = ""; }
       else { el.style.display = "none"; }
     }).catch(function () {});
+  }
+
+  // ==== the offense side: whether it is running, and the ONE named action that starts it ============
+  // This whole interface is served by `vigil up`'s reverse proxy, so the page still loads with the two
+  // offense backends (console 8787, gated api 8799) dead — and that proxy is the process that already
+  // owns their lifecycle. It is therefore the one place that can honestly offer to start them, over two
+  // routes of its OWN (they reach neither backend):
+  //
+  //     GET  /__vigil/plane/status         ->  { running, planes:{…}, starting, can_start }
+  //     POST /__vigil/plane/offense/start  ->  { result: "started" | "already_running" | "starting" }
+  //                                     a failure is a non-2xx carrying { error: "<reason>" }
+  //
+  // THE CALLER NAMES NO COMMAND. The POST body is empty: "start the offense plane" is a fixed, named
+  // action, and the proxy rebuilds the SAME argv it uses at boot from its own configuration. No path, no
+  // argument, no port, no command ever travels in the request — anything else would be remote code
+  // execution wearing a button. Both routes are token-gated and loopback/private-bound exactly like every
+  // other call on this page (same X-SIGIL-Token; the proxy refuses a public bind), and starting is
+  // single-flight on the server, so a second click can never spawn a second copy. None of this touches
+  // gating, approvals, the kill-switch, scope, or what counts as a fact: it starts a process the operator
+  // was otherwise going to start by hand.
+  const OFFENSE_STATUS_URL = "/__vigil/plane/status";
+  const OFFENSE_START_URL = "/__vigil/plane/offense/start";
+  const OFFENSE_START_WAIT_MS = 30000;   // how long we watch for it to actually answer before saying so
+
+  // known:    have we observed the offense side at all yet? Before the first probe we show NOTHING —
+  //           an indicator that guesses is worse than no indicator.
+  // up:       it answered.
+  // canStart: this proxy serves the start route. A 404 means an older `vigil up`, and then the honest
+  //           thing is to show the command, not a button that cannot work.
+  // busy:     a start we asked for is in flight.
+  const OFFENSE = { known: false, up: false, starting: false, canStart: true, busy: false };
+
+  function offenseHeaders() {
+    const hh = { "X-Requested-With": "vigil-ui" };
+    const t = V.token(); if (t) hh["X-SIGIL-Token"] = t;
+    return hh;
+  }
+
+  // One status read. Never throws, and never invents: if the proxy itself does not answer we keep the
+  // last observation rather than claiming either state.
+  function probeOffense() {
+    return fetch(OFFENSE_STATUS_URL, { headers: offenseHeaders(), credentials: "same-origin", cache: "no-store" })
+      .then(function (r) {
+        // 404/501: an older proxy with no plane routes. 401/403: a proxy that has them but will not let
+        // THIS page drive them (no token embedded, a rebinding host). Either way the honest answer is the
+        // same — we cannot offer a button — and the indicator falls back to whether the offense console
+        // itself answers. Treating an auth refusal as an unknown would leave the chip silent forever.
+        if (r.status === 404 || r.status === 501 || r.status === 401 || r.status === 403) {
+          OFFENSE.canStart = false;
+          return probeOffenseConsole();               // fall back to the console's own reachability
+        }
+        if (!r.ok) throw new Error("offense status " + r.status);
+        return r.json().then(function (d) { applyOffenseStatus(d || {}); });
+      })
+      .catch(function () { /* proxy unreachable (stale page / host going down) — assert nothing new */ })
+      .then(function () { paintOffenseChip(); });
+  }
+
+  // Read the proxy's own report. Tolerant about which key it uses for "is it running", strict about
+  // never reading a truthy "your request was accepted" as "the offense side is up".
+  function applyOffenseStatus(d) {
+    const running = d.running === true || d.up === true
+      || (d.console === true && d.api === true)
+      || String(d.state || "").toLowerCase() === "running";
+    if (d.can_start === false) OFFENSE.canStart = false;
+    OFFENSE.starting = d.starting === true;
+    noteOffenseUp(running);
+  }
+
+  // Fallback signal when the proxy has no plane routes: the offense console's own status endpoint. A 502/
+  // 503/504 is the proxy telling us the backend is not there; anything else means it answered.
+  function probeOffenseConsole() {
+    return fetch(OFF("/api/status"), { headers: offenseHeaders(), credentials: "same-origin", cache: "no-store" })
+      .then(function (r) { noteOffenseUp(r.status !== 502 && r.status !== 503 && r.status !== 504); },
+        function () { noteOffenseUp(false); });
+  }
+
+  function noteOffenseUp(up) {
+    const was = OFFENSE.known ? OFFENSE.up : null;
+    OFFENSE.known = true;
+    OFFENSE.up = !!up;
+    // The System screen tells the operator the offense side is offline; the moment it is not, that screen
+    // is stale. Re-render exactly that screen, and only when it is the one showing the offline message.
+    if (was === false && OFFENSE.up && current() === "system" && V.$("#system-offline")) route();
+  }
+
+  // ---- the top-bar indicator -------------------------------------------------
+  // Quiet when it is up (a dot and a word). A real, clearly clickable button when it is DOWN, because
+  // that is the moment the operator needs a way out that is not a terminal.
+  function offenseChip() {
+    if (!OFFENSE.known) {                       // nothing observed yet: occupy no space, claim nothing
+      return h("span.offense-chip#offense-chip", { style: { display: "none" } }, "");
+    }
+    if (OFFENSE.busy || (OFFENSE.starting && !OFFENSE.up)) {
+      return h("button.offense-chip.working#offense-chip", { disabled: true,
+        title: "Starting the offense console and API — this takes a few seconds." },
+        [h("span.dot"), h("span.txt", null, "Starting offense…")]);
+    }
+    if (OFFENSE.up) {
+      return h("span.offense-chip.up#offense-chip",
+        { title: "The offense console and API are answering." },
+        [h("span.dot"), h("span.txt", null, "Offense up")]);
+    }
+    if (!OFFENSE.canStart) {                    // honest: no button, because this proxy cannot start it
+      return h("span.offense-chip.down#offense-chip",
+        { title: "The offense side is not answering. Start it in a terminal with `vigil up`, then reload." },
+        [h("span.dot"), h("span.txt", null, "Offense down")]);
+    }
+    return h("button.offense-chip.down.action#offense-chip", {
+      title: "The offense side is not answering. Click to start it — the proxy serving this page re-runs "
+        + "the same command it uses at boot. You can also run `vigil up` in a terminal.",
+      onClick: function () { startOffensePlane(); },
+    }, [V.icon("play"), h("span.txt", null, "Start offense side")]);
+  }
+  function paintOffenseChip() {
+    const el = V.$("#offense-chip"); if (!el) return;
+    el.parentNode.replaceChild(offenseChip(), el);
+  }
+
+  // ---- the named action ------------------------------------------------------
+  // Single-flight and idempotent: a second click (or a click while a start is already running) JOINS the
+  // start in flight instead of posting again, and starting something already up is a no-op that says so.
+  // Resolves to { outcome: "started" | "already_running" | "failed", detail }. Never rejects.
+  let offenseStarting = null;
+  function startOffensePlane() {
+    if (offenseStarting) return offenseStarting;
+    OFFENSE.busy = true; paintOffenseChip();
+    offenseStarting = V.postJSON(OFFENSE_START_URL, {})   // empty body: no command, no path, no port
+      .then(readStartClaim, readStartFailure)
+      .then(function (res) {
+        OFFENSE.busy = false; offenseStarting = null;
+        V.toast(res.detail, res.outcome === "failed");
+        paintOffenseChip();
+        scheduleOffensePoll();
+        return res;
+      });
+    return offenseStarting;
+  }
+
+  function readStartClaim(r) {
+    r = r || {};
+    if (r.error) return { outcome: "failed", detail: "Could not start the offense side: " + String(r.error) };
+    const claim = String(r.result || r.state || (r.already_running ? "already_running" : (r.started ? "started" : ""))).toLowerCase();
+    if (claim === "already_running" || claim === "running") {
+      return confirmOffenseUp("already_running", "The offense side was already running.");
+    }
+    // "started" / "starting" / any other 2xx: the POST is a CLAIM, the status route is the OBSERVATION.
+    // Report only what can be SEEN, so a child that dies on its first breath is never called a success.
+    return confirmOffenseUp("started", "The offense side is up.");
+  }
+
+  function readStartFailure(e) {
+    const st = e && e.status;
+    if (st === 409) {   // the proxy's own single-flight: a start is already in progress. Watch it.
+      return confirmOffenseUp("started", "A start was already in progress, and the offense side is up.");
+    }
+    if (st === 404 || st === 501) {
+      OFFENSE.canStart = false;
+      return { outcome: "failed",
+        detail: "This build of `vigil up` has no start action — start the offense side in a terminal with `vigil up`." };
+    }
+    if (st === 401 || st === 403) {
+      return { outcome: "failed",
+        detail: "Not authorized to start the offense side. Reload the page to pick up a current session token." };
+    }
+    return { outcome: "failed",
+      detail: "Could not start the offense side: " + ((e && e.message) || "the proxy did not answer") + "." };
+  }
+
+  // Wait for it to actually answer, then report what was observed — including the unhappy case, where a
+  // timeout is a FAILURE with somewhere to look, not a quiet success.
+  function confirmOffenseUp(outcome, detail) {
+    return waitForOffense(OFFENSE_START_WAIT_MS).then(function (up) {
+      if (up) return { outcome: outcome, detail: detail };
+      return { outcome: "failed",
+        detail: "The start was accepted, but the offense side is still not answering after "
+          + Math.round(OFFENSE_START_WAIT_MS / 1000) + "s. Look at the log `vigil up` writes for it "
+          + "(ui/logs/offense-console.log under your VIGIL live directory), or run `vigil up` in a "
+          + "terminal to see the error." };
+    });
+  }
+  function waitForOffense(ms) {
+    const deadline = Date.now() + ms;
+    function attempt() {
+      return probeOffense().then(function () {
+        if (OFFENSE.up) return true;
+        if (Date.now() >= deadline) return false;
+        return new Promise(function (res) { setTimeout(res, 1200); }).then(attempt);
+      });
+    }
+    return attempt();
+  }
+
+  // A start button with in-place feedback, for a screen (the top-bar chip is its own control). Same
+  // single-flight action, same three honest outcomes.
+  function offenseStartButton(label) {
+    const btn = h("button.btn.primary", { onClick: function () {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      V.mount(btn, [V.icon("live"), "Starting…"]);
+      startOffensePlane().then(function (res) {
+        btn.disabled = false;
+        if (res.outcome === "failed") { V.mount(btn, [V.icon("play"), label]); return; }  // the toast carries why
+        V.mount(btn, [V.icon("check"), "Offense side is up"]);
+        if (current() === "system" && V.$("#system-offline")) route();   // the report can load now
+      });
+    } }, [V.icon("play"), label]);
+    return btn;
+  }
+
+  // ---- polling: often enough to notice, rarely enough not to be a nuisance ----
+  // Attentive while it is down or coming up (that is when the operator is waiting on it), quiet once it
+  // is healthy, and completely silent while the tab is hidden.
+  let offenseTimer = null;
+  function offensePollDelay() {
+    if (OFFENSE.busy || OFFENSE.starting) return 2000;
+    if (!OFFENSE.known) return 4000;
+    return OFFENSE.up ? 20000 : 6000;
+  }
+  function scheduleOffensePoll() {
+    if (offenseTimer) { clearTimeout(offenseTimer); offenseTimer = null; }
+    if (document.hidden) return;                       // a hidden tab polls nothing at all
+    offenseTimer = setTimeout(function () {
+      offenseTimer = null;
+      probeOffense().then(scheduleOffensePoll, scheduleOffensePoll);
+    }, offensePollDelay());
+  }
+  function watchOffensePlane() {
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) {
+        if (offenseTimer) { clearTimeout(offenseTimer); offenseTimer = null; }
+        return;
+      }
+      probeOffense().then(scheduleOffensePoll, scheduleOffensePoll);   // catch up the moment it is looked at
+    });
+    probeOffense().then(scheduleOffensePoll, scheduleOffensePoll);
   }
 
   function renderNav() {
@@ -1146,7 +1480,7 @@
   const TARGET_TYPES = [
     { mode: "codebase", icon: "book", t: "Scan a codebase", d: "Point at a local path or repo; the AI reads and reasons over the source (Strix)." },
     { mode: "url", icon: "live", t: "Scan a website / API", d: "Give a URL; VIGIL engages it through the full gate. A 127.0.0.1 target runs a quick loopback scan." },
-    { mode: "tool", icon: "bolt", t: "Run one tool", d: "Run a single gated capability pack against a target — the narrow, focused option." },
+    { mode: "tool", icon: "bolt", t: "Run one tool", d: "Pick one real tool from this host's roster and run the gated engagement that drives it." },
     { mode: "suite", icon: "brain", t: "Full autonomous suite", d: "The autonomous OODA loop drives the whole arsenal (gated, oracle-adjudicated)." },
     { mode: "cloud", icon: "live", t: "Cloud / K8s posture", d: "Seedless posture review of a cloud account or Kubernetes cluster (needs a signed charter)." },
     { mode: "aegis", icon: "shield", t: "Defend an app (AEGIS)", d: "Run the defensive dual over your telemetry/logs to detect AI attacks." },
@@ -1160,16 +1494,110 @@
   const CLOUD_PROVIDERS = ["aws", "gcp", "azure"];
   const ENGAGE_MODES = { url: true, tool: true, suite: true };  // modes that spawn `engage`/`scan`
 
+  // ==========================================================================
+  // "Run one tool" — the host's REAL tools, and which of them a launch can drive
+  // ==========================================================================
+  // This picker reads `/api/toolprofiles` — the engine's own joined roster (install status + live
+  // version, the admission verdict WITH its honest refusal reason, and the control surface that says
+  // HOW each tool is driven) — instead of the capability packs, which are not tools at all.
+  //
+  // A picked tool still has to BECOME something. `launch_assessment` maps every entry of the `tools`
+  // array through its capability table and SILENTLY DROPS any id it does not recognise, so posting a
+  // bare binary name would start a plain engagement that never runs the tool the operator chose, and
+  // the report would look complete. A tool is therefore selectable here exactly when a gated engage
+  // flag really drives that binary — read out of the engine, not assumed:
+  //
+  //   chromium → --browser-xss : scanner/campaign.py:_maybe_start_browser() resolves it through
+  //              scanner/browser.py:find_browser and the DOM-XSS pass confirms by real execution.
+  //
+  // Every other admitted tool is driven somewhere this launcher cannot reach: a sensor fires only
+  // inside an engagement whose fusion plan names it, the SAST backends belong to the `analysis` pass,
+  // and the typed-argv tools are built by the live `vigil engage` executor. Those stay LISTED, showing
+  // what does drive them, and unselectable. A control that pretends is worse than one honestly out of
+  // reach — and hiding an installed tool would only leave the operator hunting for it.
+  //
+  // WHY THE PHASE-GATE RULE DOES NOT PROMOTE OR DEMOTE ANYTHING HERE. `integration/.../live/wiring.py`
+  // DEFAULT_TOOL_VIEW is the fail-closed phase manifest for the live executor: a tool missing from it is
+  // denied in EVERY phase, which is how three tools once shipped "controllable" while the engine refused
+  // every call. That manifest governs USE_TOOL actions on the `vigil engage` path — a path this wizard
+  // never takes (it spawns `python -m framework.v2 engage`). So it can neither rescue nor condemn an
+  // entry above, and both directions are traps worth naming:
+  //   * Being IN it is not a licence to list a tool. nmap/httpx/nuclei/ffuf/sqlmap/hydra/nikto/wapiti/
+  //     zaproxy are all listed there, and every one is still unselectable here, because no capability
+  //     flag on THIS launcher's argv runs them — `--arsenal` is the advanced WEB arsenal (content/JS
+  //     discovery, smuggling, CSWSH), not the host-CLI arsenal its capability blurb claims.
+  //   * Being ABSENT from it is not a reason to drop chromium. Its capability never issues a USE_TOOL:
+  //     `--browser-xss` makes the scanner campaign resolve and spawn the browser itself, so the phase
+  //     manifest is not on that code path at all.
+  // The test that decides selectability is therefore only ever: does a flag this launcher really passes
+  // drive that binary? Verified by running it — `tools:["browser-xss"]` puts `--browser-xss` on the argv,
+  // while a bare `tools:["nmap"]` is silently dropped by launch_assessment and starts an ordinary run.
+  const TOOL_LAUNCH = {
+    chromium: { cap: "browser-xss",
+      how: "the Browser XSS capability starts it headless and confirms DOM XSS by real execution" },
+  };
+  // control_surface -> plain language for the roster row.
+  const SURFACE_LABEL = { cli: "its own CLI", sensor: "a gated sensor", analyzer: "the source-analysis pass",
+    browser: "the headless browser", background: "a background driver" };
+  // Every driver the profile actually reports, in its own words. The roster exposes these as separate
+  // booleans and `control_surface` only names the winner, so a tool with BOTH a typed argv builder and a
+  // gated sensor (nmap, nuclei, zaproxy) reports "cli" and its sensor would go unmentioned. Reading the
+  // booleans says all of what drives it — which is the whole point of listing an unreachable tool.
+  const TOOL_DRIVERS = [
+    ["has_typed_builder", "the live `vigil engage` executor builds it a gated command"],
+    ["has_skill_doc", "the codebase agent knows its CLI from a playbook"],
+    ["has_sensor", "a gated sensor runs it when an engagement's fusion plan names it"],
+    ["has_analyzer", "the source-analysis pass runs it"],
+    ["has_browser_driver", "the scanner launches it as its headless browser"],
+  ];
+  function toolDrivers(p) {
+    const out = [];
+    TOOL_DRIVERS.forEach(function (d) { if (p && p[d[0]]) out.push(d[1]); });
+    return out;
+  }
+
+  // Can THIS wizard start this tool? Returns {ok, why} and, when ok, the capability id the launch
+  // must carry. Every negative carries the real reason, in the order the operator would hit them.
+  function toolPickable(p) {
+    if (!p) return { ok: false, why: "unknown tool" };
+    if (!p.admitted) return { ok: false, why: p.admit_reason || "not admitted to the arsenal" };
+    if (!p.installed) {
+      return { ok: false, why: (p.status === "unsupported" ? "not supported on this platform" : "not installed on this host")
+        + " — install it from the Tools screen" + (p.apt ? " (apt: " + p.apt + ")" : "") };
+    }
+    const L = TOOL_LAUNCH[String(p.name || "")];
+    if (!L) {
+      const drivers = toolDrivers(p);
+      return { ok: false, why: "no assessment flag runs it on its own"
+        + (drivers.length ? "; driven elsewhere: " + drivers.join(" · ") : "") };
+    }
+    return { ok: true, cap: L.cap, why: L.how };
+  }
+  function capLabelOf(caps, id) {
+    for (let i = 0; i < (caps || []).length; i++) if (caps[i].id === id) return caps[i].label || id;
+    return id || "—";
+  }
+  function capsOf(d) { return (d && d.caps) || (d && d.capabilities) || []; }
+
   function renderAssess(screen) {
+    // `tool` is the TOOL the operator picked (what they see); `tools` is what the launch payload can
+    // actually carry — the capability id that drives it. Keeping both means the summary can name the
+    // tool while the request stays something the server really honours.
     const W = { step: 1, mode: "", target: "", slug: "", authorized: false, mount: false,
       scope: [], scopeInput: "", objective: "", scan_mode: "standard", aiTools: true,
-      tools: [], apply_fixes: false, keyless: false, model: "", aegis_action: "detect",
+      tool: "", tools: [], apply_fixes: false, aegis_action: "detect",
       session_id: "", graph_backed: false, sessions: [],
       cloud_mode: "cloud", provider: "aws",
-      caps: null, kernel: null, launching: false };
+      caps: null, profiles: null, profilesErr: false, kernel: null, launching: false };
     // real capability catalog + backend/LLM status (never hardcoded)
     V.getJSON(OFF("/api/capabilities")).then(function (d) { W.caps = d; draw(); }).catch(function () { W.caps = { capabilities: [], scan_modes: [] }; });
     V.getJSON(OFF("/api/kernel")).then(function (d) { W.kernel = d; draw(); }).catch(function () { W.kernel = { backends: [] }; });
+    // the host's REAL tool roster — what "Run one tool" offers (see TOOL_LAUNCH above). The endpoint is
+    // _safe-wrapped server-side: a probe failure answers 200 with an empty list AND an `error`, so an
+    // empty list alone must not be reported as "this host has no tools".
+    V.getJSON(OFF("/api/toolprofiles")).then(function (d) {
+      W.profiles = (d && d.profiles) || []; W.profilesErr = !!(d && d.error); draw();
+    }).catch(function () { W.profiles = []; W.profilesErr = true; draw(); });
     // permanent sessions (F2) — optional; a graph-backed loopback run partitions this session's Neo4j graph.
     V.getJSON(OFF("/api/sessions")).then(function (d) { W.sessions = (d && d.sessions) || []; draw(); }).catch(function () { W.sessions = []; });
 
@@ -1188,12 +1616,27 @@
       }
       if (n === 3) return true;   // scope is optional / validated on launch
       if (n === 4) {
-        if (W.mode === "tool") return W.tools.length === 1;
+        // one tool mode: a tool must be picked AND have resolved to a capability the launch really carries
+        if (W.mode === "tool") return !!W.tool && W.tools.length === 1;
         return true;
       }
       return true;
     }
     function canLaunch() { return stepValid(1) && stepValid(2) && stepValid(3) && stepValid(4) && !W.launching; }
+
+    // WHICH BRANCH ACTUALLY CARRIES A CAPABILITY PACK — ONE definition, read by the picker AND by the
+    // launch payload, so the control the operator sees and the control the request sends can never
+    // disagree. Only `launch_assessment`'s engage branch turns a pack id into a flag. A `url` run against
+    // loopback goes to the deterministic quick-scan CLI and a graph-backed run to the `vigil` bridge, and
+    // NEITHER reads `tools`: five ticked packs produced a run with none of them on its argv, reporting
+    // "running", with nothing on screen saying the run was narrower than the one just configured. The
+    // server now names that gap in `tools_note`; this stops the wizard asking for it in the first place.
+    // (`tool` mode always engages, loopback or not, so its one capability is never filtered.)
+    function wantsGraph() { return !!(W.graph_backed && W.session_id && isLoopback()); }
+    function packsRun() {
+      if (W.mode === "tool") return true;
+      return !(wantsGraph() || (W.mode === "url" && isLoopback()));
+    }
 
     function goto(n) { if (n > W.step && !stepValid(W.step)) { V.toast("Please complete this step first."); return; } set({ step: Math.max(1, Math.min(5, n)) }); }
 
@@ -1205,7 +1648,7 @@
         h("div.choice-grid", null, TARGET_TYPES.map(function (tt) {
           const sel = W.mode === tt.mode;
           return h("button.choice" + (sel ? ".sel" : "") + (tt.mode === "aegis" ? ".defense" : ""),
-            { onClick: function () { set({ mode: tt.mode, step: 2, tools: [], aiTools: tt.mode !== "tool" }); } },
+            { onClick: function () { set({ mode: tt.mode, step: 2, tool: "", tools: [], aiTools: tt.mode !== "tool" }); } },
             [h("span.cico", null, V.icon(tt.icon)), h("div", null, [h("div.ct", null, tt.t), h("div.cd", null, tt.d)])]);
         })),
       ]);
@@ -1251,11 +1694,23 @@
               onChange: function (e) { W.authorized = e.target.checked; refreshFoot(); updateSummary(); } }),
             h("span", null, "I am authorized to test this target (I own it or have written permission)."),
           ]),
-          h("div.hint", null, "VIGIL is for authorized testing only. This is recorded with the run."),
+          // It is NOT recorded with the run: the launch body carries no `authorized` field and the
+          // launcher reads none, so claiming it was recorded put a promise on screen that no file keeps.
+          h("div.hint", null, "VIGIL is for authorized testing only. This box gates the wizard — it is not "
+            + "sent with the launch and nothing stores it. The binding authorization is the signed charter "
+            + "and scope the engine enforces for this slug."),
         ]));
       }
-      rows.push(field("Objective (optional)", h("textarea", { placeholder: "e.g. focus on authentication and access control",
-        onInput: function (e) { W.objective = e.target.value; updateSummary(); } }, W.objective), "Guides the reasoning; never widens scope."));
+      // A cloud/K8s posture goes to its own launcher, whose request carries slug/mode/target/provider and
+      // nothing else — an objective typed here would be dropped on the floor, so it is not offered.
+      if (W.mode !== "cloud") {
+        rows.push(field("Objective (optional)", h("textarea", { placeholder: "e.g. focus on authentication and access control",
+          onInput: function (e) { W.objective = e.target.value; updateSummary(); } }, W.objective),
+          W.mode === "codebase"
+            ? "Handed to the agent as its instruction — this one really steers the run. It never widens scope."
+            : "Recorded with the run for your own record. The gated engagement takes no free-text objective, "
+              + "so it does NOT steer this run — use Depth and the capability packs for that."));
+      }
       return h("div.wizbody", null, [h("h2", null, "Where is it?"),
         h("p.helper", null, "Tell VIGIL exactly what to point at, and confirm you're allowed to."), h("div", null, rows)]);
     }
@@ -1302,8 +1757,56 @@
         W.scopeInput = ""; draw();
       }
     }
+    // -- the REAL tool roster (only for "Run one tool") -----------------------
+    // Every tool the engine knows about is shown, installed or not, admitted or not. Selecting one
+    // sets BOTH `tool` (what the operator picked) and `tools` (the capability id the launch carries),
+    // so the thing that leaves the browser is the thing the launcher actually acts on.
+    function toolRosterField() {
+      if (W.profiles == null) return h("div.field", null, h("div.muted", null, "Reading this host's tool roster…"));
+      if (!W.profiles.length) {
+        return h("div.field", null, h("div.muted", null, W.profilesErr
+          ? "Tool roster unavailable — the offense engine could not probe this host. Start it (`vigil up`) and reload."
+          : "This host reports no tools at all."));
+      }
+      const rows = W.profiles.map(function (p) {
+        const v = toolPickable(p);
+        const on = W.tool === p.name;
+        const cls = ".toolpick" + (v.ok ? "" : ".off") + (on ? ".sel" : "");
+        const kids = [
+          h("div.tp-h", null, [
+            h("span.tp-n.mono", null, p.name),
+            p.installed ? h("span.pill.sm.live", null, "installed")
+              : h("span.pill.sm.idle", null, p.status === "unsupported" ? "not supported here" : "not installed"),
+            h("span.pill.sm", null, "driven by " + (SURFACE_LABEL[String(p.control_surface || "")] || "nothing yet")),
+            p.admitted ? null : h("span.pill.sm.danger", null, "not admitted"),
+            on ? h("span.pill.sm.live", null, [V.icon("check"), "picked"]) : null,
+          ]),
+          p.purpose ? h("div.tp-p", null, p.purpose) : null,
+          h("div.tp-w" + (v.ok ? ".yes" : ""), null, v.ok
+            ? ["Runs here: " + v.why + " (capability “" + capLabelOf(capsOf(W.caps), v.cap) + "”)."]
+            : ["Not startable here — " + v.why + "."]),
+        ];
+        if (!v.ok) return h("div" + cls, null, kids);
+        return h("button" + cls, { onClick: function () {
+          set(on ? { tool: "", tools: [] } : { tool: p.name, tools: [v.cap] });
+        } }, kids);
+      });
+      const n = W.profiles.filter(function (p) { return toolPickable(p).ok; }).length;
+      return h("div.field", null, [
+        h("label", null, "Pick one tool"),
+        h("div.hint", { style: { marginBottom: "10px" } },
+          "These are the real tools on this host, exactly as the engine's roster reports them — not capability "
+          + "packs. " + n + " of " + W.profiles.length + " can be started from this wizard; the rest are listed "
+          + "with whatever does drive them, so an installed tool never just disappears."),
+        h("div.toolpick-list", null, rows),
+        n ? null : h("div.legend", { style: { marginTop: "10px" } }, [V.icon("info"),
+          "Nothing on this host can be started as a single tool right now. Pick “Scan a website / API” and add "
+          + "capability packs instead, or run the tool from the Tools screen."]),
+      ]);
+    }
+
     function stepMode() {
-      const caps = (W.caps && W.caps.caps) || (W.caps && W.caps.capabilities) || [];
+      const caps = capsOf(W.caps);
       const modes = (W.caps && W.caps.scan_modes) || [{ id: "quick", label: "Quick" }, { id: "standard", label: "Standard" }, { id: "deep", label: "Deep" }];
       const body = [];
       if (isEngage()) {
@@ -1311,75 +1814,148 @@
           const sel = W.scan_mode === m.id;
           return h("button.choice" + (sel ? ".sel" : ""), { onClick: function () { set({ scan_mode: m.id }); } },
             [h("div", null, [h("div.ct", null, m.label), h("div.cd", null, m.purpose || "")])]);
-        })), null));
-        if (W.mode !== "tool") {
+        })), "Sets the run's page/request budget. A loopback scan also runs targeted at Quick depth."));
+        if (W.mode === "tool") {
+          body.push(toolRosterField());
+        } else if (!packsRun()) {
+          // THIS RUN CANNOT CARRY A PACK (see `packsRun`), so it does not offer one. A dead picker here
+          // is the whole defect: the operator ticks packs, the launch answers "running", and not one of
+          // them reaches the argv. `W.tools` is deliberately NOT cleared — the payload filters it, and
+          // clearing during a render would throw away picks made for a non-loopback host the moment the
+          // operator stepped back to look at the target.
+          body.push(h("div.legend", null, [V.icon("info"), wantsGraph()
+            ? "Capability packs are not part of a graph-backed run — it goes through the `vigil` bridge, "
+              + "which takes no pack flags. Untick “graph-backed” on the previous step to add them."
+            : "Capability packs are not part of a loopback quick-scan — this target runs the deterministic "
+              + "scanner, which takes no pack flags. Its standard audit runs in full. To add packs, run a "
+              + "Full engagement suite, or point the assessment at a non-loopback host."]));
+        } else {
+          // NOT "let the AI choose the tools": nothing chooses capability packs for you. On simply means
+          // no extra flags are added, and the engagement runs its standard audit. (In a Full autonomous
+          // suite the OODA planner does choose each next ACTION — that is the --autonomous loop, and it
+          // happens whether or not this box is ticked.)
           body.push(h("div.field", null, [
             h("label", { class: "row-flex", style: { cursor: "pointer" } }, [
               h("input", { type: "checkbox", checked: W.aiTools, style: { width: "auto" },
                 onChange: function (e) { set({ aiTools: e.target.checked }); } }),
-              h("span", null, "Let the AI choose the tools (recommended)."),
+              h("span", null, "Run the engine's standard set (recommended)."),
             ]),
-            h("div.hint", null, "Off: pick exactly which gated capability packs run."),
+            h("div.hint", null, W.mode === "suite"
+              ? "On: the engagement runs its standard audit and the autonomous loop picks each next action. "
+                + "Off: you also add specific gated capability packs. The loop chooses actions either way — "
+                + "nothing chooses the packs for you."
+              : "On: the engagement runs its standard audit and no extra flags are added. Off: you choose "
+                + "exactly which gated capability packs are added to it."),
           ]));
+          if (!W.aiTools) {
+            body.push(h("div.field", null, [
+              h("label", null, "Add capability packs"),
+              h("div.hint", { style: { marginBottom: "8px" } },
+                "These are capability PACKS, not individual tools — each maps to one already-gated engage flag. "
+                + "To run one of this host's actual tools, pick “Run one tool” back on step 1."),
+              caps.length ? h("div", { style: { display: "flex", flexWrap: "wrap", gap: "8px" } }, caps.map(function (c) {
+                const on = W.tools.indexOf(c.id) >= 0;
+                return h("button.pill" + (on ? ".live" : ""), { title: c.purpose || "",
+                  onClick: function () {
+                    const i = W.tools.indexOf(c.id); if (i >= 0) W.tools.splice(i, 1); else W.tools.push(c.id);
+                    draw();
+                  } }, [on ? V.icon("check") : null, c.label, h("span.muted", { style: { fontSize: "var(--fs-micro)" } }, " " + c.tier)]);
+              })) : h("div.muted", null, "Capability catalog unavailable (offense engine offline)."),
+              h("div.hint", null, "Nothing here can widen authority — a pack only adds a flag the gate already governs."),
+            ]));
+          }
         }
-        const single = W.mode === "tool";
-        if (single || !W.aiTools) {
-          body.push(h("div.field", null, [
-            h("label", null, single ? "Pick one capability" : "Pick capabilities"),
-            caps.length ? h("div", { style: { display: "flex", flexWrap: "wrap", gap: "8px" } }, caps.map(function (c) {
-              const on = W.tools.indexOf(c.id) >= 0;
-              return h("button.pill" + (on ? ".live" : ""), { title: c.purpose || "",
-                onClick: function () {
-                  if (single) { W.tools = on ? [] : [c.id]; }
-                  else { const i = W.tools.indexOf(c.id); if (i >= 0) W.tools.splice(i, 1); else W.tools.push(c.id); }
-                  draw();
-                } }, [on ? V.icon("check") : null, c.label, h("span.muted", { style: { fontSize: "var(--fs-micro)" } }, " " + c.tier)]);
-            })) : h("div.muted", null, "Capability catalog unavailable (offense engine offline)."),
-            h("div.hint", null, "Each pack maps to an already-gated engage flag; nothing here can widen authority."),
-          ]));
-        }
-        body.push(checkbox("Apply fixes after discovery", W.apply_fixes, function (v) { W.apply_fixes = v; },
-          "Fixes are PROPOSED and queue for your approval — they never auto-apply."));
+        body.push(fixesCheckbox());
       } else {
         const legendTxt = W.mode === "codebase" ? "Strix chooses its own analysis passes over the source."
           : W.mode === "cloud" ? "The posture sensor runs its full deterministic check set over your imported inventory."
             : "AEGIS runs its full defensive oracle set over the telemetry.";
         body.push(h("div.legend", null, [V.icon("info"), legendTxt]));
-        if (W.mode !== "cloud") {
-          body.push(checkbox("Apply fixes after discovery", W.apply_fixes, function (v) { W.apply_fixes = v; },
-            "Fixes are PROPOSED and queue for your approval — they never auto-apply."));
-        }
+        if (W.mode !== "cloud") body.push(fixesCheckbox());
       }
       return h("div.wizbody", null, [h("h2", null, "How should it run?"),
-        h("p.helper", null, "Choose depth and which capabilities run."), h("div", null, body)]);
+        h("p.helper", null, W.mode === "tool"
+          ? "Choose how deep it goes, and which of this host's tools to run."
+          : "Choose how deep it goes, and which capabilities run."), h("div", null, body)]);
+    }
+    // `apply_fixes` is RECORDED on the run and echoed by the Fixes screen; it starts nothing and changes
+    // no flag. "Apply fixes after discovery" read like it scheduled work, so it says what it does instead.
+    function fixesCheckbox() {
+      return checkbox("Flag this run as one I want fixed", W.apply_fixes, function (v) { W.apply_fixes = v; },
+        "Recorded with the run and shown on the Fixes screen, which lists the fixable findings and the gated "
+        + "ladder either way. Ticking it applies nothing — a real fix is a separate, signed, gated step.");
+    }
+    // What a run of THIS mode actually does with a model. Read out of the engine rather than assumed:
+    // `framework.v2 engage` / `scan` / `aegis` import no LLM backend at all (only __main__, the console
+    // API and the sovereignty policy do), so a url / one-tool / AEGIS / cloud run is deterministic end to
+    // end. `--autonomous` is the one exception — it calls the reasoning kernel for ONE bounded ADVISORY
+    // step per cycle and degrades to the deterministic dry-run backend with no key. A codebase run IS the
+    // model: the Strix agent is the thing that reads the source.
+    function modelNeed() {
+      if (W.mode === "codebase") {
+        return { key: true, txt: "A codebase scan IS the model — the Strix agent reads and reasons over your "
+          + "source. Without a working backend it has nothing to run." };
+      }
+      if (W.mode === "suite") {
+        return { key: false, txt: "The audit itself is deterministic. The autonomous loop additionally takes one "
+          + "bounded ADVISORY reasoning step per cycle; with no backend it falls back to the engine's "
+          + "deterministic advice and the run still completes. Advice never confirms a finding — only an "
+          + "oracle does." };
+      }
+      if (W.mode === "aegis") {
+        return { key: false, txt: "AEGIS detect runs its deterministic defensive oracles over your telemetry "
+          + "file. It calls no model." };
+      }
+      if (W.mode === "cloud") {
+        return { key: false, txt: "A cloud / Kubernetes posture is deterministic sensor fusion over your "
+          + "imported inventory. It calls no model." };
+      }
+      return { key: false, txt: "A website / API / one-tool engagement is deterministic — the offense engine "
+        + "calls no model at all. Findings come from oracles, not from a model." };
     }
     function stepModel() {
       const backends = (W.kernel && W.kernel.backends) || [];
       const live = backends.filter(function (b) { return b.available; });
       const status = W.kernel == null ? "Checking…"
         : (live.length ? live.map(function (b) { return b.name; }).join(", ") + " available"
-          : "No live LLM backend detected — set ANTHROPIC_API_KEY (Settings) or run keyless.");
+          : "No live LLM backend detected — add a key in Settings.");
+      const need = modelNeed();
+      // There is no "run keyless" switch here any more. It was accepted, written to the run's meta and
+      // read by nothing: the offense CLIs never call a model, so those runs were already keyless, and a
+      // codebase run needs Strix's model whether or not the box was ticked. Saying which is which is the
+      // honest version of the same information.
       const body = [
-        h("div.field", null, [h("label", null, "Reasoning backend / API key"),
-          h("div.legend", null, [V.icon(live.length ? "check" : "info"), status]),
-          h("div.hint", null, "The model + key come from the environment (Settings). Keys are never shown or entered here.")]),
-        checkbox("Run keyless (attest, then only do what needs no model)", W.keyless, function (v) { W.keyless = v; },
-          "A keyless run still attests first and never fabricates activity."),
+        h("div.field", null, [h("label", null, "Does this run need a model?"),
+          h("div.legend", null, [V.icon(need.key ? "key" : "check"), need.txt]),
+          need.key
+            ? h("div.hint", { style: { marginTop: "8px" } }, "Backends: " + status
+                + ". The model and key come from the environment (Settings) — keys are never shown or entered here.")
+            : h("div.hint", { style: { marginTop: "8px" } }, "Backends (for the screens that do use one): "
+                + status + ". Keys are never shown or entered here."),
+        ]),
+      ];
+      if (W.mode === "cloud") {
+        // launch_cloud takes slug / mode / target / provider and nothing else — no session id, so it
+        // never links the run. Offering the picker here would have quietly detached the run instead.
+        body.push(h("div.legend", null, [V.icon("info"),
+          "A cloud / Kubernetes posture attaches to its engagement slug and signed charter, not to a session — "
+          + "the cloud launcher takes no session, so none is offered here."]));
+      } else {
         // F2/F3/F4: attach this run to a permanent session, and (loopback only) run it GRAPH-BACKED so it
         // accumulates in — and reuses — that session's Neo4j knowledge graph via the integration `vigil engage`.
-        field("Session (optional)",
+        body.push(field("Session (optional)",
           h("select", { onChange: function (e) { W.session_id = e.target.value; if (!W.session_id) W.graph_backed = false; updateSummary(); draw(); } },
             [h("option", { value: "", selected: !W.session_id }, "— none —")].concat(
               (W.sessions || []).map(function (s) { return h("option", { value: s.id, selected: s.id === W.session_id }, s.name || s.id); }))),
-          "Runs sharing a session accumulate and reuse each other's prior context."),
-        (W.session_id && isLoopback())
-          ? checkbox("Graph-backed run (accumulate in this session's knowledge graph)", W.graph_backed,
-              function (v) { W.graph_backed = v; },
-              "Loopback only. Routes the run through `vigil engage --session` so its facts partition this "
-              + "session's Neo4j graph (and union any connected sessions). Falls back to the normal engine "
-              + "if `vigil`/Neo4j isn't available.")
-          : null,
-      ];
+          "Runs sharing a session accumulate and reuse each other's prior context."));
+        if (W.session_id && isLoopback()) {
+          body.push(checkbox("Graph-backed run (accumulate in this session's knowledge graph)", W.graph_backed,
+            function (v) { W.graph_backed = v; },
+            "Loopback only. Routes the run through `vigil engage --session` so its facts partition this "
+            + "session's Neo4j graph (and union any connected sessions). If `vigil`/Neo4j isn't available it "
+            + "falls back to the normal engine — and this screen will tell you so at launch."));
+        }
+      }
       return h("div.wizbody", null, [h("h2", null, "Model & keys"),
         h("p.helper", null, "VIGIL runs on your machine with your own key — nothing is sent anywhere else."), h("div", null, body)]);
     }
@@ -1412,10 +1988,24 @@
         if (isEngage()) put("Scope", isLoopback() ? "127.0.0.1 (loopback)" : (W.scope.length ? W.scope.join(", ") : "(host only)"));
         if (isEngage()) put("Slug", W.slug || slugify(hostOf(W.target), "engagement"));
         if (isEngage()) put("Depth", W.scan_mode);
-        if (isEngage()) put("Tools", W.mode === "tool" ? (W.tools[0] || "—") : (W.aiTools ? "AI chooses" : (W.tools.join(", ") || "none")));
-        put("Fixes", W.apply_fixes ? "propose (queue for approval)" : "off");
+        if (isEngage()) {
+          // Read through the SAME `packsRun` the payload uses. Picks made for a non-loopback host are
+          // kept in `W.tools` when the operator steps back and retargets at loopback (losing them to a
+          // redraw would be its own defect) — so without this the summary would still list them while
+          // the request no longer carries them, which is the exact mismatch this whole fix is about.
+          put("Tools", W.mode === "tool"
+            ? (W.tool ? W.tool + " · via the " + capLabelOf(capsOf(W.caps), W.tools[0]) + " capability" : "—")
+            : !packsRun() ? "engine standard set (this run takes no capability packs)"
+              : (W.aiTools ? "engine standard set" : (W.tools.join(", ") || "none")));
+        }
+        // objective only reaches the run for a codebase (--instruction); elsewhere it is recorded, not acted on
+        if (W.objective.trim()) {
+          put("Objective", W.mode === "codebase" ? "steers the agent" : "recorded only (does not steer)");
+        }
+        put("Fixes", W.apply_fixes ? "flagged (nothing auto-applies)" : "off");
       }
-      put("Model", W.keyless ? "keyless" : "environment / Settings");
+      put("Model", modelNeed().key ? "needed (the agent reads your source)"
+        : (W.mode === "suite" ? "optional (advisory reasoning only)" : "not used (deterministic run)"));
       return V.card("What will happen", "SUMMARY", h("div", null, [
         h("div.stack", { style: { gap: "8px" } }, rows),
         h("div.legend", { style: { marginTop: "14px" } }, [V.icon("key"),
@@ -1451,6 +2041,8 @@
           provider: W.cloud_mode === "cloud" ? W.provider : "" };
         V.postJSON(OFF("/api/launch/cloud"), cbody).then(function (r) {
           if (r && r.error) { W.launching = false; V.toast(r.error, true); refreshFoot(); return; }
+          // the new job becomes the one being worked on (see the assessment branch below)
+          setEngagement((r && r.slug) || cbody.slug || "");
           V.toast("Cloud posture launched — watching it live.");
           location.hash = "#/live?run=" + encodeURIComponent(r.run_id);
         }).catch(function (e) {
@@ -1458,18 +2050,41 @@
         });
         return;
       }
+      // `keyless` and `model` used to ride along here. Both were written to the run's meta and read by
+      // nothing that changes a run, and no control in this wizard ever set `model` at all, so sending
+      // them only made the request look richer than it was.
+      const wantGraph = wantsGraph();
       const body = {
         mode: W.mode, target: W.target.trim(), slug: W.slug.trim(), scope: W.scope,
         objective: W.objective.trim(), scan_mode: W.scan_mode,
-        tools: (W.mode !== "tool" && W.aiTools) ? [] : W.tools,
-        apply_fixes: W.apply_fixes, keyless: W.keyless, model: W.model,
+        // `packsRun` is the SAME predicate the picker above is drawn from, so what was offered and what
+        // is sent cannot drift: a branch that would drop the packs is never asked to carry them.
+        tools: (W.mode !== "tool" && (W.aiTools || !packsRun())) ? [] : W.tools,
+        apply_fixes: W.apply_fixes,
         mount: W.mount, aegis_action: W.aegis_action,
         session_id: W.session_id,
-        graph_backed: !!(W.graph_backed && W.session_id && isLoopback()),
+        graph_backed: wantGraph,
       };
       V.postJSON(OFF("/api/launch/assessment"), body).then(function (r) {
         if (r && r.error) { W.launching = false; V.toast(r.error, true); refreshFoot(); return; }
+        // A NEW JOB TAKES OVER THE CONSOLE: scope every screen to the engagement this run was launched
+        // under, so the operator lands on their new job's work and nothing else — which, until it
+        // produces anything, is honestly empty. Prefer the slug the SERVER reports (the one the run
+        // records for itself); the wizard's is only what was asked for.
+        setEngagement((r && r.slug) || body.slug || "");
         V.toast("Assessment launched — watching it live.");
+        // A graph-backed request falls back to the normal engine whenever `vigil`/Neo4j is missing. The
+        // server says which engine it actually spawned; silently keeping that to ourselves would leave
+        // the operator believing their run partitioned a knowledge graph that was never touched.
+        if (wantGraph && !(r && r.engine === "integration-graph")) {
+          V.toast("Graph-backed was requested but is unavailable here (it needs the `vigil` entrypoint and "
+            + "NEO4J_URI) — this ran on the normal engine. The run is still linked to the session.", true);
+        }
+        // Same rule for the capability packs: only the engage branch turns a pack into a flag, so a
+        // loopback quick-scan / graph-backed / Strix / AEGIS run carries none of them. The server says so
+        // in `tools_note`; passing that on is the difference between a run the operator understands and a
+        // run they believe was broader than it was.
+        if (r && r.tools_note) V.toast(r.tools_note, true);
         location.hash = "#/live?run=" + encodeURIComponent(r.run_id);
       }).catch(function (e) {
         W.launching = false; V.toast((e && e.message) || "Launch failed", true); refreshFoot();
@@ -1501,7 +2116,7 @@
 
   function renderLive(screen) {
     const L = { run: null, runs: [], events: [], seen: {}, filter: "all", snapshot: null, started: null,
-      inbox: [], inboxLoaded: false, inboxLoading: false };
+      inbox: [], inboxLoaded: false, inboxLoading: false, elsewhere: "" };
     const want = hashQuery().run || "";
 
     V.mount(screen, [
@@ -1510,9 +2125,12 @@
       h("div#live-body", null, h("div.empty", null, "Loading runs…")),
     ]);
 
-    V.getJSON(OFF("/api/runs")).then(function (d) {
-      L.runs = (d && d.runs) || [];
+    // scoped to the active engagement — this screen shows the job being worked on, not every job ever
+    V.getJSON(runsURL()).then(function (d) {
+      L.runs = runsOf(d);
       L.run = L.runs.find(function (r) { return r.run_id === want; }) || L.runs[0] || null;
+      // a deep link into a run this job does not own: fall back to this job's newest run, and SAY so
+      L.elsewhere = (want && !L.runs.some(function (r) { return r.run_id === want; })) ? want : "";
       if (L.run) { L.started = L.run.started; attachStream(); }
       drawBody();
     }).catch(function () {
@@ -1523,7 +2141,7 @@
     function selectRun(runId) {
       teardownLive();
       L.run = L.runs.find(function (r) { return r.run_id === runId; }) || null;
-      L.events = []; L.seen = {}; L.snapshot = null; L.started = L.run && L.run.started;
+      L.events = []; L.seen = {}; L.snapshot = null; L.started = L.run && L.run.started; L.elsewhere = "";
       L.inbox = []; L.inboxLoaded = false; L.inboxLoading = false;   // per-engagement advisory inbox (B4)
       history.replaceState(null, "", "#/live?run=" + encodeURIComponent(runId));
       if (L.run) attachStream();
@@ -1555,8 +2173,8 @@
       if (run.stream === "none") liveTimers.push(setInterval(refreshRunMeta, 3000));
     }
     function refreshRunMeta() {
-      V.getJSON(OFF("/api/runs")).then(function (d) {
-        const r = ((d && d.runs) || []).find(function (x) { return x.run_id === L.run.run_id; });
+      V.getJSON(runsURL()).then(function (d) {
+        const r = runsOf(d).find(function (x) { return x.run_id === L.run.run_id; });
         if (r) { L.run = r; updateHeader(); }
       }).catch(function () {});
     }
@@ -1766,9 +2384,11 @@
     function drawBody() {
       const body = V.$("#live-body"); if (!body) return;
       if (!L.runs.length) {
-        V.mount(body, h("div.empty", null, [h("div.big", null, "No runs yet"),
-          h("p", null, "Start one from New Assessment and it appears here, live."),
-          h("button.btn.primary", { style: { marginTop: "16px" }, onClick: function () { location.hash = "#/assess"; } }, [V.icon("bolt"), "New Assessment"])]));
+        V.mount(body, activeEngagement()
+          ? scopedEmpty("runs", "Nothing has run under this job yet — the moment one starts, every action appears here live.", [newAssessBtn()])
+          : h("div.empty", null, [h("div.big", null, "No runs yet"),
+            h("p", null, "Start one from New Assessment and it appears here, live."),
+            h("button.btn.primary", { style: { marginTop: "16px" }, onClick: function () { location.hash = "#/assess"; } }, [V.icon("bolt"), "New Assessment"])]));
         return;
       }
       const picker = h("div.field", { style: { maxWidth: "520px" } }, [
@@ -1784,6 +2404,7 @@
         return h("button" + (L.filter === f[0] ? ".on" : ""), { onClick: function () { L.filter = f[0]; if (f[0] === "inbox" && !L.inboxLoaded) loadInbox(); drawBody(); } }, f[1]);
       }));
       V.mount(body, [
+        L.elsewhere ? otherEngagementNote(L.elsewhere) : null,
         picker,
         L.run ? h("div.card#live-head", { style: { marginTop: "12px" } }, headerContent()) : null,
         legend,
@@ -1894,7 +2515,8 @@
   // ---- Activity: the background-activity screen (A4e-2) -----------------------
   // A READ-ONLY window on "how things are working in the background" across both
   // planes. It reuses only existing read endpoints — nothing here mutates:
-  //   · OFF("/api/runs")      → active/recent runs (Watch-live links into #/live)
+  //   · runsURL()             → active/recent runs for the ACTIVE ENGAGEMENT (Watch-live links
+  //                             into #/live); unscoped ⇒ every job, exactly as before
   //   · SOV("/api/snapshot")  → SIGIL agent mesh (recent_by_agent), budget_today,
   //                             ingest_lag, spine head_seq, kill-switch
   //   · SOV("/api/stream")    → the live spine SSE (the "background" event feed)
@@ -2032,9 +2654,11 @@
           h("p", null, "Could not reach the offense console. Start it with `vigil up` and it appears here.")])); return;
       }
       if (!B.runs.length) {
-        V.mount(host, h("div.empty", null, [h("div.big", null, "No runs yet"),
-          h("p", null, "Start one from New Assessment and it shows up here, live."),
-          h("button.btn.primary", { style: { marginTop: "12px" }, onClick: function () { location.hash = "#/assess"; } }, [V.icon("bolt"), "New Assessment"])])); return;
+        V.mount(host, activeEngagement()
+          ? scopedEmpty("active work", "Nothing has run under this job yet — the mesh and the event stream beside this panel are console-wide and keep working.", [newAssessBtn()])
+          : h("div.empty", null, [h("div.big", null, "No runs yet"),
+            h("p", null, "Start one from New Assessment and it shows up here, live."),
+            h("button.btn.primary", { style: { marginTop: "12px" }, onClick: function () { location.hash = "#/assess"; } }, [V.icon("bolt"), "New Assessment"])])); return;
       }
       V.mount(host, h("div.stack", null, B.runs.slice(0, 12).map(runRow)));
     }
@@ -2047,8 +2671,8 @@
 
     // -- polling (read-only GETs; cleaned up by teardownLive via liveTimers) -----
     function pollRuns() {
-      V.getJSON(OFF("/api/runs")).then(function (d) {
-        B.runs = (d && d.runs) || []; B.offOnline = true; drawRuns(); drawStatus(); drawTiles();
+      V.getJSON(runsURL()).then(function (d) {
+        B.runs = runsOf(d); B.offOnline = true; drawRuns(); drawStatus(); drawTiles();
       }).catch(function () { B.offOnline = false; drawRuns(); drawStatus(); drawTiles(); });
     }
     function pollSnap() {
@@ -2151,7 +2775,7 @@
 
   // ---- the hub ---------------------------------------------------------------
   function renderFindings(screen) {
-    const S = { runs: [], run: null, tab: "findings" };
+    const S = { runs: [], run: null, tab: "findings", elsewhere: "" };
     const q = hashQuery();
     const want = q.run || "";
     const wantTab = q.tab || "";
@@ -2162,9 +2786,11 @@
       h("div#p3-body", null, h("div.empty", null, "Loading runs…")),
     ]);
 
-    V.getJSON(OFF("/api/runs")).then(function (d) {
-      S.runs = (d && d.runs) || [];
+    // scoped to the active engagement — one job's findings are never mixed with another's
+    V.getJSON(runsURL()).then(function (d) {
+      S.runs = runsOf(d);
       S.run = S.runs.find(function (r) { return r.run_id === want; }) || S.runs[0] || null;
+      S.elsewhere = (want && !S.runs.some(function (r) { return r.run_id === want; })) ? want : "";
       if (P3_TABS.some(function (t) { return t.id === wantTab; })) S.tab = wantTab;
       drawShell();
     }).catch(function () {
@@ -2178,6 +2804,7 @@
     }
     function selectRun(runId) {
       S.run = S.runs.find(function (r) { return r.run_id === runId; }) || null;
+      S.elsewhere = "";
       syncHash(); drawShell();
     }
     function selectTab(tab) { S.tab = tab; syncHash(); drawTab(); }
@@ -2185,10 +2812,12 @@
     function drawShell() {
       const body = V.$("#p3-body"); if (!body) return;
       if (!S.runs.length) {
-        V.mount(body, h("div.empty", null, [h("div.big", null, "No runs yet"),
-          h("p", null, "Start an assessment and its findings, attack graph and evidence appear here."),
-          h("button.btn.primary", { style: { marginTop: "16px" }, onClick: function () { location.hash = "#/assess"; } },
-            [V.icon("bolt"), "New Assessment"])]));
+        V.mount(body, activeEngagement()
+          ? scopedEmpty("findings", "No run in this job has produced findings yet — its findings, attack graph and evidence appear here as soon as one does.", [newAssessBtn()])
+          : h("div.empty", null, [h("div.big", null, "No runs yet"),
+            h("p", null, "Start an assessment and its findings, attack graph and evidence appear here."),
+            h("button.btn.primary", { style: { marginTop: "16px" }, onClick: function () { location.hash = "#/assess"; } },
+              [V.icon("bolt"), "New Assessment"])]));
         return;
       }
       const picker = h("div.field", { style: { maxWidth: "560px", marginBottom: "0" } }, [
@@ -2201,7 +2830,8 @@
       const tabs = h("div.segmented", { style: { marginTop: "12px", flexWrap: "wrap" } }, P3_TABS.map(function (t) {
         return h("button" + (S.tab === t.id ? ".on" : ""), { onClick: function () { selectTab(t.id); } }, t.label);
       }));
-      V.mount(body, [picker, tabs, h("div#p3-view", { style: { marginTop: "16px" } })]);
+      V.mount(body, [S.elsewhere ? otherEngagementNote(S.elsewhere) : null, picker, tabs,
+        h("div#p3-view", { style: { marginTop: "16px" } })]);
       drawTab();
     }
 
@@ -3602,16 +4232,17 @@
   // the gated ladder any auto-fix follows. Live auto-application (clone/build/open-PR) is a separate
   // sovereign-gated capability that must be provisioned + authorized — nothing is cloned/built/opened here.
   function renderFixes(screen) {
-    var S = { runs: [], run: null };
+    var S = { runs: [], run: null, elsewhere: "" };
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Fixes"),
         h("span.sub", null, "What to fix after discovery, and the gated process an auto-fix follows.")]),
       h("div#fx-body", null, h("div.empty", null, "Loading runs…")),
     ]);
     var want = (hashQuery().run) || "";
-    V.getJSON(OFF("/api/runs")).then(function (d) {
-      S.runs = (d && d.runs) || [];
+    V.getJSON(runsURL()).then(function (d) {
+      S.runs = runsOf(d);                       // scoped to the active engagement
       S.run = S.runs.find(function (r) { return r.run_id === want; }) || S.runs[0] || null;
+      S.elsewhere = (want && !S.runs.some(function (r) { return r.run_id === want; })) ? want : "";
       drawFixes(S);
     }).catch(function () {
       var b = V.$("#fx-body");
@@ -3622,9 +4253,11 @@
   function drawFixes(S) {
     var body = V.$("#fx-body"); if (!body) return;
     if (!S.runs.length) {
-      V.mount(body, h("div.empty", null, [h("div.big", null, "No runs yet"),
-        h("p", null, "Run an assessment first — its confirmed findings become fixable here."),
-        h("button.btn.primary", { style: { marginTop: "12px" }, onClick: function () { location.hash = "#/assess"; } }, "New Assessment")]));
+      V.mount(body, activeEngagement()
+        ? scopedEmpty("runs", "Nothing has run under this job yet — a run's oracle-confirmed findings become fixable here.", [newAssessBtn()])
+        : h("div.empty", null, [h("div.big", null, "No runs yet"),
+          h("p", null, "Run an assessment first — its confirmed findings become fixable here."),
+          h("button.btn.primary", { style: { marginTop: "12px" }, onClick: function () { location.hash = "#/assess"; } }, "New Assessment")]));
       return;
     }
     var picker = h("div.field", { style: { maxWidth: "560px", marginBottom: "0" } }, [
@@ -3632,13 +4265,15 @@
       h("select", { onChange: function (e) {
           S.run = S.runs.find(function (r) { return r.run_id === e.target.value; }) || null;
           history.replaceState(null, "", "#/fixes?run=" + encodeURIComponent(S.run ? S.run.run_id : ""));
+          S.elsewhere = "";
           drawFixes(S);
         } }, S.runs.map(function (r) {
         return h("option", { value: r.run_id, selected: S.run && r.run_id === S.run.run_id },
           (r.mode || "url") + " · " + (r.target || r.slug || r.run_id) + " · " + r.status);
       })),
     ]);
-    V.mount(body, [picker, h("div#fx-view", { style: { marginTop: "16px" } }, h("div.empty", null, "Loading fix plan…"))]);
+    V.mount(body, [S.elsewhere ? otherEngagementNote(S.elsewhere) : null, picker,
+      h("div#fx-view", { style: { marginTop: "16px" } }, h("div.empty", null, "Loading fix plan…"))]);
     if (!S.run) return;
     V.getJSON(OFF("/api/remediate/" + encodeURIComponent(S.run.run_id))).then(drawFixPlan)
       .catch(function () { var v = V.$("#fx-view"); if (v) V.mount(v, h("div.empty", null, "Could not load the fix plan for this run.")); });
@@ -4379,15 +5014,20 @@
 
   function brainRunScoped(v, b, tab) {
     var ep = tab === "intel" ? "/api/intel/" : "/api/planner/";
-    V.getJSON(OFF("/api/runs")).then(function (d) {
-      b.runs = (d && d.runs) || [];
+    V.getJSON(runsURL()).then(function (d) {
+      b.runs = runsOf(d);                       // scoped to the active engagement
+      // a run picked under a previous scope is another job's work — drop it rather than keep showing it
       if (!b.run || !b.runs.find(function (r) { return r.run_id === b.run.run_id; })) b.run = b.runs[0] || null;
       var picker = b.runs.length ? h("div.field", { style: { maxWidth: "560px" } }, [
         h("label", null, "Engagement"),
         h("select", { onChange: function (e) { b.run = b.runs.find(function (r) { return r.run_id === e.target.value; }); brainRunScoped(v, b, tab); } },
           b.runs.map(function (r) { return h("option", { value: r.run_id, selected: b.run && r.run_id === b.run.run_id }, (r.mode || "url") + " · " + (r.target || r.slug || r.run_id)); })),
       ]) : null;
-      var slot = h("div#brain-rs", { style: { marginTop: "12px" } }, h("div.empty", null, b.runs.length ? "Loading…" : ("No engagements yet — " + tab + " is per-engagement.")));
+      var slot = h("div#brain-rs", { style: { marginTop: "12px" } },
+        b.runs.length ? h("div.empty", null, "Loading…")
+          : (activeEngagement()
+            ? scopedEmpty("engagements", "Nothing has run under this job yet, and " + tab + " is per-engagement.", [newAssessBtn()])
+            : h("div.empty", null, "No engagements yet — " + tab + " is per-engagement.")));
       var actPanel = b.run ? brainRunAction(tab, (b.run.slug || b.run.run_id)) : null;
       V.mount(v, [picker, actPanel, slot]);
       if (!b.run) return;
@@ -4447,17 +5087,102 @@
   }
 
   // ---- Chat -----------------------------------------------------------------
-  // Tell the agent what to test in plain language. Each turn goes through the SAME gated launcher a
-  // hand-run engagement uses (scope charter-signed, WARDEN approve-then-run, oracle-confirmed findings);
-  // the conversation is saved on the operator's machine (.vigil-live/chats/<id>.jsonl). Model + effort are
-  // owner-plane settings (reused from Settings). Multi-agent "deploy N" arrives with the fireteam slice.
+  // Tell the agent what to test in plain language — or hand it material (a zip of a codebase, loose
+  // files, screenshots) and ask questions about it. Each launched turn goes through the SAME gated
+  // launcher a hand-run engagement uses (scope charter-signed, WARDEN approve-then-run, oracle-confirmed
+  // findings); the conversation is saved on the operator's machine (.vigil-live/chats/<id>.jsonl).
+  //
+  // THREE THINGS THIS SCREEN MUST NEVER BLUR:
+  //   1. An answer about uploaded material is a LEAD. A finding becomes a FACT only when a deterministic
+  //      oracle fires over real evidence — so every model-authored reply is badged as a lead, and where
+  //      the reply reports an extracted codebase it offers the gated REAL scan of those same files.
+  //   2. Nothing leaves this machine unannounced. Before the first send that carries an attachment the
+  //      operator is shown exactly what goes: how many files, how many bytes, and the list. Once per
+  //      attachment — not once per message, and never implicitly.
+  //   3. A linked chat is a READ-TIME scope, not a merge. This chat draws on that one, one-way, and
+  //      nothing is copied — which is why disconnecting takes effect immediately.
+  //
+  // Uploads ride the ordinary JSON action plane in slices (V.uploadChunked): the console refuses a POST
+  // body over 1 MiB, and a transcript record must stay small (it is re-read whole on every render and
+  // appended lock-free), so a record holds a POINTER to an attachment — never its bytes.
+  const CHAT_MAX_ATTACH = 12;
+  // Records the ENGINE authors itself: a launch, a refusal, an error, a prompt for a target, an
+  // attachment receipt. Anything else an assistant says is model prose → a LEAD, and is badged as one.
+  const CHAT_ENGINE_KINDS = { launched: 1, refused: 1, error: 1, need_target: 1, attached: 1, system: 1 };
+
+  function fmtBytes(n) {
+    const b = Number(n) || 0;
+    if (b < 1024) return b + " B";
+    const u = ["KB", "MB", "GB", "TB"];
+    let v = b / 1024, i = 0;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i += 1; }
+    return (v >= 100 ? Math.round(v) : Math.round(v * 10) / 10) + " " + u[i];
+  }
+
+  // A real modal — the screen has two decisions that must not be taken by `window.prompt` (which cannot
+  // show a list, cannot be styled, and cannot be read by a screen reader as a dialog): the egress
+  // consent and the link picker. Escape / backdrop / ✕ all cancel; the caller learns via onCancel.
+  function openModal(title, body, actions, opts) {
+    opts = opts || {};
+    const host = h("div.vmodal", { role: "dialog", "aria-modal": "true", "aria-label": String(title || "Dialog") });
+    let closed = false;
+    function close() {
+      if (closed) return; closed = true;
+      document.removeEventListener("keydown", onKey);
+      host.remove();
+    }
+    function cancel() { if (closed) return; close(); if (opts.onCancel) opts.onCancel(); }
+    function onKey(e) { if (e.key === "Escape") { e.preventDefault(); cancel(); } }
+    const card = h("div.vmodal-card", null, [
+      h("div.vmodal-h", null, [
+        h("h3", null, String(title || "")),
+        h("button.iconbtn", { "aria-label": "Close", onClick: cancel }, V.icon("x")),
+      ]),
+      h("div.vmodal-b", null, body),
+      (actions && actions.length) ? h("div.vmodal-f", null, actions) : null,
+    ]);
+    host.appendChild(card);
+    host.addEventListener("mousedown", function (e) { if (e.target === host) cancel(); });
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(host);
+    const first = card.querySelector(".vmodal-b input, .vmodal-f button, .vmodal-b button");
+    if (first && first.focus) first.focus();
+    return { close: close, card: card };
+  }
+
+  // A file dropped NEXT TO the transcript (on the nav, the top bar, the margin) would otherwise make the
+  // browser navigate away to that file and take the console with it. Same function reference every time,
+  // so re-entering the screen cannot stack duplicate listeners, and it unhooks itself once the chat
+  // screen is gone. It only ever cancels a default; it reads nothing.
+  function chatDropGuard(e) {
+    if (!document.getElementById("chat-wrap")) {
+      window.removeEventListener("dragover", chatDropGuard);
+      window.removeEventListener("drop", chatDropGuard);
+      return;
+    }
+    const types = (e.dataTransfer && e.dataTransfer.types) || [];
+    if (Array.prototype.indexOf.call(types, "Files") !== -1) e.preventDefault();
+  }
+
   function renderChat(screen) {
     teardownLive();
-    const C = { id: hashQuery().id || "", messages: [], sessions: [], st: null, busy: false };
+    window.addEventListener("dragover", chatDropGuard);
+    window.addEventListener("drop", chatDropGuard);
+    const C = {
+      id: hashQuery().id || "",
+      messages: [], sessions: [], chatMeta: {}, st: null, busy: false,
+      attach: [], seq: 0, dragDepth: 0,
+      // the real tool roster + capability catalog, so the composer's "one tool" mode can send something
+      // the launcher actually acts on (see TOOL_LAUNCH)
+      profiles: [], caps: [], profilesErr: false,
+      // the composer's own selections, kept OUT of the DOM so a redraw after a send does not quietly
+      // reset the mode (and with it the picked tool) back to "auto" under the operator
+      mode: "", tool: "",
+    };
 
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Chat"),
-        h("span.sub", null, "Ask in plain language what to test — the agent launches gated, oracle-confirmed runs and saves the conversation on your machine.")]),
+        h("span.sub", null, "Ask in plain language, or attach a zip, files and images and ask about them. Answers are leads; the gated run is what mints facts.")]),
       h("div#chat-wrap", { style: { display: "flex", gap: "16px", alignItems: "stretch", marginTop: "12px", minHeight: "60vh" } }, [
         h("div#chat-sessions", { style: { width: "240px", flex: "0 0 240px", display: "flex", flexDirection: "column", gap: "8px" } }, h("div.empty", null, "…")),
         h("div#chat-main", { style: { flex: "1 1 auto", display: "flex", flexDirection: "column", minWidth: "0" } }, h("div.empty", null, "Loading…")),
@@ -4465,18 +5190,84 @@
     ]);
 
     function load() {
+      // The roster is AWAITED, not fired and forgotten: drawing the composer before it lands would
+      // render the one-tool picker empty and tell the operator no tool can be started here — a false
+      // negative about their own machine, produced by a race.
+      const roster = Promise.all([
+        V.getJSON(OFF("/api/toolprofiles")).then(function (d) {
+          C.profiles = (d && d.profiles) || []; C.profilesErr = !!(d && d.error);
+        }).catch(function () { C.profiles = []; C.profilesErr = true; }),
+        V.getJSON(OFF("/api/capabilities")).then(function (d) { C.caps = capsOf(d); }).catch(function () { C.caps = []; }),
+      ]);
       V.getJSON(SOV("/api/settings")).then(function (st) { C.st = st; }).catch(function () { C.st = null; })
-        .then(function () { return V.getJSON(OFF("/api/chat/sessions")).then(function (d) { C.sessions = (d && d.sessions) || []; }).catch(function () { C.sessions = []; }); })
+        .then(function () { return roster; })
+        .then(loadChatList)
         .then(function () {
           if (!C.id) { C.messages = []; drawSessions(); drawMain(); return; }
-          return V.getJSON(OFF("/api/chat/session/" + encodeURIComponent(C.id)))
-            .then(function (d) { C.messages = (d && d.messages) || []; }).catch(function () { C.messages = []; })
-            .then(function () { drawSessions(); drawMain(); });
+          return refreshTranscript().then(function () { drawSessions(); drawMain(); });
         });
     }
 
+    // The sidebar reads the SESSIONS listing rather than /api/chat/sessions, because only that one
+    // carries `connections` — the other chats this one draws on. The chat listing is still read and
+    // merged in by id, for the title (first user line) and the turn count it alone knows. Union, not
+    // intersection: a transcript the registry has not adopted yet still shows up.
+    function loadChatList() {
+      return Promise.all([
+        V.getJSON(OFF("/api/sessions")).then(function (d) { return (d && d.sessions) || []; }).catch(function () { return []; }),
+        V.getJSON(OFF("/api/chat/sessions")).then(function (d) { return (d && d.sessions) || []; }).catch(function () { return []; }),
+      ]).then(function (r) {
+        const sess = r[0] || [], chats = r[1] || [];
+        const meta = {};
+        chats.forEach(function (c) { if (c && c.id) meta[c.id] = c; });
+        C.chatMeta = meta;
+        const byId = {};
+        sess.forEach(function (s) {
+          if (!s || !s.id) return;
+          if (s.kind !== "chat" && s.kind !== "mixed") return;
+          byId[s.id] = { id: s.id, name: s.name || "", kind: s.kind, connections: (s.connections || []).slice(),
+            updated: Number(s.updated) || 0, runs: (s.run_ids || []).length, registered: true };
+        });
+        chats.forEach(function (c) {
+          if (!c || !c.id || byId[c.id]) return;
+          byId[c.id] = { id: c.id, name: c.title || "", kind: "chat", connections: [],
+            updated: Number(c.updated) || 0, runs: 0, registered: false };
+        });
+        C.sessions = Object.keys(byId).map(function (k) { return byId[k]; })
+          .sort(function (a, b) { return (b.updated || 0) - (a.updated || 0); });
+      });
+    }
+
+    function rowOf(id) {
+      if (!id) return null;
+      for (let i = 0; i < C.sessions.length; i++) if (C.sessions[i].id === id) return C.sessions[i];
+      return null;
+    }
+    function titleOf(id) {
+      const m = C.chatMeta[id], r = rowOf(id);
+      return (m && m.title) || (r && r.name) || id || "(chat)";
+    }
+    function turnsOf(id) { const m = C.chatMeta[id]; return m && m.turns != null ? Number(m.turns) : null; }
+
+    function refreshTranscript() {
+      if (!C.id) { C.messages = []; return Promise.resolve(); }
+      return V.getJSON(OFF("/api/chat/session/" + encodeURIComponent(C.id)))
+        .then(function (d) { C.messages = (d && d.messages) || []; })
+        .catch(function () { C.messages = []; });
+    }
+
+    // One writer for "this conversation now has an id": the URL, the state and the upload's chat
+    // binding can then never disagree.
+    function adoptChatId(id) {
+      const next = String(id || "");
+      if (!next || C.id === next) return;
+      C.id = next;
+      history.replaceState(null, "", "#/chat?id=" + encodeURIComponent(next));
+    }
+
     function openSession(id) {
-      C.id = id || ""; C.messages = [];
+      C.id = id || "";
+      C.messages = []; C.attach = [];
       history.replaceState(null, "", "#/chat" + (id ? ("?id=" + encodeURIComponent(id)) : ""));
       load();
     }
@@ -4489,13 +5280,339 @@
       } else {
         C.sessions.forEach(function (s) {
           const active = s.id === C.id;
+          const turns = turnsOf(s.id);
+          const links = (s.connections || []).length;
           rows.push(h("button.btn" + (active ? ".owner" : ""), {
             style: { width: "100%", textAlign: "left", justifyContent: "flex-start", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-            title: s.title, onClick: function () { openSession(s.id); },
-          }, [h("span", null, s.title || "(empty)"), h("span.dim", { style: { marginLeft: "6px", fontSize: "var(--fs-xs)" } }, "· " + s.turns)]));
+            title: titleOf(s.id) + (links ? ("\ndraws on " + links + " other chat" + (links === 1 ? "" : "s")) : ""),
+            onClick: function () { openSession(s.id); },
+          }, [
+            h("span", null, titleOf(s.id)),
+            h("span.dim", { style: { marginLeft: "6px", fontSize: "var(--fs-xs)" } },
+              (turns != null ? "· " + turns : "") + (links ? " · " + links + "⛓" : "")),
+          ]));
         });
       }
       V.mount(host, rows);
+    }
+
+    // -- attachments ---------------------------------------------------------
+    // An attachment is uploaded the moment it is chosen (so the operator sees a refusal early), but it
+    // does not LEAVE the machine for the model until the send that carries it is consented to.
+    function addFiles(fileList) {
+      const files = Array.prototype.slice.call(fileList || []);
+      if (!files.length) return;
+      files.forEach(function (f) {
+        if (C.attach.length >= CHAT_MAX_ATTACH) {
+          V.toast("At most " + CHAT_MAX_ATTACH + " attachments at a time — send these first.", true);
+          return;
+        }
+        const a = {
+          key: "att" + (++C.seq), name: String(f.name || "file"), size: Number(f.size) || 0,
+          status: "uploading", pct: 0, err: "", refusals: [], consented: false, sent: false,
+          id: "", sha256: "", kind: "", files: null, fileList: [], more: 0, path: "",
+          abortRef: { aborted: false },
+        };
+        C.attach.push(a);
+        drawAttach();
+        V.uploadChunked({
+          begin: OFF("/api/chat/attach/begin"),
+          chunk: OFF("/api/chat/attach/chunk"),
+          finish: OFF("/api/chat/attach/finish"),
+          abort: OFF("/api/chat/attach/abort"),
+        }, f, {
+          fields: C.id ? { chat_id: C.id } : {},
+          finishFields: C.id ? { chat_id: C.id } : {},
+          abortRef: a.abortRef,
+          onProgress: function (sent, total) {
+            a.pct = total > 0 ? Math.round((sent / total) * 100) : 100;
+            drawAttach();
+          },
+        }).then(function (r) { applyUpload(a, r); })
+          .catch(function (e) {
+            // A 404 here is not "your file is bad" — it is a console without the upload routes. Say which,
+            // but keep any refusals the body did carry: a refusal must reach the operator either way.
+            const data = (e && e.data) || {};
+            const why = (e && e.status === 404)
+              ? "this console build has no chat upload route (404) — nothing was sent"
+              : (data.error || (e && e.message) || "upload failed");
+            applyUpload(a, { error: why, refusals: data.refusals });
+          })
+          .then(function () { drawAttach(); });
+      });
+    }
+
+    // A refusal EXPLAINS ITSELF. Whatever shape the console sends it in — a string, an object with a
+    // reason, a list — it reaches the operator as readable prose, never as a swallowed failure.
+    function normRefusals(list) {
+      if (list == null) return [];
+      if (!Array.isArray(list)) list = [list];
+      return list.map(function (x) {
+        if (typeof x === "string") return x;
+        if (x && typeof x === "object") {
+          const why = String(x.reason || x.error || x.message || x.detail || "");
+          const where = String(x.path || x.name || x.entry || "");
+          if (why && where) return why + " — " + where;
+          if (why) return why;
+          try { return JSON.stringify(x); } catch (e) { return String(x); }
+        }
+        return String(x);
+      }).filter(function (s) { return s !== ""; });
+    }
+
+    function applyUpload(a, r) {
+      r = r || {};
+      // The console returns the MANIFEST at the top level (`{chat_id, ok, attachment_id, name, kind,
+      // files, bytes, sha256, …}`). Reading only a nested `attachment` object left the count, the
+      // digest and the kind blank — and those three are exactly what the egress-consent dialog shows
+      // the operator before their code leaves the machine. A consent screen that cannot say how many
+      // files it is about to send is not consent. So the manifest is read where it actually is, with
+      // the nested shape still honoured for a console that sends one.
+      const att = r.attachment || r.file || r;
+      a.refusals = normRefusals(r.refusals || att.refusals || r.refused || att.refused);
+      if (r.chat_id) adoptChatId(String(r.chat_id));
+      const id = att.attachment_id || att.id || r.attachment_id || r.id;
+      if (r.error || r.refused || r.ok === false || !id) {
+        a.status = "failed";
+        a.err = String(r.error || r.refused || "the console did not return an attachment to send");
+        return;
+      }
+      a.id = String(id);
+      a.name = String(att.name || a.name);
+      const sz = att.bytes != null ? att.bytes : att.size;
+      if (sz != null) a.size = Number(sz) || a.size;
+      a.sha256 = String(att.sha256 || att.digest || "");
+      a.kind = String(att.kind || att.type || "");
+      const cnt = att.files != null ? att.files : (att.file_count != null ? att.file_count : null);
+      a.files = cnt == null ? null : Number(cnt);
+      const names = att.names || att.file_names || att.entries;
+      a.fileList = Array.isArray(names) ? names.map(String) : [];
+      a.more = Number(att.names_truncated || att.more || 0) || 0;
+      a.path = String(att.path || att.root || "");
+      a.status = "ready";
+    }
+
+    // Removing an attachment DELETES IT ON THE CONSOLE, it does not just drop the chip. Every chat turn
+    // reasons over everything the chat still holds, so an attachment taken off this row while the store
+    // kept it would keep going to the model on every later turn with nothing on screen saying so — the
+    // interface would be lying about what leaves the machine. The row is dropped only once the console
+    // confirms; if it refuses, the operator is told and the chip stays, because it is still attached.
+    function removeAttach(a) {
+      a.abortRef.aborted = true;
+      if (!a.id || !C.id) {                    // never uploaded (or still opening): nothing to delete
+        C.attach = C.attach.filter(function (x) { return x !== a; });
+        drawAttach();
+        return;
+      }
+      const was = a.status;
+      a.status = "removing"; drawAttach();
+      V.postJSON(OFF("/api/chat/attach/remove"), { chat_id: C.id, attachment_id: a.id })
+        .then(function (d) {
+          if (d && d.error) throw new Error(d.error);
+          C.attach = C.attach.filter(function (x) { return x !== a; });
+        })
+        .catch(function (e) {
+          a.status = was;
+          V.toast("Could not remove " + a.name + " — it is still attached to this chat. "
+            + ((e && e.message) || ""), true);
+        })
+        .then(function () { drawAttach(); });
+    }
+
+    function attachChip(a) {
+      const cls = a.status === "failed" ? ".chip.bad"
+        : ((a.status === "uploading" || a.status === "removing") ? ".chip.busy"
+          : (a.sent ? ".chip.sent" : ".chip"));
+      const bits = [h("span.nm", { title: a.name }, a.name), h("span.meta", null, fmtBytes(a.size))];
+      if (a.files != null) bits.push(h("span.meta", null, "· " + a.files + " file" + (a.files === 1 ? "" : "s")));
+      if (a.status === "uploading") {
+        bits.push(h("span.bar", null, h("span.bar-fill", { style: { width: a.pct + "%" } })));
+        bits.push(h("span.meta", null, a.pct + "%"));
+      } else if (a.status === "removing") {
+        bits.push(h("span.meta", null, "· removing…"));
+      } else if (a.status === "ready" && a.consented) {
+        // Honest about the real behaviour: an attachment stays attached to the CHAT, and every answer in
+        // it is given over everything attached. There used to be an "Include again" button here, which
+        // implied a per-message choice the console does not have — the file went either way. Removing it
+        // is the only thing that stops it, and that now really deletes it.
+        bits.push(h("span.meta", { title: "Attached to this chat: every answer here is given over it. "
+          + "Remove it to stop that." }, a.sent ? "· attached (sent)" : "· approved to send"));
+      }
+      bits.push(h("button.x", { "aria-label": "Remove " + a.name, title: "Remove from this chat (deletes it on the console)",
+        disabled: a.status === "removing", onClick: function () { removeAttach(a); } }, "✕"));
+      return h("span" + cls, null, bits);
+    }
+
+    function drawAttach() {
+      const host = V.$("#chat-attach"); if (!host) return;
+      if (!C.attach.length) { V.mount(host, null); return; }
+      const notes = [];
+      C.attach.forEach(function (a) {
+        if (a.status === "failed") {
+          notes.push(h("div.refusal", null, [
+            h("b", null, a.name + " — this upload did not complete."), h("br"), a.err,
+            a.refusals.length ? h("div", { style: { marginTop: "6px" } }, a.refusals.map(function (t) { return h("div", null, "• " + t); })) : null,
+          ]));
+        } else if (a.refusals.length) {
+          notes.push(h("div.refusal", null, [
+            h("b", null, a.name + " — the console refused part of this upload:"),
+            h("div", { style: { marginTop: "6px" } }, a.refusals.map(function (t) { return h("div", null, "• " + t); })),
+            h("div.dim", { style: { marginTop: "6px" } }, "Everything it accepted is still attached; the refused entries are not on this machine and will not be sent."),
+          ]));
+        }
+      });
+      V.mount(host, [
+        h("div.chip-row", { style: { marginTop: "8px" } }, C.attach.map(attachChip)),
+        notes.length ? h("div.stack", { style: { marginTop: "8px", gap: "8px" } }, notes) : null,
+      ]);
+    }
+
+    // -- egress consent ------------------------------------------------------
+    // The one place where material actually leaves the machine. It states the count, the bytes and the
+    // list, names where it is going, and is answered once per attachment.
+    function egressConsent(items) {
+      return new Promise(function (resolve) {
+        const bytes = items.reduce(function (n, a) { return n + (a.size || 0); }, 0);
+        const count = items.reduce(function (n, a) { return n + (a.files != null ? a.files : 1); }, 0);
+        const model = (C.st && (C.st.selected_model || C.st.model)) || "";
+        const body = [
+          h("p", null, "Sending this message copies the contents below off this machine to the model that answers this chat"
+            + (model ? (" (" + model + ")") : "") + ". Nothing else on this machine is sent — not your other chats, not your findings, not your keys."),
+          h("div.legend", { style: { marginTop: "10px" } }, [
+            V.icon("info"),
+            h("span", null, count + " file" + (count === 1 ? "" : "s") + " · " + fmtBytes(bytes) + " · " + items.length + " attachment" + (items.length === 1 ? "" : "s")),
+          ]),
+          h("div.stack", { style: { marginTop: "12px", gap: "10px" } }, items.map(function (a) {
+            const lines = a.fileList.slice(0, 200);
+            const hidden = Math.max(0, (a.files != null ? a.files : a.fileList.length) - lines.length) + (a.more || 0);
+            return h("div", null, [
+              h("div", null, [h("b", null, a.name), h("span.dim", null, "  " + fmtBytes(a.size)
+                + (a.files != null ? ("  ·  " + a.files + " file" + (a.files === 1 ? "" : "s")) : "")
+                + (a.sha256 ? ("  ·  sha256 " + a.sha256.slice(0, 12)) : ""))]),
+              lines.length ? h("pre.code", { style: { maxHeight: "180px", overflowY: "auto", marginTop: "6px" } },
+                lines.join("\n") + (hidden > 0 ? ("\n… and " + hidden + " more") : "")) : null,
+              (!lines.length && a.files != null && a.files > 1)
+                ? h("div.dim", { style: { marginTop: "4px" } }, "The console did not return a file list for this archive; the count above is what it extracted.") : null,
+            ]);
+          })),
+          h("div.hint", { style: { marginTop: "12px" } },
+            "What comes back is a LEAD — the model's reading of your files. It is not a finding. A finding "
+            + "becomes a fact only when a deterministic oracle fires over real evidence, which is what the "
+            + "gated scan does."),
+        ];
+        let done = false;
+        const m = openModal("Send these files to the model?", body, [
+          h("button.btn", { onClick: function () { done = true; m.close(); resolve(false); } }, "Cancel"),
+          h("button.btn.primary", { onClick: function () { done = true; m.close(); resolve(true); } }, [V.icon("check"), "Send them"]),
+        ], { onCancel: function () { if (!done) resolve(false); } });
+      });
+    }
+
+    // -- linked histories ----------------------------------------------------
+    // The chat id IS the session id, so the session connect/disconnect actions take a chat id verbatim.
+    function drawLinks() {
+      const host = V.$("#chat-links"); if (!host) return;
+      if (!C.id) {
+        V.mount(host, h("div.hint", { style: { marginTop: "8px" } },
+          "Send a first message to create this chat — then you can link other chats into it for context."));
+        return;
+      }
+      const row = rowOf(C.id);
+      const conns = (row && row.connections) || [];
+      const chips = conns.map(function (cid) {
+        return h("span.chip", null, [
+          V.icon("link"),
+          h("span.nm", { title: cid }, titleOf(cid)),
+          h("button.x", { "aria-label": "Disconnect " + titleOf(cid), title: "Disconnect", onClick: function () { doDisconnect(cid); } }, "✕"),
+        ]);
+      });
+      V.mount(host, h("div", { style: { marginTop: "10px", padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--r-2)", background: "var(--bg-1)" } }, [
+        h("div.chip-row", null, [
+          h("span.label", null, "Draws on"),
+          conns.length ? null : h("span.dim", null, "nothing yet — this chat answers from its own history only"),
+        ].concat(chips).concat([
+          h("button.btn.sm", { onClick: openLinkPicker }, [V.icon("link"), "Link another chat"]),
+        ])),
+        h("div.hint", { style: { marginTop: "8px" } },
+          conns.length
+            ? "This chat draws on the chats above: their history is available as extra context when it answers. It is one-way — they do not draw on this one — and linking copies nothing, so disconnecting takes effect immediately."
+            : "Linking is one-way and copies nothing: this chat would draw on the other's history as extra context, the other would not see this one, and disconnecting takes effect immediately."),
+      ]));
+    }
+
+    function openLinkPicker() {
+      if (!C.id) return;
+      const row = rowOf(C.id);
+      const linked = {};
+      ((row && row.connections) || []).forEach(function (cid) { linked[cid] = 1; });
+      const candidates = C.sessions.filter(function (s) { return s.id !== C.id && !linked[s.id]; });
+      const listHost = h("div.stack", { style: { gap: "6px", marginTop: "10px" } });
+      const filter = h("input.input", { type: "text", placeholder: "Filter by name or id…", style: { width: "100%" } });
+      let m = null;
+      function draw() {
+        const q = (filter.value || "").trim().toLowerCase();
+        const rows = candidates.filter(function (s) {
+          if (!q) return true;
+          return (titleOf(s.id) + " " + s.id).toLowerCase().indexOf(q) !== -1;
+        }).slice(0, 200);
+        V.mount(listHost, rows.length ? rows.map(function (s) {
+          const turns = turnsOf(s.id);
+          return h("button.picker-row", { onClick: function () { if (m) m.close(); doConnect(s.id); } }, [
+            V.icon("live"),
+            h("span.pn", { title: s.id }, titleOf(s.id)),
+            h("span.dim", { style: { fontSize: "var(--fs-xs)" } },
+              (turns != null ? turns + " turn" + (turns === 1 ? "" : "s") + " · " : "") + s.id),
+          ]);
+        }) : h("div.empty", null, candidates.length ? "No chat matches that filter." : "No other chats to link yet."));
+      }
+      filter.addEventListener("input", draw);
+      draw();
+      m = openModal("Link another chat into this one", [
+        h("p", null, "Pick a chat for this one to DRAW ON. Its history becomes available as extra context when this chat answers."),
+        h("div.hint", { style: { margin: "8px 0 4px" } },
+          "One-way: the other chat is not changed and does not see this one. Nothing is copied — it is a read-time scope, so you can disconnect at any moment and this chat is isolated again on its very next answer."),
+        filter,
+        listHost,
+      ], [h("button.btn", { onClick: function () { if (m) m.close(); } }, "Cancel")]);
+    }
+
+    function doConnect(otherId) {
+      V.postJSON(OFF("/api/session/connect"), { id: C.id, other: otherId }).then(function (d) {
+        if (d && d.error) { V.toast(d.error, true); return; }
+        V.toast("Linked — this chat now draws on " + titleOf(otherId));
+        return loadChatList().then(function () { drawLinks(); drawSessions(); });
+      }).catch(function (e) { V.toast((e && e.message) || String(e), true); });
+    }
+
+    function doDisconnect(otherId) {
+      V.postJSON(OFF("/api/session/disconnect"), { id: C.id, other: otherId }).then(function (d) {
+        if (d && d.error) { V.toast(d.error, true); return; }
+        V.toast("Disconnected — takes effect immediately (nothing was ever copied)");
+        return loadChatList().then(function () { drawLinks(); drawSessions(); });
+      }).catch(function (e) { V.toast((e && e.message) || String(e), true); });
+    }
+
+    // -- transcript ----------------------------------------------------------
+    function scanTargetOf(m) {
+      // Only an EXPLICIT "here is where the extracted material lives" field counts. A stray `path` on
+      // some other record must not conjure a scan button pointed at an unrelated directory.
+      const t = m && (m.scan_target || m.extract_path || m.upload_path
+        || (m.attachment && (m.attachment.path || m.attachment.root)));
+      return t ? String(t) : "";
+    }
+    function recordAttachments(m) {
+      const list = (m && (m.attachments || m.files)) || [];
+      if (!Array.isArray(list) || !list.length) return null;
+      return h("div.chip-row", { style: { marginTop: "8px" } }, list.slice(0, CHAT_MAX_ATTACH).map(function (a) {
+        const nm = String((a && (a.name || a.id)) || a);
+        const sz = a && a.size != null ? fmtBytes(a.size) : "";
+        const cnt = a && (a.files != null ? a.files : a.file_count);
+        return h("span.chip", null, [
+          h("span.nm", { title: nm }, nm),
+          sz ? h("span.meta", null, sz) : null,
+          cnt != null ? h("span.meta", null, "· " + cnt + " file" + (Number(cnt) === 1 ? "" : "s")) : null,
+        ]);
+      }));
     }
 
     function bubble(m) {
@@ -4509,22 +5626,63 @@
           border: "1px solid var(--border)", whiteSpace: "pre-wrap", wordBreak: "break-word",
         },
       };
-      const kids = [h("div", null, String(m.text || ""))];
+      // A model-authored answer is a LEAD. Say so on the message itself, not only in a footnote.
+      const isLead = !isUser && !CHAT_ENGINE_KINDS[String(m.kind || "")];
+      const kids = [];
+      if (isLead) {
+        kids.push(h("div", { style: { marginBottom: "6px" } },
+          [h("span.shield.lead", null, [V.icon("info"), "Lead — not a confirmed finding"])]));
+      }
+      kids.push(h("div", null, String(m.text || m.reply || "")));
+      const atts = recordAttachments(m);
+      if (atts) kids.push(atts);
       if (m.kind === "launched" && m.run_id) {
-        kids.push(h("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center" } }, [
+        kids.push(h("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } }, [
           h("button.btn.sm", { onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(m.run_id); } }, [V.icon("live"), "Watch live"]),
           m.slug ? h("span.pill.sm", null, m.slug) : null,
+        ]));
+      }
+      const scanPath = isLead ? scanTargetOf(m) : "";
+      if (scanPath) {
+        // The reply read an extracted codebase. Offer the REAL thing on the same files: a gated run,
+        // whose findings an oracle either confirms or does not.
+        kids.push(h("div", { style: { marginTop: "10px", paddingTop: "10px", borderTop: "1px solid var(--border)" } }, [
+          h("div.dim", { style: { fontSize: "var(--fs-xs)", marginBottom: "6px" } },
+            "Everything above is the model reading " + scanPath + ". To turn any of it into a finding, scan the same files:"),
+          h("button.btn.sm.primary", { onClick: function () { launchScan(scanPath); } }, [V.icon("bolt"), "Run the gated scan on these files"]),
         ]));
       }
       if (m.kind === "refused" || m.kind === "error") { box.style.borderColor = "var(--sev-high, #e5a13a)"; }
       return h("div", wrap, h("div", box, kids));
     }
 
+    // The same gated launcher every other entry point uses — scope charter-signed, target-touching steps
+    // held for approval. The chat only ASKS for it; it cannot widen scope or skip a gate.
+    function launchScan(path) {
+      if (C.busy || !path) return;
+      C.busy = true;
+      V.postJSON(OFF("/api/chat/send"), {
+        chat_id: C.id || undefined,
+        message: "Run the gated assessment over the uploaded files at " + path,
+        target: path, mode: "codebase",
+      }).then(function (r) {
+        if (r && r.error && !r.reply) V.toast(r.error, true);
+        if (r && r.run_id && r.slug) setEngagement(String(r.slug));
+        if (r && r.chat_id) adoptChatId(String(r.chat_id));
+        return refreshTranscript();
+      }).catch(function (e) { V.toast((e && e.message) || "Could not start the scan — is the offense console up?", true); })
+        .then(function () { C.busy = false; loadChatList().then(function () { drawSessions(); drawMain(); scrollDown(); }); });
+    }
+
     function drawMain() {
       const host = V.$("#chat-main"); if (!host) return;
       const st = C.st || {};
-      // model + effort quick controls (owner-plane; same actions as Settings). Change here persists and
-      // takes effect on the next `vigil up` run — the honest behavior, mirrored from the Settings screen.
+      // MODEL + EFFORT ARE SYSTEM-WIDE, NOT PER-CHAT. Both buttons post the SAME owner-plane actions the
+      // Settings screen posts (`set_model` / `set_effort`), which a running engine only picks up on the
+      // next `vigil up`. Neither touches THIS conversation: an answer here is produced by a model the
+      // console pins itself, and the send never carries a model or an effort. Sitting unlabelled on top
+      // of the transcript, "Use model" / "Apply effort" read as "answer me with this" — which is the one
+      // thing they do not do. So they are named for what they change and say what they don't.
       const modelSel = h("select.input", { style: { minWidth: "160px" } },
         (st.models || []).map(function (m) {
           const o = h("option", { value: m.id }, m.label || m.id);
@@ -4534,47 +5692,144 @@
         [h("option", { value: "" }, "Effort: default")].concat((st.effort_levels || ["low", "medium", "high", "xhigh", "max"]).map(function (lv) {
           const o = h("option", { value: lv }, "Effort: " + lv); if (lv === st.selected_effort) o.selected = true; return o;
         })));
-      const controls = st.models ? h("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "8px", alignItems: "center" } }, [
+      const controls = st.models ? h("div.chat-sysctl", null, [
+        h("div.hint.wide", null, "System-wide settings, not this chat. These are the same controls as Settings: "
+          + "they set the model and effort the ENGINE reasons with (engagements, scans, the codebase agent) "
+          + "and take effect on its next `vigil up`. Replies in this conversation come from a model this "
+          + "console pins, so changing them here will not change the answer below."),
         modelSel,
-        h("button.btn.sm.owner", { onClick: function () { settingsAct({ action: "set_model", model: modelSel.value, reason: "set model from Chat" }, "Model set.", load); } }, "Use model"),
+        h("button.btn.sm.owner", { onClick: function () { settingsAct({ action: "set_model", model: modelSel.value, reason: "set model from Chat" }, "System model set — effective on the next `vigil up`.", load); } }, "Set system model"),
         effortSel,
-        h("button.btn.sm.owner", { onClick: function () { settingsAct({ action: "set_effort", effort: effortSel.value, reason: "set effort from Chat" }, "Effort set.", load); } }, "Apply effort"),
-      ]) : h("div.hint", { style: { marginBottom: "8px" } }, "Model & effort controls need the owner plane (start with `vigil up`).");
+        h("button.btn.sm.owner", { onClick: function () { settingsAct({ action: "set_effort", effort: effortSel.value, reason: "set effort from Chat" }, "System effort set — effective on the next `vigil up`.", load); } }, "Set system effort"),
+      ]) : h("div.hint", { style: { marginBottom: "8px" } }, "The system-wide model & effort controls need the owner plane (start with `vigil up`).");
 
-      const list = h("div#chat-list", { style: { flex: "1 1 auto", overflowY: "auto", padding: "4px 2px", border: "1px solid var(--border)", borderRadius: "var(--r-3)", background: "var(--bg-1)" } },
+      const list = h("div#chat-list.dropzone", { style: { flex: "1 1 auto", overflowY: "auto", padding: "4px 2px", border: "1px solid var(--border)", borderRadius: "var(--r-3)", background: "var(--bg-1)" } },
         C.messages.length ? C.messages.map(bubble)
           : h("div.empty", { style: { padding: "24px" } }, [h("div.big", null, "What should we test?"),
-              h("p", null, "e.g. “scan http://127.0.0.1:8080 for auth bugs”, or paste a codebase path. Findings are oracle-confirmed; target-touching steps wait for your approval.")]));
+              h("p", null, "Ask in plain language — “scan http://127.0.0.1:8080 for auth bugs” — or drop a zip of a codebase, loose files or screenshots here and ask about them (“does this have weaknesses in its authentication?”)."),
+              h("p", { style: { marginTop: "8px" } }, "Answers about uploaded material are leads. Findings are oracle-confirmed; target-touching steps wait for your approval.")]));
 
-      const input = h("textarea.input", { rows: "2", placeholder: "Tell the agent what to test… (Enter to send, Shift+Enter for a new line)",
+      // drag-and-drop onto the transcript. The counter survives the dragleave that fires when the
+      // pointer crosses a CHILD element, which is why a bare boolean flickers here.
+      list.addEventListener("dragenter", function (e) {
+        e.preventDefault(); C.dragDepth += 1; list.classList.add("over");
+      });
+      list.addEventListener("dragover", function (e) { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; });
+      list.addEventListener("dragleave", function () { C.dragDepth = Math.max(0, C.dragDepth - 1); if (!C.dragDepth) list.classList.remove("over"); });
+      list.addEventListener("drop", function (e) {
+        e.preventDefault(); C.dragDepth = 0; list.classList.remove("over");
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+      });
+
+      const fileInput = h("input", { type: "file", multiple: true, style: { display: "none" },
+        onChange: function (e) { addFiles(e.target.files); e.target.value = ""; } });
+      const attachBtn = h("button.btn", { title: "Attach a zip, files or images to this message", onClick: function () { fileInput.click(); } },
+        [V.icon("clip"), "Attach"]);
+
+      const input = h("textarea.input", { rows: "2", placeholder: "Ask about the attached files, or tell the agent what to test… (Enter to send, Shift+Enter for a new line)",
         style: { resize: "vertical", flex: "1 1 auto", minWidth: "0" } });
-      const target = h("input.input", { placeholder: "target (optional): URL or codebase path", style: { flex: "1 1 auto", minWidth: "0" } });
-      const modeSel = h("select.input", null, [["", "auto"], ["url", "url / API / infra"], ["codebase", "codebase"], ["suite", "suite (autonomous)"], ["tool", "single tool"]].map(function (p) {
-        return h("option", { value: p[0] }, p[1]);
+      const target = h("input.input", { type: "text", placeholder: "target (optional): URL or codebase path", style: { flex: "1 1 auto", minWidth: "0" } });
+      const modeSel = h("select.input", null, [["", "auto"], ["url", "url / API / infra"], ["codebase", "codebase"], ["suite", "suite (autonomous)"], ["tool", "one tool (pick it)"]].map(function (p) {
+        const o = h("option", { value: p[0] }, p[1]); if (p[0] === C.mode) o.selected = true; return o;
       }));
+      // "one tool" USED TO RUN NO TOOL. The mode was sent on its own, and `chat_send` forwards a `tools`
+      // array the composer never filled, so the launcher added no capability flag and started an ordinary
+      // engagement — the operator asked for a single tool and got the default run. The picker below is the
+      // same roster the wizard uses; sending its capability id is what makes the mode mean anything.
+      const pickable = (C.profiles || []).filter(function (p) { return toolPickable(p).ok; });
+      const toolSel = h("select.input", { style: { minWidth: "220px" } },
+        [h("option", { value: "" }, pickable.length ? "— pick the tool —"
+          : (C.profilesErr ? "— tool roster unavailable —" : "— no tool can be started from here —"))]
+          .concat(pickable.map(function (p) {
+            const o = h("option", { value: p.name }, p.name + " — via the " + capLabelOf(C.caps, toolPickable(p).cap) + " capability");
+            if (p.name === C.tool) o.selected = true; return o;
+          })));
+      toolSel.addEventListener("change", function () { C.tool = toolSel.value; });
+      const toolRow = h("div.chat-toolrow", { style: { display: "none" } }, [
+        toolSel,
+        h("span.hint", null, pickable.length
+          ? "This host's real tools. Only the ones a gated engagement can actually drive are listed — the Tools screen shows the whole roster and what drives the rest."
+          : (C.profilesErr
+            ? "The offense engine could not probe this host's tools. Start it (`vigil up`) and reopen this chat."
+            : "No tool on this host can be started from a chat turn right now. Use “url / API / infra” instead, or the Tools screen.")),
+      ]);
+      // C.mode is the source of truth, not the <select>: a redraw rebuilds the element, and reading the
+      // fresh one back would make the row's visibility depend on how the option/`selected` round-trip
+      // happens to resolve at construction time.
+      function syncToolRow() { toolRow.style.display = C.mode === "tool" ? "flex" : "none"; }
+      modeSel.addEventListener("change", function () { C.mode = modeSel.value; syncToolRow(); });
+      syncToolRow();
       const send = h("button.btn.primary", { onClick: doSend }, [V.icon("bolt"), "Send"]);
       input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); } });
 
+      // CONSENT COVERS WHAT ACTUALLY GOES. A turn is answered over EVERYTHING the chat still holds —
+      // the console assembles the attachment block from the chat's stored attachments, not from a
+      // per-message list — so asking about only the ones ticked on this message would have shown the
+      // operator a dialog naming two files while three left the machine. The gate is therefore every
+      // READY attachment they have not already approved. (Approval is still once per attachment, not
+      // once per message: `consented` persists, so this does not nag.) To stop an attachment being sent,
+      // remove it — which now really deletes it on the console.
       function doSend() {
-        const msg = (input.value || "").trim(); if (!msg || C.busy) return;
+        const msg = (input.value || "").trim();
+        const outgoing = C.attach.filter(function (a) { return a.status === "ready"; });
+        if (C.busy) return;
+        if (!msg && !outgoing.length) return;
+        if (C.attach.some(function (a) { return a.status === "uploading"; })) {
+          V.toast("An attachment is still uploading — one moment.", true); return;
+        }
+        if (C.mode === "tool" && !C.tool) {
+          V.toast("Pick which tool to run, or switch the mode back to “auto”.", true); return;
+        }
+        const needConsent = outgoing.filter(function (a) { return !a.consented; });
+        const gate = needConsent.length ? egressConsent(needConsent) : Promise.resolve(true);
+        gate.then(function (ok) {
+          if (!ok) return;
+          needConsent.forEach(function (a) { a.consented = true; });
+          reallySend(msg, outgoing);
+        });
+      }
+
+      function reallySend(msg, outgoing) {
         C.busy = true; send.disabled = true;
-        const payload = { chat_id: C.id || undefined, message: msg, target: (target.value || "").trim(), mode: modeSel.value || undefined };
+        const payload = { chat_id: C.id || undefined, message: msg, target: (target.value || "").trim(), mode: C.mode || undefined };
+        // No per-message attachment list: the console answers over everything the chat HOLDS, so a
+        // list here would be decoration that reads like a control. Removing an attachment is the control.
+        if (C.mode === "tool" && C.tool) {
+          const pick = toolPickable((C.profiles || []).find(function (p) { return p.name === C.tool; }));
+          if (pick.ok) payload.tools = [pick.cap];
+        }
+
         V.postJSON(OFF("/api/chat/send"), payload).then(function (r) {
           if (r && r.error && !r.reply) { V.toast(r.error, true); }
-          if (r && r.chat_id && !C.id) { C.id = r.chat_id; history.replaceState(null, "", "#/chat?id=" + encodeURIComponent(r.chat_id)); }
+          // a turn that LAUNCHED a run is a new job starting, exactly like the wizard: scope to it
+          if (r && r.run_id && r.slug) setEngagement(String(r.slug));
+          if (r && r.chat_id) adoptChatId(String(r.chat_id));
+          outgoing.forEach(function (a) { a.sent = true; });
           input.value = ""; target.value = "";
-          return V.getJSON(OFF("/api/chat/session/" + encodeURIComponent(C.id))).then(function (d) { C.messages = (d && d.messages) || []; });
+          return refreshTranscript();
         }).catch(function (e) { V.toast((e && e.message) || "Send failed — is the offense console up?", true); })
-          .then(function () { C.busy = false; send.disabled = false; drawSessions(); drawMain(); scrollDown(); });
+          .then(function () {
+            C.busy = false; send.disabled = false;
+            return loadChatList().then(function () { drawSessions(); drawMain(); scrollDown(); });
+          });
       }
 
       V.mount(host, [
         controls,
         list,
+        h("div#chat-attach"),
+        h("div#chat-links"),
         h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } }, [target, modeSel]),
-        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "flex-end" } }, [input, send]),
-        h("div.hint", { style: { marginTop: "6px" } }, "Every run is gated: scope is charter-signed and target-touching steps wait for your approval. The conversation is saved locally under .vigil-live/chats/."),
+        toolRow,
+        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "flex-end", flexWrap: "wrap" } }, [attachBtn, fileInput, input, send]),
+        h("div.hint", { style: { marginTop: "6px" } },
+          "Attachments are read on this machine and only sent to the model after you approve them once. "
+          + "An answer about them is a lead — a finding becomes a fact only when an oracle confirms it in a "
+          + "gated run (scope charter-signed, target-touching steps wait for your approval). The conversation "
+          + "is saved locally under .vigil-live/chats/."),
       ]);
+      drawAttach();
+      drawLinks();
       scrollDown();
     }
 
@@ -4779,7 +6034,10 @@
       h("div.screen-head", null, [h("h1", null, "Engagement Library"),
         h("span.sub", null, "Every past job, most recently worked first — open one to get back to its runs, findings and proof.")]),
       h("div.hint", { style: { marginBottom: "10px" } },
-        "Times are shown in your timezone" + (libTimeZone() ? " (" + libTimeZone() + ")" : "")
+        "Opening a job makes it the one you are working on: every screen then shows that job's runs and "
+        + "nothing else, until you open another or widen back to all engagements. Scoping hides nothing "
+        + "permanently and deletes nothing. Times are shown in your timezone"
+        + (libTimeZone() ? " (" + libTimeZone() + ")" : "")
         + ". Renaming a job or a run is presentation only — it stores a human name beside the "
         + "machine identity and touches no signed byte, so every certificate still verifies."),
       h("div#library-body", null, h("div.empty", null, "Loading past jobs…")),
@@ -4811,9 +6069,16 @@
     var table = h("div.scroll-x", null, h("table.tbl", null, [
       h("thead", null, h("tr", null, cols.map(function (c) { return h("th", null, c); }))),
       h("tbody", null, LIB.rows.map(function (r) {
-        function open() { location.hash = "#/library?slug=" + encodeURIComponent(r.slug); }
+        var isActive = !!r.slug && r.slug === activeEngagement();
+        // OPENING A JOB SWITCHES THE SCOPE to it — the library is where the operator says "this is the
+        // job I am working on now", and every other screen follows.
+        function open() {
+          setEngagement(r.slug, r.label || "");
+          location.hash = "#/library?slug=" + encodeURIComponent(r.slug);
+        }
         return h("tr.click", { onClick: open }, [
           h("td", null, [h("b", null, libName(r)),
+            (isActive ? h("span.pill.sm.live", { style: { marginLeft: "8px" }, title: "every screen is scoped to this job" }, "active") : null),
             (r.label ? h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, r.slug) : null),
             (r.on_spine ? null : h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, "not on the spine"))]),
           h("td", null, libWhenCell(r.last_activity)),
@@ -4833,9 +6098,21 @@
         ]);
       })),
     ]));
+    // The explicit way OUT of a scope, so no past job is ever unreachable: widening is a presentation
+    // switch and nothing more — every job, run, finding and certificate is exactly where it was.
+    var scopeRow = h("div.row-flex", { style: { marginTop: "10px", gap: "10px", flexWrap: "wrap" } }, [
+      h("span.hint", null, activeEngagement()
+        ? ("Every screen is showing " + engagementName() + " only.")
+        : "Every screen is showing all engagements. Open a job below to work on just that one."),
+      activeEngagement()
+        ? h("button.btn.sm", { style: { marginLeft: "auto" }, onClick: function () { setEngagement(""); drawLibrary(); } },
+          [V.icon("book"), "All engagements"])
+        : null,
+    ]);
     V.mount(host, h("div.card", null, [
       h("div.card-h", null, [h("span.label", null, "PAST JOBS"),
         h("h3", null, LIB.rows.length + (LIB.rows.length === 1 ? " engagement" : " engagements"))]),
+      scopeRow,
       h("div", { style: { marginTop: "12px" } }, table),
     ]));
   }
@@ -4863,6 +6140,10 @@
   }
 
   function renderLibraryDetail(screen, slug) {
+    // Opening one job — from the list, a bookmark, or a shared link — makes it the active scope. The
+    // name is left alone when this job is already active (the list click knew it; a deep link does not,
+    // and drawLibraryDetail fills it in from the job's own label once it lands).
+    setEngagement(slug);
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Engagement Library"),
         h("span.sub", null, "One past job — its runs, and the way back into each one's findings and proof.")]),
@@ -4902,6 +6183,8 @@
     // the roster row carries the timestamps + counts; the detail carries the runs + charter/safety.
     var roster = null;
     LIB.rows.forEach(function (r) { if (r.slug === slug) roster = r; });
+    // now that the job's own human name is known, let the scope chip call it that
+    noteEngagementName(slug, d.label || (roster && roster.label) || "");
     var runs = d.runs || [];
     var ks = d.killswitch || {};
 
@@ -4922,7 +6205,15 @@
         d.has_charter ? V.pill("Charter on file", "ok", null) : V.pill("No charter", "idle", null),
         ks.tripped ? V.pill("Kill-switch TRIPPED", "danger", null) : null,
         roster && roster.on_spine ? V.pill("On the signed spine", "live", null) : null,
+        activeEngagement() === slug ? V.pill("Working on this job", "live", null) : null,
+        activeEngagement() === slug
+          ? h("button.btn.sm", { style: { marginLeft: "auto" }, title: "Stop scoping every screen to this job",
+            onClick: function () { setEngagement(""); location.hash = "#/library"; } }, [V.icon("book"), "All engagements"])
+          : null,
       ]),
+      h("div.hint", { style: { marginTop: "8px" } },
+        "Live, Findings, Fixes, Report, Proof, Compliance, Assurance and Activity are showing this job's "
+        + "runs only. Scoping is presentation — it changes nothing that is signed or gated."),
     ]);
 
     var runsCard;
@@ -5400,17 +6691,19 @@
 
   // ---- boot ------------------------------------------------------------------
   // ---- Compliance & ATT&CK (C3): map proven findings → standards controls ----
-  var CMP = { run: "", runs: [], data: null };
+  var CMP = { run: "", runs: [], data: null, loaded: false };
   function renderCompliance(screen) {
     var body = V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Compliance & ATT&CK"),
       h("p.sub", null, "Every oracle-confirmed FACT mapped to OWASP / CWE / PCI-DSS / SOC 2 / ISO 27001 + "
         + "MITRE ATT&CK. A lead never asserts control coverage — only a proven fact does.")])]);
-    V.getJSON(OFF("/api/runs")).then(function (d) {
-      CMP.runs = (d && d.runs) || [];
+    V.getJSON(runsURL()).then(function (d) {
+      CMP.runs = runsOf(d); CMP.loaded = true;   // scoped to the active engagement
+      // this screen's selection outlives a route change, so a run picked under a previous scope has to go
+      if (CMP.run && !CMP.runs.some(function (r) { return r.run_id === CMP.run; })) { CMP.run = ""; CMP.data = null; }
       if (!CMP.run && CMP.runs.length) CMP.run = CMP.runs[0].run_id;
       loadCompliance(body);
-    }).catch(function () { CMP.runs = []; loadCompliance(body); });
+    }).catch(function () { CMP.runs = []; CMP.loaded = false; loadCompliance(body); });
   }
   function loadCompliance(body) {
     if (!CMP.run) { drawCompliance(body); return; }
@@ -5428,6 +6721,10 @@
   }
   function drawCompliance(body) {
     var d = CMP.data || {};
+    if (CMP.loaded && !CMP.runs.length && activeEngagement()) {
+      V.mount(body, scopedEmpty("runs", "Nothing has run under this job yet — a run's proven facts map to standards controls here.", [newAssessBtn()]));
+      return;
+    }
     var picker = h("div.card", null, [h("label", { style: { marginRight: "8px" } }, "Run"),
       h("select", { onChange: function (e) { CMP.run = e.target.value; loadCompliance(body); } },
         [h("option", { value: "", selected: !CMP.run }, "— select a run —")].concat(
@@ -5567,7 +6864,7 @@
   }
 
   // ---- Report (C4): a live, re-verified, proof-carrying client report ----
-  var RPT = { run: "", runs: [], ev: null, cmp: null };
+  var RPT = { run: "", runs: [], ev: null, cmp: null, loaded: false };
   // R3 — one-click download: build the run's tamper-evident dossier (CSRF-guarded POST), then stream the
   // pre-built ZIP via an <a download> click (Content-Disposition attachment — the first client download).
   function downloadDossier(runId, btn, statusEl) {
@@ -5618,11 +6915,12 @@
       h("h2", null, "Client Report"),
       h("p.sub", null, "A LIVE, always-current report: every finding is re-verified OFFLINE on load, so a "
         + "FACT is a re-checkable certificate — not a stale PDF, and not the AI's word. Read-only.")])]);
-    V.getJSON(OFF("/api/runs")).then(function (d) {
-      RPT.runs = (d && d.runs) || [];
+    V.getJSON(runsURL()).then(function (d) {
+      RPT.runs = runsOf(d); RPT.loaded = true;   // scoped to the active engagement
+      if (RPT.run && !RPT.runs.some(function (r) { return r.run_id === RPT.run; })) { RPT.run = ""; RPT.ev = null; RPT.cmp = null; }
       if (!RPT.run && RPT.runs.length) RPT.run = RPT.runs[0].run_id;
       loadReport(body);
-    }).catch(function () { RPT.runs = []; loadReport(body); });
+    }).catch(function () { RPT.runs = []; RPT.loaded = false; loadReport(body); });
   }
   function loadReport(body) {
     if (!RPT.run) { drawReport(body); return; }
@@ -5633,6 +6931,10 @@
     ]).then(function (r) { RPT.ev = r[0]; RPT.cmp = r[1]; drawReport(body); });
   }
   function drawReport(body) {
+    if (RPT.loaded && !RPT.runs.length && activeEngagement()) {
+      V.mount(body, scopedEmpty("runs", "Nothing has run under this job yet — a run's re-verified findings become its client report here.", [newAssessBtn()]));
+      return;
+    }
     var ev = RPT.ev || {}, cmp = RPT.cmp || {};
     var findings = ev.findings || [];
     var proven = findings.filter(function (f) { return f.sound; });
@@ -5678,7 +6980,7 @@
   }
 
   // ---- Assurance (C2): continuous proof / drift between two runs ----
-  var ASR = { curr: "", prev: "", runs: [], data: null, telemetry: null };
+  var ASR = { curr: "", prev: "", runs: [], data: null, telemetry: null, loaded: false };
   function renderAssurance(screen) {
     var body = V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Assurance — continuous proof / drift"),
@@ -5690,12 +6992,15 @@
     ASR.telemetry = null;
     V.getJSON(OFF("/api/telemetry")).then(function (t) { ASR.telemetry = t; drawAssurance(body); })
       .catch(function () { ASR.telemetry = { ok: false }; drawAssurance(body); });
-    V.getJSON(OFF("/api/runs")).then(function (d) {
-      ASR.runs = (d && d.runs) || [];
+    V.getJSON(runsURL()).then(function (d) {
+      ASR.runs = runsOf(d); ASR.loaded = true;   // scoped: drift is only ever diffed WITHIN one job
+      var mine = function (id) { return !!id && ASR.runs.some(function (r) { return r.run_id === id; }); };
+      if (ASR.curr && !mine(ASR.curr)) { ASR.curr = ""; ASR.data = null; }
+      if (ASR.prev && !mine(ASR.prev)) ASR.prev = "";
       if (!ASR.curr && ASR.runs.length) ASR.curr = ASR.runs[0].run_id;
       if (!ASR.prev && ASR.runs.length > 1) ASR.prev = ASR.runs[1].run_id;
       loadAssurance(body);
-    }).catch(function () { ASR.runs = []; loadAssurance(body); });
+    }).catch(function () { ASR.runs = []; ASR.loaded = false; loadAssurance(body); });
   }
   function loadAssurance(body) {
     if (!ASR.curr) { drawAssurance(body); return; }
@@ -5705,6 +7010,10 @@
   }
   function drawAssurance(body) {
     var d = ASR.data || {};
+    if (ASR.loaded && !ASR.runs.length && activeEngagement()) {
+      V.mount(body, scopedEmpty("runs", "Drift is a diff between two runs of the SAME job, and this one has none yet — run it twice and the second run is checked against the first.", [newAssessBtn()]));
+      return;
+    }
     function runSel(which) {
       return h("select", { onChange: function (e) { ASR[which] = e.target.value; loadAssurance(body); } },
         [h("option", { value: "" }, "— none —")].concat(
@@ -5797,7 +7106,7 @@
   }
 
   // ---- Proof Studio (B5): oracle-confirmed, signed, replayable exploit proofs ----
-  var PRF = { run: "", runs: [], data: null };
+  var PRF = { run: "", runs: [], data: null, loaded: false };
   function renderProof(screen) {
     var body = V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Proof Studio"),
@@ -5805,11 +7114,12 @@
         + "deterministic oracle FIRED over the executor-captured raw bytes of the reproduction — not the "
         + "model's word. A LEAD is an honest 'not reproduced'. A DENIED proof had dangerous PoC content "
         + "refused BEFORE any mint. Read-only.")])]);
-    V.getJSON(OFF("/api/runs")).then(function (d) {
-      PRF.runs = (d && d.runs) || [];
+    V.getJSON(runsURL()).then(function (d) {
+      PRF.runs = runsOf(d); PRF.loaded = true;   // scoped to the active engagement
+      if (PRF.run && !PRF.runs.some(function (r) { return r.run_id === PRF.run; })) { PRF.run = ""; PRF.data = null; PRF.exported = null; }
       if (!PRF.run && PRF.runs.length) PRF.run = PRF.runs[0].run_id;
       loadProof(body);
-    }).catch(function () { PRF.runs = []; loadProof(body); });
+    }).catch(function () { PRF.runs = []; PRF.loaded = false; loadProof(body); });
   }
   function loadProof(body) {
     if (!PRF.run) { drawProof(body); return; }
@@ -5819,6 +7129,10 @@
   }
   function drawProof(body) {
     var d = PRF.data || {};
+    if (PRF.loaded && !PRF.runs.length && activeEngagement()) {
+      V.mount(body, scopedEmpty("proofs", "Nothing has run under this job yet — a reproduction an oracle confirms becomes a signed, replayable proof here.", [newAssessBtn()]));
+      return;
+    }
     var picker = h("div.card", null, [h("label", { style: { marginRight: "8px" } }, "Run"),
       h("select", { onChange: function (e) { PRF.run = e.target.value; loadProof(body); } },
         [h("option", { value: "", selected: !PRF.run }, "— select a run —")].concat(
@@ -5939,6 +7253,12 @@
     if (ds.sovereign != null && ds.sovereign !== "__VIGIL_SOVEREIGN__") CFG.api.sovereign = ds.sovereign;
     if (ds.offense != null && ds.offense !== "__VIGIL_OFFENSE__") CFG.api.offense = ds.offense;
     try { const t = localStorage.getItem("vigil-theme"); if (t) document.documentElement.setAttribute("data-theme", t); } catch (e) {}
+    // the job the operator was last working on — the scope survives a refresh and a console restart,
+    // so the first paint already shows that job's work (and the chip already names it).
+    try {
+      app.set({ engagement: localStorage.getItem(ENGAGEMENT_KEY) || "",
+        engagementName: localStorage.getItem(ENGAGEMENT_NAME_KEY) || "" });
+    } catch (e) { /* storage disabled: start unscoped (all engagements) */ }
     shell();
     window.addEventListener("hashchange", route);
     if (!location.hash) location.hash = "#/home";

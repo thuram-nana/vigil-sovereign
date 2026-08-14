@@ -102,9 +102,13 @@ def test_dispatcher_is_pure_stdlib_exec_only():
 # it must import neither framework/strix (offense engine) nor sigil (sovereign core), so a single
 # interpreter never co-loads both trust domains — exactly like the dispatcher it delegates spawning to.
 _UP_ALLOWED_STDLIB = {
-    "__future__", "base64", "binascii", "http", "ipaddress", "json", "os", "re", "signal", "socket",
-    "socketserver", "subprocess", "sys", "threading", "time", "pathlib", "queue", "typing", "urllib",
-    "webbrowser",
+    # `hmac` is on this list for ONE reason: `compare_digest` on the plane-control session token. A
+    # token compared with `==` leaks itself a byte at a time to a timing attacker, and the proxy is the
+    # process that can start the offense backends — so this is a stdlib primitive, not a dependency, and
+    # the boundary it guards is the reason it is allowed.
+    "__future__", "base64", "binascii", "hmac", "http", "ipaddress", "json", "os", "re", "signal",
+    "socket", "socketserver", "subprocess", "sys", "threading", "time", "pathlib", "queue", "typing",
+    "urllib", "webbrowser",
 }
 _BANNED = ("framework", "strix", "sigil")
 

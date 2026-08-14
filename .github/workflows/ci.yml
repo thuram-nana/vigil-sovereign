@@ -20,6 +20,21 @@ jobs:
       - name: migration-safety tests (v1 byte-identical signing, threshold, tamper)
         run: pytest packages/core/vigil_core/tests -q
 
+  briefing-completeness:
+    name: the briefing explains every agent and capability
+    runs-on: ubuntu-latest
+    # Reads files only — imports neither trust domain — so it needs no environment and is safe
+    # to run anywhere. It exists because the plain-English briefing silently fell a whole half of
+    # the system behind the code once, and prose cannot promise not to do that again.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pytest
+      - name: every agent and named capability the code declares is explained to a reader
+        run: pytest docs/tests -q
+
   crucible-core:
     name: CRUCIBLE core on vigil_core
     runs-on: ubuntu-latest
@@ -51,6 +66,7 @@ jobs:
         framework/v2/defender
         framework/v2/memory
         framework/v2/analysis
+        framework/v2/tools
         framework/v2/agents/tests/test_engagement_library.py
     steps:
       - uses: actions/checkout@v4
@@ -281,11 +297,20 @@ jobs:
               --ignore=integration/tests/test_k8s_rbac_grant_verify.py \
               --ignore=integration/tests/test_dossier_case_file.py \
               --ignore=integration/tests/test_brain_engine.py \
-              --ignore=integration/tests/test_sovereignty_governs_llm_egress.py -q
+              --ignore=integration/tests/test_sovereignty_governs_llm_egress.py \
+              --ignore=integration/tests/test_live_executor_report_builders.py -q
             # The offense-process suite: framework-dependent tests run in their OWN process. The
             # scoped-executor test (WS-A) exercises the signed-scope egress guard, which resolves scope via
             # vigil_gateway.scope_source → CRUCIBLE host_matches_scope, so it belongs here (it would load
             # `framework` into the sovereign-path process above and trip its import-clean assertions).
+            #
+            # test_live_executor_report_builders.py is here for the same reason, and it was NOT here when
+            # the file was added. Its point is that a tool VIGIL ran produces a report the ENGINE can then
+            # read, and the reading half is `framework.v2.imports.parsers` — importable only with
+            # engine/crucible on the path. Collected in the sovereign process it did not fail, it SKIPPED:
+            # five `importorskip`s reported "CRUCIBLE not importable here" and the job went green having
+            # proved nothing about the consume leg. A skipped proof and a passing proof are the same colour
+            # on a dashboard, so the file has to run in the process that can import the parser.
             PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
               integration/tests/test_oracle_adapter.py \
               integration/tests/test_external_tool_runner.py \
@@ -300,6 +325,7 @@ jobs:
               integration/tests/test_cli_terminal.py \
               integration/tests/test_cli_sandbox.py \
               integration/tests/test_detection_vocabulary.py \
+              integration/tests/test_live_executor_report_builders.py \
               integration/tests/test_proof_engine.py \
               integration/tests/test_proof_run.py \
               integration/tests/test_proof_bootstrap.py \

@@ -198,7 +198,13 @@ def _running_server():
 def test_api_tools_route_serves_json_with_csp() -> None:
     with _running_server() as base:
         req = urllib.request.Request(base + "/api/tools", headers=AUTH_HEADERS)
-        with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 (loopback test)
+        # 60s, not 5s. `/api/tools` PROBES the host: it shells out to every known binary for its
+        # version, which on a machine with the arsenal installed is ~8s of real subprocess time — so a
+        # 5s client timeout failed this test on exactly the hosts that have the most tools to report,
+        # and passed on the bare ones. What is under test here is the route's JSON + CSP parity, not
+        # how fast a probe runs; the timeout only needs to be longer than an honest probe, and a hang
+        # still fails rather than blocking forever.
+        with urllib.request.urlopen(req, timeout=60) as r:  # noqa: S310 (loopback test)
             assert r.status == 200
             assert r.headers.get_content_type() == "application/json"
             # strict CSP parity with the other data routes (defense-in-depth on JSON).

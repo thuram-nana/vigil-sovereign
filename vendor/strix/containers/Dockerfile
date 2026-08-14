@@ -143,6 +143,19 @@ RUN git clone https://github.com/aravind0x7/JS-Snooper.git && \
 USER root
 
 RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+
+# A14 (supply chain): PINNED, not resolved at build time.
+#
+# This step used to ask the GitHub API for "latest" while the image built. Two problems, both
+# observed rather than theorised. It is an UNAUTHENTICATED api.github.com call, capped at 60 an hour
+# for the whole host — provisioning other tools on this machine exhausted that budget, the call
+# returned 403, the tag came back EMPTY, and the download degraded into a 404 that killed the build
+# at step 21 of 36. Separately, resolving "latest" makes two builds a day apart ship different
+# contents, which is exactly the non-reproducibility the digest-pinned FROM line at the top of this
+# file exists to remove: a pinned base carrying floating tools is only half a supply chain.
+#
+# Bump deliberately — change the version, rebuild, and say so in the change.
+ARG GITLEAKS_VERSION=8.30.1
 RUN set -eux; \
     ARCH="$(uname -m)"; \
     case "$ARCH" in \
@@ -150,8 +163,8 @@ RUN set -eux; \
         aarch64|arm64) GITLEAKS_ARCH="arm64" ;; \
         *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;; \
     esac; \
-    TAG="$(curl -fsSL https://api.github.com/repos/gitleaks/gitleaks/releases/latest | jq -r .tag_name)"; \
-    curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/${TAG}/gitleaks_${TAG#v}_linux_${GITLEAKS_ARCH}.tar.gz" -o /tmp/gitleaks.tgz; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+         "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GITLEAKS_ARCH}.tar.gz" -o /tmp/gitleaks.tgz; \
     tar -xzf /tmp/gitleaks.tgz -C /tmp; \
     install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks; \
     rm -f /tmp/gitleaks /tmp/gitleaks.tgz

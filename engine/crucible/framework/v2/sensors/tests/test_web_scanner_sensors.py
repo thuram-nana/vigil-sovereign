@@ -328,6 +328,56 @@ def test_zap_absent_binaries_degrade_cleanly(monkeypatch: pytest.MonkeyPatch) ->
     assert not res.ok and "not on PATH" in (res.note or "")
 
 
+# --- the ZAP plan: the shape that decides whether a scan can find an injection at all -------------
+#
+# MEASURED DEFECT this guards. Driven by `-quickurl` and seeded with a bare host, ZAP's active scanner
+# scans exactly the sites-tree node it was seeded with — its own log says `Scanning 1 node(s)` — so
+# every parameter-level rule sends ZERO requests (`CrossSiteScriptingScanRule … 0 message(s) sent`)
+# even after the spider has already fetched the injectable `/search?q=`. The report comes back clean
+# and byte-identical to a hardened control's, and the budget makes no difference: the narrowing is
+# structural. Each assertion below, alone, restores that defect if it is lost.
+
+
+def test_the_zap_plan_attacks_the_whole_crawl_not_just_the_seed_node() -> None:
+    from framework.v2.sensors.web_scanner import _zap_plan
+    plan = _zap_plan("http://127.0.0.1:9/reflect?q=1", "/tmp/zapdir", "zap-report.json")
+    assert plan is not None
+    order = [line.strip() for line in plan.splitlines() if line.strip().startswith("- type:")]
+    assert order == ["- type: spider", "- type: passiveScan-wait", "- type: activeScan",
+                     "- type: report"], (
+        "the crawl must run BEFORE the active scan — an active scan with an empty sites tree has only "
+        "its seed to attack, which IS the quick-scan defect — and the passive scanner must drain "
+        "before the report or its alerts are missing from it")
+    active = plan.split("- type: activeScan", 1)[1].split("  - type:", 1)[0]
+    assert "context: 'crucible-target'" in active
+    assert "url:" not in active, "an activeScan aimed at one URL is the seed-node scan again"
+    assert "url: 'http://127.0.0.1:9/reflect?q=1'" in plan, (
+        "the crawl must START at the caller's target, so a URL nothing links to is still scanned")
+    assert "failOnError: true" in plan and "continueOnFailure: false" in plan, (
+        "a target that cannot be reached must abort the plan with no report at all — an empty but "
+        "well-formed clean report is indistinguishable from a target that was scanned and found sound")
+
+
+def test_the_zap_plan_scope_is_the_targets_origin_and_carries_no_credential() -> None:
+    from framework.v2.sensors.web_scanner import _zap_plan
+    plan = _zap_plan("http://operator:hunter2@127.0.0.1:9/app", "/tmp/zapdir", "zap-report.json")
+    assert plan is not None
+    assert "- 'http://127.0.0.1:9/'" in plan               # the context is the ORIGIN
+    assert "- '\\Qhttp://127.0.0.1:9/\\E.*'" in plan       # anchored literal, never a regex
+    assert "hunter2" not in plan.split("jobs:", 1)[0], (
+        "the context is rebuilt from urlsplit's parts, so no userinfo reaches the plan's scope")
+
+
+@pytest.mark.parametrize("target", ["http://127.0.0.1:9/a'b", 'http://127.0.0.1:9/a"b',
+                                    "http://127.0.0.1:9/a\\b", "http://127.0.0.1:9/\x01",
+                                    "http://127.0.0.1:9/\u00e9"])
+def test_a_target_that_cannot_be_quoted_into_the_plan_is_refused(target: str) -> None:
+    """A plan is a file, which is a quoting surface an argv never was. Anything that cannot be written
+    as a plain single-quoted YAML scalar is refused, not escaped-and-hoped."""
+    from framework.v2.sensors.web_scanner import _zap_plan
+    assert _zap_plan(target, "/tmp/zapdir", "zap-report.json") is None
+
+
 def test_burp_no_url_degrades_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CRUCIBLE_BURP_URL", raising=False)
     res = BurpWebSensor(api_url="").run({"target": TARGET}, _ctx())

@@ -503,3 +503,152 @@ negative — not a gap between what is claimed and what exists.
 
 *Compiled by reading source. Working tree unchanged; test suites were run read-only and `git status` was
 clean afterwards.*
+
+---
+
+# Addendum — 10 further items, found while writing the plain-English briefing
+
+**Date:** 2026-08-13. **Method:** these were not found by auditing. They were found by *writing down
+what the system does in plain English and then checking each sentence against the code and against
+this machine* — which turns out to be an unusually effective way to find defects, because a claim a
+document must state precisely is a claim someone finally has to verify.
+
+None of these appear in the 78 items above. Severity is my own; the evidence is stated so it can be
+disputed.
+
+## A. The memory projections have drifted from the signed record — HIGH
+
+The similarity index and the entity map were both built from a record far larger than the one now in
+use. Measured on this host: the signed chain holds **16 entries**; the similarity index holds
+**13,667 points with a high-water entry number of 43,350**; the entity map's own health note records
+a rebuild at entry **43,332**. A live memory search returned citations numbered 41266 / 6584 / 38783
+— **entry numbers that do not resolve against the current chain**.
+
+Why it matters more than it looks: *citing the source* is the property the whole sovereign design
+rests on. The mechanism is sound and tested — the gate re-fetches the cited record and checks the
+quotation verbatim — but on this machine a citation can point at nothing. The chain itself verifies;
+the two derived views are simply views of a record that is no longer there.
+
+**Not the same thing** as the index legitimately holding fewer points than the record has entries:
+only seven recall-valuable entry kinds are embedded by design, so index < record is normal and
+expected. The drift here is the opposite direction and is not by design.
+
+*Fix:* rebuild both projections from the current chain, or restore the record they were built from.
+
+## B. The record on this host has no signed head — MEDIUM
+
+The status check returns `no signed head`. The chain links cleanly, but nothing has attested "this
+is the record and it ends here", so growth and truncation are indistinguishable to an outside
+checker. This is an operational omission, not a code defect: the signing command exists.
+
+## C. Curated-document ingestion is not idempotent — MEDIUM
+
+Assistant transcripts, sub-agent transcripts and code commits are all cursor-guarded and safe to
+re-run. The curated-document pass has **no cursor entry and no duplicate detection**, and the append
+path does not de-duplicate, so a second run files every chunk again. It is opt-in rather than
+automatic, which is the only reason this has not already polluted the record. The project's own
+summary describes all four sources as incremental and idempotent; that is wrong for the fourth.
+
+## D. The agent gate does not cover a registered, target-touching tool — HIGH
+
+The gate in front of the vendored testing agent classifies `exec_command` and `write_stdin` at the
+top tier — correctly, since every command-line invocation flows through them — and **everything else
+at auto**. Its own comment says this "targets the shell and only the shell", which is honest about
+scope but leaves a gap: the proxy tool `repeat_request` is **registered on the agent** and sends a
+*modified* captured request to the target (its own documentation calls this an auth-bypass test). It
+reaches the target over the network without going through the shell, so it auto-runs ungated.
+
+*Mitigating control, not yet confirmed:* the sandbox is pinned to an internal network whose only exit
+is the gateway, so gateway-level scope enforcement may still apply. **Someone should confirm whether
+the gateway scope-checks proxy traffic.** If it does, this is a defence-in-depth gap; if it does not,
+it is a scope-enforcement gap. `web_search` is auto for the same reason and is also outbound.
+
+## E. The web-research crawl cannot be stopped mid-flight — MEDIUM
+
+**Confirmed independently by a second reader, with a sharper account than the first.** The
+point-at-a-URL learning path passes the emergency stop in as a cancel hook that aborts between page
+fetches. The plain web-research path calls the crawler with no cancel argument at all, so the
+constructor's "no hook" default applies and the loop's cancel check can never fire. Same subsystem,
+same risk, one of two paths wired.
+
+The nuance matters, and the first account missed it: **the emergency stop still bites at the end.**
+A halted general research run files nothing, because the resulting proposal goes through the normal
+governor path and is denied under the stop, with a refusal recorded. So the failure is not "a halted
+run publishes anyway" — it is that **the already-queued pages are still fetched** after the owner has
+pressed stop. Outbound requests continue against a halt; the record stays clean.
+
+*Fix:* pass the same cancel hook on the general path. It is one argument.
+
+## F. The query/passage embedding asymmetry is implemented but unused — MEDIUM (quality, not safety)
+
+The embedding module defines a query-side function that applies the retrieval-instruction prefix the
+model expects, and the search path calls the plain passage-side function instead. The asymmetry the
+model was trained with is therefore lost on every search. This is a silent retrieval-quality defect:
+nothing fails, results are just worse than they should be, which is the hardest kind to notice.
+
+## G. Not every structural node in the entity map carries a provenance anchor — LOW
+
+The schema's own documentation says each structural node stores an anchor back into the record. The
+session, document and commit tables do. **The project table does not** — it holds a name and four
+tallies. The blanket claim is broader than the schema delivers.
+
+## H. A stored confidence value is never read — LOW
+
+The promoted-fact payload carries a model-confidence field commented "may lower ranking, never
+promote". Nothing in the gate, the promotion path or the query path reads it. The field is inert and
+the comment describes behaviour that does not exist — which is worse than no comment, because a
+reader takes it as a control that is operating.
+
+## I. The consolidation pass writes no entity-map nodes — LOW (documentation)
+
+The schema documentation's present tense implies the nightly pass adds semantic nodes. It does not:
+the rebuild reads only structural record kinds, and promoted decisions, commitments and
+contradictions are served by the recall tools alone. The absence of semantic node kinds is a
+deliberate and defensible choice; the documentation implying otherwise is not.
+
+## J. The nightly consolidation is not scheduled on this host — LOW (operations)
+
+The scheduler units ship in the repository and are not installed here; the cursor shows hand runs
+only, most recently 17 July. The live open-threads tool returns empty, consistent with the pass never
+having run against the current record.
+
+## K. The interface header does not reflow, hiding the primary action — LOW (usability)
+
+Found while capturing screenshots of the four screens that had none. At the documented capture width
+of 1600×900, when an alert chip is present in the header (here, "1 API key failing"), the header row
+overflows instead of wrapping or shrinking, and the primary "New Assessment" button is pushed off
+the right edge. The page gains a horizontal scrollbar, so nothing is permanently unreachable — but
+the main call to action is invisible until the user scrolls sideways, which is not a thing people do.
+
+Reproducible on every screen, since the header is global. It does not appear in the older
+screenshots because no alert chip was present when those were taken. On a 1920-wide display it fits.
+
+*Fix:* let the header wrap, or collapse the status chips to icons below a width threshold.
+
+## L. The memory search index is readable by anything on the machine — HIGH
+
+Surfaced by an adversarial reviewer checking a sovereignty claim, and reproduced directly:
+
+```
+$ curl -s http://127.0.0.1:6333/collections
+{"result":{"collections":[{"name":"sigil_memory"}]},"status":"ok"}
+```
+
+No credential is asked for. A scroll request against that collection returns the indexed text of the
+owner's own memory — the content of assistant conversations, commits and documents. The directory
+holding the record is owner-only (`drwx------`), which is what the briefing rightly claims; the
+search index built from it is not, because as deployed here it is a separate service listening on a
+loopback port with authentication switched off.
+
+Loopback is a real boundary and this is not remotely reachable. But "only the owner can read it" is
+the claim the sovereign design rests on, and on this machine **any process running as any user on
+this box can read the owner's memory** without asking anyone. Browser-based attacks on loopback
+services are also a known class, which is why the phone bridge — a sibling service — implements an
+origin allowlist specifically to resist them.
+
+Note the shipped default is not this: the code's default is an embedded file-backed store with no
+listener at all. A setting in the environment file switches it to the networked server, and that is
+what is running here.
+
+*Fix, in order of preference:* return to the embedded store; or enable the service's API-key
+authentication and give the key to the indexer; or bind it to a socket the owner alone can open.

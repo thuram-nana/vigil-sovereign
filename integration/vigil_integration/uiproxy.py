@@ -6,9 +6,20 @@ at ONE origin, then federates the two isolated trust planes behind it:
     browser ─▶ vigil up proxy (the ONLY listener a human points a browser at)
                  ├─ /sovereign/*        ▶ 127.0.0.1:8733   (sigil serve — the sovereign cockpit)
                  ├─ /offense/api/v1/*   ▶ 127.0.0.1:8799   (crucible api — the gated action plane)
-                 └─ /offense/*          ▶ 127.0.0.1:8787   (crucible console — read + SSE plane)
+                 ├─ /offense/*          ▶ 127.0.0.1:8787   (crucible console — read + SSE plane)
+                 └─ /__vigil/plane/*    ▶ answered BY THE PROXY (plane status + start the offense plane)
     /  and the bundle files (style.css, ui.js, manual.js, app.js, index.html) are served by the
     proxy itself from a runtime serve dir assembled by `vigil up`.
+
+PLANE CONTROL (why it lives here): because the proxy serves the interface itself, the page still loads
+when the offense backends are dead — and the proxy is the process that already owns their lifecycle. So
+it is the one process that can honestly answer "is each plane up?" and "start the offense plane". The
+operator keeps the command (`vigil up` is unchanged, byte-for-byte) AND gets a button. The action is
+FIXED and NAMED: the request body is discarded and the argv is rebuilt from the proxy's own boot
+configuration (``offense_argv`` — the single definition the boot path itself uses), so no path, port,
+argument or command can ever come from a request. It is token-gated and loopback/private-peer-only like
+every other route, single-flight + idempotent, and it changes NOTHING about gating, approvals, the
+kill-switch, scope, or what counts as a fact — it only restarts the same two backends `vigil up` spawns.
 
 CRITICAL boundary property (mirrors ``dispatch``): this module is PURE STDLIB. It imports NEITHER
 ``framework``/``strix`` (the offense engine) NOR ``sigil`` (the sovereign core) — the three backends
@@ -35,6 +46,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hmac
 import http.client
 import http.server
 import ipaddress
@@ -51,7 +63,7 @@ import time
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from . import dispatch
 
@@ -65,6 +77,35 @@ API_PORT = 8799           # crucible api     (offense gated /api/v1 action plane
 # federated mount bases written into index.html (what app.js prepends to every fetch)
 SOVEREIGN_BASE = "/sovereign"
 OFFENSE_BASE = "/offense"
+
+# ---- proxy-local plane control (answered BY THE PROXY, never forwarded) ---------------------------
+# A backend that is DOWN cannot answer a request to start itself. The proxy is the process that already
+# OWNS the three backends' lifecycle and serves the interface itself, so it is the one place that can
+# honestly offer to start them — which is what turns "go to a terminal and run `vigil up`" into a
+# button, WITHOUT changing what `vigil up` does.
+#
+# The prefix is `/__vigil/` precisely because it cannot collide with a backend mount: `route()` maps
+# only `/sovereign*` and `/offense*` to a backend, `_handle` checks the plane prefix BEFORE it tries to
+# route, and `route()` ALSO refuses the prefix explicitly (belt-and-braces, so a future mount-prefix
+# change can never silently forward a plane-control request to a backend).
+PLANE_BASE = "/__vigil/plane"
+PLANE_STATUS_PATH = PLANE_BASE + "/status"
+PLANE_START_OFFENSE_PATH = PLANE_BASE + "/offense/start"
+# The plane-control routes take NO input: the START action is a FIXED, NAMED action whose argv the proxy
+# rebuilds from its OWN boot configuration. Any request body is drained and DISCARDED (never parsed as
+# configuration) — a caller-named command/path/port would be remote code execution wearing a button — so
+# the cap is small: a body this large is a client bug, not a payload.
+_PLANE_MAX_BODY = 64 * 1024
+# How long after a spawn the proxy will still say "starting". A backend that has not bound by then is
+# not starting, it is broken — and saying "starting" forever would hide that behind a spinner.
+_PLANE_START_GRACE_S = 45.0
+
+# The credential carriers the whole UI already uses (mirrors console/server.py + the cockpit): the
+# `X-SIGIL-Token` header the SPA fetch sets, or `?token=` for carriers that cannot set a header. The
+# custom header a cross-site HTML form physically cannot set is the CSRF conjunct on POST.
+_TOKEN_HEADER = "X-SIGIL-Token"
+_TOKEN_QUERY = "token"
+_CSRF_HEADER = "X-Requested-With"
 
 # the bundle files the proxy serves from the runtime serve dir
 BUNDLE_JS = ("ui.js", "manual.js", "app.js")
@@ -121,6 +162,37 @@ def _is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return host in ("localhost",)
+
+
+def _peer_ok(addr: str) -> bool:
+    """True iff a CONNECTING peer may use the proxy-local plane-control routes: the same never-public
+    predicate the bind itself is held to (``bind_ok``) — loopback, or a private/tunnel address. This is
+    the existing check reused, not a second weaker one; the only normalisation is unwrapping an
+    IPv4-mapped IPv6 peer (``::ffff:127.0.0.1``, what an AF_INET6 listener reports for a v4 client),
+    which can only ever REJECT the same public addresses ``bind_ok`` already rejects."""
+    try:
+        ip = ipaddress.ip_address((addr or "").strip().strip("[]"))
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return bind_ok(str(mapped) if mapped is not None else str(ip))
+
+
+def _authority_matches(value: str, scheme_default: int, port: int) -> bool:
+    """True iff a ``Host``/``Origin`` authority names the LOOPBACK proxy on its exact bound port —
+    the DNS-rebinding defense the console/cockpit apply (``_host_is_console``), reimplemented inline so
+    this offense-side path imports nothing. A missing port means the scheme default (a browser omits it
+    on 80/443); a malformed authority or port fails CLOSED."""
+    try:
+        u = urlsplit(value if "//" in value else "//" + value)
+        host = u.hostname or ""
+        try:
+            p = u.port
+        except ValueError:
+            return False
+    except ValueError:
+        return False
+    return _is_loopback(host) and (p if p is not None else scheme_default) == port
 
 
 def compute_authority(host: str, port: int, domain: str = "") -> tuple[str, str, bool]:
@@ -189,10 +261,23 @@ def assemble_serve_dir(src_dir: Path, serve_dir: Path, *, token: str,
 # ==================================================================================================
 # the reverse proxy
 # ==================================================================================================
+def is_plane_path(path: str) -> bool:
+    """True for a proxy-local plane-control path. Matched as a PREFIX (not just the two exact routes)
+    so anything under it — including a traversal-looking or unknown sub-path — is answered by the proxy
+    (with a 404) and can never fall through to the static server or to a backend."""
+    return path == PLANE_BASE or path.startswith(PLANE_BASE + "/")
+
+
 def route(path: str) -> Optional[tuple[str, int, str]]:
     """Map a request path to ``(backend_host, backend_port, upstream_path)`` or ``None`` (serve
     static). Strips the mount prefix so the upstream sees its own path; the query is preserved by the
     caller. The offense api is disambiguated by its ``/api/v1`` sub-prefix (see the module docstring)."""
+    # PROXY-LOCAL, never forwarded: a backend that is DOWN cannot answer a request to start itself, so
+    # `/__vigil/plane/*` must never resolve to a backend. `_handle` already intercepts it BEFORE routing;
+    # this is the belt-and-braces half — if a mount prefix ever changed such that it could match, the
+    # request would still be refused here rather than proxied to (or smuggled through) a backend.
+    if is_plane_path(path):
+        return None
     if path == SOVEREIGN_BASE or path.startswith(SOVEREIGN_BASE + "/"):
         rest = path[len(SOVEREIGN_BASE):] or "/"
         return ("127.0.0.1", SOVEREIGN_PORT, rest)
@@ -206,13 +291,169 @@ def route(path: str) -> Optional[tuple[str, int, str]]:
     return None
 
 
+class PlaneControl:
+    """The offense plane's lifecycle, as the proxy is allowed to touch it: probe it, and start it.
+
+    THE CALLER NAMES NOTHING. This object is constructed by ``run_up`` from the argv IT already built to
+    spawn the backends at boot — the same list, captured, not rebuilt from a request. The HTTP surface
+    passes no arguments at all: ``start_offense()`` takes none, so no path, port, flag or command can
+    travel in a request. That is the whole security design of the feature; a button that accepted an
+    argv would be remote code execution wearing a button.
+
+    SINGLE-FLIGHT + IDEMPOTENT. ``_LOCK`` serialises the decision, so two clicks (or two browser tabs)
+    cannot race into two copies of a backend. A backend already LISTENING is left alone and reported as
+    such, and a child this object already started and that is still alive is never started again — so
+    the operator cannot orphan a process by clicking twice.
+
+    NOT A NEW AUTHORITY. Starting the console and the api is exactly what `vigil up` does; it changes
+    nothing about scope, the charter, WARDEN's approve-then-run gate, the kill-switch, signing, or what
+    counts as a fact. It is process lifecycle, and nothing else."""
+
+    def __init__(self, specs, *, on_started=None):
+        # specs: [(name, argv, log_path, extra_env, host, port), ...] — captured from the boot path.
+        self._specs = list(specs)
+        self._on_started = on_started      # run_up hands us a callback so `vigil down` learns the pids
+        self._lock = threading.Lock()
+        self._children: dict = {}          # name -> Popen, for the ones WE started
+        self._started_at = 0.0             # when we last spawned — the basis for the "starting" signal
+
+    # ---- reporting ------------------------------------------------------------------------------
+    def ports(self) -> "list[tuple[str, str, int]]":
+        return [(name, host, port) for name, _argv, _log, _env, host, port in self._specs]
+
+    def is_starting(self) -> bool:
+        """True only while a child we just spawned is alive and its port has NOT come up yet.
+
+        Deliberately MEASURED, not a flag held over the spawn: the spawn itself takes milliseconds, so a
+        boolean set-and-cleared around it would never be observed and the interface would flip straight
+        from "down" to "down" while the backend was in fact booting. This says the honest thing —
+        something is coming up — and stops saying it the moment the port answers, the child dies, or the
+        grace window expires (a backend that never binds must NOT read as forever-starting)."""
+        with self._lock:
+            if not self._started_at or (time.monotonic() - self._started_at) > _PLANE_START_GRACE_S:
+                return False
+            for name, host, port in self.ports():
+                if self._alive(name) and not _listening(host, port):
+                    return True
+            return False
+
+    def _alive(self, name: str) -> bool:
+        """True if a child WE started under this name is still running. A child that exited is reaped
+        and forgotten, so a failed start never blocks a retry."""
+        p = self._children.get(name)
+        if p is None:
+            return False
+        if p.poll() is None:
+            return True
+        self._children.pop(name, None)
+        return False
+
+    # ---- the one named action -------------------------------------------------------------------
+    def start_offense(self) -> dict:
+        """Start whichever offense backends are not answering. Returns
+        ``{"ok", "action": "start-offense", "result": "already_running"|"started"|"starting", ...}``.
+
+        Never raises: a spawn failure is reported as a failure, with the reason, because the operator's
+        alternative is a terminal and they need to know which."""
+        with self._lock:
+            # A plane is "down" only if nothing is LISTENING on its port and no child we started is
+            # still alive on it. Both halves matter: the port check catches a backend someone else
+            # started, and the liveness check covers the window between our spawn and its bind — which
+            # is exactly the window a second click lands in.
+            down = [(name, argv, log, env, host, port)
+                    for name, argv, log, env, host, port in self._specs
+                    if not (_listening(host, port) or self._alive(name))]
+            if not down:
+                return {"ok": True, "action": "start-offense", "result": "already_running",
+                        "detail": "the offense console and API are already answering (or are coming up "
+                                  "from a start already in flight).",
+                        "status": self._status_locked()}
+            started, failed = [], []
+            for name, argv, log, env, _host, _port in down:
+                try:
+                    self._children[name] = _spawn(list(argv), Path(log), extra_env=dict(env or {}))
+                    started.append(name)
+                except (OSError, ValueError) as exc:
+                    failed.append(f"{name} ({type(exc).__name__}: {exc})")
+            if started:
+                self._started_at = time.monotonic()
+            if self._on_started and started:
+                try:
+                    self._on_started([(n, self._children[n]) for n in started if n in self._children])
+                except Exception:  # noqa: BLE001 — bookkeeping must never fail the start
+                    pass
+            if failed and not started:
+                return {"ok": False, "action": "start-offense", "result": "failed",
+                        "error": "the offense plane could not be started: " + "; ".join(failed)
+                                 + ". Start it in a terminal with `vigil up`.",
+                        "status": self._status_locked()}
+            detail = "starting the offense console and API — this takes a few seconds."
+            if failed:
+                detail += " (" + "; ".join(failed) + " did not start)"
+            return {"ok": True, "action": "start-offense", "result": "started", "started": started,
+                    "detail": detail, "status": self._status_locked()}
+
+    def _status_locked(self) -> dict:
+        # Called with ``_lock`` held, so it must not re-derive `starting` through `is_starting()`
+        # (a plain Lock is NOT reentrant — that would deadlock the very request it is answering).
+        return _plane_ports_status(self.ports(), starting=bool(
+            self._started_at and (time.monotonic() - self._started_at) <= _PLANE_START_GRACE_S))
+
+
+def _listening(host: str, port: int) -> bool:
+    """True if something is LISTENING on (host, port) right now. A short-timeout connect, nothing sent:
+    this REPORTS, it never probes a backend's behaviour."""
+    try:
+        with socket.create_connection((host, int(port)), timeout=0.35):
+            return True
+    except (OSError, ValueError, OverflowError):
+        return False
+
+
+def _plane_ports_status(ports, *, starting: bool = False) -> dict:
+    out = {name: _listening(host, port) for name, host, port in ports}
+    return {"ok": True, "planes": out, "running": bool(out) and all(out.values()), "starting": starting}
+
+
+def plane_status(pc: "Optional[PlaneControl]") -> dict:
+    """What each plane is doing right now, measured — never remembered.
+
+    A LIVE port probe, so the answer is true even when the backend was started by a different `vigil up`,
+    by hand, or died a second ago. ``can_start`` says whether THIS proxy can do anything about it: a
+    proxy built without plane control (a test harness, an older boot path) reports the truth and offers
+    no button, rather than showing one that cannot work.
+
+    Works with ``pc is None``: probing needs no configuration, and a status route that fails closed
+    would leave the interface unable to say why the offense side is dark."""
+    ports = pc.ports() if pc is not None else [("offense-console", "127.0.0.1", CONSOLE_PORT),
+                                               ("offense-api", "127.0.0.1", API_PORT)]
+    st = _plane_ports_status(ports, starting=bool(pc is not None and pc.is_starting()))
+    st["can_start"] = pc is not None
+    st["sovereign"] = _listening("127.0.0.1", SOVEREIGN_PORT)
+    return st
+
+
 class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """Threaded so SSE long-lived streams and normal requests can run concurrently."""
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, addr, handler, *, serve_dir: Path):
+    def __init__(self, addr, handler, *, serve_dir: Path, token: str = "",
+                 allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
+                 plane_control: "Optional[PlaneControl]" = None):
         self.serve_dir = serve_dir
+        # The session token `vigil up` captured from the cockpit and embedded in index.html — the SAME
+        # credential the two federated planes take. It gates the proxy-local plane-control routes.
+        # Empty (a proxy built without one) ⇒ those routes FAIL CLOSED (401), never open.
+        self.token = token or ""
+        # The browser-visible authority/origin of THIS proxy (`--domain`, or a tunnel bind) — the same
+        # values handed to the backends as --allow-host/--allow-origin. Loopback with the proxy's own
+        # port is always accepted; everything else must be one of these.
+        self.allowed_hosts = frozenset(h for h in allowed_hosts if h)
+        self.allowed_origins = frozenset(o.rstrip("/") for o in allowed_origins if o)
+        # None ⇒ the proxy can still REPORT plane status (a live port probe needs no configuration) but
+        # cannot start anything (503). Only `vigil up`'s boot path supplies one.
+        self.plane_control = plane_control
         family = socket.AF_INET
         try:
             if ipaddress.ip_address(addr[0]).version == 6:
@@ -261,6 +502,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _handle(self):
         try:
             split = urlsplit(self.path)
+            # PROXY-LOCAL FIRST: plane control is answered by this process, BEFORE any attempt to route
+            # or to serve a file. That ordering is the whole point — a backend that is down cannot answer
+            # a request to start itself, and the interface is still being served here while it is down.
+            if is_plane_path(split.path):
+                self._plane_control(split.path, split.query)
+                return
             target = route(split.path)
             if target is None:
                 self._serve_static(split.path)
@@ -305,6 +552,129 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(data)
+
+    # -- proxy-local plane control (status + start the offense plane) --------------------------------
+    def _plane_control(self, path: str, query: str):
+        """Answer a `/__vigil/plane/*` request in THIS process. Never forwarded, never served from the
+        serve dir. The guards are the same conjunction every other endpoint is held to — private peer,
+        Host/Origin (anti-rebinding), session token, and (POST) the SPA custom header a cross-site form
+        cannot set — checked BEFORE anything is inspected or spawned."""
+        # 1) Drain the request body EXACTLY ONCE, up front, and DISCARD it. The caller names no command:
+        #    neither route takes input, so the body is never parsed. Draining keeps framing honest, and
+        #    the connection is closed on every plane response anyway (no smuggling window).
+        try:
+            clen = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            clen = 0
+        self.close_connection = True
+        if clen > _PLANE_MAX_BODY:
+            self._plane_json({"ok": False, "error": "request body too large"}, status=413, drained=True)
+            return
+        if clen > 0:
+            self.rfile.read(clen)          # read + discard: NOT configuration, not logged
+
+        # 2) never-public: only a loopback / private-tunnel peer may drive the planes.
+        if not _peer_ok(self.client_address[0] if self.client_address else ""):
+            self._plane_json({"ok": False, "error": "plane control refused (non-private peer)"},
+                             status=403, drained=True)
+            return
+        # 3) anti-rebinding: the Host (and Origin, when present) must name THIS proxy.
+        ok, why = self._plane_authority_ok()
+        if not ok:
+            self._plane_json({"ok": False, "error": f"plane control refused ({why})"},
+                             status=403, drained=True)
+            return
+        # 4) the session credential — the same token the rest of the UI presents.
+        if not self._plane_token_ok(query):
+            self._plane_json({"ok": False, "error": "missing/invalid token"}, status=401, drained=True)
+            return
+        # 5) a mutating POST additionally needs the SPA's custom header (a cross-site HTML <form>
+        #    physically cannot set one, forcing a preflight this proxy never answers) and a
+        #    non-cross-site Sec-Fetch-Site — the console's own POST conjunction.
+        if self.command == "POST":
+            if not self.headers.get(_CSRF_HEADER):
+                self._plane_json({"ok": False,
+                                  "error": f"cross-site POST refused (missing {_CSRF_HEADER})"},
+                                 status=403, drained=True)
+                return
+            sfs = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+            if sfs and sfs not in ("same-origin", "none"):
+                self._plane_json({"ok": False, "error": f"cross-site POST refused (Sec-Fetch-Site={sfs})"},
+                                 status=403, drained=True)
+                return
+
+        pc: "Optional[PlaneControl]" = getattr(self.server, "plane_control", None)
+        if path == PLANE_STATUS_PATH:
+            if self.command not in ("GET", "HEAD"):
+                self._plane_json({"ok": False, "error": "method not allowed"}, status=405, drained=True)
+                return
+            self._plane_json(plane_status(pc), drained=True)
+            return
+        if path == PLANE_START_OFFENSE_PATH:
+            # POST only: a GET/HEAD must never start anything (no side effect on a safe method).
+            if self.command != "POST":
+                self._plane_json({"ok": False, "error": "method not allowed (POST only)"},
+                                 status=405, drained=True)
+                return
+            if pc is None:
+                self._plane_json({"ok": False, "action": "start-offense",
+                                  "error": "this proxy has no plane control configured — start the "
+                                           "planes with `vigil up`.",
+                                  "status": plane_status(None)}, status=503, drained=True)
+                return
+            self._plane_json(pc.start_offense(), drained=True)
+            return
+        self._plane_json({"ok": False, "error": "not found"}, status=404, drained=True)
+
+    def _plane_authority_ok(self) -> tuple[bool, str]:
+        """Host/Origin must name THIS proxy: loopback on its bound port, or the exact authority/origin
+        `vigil up` was launched with (the same strings handed to the backends as --allow-host /
+        --allow-origin). A missing/rebinding/malformed Host fails closed."""
+        port = self.server.server_address[1]
+        allow_hosts = getattr(self.server, "allowed_hosts", frozenset())
+        allow_origins = getattr(self.server, "allowed_origins", frozenset())
+        host_hdr = (self.headers.get("Host") or "").strip()
+        if not host_hdr:
+            return False, "Host missing"
+        if not (_authority_matches(host_hdr, 80, port) or host_hdr in allow_hosts):
+            return False, f"Host={host_hdr!r}"
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin:
+            scheme_default = 443 if origin.lower().startswith("https:") else 80
+            if not (_authority_matches(origin, scheme_default, port)
+                    or origin.rstrip("/") in allow_origins):
+                return False, f"Origin={origin!r}"
+        return True, ""
+
+    def _plane_token_ok(self, query: str) -> bool:
+        """The session credential on THIS request: the ``X-SIGIL-Token`` header, or ``?token=``.
+        Constant-time compare. Fail-closed — a missing/blank/wrong token, or a proxy built with no
+        token at all, is False."""
+        expected = getattr(self.server, "token", "") or ""
+        tok = self.headers.get(_TOKEN_HEADER) or (parse_qs(query).get(_TOKEN_QUERY) or [""])[0]
+        if not tok or not expected:
+            return False
+        return hmac.compare_digest(str(tok), str(expected))
+
+    def _plane_json(self, payload: dict, status: int = 200, *, drained: bool = False):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if not drained:
+            self._read_request_body()
+        self.close_connection = True
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Security-Policy", _BUNDLE_CSP)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.close_connection = True
 
     # -- faithful forward to a loopback backend, STREAMING the response ------------------------------
     def _proxy(self, host: str, port: int, upstream_path: str):
@@ -388,16 +758,25 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
 
 
-def make_proxy_server(host: str, port: int, serve_dir: Path) -> _ProxyServer:
+def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
+                      allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
+                      plane_control: "Optional[PlaneControl]" = None) -> _ProxyServer:
     """Build (do not run) the reverse proxy bound to ``host:port``. Refuses a public/unspecified bind
     (``bind_ok``) — the proxy is the only listener a human points a browser at, so it must never be
-    reachable from the open internet."""
+    reachable from the open internet.
+
+    The plane-control credentials are OPTIONAL and default to nothing, which fails CLOSED: a proxy
+    built without a token (a test harness, an embedding caller) answers 401 on every plane-control
+    route, and one built without a ``plane_control`` can report plane status but starts nothing (503).
+    Only ``run_up`` — the boot path that owns the backends' lifecycle — supplies either."""
     if not bind_ok(host):
         raise ValueError(
             f"refusing to bind {host!r}: the vigil up proxy binds loopback or a PRIVATE "
             f"(WireGuard/Tailscale) address only — never 0.0.0.0 / an unspecified / a public address. "
             f"Front a real domain with a TLS reverse proxy (--domain; see deploy/reverse-proxy/).")
-    return _ProxyServer((host, port), ProxyHandler, serve_dir=serve_dir)
+    return _ProxyServer((host, port), ProxyHandler, serve_dir=serve_dir, token=token,
+                        allowed_hosts=tuple(allowed_hosts), allowed_origins=tuple(allowed_origins),
+                        plane_control=plane_control)
 
 
 # ==================================================================================================
@@ -892,6 +1271,29 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     if _track("offense-api", api_argv, logs / "offense-api.log", extra_env=offense_llm_env):
         return 1
 
+    # PLANE CONTROL captures THESE spawns — the argv, env and log path just used, byte for byte — so the
+    # button restarts exactly what the boot path started. It is built from what we already have; nothing
+    # about `vigil up` above changed to accommodate it, and no request will ever contribute a value to it.
+    def _adopt(started: "list[tuple[str, subprocess.Popen]]") -> None:
+        """A backend restarted through the proxy joins the SAME bookkeeping the boot path uses, so
+        Ctrl-C still reaps it and `vigil down` still finds it. Without this a restarted console would
+        outlive its parent as an orphan holding port 8787 — and the next `vigil up` would refuse to
+        start because the port it needs is 'already in use'."""
+        for name, proc in started:
+            procs[:] = [(n, p) for n, p in procs if n != name] + [(name, proc)]
+        try:
+            _write_pids(base, [{"name": "orchestrator", "pid": os.getpid()},
+                               *[{"name": n, "pid": p.pid} for n, p in procs]])
+        except OSError:
+            pass                      # the children are still tracked in-process for Ctrl-C
+
+    plane_control = PlaneControl(
+        [("offense-console", list(console_argv), logs / "offense-console.log", dict(console_env),
+          "127.0.0.1", CONSOLE_PORT),
+         ("offense-api", list(api_argv), logs / "offense-api.log", dict(offense_llm_env),
+          "127.0.0.1", API_PORT)],
+        on_started=_adopt)
+
     # Readiness (B4): the cockpit's startup is verified via its token, but the offense console/api are
     # spawned fire-and-forget — if one fails to bind (an import error, a port race), the proxy would still
     # come up and /offense/* would 502 with NO signal to the operator. Probe their ports briefly and WARN
@@ -983,7 +1385,12 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     # does NOT prevent an EADDRINUSE collision with an ACTIVE listener, and an uncaught bind error here
     # would escape past _cleanup() and orphan every backend already spawned above.
     try:
-        httpd = make_proxy_server(host, port, ui_dir)
+        # The plane-control routes take the SAME session token the two federated planes take (the one
+        # the cockpit printed and that is embedded in index.html), and the SAME Host/Origin allowlist
+        # handed to the backends. One credential, one anti-rebinding rule — not a second, weaker path.
+        httpd = make_proxy_server(host, port, ui_dir, token=token,
+                                  allowed_hosts=(authority,), allowed_origins=(origin,),
+                                  plane_control=plane_control)
     except (ValueError, OSError) as exc:
         print(f"vigil up: could not bind the UI proxy on {host}:{port}: {exc}", file=sys.stderr)
         _cleanup()

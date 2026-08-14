@@ -1,0 +1,68 @@
+# VIGIL COMMAND — keep the unified interface up, across reboots.
+#
+# WHAT THIS IS FOR. `vigil up` federates both trust planes behind one loopback origin so the whole
+# system is reachable from a single browser tab. Run by hand it dies with the terminal that started
+# it. This unit makes it a service: it comes back after a crash, and it comes back after a reboot.
+#
+# THE URL IS STABLE: http://127.0.0.1:8770/
+# The sovereign plane's session token is written into the served page at start-up, so the browser
+# picks it up automatically. That means the bare URL above is bookmarkable and keeps working even
+# though the token itself is regenerated on every restart. Do not bookmark a `?token=` URL — it will
+# go stale; the bare one will not.
+#
+# THIS IS A USER SERVICE, DELIBERATELY. It runs as the owner, with the owner's keys, the owner's
+# environments and the owner's home directory — exactly as it does when started by hand. Running it
+# as root would change who the system believes the owner is, which is the one thing the whole
+# sovereign design rests on.
+#
+# NEVER PUBLIC. The proxy binds loopback. The bind address is not configurable here on purpose: a
+# public bind is refused by the program itself, and this unit does not attempt to talk it round.
+#
+# INSTALL:
+#   mkdir -p ~/.config/systemd/user
+#   cp infra/systemd/vigil-command.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-command.service
+#   sudo loginctl enable-linger "$USER"     # start at boot without anyone logging in
+#
+# The linger line is the part people forget. Without it a user service starts when you log in and
+# stops when your last session ends — so the machine would boot with nothing running.
+#
+# CHECK:   systemctl --user status vigil-command
+# LOGS:    journalctl --user -u vigil-command -f        (and .vigil-live/ui/logs/)
+# STOP:    systemctl --user stop vigil-command
+
+[Unit]
+Description=VIGIL COMMAND — the unified interface, both planes behind one loopback origin
+Documentation=file:/home/kali/vigil/docs/screenshots/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/kali/vigil
+
+# A service starts with a nearly empty environment — it does NOT read your shell profile. That is
+# usually what you want (it is why the service behaves the same for everyone), but it means anything
+# you rely on being exported in a terminal is absent here, and the interface can end up showing a
+# different set of engagements from the one you see when you start it by hand. Put such settings in
+# the file below; the leading `-` makes it optional, so nothing breaks if it does not exist.
+EnvironmentFile=-/home/kali/vigil/.vigil-live/service.env
+ExecStart=/home/kali/vigil/.venv-offense/bin/vigil up --port 8770 --no-browser
+ExecStop=/home/kali/vigil/.venv-offense/bin/vigil down
+
+# `vigil up` spawns the three backends as its own children. The default control-group kill mode
+# takes them down with the parent, so a stop or a restart never leaves an orphaned listener holding
+# the port — which is the failure that makes a service look "started" while the interface is dead.
+KillMode=control-group
+TimeoutStopSec=25
+
+Restart=always
+RestartSec=5
+# Ten restarts in five minutes means it is failing for a reason restarting will not fix. Stop, and
+# leave the failure visible in the status output rather than hiding it behind an endless loop.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Install]
+WantedBy=default.target

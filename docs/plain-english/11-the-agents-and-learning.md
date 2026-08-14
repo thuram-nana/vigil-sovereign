@@ -111,21 +111,28 @@ offensive machinery.
 ### How many automated workers there are, in total
 
 Chapter 9 gives the reader a screen count so the shape of the interface can be held in mind. The same
-is useful here. The figures below were counted directly from the code while this chapter was written,
-and the counting rule is stated so a reviewer can repeat it.
+is useful here. The figures below were counted directly from the code while this chapter was written.
+The counting rule, so a reviewer can repeat it: one for every worker that carries a name of its own in
+the code and is a permanent part of the system, wherever in the tree that worker happens to sit.
+Anything created for a single job, and anything that is not a worker at all, is not counted.
 
 | Group | Count | What was counted |
 |---|---:|---|
 | Investigation team — agents proper | **8** | The eight classes in the offensive agents folder that are built as agents: recon, hypothesis, exploit, critique, reporter, memory, the critic panel, and reflection. |
 | Investigation team — further automated workers in the same folder | **3** | The refusal decision, the chain builder, and the impact re-proof layer. These do a worker's job but are not written as agent classes, so they are counted separately rather than quietly folded in. |
 | The owner's personal mesh | **9** | Nine named agents, listed individually in section 4. |
+| The perception assistant | **1** | PERCEPTION, which answers questions about the owner's own screen and camera. It is built on the same foundation as the nine and declares its own name and its own ceiling, but it sits beside the screen-capture code rather than inside the mesh folder, so it gets a line of its own rather than being folded into the row above. Section 4 returns to it. |
 | The connective layer | **4** | The general reasoning body; the parallel-team member; the one included proposal-only planner; and the vendored third-party agentic tool. |
-| **Total named, permanent automated workers** | **24** | |
+| **Total named, permanent automated workers** | **25** | |
 
-Three notes keep that number honest.
+Four notes keep that number honest.
 
+- The nine of the mesh plus the perception assistant are the **ten named identities that can write to
+  the owner's record**, which is the figure section 4 and chapter 14 both use. It is the same ten,
+  counted for a different purpose: this table counts every automated worker in the product, while that
+  one counts only the workers on the owner's own side.
 - The critic panel is counted as **one** agent, but it runs **three** separate reviewing lenses inside
-  itself. Counting lenses instead would give 26.
+  itself. Counting lenses instead would give 27.
 - The parallel-team member is counted as **one**, because it is a template rather than a named
   personality: a wave is capped at five members with at most three running at once, and the members
   are created for the job and then finish.
@@ -512,6 +519,16 @@ Every agent proposes actions carrying a tier, and every agent also has its own *
 applies automatically only if it is at or below the automatic bar **and** at or below that agent's own
 ceiling. The default ceiling for a new agent is A1.
 
+**A note on the count, so a reader who counts differently does not think the document is sloppy.**
+Nine assistant types live in the folder the system calls its agent mesh, and those nine are the ones
+set out below. There is a **tenth** named identity that does not live in that folder: the perception
+assistant, **PERCEPTION**, which answers questions about the owner's own screen and camera. It is
+built on the same foundation as the other nine — the same base class, the same routing through the
+governor, the same outcome written to the same record — and declares its own name and its own ceiling
+of A1. It simply sits alongside the screen-capture code it serves. The honest formulation is
+therefore **nine assistants in the mesh, plus a perception assistant: ten named identities that can
+write to the owner's record.** Chapter 14, sections 5 and 6, covers PERCEPTION in full.
+
 ### The nine agents
 
 | Agent | Its job | Its ceiling and hard limits |
@@ -521,7 +538,7 @@ ceiling. The default ceiling for a new agent is A1.
 | **STEWARD** | Personal operations: the morning briefing, the commitment ledger, recurring admin. The briefing lists due commitments, open threads, flagged contradictions, and a recent-activity summary. | Ceiling A2 — calendar writes queue until trust is granted. **Every line in the briefing is cited to a specific record number**, and it is composed only from grounded memory. |
 | **ENVOY** | Communications: triages inbound messages into urgent, normal, informational, or spam, and **drafts** outbound replies. | Ceiling A2, hard, with **no promotion path ever**. Enforced structurally: there is no method in it that transmits anything. There is deliberately no send function. It writes draft records marked "awaiting-approval". A human sends them, or does not. |
 | **ARTIFICER** | Engineering: drives a headless coding assistant against a code repository to own a coding task end to end. | Ceiling A2. **It never pushes code**, and it **runs the tests before claiming it is done**. Set out below, under "Three more of the nine, in a little more detail". |
-| **SCHOLAR** | Research and analysis: long-horizon research and sourced synthesis. | Ceiling A1 — research touches no external state. Its discipline is evidential: every claim must carry a source **and a verbatim quote**, and the quote must actually appear in the cited source and be specific enough to matter. A claim that does not verify against its own source is **demoted, not asserted**. |
+| **SCHOLAR** | Research and analysis: long-horizon research and sourced synthesis. | Ceiling A1 — research touches no external state. Its discipline is evidential: every claim must carry a source **and a verbatim quote**, and the quote must actually appear in the cited source and be specific enough to matter. A claim that does not verify against its own source is **demoted, not asserted**. It also reads the public web; that mode is set out below, under "SCHOLAR reading the public web". |
 | **BASTION** | Defensive posture over the owner's **own** infrastructure only: certificate expiry, dependency vulnerability exposure, uptime. | Ceiling A1 — it observes and never fixes anything. **No exploitation, no port sweep, no third-party target.** Set out below, under "A word on BASTION". |
 | **OPERATOR** | Opens folders and files and runs terminal commands on request, one transaction at a time. | Ceiling A2. It is the agent that touches the owner's own machine, so it carries the most machinery of any of the nine. Its rules are set out in full below, under "The OPERATOR in detail". |
 | **DELEGATE** | The owner's account and identity manager: manages the owner's own credentials and, with per-action approval, creates accounts, logs in, fills forms, submits. | Ceiling A2, and permanently barred from ever being promoted. It is the agent that acts in the world under the owner's name, so its rules are also set out in full below, under "The DELEGATE in detail". |
@@ -570,6 +587,51 @@ inside a published advisory's affected range. If the version or the advisory's b
 with certainty, the result is *no finding* — recorded honestly as something not assessed, rather than
 guessed at in either direction.
 
+### SCHOLAR reading the public web
+
+SCHOLAR has a second mode, for questions whose answers are on public web pages rather than in
+documents the owner already holds. It is described here rather than as a tenth row in the table
+above, because **it is not a tenth agent**. The same agent does the work, under the same name on the
+permanent record, at the same A1 ceiling, through the same budgets, the same emergency stop and the
+same approval wiring. Someone auditing the record for a separate web-crawling identity would find
+none, because there is none.
+
+The mode deserves its own explanation for a different reason. Fetching pages from the open internet
+is the point at which a research assistant is most easily turned into something else — a scanner, a
+nuisance to somebody else's server, or a way to reach machines inside the owner's own network. Each
+of those is closed off separately, and each closure is checkable.
+
+| The risk | What bounds it |
+|---|---|
+| **Reading somewhere the owner never authorised** | A list of permitted sites, declared by the owner. **An empty list permits nothing at all** — the default is refusal, not permission. Matching is on the exact site name unless the owner deliberately opts in to including its sub-sites, and the code is candid that the widening is computed crudely, by taking the last two parts of the name, which is wider than intended for names under a two-part country suffix. The narrow default is the one to rely on. |
+| **Being steered onto a machine inside the owner's own network** | This is the attack called server-side request forgery: persuading a program that fetches web addresses to fetch an internal one on the attacker's behalf. Every name is looked up once, and *every* address it resolves to must be an ordinary public internet address — anything private, loopback, link-local, reserved, or in the carrier-shared range is refused before a connection is opened. The connection is then pinned to the exact address that was checked, so a name that changes its answer between the check and the fetch cannot redirect it. Redirections are not followed at all. Proxy settings in the surrounding environment are ignored, so routing cannot be diverted from outside. This check is applied on **every** page, not only the first. |
+| **Ignoring what a site asks of visitors** | The standing instructions a site publishes for automated visitors are themselves fetched through the same gate, then obeyed. A page the site excludes is dropped and recorded as a skip — never fetched. If those instructions cannot be read unambiguously, because the site errors, refuses, or asks for a slow-down, **the whole site is treated as excluded for that run**. A site that publishes none is treated as open, which is the ordinary convention. |
+| **Overwhelming somebody else's server** | One request at a time per site, with a minimum interval between them. Where a site publishes its own requested delay, that raises the floor rather than being traded off against it. The code's own word for this is "politeness, never evasion". |
+| **Becoming an attack tool** | Only plain retrieval requests are ever made: no forms, no logins, nothing submitted. The label the program presents to each website is fixed and says in plain words that it is authorised owner research; it is never varied to disguise the traffic. And the whole component refuses to load at all if any offensive module has been loaded into the same process. |
+| **Misrepresenting how much was actually read** | The crawl is bounded by a page budget, a depth limit and a per-site cap. **Every address that entered the queue and was then not fetched is written down with its reason** — out of scope, excluded by the site, over the per-site cap, a failed fetch, or simply beyond the page budget. The stated reason: a silent cap would misrepresent coverage. One kind of address never enters the queue and is therefore not itemised: links found on a page that has already reached the depth limit are neither followed nor listed, because the depth limit is a bound set before the crawl starts rather than a budget that runs out during it. On the owner's "learn from this address" path that limit is one hop from the starting page, so the recorded reasons are an honest account of the queue, not a list of every link the crawl ever saw. |
+
+Then comes the part that matters most for this document. **A web page is a stranger's assertion, and
+nothing a stranger asserts becomes a fact here.** Every page fetched is written to the permanent
+record as its own citable entry. Every claim then produced from those pages passes the identical
+admission gate described earlier for the owner's memory — the same code, not a similar one. A claim
+is admitted only if it cites one of the pages fetched for this very question, its quotation appears
+word for word in the page as re-read *from the record* rather than from the model's own copy, and the
+quotation is specific enough to carry meaning. What the owner is then shown is the quotation itself,
+with the record number and the address it came from. Anything that fails is kept, labelled advisory,
+reported alongside, and counted. The gate can only demote; it has no path that promotes.
+
+**It can be stopped part-way.** The owner-facing "learn from this web address" path hands the
+emergency stop to the crawler as a check made between pages, so a stop takes effect within one page
+rather than at the end of the job. That wiring belongs to that path; a crawl started by another
+caller runs to its budget unless that caller supplies the same hook.
+
+**Status, stated exactly.** The scope check, the address vetting, the site-instruction handling, the
+rate limiting, the crawl bounds and the grounding gate are built and covered by tests that run
+without a network. On the machine this chapter was checked against, the permanent record contains no
+fetched-page entry of any kind, so **this mode has not been run against a live outside website
+here**. Nothing about its logic depends on a network to be verified; what has not happened is the
+field exercise.
+
 ### The OPERATOR in detail
 
 This is the agent that opens files and runs commands on the owner's own computer. Everything about it
@@ -603,6 +665,20 @@ everything.
 **Undo.** Before it changes a file, the agent saves the original contents, so it can put them back.
 When a restore does not work, or when a command that cannot be undone has already run, it says so
 plainly instead of reporting success.
+
+**There are two governed terminals in this system, and they are not the same design.** Chapter 9
+describes the other one — a screen on the offensive side where an operator types a command, or asks
+in plain English and is offered one. That path is bounded by **what may run at all**: a fixed list of
+local read-and-print programs, no shell, nothing that writes a file, nothing that reaches the
+network. On it, changing the machine or reaching the network is impossible by construction rather
+than merely forbidden. The OPERATOR described here is bounded the other way round, because its whole
+purpose is to read and change files on the owner's own computer. It therefore bounds **where** — the
+two rings — and **how much consequence each step carries**, and it treats *any* terminal command as
+the highest consequence level there is. That means an explicit owner approval, bound to that exact
+previewed command, every time; and at that level there is no promotion to automatic available at all,
+so no amount of accumulated trust converts it into something that runs by itself. Neither is a
+general-purpose terminal. One cannot touch the machine; the other can, and therefore can never move
+without a signature.
 
 ### The DELEGATE in detail
 
@@ -1023,6 +1099,57 @@ Another explicitly refuses to fabricate: a proposal's code change is left **empt
 fills it, on the stated basis that describing a change precisely without pretending to have written
 code you did not write is the honest output.
 
+#### Deep-learn — one accepted lead becomes three pieces of guidance
+
+There is one further learning step, and it is the one an outsider is most likely to mistake for the
+system teaching itself to attack. It is called deep-learn. **What it produces is writing, not
+capability.**
+
+Its input is a single vulnerability lead — a published advisory about a weakness in some piece of
+software — either one the owner has approved through the signed cross-boundary path described in the
+next section, which ends in exactly this step, or one an operator names from the intelligence a job
+already holds. Its output is three short advisory documents:
+
+| Document | What it says |
+|---|---|
+| **FIND** | Where to look. Which product and version the advisory affects, how severe it is rated, whether it is recorded as being exploited in the wild, and what would need mapping: the reachable entry points, and the inputs that reach the affected code. It states on its own face that it is a lead, and that confirming anything requires an automatic test firing over data a real target produced. |
+| **DETECT** | How the system would recognise this weakness if it were present. This is the only one of the three with any mechanical consequence, and it splits two ways — set out below. |
+| **PREVENT** | How to stop it. Patch or upgrade the affected component, and apply the input-handling, output-handling and least-privilege measures appropriate to that family of weakness. It ends by saying that it is guidance, not a guarantee: it authorises no change and confirms no fix. |
+
+**None of the three carries authority of any kind.** Their headers deliberately have no permission
+level and no authority field. The code states the rule in seven words — "a skill is guidance, it
+authorises nothing" — and the documents are exactly that: things a person or an agent may read. They
+open no gate, run no tool, and mint nothing.
+
+The DETECT document is where the honesty lives, because it splits according to what the system can
+actually do:
+
+- Where the weakness belongs to a family the automatic tests can already adjudicate, the document
+  **names those existing tests** and says plainly that a fact is minted only when such a test fires
+  over data a real target produced. The document points at the test; it does not itself confirm
+  anything. As a defence against drift, every name it emits is checked against the real register of
+  tests, and a name that does not correspond to one raises an error rather than being written down.
+- Where the family is one the system cannot yet adjudicate, the document says so, and deep-learn
+  drafts a **proposal for a real, deterministic new test** — described precisely, with the code
+  change left empty. That proposal enters the same merge gate described above: the deployment must
+  hold the capability, the candidate build must pass its tests, and a threshold number of governance
+  authorisers must sign the exact content — and even then a person applies it. The proposal may never
+  ask for a test whose judgment is a language model's opinion.
+
+**The load-bearing negative: deep-learn does not move the system's calibrated confidence at all.**
+The reason is stated in one line in the code and it is the sharpest sentence in this whole area — a
+vulnerability the system has learned *about* is not a test outcome. The running expectations
+described in section 7.3 are recorded after the fact from things that actually happened; feeding them
+something merely read about would corrupt them, and the system would then grow more confident because
+it had done more reading. So learning about a weakness moves no number. It produces guidance, and
+guidance is ranked alongside other guidance.
+
+Two properties a reviewer should note. Deep-learn is **deterministic**: the time is passed into it
+rather than read from a clock, so the same lead deep-learns into the same three documents every time,
+and two people can compare results. And it is **refused outright while the emergency stop is engaged**
+for that job — checked before anything is started, so nothing is even launched under a stop, and
+checked again inside the step that does the work.
+
 #### The one place where the system does build a new check for itself
 
 There is a component that goes one step further than a written proposal, and because "the tool writes
@@ -1242,10 +1369,12 @@ identical in both places; the difference is that the map's write path *applies t
 firewall *re-runs the proof*.
 
 One more honest note, because it is the kind of thing a reviewer will find. The component's own
-internal comment still describes it as a building block exercised only by its own tests. **That
-comment is out of date**, and this chapter states what the code does rather than what the comment
-says. Chapter 4 gives the fuller treatment, and the same discrepancy has been flagged to the
-engineers.
+internal comment used to describe it as a building block exercised only by its own tests. **That
+comment has since been corrected**, and an automated test now fails the build in both directions —
+if the retired "only exercised by its tests" phrasing comes back while real callers exist, and
+equally if a module that does call it is dropped from the list the comment keeps. The project
+treats a note that outlives its phase as the same class of defect as an overclaim. Chapter 4 gives
+the fuller treatment.
 
 ---
 
