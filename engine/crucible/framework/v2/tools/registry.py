@@ -207,29 +207,6 @@ HOST_TOOLS: tuple[ToolSpec, ...] = (
         pip="semgrep", version_args=("--version",),
         manual="pipx install semgrep  (or: python3 -m pip install --user semgrep)",
     ),
-    # Wave 2 source scanners. They are in the roster because the arsenal must be able to NAME every
-    # binary the engine spawns — the drift guard states the rule as "a driven tool the arsenal cannot
-    # even name is a gap", and it caught these three the moment their analyzers landed.
-    ToolSpec(
-        name="bandit", binary="bandit", optional=True,
-        purpose="Python-specific SAST over source (analysis backend).",
-        pip="bandit", version_args=("--version",),
-        manual="pipx install bandit  (or: python3 -m pip install --user bandit)",
-    ),
-    ToolSpec(
-        name="gitleaks", binary="gitleaks", optional=True,
-        purpose="Secret detection across a source tree and its git history (analysis backend).",
-        apt="gitleaks", version_args=("version",),   # `gitleaks version`, NOT `--version`
-        manual="sudo apt-get install -y gitleaks  (or: https://github.com/gitleaks/gitleaks/releases)",
-    ),
-    ToolSpec(
-        name="trufflehog", binary="trufflehog", optional=True,
-        purpose="Secret detection with per-detector classification (analysis backend). Always driven "
-                "with --no-verification: verification contacts third-party APIs, which the charter's "
-                "no-egress limit forbids.",
-        version_args=("--version",),   # no apt/pip on Kali — installed out of band
-        manual="https://github.com/trufflesecurity/trufflehog/releases  (or: brew install trufflehog)",
-    ),
     ToolSpec(
         name="joern", binary="joern", optional=True,
         purpose="Code-property-graph inter-procedural dataflow (deep source review).",

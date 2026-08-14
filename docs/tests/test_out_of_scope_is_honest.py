@@ -21,6 +21,8 @@ It reads files and imports the two driver registries. No tool runs, no packet is
 
 from __future__ import annotations
 
+import importlib
+import os
 import re
 from pathlib import Path
 
@@ -28,6 +30,33 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 ADR = REPO / "knowledge" / "decisions" / "0003-tool-waves-and-ncat.md"
+
+# THIS FILE NEEDS BOTH TRUST DOMAINS, WHICH IS WHY IT CANNOT LIVE ONLY IN THE DOCS JOB.
+#
+# It compares the ADR against the real driver registries, so it must import `vigil_integration` AND
+# `framework`. The `briefing-completeness` job installs nothing but pytest — deliberately, because the
+# briefing test reads files only — so here every check SKIPPED, silently, while the ADR claimed to be
+# "enforced by a required check". A skipped guard and a passing guard are the same colour.
+#
+# The fix is two-sided: the REQUIRED integration job now runs this file with both paths present, and
+# there it sets VIGIL_REQUIRE_FRONTIER_CHECK=1 — which turns an import failure into a FAILURE instead
+# of a skip. In the docs-only job the skip is still correct and honest.
+_REQUIRED_HERE = (os.environ.get("VIGIL_REQUIRE_FRONTIER_CHECK") or "").strip().lower() in {
+    "1", "true", "yes", "on"}
+
+
+def _need(module: str):
+    """Import ``module``, or skip — unless this environment declares the check mandatory, in which case
+    an unimportable module is a hard failure. Nothing may silently disable this guard where it counts."""
+    try:
+        return importlib.import_module(module)
+    except ImportError as exc:
+        if _REQUIRED_HERE:
+            raise AssertionError(
+                f"VIGIL_REQUIRE_FRONTIER_CHECK is set but {module!r} could not be imported ({exc}). "
+                f"This job is the one that ENFORCES the deferred-tool frontier; a skip here would make "
+                f"ADR 0003's guarantee silently absent.") from exc
+        pytest.skip(f"could not import {module!r}: {exc}")
 
 
 def _adr_text() -> str:
@@ -64,8 +93,8 @@ def _tools_in_section(heading_fragment: str) -> set[str]:
 
 def _driven() -> dict[str, str]:
     """Every tool the code can actually drive, mapped to the surface that drives it."""
-    ex = pytest.importorskip("vigil_integration.live.executor")
-    pf = pytest.importorskip("framework.v2.tools.profile")
+    ex = _need("vigil_integration.live.executor")
+    pf = _need("framework.v2.tools.profile")
     out: dict[str, str] = {}
     for name in ex._BUILDERS:
         out[name] = "cli"
@@ -132,7 +161,7 @@ def test_the_deferred_list_covers_every_undriven_tool_in_the_catalogue():
     """The undercount that started this. Any tool in the catalogue with no driver must be NAMED in the
     ADR — as deferred work or as a refusal. Silence about one is exactly how 'twelve' came to mean
     fifteen."""
-    reg = pytest.importorskip("framework.v2.tools.registry")
+    reg = _need("framework.v2.tools.registry")
     catalogue = {s.name for s in (*reg.HOST_TOOLS, *reg.SANDBOX_TOOLS)}
     undriven = catalogue - set(_driven())
     named = _tools_in_section("**Wave 3 —") | _tools_in_section("**Wave 4 —") | {"ncat"}

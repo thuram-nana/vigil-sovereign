@@ -147,7 +147,16 @@ static int is_loopback(const struct sockaddr_storage *ss, socklen_t len, char *d
 }
 
 /* The supervisor loop: receive connect notifications, allow loopback (CONTINUE), refuse the rest. */
-static void supervise(int notifyfd, pid_t child) {
+/* `reaped` is set non-zero and `*status_out` filled if this loop is the one that reaps the child.
+ *
+ * WHY THE STATUS HAS TO COME BACK FROM HERE. It used to reap with `waitpid(child, NULL, WNOHANG)` and
+ * THROW THE STATUS AWAY, leaving main() to call waitpid again — which then failed with ECHILD against a
+ * zero-initialised status. WIFEXITED(0) is true and WEXITSTATUS(0) is 0, so the guard reported SUCCESS
+ * for a tool that had failed. Reproduced: `egress_guard -- sh -c 'sleep 2 & exit 3'` returned 0. It only
+ * triggers when a descendant outlives the direct child (that is what keeps the listener open past the
+ * child's exit), which is why the single-process exit-code test never saw it — and it is a false-clean
+ * produced by the control whose whole purpose is to stop false-cleans. */
+static void supervise(int notifyfd, pid_t child, int *status_out, int *reaped) {
     struct seccomp_notif_sizes sizes = {0};
     if (syscall(SYS_seccomp, SECCOMP_GET_NOTIF_SIZES, 0, &sizes) < 0) {
         sizes.seccomp_notif = sizeof(struct seccomp_notif);
@@ -162,7 +171,7 @@ static void supervise(int notifyfd, pid_t child) {
         int pr = poll(&pfd, 1, 200);
         if (pr < 0) { if (errno == EINTR) continue; break; }
         if (pr == 0) {                                   /* timeout: is the child gone? */
-            if (waitpid(child, NULL, WNOHANG) == child) break;
+            if (waitpid(child, status_out, WNOHANG) == child) { *reaped = 1; break; }
             continue;
         }
         if (pfd.revents & (POLLHUP | POLLERR)) break;
@@ -310,10 +319,9 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    if (notifyfd >= 0) supervise(notifyfd, child);
-
-    int status = 0;
-    waitpid(child, &status, 0);
+    int status = 0, reaped = 0;
+    if (notifyfd >= 0) supervise(notifyfd, child, &status, &reaped);
+    if (!reaped) waitpid(child, &status, 0);
     logf_("egress-guard: seen=%ld blocked=%ld", g_seen, g_blocked);
     if (g_log) fclose(g_log);
 

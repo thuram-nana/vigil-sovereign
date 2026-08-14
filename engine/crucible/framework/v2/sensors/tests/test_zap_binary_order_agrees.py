@@ -55,3 +55,30 @@ def test_all_three_zap_binary_sites_agree():
     from framework.v2.sensors import web_scanner
     registry = binary_resolution_order("zaproxy")
     assert web_scanner._ZAP_BINARIES == registry == ZapAdapter()._binaries
+
+
+# ---------------------------------------------------------------------------------------------------
+# roster integrity — a tool must be declared exactly once
+# ---------------------------------------------------------------------------------------------------
+
+def test_no_tool_is_declared_twice_in_the_roster():
+    """THE DEFECT THIS PINS. Wave 2's three source scanners were each added to HOST_TOOLS TWICE, by two
+    people solving the same drift-guard failure independently. The pairs disagreed on metadata (one
+    bandit entry offered an apt route, the other did not), and because ``_resolve`` walks the tuple in
+    order the FIRST of each pair silently won every lookup while the second was dead text. Every
+    consumer that iterates the roster — the console Tools screen, the installer's shell dump —
+    rendered each of them twice.
+
+    Nothing in the repository asserted uniqueness. The existing console test pinned
+    ``len(tools) == len(HOST_TOOLS)``, so it agreed with the duplication rather than catching it, and
+    the out-of-scope honesty test builds a SET of names, which cannot see it either."""
+    from collections import Counter
+
+    from framework.v2.tools.registry import HOST_TOOLS, SANDBOX_TOOLS
+    for label, roster in (("HOST_TOOLS", HOST_TOOLS), ("SANDBOX_TOOLS", SANDBOX_TOOLS)):
+        dupes = {n: c for n, c in Counter(s.name for s in roster).items() if c > 1}
+        assert not dupes, f"{label} declares these tools more than once: {dupes}"
+    # the binaries must be unique too: two specs resolving the same executable under different roster
+    # names would make `_roster_names_for` ambiguous for the arsenal's drift guard.
+    host_bins = Counter(s.binary for s in HOST_TOOLS)
+    assert not {b: c for b, c in host_bins.items() if c > 1}, f"duplicate binaries: {host_bins}"

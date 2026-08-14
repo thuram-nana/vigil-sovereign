@@ -73,11 +73,24 @@ jobs:
           VIGIL_EGRESS_GUARD_LOG: ${{ github.workspace }}/livefire-egress.log
         run: bash tools/livefire/tool_drivers_livefire.sh
 
-      - name: what left the host during the run
+      - name: assert nothing left the host during the run
         if: always()
-        # Evidence either way: on a clean run this prints blocked=0 for every guarded tool, which is a
-        # measurement rather than an assumption.
-        run: cat "${{ github.workspace }}/livefire-egress.log" || echo "(no guarded spawn recorded)"
+        # ASSERTED, NOT MERELY PRINTED. Printing the log makes a run with blocked=17 byte-identically as
+        # green as one with blocked=0 — which leaves the no-egress figure exactly what this program set
+        # out to replace: a measurement a human has to read. The job fails if any non-loopback send was
+        # refused, because on a loopback-only range there is no legitimate reason for one.
+        run: |
+          log="${{ github.workspace }}/livefire-egress.log"
+          if [ ! -s "$log" ]; then
+            echo "::error::no guard log — the egress guard did not run, so nothing was measured"
+            exit 1
+          fi
+          cat "$log"
+          if grep -q 'BLOCKED' "$log"; then
+            echo "::error::a tool attempted to leave the host during the live-fire run"
+            exit 1
+          fi
+          echo "no non-loopback send was attempted by any guarded tool"
 
   livefire-full:
     name: livefire full table (nightly)

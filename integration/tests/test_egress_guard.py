@@ -19,6 +19,7 @@ what keeps them charter-safe — no packet leaves. The loopback cases talk to a 
 from __future__ import annotations
 
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -161,8 +162,8 @@ def test_a_forked_child_is_covered_by_the_same_filter(tmp_path):
 
 
 @_needs_guard
-def test_ipv6_loopback_is_allowed_and_ipv6_public_is_refused(tmp_path):
-    """Both IP families are policed. ``::1`` proceeds; a public v6 address does not."""
+def test_a_public_ipv6_connect_is_refused(tmp_path):
+    """Both IP families are policed, not just v4."""
     log = tmp_path / "guard.log"
     res = _run_guarded(
         "import socket\n"
@@ -173,6 +174,68 @@ def test_ipv6_loopback_is_allowed_and_ipv6_public_is_refused(tmp_path):
         log=log)
     assert "V6-CONNECTED" not in res.stdout, "a public IPv6 connect succeeded"
     assert "blocked=1" in log.read_text(encoding="utf-8")
+
+
+@_needs_guard
+def test_ipv6_loopback_is_allowed(tmp_path):
+    """THE HALF THAT WAS MISSING. This test's predecessor was named for both directions but only ever
+    made ONE connection — to a public v6 address — so the ``::1`` allow-branch of ``is_loopback`` was
+    covered by nothing. A mutation returning 0 for ``::1`` would have broken every IPv6 loopback scan
+    and passed the whole suite. The v4 side has had a real loopback control all along; this is its
+    v6 counterpart."""
+    srv = socket.socket(socket.AF_INET6)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        srv.bind(("::1", 0))
+    except OSError:                                     # host without IPv6 loopback
+        srv.close()
+        pytest.skip("no IPv6 loopback on this host")
+    srv.listen(2)
+    port = srv.getsockname()[1]
+    stop = threading.Event()
+
+    def _serve():
+        srv.settimeout(0.25)
+        while not stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except (socket.timeout, OSError):
+                continue
+            try:
+                conn.sendall(b"hi")
+            finally:
+                conn.close()
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    try:
+        log = tmp_path / "guard.log"
+        res = _run_guarded(
+            "import socket\n"
+            f"s = socket.create_connection(('::1', {port}), 3)\n"
+            "print('V6-LOOPBACK-GOT', s.recv(2).decode()); s.close()\n",
+            log=log)
+        assert "V6-LOOPBACK-GOT hi" in res.stdout, f"::1 was broken by the guard: {res.stdout!r} {res.stderr!r}"
+        assert "blocked=0" in log.read_text(encoding="utf-8"), "an IPv6 loopback connect was wrongly blocked"
+    finally:
+        stop.set()
+        t.join(timeout=2)
+        srv.close()
+
+
+@_needs_guard
+def test_a_failing_tool_is_not_reported_as_clean_when_a_descendant_outlives_it(tmp_path):
+    """BLOCK-1, pinned. When any descendant outlives the direct child, the listener stays open past the
+    child's exit, the supervisor's poll times out and reaps the child — and it used to DISCARD the
+    status, leaving the caller's second waitpid to fail with ECHILD against a zero-initialised status.
+    ``WIFEXITED(0)`` is true and ``WEXITSTATUS(0)`` is 0, so a tool that FAILED was reported as a clean
+    exit-0 run: a false-clean produced by the control whose entire purpose is to prevent false-cleans.
+
+    The single-process exit-code test could never see this, because it spawns nothing."""
+    argv = [str(GUARD), "--log", str(tmp_path / "g.log"), "--", "sh", "-c", "sleep 2 & exit 3"]
+    res = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    assert res.returncode == 3, (
+        f"the guard reported {res.returncode} for a tool that exited 3 — a failing run read as clean")
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -217,15 +280,23 @@ def test_a_statically_linked_go_binary_is_covered(tmp_path):
     """THE REASON THIS IS seccomp AND NOT LD_PRELOAD. ``nuclei`` is statically linked ('not a dynamic
     executable'), so an LD_PRELOAD connect-shim cannot see its syscalls at all. Measured on this machine:
     nuclei attempts a DNS connect merely to print its version. Under the guard that attempt is refused —
-    which is both the proof of coverage and the reason the run stays charter-safe."""
+    which is both the proof of coverage and the reason the run stays charter-safe.
+
+    THE ASSERTION THIS TEST USED TO MAKE PROVED NOTHING: it checked that the log contained "seen=" and
+    "blocked=", which the guard writes unconditionally on EVERY run, so substituting ``/bin/true`` for
+    nuclei passed it. The filter reaching a static binary is the one thing it exists to show, so it must
+    assert a NON-ZERO count of syscalls actually intercepted from that binary."""
     log = tmp_path / "guard.log"
     subprocess.run([str(GUARD), "--log", str(log), "--", "/usr/bin/nuclei", "-version"],
                    capture_output=True, text=True, timeout=90)
     text = log.read_text(encoding="utf-8") if log.exists() else ""
-    assert "seen=" in text, "the guard saw no connect at all from the static binary — filter not applied"
-    # Either it attempted egress and we blocked it, or the resolver was loopback and nothing was blocked.
-    # Both are correct outcomes; what must be true is that the guard OBSERVED the static binary's syscalls.
-    assert "blocked=" in text
+    m = re.search(r"seen=(\d+) blocked=(\d+)", text)
+    assert m, f"the guard wrote no summary for the static binary: {text!r}"
+    seen = int(m.group(1))
+    assert seen > 0, (
+        "the guard intercepted ZERO syscalls from a statically linked binary — the seccomp filter did "
+        "not reach it, which is the entire claim this test exists to make (a libc shim would also "
+        "show zero here, and that is the point)")
 
 
 # ---------------------------------------------------------------------------------------------------

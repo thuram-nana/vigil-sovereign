@@ -2,8 +2,12 @@
 
 - **Status:** Accepted
 - **Scope:** VIGIL (`/home/kali/vigil`, repo `thuram-nana/vigil-sovereign`)
-- **Enforced by:** [`../../docs/tests/test_out_of_scope_is_honest.py`](../../docs/tests/test_out_of_scope_is_honest.py)
-  — a required check reads THIS file and fails when it disagrees with the code.
+- **Enforced by:** [`../../docs/tests/test_out_of_scope_is_honest.py`](../../docs/tests/test_out_of_scope_is_honest.py),
+  run inside the **required** `integration two-env boundary (P5)` job — it reads THIS file and fails when
+  it disagrees with the code. It runs there rather than in the docs job because it needs both trust
+  domains on the path; in the docs job it skipped, and an earlier version of this line claimed
+  enforcement that did not exist. `VIGIL_REQUIRE_FRONTIER_CHECK=1` makes an import failure in that job a
+  failure rather than a skip, so the guard cannot go dark silently again.
 
 ## Context
 
