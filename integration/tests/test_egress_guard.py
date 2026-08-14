@@ -114,6 +114,53 @@ def test_loopback_still_works_under_the_guard(loopback_server, tmp_path):
 
 
 @_needs_guard
+def test_an_unconnected_udp_send_cannot_slip_past(tmp_path):
+    """THE BYPASS THAT WAS REAL, pinned so it cannot reopen.
+
+    The first version of this guard policed connect(2) only. An unconnected UDP socket needs no
+    connect at all — ``sendto(fd, buf, len, 0, &dest, sizeof dest)`` puts a packet on the wire
+    directly — so the guard reported ``seen=0 blocked=0`` while the byte left the host. The whole
+    no-egress guarantee, defeated by one call, and DNS is routinely done exactly this way. The filter
+    now covers sendto and sendmsg as well.
+
+    A NOTE ON WHY THE FIX WAS NOT TRIVIAL: the guard's own bootstrap handed the seccomp listener to
+    the supervisor over SCM_RIGHTS — a sendmsg — so policing sendmsg deadlocked the guard against
+    itself before the child could exec. The listener is now passed by number over write(2) and
+    fetched with pidfd_getfd."""
+    log = tmp_path / "guard.log"
+    res = _run_guarded(
+        "import socket\n"
+        "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+        "try:\n"
+        "    s.sendto(b'x', ('1.1.1.1', 53)); print('SENT')\n"
+        "except OSError:\n"
+        "    print('REFUSED')\n",
+        log=log)
+    assert "SENT" not in res.stdout, "an unconnected UDP datagram left the host — connect-only bypass"
+    text = log.read_text(encoding="utf-8")
+    assert "BLOCKED sendto -> 1.1.1.1:53" in text, f"the sendto was not seen or not named: {text!r}"
+
+
+@_needs_guard
+def test_a_forked_child_is_covered_by_the_same_filter(tmp_path):
+    """A seccomp filter is inherited across fork, so a tool that forks cannot escape by doing its
+    networking in the child. Asserted rather than assumed."""
+    log = tmp_path / "guard.log"
+    res = _run_guarded(
+        "import os, socket\n"
+        "if os.fork() == 0:\n"
+        "    try:\n"
+        "        socket.create_connection(('1.1.1.1', 80), 3); print('CHILD-CONNECTED')\n"
+        "    except OSError:\n"
+        "        print('child refused')\n"
+        "    os._exit(0)\n"
+        "os.wait()\n",
+        log=log)
+    assert "CHILD-CONNECTED" not in res.stdout, "a forked child escaped the filter"
+    assert "BLOCKED connect" in log.read_text(encoding="utf-8")
+
+
+@_needs_guard
 def test_ipv6_loopback_is_allowed_and_ipv6_public_is_refused(tmp_path):
     """Both IP families are policed. ``::1`` proceeds; a public v6 address does not."""
     log = tmp_path / "guard.log"

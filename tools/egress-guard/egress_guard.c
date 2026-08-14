@@ -35,6 +35,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,6 +62,13 @@
 #define SECCOMP_USER_NOTIF_FLAG_CONTINUE (1UL << 0)
 #endif
 
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#ifndef SYS_pidfd_getfd
+#define SYS_pidfd_getfd 438
+#endif
+
 #define EGRESS_BLOCKED_EXIT 97
 
 static FILE *g_log = NULL;
@@ -75,17 +83,28 @@ static void logf_(const char *fmt, ...) {
     fflush(g_log);
 }
 
-/* Install the filter: NOTIFY on connect for the native arch, ALLOW everything else. Returns the
- * user-notify listener fd, or -1. Must be preceded by NO_NEW_PRIVS. */
+/* Install the filter: NOTIFY on connect/sendto/sendmsg for the native arch, ALLOW everything else.
+ * Returns the user-notify listener fd, or -1. Must be preceded by NO_NEW_PRIVS.
+ *
+ * WHY sendto AND sendmsg AND NOT JUST connect. Policing connect(2) alone is a REAL BYPASS, demonstrated
+ * against the first version of this guard: an unconnected UDP socket needs no connect at all —
+ * `sendto(fd, buf, len, 0, &dest, sizeof dest)` puts a packet on the wire directly. The guard reported
+ * `seen=0 blocked=0` while the byte left the host. That is the whole no-egress guarantee defeated by one
+ * call, and DNS is routinely done exactly this way.
+ *
+ * (fork() needs no handling: a seccomp filter is inherited by children, which is measured — a forked
+ * child's connect is refused by the same supervisor.) */
 static int install_filter(void) {
     struct sock_filter filter[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),   /* other arch: don't police, don't break */
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_connect, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_connect, 3, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendto,  2, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendmsg, 1, 0),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
     };
     struct sock_fprog prog = { .len = sizeof(filter) / sizeof(filter[0]), .filter = filter };
     return syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER, &prog);
@@ -155,12 +174,40 @@ static void supervise(int notifyfd, pid_t child) {
         }
         g_seen++;
 
+        /* WHERE THE DESTINATION LIVES DIFFERS PER SYSCALL:
+         *   connect(fd, addr, addrlen)                       -> args[1], args[2]
+         *   sendto(fd, buf, len, flags, dest_addr, addrlen)   -> args[4], args[5]
+         *   sendmsg(fd, msghdr *, flags)                      -> msghdr.msg_name / .msg_namelen
+         * A NULL destination means the socket is already connected, and connect(2) was policed on the
+         * way in — so there is nothing left to decide and the call proceeds. */
         struct sockaddr_storage ss;
         memset(&ss, 0, sizeof(ss));
-        unsigned long long addr = req->data.args[1];
-        socklen_t alen = (socklen_t)req->data.args[2];
+        unsigned long long addr = 0;
+        socklen_t alen = 0;
+        int addressless = 0;
+
+        if (req->data.nr == __NR_connect) {
+            addr = req->data.args[1];
+            alen = (socklen_t)req->data.args[2];
+        } else if (req->data.nr == __NR_sendto) {
+            addr = req->data.args[4];
+            alen = (socklen_t)req->data.args[5];
+            if (!addr) addressless = 1;                  /* connected socket: already policed */
+        } else if (req->data.nr == __NR_sendmsg) {
+            struct { unsigned long long name; unsigned int namelen; } hdr;
+            memset(&hdr, 0, sizeof(hdr));
+            /* msghdr's first two members are `void *msg_name; socklen_t msg_namelen;` — reading just
+             * those two is enough and avoids depending on the rest of the struct's layout. */
+            if (read_target_mem(req->pid, req->data.args[1], &hdr, sizeof(hdr)) >= 0 && hdr.name) {
+                addr = hdr.name;
+                alen = (socklen_t)hdr.namelen;
+            } else {
+                addressless = 1;
+            }
+        }
         if (alen > sizeof(ss)) alen = sizeof(ss);
-        int mem_ok = (addr && alen) ? (read_target_mem(req->pid, addr, &ss, alen) >= 0) : 0;
+        int mem_ok = (!addressless && addr && alen)
+                     ? (read_target_mem(req->pid, addr, &ss, alen) >= 0) : 0;
 
         /* Re-validate the notification id AFTER reading memory: if the target died meanwhile the id is
          * stale and SEND would fail; skip it. */
@@ -168,7 +215,12 @@ static void supervise(int notifyfd, pid_t child) {
         if (ioctl(notifyfd, SECCOMP_IOCTL_NOTIF_ID_VALID, &id) < 0) continue;
 
         char dst[64] = "<unread>";
-        int allow = mem_ok ? is_loopback(&ss, alen, dst, sizeof(dst)) : 1; /* unreadable: fail-open, log */
+        /* An addressless send on an already-connected socket proceeds (connect was policed). An
+         * address we could not READ falls open and is logged — honest, and not a hole a tool can aim
+         * at: it cannot choose to make its own sockaddr unreadable to the supervisor. */
+        int allow = addressless ? 1
+                  : (mem_ok ? is_loopback(&ss, alen, dst, sizeof(dst)) : 1);
+        if (addressless) snprintf(dst, sizeof(dst), "<connected-socket>");
 
         memset(resp, 0, sizes.seccomp_notif_resp);
         resp->id = req->id;
@@ -181,7 +233,11 @@ static void supervise(int notifyfd, pid_t child) {
             resp->error = -ECONNREFUSED;                      /* refuse without executing the syscall */
             resp->val = 0;
             g_blocked++;
-            logf_("egress-guard: BLOCKED connect -> %s", dst);
+            /* Name the syscall that was actually refused. Logging every refusal as "connect" would
+             * misdescribe a sendto/sendmsg to whoever reads this looking for what a tool did. */
+            logf_("egress-guard: BLOCKED %s -> %s",
+                  req->data.nr == __NR_connect ? "connect"
+                  : req->data.nr == __NR_sendto ? "sendto" : "sendmsg", dst);
         }
         if (ioctl(notifyfd, SECCOMP_IOCTL_NOTIF_SEND, resp) < 0 && errno != ENOENT)
             logf_("egress-guard: SEND failed: %s", strerror(errno));
@@ -216,37 +272,43 @@ int main(int argc, char **argv) {
         if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) { perror("no_new_privs"); _exit(126); }
         int nfd = install_filter();
         if (nfd < 0) { perror("seccomp"); _exit(126); }
-        /* send the listener fd to the parent over SCM_RIGHTS */
-        struct msghdr msg = {0};
-        char cbuf[CMSG_SPACE(sizeof(int))] = {0};
-        char dummy = 'x';
-        struct iovec iov = { .iov_base = &dummy, .iov_len = 1 };
-        msg.msg_iov = &iov; msg.msg_iovlen = 1;
-        msg.msg_control = cbuf; msg.msg_controllen = sizeof(cbuf);
-        struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
-        cm->cmsg_level = SOL_SOCKET; cm->cmsg_type = SCM_RIGHTS; cm->cmsg_len = CMSG_LEN(sizeof(int));
-        memcpy(CMSG_DATA(cm), &nfd, sizeof(int));
-        if (sendmsg(sv[1], &msg, 0) < 0) { perror("sendmsg"); _exit(126); }
+        /* Hand the listener to the parent by NUMBER over a plain write(2), and let the parent steal
+         * the descriptor itself with pidfd_getfd(2).
+         *
+         * THIS USED TO USE SCM_RIGHTS, AND THAT DEADLOCKED THE MOMENT sendmsg BECAME POLICED. The
+         * filter is installed just above, so the sendmsg that carried the listener was itself the
+         * first notified syscall — and nobody could answer it, because the only process that could
+         * was still waiting to receive the very fd that call was delivering. The guard hung before
+         * the child ever exec'd. write(2) is not policed, so this ordering has no such cycle. */
+        if (write(sv[1], &nfd, sizeof(nfd)) != (ssize_t)sizeof(nfd)) { perror("write"); _exit(126); }
         close(sv[1]);
         execvp(child_argv[0], child_argv);
         perror("execvp");
         _exit(127);
     }
 
-    /* parent: receive the notify fd, then supervise */
+    /* parent: take the notify fd out of the child, then supervise */
     close(sv[1]);
-    struct msghdr msg = {0};
-    char cbuf[CMSG_SPACE(sizeof(int))] = {0};
-    char dummy = 0;
-    struct iovec iov = { .iov_base = &dummy, .iov_len = 1 };
-    msg.msg_iov = &iov; msg.msg_iovlen = 1;
-    msg.msg_control = cbuf; msg.msg_controllen = sizeof(cbuf);
-    int notifyfd = -1;
-    if (recvmsg(sv[0], &msg, 0) >= 0) {
-        struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
-        if (cm && cm->cmsg_type == SCM_RIGHTS) memcpy(&notifyfd, CMSG_DATA(cm), sizeof(int));
+    int child_fd = -1, notifyfd = -1;
+    if (read(sv[0], &child_fd, sizeof(child_fd)) == (ssize_t)sizeof(child_fd) && child_fd >= 0) {
+        int pidfd = (int)syscall(SYS_pidfd_open, child, 0);
+        if (pidfd >= 0) {
+            notifyfd = (int)syscall(SYS_pidfd_getfd, pidfd, child_fd, 0);
+            close(pidfd);
+        }
     }
     close(sv[0]);
+    if (notifyfd < 0) {
+        /* Without the listener nothing is supervised. Say so and refuse rather than run a tool while
+         * reporting that it was guarded — a guard believed to be on but absent is worse than none. */
+        logf_("egress-guard: FAILED to acquire the seccomp listener (%s) — nothing was supervised",
+              strerror(errno));
+        fprintf(stderr, "egress_guard: could not acquire the seccomp listener; refusing to continue\n");
+        kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+        if (g_log) fclose(g_log);
+        return 2;
+    }
 
     if (notifyfd >= 0) supervise(notifyfd, child);
 
