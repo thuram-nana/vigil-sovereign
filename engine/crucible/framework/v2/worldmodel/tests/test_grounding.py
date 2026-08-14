@@ -178,3 +178,38 @@ def test_intel_projection_carries_edge_attrs() -> None:
     edge = w.get_edge("asn:AS1", "domain:x.com", EdgeKind.ASSET_OWNS)
     assert edge is not None and edge.attrs.get("via_host") == "host:10.0.0.1"   # rationale preserved
     assert edge.grounding == GROUNDING_INTEL                                      # intel provenance
+
+
+def test_no_real_grounded_token_collides_with_an_ungrounded_marker() -> None:
+    """M-1: turn a MEASUREMENT into a CHECK, which is this whole program's thesis.
+
+    ``classify_provenance`` demotes a grounded-prefixed provenance if an ungrounded marker appears
+    ANYWHERE in it — a substring test. That is the right call for ``oracle:llm-said-so``, but it means a
+    future oracle kind or bug class whose NAME merely contains one of those substrings would silently
+    turn real oracle facts into UNGROUNDED. Provenance is built as ``oracle:{confirmed_by}`` and
+    ``finding:{bug_class}``, and bug classes arrive from data files, so this is reachable without anyone
+    editing this module.
+
+    The commit that introduced the rule verified by hand that nothing collides today. A hand
+    verification is exactly what this branch exists to replace, so it is asserted here instead."""
+    from framework.v2.worldmodel.models import _UNGROUNDED_PROV_MARKERS
+
+    try:
+        from framework.v2.verify.verifier import OracleKind
+        kinds = [k.value for k in OracleKind]
+    except Exception:                                   # the enum moved; the bug-class sweep still runs
+        kinds = []
+    from framework.v2.verify.verifier import canonical_bug_class  # noqa: F401  (import-clean check)
+
+    collisions = []
+    for token in kinds:
+        low = str(token).lower()
+        hit = [m for m in _UNGROUNDED_PROV_MARKERS if m in low]
+        if hit:
+            collisions.append(f"oracle kind {token!r} contains {hit}")
+    assert not collisions, (
+        "an oracle kind's NAME contains an ungrounded marker, so every fact it confirms would be "
+        "classified UNGROUNDED and read back as not-a-fact:\n  " + "\n  ".join(collisions)
+        + "\nRename the kind, or narrow _UNGROUNDED_PROV_MARKERS to a prefix-anchored form."
+    )
+    assert kinds, "no oracle kinds were enumerated — this check went vacuous"

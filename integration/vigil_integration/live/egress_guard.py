@@ -37,7 +37,21 @@ correlatable and owner-run — so the guard is a control against a tool's own de
 argv, NOT a containment boundary for hostile code. The kernel-isolation boundary remains ``sandbox_exec``
 (bwrap ``--unshare-all``).
 
-HONEST BOUND 2 — THE GUARD STRIPS PRIVILEGE, AND THAT CAN SILENCE A TOOL. An unprivileged seccomp filter
+HONEST BOUND 2 — WHAT THE FILTER DOES NOT COVER. It polices ``connect``/``sendto``/``sendmsg`` on the
+NATIVE architecture. Three gaps follow, none of them hypothetical:
+
+  * a 32-bit (i386) binary matches no arch branch, so every syscall is ALLOWED and the run records
+    ``seen=0 blocked=0`` — indistinguishable from a tool that tried nothing;
+  * ``sendmmsg`` and ``io_uring`` submissions (``IORING_OP_CONNECT``/``IORING_OP_SEND``) are not
+    filtered; and
+  * an exit code of 97 from the tool ITSELF is indistinguishable from the guard's
+    ``EGRESS_BLOCKED_EXIT``. Read the log to disambiguate — ``blocked=`` is the ground truth, the exit
+    code is a convenience.
+
+None of the tools this engine drives is 32-bit or uses io_uring today, which is why these are bounds
+rather than holes — but a bound nobody wrote down is how the last three defects here started.
+
+HONEST BOUND 3 — THE GUARD STRIPS PRIVILEGE, AND THAT CAN SILENCE A TOOL. An unprivileged seccomp filter
 REQUIRES ``PR_SET_NO_NEW_PRIVS``, and that flag also blocks setuid/setgid and FILE CAPABILITY elevation.
 Measured on this machine: ``/usr/lib/nmap/nmap`` carries ``cap_net_raw``; run under the guard it cannot
 acquire it, and it reports **no open ports at all** while exiting 0. That is not a degraded result, it is
@@ -52,8 +66,11 @@ import os
 import shutil
 from pathlib import Path
 
-# The guard's exit code when --fail-on-egress is set and at least one connect was blocked. Distinct from
-# any tool's own exit code so the two are never confused in a record.
+# The guard's exit code when --fail-on-egress is set and at least one send was blocked.
+#
+# NOT a reserved value: a tool that exits 97 by itself is indistinguishable from this, and an earlier
+# comment here claimed otherwise. The log's ``blocked=`` count is the ground truth; this exit code is a
+# convenience for a caller that does not read the log.
 EGRESS_BLOCKED_EXIT = 97
 
 _REPO_BIN = Path(__file__).resolve().parents[3] / "tools" / "egress-guard" / "egress_guard"

@@ -779,8 +779,14 @@ Chapter 8, "Scope enforcement", is the authoritative account.
   property rather than a set of examples**: it is checked against every shape of observation the system
   can produce, at the single point they all pass through, so a source added tomorrow is covered without
   anyone remembering to cover it. **The no-egress limit is enforced by running rather than by reading
-  the command line** — a supervisor watches every outbound connection each tool attempts and refuses
-  any that does not stay on the machine. **And the accuracy figures are now guarded by a check that can
+  the command line** — a supervisor can watch the outbound connections a tool attempts and refuse any
+  that does not stay on the machine. Three qualifications belong in the same breath, because the
+  unqualified sentence is the kind this programme exists to stop: the supervisor is **off unless it is
+  switched on** (an ordinary run behaves exactly as before, and the build switches it on); it watches
+  the three system calls a program uses to send, on the machine's native instruction set, which covers
+  every tool here but is not the same as "everything"; and it **deliberately does not supervise the
+  port-scanner**, because doing so removes a privilege that tool needs and it then reports nothing at
+  all. **And the accuracy figures are now guarded by a check that can
   block a change**, where before they were measured by one that could not. Two faults in the system
   itself were found while doing this, both described in chapter 1: one by which a recorded result could
   read back as proven when it was not, and one by which the same named tool could resolve to two
