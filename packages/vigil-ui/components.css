@@ -480,6 +480,48 @@ textarea { min-height: 80px; resize: vertical; }
   text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .pill.reconnect .dot, .pill.owner .dot { animation: pulse 1.4s ease-in-out infinite; }
 
+/* W5 process box — a fixed, collapsible, RESIZABLE live-activity overlay (bottom-right, below the toast
+   stack). It floats above the page and is never in the document flow, so it cannot shift the workspace. */
+#process-box { position: fixed; right: var(--sp-5); bottom: var(--sp-5); z-index: 70;
+  display: flex; flex-direction: column; align-items: flex-end; }
+.pb-pill { display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; border-radius: var(--r-pill);
+  border: 1px solid var(--border-strong); background: var(--bg-2); color: var(--text-1); cursor: pointer;
+  font: inherit; font-size: var(--fs-sm); box-shadow: var(--shadow-2); }
+.pb-pill:hover { color: var(--text-0); }
+.pb-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-2); }
+.pb-pill.live .dot { background: var(--st-running); animation: pulse 1.4s ease-in-out infinite; }
+.pb-card { width: 380px; max-width: 92vw; height: 340px; min-width: 260px; min-height: 150px; max-height: 82vh;
+  display: flex; flex-direction: column; background: var(--bg-2); border: 1px solid var(--border-strong);
+  border-radius: var(--r-2); box-shadow: var(--shadow-2); overflow: hidden; resize: both; animation: fadein .2s ease; }
+.pb-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px;
+  border-bottom: 1px solid var(--border); flex: 0 0 auto; }
+.pb-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.pb-title .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-2); flex: 0 0 auto; }
+.pb-title .dot.pb-on { background: var(--st-running); animation: pulse 1.4s ease-in-out infinite; }
+.pb-run { color: var(--text-2); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; max-width: 150px; }
+.pb-btns { display: flex; gap: 2px; flex: 0 0 auto; }
+.pb-x { background: transparent; border: 0; color: var(--text-2); cursor: pointer; font-size: 15px;
+  line-height: 1; padding: 2px 8px; border-radius: var(--r-1); }
+.pb-x:hover { color: var(--text-0); background: var(--bg-3); }
+.pb-step { padding: 6px 10px; font-size: var(--fs-xs); color: var(--text-1); border-bottom: 1px solid var(--border);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 0 auto; }
+.pb-feed { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; padding: 2px 0; }
+.pb-empty { padding: 18px 14px; color: var(--text-2); font-size: var(--fs-sm); text-align: center; line-height: 1.5; }
+.pb-row { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; padding: 5px 10px;
+  border-bottom: 1px solid var(--border); animation: fadein .3s ease; }
+.pb-row .pb-ico { width: 20px; height: 20px; display: grid; place-items: center; color: var(--text-2); }
+.pb-body { min-width: 0; }
+.pb-k { font-size: var(--fs-xs); font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.pb-m { color: var(--text-1); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pb-t { color: var(--text-2); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; align-self: start; }
+.pb-tag { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: var(--r-pill); text-transform: uppercase; letter-spacing: .02em; }
+.pb-tag.pb-blocked { color: var(--st-blocked); background: color-mix(in srgb, var(--st-blocked) 16%, transparent); }
+.pb-tag.pb-failed { color: var(--st-blocked); background: color-mix(in srgb, var(--st-blocked) 12%, transparent); }
+.pb-row.pb-blocked .pb-ico, .pb-row.pb-failed .pb-ico { color: var(--st-blocked); }
+.pb-row.pb-finding .pb-ico { color: var(--st-confirmed); }
+.pb-row.pb-finding .pb-tag { color: var(--st-confirmed); background: color-mix(in srgb, var(--st-confirmed) 14%, transparent); }
+
 /* responsive shell */
 @media (max-width: 900px) {
   #app { grid-template-columns: 1fr; grid-template-rows: var(--topbar-h) 1fr; grid-template-areas: "topbar" "main"; }
