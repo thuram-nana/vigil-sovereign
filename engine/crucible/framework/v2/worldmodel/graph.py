@@ -34,6 +34,7 @@ from collections.abc import Iterable, Iterator
 
 from ..common.errors import CrucibleError
 from .models import (
+    GROUNDING_GROUNDED,
     GROUNDING_UNGROUNDED,
     Edge,
     EdgeKind,
@@ -59,6 +60,21 @@ class WorldModelError(CrucibleError):
 # Pseudo-count added to the Beta belief per observation. One observation of
 # confidence c contributes _BELIEF_WEIGHT*c corroboration and *(1-c) refutation.
 _BELIEF_WEIGHT = 1.0
+
+
+def _sticky_grounded(existing_prov: str, winning_prov: str) -> str:
+    """GROUNDED is sticky on upsert: a node/edge an oracle already grounded is never demoted
+    to a lead by a later non-grounded (intel/ungrounded) re-observation.
+
+    Without this, a high-confidence sensor lead re-asserted on an oracle-confirmed node wins the
+    max-confidence tiebreak, rewrites the provenance pointer to itself, and the fact silently
+    becomes a lead (belief-floored in strict mode). This can only KEEP or protect grounding — it
+    never turns a lead into a fact, so the lead→fact direction the whole model forbids is
+    untouched. When the incoming write is ITSELF grounded (a second oracle), the winner stands."""
+    if (classify_provenance(existing_prov) == GROUNDING_GROUNDED
+            and classify_provenance(winning_prov) != GROUNDING_GROUNDED):
+        return existing_prov
+    return winning_prov
 
 
 def _seed_belief(confidence: float, alpha: float, beta: float) -> tuple[float, float]:
@@ -132,6 +148,7 @@ class WorldModel:
             provenance, confidence = node.provenance, node.confidence
         else:
             provenance, confidence = existing.provenance, existing.confidence
+        provenance = _sticky_grounded(existing.provenance, provenance)
         alpha, beta = _update_belief(existing.alpha, existing.beta, node.confidence)
         merged = existing.model_copy(
             update={
@@ -196,6 +213,7 @@ class WorldModel:
                 provenance, confidence = edge.provenance, edge.confidence
             else:
                 provenance, confidence = existing.provenance, existing.confidence
+            provenance = _sticky_grounded(existing.provenance, provenance)
             alpha, beta = _update_belief(existing.alpha, existing.beta, edge.confidence)
             stored = existing.model_copy(
                 update={

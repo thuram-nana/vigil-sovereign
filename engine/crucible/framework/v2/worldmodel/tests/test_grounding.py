@@ -46,6 +46,40 @@ def test_classify_provenance_tiers() -> None:
     assert classify_provenance("") == GROUNDING_UNCLASSIFIED
 
 
+def test_a_grounded_prefix_cannot_launder_an_ungrounded_claim() -> None:
+    """THE ORDERING HAZARD, pinned. The classifier used to test grounded prefixes BEFORE the
+    ungrounded markers, so a string that carried a grounded prefix AND an ungrounded marker in its
+    remainder — ``oracle:llm-said-so``, ``evidence:unverified-thing`` — read back as a FACT. Nothing
+    writes such a string today, but an unsound classifier is a latch waiting for a future caller. The
+    marker now wins inside the grounded-prefix branch."""
+    assert classify_provenance("oracle:llm-said-so") == GROUNDING_UNGROUNDED
+    assert classify_provenance("evidence:unverified-thing") == GROUNDING_UNGROUNDED
+    assert classify_provenance("finding:assume-it-works") == GROUNDING_UNGROUNDED
+    assert classify_provenance("cert:hallucinated") == GROUNDING_UNGROUNDED
+    # the fix is SCOPED to the grounded-prefix branch: an ordinary intel provenance that legitimately
+    # contains a marker word ("advisory") stays INTEL, not reclassified to ungrounded.
+    assert classify_provenance("intel:advisory:CVE-2024-0001") == GROUNDING_INTEL
+    # and a genuine oracle fact is untouched.
+    assert classify_provenance("oracle:boolean_sqli") == GROUNDING_GROUNDED
+
+
+def test_grounded_is_sticky_a_lead_cannot_demote_a_fact() -> None:
+    """A confirmed fact must not be silently erased. A conf-1.0 sensor LEAD re-asserted on an
+    oracle-grounded node wins the max-confidence tiebreak — and used to rewrite the provenance to
+    itself, demoting the fact to a lead (belief-floored under strict mode). GROUNDED is now sticky:
+    the belief still updates, but the node stays a fact. This never promotes — a lead on a lead is
+    unaffected, and a second oracle still wins."""
+    w = WorldModel()
+    w.add_node(_node("host:f", "oracle:boolean_sqli", 0.99))           # an oracle confirms it
+    after = w.add_node(_node("host:f", "intel:nmap-reobserved", 1.0))  # a higher-conf lead re-observes
+    assert after.grounding == GROUNDING_GROUNDED, "a high-confidence lead demoted a confirmed fact"
+    assert after.provenance == "oracle:boolean_sqli", "the fact's provenance pointer was overwritten"
+    # sticky protects a fact; it does NOT fabricate one — a lead re-observed on a lead stays a lead.
+    w.add_node(_node("host:g", "intel:a", 0.5))
+    lead_after = w.add_node(_node("host:g", "intel:b", 1.0))
+    assert lead_after.grounding == GROUNDING_INTEL
+
+
 # ---- add_node tags grounding, DEFAULT belief unchanged ----------------------
 
 
