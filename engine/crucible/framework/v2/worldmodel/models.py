@@ -173,11 +173,21 @@ GROUNDING_UNCLASSIFIED = "unclassified"
 
 def classify_provenance(provenance: str) -> str:
     """Classify a provenance string into a grounding tier. Total (never raises); the
-    single source of truth for 'is this write oracle/cert-grounded'."""
+    single source of truth for 'is this write oracle/cert-grounded'.
+
+    A grounded prefix grounds a write ONLY when nothing in the string also makes an
+    ungrounded claim. ``oracle:llm-said-so`` carries a grounded prefix but names an
+    ungrounded marker in its remainder, and it must NOT read back as a fact: the
+    marker check sits INSIDE the grounded-prefix branch so a mislabelled write can
+    never be promoted by its prefix alone. The check is scoped to that branch on
+    purpose — an ordinary intel provenance like ``intel:advisory:CVE-…`` legitimately
+    contains a marker word and stays INTEL, exactly as before."""
     p = (provenance or "").strip().lower()
     if not p:
         return GROUNDING_UNCLASSIFIED
     if any(p.startswith(x) for x in _GROUNDED_PROV_PREFIXES):
+        if any(m in p for m in _UNGROUNDED_PROV_MARKERS):
+            return GROUNDING_UNGROUNDED
         return GROUNDING_GROUNDED
     if any(p.startswith(m) for m in _UNGROUNDED_PROV_MARKERS):
         return GROUNDING_UNGROUNDED

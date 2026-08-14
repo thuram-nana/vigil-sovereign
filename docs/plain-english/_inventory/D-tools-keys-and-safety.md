@@ -61,6 +61,9 @@ the installer and the UI's Tools screen cannot drift apart.
 |---|---|
 | `semgrep` | Static analysis (SAST) over source code. |
 | `joern` | Code-property-graph inter-procedural dataflow (deep source review). Installed out of band. |
+| `bandit` | Python-specific SAST — the AST checks semgrep's taint mode does not cover. |
+| `gitleaks` | Secret scanning over the source tree. Runs offline on its embedded rules; the leaked value is masked out of every finding, never recorded. |
+| `trufflehog` | Secret scanning over the source tree. Always run with `--no-verification` — verification would call third-party provider APIs carrying the operator's real secrets, which the no-egress limit forbids. No `apt` package is declared on purpose: several distros ship the abandoned python v2 under the same name, and v2 has no `filesystem` subcommand. |
 | `tshark` | Packet-capture flow analysis (sensor). |
 | `chromium` (or `chromium-browser` / `google-chrome*`) | Headless DOM render for DOM-XSS confirmation. |
 | `nikto` | Web-server misconfiguration scan (report parsed by an adapter). |

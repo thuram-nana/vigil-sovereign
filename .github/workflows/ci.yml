@@ -58,6 +58,15 @@ jobs:
       # alone would run it unguarded, so a path typo that collects ZERO tests would
       # merge green (`framework/v2/agents` is not covered wholesale; only named
       # files under it run).
+      #
+      # THE ACCURACY GATE IS HERE ON PURPOSE (test_recall_baseline / test_gate, ~50s of
+      # this job's ~8m). They also run in `crucible-eval`, which is NOT a required check
+      # — so the product's accuracy claim (recall 1.0, precision 1.0, fp 0, fn 0, the
+      # committed core byte-identically reproduced, its Ed25519 signature verified against
+      # a source-pinned trust root) could regress and still merge. Running them in a
+      # REQUIRED job makes that impossible in CODE, independently of any branch-protection
+      # setting, which is a setting somebody can change. The expensive corpus/soak stays in
+      # crucible-eval so this job's critical path barely moves.
       CRUCIBLE_UNCOVERED_SUITES: >-
         framework/v2/veracity
         framework/v2/kernel
@@ -68,6 +77,8 @@ jobs:
         framework/v2/analysis
         framework/v2/tools
         framework/v2/agents/tests/test_engagement_library.py
+        framework/v2/eval/tests/test_recall_baseline.py
+        framework/v2/eval/tests/test_gate.py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -237,6 +248,48 @@ jobs:
           # apps/sigil builds the Rust WARDEN kernel; best-effort so the structural boundary
           # proof runs when it succeeds and skips (not fails) when the toolchain is unavailable.
           pip install -e apps/sigil || echo "apps/sigil build skipped — boundary test will skip"
+      - name: install bubblewrap — WITHOUT it the strongest egress proofs SKIP
+        # test_sandbox_exec.py's real-isolation tests (a connect() from inside the sandbox must fail;
+        # host daemon sockets must be unreachable) are gated on a working `bwrap`. bwrap was never
+        # installed on the runners, so those four tests skipped on EVERY CI run — the repository's
+        # strongest runtime no-egress evidence was dark, and a skipped proof is the same colour as a
+        # passing one on a dashboard. Installing it here is what makes them actually run.
+        # Installing bwrap is NOT the same as those tests running: the gate is `_bwrap_works()`, which
+        # requires bwrap to actually construct namespaces, and unprivileged user namespaces are
+        # AppArmor-restricted on some Ubuntu runners. So prove it works here — otherwise the job would
+        # install a package, the tests would skip exactly as before, and the "fixed" claim would be
+        # believed. That is the same failure this step exists to end.
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          # UBUNTU 24.04 BLOCKS THE THING BWRAP NEEDS, and this is not theoretical: the first CI run of
+          # this step failed with "bwrap cannot construct namespaces here". Noble ships
+          # kernel.apparmor_restrict_unprivileged_userns=1, which denies unprivileged user namespaces —
+          # exactly what an unprivileged bwrap constructs. Installing the package therefore did NOT make
+          # the real-isolation tests run; they would have skipped precisely as before, while the commit
+          # that added the install claimed they now execute.
+          #
+          # So lift the restriction rather than lower the claim. `|| true` because a runner image that
+          # does not have this knob at all (or already permits it) is fine — the assertion below is what
+          # decides, not this line.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          # Assert with the TEST'S OWN predicate, not a second one written here. A separate bwrap
+          # invocation could pass while `_bwrap_works()` returned False (different binds, different
+          # flags) and the tests would skip while this step reported success — one more guard that is
+          # believed rather than true.
+          PYTHONPATH=integration:gateway python -c "
+          import sys
+          sys.path.insert(0, 'integration/tests')
+          from test_sandbox_exec import _bwrap_works
+          if not _bwrap_works():
+              sys.exit('bwrap cannot construct namespaces here; the real-isolation tests would SKIP')
+          print('bwrap works — test_sandbox_exec real-isolation tests will RUN')
+          "
+      - name: build the egress guard (loopback-only connect(2) supervisor)
+        # No external dependency: raw seccomp BPF against the kernel uapi headers. Built here so
+        # test_egress_guard.py RUNS rather than skipping — it is the test that proves the no-egress
+        # limit by EXECUTION (a real refused connect, a real permitted loopback connect) rather than
+        # by argv construction, which is all the older no-egress tests could assert.
+        run: make -C tools/egress-guard
       - name: integration tests (inert receiver, keyless worker, boundary, oracle adapter)
         run: |
           if [ -d integration/tests ]; then
@@ -311,7 +364,16 @@ jobs:
             # five `importorskip`s reported "CRUCIBLE not importable here" and the job went green having
             # proved nothing about the consume leg. A skipped proof and a passing proof are the same colour
             # on a dashboard, so the file has to run in the process that can import the parser.
+            # docs/tests/test_out_of_scope_is_honest.py runs HERE, not in briefing-completeness. It
+            # compares ADR 0003's deferred-tool frontier against the REAL driver registries, so it needs
+            # BOTH trust domains on the path — and briefing-completeness installs only pytest (rightly:
+            # the briefing test reads files). There it skipped, silently, all five checks, while the ADR
+            # claimed to be "enforced by a required check". This job IS required, and
+            # VIGIL_REQUIRE_FRONTIER_CHECK=1 turns an import failure into a FAILURE rather than a skip,
+            # so the guard cannot go dark again without the build going red.
+            VIGIL_REQUIRE_FRONTIER_CHECK=1 \
             PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
+              docs/tests/test_out_of_scope_is_honest.py \
               integration/tests/test_oracle_adapter.py \
               integration/tests/test_external_tool_runner.py \
               integration/tests/test_conformance.py \

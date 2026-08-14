@@ -1,0 +1,398 @@
+"""The no-egress limit, enforced by RUNNING rather than by argv construction.
+
+WHY THIS EXISTS. Every previous no-egress proof in this repository is a guarantee that a tool will not be
+ASKED to leave the host: the wapiti module allowlist, nuclei's ``-disable-update-check``, nikto's
+``-notel`` — all asserted over argv, with no process spawned (``test_wapiti_no_egress.py`` says so in its
+own docstring). That guarantee kept failing in exactly one way: the tool egressed anyway, by its own
+defaults, invisibly, until something ran it. wapiti's default modules reached ``wapiti3.ovh``; ``wapp``
+downloaded a technology database by a different mechanism entirely; nuclei phoned home on two sensor
+routes no gate covered.
+
+These tests RUN the supervisor and MEASURE what it did. The two halves that make a detector worth
+trusting are both here: it must FIRE on a real non-loopback connect, and it must stay SILENT on loopback
+(a guard that blocks everything would pass a fire-only test while breaking every real scan).
+
+Nothing here reaches a third party: the blocked-egress cases are blocked BY the guard under test, which is
+what keeps them charter-safe — no packet leaves. The loopback cases talk to a listener this file starts.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import socket
+import subprocess
+import threading
+from pathlib import Path
+
+import pytest
+
+ex = pytest.importorskip("vigil_integration.live.executor")
+eg = pytest.importorskip("vigil_integration.live.egress_guard")
+
+GUARD = Path(__file__).resolve().parents[2] / "tools" / "egress-guard" / "egress_guard"
+_needs_guard = pytest.mark.skipif(
+    not (GUARD.is_file() and os.access(GUARD, os.X_OK)),
+    reason="egress_guard not built — run `make -C tools/egress-guard`")
+
+_PY = "python3"
+
+
+def _run_guarded(code: str, *, log: Path, fail_on_egress: bool = False, timeout: int = 60):
+    argv = [str(GUARD), "--log", str(log)]
+    if fail_on_egress:
+        argv.append("--fail-on-egress")
+    argv += ["--", _PY, "-c", code]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
+@pytest.fixture()
+def loopback_server():
+    """A real loopback listener, so the positive control talks to something that actually answers."""
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+    stop = threading.Event()
+
+    def _serve():
+        srv.settimeout(0.25)
+        while not stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except (socket.timeout, OSError):
+                continue
+            try:
+                conn.sendall(b"hi")
+            finally:
+                conn.close()
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    yield port
+    stop.set()
+    t.join(timeout=2)
+    srv.close()
+
+
+# ---------------------------------------------------------------------------------------------------
+# the two halves of a trustworthy detector
+# ---------------------------------------------------------------------------------------------------
+
+
+@_needs_guard
+def test_a_non_loopback_connect_is_refused_and_recorded(tmp_path):
+    """IT FIRES. A connect to a public address is refused at the syscall and named in the log. The
+    process never reaches the network: this is why running the test sends no packet off-host."""
+    log = tmp_path / "guard.log"
+    res = _run_guarded(
+        "import socket\n"
+        "try:\n"
+        "    socket.create_connection(('1.1.1.1', 80), 3); print('CONNECTED')\n"
+        "except OSError as e:\n"
+        "    print('REFUSED', e.errno)\n",
+        log=log)
+    assert "CONNECTED" not in res.stdout, "a non-loopback connect SUCCEEDED — the guard did not hold"
+    assert "REFUSED" in res.stdout
+    text = log.read_text(encoding="utf-8")
+    assert "BLOCKED connect -> 1.1.1.1:80" in text, f"the guard did not record the destination: {text!r}"
+    assert "blocked=1" in text
+
+
+@_needs_guard
+def test_loopback_still_works_under_the_guard(loopback_server, tmp_path):
+    """IT STAYS SILENT. The mutation control for the test above: a guard that refused everything would
+    pass the fire test while making every real loopback scan impossible. Loopback must be untouched."""
+    log = tmp_path / "guard.log"
+    res = _run_guarded(
+        "import socket\n"
+        f"s = socket.create_connection(('127.0.0.1', {loopback_server}), 3)\n"
+        "print('GOT', s.recv(2).decode()); s.close()\n",
+        log=log)
+    assert "GOT hi" in res.stdout, f"loopback was broken by the guard: {res.stdout!r} {res.stderr!r}"
+    assert "blocked=0" in log.read_text(encoding="utf-8"), "a loopback connect was wrongly blocked"
+
+
+@_needs_guard
+def test_an_unconnected_udp_send_cannot_slip_past(tmp_path):
+    """THE BYPASS THAT WAS REAL, pinned so it cannot reopen.
+
+    The first version of this guard policed connect(2) only. An unconnected UDP socket needs no
+    connect at all — ``sendto(fd, buf, len, 0, &dest, sizeof dest)`` puts a packet on the wire
+    directly — so the guard reported ``seen=0 blocked=0`` while the byte left the host. The whole
+    no-egress guarantee, defeated by one call, and DNS is routinely done exactly this way. The filter
+    now covers sendto and sendmsg as well.
+
+    A NOTE ON WHY THE FIX WAS NOT TRIVIAL: the guard's own bootstrap handed the seccomp listener to
+    the supervisor over SCM_RIGHTS — a sendmsg — so policing sendmsg deadlocked the guard against
+    itself before the child could exec. The listener is now passed by number over write(2) and
+    fetched with pidfd_getfd."""
+    log = tmp_path / "guard.log"
+    res = _run_guarded(
+        "import socket\n"
+        "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+        "try:\n"
+        "    s.sendto(b'x', ('1.1.1.1', 53)); print('SENT')\n"
+        "except OSError:\n"
+        "    print('REFUSED')\n",
+        log=log)
+    assert "SENT" not in res.stdout, "an unconnected UDP datagram left the host — connect-only bypass"
+    text = log.read_text(encoding="utf-8")
+    assert "BLOCKED sendto -> 1.1.1.1:53" in text, f"the sendto was not seen or not named: {text!r}"
+
+
+@_needs_guard
+def test_a_forked_child_is_covered_by_the_same_filter(tmp_path):
+    """A seccomp filter is inherited across fork, so a tool that forks cannot escape by doing its
+    networking in the child. Asserted rather than assumed."""
+    log = tmp_path / "guard.log"
+    res = _run_guarded(
+        "import os, socket\n"
+        "if os.fork() == 0:\n"
+        "    try:\n"
+        "        socket.create_connection(('1.1.1.1', 80), 3); print('CHILD-CONNECTED')\n"
+        "    except OSError:\n"
+        "        print('child refused')\n"
+        "    os._exit(0)\n"
+        "os.wait()\n",
+        log=log)
+    assert "CHILD-CONNECTED" not in res.stdout, "a forked child escaped the filter"
+    assert "BLOCKED connect" in log.read_text(encoding="utf-8")
+
+
+@_needs_guard
+def test_a_public_ipv6_connect_is_refused(tmp_path):
+    """Both IP families are policed, not just v4."""
+    log = tmp_path / "guard.log"
+    res = _run_guarded(
+        "import socket\n"
+        "try:\n"
+        "    socket.create_connection(('2606:4700:4700::1111', 80), 3); print('V6-CONNECTED')\n"
+        "except OSError as e:\n"
+        "    print('V6-REFUSED')\n",
+        log=log)
+    assert "V6-CONNECTED" not in res.stdout, "a public IPv6 connect succeeded"
+    assert "blocked=1" in log.read_text(encoding="utf-8")
+
+
+@_needs_guard
+def test_ipv6_loopback_is_allowed(tmp_path):
+    """THE HALF THAT WAS MISSING. This test's predecessor was named for both directions but only ever
+    made ONE connection — to a public v6 address — so the ``::1`` allow-branch of ``is_loopback`` was
+    covered by nothing. A mutation returning 0 for ``::1`` would have broken every IPv6 loopback scan
+    and passed the whole suite. The v4 side has had a real loopback control all along; this is its
+    v6 counterpart."""
+    srv = socket.socket(socket.AF_INET6)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        srv.bind(("::1", 0))
+    except OSError:                                     # host without IPv6 loopback
+        srv.close()
+        pytest.skip("no IPv6 loopback on this host")
+    srv.listen(2)
+    port = srv.getsockname()[1]
+    stop = threading.Event()
+
+    def _serve():
+        srv.settimeout(0.25)
+        while not stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except (socket.timeout, OSError):
+                continue
+            try:
+                conn.sendall(b"hi")
+            finally:
+                conn.close()
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    try:
+        log = tmp_path / "guard.log"
+        res = _run_guarded(
+            "import socket\n"
+            f"s = socket.create_connection(('::1', {port}), 3)\n"
+            "print('V6-LOOPBACK-GOT', s.recv(2).decode()); s.close()\n",
+            log=log)
+        assert "V6-LOOPBACK-GOT hi" in res.stdout, f"::1 was broken by the guard: {res.stdout!r} {res.stderr!r}"
+        assert "blocked=0" in log.read_text(encoding="utf-8"), "an IPv6 loopback connect was wrongly blocked"
+    finally:
+        stop.set()
+        t.join(timeout=2)
+        srv.close()
+
+
+@_needs_guard
+def test_a_failing_tool_is_not_reported_as_clean_when_a_descendant_outlives_it(tmp_path):
+    """BLOCK-1, pinned. When any descendant outlives the direct child, the listener stays open past the
+    child's exit, the supervisor's poll times out and reaps the child — and it used to DISCARD the
+    status, leaving the caller's second waitpid to fail with ECHILD against a zero-initialised status.
+    ``WIFEXITED(0)`` is true and ``WEXITSTATUS(0)`` is 0, so a tool that FAILED was reported as a clean
+    exit-0 run: a false-clean produced by the control whose entire purpose is to prevent false-cleans.
+
+    The single-process exit-code test could never see this, because it spawns nothing."""
+    argv = [str(GUARD), "--log", str(tmp_path / "g.log"), "--", "sh", "-c", "sleep 2 & exit 3"]
+    res = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    assert res.returncode == 3, (
+        f"the guard reported {res.returncode} for a tool that exited 3 — a failing run read as clean")
+
+
+# ---------------------------------------------------------------------------------------------------
+# the exit contract — a blocked run must be distinguishable from a clean one
+# ---------------------------------------------------------------------------------------------------
+
+
+@_needs_guard
+def test_fail_on_egress_fails_the_run_even_when_the_tool_swallows_the_error(tmp_path):
+    """THE CASE THAT MATTERS. A tool that catches its own connection error exits 0 and looks clean. With
+    --fail-on-egress the RUN still fails (97), so an egress attempt cannot be hidden by the tool."""
+    res = _run_guarded(
+        "import socket\n"
+        "try: socket.create_connection(('1.1.1.1', 80), 3)\n"
+        "except Exception: pass\n"
+        "print('tool exits zero')\n",
+        log=tmp_path / "g.log", fail_on_egress=True)
+    assert "tool exits zero" in res.stdout
+    assert res.returncode == eg.EGRESS_BLOCKED_EXIT, "an egress attempt did not fail the run"
+    assert eg.blocked_egress(res.returncode)
+
+
+@_needs_guard
+def test_a_clean_run_passes_the_childs_own_exit_code_through(tmp_path):
+    """MUTATION CONTROL for the exit contract: the guard must not invent failures, and must not mask a
+    tool's own failure as an egress block."""
+    ok = _run_guarded("print('clean')", log=tmp_path / "a.log", fail_on_egress=True)
+    assert ok.returncode == 0 and "clean" in ok.stdout
+    bad = _run_guarded("import sys; sys.exit(42)", log=tmp_path / "b.log", fail_on_egress=True)
+    assert bad.returncode == 42, "the tool's own exit code was masked"
+    assert not eg.blocked_egress(bad.returncode)
+
+
+# ---------------------------------------------------------------------------------------------------
+# coverage a libc shim cannot buy: a statically linked binary
+# ---------------------------------------------------------------------------------------------------
+
+
+@_needs_guard
+@pytest.mark.skipif(not Path("/usr/bin/nuclei").exists(), reason="nuclei not installed")
+def test_a_statically_linked_go_binary_is_covered(tmp_path):
+    """THE REASON THIS IS seccomp AND NOT LD_PRELOAD. ``nuclei`` is statically linked ('not a dynamic
+    executable'), so an LD_PRELOAD connect-shim cannot see its syscalls at all. Measured on this machine:
+    nuclei attempts a DNS connect merely to print its version. Under the guard that attempt is refused —
+    which is both the proof of coverage and the reason the run stays charter-safe.
+
+    THE ASSERTION THIS TEST USED TO MAKE PROVED NOTHING: it checked that the log contained "seen=" and
+    "blocked=", which the guard writes unconditionally on EVERY run, so substituting ``/bin/true`` for
+    nuclei passed it. The filter reaching a static binary is the one thing it exists to show, so it must
+    assert a NON-ZERO count of syscalls actually intercepted from that binary."""
+    log = tmp_path / "guard.log"
+    subprocess.run([str(GUARD), "--log", str(log), "--", "/usr/bin/nuclei", "-version"],
+                   capture_output=True, text=True, timeout=90)
+    text = log.read_text(encoding="utf-8") if log.exists() else ""
+    m = re.search(r"seen=(\d+) blocked=(\d+)", text)
+    assert m, f"the guard wrote no summary for the static binary: {text!r}"
+    seen = int(m.group(1))
+    assert seen > 0, (
+        "the guard intercepted ZERO syscalls from a statically linked binary — the seccomp filter did "
+        "not reach it, which is the entire claim this test exists to make (a libc shim would also "
+        "show zero here, and that is the point)")
+
+
+# ---------------------------------------------------------------------------------------------------
+# the wiring into the live executor — default OFF, opt-in, fail-closed only when demanded
+# ---------------------------------------------------------------------------------------------------
+
+
+def test_the_guard_is_off_by_default_and_argv_is_unchanged(monkeypatch):
+    """An operator's ordinary host run must be byte-identical to before this feature existed."""
+    monkeypatch.delenv("VIGIL_EGRESS_GUARD", raising=False)
+    argv = ["nmap", "-Pn", "127.0.0.1"]
+    assert eg.wrap_argv(argv) == argv
+    assert eg.enabled() is False
+
+
+@_needs_guard
+def test_enabling_the_guard_prefixes_the_spawn(monkeypatch, tmp_path):
+    # nuclei, not nmap: nmap is deliberately never wrapped (it needs cap_net_raw — see the
+    # privilege tests below), so using it here would test the refusal rather than the wrapping.
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD", "1")
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD_LOG", str(tmp_path / "l.log"))
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD_FAIL", "1")
+    tool = ["nuclei", "-u", "http://127.0.0.1:8080/"]
+    wrapped = eg.wrap_argv(tool)
+    assert wrapped[0].endswith("egress_guard")
+    assert "--fail-on-egress" in wrapped and "--" in wrapped
+    # the tool's own argv survives intact, in order, after the separator
+    assert wrapped[wrapped.index("--") + 1:] == tool
+
+
+def test_require_mode_refuses_to_spawn_unguarded(monkeypatch):
+    """FAIL CLOSED. Believing the guard is on while it is not is worse than knowing it is off, so
+    `require` raises rather than silently spawning an unguarded tool."""
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD", "require")
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD_BIN", "/nonexistent/egress_guard")
+    with pytest.raises(eg.EgressGuardUnavailable):
+        eg.wrap_argv(["nuclei", "-u", "http://127.0.0.1:8080/"])
+
+
+def test_require_mode_failure_degrades_the_runner_instead_of_crashing(monkeypatch):
+    """The executor's runner is TOTAL — it returns a RunOutcome, never raises. A demanded-but-missing
+    guard must therefore surface as a failed outcome, with nothing spawned."""
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD", "require")
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD_BIN", "/nonexistent/egress_guard")
+    out = ex.subprocess_runner(["echo", "hi"])
+    assert out.exit_code is None and "egress guard unavailable" in out.stderr
+
+
+# ---------------------------------------------------------------------------------------------------
+# THE GUARD MUST NOT SILENTLY CRIPPLE A TOOL — the defect this suite caught in the guard itself
+# ---------------------------------------------------------------------------------------------------
+
+
+def test_a_privilege_dependent_tool_is_not_wrapped(monkeypatch):
+    """MEASURED, NOT THEORISED. An unprivileged seccomp filter requires NO_NEW_PRIVS, which also blocks
+    file-capability elevation. /usr/lib/nmap/nmap carries cap_net_raw; wrapped, nmap emits XML with NO
+    <port> element and exits 0 — a false negative indistinguishable from a target with nothing
+    listening. The first live-fire run under the guard failed on exactly this.
+
+    So nmap is not wrapped. Its argv is already pinned to loopback by the executor, so declining the
+    extra layer costs nothing; running it crippled would cost the truth of every nmap row."""
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD", "1")
+    argv = ["nmap", "-oX", "-", "-Pn", "-n", "127.0.0.1"]
+    assert eg.wrap_argv(argv) == argv, "nmap was wrapped — its results can no longer be trusted"
+    assert eg.refuses_to_wrap(argv) is not None
+    assert "false negative" in eg.refuses_to_wrap(argv)
+
+
+def test_the_refusal_survives_an_absolute_path_and_a_wrapper_name(monkeypatch):
+    """The capabilities live on /usr/lib/nmap/nmap, NOT on the /usr/bin/nmap the executor resolves — so
+    a filesystem check of argv[0] alone would MISS this. The name is the reliable signal."""
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD", "1")
+    for argv0 in ("/usr/bin/nmap", "/usr/local/bin/nmap", "nmap"):
+        assert eg.refuses_to_wrap([argv0, "127.0.0.1"]) is not None, argv0
+
+
+@_needs_guard
+def test_tools_that_do_not_need_privilege_are_still_wrapped(monkeypatch):
+    """MUTATION CONTROL. A blanket 'never wrap anything' would pass the test above while removing the
+    entire feature. The tools that actually phone home — the web scanners — must still be guarded."""
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD", "1")
+    for tool in ("nuclei", "httpx", "wapiti", "nikto", "ffuf"):
+        wrapped = eg.wrap_argv([tool, "-u", "http://127.0.0.1:8080/"])
+        assert wrapped[0].endswith("egress_guard"), f"{tool} lost its guard"
+
+
+def test_a_setuid_binary_is_detected_by_the_filesystem_check(tmp_path, monkeypatch):
+    """The belt-and-braces half: anything directly setuid/setgid is refused even if it is not on the
+    name list, so a privileged tool added later cannot silently degrade."""
+    fake = tmp_path / "privtool"
+    fake.write_text("#!/bin/sh\ntrue\n")
+    fake.chmod(0o4755)                      # setuid
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD", "1")
+    assert eg.refuses_to_wrap([str(fake)]) is not None
+    assert eg._is_privileged_binary(str(fake)) is True
+    plain = tmp_path / "plaintool"
+    plain.write_text("#!/bin/sh\ntrue\n")
+    plain.chmod(0o755)
+    assert eg._is_privileged_binary(str(plain)) is False   # control: an ordinary binary is not flagged

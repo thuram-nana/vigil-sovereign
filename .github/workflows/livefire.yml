@@ -1,0 +1,197 @@
+name: livefire
+
+# THE GAP THIS CLOSES. The strongest evidence this repository produces — an engine-built argv, a real
+# tool run against a live target, its bytes read by an engine reader, the planted weakness reported, and
+# a negative control proven to have RUN and stayed silent — lived entirely in
+# tools/livefire/tool_drivers_livefire.py, which NO workflow invoked. It was proven by a person running
+# it by hand, once. Everything it guarded could regress green.
+#
+# Two jobs, because the table is not uniformly cheap:
+#   * livefire-smoke — per PR. The rows whose tools apt-install in seconds AND drive cleanly: nmap and
+#     both hydra rows (hydra carries the negative control proven to have RUN). ~3 minutes. REQUIRED.
+#     nikto is deliberately NOT here — apt's is a 2011 build whose JSON output the engine cannot read,
+#     and a working one needs an unverifiable-from-here source build; it runs nightly instead.
+#   * livefire-full  — nightly + on demand. All ten rows; needs a JVM, three Go binaries and a nikto
+#     from source, and takes up to ~70 minutes. Reports; never blocks a PR.
+#
+# The range needs NO docker, NO network and NO root: the `vulnapp` target is the repository's own
+# stdlib HTTP app on loopback, and the harness starts its own in-process controls.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * *"        # nightly, for the full table
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "comma-separated subset of rows to drive (blank = the whole table)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  livefire-smoke:
+    name: livefire smoke (per-PR subset)
+    # The nightly cron should not also run the smoke — the full job below covers it.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: install the fast tools
+        # ONLY tools that come from apt in seconds AND drive cleanly. nuclei/httpx/ffuf (Go) and zaproxy
+        # (JVM) are deliberately NOT here — they belong to the nightly job, so a slow or flaky
+        # third-party download can never block a pull request.
+        #
+        # NIKTO IS NOT HERE EITHER, and that is a deliberate move to the nightly job, not a dropped row.
+        # apt ships nikto 1:2.1.5-3.1 — a 2011 release whose `-Format json` writes plain TEXT, which the
+        # engine's reader correctly refuses. A working nikto (2.6.0, which drives end to end — measured
+        # locally, engine-parsed=5 observations on the vulnerable target, silent on the control) is only
+        # available from source, and this charter-restricted host cannot reach the network to VERIFY a
+        # source pin before trusting it. A REQUIRED per-PR gate must not depend on an unverified
+        # from-source build, so nikto joins the other provision-fragile tools in the non-blocking nightly
+        # run, where a bad pin is a signal rather than a merge-blocker. The capability is proven; only its
+        # fast-lane provisioning is unreliable, which is exactly the distinction this split already makes.
+        run: sudo apt-get update && sudo apt-get install -y nmap hydra
+
+      - name: install the engine's python deps
+        run: |
+          pip install -e packages/core/vigil_core \
+            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
+            "cryptography>=42" packaging
+
+      - name: build the egress guard
+        run: make -C tools/egress-guard
+
+      - name: drive the subset against the loopback range
+        id: drive
+        env:
+          # nmap + both hydra rows. hydra is here deliberately: its form-login row is the one that
+          # proves a negative control ACTUALLY RAN (read from the target's own ledger), and that the
+          # cracked credential reaches neither the observations nor the signed record.
+          VIGIL_LIVEFIRE_ONLY: "nmap,hydra"
+          VIGIL_LIVEFIRE_PYTHON: python
+          # Record every connect the run makes. nmap is exempted by the guard itself (NO_NEW_PRIVS
+          # would strip its cap_net_raw and it would silently report nothing) — see live/egress_guard.py.
+          VIGIL_EGRESS_GUARD: "1"
+          VIGIL_EGRESS_GUARD_LOG: ${{ github.workspace }}/livefire-egress.log
+        run: bash tools/livefire/tool_drivers_livefire.sh
+
+      - name: assert nothing left the host during the run
+        # Only when the run actually happened. If an earlier step failed, the missing log is
+        # expected, and a second error about it buries the real cause.
+        if: always() && steps.drive.outcome != 'skipped'
+        # ASSERTED, NOT MERELY PRINTED. Printing the log makes a run with blocked=17 byte-identically as
+        # green as one with blocked=0 — which leaves the no-egress figure exactly what this program set
+        # out to replace: a measurement a human has to read. The job fails if any non-loopback send was
+        # refused, because on a loopback-only range there is no legitimate reason for one.
+        run: |
+          log="${{ github.workspace }}/livefire-egress.log"
+          if [ ! -s "$log" ]; then
+            echo "::error::no guard log — the egress guard did not run, so nothing was measured"
+            exit 1
+          fi
+          cat "$log"
+          if grep -q 'BLOCKED' "$log"; then
+            echo "::error::a tool attempted to leave the host during the live-fire run"
+            exit 1
+          fi
+          echo "no non-loopback send was attempted by any guarded tool"
+
+  livefire-full:
+    name: livefire full table (nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: install the apt tools
+        # nikto deliberately NOT from apt — see the smoke job: noble's 2.1.5 predates JSON output and
+        # silently writes text, so the engine's reader cannot consume it.
+        run: sudo apt-get update && sudo apt-get install -y nmap hydra sqlmap wapiti libnet-ssleay-perl
+
+      - name: install a nikto the engine can actually drive
+        # Pinned to a COMMIT on main, not the 2.5.0 RELEASE TAG. The first CI run of this branch pinned
+        # 2.5.0 and it wrote no usable JSON at all (empty report -> "Expecting value: line 1 column 1");
+        # the JSON output was repaired after that release. This SHA is main HEAD (2026-07-31), which
+        # reports the same "2.6.0 (LW 2.5)" version string as the Kali build that drives end to end
+        # locally. It is NOT verified on this host — the charter forbids the egress a local clone needs —
+        # which is exactly why nikto rides this NON-BLOCKING nightly job and not the required per-PR gate.
+        run: |
+          sudo git clone --filter=blob:none https://github.com/sullo/nikto /opt/nikto
+          sudo git -C /opt/nikto checkout d5067406bc0902f8174cb5f8d595f637951974ce
+          printf '#!/bin/sh\nexec /opt/nikto/program/nikto.pl "$@"\n' | sudo tee /usr/local/bin/nikto >/dev/null
+          sudo chmod +x /usr/local/bin/nikto
+          nikto -Version | head -2
+          ver="$(nikto -Version 2>/dev/null | sed -n 's/^Nikto \([0-9][0-9.]*\).*/\1/p' | head -1)"
+          major="${ver%%.*}"; minor="$(printf '%s' "${ver#*.}" | cut -d. -f1)"
+          if [ -z "$ver" ] || [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 6 ]; }; then
+            echo "::error::nikto ${ver:-unknown} is below 2.6 - the 2.5.0 release's JSON output is broken"
+            exit 1
+          fi
+
+      - name: install the Go tools (pinned)
+        # Pinned versions, not @latest: a live-fire whose tool set changes underneath it cannot be
+        # compared to the run before it.
+        run: |
+          go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.3.7 || echo "nuclei install failed"
+          go install github.com/projectdiscovery/httpx/cmd/httpx@v1.6.9   || echo "httpx install failed"
+          go install github.com/ffuf/ffuf/v2@v2.1.0                        || echo "ffuf install failed"
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: install the engine's python deps
+        run: |
+          pip install -e packages/core/vigil_core \
+            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
+            "cryptography>=42" packaging
+
+      - name: build the egress guard
+        run: make -C tools/egress-guard
+
+      - name: drive the table against the loopback range
+        id: drive
+        env:
+          VIGIL_LIVEFIRE_ONLY: ${{ github.event.inputs.only }}
+          VIGIL_LIVEFIRE_PYTHON: python
+          # A tool that is absent cannot be proven, and this job must not report a SKIP as a pass. Only
+          # zaproxy is acknowledged: it needs a full JVM install this job does not do. Everything else
+          # is expected to be present, and a missing one FAILS — which is the honest outcome.
+          VIGIL_LIVEFIRE_ALLOW_MISSING: "zaproxy"
+          VIGIL_EGRESS_GUARD: "1"
+          VIGIL_EGRESS_GUARD_LOG: ${{ github.workspace }}/livefire-egress.log
+        run: bash tools/livefire/tool_drivers_livefire.sh
+
+      - name: assert nothing left the host during the run
+        # Only when the run actually happened. If an earlier step failed, the missing log is
+        # expected, and a second error about it buries the real cause.
+        if: always() && steps.drive.outcome != 'skipped'
+        # Same rule as the smoke job: on a loopback-only range a refused non-loopback send means a tool
+        # tried to leave, and printing that is not the same as failing on it.
+        run: |
+          log="${{ github.workspace }}/livefire-egress.log"
+          if [ ! -s "$log" ]; then
+            echo "::error::no guard log — the egress guard did not run, so nothing was measured"
+            exit 1
+          fi
+          cat "$log"
+          if grep -q 'BLOCKED' "$log"; then
+            echo "::error::a tool attempted to leave the host during the live-fire run"
+            exit 1
+          fi
+          echo "no non-loopback send was attempted by any guarded tool"

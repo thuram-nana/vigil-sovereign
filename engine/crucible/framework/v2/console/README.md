@@ -20,6 +20,18 @@ Behind the `vigil up` reverse proxy this same surface is what the CSP-clean **vi
 (`packages/vigil-ui`) talks to. See the full picture in
 [../../../../../knowledge/kb/console-and-ui.md](../../../../../knowledge/kb/console-and-ui.md).
 
+### Design notes that are NOT all shipped behaviour
+
+Three documents in this directory describe intended behaviour. They were written alongside the chat work
+and then referenced from nothing — which is how a design note quietly becomes indistinguishable from a
+description of what exists. Linked here, with their status, on a page a reader actually reaches:
+
+| Document | Status |
+|---|---|
+| [CHAT-VISION.md](CHAT-VISION.md) | **Design only — not built.** Hypothesis objects as first-class, minted from conversation and closed when an oracle fires; the four sources (evidence / attached material / linked chat / model inference) made visually distinguishable in the interface rather than merely requested in a prompt. What ships today is attachments, the reasoning call, and linked histories — not this. |
+| [MODEL-SELECTION.md](MODEL-SELECTION.md) | **Design only — not built.** The model picker, adjustable reasoning depth, visible token budget, and the local-model-with-no-cloud-fallback posture. |
+| [ATTACHMENT-SAFETY.md](ATTACHMENT-SAFETY.md) | **Shipped.** The extractor's refusals — path escape, symlinked parents, compression-ratio bombs, member floods, size-understating members — are implemented in `attachments.py` and covered by tests. |
+
 ## Authoritative code paths
 
 | File | Role |

@@ -37,8 +37,12 @@ not an aspirational arsenal; every entry is traceable to a call site):
   * nmap / httpx / nuclei / ffuf / sqlmap / hydra  → ``live.executor`` argv builders
     (the offense core the live ReAct loop drives); nmap/nuclei also power the read-only
     sensors (``sensors/nmap.py``, ``sensors/web_scanner.py``).
-  * semgrep / joern                                → the SAST analysis backends
+  * semgrep / joern / bandit                       → the SAST analysis backends
     (``analysis/analyzers/external.py`` / ``joern.py``); used when present, skipped cleanly.
+  * gitleaks / trufflehog                          → the secret-scanning analysis backends
+    (``analysis/analyzers/external.py``); run OFFLINE (trufflehog is pinned to
+    ``--no-verification``, which is what stops it phoning every provider's API with the
+    operator's secrets) and the leaked value is masked out of every finding.
   * tshark                                         → the packet-flow sensor (``sensors/tshark.py``).
   * chromium (or chrome)                           → headless DOM render for DOM-XSS
     confirmation (``scanner/browser.py`` / ``scanner/cdp.py``).
@@ -72,6 +76,7 @@ __all__ = [
     "ToolSpec",
     "HOST_TOOLS",
     "SANDBOX_TOOLS",
+    "binary_resolution_order",
     "SANDBOX_IMAGE",
     "platform_info",
     "install_hint",
@@ -211,6 +216,34 @@ HOST_TOOLS: tuple[ToolSpec, ...] = (
         version_timeout_s=60.0,
         manual="Install from https://joern.io (or set CRUCIBLE_JOERN_HOME to its dir).",
     ),
+    ToolSpec(
+        name="bandit", binary="bandit", optional=True,
+        purpose="Python-specific SAST — the AST checks semgrep's taint mode does not cover "
+                "(source-review analysis backend).",
+        apt="bandit", pip="bandit", version_args=("--version",),
+        manual="pipx install bandit  (or: sudo apt-get install -y bandit)",
+    ),
+    ToolSpec(
+        name="gitleaks", binary="gitleaks", optional=True,
+        purpose="Secret scanning over the source tree (analysis backend). Runs offline on its "
+                "embedded rules; the leaked VALUE is masked out of every finding, never recorded.",
+        apt="gitleaks", version_args=("version",),  # v8's banner is a subcommand, not a flag
+        manual="Kali/Debian: sudo apt-get install -y gitleaks  |  else: "
+               "go install github.com/gitleaks/gitleaks/v8@latest",
+    ),
+    ToolSpec(
+        name="trufflehog", binary="trufflehog", optional=True,
+        purpose="Secret scanning over the source tree (analysis backend). Always run with "
+                "--no-verification: verification calls third-party provider APIs with the "
+                "operator's real secrets, and this host forbids all egress.",
+        # Deliberately NO ``apt``: several distros package the abandoned python trufflehog v2 under
+        # this same name, and v2 has no ``filesystem`` subcommand — an auto-install would put a
+        # binary on PATH that the adapter cannot drive, which is worse than reporting it missing.
+        version_args=("--version",),
+        manual="Install trufflehog v3 from https://github.com/trufflesecurity/trufflehog/releases "
+               "(or: go install github.com/trufflesecurity/trufflehog/v3@latest). NOT the python "
+               "'trufflehog' v2 package — a different CLI with no `filesystem` subcommand.",
+    ),
     # -- sensors / browser: read-only observation surfaces (optional=True) --------------------------
     ToolSpec(
         name="tshark", binary="tshark", optional=True,
@@ -286,6 +319,23 @@ SANDBOX_TOOLS: tuple[ToolSpec, ...] = tuple(
         ("jwt_tool", "JWT analysis / attack."),
     )
 )
+
+
+def binary_resolution_order(tool_name: str) -> tuple[str, ...]:
+    """The canonical order in which a tool's binary is looked up on PATH: its declared
+    ``binary`` first, then each ``alt_binaries`` name — the same order the shadow-aware
+    resolver walks (see ``_resolve`` below, ``for name in (spec.binary, *spec.alt_binaries)``).
+
+    This exists so a tool that installs under several names (ZAP as ``zaproxy`` / ``zap.sh`` /
+    ``zap-cli``; ProjectDiscovery httpx as ``httpx-toolkit``) has ONE source of truth for that
+    order. A consumer that hardcodes its own tuple silently drifts — the eval ZAP adapter did
+    exactly that, resolving ``zap.sh`` before ``zaproxy`` while the production sensor resolved
+    ``zaproxy`` first, so on a host with both they picked different binaries. Returns ``()`` for
+    an unknown tool, so a caller can fall back rather than crash."""
+    spec = next((s for s in (*HOST_TOOLS, *SANDBOX_TOOLS) if s.name == tool_name), None)
+    if spec is None:
+        return ()
+    return (spec.binary, *spec.alt_binaries)
 
 
 # ---------------------------------------------------------------------------------------------------

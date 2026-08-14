@@ -423,10 +423,53 @@ cmd_down() {
   ok "nothing left behind"
 }
 
+# A vulnapp nobody recorded is invisible to every teardown path here: `down` iterates the manifest's
+# targets, and the live-fire trap only touches the one it started. Two such processes — started by
+# ad-hoc one-liners in earlier sessions — held :18081 and :8099 for days, answering like targets while
+# belonging to no run. They cost a port each, and a stale one is exactly the thing that makes a later
+# scan report a weakness nobody planted.
+#
+# This does NOT kill anything: an unrecorded process may be someone's deliberate spike. It NAMES them,
+# which is all that was missing.
+cmd_strays() {
+  local mine found=0 pid cmd
+  mine="$(cat "$RUN_DIR"/*.pid 2>/dev/null | tr '\n' ' ')"
+  bold "vulnapp processes on this host that no range pidfile claims"
+  # Matching on the whole command line is WRONG here and the first version did it: `pgrep -af vulnapp`
+  # also matched the shell whose -c script merely MENTIONS the file, so running this check reported
+  # itself as a stray. A process is a vulnapp only if one of its argv ELEMENTS is that script and its
+  # argv[0] is a python interpreter — read from /proc, where argv is NUL-separated and unambiguous.
+  while IFS='|' read -r pid cmd; do
+    [ -n "$pid" ] || continue
+    case " $mine " in *" $pid "*) continue ;; esac
+    found=1
+    printf '   \033[33mstray\033[0m pid %s  %s\n' "$pid" "$cmd"
+  done < <(python3 - <<'PY'
+import os
+for pid in sorted(p for p in os.listdir("/proc") if p.isdigit()):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            argv = [a.decode("utf-8", "replace") for a in fh.read().split(b"\0") if a]
+    except OSError:
+        continue
+    if not argv or os.path.basename(argv[0]).split(".")[0] not in ("python", "python3"):
+        continue
+    if any(a.endswith("vulnapp.py") for a in argv[1:]):
+        print(f"{pid}|{' '.join(argv)}")
+PY
+  )
+  if [ "$found" -eq 0 ]; then
+    ok "none — every vulnapp on this host belongs to a recorded range target"
+  else
+    info "these belong to no range target. Stop one with: kill <pid>"
+  fi
+}
+
 case "${1:-}" in
   up)     shift; cmd_up "$@" ;;
   down)   shift; cmd_down "$@" ;;
   status) cmd_status ;;
+  strays) cmd_strays ;;
   list)   cmd_list ;;
   verify) shift; cmd_verify "$@" ;;
   -h|--help|help|"") usage ;;

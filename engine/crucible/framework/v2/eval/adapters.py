@@ -154,12 +154,19 @@ def parse_zap(output: str) -> list[NormalizedFinding]:
 
 
 class ZapAdapter:
-    """ZAP via its CLI (``zap.sh``/``zap-cli``/``zaproxy``), emitting a JSON report."""
+    """ZAP via its CLI (``zaproxy``/``zap.sh``/``zap-cli``), emitting a JSON report."""
 
     name: str = "zap"
 
-    def __init__(self, *, binaries: tuple[str, ...] = ("zap.sh", "zap-cli", "zaproxy"), timeout: float = 600.0) -> None:
-        self._binaries = tuple(binaries)
+    def __init__(self, *, binaries: tuple[str, ...] | None = None, timeout: float = 600.0) -> None:
+        # DERIVED from the registry's canonical order (``zaproxy`` first), not a hardcoded tuple.
+        # This adapter used to list ``zap.sh`` first while the production sensor resolved ``zaproxy``
+        # first, so on a host with both installed the two paths spawned DIFFERENT programs. Sharing
+        # one source of truth removes the drift; a test asserts the sensor, the registry and this
+        # adapter all agree on the order.
+        from ..tools.registry import binary_resolution_order
+        default = binary_resolution_order("zaproxy") or ("zaproxy", "zap.sh", "zap-cli")
+        self._binaries = tuple(binaries) if binaries is not None else default
         self._timeout = timeout
 
     def _resolve(self) -> str | None:

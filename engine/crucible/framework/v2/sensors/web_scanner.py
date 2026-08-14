@@ -72,10 +72,16 @@ _WEB_SCANNER_RELIABILITY = SourceReliability(reliability=Reliability.C, credibil
 
 _DEFAULT_TIMEOUT_S = 600
 _TEMPLATE_TIMEOUT_S = 1200
-# Order MATCHES the tool registry's ZAP entry — primary `zaproxy`, then the `zap.sh`/`zap-cli`
-# alternates — so this sensor resolves the same binary the catalogue reports as installed. It used to
-# list `zap.sh` first, so on a host carrying both names the sensor and the catalogue could pick
-# different programs — the same binary-name drift just fixed for the builders.
+# A LITERAL MIRROR of the tool registry's ZAP entry — primary `zaproxy`, then the `zap.sh`/`zap-cli`
+# alternates — so this sensor resolves the same binary the catalogue reports as installed. It once
+# listed `zap.sh` first, so on a host carrying both names the sensor and the catalogue could pick
+# different programs.
+#
+# WHY A LITERAL AND NOT A CALL TO THE REGISTRY. This is the same shape as `profile._TYPED_BUILDER_TOOLS`,
+# and for the same reason: the arsenal's drift guard reads this module's SOURCE with `ast` to learn which
+# binaries a sensor spawns. A value computed at import time is invisible to a static reader, so deriving
+# it here silently emptied `zaproxy` out of the sensor-driven set. The literal is the value; the drift
+# guard in `sensors/tests/test_zap_binary_order_agrees.py` is what keeps it equal to the registry.
 _ZAP_BINARIES: tuple[str, ...] = ("zaproxy", "zap.sh", "zap-cli")
 # Deliberately NOT 8080. See the note at the argv below: ZAP binds a proxy listener even for a one-shot
 # scan, and a busy default port turns the whole scan into a silent no-op. Distinct from the live

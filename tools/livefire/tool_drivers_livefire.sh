@@ -217,8 +217,23 @@ info "controls     : started in-process on loopback by the harness"
 info "charter      : targets/loopback/charter.md — 127.0.0.0/8 only, nothing external"
 info "run lock     : $LOCK_FILE (held by pid $$; a second run is refused, not queued)"
 
-[ -x "$VENV/bin/python" ] || die "the offense virtualenv is missing at $VENV
-        (it carries the framework + integration packages this harness drives)"
+# The offense virtualenv is how an operator machine carries the framework + integration packages this
+# harness drives. CI has no such venv (it pip-installs into the job's own interpreter and never builds
+# the Rust kernel), so fall back to the interpreter on PATH when the venv is absent AND the packages
+# import from there. Falling back only on a WORKING import keeps the original error for the real
+# failure this check was written for — an operator whose venv is broken or half-built.
+if [ -x "$VENV/bin/python" ]; then
+  PY="$VENV/bin/python"
+elif PYTHONPATH="integration:engine/crucible:gateway" \
+     "${VIGIL_LIVEFIRE_PYTHON:-python3}" -c "import vigil_integration.live.executor" 2>/dev/null; then
+  PY="${VIGIL_LIVEFIRE_PYTHON:-python3}"
+  info "venv         : absent — using ${PY} (the packages import from it)"
+else
+  die "the offense virtualenv is missing at $VENV
+        (it carries the framework + integration packages this harness drives)
+        No fallback interpreter could import vigil_integration either. Set VIGIL_LIVEFIRE_PYTHON
+        to an interpreter that can, or build the venv with ./bootstrap.sh"
+fi
 [ -f "$HERE/range_targets.py" ] || die "the range is missing at $HERE/range_targets.py
         This harness reads the range manifest rather than hardcoding a port."
 
@@ -262,5 +277,5 @@ fi
 cd "$REPO"
 rc=0
 PYTHONPATH="integration:engine/crucible:gateway" \
-  "$VENV/bin/python" "$HERE/tool_drivers_livefire.py" || rc=$?
+  "$PY" "$HERE/tool_drivers_livefire.py" || rc=$?
 exit $rc
