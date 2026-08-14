@@ -348,7 +348,8 @@ def test_sensor_driven_set_does_not_drift_from_the_sensors_package():
 
 
 _AUDITED_ANALYZER_MODULES = {
-    "external.py": "SemgrepAnalyzer -> semgrep",
+    "external.py": "SemgrepAnalyzer -> semgrep; BanditAnalyzer -> bandit; "
+                   "GitleaksAnalyzer -> gitleaks; TruffleHogAnalyzer -> trufflehog",
     "joern.py":    "JoernAnalyzer   -> joern (CRUCIBLE_JOERN_HOME or PATH)",
 }
 

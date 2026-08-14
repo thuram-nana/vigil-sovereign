@@ -19,7 +19,12 @@ from ..common import logging as clog
 from ..common.errors import CrucibleError
 from ..entitlement import Capability, require_capability
 from .analyzers.builtin import PatternAnalyzer
-from .analyzers.external import SemgrepAnalyzer
+from .analyzers.external import (
+    BanditAnalyzer,
+    GitleaksAnalyzer,
+    SemgrepAnalyzer,
+    TruffleHogAnalyzer,
+)
 from .analyzers.joern import JoernAnalyzer
 from .models import (
     AnalysisFinding,
@@ -37,11 +42,22 @@ _SEVERITY_RANK: dict[str, int] = {
 
 
 def default_analyzers() -> list[Analyzer]:
-    """Built-in pattern analyzer (always available), the Semgrep taint
-    adapter (available iff semgrep is installed), and the Joern CPG
-    adapter (available iff joern is provisioned). Unavailable analyzers
-    are recorded as skipped, never fatal."""
-    return [PatternAnalyzer(), SemgrepAnalyzer(), JoernAnalyzer()]
+    """Built-in pattern analyzer (always available) plus every external
+    adapter: Semgrep taint, Joern CPG, bandit (Python-idiom SAST) and the
+    two secret scanners gitleaks / trufflehog. Each is available iff its
+    binary is provisioned on the analysis host; the unavailable ones are
+    recorded as skipped with a reason, never fatal.
+
+    Listing an adapter here is not a claim it will run — the orchestrator
+    probes each one — and nothing any of them emits is a confirmed fact."""
+    return [
+        PatternAnalyzer(),
+        SemgrepAnalyzer(),
+        JoernAnalyzer(),
+        BanditAnalyzer(),
+        GitleaksAnalyzer(),
+        TruffleHogAnalyzer(),
+    ]
 
 
 def _dedup(findings: list[AnalysisFinding]) -> list[AnalysisFinding]:

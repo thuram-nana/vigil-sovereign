@@ -37,8 +37,12 @@ not an aspirational arsenal; every entry is traceable to a call site):
   * nmap / httpx / nuclei / ffuf / sqlmap / hydra  → ``live.executor`` argv builders
     (the offense core the live ReAct loop drives); nmap/nuclei also power the read-only
     sensors (``sensors/nmap.py``, ``sensors/web_scanner.py``).
-  * semgrep / joern                                → the SAST analysis backends
+  * semgrep / joern / bandit                       → the SAST analysis backends
     (``analysis/analyzers/external.py`` / ``joern.py``); used when present, skipped cleanly.
+  * gitleaks / trufflehog                          → the secret-scanning analysis backends
+    (``analysis/analyzers/external.py``); run OFFLINE (trufflehog is pinned to
+    ``--no-verification``, which is what stops it phoning every provider's API with the
+    operator's secrets) and the leaked value is masked out of every finding.
   * tshark                                         → the packet-flow sensor (``sensors/tshark.py``).
   * chromium (or chrome)                           → headless DOM render for DOM-XSS
     confirmation (``scanner/browser.py`` / ``scanner/cdp.py``).
@@ -203,6 +207,29 @@ HOST_TOOLS: tuple[ToolSpec, ...] = (
         pip="semgrep", version_args=("--version",),
         manual="pipx install semgrep  (or: python3 -m pip install --user semgrep)",
     ),
+    # Wave 2 source scanners. They are in the roster because the arsenal must be able to NAME every
+    # binary the engine spawns — the drift guard states the rule as "a driven tool the arsenal cannot
+    # even name is a gap", and it caught these three the moment their analyzers landed.
+    ToolSpec(
+        name="bandit", binary="bandit", optional=True,
+        purpose="Python-specific SAST over source (analysis backend).",
+        pip="bandit", version_args=("--version",),
+        manual="pipx install bandit  (or: python3 -m pip install --user bandit)",
+    ),
+    ToolSpec(
+        name="gitleaks", binary="gitleaks", optional=True,
+        purpose="Secret detection across a source tree and its git history (analysis backend).",
+        apt="gitleaks", version_args=("version",),   # `gitleaks version`, NOT `--version`
+        manual="sudo apt-get install -y gitleaks  (or: https://github.com/gitleaks/gitleaks/releases)",
+    ),
+    ToolSpec(
+        name="trufflehog", binary="trufflehog", optional=True,
+        purpose="Secret detection with per-detector classification (analysis backend). Always driven "
+                "with --no-verification: verification contacts third-party APIs, which the charter's "
+                "no-egress limit forbids.",
+        version_args=("--version",),   # no apt/pip on Kali — installed out of band
+        manual="https://github.com/trufflesecurity/trufflehog/releases  (or: brew install trufflehog)",
+    ),
     ToolSpec(
         name="joern", binary="joern", optional=True,
         purpose="Code-property-graph inter-procedural dataflow (deep source review).",
@@ -211,6 +238,34 @@ HOST_TOOLS: tuple[ToolSpec, ...] = (
         # so the 2 s default timed it out and the roster showed it installed with no version.
         version_timeout_s=60.0,
         manual="Install from https://joern.io (or set CRUCIBLE_JOERN_HOME to its dir).",
+    ),
+    ToolSpec(
+        name="bandit", binary="bandit", optional=True,
+        purpose="Python-specific SAST — the AST checks semgrep's taint mode does not cover "
+                "(source-review analysis backend).",
+        apt="bandit", pip="bandit", version_args=("--version",),
+        manual="pipx install bandit  (or: sudo apt-get install -y bandit)",
+    ),
+    ToolSpec(
+        name="gitleaks", binary="gitleaks", optional=True,
+        purpose="Secret scanning over the source tree (analysis backend). Runs offline on its "
+                "embedded rules; the leaked VALUE is masked out of every finding, never recorded.",
+        apt="gitleaks", version_args=("version",),  # v8's banner is a subcommand, not a flag
+        manual="Kali/Debian: sudo apt-get install -y gitleaks  |  else: "
+               "go install github.com/gitleaks/gitleaks/v8@latest",
+    ),
+    ToolSpec(
+        name="trufflehog", binary="trufflehog", optional=True,
+        purpose="Secret scanning over the source tree (analysis backend). Always run with "
+                "--no-verification: verification calls third-party provider APIs with the "
+                "operator's real secrets, and this host forbids all egress.",
+        # Deliberately NO ``apt``: several distros package the abandoned python trufflehog v2 under
+        # this same name, and v2 has no ``filesystem`` subcommand — an auto-install would put a
+        # binary on PATH that the adapter cannot drive, which is worse than reporting it missing.
+        version_args=("--version",),
+        manual="Install trufflehog v3 from https://github.com/trufflesecurity/trufflehog/releases "
+               "(or: go install github.com/trufflesecurity/trufflehog/v3@latest). NOT the python "
+               "'trufflehog' v2 package — a different CLI with no `filesystem` subcommand.",
     ),
     # -- sensors / browser: read-only observation surfaces (optional=True) --------------------------
     ToolSpec(

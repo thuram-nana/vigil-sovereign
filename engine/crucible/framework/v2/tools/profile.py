@@ -80,9 +80,14 @@ _EXTRA_RECOGNISED: frozenset = frozenset()
 _SENSOR_DRIVEN_TOOLS = frozenset({"nmap", "nuclei", "tshark", "zaproxy"})
 
 # Mirrors: analysis/analyzers/*.py — the SAST backends the analysis orchestrator runs when present.
-#   semgrep  ← analyzers/external.py:SemgrepAnalyzer       (shutil.which("semgrep"))
-#   joern    ← analyzers/joern.py:JoernAnalyzer            (CRUCIBLE_JOERN_HOME or shutil.which("joern"))
-_ANALYZER_DRIVEN_TOOLS = frozenset({"semgrep", "joern"})
+#   semgrep    ← analyzers/external.py:SemgrepAnalyzer     (shutil.which("semgrep"))
+#   joern      ← analyzers/joern.py:JoernAnalyzer          (CRUCIBLE_JOERN_HOME or shutil.which("joern"))
+#   bandit     ← analyzers/external.py:BanditAnalyzer      (shutil.which("bandit"))
+#   gitleaks   ← analyzers/external.py:GitleaksAnalyzer    (shutil.which("gitleaks"))
+#   trufflehog ← analyzers/external.py:TruffleHogAnalyzer  (shutil.which("trufflehog"))
+# All five are SOURCE analyzers — they take a directory, not a host — which is why none of them is a
+# typed argv builder: the live executor fail-closes without a network target to resolve.
+_ANALYZER_DRIVEN_TOOLS = frozenset({"semgrep", "joern", "bandit", "gitleaks", "trufflehog"})
 
 # Mirrors: scanner/browser.py:_BROWSERS — the headless browser the DOM-XSS confirmation launches
 # (``scanner/browser.py`` is the sole resolver; ``scanner/cdp.py`` and ``scanner/browser_xss.py``

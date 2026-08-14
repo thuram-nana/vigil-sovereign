@@ -13,10 +13,14 @@ Two classes of analyzer:
   - **Built-in, offline, always available.** A pattern analyzer with a
     curated dangerous-pattern ruleset that runs with no external
     dependency. Real, deterministic SAST you can run today.
-  - **External adapters.** Wrappers over Semgrep (and, by the same
-    contract, CodeQL / Joern) that shell out when the tool is installed
-    and degrade gracefully — reported as skipped with a reason — when it
-    is not. No silent capability loss.
+  - **External adapters.** Wrappers over Semgrep, Joern, bandit and the
+    secret scanners gitleaks / trufflehog (and, by the same contract,
+    CodeQL) that shell out when the tool is installed and degrade
+    gracefully — reported as skipped with a reason — when it is not. No
+    silent capability loss. They run offline: no adapter is permitted an
+    argv that reaches the network, which is why trufflehog is pinned to
+    `--no-verification`, and a leaked credential is masked out of every
+    finding rather than recorded.
 
 Plus a Python symbol index (`index.py`) over AST: functions, classes,
 imports, call sites — queryable by the kernel.
@@ -27,7 +31,8 @@ Public surface:
 
     from framework.v2.analysis import (
         AnalysisTarget, AnalysisFinding, AnalysisReport, Analyzer,
-        PatternAnalyzer, SemgrepAnalyzer, run_analysis,
+        PatternAnalyzer, SemgrepAnalyzer, JoernAnalyzer, BanditAnalyzer,
+        GitleaksAnalyzer, TruffleHogAnalyzer, run_analysis,
         SymbolIndex, build_symbol_index,
     )
 """
@@ -35,7 +40,12 @@ Public surface:
 from __future__ import annotations
 
 from .analyzers.builtin import PatternAnalyzer
-from .analyzers.external import SemgrepAnalyzer
+from .analyzers.external import (
+    BanditAnalyzer,
+    GitleaksAnalyzer,
+    SemgrepAnalyzer,
+    TruffleHogAnalyzer,
+)
 from .analyzers.joern import JoernAnalyzer
 from .index import SymbolIndex, build_symbol_index
 from .models import (
@@ -57,6 +67,9 @@ __all__ = [
     "PatternAnalyzer",
     "SemgrepAnalyzer",
     "JoernAnalyzer",
+    "BanditAnalyzer",
+    "GitleaksAnalyzer",
+    "TruffleHogAnalyzer",
     "run_analysis",
     "SymbolIndex",
     "build_symbol_index",
