@@ -515,3 +515,110 @@ def test_spawn_tracked_cleans_up_on_spawn_failure(monkeypatch):
     monkeypatch.setattr(uiproxy, "_spawn", lambda *a, **k: "PROC")
     ok = uiproxy._spawn_tracked(procs, "offense-api", ["y"], object(), lambda: None)
     assert ok is False and procs[-1] == ("offense-api", "PROC")
+
+
+# ---- PlaneControl.stop_offense (the STOP that pairs with the start button) ------------------------
+def _free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+def test_plane_control_stop_offense_already_stopped_when_nothing_listens():
+    """Nothing listening on either backend port → an immediate, idempotent `already_stopped`, and the
+    on_stopped callback is never invoked (there is nothing to terminate)."""
+    port = _free_port()
+    called = []
+    specs = [("offense-console", ["a"], "log", {}, "127.0.0.1", port),
+             ("offense-api", ["b"], "log", {}, "127.0.0.1", port)]
+    pc = uiproxy.PlaneControl(specs, on_stopped=lambda names: called.append(names))
+    res = pc.stop_offense()
+    assert res["result"] == "already_stopped"
+    assert res["ok"] is True
+    assert called == []
+
+
+def test_plane_control_stop_offense_uses_on_stopped_for_boot_children():
+    """The common case: the console + api were spawned at boot (not through this object), so stop asks
+    its on_stopped callback to terminate + un-track them — passing ONLY the two offense names — and then
+    reports a measured `stopped` once their ports read free. A second stop is idempotent."""
+    s1 = socket.socket(); s1.bind(("127.0.0.1", 0)); s1.listen()
+    s2 = socket.socket(); s2.bind(("127.0.0.1", 0)); s2.listen()
+    p1 = s1.getsockname()[1]
+    p2 = s2.getsockname()[1]
+    asked = []
+
+    def _on_stopped(names):
+        asked.extend(names)
+        s1.close(); s2.close()            # the boot path kills the children → ports freed
+    specs = [("offense-console", ["a"], "log", {}, "127.0.0.1", p1),
+             ("offense-api", ["b"], "log", {}, "127.0.0.1", p2)]
+    pc = uiproxy.PlaneControl(specs, on_stopped=_on_stopped)
+    try:
+        res = pc.stop_offense()
+    finally:
+        for s in (s1, s2):
+            try:
+                s.close()
+            except OSError:
+                pass
+    assert set(asked) == {"offense-console", "offense-api"}
+    assert res["result"] == "stopped"
+    assert res["status"]["running"] is False
+    # idempotent: nothing listening now → already_stopped, callback not invoked again
+    asked.clear()
+    res2 = pc.stop_offense()
+    assert res2["result"] == "already_stopped"
+    assert asked == []
+
+
+def test_plane_control_stop_offense_terminates_a_child_it_started(monkeypatch):
+    """A backend the proxy itself started (a Popen in `_children`) is terminated on stop; the port then
+    reads free and the result is a clean `stopped`."""
+    sock = socket.socket(); sock.bind(("127.0.0.1", 0)); sock.listen()
+    port = sock.getsockname()[1]
+    killed = []
+
+    def _fake_terminate(pid, **_kw):
+        killed.append(pid)
+        sock.close()                      # the child dying frees its listening port
+        return True
+    monkeypatch.setattr(uiproxy, "_terminate", _fake_terminate)
+
+    class _FakeProc:
+        pid = 4242
+
+        def poll(self):
+            return None                   # alive
+    specs = [("offense-console", ["x"], "log", {}, "127.0.0.1", port)]
+    pc = uiproxy.PlaneControl(specs)
+    pc._children["offense-console"] = _FakeProc()
+    try:
+        res = pc.stop_offense()
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    assert 4242 in killed
+    assert res["result"] == "stopped"
+    assert res["status"]["running"] is False
+
+
+def test_plane_control_stop_offense_reports_failure_if_a_backend_will_not_die(monkeypatch):
+    """A kill that did not take (the backend keeps listening) must surface as an honest `failed` that
+    NAMES the surviving backend — never a false clean stop."""
+    monkeypatch.setattr(uiproxy.time, "sleep", lambda *_a: None)   # skip the settle wait; fail fast
+    sock = socket.socket(); sock.bind(("127.0.0.1", 0)); sock.listen()
+    port = sock.getsockname()[1]
+    specs = [("offense-console", ["x"], "log", {}, "127.0.0.1", port)]
+    pc = uiproxy.PlaneControl(specs, on_stopped=lambda names: None)   # does NOT free the port
+    try:
+        res = pc.stop_offense()
+    finally:
+        sock.close()
+    assert res["ok"] is False
+    assert res["result"] == "failed"
+    assert "offense-console" in res["error"]

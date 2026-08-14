@@ -91,6 +91,7 @@ OFFENSE_BASE = "/offense"
 PLANE_BASE = "/__vigil/plane"
 PLANE_STATUS_PATH = PLANE_BASE + "/status"
 PLANE_START_OFFENSE_PATH = PLANE_BASE + "/offense/start"
+PLANE_STOP_OFFENSE_PATH = PLANE_BASE + "/offense/stop"
 # The plane-control routes take NO input: the START action is a FIXED, NAMED action whose argv the proxy
 # rebuilds from its OWN boot configuration. Any request body is drained and DISCARDED (never parsed as
 # configuration) — a caller-named command/path/port would be remote code execution wearing a button — so
@@ -309,10 +310,11 @@ class PlaneControl:
     nothing about scope, the charter, WARDEN's approve-then-run gate, the kill-switch, signing, or what
     counts as a fact. It is process lifecycle, and nothing else."""
 
-    def __init__(self, specs, *, on_started=None):
+    def __init__(self, specs, *, on_started=None, on_stopped=None):
         # specs: [(name, argv, log_path, extra_env, host, port), ...] — captured from the boot path.
         self._specs = list(specs)
         self._on_started = on_started      # run_up hands us a callback so `vigil down` learns the pids
+        self._on_stopped = on_stopped      # …and one so a STOP terminates + un-tracks the boot children
         self._lock = threading.Lock()
         self._children: dict = {}          # name -> Popen, for the ones WE started
         self._started_at = 0.0             # when we last spawned — the basis for the "starting" signal
@@ -391,6 +393,70 @@ class PlaneControl:
             if failed:
                 detail += " (" + "; ".join(failed) + " did not start)"
             return {"ok": True, "action": "start-offense", "result": "started", "started": started,
+                    "detail": detail, "status": self._status_locked()}
+
+    def stop_offense(self) -> dict:
+        """Stop the offense backends this proxy manages — the offense console and the gated api, and
+        NOTHING else. The exact inverse of ``start_offense``: never the sovereign cockpit, never the
+        proxy/orchestrator that serves this page, never the optional sidecars (feed / telemetry /
+        learn) — only the two backends whose ports the offense indicator reflects. The set of names it
+        may touch is fixed by ``self._specs`` (captured at boot), so a request can no more name what to
+        stop than it can name what to start. Returns
+        ``{"ok", "action": "stop-offense", "result": "already_stopped"|"stopped"|"failed", ...}``.
+
+        SINGLE-FLIGHT under ``_lock`` — a second click cannot race a half-finished stop — and it never
+        raises: a signal that cannot be delivered is reported, not thrown, because the operator's
+        alternative is a terminal and they need to know which."""
+        with self._lock:
+            # "up" = a backend is LISTENING, or a child we started is still alive on its port. Both halves
+            # matter for the same reason they do in start_offense: the port check catches a backend the
+            # boot path (or a hand-run) started, the liveness check covers the spawn→bind window.
+            up = [name for name, _argv, _log, _env, host, port in self._specs
+                  if _listening(host, port) or self._alive(name)]
+            if not up:
+                self._started_at = 0.0
+                return {"ok": True, "action": "stop-offense", "result": "already_stopped",
+                        "detail": "the offense console and API are already stopped.",
+                        "status": self._status_locked()}
+            # 1) Terminate any child WE started (we hold its Popen): SIGTERM, then SIGKILL after a grace.
+            failed = []
+            for name in up:
+                p = self._children.get(name)
+                if p is not None:
+                    try:
+                        _terminate(p.pid)
+                    except OSError as exc:
+                        failed.append(f"{name} ({type(exc).__name__})")
+                    self._children.pop(name, None)
+            # 2) Ask the boot path to terminate + UN-TRACK any backend IT started under these names — a
+            #    console spawned at `vigil up` time (not through this object) is stopped too, its port
+            #    freed, and Ctrl-C / `vigil down` never chase a dead pid. Restricted to the offense names
+            #    in `up`, so the cockpit and the orchestrator can never be reached through this path.
+            if self._on_stopped:
+                try:
+                    self._on_stopped(list(up))
+                except Exception:  # noqa: BLE001 — bookkeeping must never fail the stop
+                    pass
+            self._started_at = 0.0
+            # 3) Report what is DOWN now, MEASURED (a live re-probe), not asserted. `_terminate` already
+            #    waited for each process to exit, so the kernel closes its listener on the way out; a short
+            #    settle covers the rare lag before the port reads free, so a clean stop never mis-reports.
+            still_up: list[str] = []
+            for _ in range(6):
+                still_up = [name for name, _a, _l, _e, host, port in self._specs if _listening(host, port)]
+                if not still_up:
+                    break
+                time.sleep(0.2)
+            if still_up:
+                return {"ok": False, "action": "stop-offense", "result": "failed",
+                        "error": "the offense plane did not fully stop (" + ", ".join(still_up)
+                                 + " still listening). Stop it in a terminal with `vigil down`.",
+                        "status": self._status_locked()}
+            detail = ("the offense console and API were stopped. Start them again here, or with "
+                      "`vigil up` in a terminal.")
+            if failed:
+                detail += " (" + "; ".join(failed) + ")"
+            return {"ok": True, "action": "stop-offense", "result": "stopped", "stopped": up,
                     "detail": detail, "status": self._status_locked()}
 
     def _status_locked(self) -> dict:
@@ -623,6 +689,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                   "status": plane_status(None)}, status=503, drained=True)
                 return
             self._plane_json(pc.start_offense(), drained=True)
+            return
+        if path == PLANE_STOP_OFFENSE_PATH:
+            # POST only, exactly like start: a GET/HEAD must never stop anything (no side effect on a
+            # safe method). Same single-flight, same fixed set of backends — the request names nothing.
+            if self.command != "POST":
+                self._plane_json({"ok": False, "error": "method not allowed (POST only)"},
+                                 status=405, drained=True)
+                return
+            if pc is None:
+                self._plane_json({"ok": False, "action": "stop-offense",
+                                  "error": "this proxy has no plane control configured — stop the "
+                                           "planes with `vigil down`.",
+                                  "status": plane_status(None)}, status=503, drained=True)
+                return
+            self._plane_json(pc.stop_offense(), drained=True)
             return
         self._plane_json({"ok": False, "error": "not found"}, status=404, drained=True)
 
@@ -1287,12 +1368,29 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
         except OSError:
             pass                      # the children are still tracked in-process for Ctrl-C
 
+    def _unadopt(names: "list[str]") -> None:
+        """A backend STOPPED through the proxy leaves the SAME bookkeeping the boot path uses: terminate
+        any child we track under these names (SIGTERM→SIGKILL) and drop the dead ones, so Ctrl-C /
+        `vigil down` never chase a dead pid and the next start (or the next `vigil up`) can rebind the
+        freed port. Only the NAMED offense backends are touched — the cockpit and this orchestrator are
+        never in `names`, and a still-alive child (a kill that did not take) is KEPT so cleanup retries."""
+        want = set(names)
+        for name, proc in list(procs):
+            if name in want and proc.poll() is None:
+                _terminate(proc.pid)
+        procs[:] = [(n, p) for n, p in procs if not (n in want and p.poll() is not None)]
+        try:
+            _write_pids(base, [{"name": "orchestrator", "pid": os.getpid()},
+                               *[{"name": n, "pid": p.pid} for n, p in procs]])
+        except OSError:
+            pass
+
     plane_control = PlaneControl(
         [("offense-console", list(console_argv), logs / "offense-console.log", dict(console_env),
           "127.0.0.1", CONSOLE_PORT),
          ("offense-api", list(api_argv), logs / "offense-api.log", dict(offense_llm_env),
           "127.0.0.1", API_PORT)],
-        on_started=_adopt)
+        on_started=_adopt, on_stopped=_unadopt)
 
     # Readiness (B4): the cockpit's startup is verified via its token, but the offense console/api are
     # spawned fire-and-forget — if one fails to bind (an import error, a port race), the proxy would still

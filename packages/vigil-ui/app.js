@@ -219,7 +219,9 @@
   // was otherwise going to start by hand.
   const OFFENSE_STATUS_URL = "/__vigil/plane/status";
   const OFFENSE_START_URL = "/__vigil/plane/offense/start";
+  const OFFENSE_STOP_URL = "/__vigil/plane/offense/stop";
   const OFFENSE_START_WAIT_MS = 30000;   // how long we watch for it to actually answer before saying so
+  const OFFENSE_STOP_WAIT_MS = 15000;    // …and how long we watch for it to go quiet after a stop
 
   // known:    have we observed the offense side at all yet? Before the first probe we show NOTHING —
   //           an indicator that guesses is worse than no indicator.
@@ -227,7 +229,7 @@
   // canStart: this proxy serves the start route. A 404 means an older `vigil up`, and then the honest
   //           thing is to show the command, not a button that cannot work.
   // busy:     a start we asked for is in flight.
-  const OFFENSE = { known: false, up: false, starting: false, canStart: true, busy: false };
+  const OFFENSE = { known: false, up: false, starting: false, canStart: true, busy: false, stopping: false };
 
   function offenseHeaders() {
     const hh = { "X-Requested-With": "vigil-ui" };
@@ -290,15 +292,32 @@
     if (!OFFENSE.known) {                       // nothing observed yet: occupy no space, claim nothing
       return h("span.offense-chip#offense-chip", { style: { display: "none" } }, "");
     }
+    if (OFFENSE.stopping) {
+      return h("button.offense-chip.working#offense-chip", { disabled: true,
+        title: "Stopping the offense console and API." },
+        [h("span.dot"), h("span.txt", null, "Stopping offense…")]);
+    }
     if (OFFENSE.busy || (OFFENSE.starting && !OFFENSE.up)) {
       return h("button.offense-chip.working#offense-chip", { disabled: true,
         title: "Starting the offense console and API — this takes a few seconds." },
         [h("span.dot"), h("span.txt", null, "Starting offense…")]);
     }
     if (OFFENSE.up) {
+      // Up: a quiet indicator, PLUS the STOP that pairs with the start button — so the offense side can
+      // be brought DOWN from the screen the same way it is brought up. The proxy serving this page owns
+      // the two backends' lifecycle and tears exactly them down (never the cockpit, never itself).
+      // `canStart` gates stop too: a proxy that cannot start the plane cannot stop it, so it shows no
+      // button rather than one that cannot work.
+      const upKids = [h("span.dot"), h("span.txt", null, "Offense up")];
+      if (OFFENSE.canStart) {
+        upKids.push(h("button.oc-stop", {
+          title: "Stop the offense console and API. Findings, reports and proof stay on disk; you can "
+            + "start the offense side again here or with `vigil up`.",
+          onClick: function (e) { e.preventDefault(); e.stopPropagation(); confirmStopOffense(); },
+        }, "Stop"));
+      }
       return h("span.offense-chip.up#offense-chip",
-        { title: "The offense console and API are answering." },
-        [h("span.dot"), h("span.txt", null, "Offense up")]);
+        { title: "The offense console and API are answering." }, upKids);
     }
     if (!OFFENSE.canStart) {                    // honest: no button, because this proxy cannot start it
       return h("span.offense-chip.down#offense-chip",
@@ -390,6 +409,80 @@
     return attempt();
   }
 
+  // ---- the named STOP action -------------------------------------------------
+  // Stopping the offense side shuts down the console + api that serve findings/reports; disruptive enough
+  // to confirm first, reversible enough (start again here or `vigil up`) not to need more than that.
+  function confirmStopOffense() {
+    if (!window.confirm("Stop the offense side?\n\nThe offense console and API will be shut down. Your "
+      + "findings, reports and proof stay on disk — start the offense side again from here (or with "
+      + "`vigil up`) whenever you want. Any assessment still running will be stopped.")) return;
+    stopOffensePlane();
+  }
+  // Single-flight and idempotent, exactly like the start action. Resolves to
+  // { outcome: "stopped" | "already_stopped" | "failed", detail }. Never rejects.
+  let offenseStopping = null;
+  function stopOffensePlane() {
+    if (offenseStopping) return offenseStopping;
+    OFFENSE.stopping = true; paintOffenseChip();
+    offenseStopping = V.postJSON(OFFENSE_STOP_URL, {})     // empty body: no command, no path, no port
+      .then(readStopClaim, readStopFailure)
+      .then(function (res) {
+        OFFENSE.stopping = false; offenseStopping = null;
+        V.toast(res.detail, res.outcome === "failed");
+        paintOffenseChip();
+        scheduleOffensePoll();
+        return res;
+      });
+    return offenseStopping;
+  }
+  function readStopClaim(r) {
+    r = r || {};
+    if (r.error) return { outcome: "failed", detail: "Could not stop the offense side: " + String(r.error) };
+    const claim = String(r.result || "").toLowerCase();
+    if (claim === "already_stopped") {
+      return confirmOffenseDown("already_stopped", "The offense side was already stopped.");
+    }
+    // "stopped" / any other 2xx: the POST is a CLAIM, the status route is the OBSERVATION — report only
+    // what can be SEEN, so a backend that refused to die is never called a clean stop.
+    return confirmOffenseDown("stopped", "The offense side was stopped.");
+  }
+  function readStopFailure(e) {
+    const st = e && e.status;
+    if (st === 404 || st === 501) {
+      return { outcome: "failed",
+        detail: "This build of `vigil up` has no stop action — stop the offense side with `vigil down`." };
+    }
+    if (st === 401 || st === 403) {
+      return { outcome: "failed",
+        detail: "Not authorized to stop the offense side. Reload the page to pick up a current session token." };
+    }
+    if (st === 503) {
+      return { outcome: "failed",
+        detail: "This page's proxy has no plane control — stop the offense side with `vigil down`." };
+    }
+    return { outcome: "failed",
+      detail: "Could not stop the offense side: " + ((e && e.message) || "the proxy did not answer") + "." };
+  }
+  function confirmOffenseDown(outcome, detail) {
+    return waitForOffenseDown(OFFENSE_STOP_WAIT_MS).then(function (down) {
+      if (down) return { outcome: outcome, detail: detail };
+      return { outcome: "failed",
+        detail: "The stop was accepted, but the offense side is still answering after "
+          + Math.round(OFFENSE_STOP_WAIT_MS / 1000) + "s. Stop it with `vigil down` in a terminal." };
+    });
+  }
+  function waitForOffenseDown(ms) {
+    const deadline = Date.now() + ms;
+    function attempt() {
+      return probeOffense().then(function () {
+        if (!OFFENSE.up) return true;
+        if (Date.now() >= deadline) return false;
+        return new Promise(function (res) { setTimeout(res, 1000); }).then(attempt);
+      });
+    }
+    return attempt();
+  }
+
   // A start button with in-place feedback, for a screen (the top-bar chip is its own control). Same
   // single-flight action, same three honest outcomes.
   function offenseStartButton(label) {
@@ -412,7 +505,7 @@
   // is healthy, and completely silent while the tab is hidden.
   let offenseTimer = null;
   function offensePollDelay() {
-    if (OFFENSE.busy || OFFENSE.starting) return 2000;
+    if (OFFENSE.busy || OFFENSE.starting || OFFENSE.stopping) return 2000;
     if (!OFFENSE.known) return 4000;
     return OFFENSE.up ? 20000 : 6000;
   }
@@ -5937,9 +6030,13 @@
 
   // ---- sessions (F2) — permanent, renamable/deletable engagement sessions ----
   function sessionKindPill(kind) {
-    var tone = kind === "engagement" ? "live" : "idle";
+    // A session's KIND (engagement / chat / mixed) is a category, NOT a run-state. It must NEVER use the
+    // "live" tone: that green is the top bar's "a run is executing right now" signal, and an idle
+    // engagement session — one is auto-created the moment the console or a chat starts — wearing it reads
+    // as "a live engagement you didn't start". The kind is carried by the LABEL; the tone stays neutral.
+    // Whether a session actually has work is shown by its run count beside this pill, never by colour.
     var label = kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : "Session";
-    return V.pill(label, tone, null);
+    return V.pill(label, "idle", null);
   }
 
   function loadSessions() {
