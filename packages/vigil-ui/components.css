@@ -51,6 +51,7 @@ button { font: inherit; }
 #topbar .segmented,
 #topbar .pill,
 #topbar .safety,
+#topbar .offense-chip,
 #topbar .iconbtn,
 #topbar .btn.primary { flex: 0 0 auto; }
 
@@ -106,6 +107,22 @@ button { font: inherit; }
 .safety.clear { color: var(--st-confirmed); border-color: color-mix(in srgb, var(--st-confirmed) 40%, var(--border)); background: transparent; }
 .safety.waiting { animation: pulse 1.6s ease-in-out infinite; }
 .safety.tripped { color: #fff; background: var(--st-blocked); border-color: var(--st-blocked); }
+
+/* the offense-side indicator, and its one-click start (see app.js offenseChip). Quiet when the offense
+   side is up; a real, clearly clickable button when it is DOWN and this proxy can start it — the moment
+   the operator most needs a way out that is not a terminal. Styling deliberately mirrors .safety. */
+.offense-chip { display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: var(--r-pill);
+  font-weight: 700; font-size: var(--fs-sm); font-family: inherit; border: 1px solid var(--border);
+  background: var(--bg-2); color: var(--text-1); }
+.offense-chip .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: 0 0 auto; }
+.offense-chip .txt { white-space: nowrap; }
+.offense-chip.up { color: var(--st-confirmed); border-color: color-mix(in srgb, var(--st-confirmed) 40%, var(--border)); background: transparent; }
+.offense-chip.working { color: var(--text-1); cursor: default; }
+.offense-chip.working .dot { animation: pulse 1.4s ease-in-out infinite; }
+.offense-chip.down { color: var(--text-1); }
+.offense-chip.down.action { cursor: pointer; color: var(--owner); border-color: var(--owner-line); background: var(--owner-dim); }
+.offense-chip.down.action:hover { color: var(--text-0); background: color-mix(in srgb, var(--owner) 32%, transparent); border-color: var(--owner); }
+.offense-chip.down.action:focus-visible { outline: 2px solid var(--owner); outline-offset: 2px; }
 
 /* buttons ------------------------------------------------------------------ */
 .btn { display: inline-flex; align-items: center; gap: 8px; background: var(--bg-2); border: 1px solid var(--border-strong);

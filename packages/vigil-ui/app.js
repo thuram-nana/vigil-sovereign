@@ -178,7 +178,12 @@
     // API-key failure badge — hidden until a live probe reports a failing key (populated by refreshKeysBadge)
     const keysBadge = h("button.safety.tripped#keys-badge", { style: { display: "none" },
       title: "One or more API keys are failing", onClick: function () { location.hash = "#/apikeys"; } }, "");
-    return h("div#topbar", null, [seg, scope, cmdk, h("div.spacer"), counts, live, keysBadge, safety, themeBtn, cta]);
+    // offenseChip() is the "start the offense side from the screen" control (see its own comment). It
+    // MUST be in this list: it renders itself as `#offense-chip`, and paintOffenseChip() only *replaces*
+    // an existing `#offense-chip` — so without a seat here on first render there is nothing for the state
+    // poll to update, and the button never appears. It was written and then left out of this array,
+    // which is exactly why the screen carried no way to start the offense side without a terminal.
+    return h("div#topbar", null, [seg, scope, cmdk, h("div.spacer"), counts, live, offenseChip(), keysBadge, safety, themeBtn, cta]);
   }
 
   // Poll the redacted settings status for the failing-key count and show/hide the top-bar badge. Cheap +
