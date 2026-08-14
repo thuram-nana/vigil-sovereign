@@ -159,23 +159,22 @@
     // A VIEW FILTER, not a running job. It reads "Viewing: <job>" (never "active"/"live") so a scoped
     // view is never mistaken for an engagement that is running, and it carries an inline × to clear the
     // filter from anywhere — the operator's complaint was a scoped job that looked "active" and could not
-    // be cleared from the top bar.
-    const scopeKids = [V.icon("book"),
-      h("span.txt", null, s.engagement ? ("Viewing: " + scopeLabel) : scopeLabel)];
-    if (s.engagement) {
-      scopeKids.push(h("button.scope-clear", {
-        title: "Clear this view filter — show all engagements again",
-        "aria-label": "Clear view filter, show all engagements",
-        onClick: function (e) { e.preventDefault(); e.stopPropagation(); setEngagement(""); route(); },
-      }, "×"));
-    }
-    const scope = h("button.scope-chip" + (s.engagement ? ".on" : ""), {
+    // be cleared from the top bar. The × is a SIBLING button next to the chip (never nested inside it —
+    // a button-in-a-button is invalid HTML and mis-announces to assistive tech).
+    const scopeChip = h("button.scope-chip" + (s.engagement ? ".on" : ""), {
       title: s.engagement
         ? ("A VIEW FILTER — every screen is showing " + scopeLabel + " only. This is not a running job; "
           + "click to switch job, or use × to show all engagements.")
         : "Every screen is showing all engagements — click to pick a job to view",
       onClick: function () { location.hash = "#/library"; },
-    }, scopeKids);
+    }, [V.icon("book"), h("span.txt", null, s.engagement ? ("Viewing: " + scopeLabel) : scopeLabel)]);
+    const scope = s.engagement
+      ? h("span.scope-wrap", null, [scopeChip, h("button.scope-clear", {
+          title: "Clear this view filter — show all engagements again",
+          "aria-label": "Clear view filter, show all engagements",
+          onClick: function (e) { e.preventDefault(); e.stopPropagation(); setEngagement(""); route(); },
+        }, "×")])
+      : scopeChip;
     const live = s.killed ? V.pill("Kill-switch", "danger", null)
       : (s.live === "live" ? V.pill("Live", "live", null) : V.pill("Idle", "idle", null));
     const counts = h("div.counts", null, [

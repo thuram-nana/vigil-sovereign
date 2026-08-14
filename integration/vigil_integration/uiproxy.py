@@ -440,11 +440,21 @@ class PlaneControl:
             failed = []
             for name in up:
                 p = self._children.get(name)
-                if p is not None:
-                    try:
-                        _terminate(p.pid)
-                    except OSError as exc:
-                        failed.append(f"{name} ({type(exc).__name__})")
+                if p is None:
+                    continue
+                if p.poll() is not None:
+                    # Already dead — reap the handle and move on. NEVER signal its pid: it may have been
+                    # recycled, and looping _terminate over a zombie would just spin the full grace under
+                    # the lock (a stall, not a wrong-kill). This mirrors _unadopt's poll() guard.
+                    self._children.pop(name, None)
+                    continue
+                try:
+                    _terminate(p.pid)
+                except OSError as exc:
+                    failed.append(f"{name} ({type(exc).__name__})")
+                # Drop the handle ONLY if the child actually died; KEEP a survivor (a kill that did not
+                # take — a D-state child) so a retry can still re-target it, symmetric with _unadopt.
+                if p.poll() is not None:
                     self._children.pop(name, None)
             # 2) Ask the boot path to terminate + UN-TRACK any backend IT started under these names — a
             #    console spawned at `vigil up` time (not through this object) is stopped too, its port

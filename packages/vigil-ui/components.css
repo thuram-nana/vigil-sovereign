@@ -67,11 +67,14 @@ button { font: inherit; }
 .scope-chip .txt { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .scope-chip.on { color: var(--owner); border-color: var(--owner-line); background: var(--owner-dim); }
 .scope-chip.on .glyph { opacity: 1; }
-/* the inline × that clears the view filter straight from the top bar (no trip to the library needed). */
-.scope-clear { flex: 0 0 auto; margin-left: 2px; padding: 0 5px; border: 0; background: transparent;
-  color: inherit; font: inherit; font-weight: 700; line-height: 1; cursor: pointer; border-radius: var(--r-1);
-  opacity: .75; }
-.scope-clear:hover { opacity: 1; background: color-mix(in srgb, var(--owner) 22%, transparent); }
+/* the × that clears the view filter straight from the top bar (no trip to the library needed). It is a
+   SIBLING of the chip inside .scope-wrap — never nested in the chip button (a button-in-a-button is
+   invalid HTML). */
+.scope-wrap { display: inline-flex; align-items: center; gap: 2px; min-width: 0; }
+.scope-clear { flex: 0 0 auto; padding: 3px 7px; border: 1px solid var(--owner-line); background: var(--owner-dim);
+  color: var(--owner); font: inherit; font-weight: 700; line-height: 1; cursor: pointer;
+  border-radius: var(--r-1); opacity: .85; }
+.scope-clear:hover { opacity: 1; background: color-mix(in srgb, var(--owner) 28%, transparent); border-color: var(--owner); }
 .scope-clear:focus-visible { outline: 2px solid var(--owner); outline-offset: 1px; }
 
 /* segmented control (All / Offense / Defense) */

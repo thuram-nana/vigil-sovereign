@@ -685,3 +685,44 @@ def test_plane_control_stop_offense_reports_failure_if_a_backend_will_not_die(mo
     assert res["ok"] is False
     assert res["result"] == "failed"
     assert "offense-console" in res["error"]
+
+
+def test_plane_control_stop_offense_keeps_a_child_it_could_not_kill(monkeypatch):
+    """A UI-started child that survives the kill (poll stays None — a D-state child) must KEEP its Popen
+    handle so a retry can still re-target it, symmetric with _unadopt. Dropping it would strand the plane
+    (the operator would have to fall back to `vigil down`)."""
+    monkeypatch.setattr(uiproxy.time, "sleep", lambda *_a: None)   # skip the settle wait; fail fast
+    monkeypatch.setattr(uiproxy, "_terminate", lambda pid, **_k: False)   # the kill does not take
+    sock = socket.socket(); sock.bind(("127.0.0.1", 0)); sock.listen()
+    port = sock.getsockname()[1]
+
+    class _Stubborn:
+        pid = 5252
+
+        def poll(self):
+            return None                   # never dies
+    specs = [("offense-console", ["x"], "log", {}, "127.0.0.1", port)]
+    pc = uiproxy.PlaneControl(specs)
+    pc._children["offense-console"] = _Stubborn()
+    try:
+        res = pc.stop_offense()
+    finally:
+        sock.close()
+    assert res["result"] == "failed"
+    assert "offense-console" in pc._children   # handle KEPT so a retry can re-target the survivor
+
+
+def test_new_plane_routes_are_guarded_like_start(proxy):
+    """/offense/stop (POST) and /offense/version (GET) run the SAME guard chain as /offense/start: this
+    fixture's proxy has no session token, so every plane route fails closed with a 4xx BEFORE the route
+    body runs — proving the guard is not bypassed for the routes this slice added."""
+    base, _serve = proxy
+    for method, path in [("POST", "/__vigil/plane/offense/stop"),
+                         ("GET", "/__vigil/plane/version")]:
+        req = urllib.request.Request(base + path, method=method,
+                                     data=(b"{}" if method == "POST" else None))
+        try:
+            urllib.request.urlopen(req, timeout=5)  # noqa: S310 (loopback test)
+            raise AssertionError(f"{method} {path} should have been refused (no token)")
+        except urllib.error.HTTPError as e:  # type: ignore[attr-defined]
+            assert e.code in (401, 403), f"{method} {path} → {e.code} (expected a fail-closed refusal)"
