@@ -237,6 +237,19 @@ jobs:
           # apps/sigil builds the Rust WARDEN kernel; best-effort so the structural boundary
           # proof runs when it succeeds and skips (not fails) when the toolchain is unavailable.
           pip install -e apps/sigil || echo "apps/sigil build skipped — boundary test will skip"
+      - name: install bubblewrap — WITHOUT it the strongest egress proofs SKIP
+        # test_sandbox_exec.py's real-isolation tests (a connect() from inside the sandbox must fail;
+        # host daemon sockets must be unreachable) are gated on a working `bwrap`. bwrap was never
+        # installed on the runners, so those four tests skipped on EVERY CI run — the repository's
+        # strongest runtime no-egress evidence was dark, and a skipped proof is the same colour as a
+        # passing one on a dashboard. Installing it here is what makes them actually run.
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: build the egress guard (loopback-only connect(2) supervisor)
+        # No external dependency: raw seccomp BPF against the kernel uapi headers. Built here so
+        # test_egress_guard.py RUNS rather than skipping — it is the test that proves the no-egress
+        # limit by EXECUTION (a real refused connect, a real permitted loopback connect) rather than
+        # by argv construction, which is all the older no-egress tests could assert.
+        run: make -C tools/egress-guard
       - name: integration tests (inert receiver, keyless worker, boundary, oracle adapter)
         run: |
           if [ -d integration/tests ]; then

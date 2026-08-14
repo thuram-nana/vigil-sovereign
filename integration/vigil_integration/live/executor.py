@@ -81,6 +81,8 @@ from ..agent.state import Phase
 from ..agent.targets import extract_target
 from ..tools import authorize_tool_call
 from ..tools.mcp_registry import _redact_arg_list, _redact_str
+from .egress_guard import EgressGuardUnavailable
+from .egress_guard import wrap_argv as _wrap_egress
 
 __all__ = ["ExecResult", "ExecRecord", "RunOutcome", "execute", "execute_terminal", "subprocess_runner",
            "derive_gate_binding"]
@@ -167,8 +169,19 @@ def subprocess_runner(argv: list, *, timeout: float = DEFAULT_TIMEOUT,
 
     ``cwd`` runs the child in that directory (a build/git tree). ``env``, when given, is the child's FULL
     environment — pass secrets (e.g. a GH token) HERE, never in ``argv`` (argv shows up in ``ps``/logs);
-    both default to inherit-parent, so existing callers are unchanged."""
+    both default to inherit-parent, so existing callers are unchanged.
+
+    EGRESS GUARD. When ``VIGIL_EGRESS_GUARD`` is set, the spawn is wrapped in the loopback-only
+    ``connect(2)`` supervisor (see ``live.egress_guard``), so the charter's no-egress limit is enforced by
+    RUNNING rather than only by the argv allowlist — the class of defect (wapiti's default modules,
+    nuclei's update check) that is invisible to argv tests. Default OFF: an unset variable leaves this
+    path byte-identical to before."""
     args = [str(a) for a in argv]
+    try:
+        args = [str(a) for a in _wrap_egress(args)]
+    except EgressGuardUnavailable as exc:
+        # `require` mode only: refuse to spawn UNGUARDED rather than pretend the guard is on.
+        return RunOutcome(exit_code=None, stdout="", stderr=f"egress guard unavailable: {exc}")
     try:
         # stdin=DEVNULL: a governed executor is NON-INTERACTIVE — never read the parent's stdin. Without this a
         # bare stdin-reading allowlisted command (e.g. `cat`/`grep <pat>` with no file operand) would block up

@@ -33,3 +33,6 @@ target/
 /scratchpad/
 /conftest_probe.py
 /benchmark-report.md
+
+# compiled egress guard (built by `make -C tools/egress-guard`, never committed)
+/tools/egress-guard/egress_guard
