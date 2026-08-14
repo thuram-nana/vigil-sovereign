@@ -608,16 +608,24 @@ larger than 2 megabytes are skipped rather than read into memory. The file list 
 before it is used, so two runs over the same tree examine the same files in the same order —
 the same recipe, the same dish.
 
-### Three layers of reading
+### The analysers that read the source
 
-The source-review subsystem runs up to three analysers over a supplied code tree and merges
-their output into one report, removing duplicates.
+The source-review subsystem runs a set of analysers over a supplied code tree and merges
+their output into one report, removing duplicates. The first three below read for dangerous
+code paths at increasing depth — the same code read three ways, each deeper than the last.
+Three more read the same tree for two different things: weaknesses specific to Python, and
+credentials accidentally committed into the source. Every one of them, deep or shallow,
+produces a **lead** and nothing stronger, and every one is pointed at a directory of source,
+never at a live target.
 
 | Layer | What it is | Available when | What each finding is worth |
 |---|---|---|---|
 | **Built-in pattern analyser** | A curated list of genuinely dangerous code patterns, matched line by line. Needs nothing installed and is always available. | Always | A lead. The code says why: pattern matching can see that a dangerous instruction *appears* in the file, but it cannot show that untrusted data ever *reaches* it. |
 | **Semgrep, in taint mode** | An industry static-analysis tool run against a rule set shipped with the product, in *taint* mode — meaning it traces untrusted input as it flows through the program to a dangerous destination. | When the `semgrep` program is installed on the analysis machine | A stronger lead: it means untrusted input provably reaches a dangerous point, not merely that a dangerous word appeared. |
 | **Joern** | A heavyweight tool that builds a full graph of the program and runs whole-program, across-function, across-file flow queries. Roughly two gigabytes and requires a Java runtime. | When Joern is provisioned separately on the analysis machine | The deepest available: cross-function flows, and languages the others handle poorly, including C and C++. |
+| **Bandit** | An industry scanner for weaknesses specific to Python — insecure functions and risky patterns the general tools do not specialise in. It reads the source tree; it does not touch a running system. | When the `bandit` program is installed on the analysis machine | A lead. |
+| **gitleaks** | A secret scanner: it reads the source it is pointed at for credentials — passwords, keys, and tokens — committed into the code. | When the `gitleaks` program is installed on the analysis machine | A lead. The value it matched is masked out of the finding — see below. |
+| **trufflehog** | A second secret scanner of the same kind, run with its live-verification step turned off (see below). | When the `trufflehog` program is installed on the analysis machine | A lead, masked the same way. |
 
 A word that recurs in this Part: a **sink** is the dangerous destination — the point in a
 program where data stops being merely data and starts having an effect, such as being run
@@ -642,6 +650,46 @@ output, and a hard timeout (five minutes for Semgrep, ten for Joern). Joern is r
 temporary directory so that its large working output never pollutes the repository being
 examined. An analyser that fails mid-run is recorded as skipped with the error; it does not
 abort the whole report.
+
+### The three added scanners, and how live secrets are handled
+
+Three analysers were added to the set above: **Bandit**, which reads for Python-specific
+weaknesses, and **gitleaks** and **trufflehog**, which read for credentials committed into
+the source. Each reads a directory of source code, not a running system, and — like every
+other tool in this Part — everything it reports is a **lead**, never a fact on its own. Four
+points are worth stating exactly.
+
+- **Why they run as analysers, not as command-builder tools.** The product's other path for
+  driving an external tool — its live command-builder, which points a tool at a running
+  target — locks every command onto a specific network target and fails closed when it has
+  none; that lock is the pin that keeps the path safe. A source scanner has no network
+  target; it has only a directory. Bolting a fake target onto it to satisfy the
+  command-builder would corrupt that safety pin. So a source scanner is driven on the
+  **analyser** contract instead — the same contract the built-in pattern analyser, Semgrep
+  and Joern use, which already takes a directory of source and nothing more.
+
+- **The secret value is masked out of the finding, never recorded.** gitleaks and trufflehog
+  find real, working credentials. The finding keeps the **rule that matched**, the **file**,
+  and the **line** — and masks the secret value out of it. The value is not written into the
+  finding, into the stored record, or into any certificate.
+
+- **trufflehog always runs with its verification step turned off.** Left on, trufflehog's
+  "verify" step calls each secret's own provider over the internet to check whether the
+  credential is still live — which would send the operator's real secret to a third party,
+  exactly the outbound contact the engagement's no-egress rule forbids. So the engine always
+  builds the command with verification disabled. One honest bound on that claim: it is
+  enforced in the command the engine constructs — the disabling flag is always present in the
+  argument list — and has not yet been separately observed at the system-call level for this
+  tool.
+
+- **Confirming a secret is genuinely live is done a different, governed way.** Turning
+  trufflehog's verify off does not leave the system unable to prove a leaked credential is
+  real: its exposed-credential validity checker, described later in this chapter, does that
+  job properly — a gated call whose retained evidence redacts the secret and re-checks
+  offline, and which sends a credential only to that credential type's own confirming
+  address, closing off the trick of pointing confirmation at an attacker-controlled endpoint
+  to launder an arbitrary string into a fact. It covers only the credential types it
+  recognises.
 
 ### What the built-in pattern list actually contains
 
@@ -1579,7 +1627,7 @@ The table below is a summary; the detail behind each cell is in the Part above.
 | **Social-engineering defence** | Nine offline indicators over an inbound message, a weighted score, five risk bands, a recommendation, and a command that can gate a mail pipeline | Machine-learning or AI classifiers on top are described as what a production deployment adds | Any generation of phishing or impersonation content; detection of faked audio or video |
 | **Detection Mirror** | Twelve checks over web access, authentication, and connection logs, each with a benign twin; certificates that re-check offline; downgrade to lead if a certificate fails | Four whole domains (outbound command-and-control, directory/identity, cloud audit, session) are honest placeholders that name the missing data source | Nothing is fabricated for a domain with no log source |
 | **Detection engineering** | Sigma-subset rule evaluation over your own logs; gap report; candidate rules for every miss; ATT&CK mapping; its test suite now runs on every proposed change to the product | — | Any working bypass for a named commercial defence product; any evasion recipe; any claim to model a specific log-and-alert platform |
-| **Source-code review** | Thirteen built-in patterns, each scoped to the languages it applies to, matched across a default walk of fifteen source-file types and always available; fourteen shipped dataflow rules when Semgrep is present; Joern when provisioned; a Python symbol index; conversion of findings into testable questions; permission gate, kill switch, budget; the AI review step's model call now passes a jurisdiction check before any provider software is loaded; its test suite now runs on every proposed change to the product | Semgrep and Joern must be installed by the deployment; absence is reported, never hidden. The symbol index covers Python only. The jurisdiction tier ships **permissive** by default — it is a control the operator sets, not one the customer inherits | Treating a static finding as proof. Static analysis output is a lead by design |
+| **Source-code review** | Thirteen built-in patterns, each scoped to the languages it applies to, matched across a default walk of fifteen source-file types and always available; fourteen shipped dataflow rules when Semgrep is present; Joern when provisioned; Bandit and two committed-secret scanners (gitleaks, trufflehog) when installed, all lead-only and with trufflehog's live-verification flag disabled and the matched value masked out of the finding; a Python symbol index; conversion of findings into testable questions; permission gate, kill switch, budget; the AI review step's model call now passes a jurisdiction check before any provider software is loaded; its test suite now runs on every proposed change to the product | Semgrep, Joern, Bandit, gitleaks and trufflehog must be installed by the deployment; absence is reported, never hidden. The symbol index covers Python only. The jurisdiction tier ships **permissive** by default — it is a control the operator sets, not one the customer inherits | Treating a static finding as proof. Static analysis output is a lead by design |
 | **The agent-driven "scan a codebase" route** | The agent's single route to a command line is held for per-call, single-use, owner-signed approval while its other tools run freely; on by default; since 12 August 2026 a wiring failure halts the run rather than silently leaving that surface ungoverned | Requires Docker; the run happens inside a disposable container and produces no re-checkable web report | Treating the agent's output as anything but leads — the machinery that mints a signed proven fact does not run over it |
 | **Dependency review** | Vulnerable dependencies are proven by the system's own version comparator against a pinned advisory snapshot, and re-check offline | Saying "no vulnerable dependency" — as opposed to "this one is vulnerable" — needs non-pinned constraints resolved and snapshot coverage recorded; named as outstanding work | Trusting any scanner's own vulnerability match |
 | **Fix production** | Propose; apply into a disposable clone; sandbox build; timeout-rejects approval; explicit file staging only; the proposal step's model call — the one carrying real repository source — passes the jurisdiction check, and a refusal degrades to "no proposal" | The leg that raises a real change proposal is off by default and requires multi-signature keys the operator must first provision, plus a repository token — a capability, not a field deployment. The jurisdiction tier ships permissive by default | Applying a fix to a lead. Only proven findings are eligible |

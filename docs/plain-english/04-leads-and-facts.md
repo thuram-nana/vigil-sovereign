@@ -643,6 +643,47 @@ correct summary is: a real, working, widely called layer, not yet a single
 universal gateway. This briefing preserves that distinction rather than smoothing
 it over in either direction.
 
+**What the fourth revision hardened here, on 14 August 2026.** The paragraph above
+names one honest bound — that the shared provenance classifier, not the admission
+desk, is what stands over every write into the internal map. That classifier is now
+held to a much stronger standard than before, in three ways, each a check that fails
+the build rather than a promise in prose.
+
+- **The rule is now a property, not a handful of examples.** Before, that a
+  collector's result could never become a fact on its own was checked one source at
+  a time — a test for this producer, a test for that one — which is coverage by
+  example, and a source added tomorrow was covered by none of them. A single test now
+  drives *every shape* a result can take — every kind of source, both polarities,
+  every confidence — through the one point they all pass into the map, and asserts
+  that none of them lands as a fact, even when the result is deliberately dressed up
+  to look confirmed. Because every collector reaches the map the same way, that one
+  test covers a source nobody has written yet.
+- **No collector can slip a fact in the side door.** A second check reads the source
+  of every collector and refuses any that tries to write a fact-grade label directly,
+  in whatever form — a bare label, a label built from pieces, a label held in a
+  variable. An adversarial reviewer planted exactly such a back door, written the way
+  the system's own code writes these labels; the first version of the check, which
+  looked only for the most obvious spelling, let it through. The check now reads the
+  code's structure rather than its text, and catches the planted door in every form
+  it was tried in.
+- **A confirmed fact is no longer quietly demoted by a louder guess.** A fact the
+  checker confirmed is now *sticky*: a later, more confident re-observation of the
+  same thing can still raise its belief, but it can no longer overwrite the fact's
+  grounding and turn it back into a suspicion. The one exception is the demotion-only
+  firewall itself: when it re-runs a fact's evidence and the evidence does not fire
+  again, its demotion always lands — a stale or tampered fact must be taken down, and
+  nothing, including stickiness, is allowed to protect it. Building the first of these
+  guarantees briefly broke the second; that regression was caught by asking of the new
+  rule the very question it was meant to answer, and both directions are now pinned by
+  tests.
+
+A latent flaw in the classifier itself was found and closed in the same pass. It
+tested a write's fact-grade prefix before it tested the words that mark a write as
+unproven, so a label that carried both — a made-up "confirmed by the checker, which
+merely guessed" — would have been read back as a fact. Nothing in the system writes
+such a label today, but an unsound classifier is a trap laid for a future caller, and
+it is now sound: an unproven marker anywhere in a label defeats a fact-grade prefix.
+
 ### Stage 6 — anyone can check it again, offline
 
 This is the step that makes the rest meaningful.

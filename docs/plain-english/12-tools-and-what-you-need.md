@@ -294,6 +294,37 @@ be false. The list of acceptable answers is closed, so a label nobody has taught
 the gate about refuses rather than admits. Inventing a new word cannot widen the
 arsenal.
 
+**Which tools are driven, and which are deliberately not, is now written down and
+checked.** The full account of the tools the engine drives and the tools it has
+decided not to used to live only in the description of a single past change —
+unreachable from the code, and, when someone finally held it against the code, wrong
+in both directions at once: it claimed twelve further tools while naming eleven, and
+the true number it had not yet driven was fifteen. That account now lives in the
+repository as a dated decision record, and a **required** check reads it against the
+code on every change. It fails the build if a tool the record calls "not yet driven"
+has quietly gained a driver, if the one permanently-refused tool has gained one, or
+if any installed tool is driven by nothing and is named nowhere. The frontier can no
+longer drift from the code in silence.
+
+The three source-code scanners added in the fourth revision — one for
+Python-specific weaknesses, two that hunt for secrets committed into source —
+arrived on the **analyser** route, beside the two deep source analysers already
+there, and for a precise reason. The typed-builder route locks every command onto a
+network target; a source scanner has no network target, only a directory, so forcing
+one onto it would corrupt the very pin that makes that route safe. The right home for
+a tool that reads a directory is the route that already takes a directory.
+
+The clearest case of a tool the system refuses **permanently, by design** is a
+general-purpose networking tool — a raw connector that will open any connection,
+listen on any port, move any bytes. A typed builder for it could only be one of two
+things. Either it is genuinely narrow — in which case it is not that tool any more,
+and the honest move is to build the narrow one. Or it is a thin wrapper that passes
+an operator's arguments straight through — in which case every safety property the
+builder exists to provide is bypassed by construction, because the arguments *are*
+the attack surface. So it is declined on purpose, and the decision is written down
+rather than left implicit. It stays available inside the sealed container for the
+optional agent's own use; the engine simply will not claim to drive it.
+
 Two things deliberately do **not** count as driving a tool, and that boundary is
 what gives the refusal its teeth:
 
@@ -452,10 +483,21 @@ a threshold being lowered.
   plumbing — built, ran, read, and told the difference — not that any weakness
   exists anywhere. A finding still requires the system's own fixed test over its
   own evidence, and the exercise says exactly that in its own output.
-- **It is not part of the automated build.** It needs the local range standing,
-  so it is run deliberately by a person rather than on every change. It does
-  report every builder that has no row of its own, so a new driver cannot arrive
-  unproven and unnoticed.
+- **A subset now runs on every proposed change; the whole table runs nightly.**
+  Until the fourth revision this exercise ran only when a person started it, because
+  it needs the local range standing. It is now in the automated build, in two parts.
+  A fast, **required** check on every proposed change drives a subset — the port
+  scanner and both forms of the password-guessing tool, chosen because they install
+  in seconds and because the password-guessing tool carries the one negative control
+  that has to be *proven to have run* rather than merely observed to be quiet. A
+  separate nightly run drives the whole ten-row table. The fast check will not read as
+  the full exercise: it names, in its own verdict, every row it did not attempt, and
+  refuses the unqualified "every driver" wording. Both still report every builder that
+  has no row of its own, so a new driver cannot arrive unproven and unnoticed. (A
+  couple of the tools cannot be installed cleanly in the fast lane — the web-server
+  scanner needs a from-source build for a version whose output the engine can read at
+  all — so they run only in the nightly part, where a fragile install cannot block a
+  change.)
 - **Two of the nine cannot be reached by the ordinary path at all, and the
   exercise says so rather than quietly working around it.** The two destructive
   tools — the database-injection tool and the password-guessing tool — are gated

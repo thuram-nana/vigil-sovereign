@@ -223,6 +223,24 @@ CAPABILITIES: list[tuple[str, list[str]]] = [
      ["a port that was already in use", "silent no-op", "ten-second"]),
     ("capability selections that were accepted and never applied",
      ["were not applied", "accepted and silently", "accepted and then discarded"]),
+
+    # ----------------------------------------------------------------------------------------
+    # Added 2026-08-14, the fourth revision (PR #310). Each of these turned a caveat the
+    # briefing had stated in prose into a capability the briefing must now keep explaining, so
+    # each earns a row. As with the block above, the phrasings are DELIBERATELY NARROW — worded
+    # so that only the fourth-revision material can satisfy them and not some older, unrelated
+    # use of the same bare word (there are many "supervisor"s and "verification"s elsewhere).
+    # ----------------------------------------------------------------------------------------
+
+    # -- the no-egress supervisor (no-egress enforced by running, not by argv inspection) -----
+    ("the supervisor that watches a tool's system calls to hold it to loopback",
+     ["watches the system call", "watch the actual system calls", "watches the actual system calls",
+      "does not watch"]),
+    # -- the Wave 2 source scanners and how a live secret is handled --------------------------
+    ("the secret scanners over source, and the value masked out of every finding",
+     ["masked out of the finding", "committed into the source"]),
+    ("the secret scanner run with its live-verification turned off to honour no-egress",
+     ["verification step turned off", "verification disabled", "live-verification"]),
 ]
 
 

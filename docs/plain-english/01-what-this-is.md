@@ -21,8 +21,18 @@ the missing part rather than by softening the words. The smaller figures this ch
 the way — three tools proven, then six, then nine — were accurate on the day each was written, and the
 progression is left visible on the page rather than tidied into a single confident number, because a
 document that shows its own movement is easier to trust than one that appears to have always been
-right. Where something is built but has not yet been used against a live third-party system, it says
-so.*
+right. A fourth revision, later on 14 August 2026 against version `0e8b2dae`, changed no claim about
+what the system does; it changed how far four of this chapter's own honest caveats are *enforced*
+rather than merely stated. The proving range now runs in the automated build — a fast required check
+on every proposed change, and the full table each night (sections 2.9 and 9.8). The rule that a
+tool's output is a lead and never a fact is now checked as a property against every shape of result
+the system can produce, at the one point they all pass through, rather than one source at a time
+(chapter 4). The no-external-egress limit is now enforced by watching the connections a tool actually
+attempts, not only by inspecting the command line built for it (chapter 8). And the accuracy figures
+are guarded by a check that can block a change, where before they were measured by one that could
+only report (section 9.8). Two faults in the system itself surfaced during that work — both found by
+running things rather than reading them — and both are set down in section 9.8.3. Where something is
+built but has not yet been used against a live third-party system, it says so.*
 
 *Two navigation notes. A full contents list for the set, with a suggested reading order and a note on
 how the briefing was written, is at the end of this chapter (section 11). The set also has front
@@ -1679,9 +1689,10 @@ one six, then nine, and the last one all ten.
 **Do not read that as "the system drives nine tools in the field."** Four limits travel with the
 claim, and chapter 12 sets them out in full. The targets are deliberately vulnerable applications on
 the operator's own machine, so **none of this is a result about anybody's estate**. Everything those
-nine tools report is a lead and never a fact. The exercise needs the local range standing, so it is
-run deliberately by a person rather than on every change — though it does report any builder that
-has no proving result, so a new driver cannot arrive unproven and unnoticed. And two of the nine, the
+nine tools report is a lead and never a fact. A subset of the exercise now runs on every proposed
+change and the whole of it runs each night — until the fourth revision it ran only when a person
+started it, because it needs the local range standing; either way it reports any builder that has no
+proving result, so a new driver cannot arrive unproven and unnoticed. And two of the nine, the
 two destructive ones, cannot be reached by the ordinary route at all as the production wiring stands
 today: the exercise supplies the extra authorisation itself and prints a note saying it had to,
 which is a gap in *reaching* those two drivers rather than a hole in the gate that stopped them. A
@@ -1778,6 +1789,20 @@ automated test, so a future edit that dropped it on any route would fail the bui
 would otherwise send goes to that tool's own publisher and carries nothing whatever about the target,
 and it is written down here rather than left for a reader to find.
 
+**What the fourth revision added here.** The measurement above is a one-off — a person stands the trap
+up and reads it. The fourth revision added the standing version of the same idea: a supervisor that
+watches the actual system calls a tool uses to open a connection or send a packet, and refuses any
+that does not stay on the machine, while the run is happening. Because it watches the system call
+rather than a shared library, it catches even a tool built in a way a library-level trap cannot see.
+It is off unless switched on, and the proving range now runs with it on, so each of those runs now
+carries its own record of what every tool tried to send — a record that, on a loopback-only range, is
+expected to be empty, and the build fails if it is not. It does not retire the sealed-network
+measurement above: the supervisor is a control against a tool's own defaults and a mis-built command
+line, not a sealed cage, so a claim of total silence is still established from the outside by the trap.
+Chapter 8 sets out the supervisor in full, including the one tool it deliberately does not watch, and
+the real gap review found in it — that watching only one kind of connection let an unconnected packet
+out — which was closed.
+
 #### 9.8.3 The defects found by running things rather than reading them
 
 Not one of the faults below was visible to the system's own automated tests; each was invisible to
@@ -1798,6 +1823,8 @@ that has never looked.
 | Three tools the interface listed as controllable while the engine refused every single call. | A claim of control has to hold at *every* layer. Refusing a tool honestly on one screen while a different component silently blocks it is the same false claim of control, moved one level down. |
 | A capability the operator selected being accepted and then silently discarded — and, in the single-tool mode, an unrecognised selection throwing away the valid one behind it, so the run started with no capability at all. | A request that cannot be honoured must be **refused by name, before anything starts**. The alternative is what happened here: the operator watches a run they believe is doing one thing, and the report looks complete while the work was narrower than they were told. |
 | Whole capability selections dropped on several routes — including the one an operator uses most often, a quick scan of a target on their own machine. | The same lesson at a larger scale. The system now states, both in the run's own permanent record and in what it hands back to the screen, exactly which selections **were not applied**, which were, and why. |
+| **The new no-egress supervisor, switched on, silently disabled the port scanner.** Turning the supervisor on requires stripping a privilege the scanner needs; without it the scanner found **no open ports and exited successfully** — a clean-looking result that meant it had been crippled, produced by the very control added to prevent clean-looking results that mean nothing. | The failure this whole product exists to prevent, produced by a new safeguard the moment it was switched on — and caught only by running the proving range under it, never by reading. The supervisor now **declines to watch that one tool** rather than cripple it, and says so, because a loud refusal beats a silent no-op. A second gap in the same supervisor was found the same way: in its first form it watched only one kind of connection, so an unconnected packet — the ordinary way a name is looked up — left the machine while it recorded nothing. It now watches all three. |
+| **In the automated build, a tool present is not a tool that works.** The sandbox program installed cleanly but could not create the isolation it exists for, because the build's own machines forbid it — so the strongest isolation tests would have quietly **skipped** while the install looked successful. Separately, the web-server scanner the build installed from the system catalogue was a fourteen-year-old version that accepts the modern output flag and silently writes the old format the reader cannot parse. | **A skipped proof and a passing proof are the same colour on a dashboard.** Both were caught because the build now asserts the capability actually works — the isolation can be created, the scanner emits the format the reader consumes — rather than trusting that the package is present. The scanner that cannot be installed cleanly in the fast lane was moved to the nightly run, where a fragile install cannot block a change. |
 
 **What every one of them has in common, and why an agency should weigh it.** They divide into two
 kinds, and neither kind could have been found by reading.
