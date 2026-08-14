@@ -767,10 +767,27 @@ Chapter 8, "Scope enforcement", is the authoritative account.
   it confirmed by running it, so the sentences describing it as unbuilt have gone. That second item is
   the clearest illustration in the whole briefing of the method described in the bullet below —
   running a thing, rather than reading it, is what found every one of those faults, and every
-  automated test had been passing over them. This work was verified in the working copy on the machine
-  the briefing was written on, and had not yet been folded into a recorded snapshot of the software
-  when this page was written; a reader checking it against the released version should expect to find
-  it in a later snapshot than `05b81e9f`.
+  automated test had been passing over them. That work has since been folded into a recorded snapshot:
+  it is in the software from `61f56160` onward, so a reader checking it against the released version
+  will find it there rather than having to wait for a later one.
+- **What the fourth revision added, on 14 August 2026.** The third revision left four of its limits
+  stated honestly in prose, which is a weaker thing than a limit a machine enforces. Each is now
+  enforced, so a regression in it fails a check instead of waiting for a reader to notice. **The
+  proving range now runs in the build** — a fast subset on every proposed change, including the
+  password-guessing tool, whose result is the one that demonstrates a silent control genuinely ran, and
+  the whole table each night. **The rule that a tool's output is a lead and never a proof is now a
+  property rather than a set of examples**: it is checked against every shape of observation the system
+  can produce, at the single point they all pass through, so a source added tomorrow is covered without
+  anyone remembering to cover it. **The no-egress limit is enforced by running rather than by reading
+  the command line** — a supervisor watches every outbound connection each tool attempts and refuses
+  any that does not stay on the machine. **And the accuracy figures are now guarded by a check that can
+  block a change**, where before they were measured by one that could not. Two faults in the system
+  itself were found while doing this, both described in chapter 1: one by which a recorded result could
+  read back as proven when it was not, and one by which the same named tool could resolve to two
+  different programs on the same machine. A third was found in the new supervisor, and is the plainest
+  example in this briefing of why running a thing is not optional: switched on, it silently removed a
+  privilege the port-scanner needs, and the scanner then reported nothing at all — a result identical
+  to a clean one. It now declines to supervise that tool rather than quietly weaken it.
 - **A note on the figures in that second item, because the briefing has deliberately not hidden its
   own movement.** As the work proceeded this page and chapter 1 reported, in turn, three tools proven,
   then six, then nine, and now ten results across nine tools. **Each of those figures was accurate on
