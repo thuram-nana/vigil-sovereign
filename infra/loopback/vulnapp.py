@@ -19,6 +19,7 @@ Run:  python3 infra/loopback/vulnapp.py --port 8080 --logdir /path/to/logs
 from __future__ import annotations
 
 import argparse
+import atexit
 import datetime
 import html
 import http.server
@@ -150,12 +151,32 @@ class _Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
 
+def _remove_quietly(path: str) -> None:
+    """Best-effort pidfile removal — a process that is being killed must not fail on cleanup."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--logdir", default=os.path.join(os.path.dirname(__file__), "logs"))
+    # An instance started outside the range (an ad-hoc spike, a debugging one-liner) owns a loopback
+    # port and answers like a target, but NO teardown path can see it: `range.sh down` only iterates
+    # the manifest's targets, and the live-fire trap only touches its own. Two such processes survived
+    # days across sessions on this machine, holding :18081 and :8099. Writing a pidfile is what lets a
+    # caller reclaim its own instance; `range.sh strays` finds the ones nobody recorded.
+    ap.add_argument("--pidfile", default="", help="write this process's pid here; removed on exit")
     args = ap.parse_args()
     os.makedirs(args.logdir, exist_ok=True)
+
+    if args.pidfile:
+        os.makedirs(os.path.dirname(os.path.abspath(args.pidfile)) or ".", exist_ok=True)
+        with open(args.pidfile, "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+        atexit.register(lambda: _remove_quietly(args.pidfile))
 
     srv = _Server(("127.0.0.1", args.port), _Handler)      # HARD-PINNED to loopback
     srv.db = _build_db()                                   # type: ignore[attr-defined]
