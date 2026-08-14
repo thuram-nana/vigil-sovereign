@@ -288,6 +288,30 @@ def record(tool: str, tokens: int, *, now: Optional[float] = None) -> Status:
         return status(tool, now=now)
 
 
+def _usage_field(usage: object, *names: str) -> int:
+    for n in names:
+        v = usage.get(n) if isinstance(usage, dict) else getattr(usage, n, None)
+        if v is not None:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                pass
+    return 0
+
+
+def record_usage(tool: str, usage: object, *, now: Optional[float] = None) -> Status:
+    """Charge from a provider ``usage`` object/dict that carries ``input_tokens``/``output_tokens``
+    (Anthropic shape) or ``prompt_tokens``/``completion_tokens`` (OpenAI shape). A ``None`` usage or a
+    missing field charges 0. Never raises — a direct-SDK call site can call this straight from its
+    response without guarding."""
+    try:
+        i = _usage_field(usage, "input_tokens", "prompt_tokens")
+        o = _usage_field(usage, "output_tokens", "completion_tokens")
+        return record(tool, i + o, now=now)
+    except Exception:              # noqa: BLE001
+        return status(tool, now=now)
+
+
 def throttle(tool: str, *, now: Optional[float] = None) -> Status:
     """Convenience for a spending path: consult the budget, SLEEP the bounded throttle delay if over,
     and return the status (so the caller can log ``.warn``). Never blocks — the sleep is capped at

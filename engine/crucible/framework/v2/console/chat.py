@@ -909,10 +909,25 @@ def _reason(chat_id: str, question: str) -> dict:
                                                 "block lists them."})
         content.extend(images)
 
+    # Per-tool TOKEN BUDGET for "chat" (warn + throttle, never block) — this is the largest single LLM
+    # call in the system (max_tokens 16000) and it bypasses the kernel, so meter it explicitly. Guarded:
+    # a missing vigil_core never stops the call.
+    try:
+        from vigil_core import token_budget as _tb
+    except Exception:  # noqa: BLE001
+        _tb = None
+    _mx = 16000
+    if _tb is not None:
+        try:
+            _tb.throttle("chat")
+            _mx = _tb.clamp_output("chat", 16000)
+        except Exception:  # noqa: BLE001 — metering must never break the chat call
+            _tb = None
+
     def _call(blocks):
         client = anthropic.Anthropic(api_key=key)
         return client.messages.create(
-            model="claude-opus-5", max_tokens=16000,
+            model="claude-opus-5", max_tokens=_mx,
             system=_CHAT_SYSTEM,
             messages=[{"role": "user", "content": blocks}],
         )
@@ -933,6 +948,12 @@ def _reason(chat_id: str, question: str) -> dict:
                              f"still runs."}
         notes.append(f"the attached image(s) were rejected by the model ({type(e).__name__}); this answer "
                      f"covers the attached TEXT only.")
+
+    if _tb is not None:                # charge the ACTUAL tokens the chat call spent (either attempt)
+        try:
+            _tb.record_usage("chat", getattr(resp, "usage", None))
+        except Exception:  # noqa: BLE001
+            pass
 
     # Opus 5 safety classifiers can decline (HTTP 200, stop_reason == "refusal") — handle before reading content.
     if getattr(resp, "stop_reason", None) == "refusal":

@@ -128,6 +128,18 @@ def test_using_tool_contextvar(store):
     assert tb.current_tool() == "engine"               # restored
 
 
+def test_record_usage_from_provider_shapes(store):
+    class _AnthropicUsage:
+        input_tokens = 100
+        output_tokens = 250
+    tb.record_usage("chat", _AnthropicUsage())
+    assert tb.status("chat").used == 350
+    tb.record_usage("chat", {"prompt_tokens": 10, "completion_tokens": 5})   # OpenAI-shape dict
+    assert tb.status("chat").used == 365
+    tb.record_usage("chat", None)                                             # no usage -> 0, never raises
+    assert tb.status("chat").used == 365
+
+
 def test_metering_never_raises_on_a_broken_store(tmp_path, monkeypatch):
     # point the store at a path that cannot be created (a file where a directory must go)
     bad = tmp_path / "afile"

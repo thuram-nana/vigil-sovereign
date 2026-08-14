@@ -41,6 +41,52 @@ from .models import CallTrace
 
 _log = v2log.get_logger(__name__)
 
+# Per-tool TOKEN BUDGETS (warn + throttle, never block). vigil_core is the shared substrate both planes
+# import; guard the import so the kernel still runs if it is ever unavailable — metering is advisory
+# back-pressure, never a gate, so its absence must NEVER stop a completion.
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import token_budget as _token_budget
+except Exception:                                          # noqa: BLE001
+    _token_budget = None
+
+
+def _tb_tool() -> str:
+    try:
+        return _token_budget.current_tool() if _token_budget else "engine"
+    except Exception:                                      # noqa: BLE001
+        return "engine"
+
+
+def _tb_throttle(tool: str) -> None:
+    """Consult the tool's budget and SLEEP the bounded throttle delay if over. Never blocks, never raises."""
+    if _token_budget is None:
+        return
+    try:
+        _token_budget.throttle(tool)
+    except Exception:                                      # noqa: BLE001
+        pass
+
+
+def _tb_clamp(tool: str, max_tokens: int) -> int:
+    if _token_budget is None:
+        return max_tokens
+    try:
+        return _token_budget.clamp_output(tool, max_tokens)
+    except Exception:                                      # noqa: BLE001
+        return max_tokens
+
+
+def _tb_record(tool: str, trace: "CallTrace") -> None:
+    """Charge the ACTUAL tokens a real (non-dry-run) call spent. Never raises."""
+    if _token_budget is None or getattr(trace, "is_dryrun", False):
+        return
+    try:
+        spent = int(getattr(trace, "tokens_in", 0) or 0) + int(getattr(trace, "tokens_out", 0) or 0)
+        if spent > 0:
+            _token_budget.record(tool, spent)
+    except Exception:                                      # noqa: BLE001
+        pass
+
 
 @dataclass
 class Prompt:
@@ -238,6 +284,26 @@ def reset_cache() -> None:
 
 
 def complete_with_failover(prompt: "Prompt") -> "LLMResult":
+    """Complete ``prompt`` with failover (see ``_complete_with_failover`` for the failover contract),
+    wrapped in the per-tool TOKEN BUDGET: consult the current tool's budget and apply WARN + THROTTLE
+    (a bounded delay, NEVER a block) before the call, clamp the per-call output ceiling, and charge the
+    ACTUAL tokens the call spent afterwards. The tool is read from ``token_budget.current_tool()`` (a
+    subsystem sets it with ``using_tool(...)``; the default is ``engine``). Metering never changes what
+    the call does — it can only slow it and record it."""
+    tool = _tb_tool()
+    _tb_throttle(tool)                                   # warn + throttle (bounded), never blocks
+    _mx = getattr(prompt, "max_tokens", None)            # defensive: a minimal prompt double may lack it
+    if _mx is not None:
+        try:
+            prompt.max_tokens = _tb_clamp(tool, _mx)
+        except (AttributeError, TypeError):
+            pass
+    result = _complete_with_failover(prompt)
+    _tb_record(tool, getattr(result, "trace", None))     # None trace records nothing (spent == 0)
+    return result
+
+
+def _complete_with_failover(prompt: "Prompt") -> "LLMResult":
     """Complete ``prompt``, failing over across the permitted backends IN-TIER on a transient
     overload (Speed X4). Tries the auto-selected primary (the cached ``get_backend()``); a
     :class:`BackendOverloaded` — a rate-limit / overload / 5xx / connection failure that

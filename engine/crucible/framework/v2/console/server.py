@@ -121,6 +121,7 @@ _EXACT_ROUTES = {
     "/api/governance": api.governance_data,     # Governance & Gate audit: READ-ONLY posture + m-of-n destruction quorum
     "/api/mcp": api.mcp_data,                    # MCP: the gated capabilities exposed over the stdio MCP server (read-only)
     "/api/services": api.services_data,          # System: readiness (venvs/dirs/ports/binaries) + docker-service state (read-only)
+    "/api/token-budgets": api.token_budgets_data,  # Token Budgets: per-tool daily token caps + today's usage (read-only)
 }
 
 # Read-only GET routes that take ONE optional `?slug=` ENGAGEMENT SCOPE: exact path -> provider
@@ -556,6 +557,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         body = self._read_body()
         try:
+            if path == "/api/token-budgets":
+                # Token Budgets: set one tool's daily token cap / mode from the UI. Pure config write to
+                # the shared vigil_core ledger — no scope, gate, or fact is touched; it can only change how
+                # loudly a tool is warned/throttled, never whether a call is allowed (never-block).
+                self._json(actions.set_token_budget(body))
+                return
             if path == "/api/launch/assessment":
                 # The New-Assessment wizard's one action. It spawns only the SAME gated CLIs; it
                 # cannot relax scope (charter-signed, never an arg) or bypass a gate. A clean JSON

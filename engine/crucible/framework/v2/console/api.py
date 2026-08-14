@@ -1192,6 +1192,23 @@ def _vuln_sources() -> list[dict]:
     return [{"name": s.name, "host": s.host, "mode": s.mode} for s in TRUSTED_VULN_SOURCES]
 
 
+def token_budgets_data() -> dict[str, Any]:
+    """Per-tool TOKEN budgets + today's usage, for the Token Budgets screen. Read-only. The limits are the
+    operator-editable values (over the built-in defaults) from the shared vigil_core ledger, so this and the
+    engine that enforces them read the SAME numbers. Total: any error yields an empty list, never a traceback."""
+    try:
+        from vigil_core import token_budget as tb
+        return {
+            "tools": [s.as_dict() for s in tb.list_status()],
+            "doctrine": ("Per-tool daily token budgets. When a tool goes over, the system WARNS and THROTTLES "
+                         "(slows it) — it never hard-blocks a call. Edit any limit or mode here; it takes "
+                         "effect immediately and is stored, not hard-coded. Free/local models spend ~$0 but "
+                         "their tokens still count here."),
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"tools": [], "error": f"{type(e).__name__}: {e}"}
+
+
 def feed_status() -> dict[str, Any]:
     """K1: the READ-ONLY vuln-feed schedule / egress posture for the Knowledge screen.
 

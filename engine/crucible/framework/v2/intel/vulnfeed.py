@@ -101,6 +101,33 @@ class VulnfeedResult:
     refused: dict = field(default_factory=dict)   # source name -> reason the egress gate refused it
 
 
+# Attribute this feed's outbound requests to the "vulnfeed" token budget (the shared transport charges
+# the current tool, whose default is "recon"). Guarded: a missing vigil_core never affects the pull.
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import token_budget as _token_budget
+except Exception:                                          # noqa: BLE001
+    _token_budget = None
+
+
+def _tb_vulnfeed_enter():
+    if _token_budget is None:
+        return None
+    try:
+        ctx = _token_budget.using_tool("vulnfeed")
+        ctx.__enter__()
+        return ctx
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
+def _tb_vulnfeed_exit(ctx) -> None:
+    if ctx is not None:
+        try:
+            ctx.__exit__(None, None, None)
+        except Exception:                                  # noqa: BLE001
+            pass
+
+
 def refresh_vulnintel(plan, *, transport_for, ingest, seq: int = 0, cancel=None) -> VulnfeedResult:
     """Pull each planned source through its gated transport and ingest the (lead-only) observations.
 
@@ -119,6 +146,7 @@ def refresh_vulnintel(plan, *, transport_for, ingest, seq: int = 0, cancel=None)
     qrun = 0
     cancelled = False
 
+    _tb_ctx = _tb_vulnfeed_enter()          # transport fetches below charge the "vulnfeed" budget
     for source, queries in plan:
         if cancel():
             cancelled = True
@@ -154,6 +182,7 @@ def refresh_vulnintel(plan, *, transport_for, ingest, seq: int = 0, cancel=None)
         minted[source.name] = minted.get(source.name, 0) + got
         if cancelled:
             break
+    _tb_vulnfeed_exit(_tb_ctx)              # stop attributing to "vulnfeed" before the (fetch-free) ingest
 
     applied = ingest.ingest(all_obs).applied if all_obs else 0
     return VulnfeedResult(minted_by_source=minted, applied=applied, queries_run=qrun,

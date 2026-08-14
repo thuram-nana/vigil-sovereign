@@ -169,6 +169,14 @@ screens:
     description: The whole system's readiness at a glance (the `vigil doctor` report surfaced in the UI) — prerequisites (binaries + both venvs + writable dirs), the four UI ports (free / in-use), and every docker service's live state (gateway + qdrant / neo4j / otel). Read-only; create the absent services with `vigil services up`.
     synonyms: [system, services, doctor, readiness, health, prerequisites, docker services, qdrant, neo4j, otel, gateway status, ports, venvs, bring up]
 
+  - id: budgets
+    label: Token Budgets
+    group: MANAGE
+    owner: false
+    plane: unified
+    description: A daily TOKEN budget for every tool/API (the autonomous engine, chat, terminal, codefix, threat-model, fireteam, SIGIL, Strix, the vuln-feed and recon). Edit any limit here; when a tool goes over, the system WARNS and THROTTLES it (slows it) — it never hard-blocks a call. Limits are stored, not hard-coded, and take effect immediately.
+    synonyms: [token budget, token budgets, budget, budgets, spend, token limit, token cap, api tokens, throttle, rate limit, cost, tokens per tool, max tokens, per tool budget]
+
   - id: compliance
     label: Compliance
     group: MANAGE
