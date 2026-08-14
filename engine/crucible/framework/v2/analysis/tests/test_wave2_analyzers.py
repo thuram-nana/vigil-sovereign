@@ -1,10 +1,19 @@
 """
 Wave 2 — the three new external analyzers: bandit, gitleaks, trufflehog.
 
-Every test here plays the tool with a MOCKED ``subprocess.run`` over RECORDED output.
-No real binary is ever spawned, so nothing in this file is evidence that a live bandit /
-gitleaks / trufflehog behaves as recorded — it is evidence about this repo's parse,
-normalize, mask and failure handling, which is what the adapters own.
+Every test here plays the tool with a MOCKED ``subprocess.run``. No real binary is ever
+spawned, so nothing in this file is evidence that a live bandit / gitleaks / trufflehog
+behaves as the fixtures say — it is evidence about this repo's parse, normalize, mask and
+failure handling, which is what the adapters own.
+
+PROVENANCE OF THE FIXTURES, because "recorded" is a claim and only one of the three earns
+it here. The gitleaks fixture's shape was CONFIRMED against gitleaks 8.26.0-1+b1 on the
+build host: the argv this adapter constructs was accepted, the report was written, and its
+keys are the ones read below. The bandit and trufflehog fixtures were NOT captured from a
+live run — neither binary is provisioned here — so they are written to those tools'
+documented JSON schema and are only as right as that schema. A field renamed upstream
+would break the real adapter while these tests stayed green; the guard against that is a
+live run on a host that has the binary, which nothing in this file substitutes for.
 
 Three properties get a control strong enough to fail on a real regression:
 
@@ -104,9 +113,9 @@ def _dumped(findings: list[AnalysisFinding]) -> str:
 
 
 def _bandit_json(root: Path) -> str:
-    """A recorded ``bandit -f json -q -r`` document: a HIGH shell-injection issue, a MEDIUM
-    yaml.load, and a LOW B105 whose issue text INTERPOLATES the matched password (which is
-    what the mask exists for)."""
+    """A ``bandit -f json -q -r`` document (schema-written, not captured — see the module
+    docstring): a HIGH shell-injection issue, a MEDIUM yaml.load, and a LOW B105 whose
+    issue text INTERPOLATES the matched password, which is what the mask exists for."""
     return json.dumps({
         "errors": [],
         "generated_at": "2026-08-13T00:00:00Z",
@@ -150,8 +159,10 @@ def _bandit_json(root: Path) -> str:
 
 
 def _gitleaks_report(root: Path) -> str:
-    """A recorded ``gitleaks detect --report-format json`` report: a top-level LIST (not an
-    object), carrying the raw credential in both ``Secret`` and ``Match``."""
+    """A ``gitleaks detect --report-format json`` report — a top-level LIST (not an object),
+    carrying the raw credential in both ``Secret`` and ``Match``. Key set and shape confirmed
+    against gitleaks 8.26.0-1+b1, which accepted this adapter's argv and wrote exactly these
+    fields."""
     return json.dumps([
         {
             "RuleID": "aws-access-token",
@@ -179,8 +190,9 @@ def _gitleaks_report(root: Path) -> str:
 
 
 def _trufflehog_jsonl(root: Path) -> str:
-    """Recorded ``trufflehog filesystem --json`` output: JSON LINES, not an array. Includes
-    a blank line and a human log line, both of which the adapter must skip."""
+    """``trufflehog filesystem --json`` output (schema-written, not captured — see the module
+    docstring): JSON LINES, not an array. Includes a blank line and a human log line, both of
+    which the adapter must skip."""
     return "\n".join([
         json.dumps({
             "DetectorName": "Github",
