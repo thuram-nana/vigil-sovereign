@@ -138,6 +138,17 @@ ALLOW_MISSING = {t.strip().lower() for t in
 # the run (turn it on once a wave's rows have landed).
 STRICT_ALL_BUILDERS = os.environ.get("VIGIL_LIVEFIRE_STRICT_BUILDERS") == "1"
 
+# A SUBSET of the rows, so a per-PR CI job can prove the drivers whose tools install in seconds while
+# the full table (which needs a JVM and three Go binaries, ~69 min) runs nightly.
+#
+# THE HONESTY REQUIREMENT THAT COMES WITH IT. A run that silently drove 3 of 10 rows and printed the
+# same green verdict as a full run would be the exact overclaim this harness exists to prevent — the
+# reader cannot see what was not attempted. So a filtered run: names every row it EXCLUDED in the
+# table and the honesty block, and refuses the unqualified "every driver" verdict. Filtering changes
+# what is ATTEMPTED; it never changes what a passing row MEANS.
+ONLY_TOOLS = {t.strip().lower() for t in
+              (os.environ.get("VIGIL_LIVEFIRE_ONLY") or "").split(",") if t.strip()}
+
 BOLD, DIM, RED, GREEN, YELLOW, OFF = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[33m", "\033[0m"
 if not sys.stdout.isatty():
     BOLD = DIM = RED = GREEN = YELLOW = OFF = ""
@@ -2249,6 +2260,19 @@ def print_honesty() -> None:
 def main() -> int:
     failures: list = []
 
+    # Resolve the row selection FIRST — before the lock, before the range, before any packet. A typo in
+    # VIGIL_LIVEFIRE_ONLY must not bring a target up and only then refuse; and a filter that selected
+    # nothing must never be mistaken for a clean run.
+    selected = [p for p in TABLE if not ONLY_TOOLS or p.tool.lower() in ONLY_TOOLS]
+    excluded = [p for p in TABLE if p not in selected]
+    if ONLY_TOOLS:
+        unknown = ONLY_TOOLS - {p.tool.lower() for p in TABLE}
+        if unknown:
+            die(f"the row filter names {sorted(unknown)}, which no row in the table drives. "
+                f"Rows available: {sorted({p.tool for p in TABLE})}")
+        if not selected:
+            die("the row filter excluded every row — a run that drives nothing proves nothing.")
+
     # ONE live-fire on this machine at a time, enforced HERE: before a control is started, before
     # an authority is minted, and before a single packet is sent at anything. A second run is
     # refused rather than queued — see the run-lock section for what concurrent runs corrupt.
@@ -2332,9 +2356,13 @@ def main() -> int:
               form_weak=form_weak, form_hard=form_hard)
 
     say("4. Driving each tool through the engine — vulnerable target, then clean control")
+    if ONLY_TOOLS:
+        info(f"{YELLOW}SUBSET RUN{OFF} driving {len(selected)} of {len(TABLE)} rows "
+             f"(VIGIL_LIVEFIRE_ONLY={','.join(sorted(ONLY_TOOLS))})")
+        info(f"{YELLOW}not attempted:{OFF} {', '.join(p.name for p in excluded)}")
     rows: list = []
     seq = 1
-    for proof in TABLE:
+    for proof in selected:
         row = run_row(proof, env, gov, seq)
         seq += 10
         rows.append(row)
@@ -2364,11 +2392,20 @@ def main() -> int:
         print(f"\n   Drivers proven end to end: {', '.join(passed) if passed else 'none'}")
         print(f"   Fixtures and tool output left in {workdir}")
         return 1
-    print(f"   {GREEN}Every driver in the table built its own argv through the engine, ran against a "
+    scope = "Every driver in the table" if not ONLY_TOOLS else (
+        f"Each of the {len(selected)} driver(s) this SUBSET run attempted")
+    print(f"   {GREEN}{scope} built its own argv through the engine, ran against a "
           f"live target,{OFF}")
     print(f"   {GREEN}parsed through an engine reader, reported the planted weakness, and stayed "
           f"silent on a{OFF}")
     print(f"   {GREEN}control that was still being tested.{OFF}")
+    if ONLY_TOOLS:
+        # The reader must not be able to mistake this for the full proof. Say what was NOT attempted,
+        # in the verdict itself, where a passing run is read.
+        print(f"\n   {YELLOW}THIS RUN PROVES A SUBSET.{OFF} {len(excluded)} row(s) were not attempted "
+              f"and are NOT covered by this verdict:")
+        print(f"     {', '.join(p.name for p in excluded)}")
+        print(f"   {DIM}Run with no VIGIL_LIVEFIRE_ONLY for the full table.{OFF}")
     shutil.rmtree(workdir, ignore_errors=True)
     return 0
 
@@ -2385,7 +2422,15 @@ if __name__ == "__main__":
         _PATH = lock_path()
         print(f"   {RED}FAIL{OFF} {refusal_text(_PATH, _holder_record(_PATH))}")
         sys.exit(0)
+    if _ARG.startswith("--only"):
+        # `--only nmap,hydra` / `--only=nmap,hydra` — the same subset the env var selects, so a CI job
+        # or an operator can drive one row without exporting anything.
+        _VAL = _ARG.split("=", 1)[1] if "=" in _ARG else (sys.argv[2] if len(sys.argv) > 2 else "")
+        if not _VAL.strip():
+            die("--only needs a comma-separated tool list, e.g. --only nmap,hydra")
+        ONLY_TOOLS = {t.strip().lower() for t in _VAL.split(",") if t.strip()}
+        sys.exit(main())
     if _ARG:
         die(f"unknown argument {_ARG!r}. This harness takes no arguments, or --lock-path / "
-            "--lock-holder.")
+            "--lock-holder / --only <tools>.")
     sys.exit(main())

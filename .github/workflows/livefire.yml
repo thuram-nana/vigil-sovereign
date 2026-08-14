@@ -1,0 +1,131 @@
+name: livefire
+
+# THE GAP THIS CLOSES. The strongest evidence this repository produces — an engine-built argv, a real
+# tool run against a live target, its bytes read by an engine reader, the planted weakness reported, and
+# a negative control proven to have RUN and stayed silent — lived entirely in
+# tools/livefire/tool_drivers_livefire.py, which NO workflow invoked. It was proven by a person running
+# it by hand, once. Everything it guarded could regress green.
+#
+# Two jobs, because the table is not uniformly cheap:
+#   * livefire-smoke — per PR. The rows whose tools apt-install in seconds (nmap, hydra x2, nikto).
+#     ~3 minutes. This is the one that should be a REQUIRED check.
+#   * livefire-full  — nightly + on demand. All ten rows; needs a JVM and three Go binaries and takes
+#     up to ~70 minutes. Reports; never blocks a PR.
+#
+# The range needs NO docker, NO network and NO root: the `vulnapp` target is the repository's own
+# stdlib HTTP app on loopback, and the harness starts its own in-process controls.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * *"        # nightly, for the full table
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "comma-separated subset of rows to drive (blank = the whole table)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  livefire-smoke:
+    name: livefire smoke (per-PR subset)
+    # The nightly cron should not also run the smoke — the full job below covers it.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: install the fast tools
+        # Only tools that come from apt in seconds. nuclei/httpx/ffuf (Go) and zaproxy (JVM) are
+        # deliberately NOT here — they belong to the nightly job, so a slow or flaky third-party
+        # download can never block a pull request.
+        run: sudo apt-get update && sudo apt-get install -y nmap hydra nikto
+
+      - name: install the engine's python deps
+        run: |
+          pip install -e packages/core/vigil_core \
+            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
+            "cryptography>=42" packaging
+
+      - name: build the egress guard
+        run: make -C tools/egress-guard
+
+      - name: drive the subset against the loopback range
+        env:
+          # nmap + both hydra rows. hydra is here deliberately: its form-login row is the one that
+          # proves a negative control ACTUALLY RAN (read from the target's own ledger), and that the
+          # cracked credential reaches neither the observations nor the signed record.
+          VIGIL_LIVEFIRE_ONLY: "nmap,hydra,nikto"
+          VIGIL_LIVEFIRE_PYTHON: python
+          # Record every connect the run makes. nmap is exempted by the guard itself (NO_NEW_PRIVS
+          # would strip its cap_net_raw and it would silently report nothing) — see live/egress_guard.py.
+          VIGIL_EGRESS_GUARD: "1"
+          VIGIL_EGRESS_GUARD_LOG: ${{ github.workspace }}/livefire-egress.log
+        run: bash tools/livefire/tool_drivers_livefire.sh
+
+      - name: what left the host during the run
+        if: always()
+        # Evidence either way: on a clean run this prints blocked=0 for every guarded tool, which is a
+        # measurement rather than an assumption.
+        run: cat "${{ github.workspace }}/livefire-egress.log" || echo "(no guarded spawn recorded)"
+
+  livefire-full:
+    name: livefire full table (nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: install the apt tools
+        run: sudo apt-get update && sudo apt-get install -y nmap hydra nikto sqlmap wapiti
+
+      - name: install the Go tools (pinned)
+        # Pinned versions, not @latest: a live-fire whose tool set changes underneath it cannot be
+        # compared to the run before it.
+        run: |
+          go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.3.7 || echo "nuclei install failed"
+          go install github.com/projectdiscovery/httpx/cmd/httpx@v1.6.9   || echo "httpx install failed"
+          go install github.com/ffuf/ffuf/v2@v2.1.0                        || echo "ffuf install failed"
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: install the engine's python deps
+        run: |
+          pip install -e packages/core/vigil_core \
+            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
+            "cryptography>=42" packaging
+
+      - name: build the egress guard
+        run: make -C tools/egress-guard
+
+      - name: drive the table against the loopback range
+        env:
+          VIGIL_LIVEFIRE_ONLY: ${{ github.event.inputs.only }}
+          VIGIL_LIVEFIRE_PYTHON: python
+          # A tool that is absent cannot be proven, and this job must not report a SKIP as a pass. Only
+          # zaproxy is acknowledged: it needs a full JVM install this job does not do. Everything else
+          # is expected to be present, and a missing one FAILS — which is the honest outcome.
+          VIGIL_LIVEFIRE_ALLOW_MISSING: "zaproxy"
+          VIGIL_EGRESS_GUARD: "1"
+          VIGIL_EGRESS_GUARD_LOG: ${{ github.workspace }}/livefire-egress.log
+        run: bash tools/livefire/tool_drivers_livefire.sh
+
+      - name: what left the host during the run
+        if: always()
+        run: cat "${{ github.workspace }}/livefire-egress.log" || echo "(no guarded spawn recorded)"
