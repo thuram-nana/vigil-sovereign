@@ -8,12 +8,18 @@ defect that kept recurring: wapiti's DEFAULT modules reached ``wapiti3.ovh``; ``
 technology database; nuclei phoned home on two sensor routes that no gate covered. Each was invisible
 until something RAN.
 
-``tools/egress-guard/egress_guard.c`` polices ``connect(2)`` with a seccomp user-notify filter: loopback
-(``127.0.0.0/8``, ``::1``, ``::ffff:127.x``) and non-IP families (AF_UNIX, netlink) proceed; anything else
-is refused with ECONNREFUSED and recorded. Because it filters the SYSCALL rather than libc, it covers
-statically linked Go binaries — measured: ``nuclei`` (static) attempts a DNS connect merely to print its
-version, and the guard blocks it. An ``LD_PRELOAD`` shim cannot see that call at all, which is why this is
-the primary mechanism and not the fallback.
+``tools/egress-guard/egress_guard.c`` polices ``connect(2)``, ``sendto(2)`` and ``sendmsg(2)`` with a
+seccomp user-notify filter: loopback (``127.0.0.0/8``, ``::1``, ``::ffff:127.x``) and non-IP families
+(AF_UNIX, netlink) proceed; anything else is refused with ECONNREFUSED and recorded. Because it filters
+the SYSCALL rather than libc, it covers statically linked Go binaries — measured: ``nuclei`` (static)
+attempts a DNS connect merely to print its version, and the guard blocks it. An ``LD_PRELOAD`` shim
+cannot see that call at all, which is why this is the primary mechanism and not the fallback.
+
+ALL THREE SEND SYSCALLS, NOT JUST ``connect``. Policing ``connect`` alone was a measured BYPASS: an
+unconnected UDP socket needs no connect, so ``sendto(fd, buf, len, 0, &dest, ...)`` put a packet on the
+wire while the guard reported ``seen=0 blocked=0``. A forked child is covered for free (a seccomp filter
+is inherited across ``fork``), and a non-blocking connect is refused on its ``EINPROGRESS`` path — both
+attacked and both held.
 
 DEFAULT OFF, opt-in by environment, so an operator's ordinary host run is byte-identical unless they ask
 for the guard. Live-fire and CI turn it on.
