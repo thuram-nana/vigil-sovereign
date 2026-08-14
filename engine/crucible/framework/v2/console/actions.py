@@ -337,8 +337,10 @@ def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
     # built-ins, so honouring the flag widens COVERAGE without touching soundness.
     if use_library:
         cmd.append("--library")
-    _base = dict(ephemeral=ephemeral, target=target, cmd=cmd, run_kind="scan")
-    _write_meta(run_id, **_base, status="running", started=time.time())
+    # `started` is stamped ONCE, into _base, so every later write preserves the true launch moment
+    # (_write_meta rewrites the whole file — a fresh time.time() in the pid write would silently advance it).
+    _base = dict(ephemeral=ephemeral, target=target, cmd=cmd, run_kind="scan", started=time.time())
+    _write_meta(run_id, **_base, status="running")
 
     def _run() -> None:
         try:
@@ -348,8 +350,7 @@ def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
             _write_meta(run_id, **_base, status="error", error=str(e), finished=time.time())
             return
         # record the live pid so a console restart can reconcile this scan if it is orphaned.
-        _write_meta(run_id, **_base, status="running", started=time.time(),
-                    pid=proc.pid, boot_id=_boot_id())
+        _write_meta(run_id, **_base, status="running", pid=proc.pid, boot_id=_boot_id())
         try:
             out, err = proc.communicate(timeout=1800)
         except subprocess.TimeoutExpired:
@@ -498,9 +499,19 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
 
 def reconcile_orphaned_runs() -> int:
     """Called once at console startup: any run still recorded 'running' whose process is GONE is rewritten
-    to 'interrupted' + ``resumable: True`` — so a run orphaned by a console or host restart is never shown
-    as live forever (the "a live engagement I did not start" symptom) and can be resumed. A run whose pid
-    is still alive is left running. Total: a broken meta file is skipped, and it never raises."""
+    to 'interrupted' + ``resumable: True`` — the "a live engagement I did not start" symptom — and can be
+    resumed. A run whose pid is still alive is left running.
+
+    Liveness is decided by ``_pid_alive(pid)`` (+ a ``boot_id`` guard so a pid recycled across a REBOOT is
+    treated as dead). This is deliberately CONSERVATIVE — it never false-interrupts a live run — so two
+    edges are knowingly NOT cleared and can strand a run as 'running':
+      * same-boot pid REUSE: the child died and its pid was recycled by an unrelated live process before
+        this console started (no portable way to tell "my dead run's recycled pid" from "a live process");
+      * an orphan-alive child: only the console pid died (a bare uncaught crash, not a signal to the whole
+        process group) so the scan/engage child is reparented to init and keeps running. Under the shipped
+        systemd deployment (``KillMode=control-group``) the child dies WITH the console, so this is covered
+        on the normal path; a bare ``kill -9 <console>`` is the residual gap.
+    Total: a broken meta file is skipped, and it never raises."""
     n = 0
     try:
         runs = console_dir() / "runs"

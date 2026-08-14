@@ -106,3 +106,31 @@ def test_list_runs_surfaces_a_failed_runs_rc_and_stderr(console_root):
     row = [r for r in rows if r["run_id"] == "r2"][0]
     assert row["rc"] == 2
     assert "boom on line 5" in row["stderr_tail"]
+
+
+def test_launch_scan_does_not_advance_started_across_the_pid_write(console_root, monkeypatch):
+    """LOW-3: `started` is stamped once. The in-thread pid write rewrites the whole meta.json, so a fresh
+    time.time() there would silently move the launch time forward — assert it does not."""
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return ('{"findings": []}', "")   # non-empty stdout → a 'done' scan with a report
+
+    monkeypatch.setattr(actions.subprocess, "Popen", lambda *a, **k: _FakeProc())
+    # run the launch thread INLINE so the pid + terminal writes complete before we read the meta.
+    monkeypatch.setattr(actions.threading, "Thread",
+                        lambda target=None, **k: type("_T", (), {"start": lambda self: target()})())
+    # a monotonic clock that advances on every call: a re-stamp would be a strictly later value.
+    ticks = iter([1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0])
+    monkeypatch.setattr(actions.time, "time", lambda: next(ticks))
+
+    res = actions.launch_scan("http://127.0.0.1:18080/")
+    meta = _meta(console_root, res["run_id"])
+    assert meta["status"] == "done"
+    assert meta["pid"] == 4321
+    # started is the ONE tick taken when _base was built; finished is strictly later — proving the pid
+    # write in between did NOT re-stamp started.
+    assert meta["started"] < meta["finished"]
+    assert meta["started"] == 2000.0

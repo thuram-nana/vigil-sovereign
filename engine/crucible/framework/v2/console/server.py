@@ -808,8 +808,9 @@ def serve(host: str = "127.0.0.1", port: int = 8787,
     srv.allowed_hosts = frozenset(h.strip() for h in allowed_hosts if h and h.strip())
     srv.allowed_origins = frozenset(o.strip().rstrip("/") for o in allowed_origins if o and o.strip())
     srv.token = _resolve_token(token)
-    # Reconcile any run left 'running' by a prior console/host that is now gone → 'interrupted' + resumable,
-    # so a dead run is never shown as a live engagement forever. Total; never blocks startup.
+    # Reconcile any run left 'running' by a prior console/host whose process is now gone → 'interrupted' +
+    # resumable, so a dead run is not shown as a live engagement (conservatively — a same-boot pid reuse or
+    # an orphan-alive child can still strand one; see reconcile_orphaned_runs). Total; never blocks startup.
     try:
         actions.reconcile_orphaned_runs()
     except Exception:  # noqa: BLE001
