@@ -49,7 +49,40 @@ jobs:
         # Only tools that come from apt in seconds. nuclei/httpx/ffuf (Go) and zaproxy (JVM) are
         # deliberately NOT here — they belong to the nightly job, so a slow or flaky third-party
         # download can never block a pull request.
-        run: sudo apt-get update && sudo apt-get install -y nmap hydra nikto
+        run: sudo apt-get update && sudo apt-get install -y nmap hydra libnet-ssleay-perl
+
+      - name: install a nikto the engine can actually drive
+        # NOT apt's. Ubuntu noble ships nikto 1:2.1.5-3.1 — a 2011 release that predates JSON output
+        # entirely: it ACCEPTS `-Format json`, ignores it, and writes plain text. Measured on the first
+        # CI run of this job: the tool ran, exited 0, produced 1449 bytes, and the engine's reader
+        # correctly refused them ("nikto report is not valid JSON"). Kali ships 2.6.0, which is why this
+        # could never fail locally.
+        #
+        # A tool that cannot emit the format the engine reads is not a driveable tool, so the answer is
+        # to provide one that can rather than to drop the row and call the subset proven. Pinned to a
+        # tag: a live-fire whose tool changes underneath it cannot be compared to the run before it.
+        run: |
+          sudo git clone --depth 1 --branch 2.5.0 https://github.com/sullo/nikto /opt/nikto
+          printf '#!/bin/sh\nexec /opt/nikto/program/nikto.pl "$@"\n' | sudo tee /usr/local/bin/nikto >/dev/null
+          sudo chmod +x /usr/local/bin/nikto
+          # PROVE IT CAN DO THE ONE THING THE ROW DEPENDS ON before any row claims to prove anything:
+          # that `-Format json` really produces JSON. This is the check whose absence let 2.1.5 through.
+          nikto -Version | head -2
+          python3 - <<'PY'
+          import json, subprocess, sys, tempfile, os
+          out = os.path.join(tempfile.mkdtemp(), "probe.json")
+          subprocess.run(["nikto", "-h", "http://127.0.0.1:1", "-Format", "json", "-output", out,
+                          "-nointeractive", "-ask", "no", "-maxtime", "5s"],
+                         capture_output=True, timeout=120)
+          if not os.path.exists(out):
+              sys.exit("nikto wrote no report at all — it cannot be driven by the engine")
+          body = open(out, encoding="utf-8", errors="replace").read().strip()
+          try:
+              json.loads(body or "{}")
+          except json.JSONDecodeError as exc:
+              sys.exit(f"nikto -Format json did NOT produce JSON ({exc}); first bytes: {body[:120]!r}")
+          print("nikto emits JSON — the engine's reader can consume it")
+          PY
 
       - name: install the engine's python deps
         run: |
@@ -107,7 +140,16 @@ jobs:
           go-version: "1.23"
 
       - name: install the apt tools
-        run: sudo apt-get update && sudo apt-get install -y nmap hydra nikto sqlmap wapiti
+        # nikto deliberately NOT from apt — see the smoke job: noble's 2.1.5 predates JSON output and
+        # silently writes text, so the engine's reader cannot consume it.
+        run: sudo apt-get update && sudo apt-get install -y nmap hydra sqlmap wapiti libnet-ssleay-perl
+
+      - name: install a nikto the engine can actually drive
+        run: |
+          sudo git clone --depth 1 --branch 2.5.0 https://github.com/sullo/nikto /opt/nikto
+          printf '#!/bin/sh\nexec /opt/nikto/program/nikto.pl "$@"\n' | sudo tee /usr/local/bin/nikto >/dev/null
+          sudo chmod +x /usr/local/bin/nikto
+          nikto -Version | head -2
 
       - name: install the Go tools (pinned)
         # Pinned versions, not @latest: a live-fire whose tool set changes underneath it cannot be
@@ -139,6 +181,19 @@ jobs:
           VIGIL_EGRESS_GUARD_LOG: ${{ github.workspace }}/livefire-egress.log
         run: bash tools/livefire/tool_drivers_livefire.sh
 
-      - name: what left the host during the run
+      - name: assert nothing left the host during the run
         if: always()
-        run: cat "${{ github.workspace }}/livefire-egress.log" || echo "(no guarded spawn recorded)"
+        # Same rule as the smoke job: on a loopback-only range a refused non-loopback send means a tool
+        # tried to leave, and printing that is not the same as failing on it.
+        run: |
+          log="${{ github.workspace }}/livefire-egress.log"
+          if [ ! -s "$log" ]; then
+            echo "::error::no guard log — the egress guard did not run, so nothing was measured"
+            exit 1
+          fi
+          cat "$log"
+          if grep -q 'BLOCKED' "$log"; then
+            echo "::error::a tool attempted to leave the host during the live-fire run"
+            exit 1
+          fi
+          echo "no non-loopback send was attempted by any guarded tool"

@@ -261,6 +261,17 @@ jobs:
         # believed. That is the same failure this step exists to end.
         run: |
           sudo apt-get update && sudo apt-get install -y bubblewrap
+          # UBUNTU 24.04 BLOCKS THE THING BWRAP NEEDS, and this is not theoretical: the first CI run of
+          # this step failed with "bwrap cannot construct namespaces here". Noble ships
+          # kernel.apparmor_restrict_unprivileged_userns=1, which denies unprivileged user namespaces —
+          # exactly what an unprivileged bwrap constructs. Installing the package therefore did NOT make
+          # the real-isolation tests run; they would have skipped precisely as before, while the commit
+          # that added the install claimed they now execute.
+          #
+          # So lift the restriction rather than lower the claim. `|| true` because a runner image that
+          # does not have this knob at all (or already permits it) is fine — the assertion below is what
+          # decides, not this line.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           # Assert with the TEST'S OWN predicate, not a second one written here. A separate bwrap
           # invocation could pass while `_bwrap_works()` returned False (different binds, different
           # flags) and the tests would skip while this step reported success — one more guard that is
