@@ -72,6 +72,7 @@ __all__ = [
     "ToolSpec",
     "HOST_TOOLS",
     "SANDBOX_TOOLS",
+    "binary_resolution_order",
     "SANDBOX_IMAGE",
     "platform_info",
     "install_hint",
@@ -286,6 +287,23 @@ SANDBOX_TOOLS: tuple[ToolSpec, ...] = tuple(
         ("jwt_tool", "JWT analysis / attack."),
     )
 )
+
+
+def binary_resolution_order(tool_name: str) -> tuple[str, ...]:
+    """The canonical order in which a tool's binary is looked up on PATH: its declared
+    ``binary`` first, then each ``alt_binaries`` name — the same order the shadow-aware
+    resolver walks (see ``_resolve`` below, ``for name in (spec.binary, *spec.alt_binaries)``).
+
+    This exists so a tool that installs under several names (ZAP as ``zaproxy`` / ``zap.sh`` /
+    ``zap-cli``; ProjectDiscovery httpx as ``httpx-toolkit``) has ONE source of truth for that
+    order. A consumer that hardcodes its own tuple silently drifts — the eval ZAP adapter did
+    exactly that, resolving ``zap.sh`` before ``zaproxy`` while the production sensor resolved
+    ``zaproxy`` first, so on a host with both they picked different binaries. Returns ``()`` for
+    an unknown tool, so a caller can fall back rather than crash."""
+    spec = next((s for s in (*HOST_TOOLS, *SANDBOX_TOOLS) if s.name == tool_name), None)
+    if spec is None:
+        return ()
+    return (spec.binary, *spec.alt_binaries)
 
 
 # ---------------------------------------------------------------------------------------------------

@@ -60,6 +60,7 @@ from ..intel.models import (
     SourceReliability,
 )
 from ..intel.refs import EntityRef, canonicalize
+from ..tools.registry import binary_resolution_order
 from ..verify.verifier import canonical_bug_class, is_known_bug_class, normalize_bug_class
 from ..worldmodel.models import NodeKind
 
@@ -72,11 +73,12 @@ _WEB_SCANNER_RELIABILITY = SourceReliability(reliability=Reliability.C, credibil
 
 _DEFAULT_TIMEOUT_S = 600
 _TEMPLATE_TIMEOUT_S = 1200
-# Order MATCHES the tool registry's ZAP entry — primary `zaproxy`, then the `zap.sh`/`zap-cli`
+# DERIVED from the tool registry's ZAP entry — primary `zaproxy`, then the `zap.sh`/`zap-cli`
 # alternates — so this sensor resolves the same binary the catalogue reports as installed. It used to
-# list `zap.sh` first, so on a host carrying both names the sensor and the catalogue could pick
-# different programs — the same binary-name drift just fixed for the builders.
-_ZAP_BINARIES: tuple[str, ...] = ("zaproxy", "zap.sh", "zap-cli")
+# hardcode its own tuple (once `zap.sh` first), so on a host carrying both names the sensor and the
+# catalogue could pick different programs. Now there is ONE source of truth for the order; the literal
+# is only a fallback for a registry that somehow lacks the entry, and a test asserts the two agree.
+_ZAP_BINARIES: tuple[str, ...] = binary_resolution_order("zaproxy") or ("zaproxy", "zap.sh", "zap-cli")
 # Deliberately NOT 8080. See the note at the argv below: ZAP binds a proxy listener even for a one-shot
 # scan, and a busy default port turns the whole scan into a silent no-op. Distinct from the live
 # executor's pin so a sensor run and an executor run can never collide with each other either.

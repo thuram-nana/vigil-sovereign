@@ -74,7 +74,7 @@ _EXTRA_RECOGNISED: frozenset = frozenset()
 #   nmap     ← sensors/nmap.py:NmapServiceSensor           (shutil.which("nmap"))
 #   nuclei   ← sensors/web_scanner.py:NucleiWebSensor / NucleiTemplateSensor (binary="nuclei")
 #   tshark   ← sensors/tshark.py:TsharkFlowSensor          (shutil.which("tshark"))
-#   zaproxy  ← sensors/web_scanner.py:ZapWebSensor         (_ZAP_BINARIES = zap.sh|zap-cli|zaproxy)
+#   zaproxy  ← sensors/web_scanner.py:ZapWebSensor         (_ZAP_BINARIES = zaproxy|zap.sh|zap-cli)
 # NOT here: sensors/fuzz.py spawns an OPERATOR-SUPPLIED harness under an allowlisted root — that is
 # the operator's binary, not a named host tool, so it names nothing in the arsenal.
 _SENSOR_DRIVEN_TOOLS = frozenset({"nmap", "nuclei", "tshark", "zaproxy"})
