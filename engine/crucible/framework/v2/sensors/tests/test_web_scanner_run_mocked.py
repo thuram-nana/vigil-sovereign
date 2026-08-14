@@ -94,6 +94,11 @@ def test_nuclei_run_packages_jsonl_and_builds_the_fixed_argv(monkeypatch: pytest
     assert argv[0] == "/usr/bin/nuclei"
     assert "-u" in argv and argv[argv.index("-u") + 1] == TARGET   # single scoped URL as -u's value
     assert "-jsonl" in argv and "-silent" in argv
+    # nuclei contacts ProjectDiscovery's update host on startup by DEFAULT. This sensor is one of the
+    # nuclei routes into the engine and was the one missing the suppression, so a scan here left the
+    # host on every run — a no-egress breach with no gate to catch it, because it is the tool's own
+    # default rather than anything the argv asked for. Pinned so a future edit cannot drop it silently.
+    assert "-disable-update-check" in argv, "nuclei web sensor egresses a version check on every run"
 
 
 def test_nuclei_run_result_flows_through_normalize_into_leads(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -166,6 +171,8 @@ def test_nuclei_template_run_passes_templates_and_normalizes(
     assert res.ok and res.output["jsonl"] == _NUCLEI_JSONL
     argv = calls[0]
     assert "-t" in argv and argv[argv.index("-t") + 1] == str(templates)   # corpus path as -t's value
+    # The third nuclei route into the engine — same startup update check, same no-egress reason.
+    assert "-disable-update-check" in argv, "nuclei template runner egresses a version check on every run"
     world = WorldModel()
     IntelIngest(world, engagement_slug="alpha").ingest(sensor.normalize(res, ctx, seq=1), seq=1)
     assert world.has_node("endpoint:http://127.0.0.1:9/reflect?q=payload")
@@ -177,12 +184,27 @@ def test_nuclei_template_run_passes_templates_and_normalizes(
 
 
 def test_zap_run_reads_the_written_report_and_normalizes(monkeypatch: pytest.MonkeyPatch) -> None:
-    # ZAP writes its JSON report to the -quickout path; the mock plays the tool by writing
-    # exactly that file, so run()'s report-read output-handling is exercised end to end.
+    # ZAP is driven by an automation plan, and the plan's report job names the artifact — so the mock
+    # READS THE PLAN to find out where to write, exactly as ZAP does. A mock that guessed the path
+    # instead would keep passing even if the plan named a different file, which is the one break in
+    # this seam worth catching. It also asserts the property the scan hangs on: the active scan is
+    # aimed at the CONTEXT (every URL the crawl found), never at a single URL. A seed-node scan sends
+    # ZERO parameter requests and returns a report identical to a clean target's — measured, and the
+    # reason this sensor no longer uses `-quickurl`.
     monkeypatch.setattr(ws_mod.shutil, "which", lambda _b: "/usr/bin/zap.sh")
 
     def _run(argv, **_kw):
-        out_path = Path(argv[argv.index("-quickout") + 1])
+        assert "-quickurl" not in argv, "the quick scan active-scans only the node it is seeded with"
+        plan = Path(argv[argv.index("-autorun") + 1]).read_text(encoding="utf-8")
+        assert plan.index("- type: spider") < plan.index("- type: activeScan"), (
+            "an active scan that runs before the crawl has only its seed node to attack")
+        active = plan.split("- type: activeScan", 1)[1].split("  - type:", 1)[0]
+        assert "context:" in active and "url:" not in active, (
+            "the active scan must take the CONTEXT, not one URL")
+        assert "failOnError: true" in plan, "an unreachable target must fail, not report clean"
+        report = dict(line.strip().split(": ", 1) for line
+                      in plan.split("- type: report", 1)[1].splitlines() if ": " in line)
+        out_path = Path(report["reportDir"].strip("'")) / report["reportFile"].strip("'")
         out_path.write_text(_ZAP_JSON, encoding="utf-8")
         return _FakeProc(stdout="", returncode=0)
 

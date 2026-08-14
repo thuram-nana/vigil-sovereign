@@ -8,13 +8,28 @@ that ``tools.registry`` roster keys, the Strix ``skills/tooling/<name>.md`` play
   * install + live status + binary + version + install_hint  ← :func:`tools.registry.probe_tools`
   * CLI-usage knowledge ("already knows how to use it")       ← a Strix ``tooling/<name>.md`` skill playbook
   * a machine-checkable "we can drive its CLI ourselves"      ← a typed argv builder in the live executor
+  * the engine's OWN drivers — the code that already spawns   ← a gated ``sensors`` sensor, an
+    the binary as part of an engagement                          ``analysis.analyzers`` analyzer, or the
+                                                                 ``scanner.browser`` headless-browser driver
 
 THE ADMISSION GATE (the operator's rule — "only globally-recognised tools it can fully control via CLI or
 background"): a tool is ADMITTED to the arsenal iff it is ``global_recognition`` AND has a ``control_surface``
-in {cli, background}. A tool with a binary but no usage knowledge (no skill playbook AND no typed builder) is
-REFUSED with an honest reason — the system will not claim to control a tool it has no way to drive. This is
-advisory metadata only: it ADVISES what may be adopted/run; every actual execution still passes the WARDEN
-gate, and a finding is a FACT only via a fired oracle. Read-only + pure (safe to call on every request).
+in :data:`_ADMITTABLE_SURFACES`. A tool with a binary but no way to drive it at all (no skill playbook, no
+typed builder, and no engine driver) is REFUSED with an honest reason — the system will not claim to control
+a tool it has no way to drive. This is advisory metadata only: it ADVISES what may be adopted/run; every
+actual execution still passes the WARDEN gate, and a finding is a FACT only via a fired oracle. Read-only +
+pure (safe to call on every request).
+
+WHAT IS *NOT* COUNTED AS A CONTROL SURFACE (the honest boundary, so the gate keeps its teeth):
+
+  * A PARSER for a tool's report (``imports.parsers``, ``eval.adapters_ext.parse_*``) is not control —
+    reading someone else's output proves nothing about being able to produce it.
+  * The offline BENCHMARK harness (``eval.adapters`` / ``eval.benchmark_run``) does spawn incumbents
+    (nikto / wapiti / sqlmap / …) to SCORE CRUCIBLE against them; that is a measurement rig, not the
+    engagement pipeline — it is not WARDEN/scope-gated, is not exposed to the agent as a tool, and is
+    skippable with ``--incumbent-free``. Counting it would let the screen claim an engagement capability
+    that does not exist, so it is deliberately excluded and those tools stay REFUSED until a real driver
+    (playbook / typed builder / sensor) is BUILT for them.
 
 Two-env boundary: OFFENSE-side (imports the framework roster; the Strix catalog is imported LAZILY so this
 module stays import-clean when Strix is absent — then skill-doc knowledge simply reads empty, honestly).
@@ -28,11 +43,65 @@ from .registry import probe_tools
 # The tools the live executor can turn into a validated, gated argv itself (a STRONG "control via CLI"
 # proof — VIGIL builds + gates the command). Duplicated from integration.live.executor._BUILDERS to avoid
 # a backwards crucible→integration import; a drift-guard test asserts this stays equal to that source.
-_TYPED_BUILDER_TOOLS = frozenset({"ffuf", "httpx", "hydra", "nmap", "nuclei", "sqlmap"})
+_TYPED_BUILDER_TOOLS = frozenset({"ffuf", "httpx", "hydra", "nikto", "nmap", "nuclei",
+                                  "sqlmap", "wapiti", "zaproxy"})
 
 # Globally-recognised tools NOT in the host roster and without a Strix skill doc (net-new curated metadata;
 # empty today — the curated host roster + the maintained skill playbooks already are the recognition list).
 _EXTRA_RECOGNISED: frozenset = frozenset()
+
+# ---------------------------------------------------------------------------------------------------
+# the engine's OWN drivers — control surfaces that exist in code, not in a playbook
+# ---------------------------------------------------------------------------------------------------
+# A playbook and a typed builder are not the only ways this engine drives a binary: parts of CRUCIBLE
+# resolve and spawn tools THEMSELVES. Those tools are genuinely controllable, and reporting them as
+# "no CLI-usage knowledge" was a REPORTING defect (the operator saw six installed tools refused that
+# the engine already runs). The sets below name them, in ROSTER-KEY space (``tools.registry`` names,
+# so an alt binary like ``zap.sh`` / ``chromium-browser`` folds onto its one roster tool).
+#
+# Each is a small explicit MIRROR rather than an import, for the same reason ``_TYPED_BUILDER_TOOLS``
+# mirrors the executor instead of importing it (that one avoids a backwards crucible→integration
+# import): ``tools.profile`` is a pure, import-light, read-only metadata module called on every console
+# request, and importing ``sensors`` / ``analysis`` / ``scanner`` here would drag the whole observation,
+# world-model and subprocess stack — plus an import cycle risk — into a function that needs only NAMES.
+# A drift-guard test per set parses the REAL source and asserts the mirror equals what that source
+# actually drives (and that each name is in the host roster), so a tool added to a sensor/analyzer/the
+# browser resolver and forgotten here FAILS THE BUILD instead of silently rotting.
+
+# Mirrors: sensors/*.py — the binaries the gated sensors resolve + spawn (registered in
+# ``sensors.builtin.register_builtin_sensors``; registration is not invocation — each still passes
+# run_sensor's kill-switch/entitlement/scope/egress gate).
+#   nmap     ← sensors/nmap.py:NmapServiceSensor           (shutil.which("nmap"))
+#   nuclei   ← sensors/web_scanner.py:NucleiWebSensor / NucleiTemplateSensor (binary="nuclei")
+#   tshark   ← sensors/tshark.py:TsharkFlowSensor          (shutil.which("tshark"))
+#   zaproxy  ← sensors/web_scanner.py:ZapWebSensor         (_ZAP_BINARIES = zap.sh|zap-cli|zaproxy)
+# NOT here: sensors/fuzz.py spawns an OPERATOR-SUPPLIED harness under an allowlisted root — that is
+# the operator's binary, not a named host tool, so it names nothing in the arsenal.
+_SENSOR_DRIVEN_TOOLS = frozenset({"nmap", "nuclei", "tshark", "zaproxy"})
+
+# Mirrors: analysis/analyzers/*.py — the SAST backends the analysis orchestrator runs when present.
+#   semgrep  ← analyzers/external.py:SemgrepAnalyzer       (shutil.which("semgrep"))
+#   joern    ← analyzers/joern.py:JoernAnalyzer            (CRUCIBLE_JOERN_HOME or shutil.which("joern"))
+_ANALYZER_DRIVEN_TOOLS = frozenset({"semgrep", "joern"})
+
+# Mirrors: scanner/browser.py:_BROWSERS — the headless browser the DOM-XSS confirmation launches
+# (``scanner/browser.py`` is the sole resolver; ``scanner/cdp.py`` and ``scanner/browser_xss.py``
+# both go through its ``find_browser``). All five alt binaries fold onto the roster's ``chromium``.
+_BROWSER_DRIVEN_TOOLS = frozenset({"chromium"})
+
+# How a tool is driven, most-direct first. "cli" keeps its original meaning EXACTLY — the model reads a
+# CLI playbook, or the live executor builds a validated argv — so nothing that was "cli" changes. The
+# engine-driver labels are deliberately distinct: a tool run by a sensor is NOT a model reading a
+# playbook, and the operator deserves to see which of the two they have.
+_SURFACE_CLI = "cli"
+_SURFACE_SENSOR = "sensor"
+_SURFACE_ANALYZER = "analyzer"
+_SURFACE_BROWSER = "browser"
+
+# The CLOSED allowlist of surfaces that admit. Closed on purpose: a future label that is not listed
+# here refuses, so "give it a surface string" can never become "admit everything".
+_ADMITTABLE_SURFACES = frozenset({_SURFACE_CLI, "background", _SURFACE_SENSOR, _SURFACE_ANALYZER,
+                                  _SURFACE_BROWSER})
 
 
 @dataclass(frozen=True)
@@ -55,7 +124,12 @@ class ToolProfile:
     # consciousness signals
     has_skill_doc: bool = False        # a Strix tooling/<name>.md CLI playbook exists ("knows how to use it")
     has_typed_builder: bool = False    # the live executor can build a validated, gated argv for it
-    control_surface: str = ""          # "cli" | "background" | "" (none → refused)
+    has_sensor: bool = False           # a gated sensor resolves + spawns it (sensors/*.py)
+    has_analyzer: bool = False         # an analysis backend resolves + spawns it (analysis/analyzers/*.py)
+    has_browser_driver: bool = False   # the scanner's headless-browser driver launches it (scanner/browser.py)
+    # HOW it is driven — "cli" (playbook or typed argv) | "sensor" | "analyzer" | "browser" |
+    # "background" | "" (nothing drives it → refused). See _ADMITTABLE_SURFACES.
+    control_surface: str = ""
     global_recognition: bool = False
     admitted: bool = False
     admit_reason: str = ""
@@ -74,21 +148,36 @@ def _skill_tooling_names() -> set:
         return set()
 
 
-def _control_surface(*, has_skill_doc: bool, has_typed_builder: bool) -> str:
-    """How we can drive the tool. A CLI playbook (the model knows the CLI) OR a typed argv builder (we build
-    + gate the command) is a genuine CLI control surface. Neither ⇒ "" (no way to control it → refused)."""
+def _control_surface(*, has_skill_doc: bool, has_typed_builder: bool,
+                     has_sensor: bool = False, has_analyzer: bool = False,
+                     has_browser_driver: bool = False) -> str:
+    """How we can drive the tool, reported as the MOST DIRECT surface we have.
+
+    "cli" is unchanged: a CLI playbook (the model knows the CLI) OR a typed argv builder (we build + gate
+    the command). It keeps precedence, so every tool that reported "cli" before still does. Otherwise the
+    engine's own driver is named honestly — a sensor / an analyzer / the headless browser is real control
+    (that code resolves the binary and spawns it), but it is NOT a model reading a playbook, and the
+    screen should say which. Nothing at all ⇒ "" (no way to drive it → refused)."""
     if has_skill_doc or has_typed_builder:
-        return "cli"
+        return _SURFACE_CLI
+    if has_sensor:
+        return _SURFACE_SENSOR
+    if has_analyzer:
+        return _SURFACE_ANALYZER
+    if has_browser_driver:
+        return _SURFACE_BROWSER
     return ""
 
 
 def _admit(global_recognition: bool, control_surface: str) -> tuple[bool, str]:
-    """The gate: globally recognised AND a real cli|background control surface. Fail-closed + honest reason."""
+    """The gate: globally recognised AND a real control surface from the CLOSED _ADMITTABLE_SURFACES
+    allowlist. Fail-closed + honest reason (an unknown surface label refuses, it does not admit)."""
     if not global_recognition:
         return False, "refused: not a globally-recognised tool (arsenal is curated, not arbitrary)"
-    if control_surface not in ("cli", "background"):
-        return False, ("refused: no CLI-usage knowledge — add a skill playbook or a typed argv builder "
-                       "before this tool can be driven")
+    if control_surface not in _ADMITTABLE_SURFACES:
+        return False, ("refused: no CLI-usage knowledge and nothing in the engine drives it — add a skill "
+                       "playbook, a typed argv builder, or a sensor/analyzer driver before this tool can "
+                       "be driven")
     return True, f"admitted ({control_surface})"
 
 
@@ -105,7 +194,15 @@ def build_profiles() -> dict:
         in_roster = name in roster
         has_skill = name in skill_docs
         has_builder = name in _TYPED_BUILDER_TOOLS
-        surface = _control_surface(has_skill_doc=has_skill, has_typed_builder=has_builder)
+        has_sensor = name in _SENSOR_DRIVEN_TOOLS
+        has_analyzer = name in _ANALYZER_DRIVEN_TOOLS
+        has_browser = name in _BROWSER_DRIVEN_TOOLS
+        surface = _control_surface(has_skill_doc=has_skill, has_typed_builder=has_builder,
+                                   has_sensor=has_sensor, has_analyzer=has_analyzer,
+                                   has_browser_driver=has_browser)
+        # Recognition is left exactly as it was (the curated roster / playbook list). Every engine-driven
+        # tool is already a roster entry, and the drift guards ASSERT that — a driven binary missing from
+        # the roster fails the build rather than quietly widening what counts as "recognised" here.
         recognised = in_roster or has_skill or name in _EXTRA_RECOGNISED
         admitted, reason = _admit(recognised, surface)
         profiles.append(asdict(ToolProfile(
@@ -122,6 +219,9 @@ def build_profiles() -> dict:
             in_host_roster=in_roster,
             has_skill_doc=has_skill,
             has_typed_builder=has_builder,
+            has_sensor=has_sensor,
+            has_analyzer=has_analyzer,
+            has_browser_driver=has_browser,
             control_surface=surface,
             global_recognition=recognised,
             admitted=admitted,

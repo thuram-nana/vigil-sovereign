@@ -72,12 +72,110 @@ _WEB_SCANNER_RELIABILITY = SourceReliability(reliability=Reliability.C, credibil
 
 _DEFAULT_TIMEOUT_S = 600
 _TEMPLATE_TIMEOUT_S = 1200
-_ZAP_BINARIES: tuple[str, ...] = ("zap.sh", "zap-cli", "zaproxy")
+# Order MATCHES the tool registry's ZAP entry — primary `zaproxy`, then the `zap.sh`/`zap-cli`
+# alternates — so this sensor resolves the same binary the catalogue reports as installed. It used to
+# list `zap.sh` first, so on a host carrying both names the sensor and the catalogue could pick
+# different programs — the same binary-name drift just fixed for the builders.
+_ZAP_BINARIES: tuple[str, ...] = ("zaproxy", "zap.sh", "zap-cli")
+# Deliberately NOT 8080. See the note at the argv below: ZAP binds a proxy listener even for a one-shot
+# scan, and a busy default port turns the whole scan into a silent no-op. Distinct from the live
+# executor's pin so a sensor run and an executor run can never collide with each other either.
+_ZAP_SENSOR_PROXY_PORT = 18098
+# The crawl and the active scan each get this many minutes, and the passive drain one more, so a run
+# that spends its whole budget still finishes inside `_DEFAULT_TIMEOUT_S` (3 + 1 + 3 minutes plus JVM
+# start ≈ 7.5 of the 10 available). The quick scan this replaced had NO in-tool bound at all: on a
+# target big enough to outlast the subprocess timeout it was SIGKILLed before the report was written,
+# and the sensor reported "no report" for a scan that had been working the whole time.
+_ZAP_SENSOR_SCAN_MINUTES = 3
+# ZAP's DOM-XSS active rule drives a REAL FIREFOX through the selenium add-on, and Firefox resolves
+# `firefox.settings.services.mozilla.com` on startup for its Remote Settings sync — DNS leaving the host
+# for a name that is not the target. Neither `-silent` (the callhome add-on) nor `-notel` (telemetry)
+# touches it. Pinning both browser binaries at a path that CANNOT exist is the mechanism rather than
+# naming each browser-driven rule, because rules are a moving set and a browser binary is the one thing
+# all of them need. Measured in the live executor's own namespace capture: 16 such DNS queries in one
+# 41-second scan without this, zero with it, and the report keeps its Cross Site Scripting alert; the
+# scan loses only the DOM-XSS rule, which cannot run under a no-egress charter at all. Mirrors
+# `live.executor._ZAP_NO_BROWSER` — this sensor drives the same tool with the same default policy, so it
+# had the same egress path.
+_ZAP_NO_BROWSER: tuple[str, ...] = (
+    "-config", "selenium.firefoxBinary=/nonexistent/vigil-no-browser",
+    "-config", "selenium.chromeBinary=/nonexistent/vigil-no-browser",
+)
 
 
 # ---------------------------------------------------------------------------
 # target validation — the AUTHORIZATION-CRITICAL guard (mirrors nmap's single-host rule)
 # ---------------------------------------------------------------------------
+
+
+def _zap_plan_safe(value: str, *, forbidden: str = "'\"\\") -> bool:
+    """True when ``value`` can be written into a ZAP automation plan verbatim inside single quotes.
+
+    ``'`` ends a single-quoted YAML scalar; ``"`` and ``\\`` are what a DOUBLE-quoted one would
+    reinterpret, and are refused too so the plan means the same thing under either quoting. Non-ASCII
+    and control characters are refused because a YAML reader's handling of them is not worth depending
+    on. Refusing is the whole point: a plan is a file, which is a quoting surface an argv never was."""
+    return (isinstance(value, str) and bool(value)
+            and all(0x20 <= ord(c) <= 0x7e for c in value)
+            and not any(c in value for c in forbidden))
+
+
+def _zap_plan(target: str, report_dir: str, report_file: str,
+              minutes: int = _ZAP_SENSOR_SCAN_MINUTES) -> str | None:
+    """The ZAP automation plan for one bounded scan of ``target``, or None (⇒ the sensor refuses).
+
+    The context is the target's ORIGIN, rebuilt from ``urlsplit``'s parsed parts rather than copied out
+    of the caller's string — so any userinfo in the target stays out of the plan — and the crawl STARTS
+    at the target itself, so a URL nothing links to is still reached. The active-scan job then names
+    that CONTEXT rather than a URL: that is the fix, because a job aimed at one URL is the seed-node
+    scan whose parameter rules sent zero requests."""
+    parts = urlsplit(target)
+    host = parts.hostname or ""
+    netloc = f"[{host}]" if ":" in host else host
+    try:
+        if parts.port:
+            netloc = f"{netloc}:{parts.port}"
+    except ValueError:
+        return None
+    origin = f"{parts.scheme}://{netloc}/"
+    if not (_zap_plan_safe(origin) and _zap_plan_safe(target)
+            and _zap_plan_safe(report_dir, forbidden="'\"\\[]{}")
+            and _zap_plan_safe(report_file, forbidden="'\"\\[]{}")):
+        return None
+    return (
+        "# CRUCIBLE-generated ZAP automation plan for one zap_web sensor run.\n"
+        "env:\n"
+        "  contexts:\n"
+        "    - name: 'crucible-target'\n"
+        "      urls:\n"
+        f"        - '{origin}'\n"
+        "      includePaths:\n"
+        f"        - '\\Q{origin}\\E.*'\n"
+        "  parameters:\n"
+        "    failOnError: true\n"          # an unreachable target aborts the plan; no clean-looking report
+        "    failOnWarning: false\n"
+        "    continueOnFailure: false\n"
+        "    progressToStdout: true\n"
+        "jobs:\n"
+        "  - type: spider\n"
+        "    parameters:\n"
+        "      context: 'crucible-target'\n"
+        f"      url: '{target}'\n"
+        f"      maxDuration: {minutes}\n"
+        "  - type: passiveScan-wait\n"
+        "    parameters:\n"
+        "      maxDuration: 1\n"
+        "  - type: activeScan\n"
+        "    parameters:\n"
+        "      context: 'crucible-target'\n"   # NOT `url` — every URL the crawl found, not one node
+        f"      maxScanDurationInMins: {minutes}\n"
+        f"      maxRuleDurationInMins: {max(1, minutes // 2)}\n"
+        "  - type: report\n"
+        "    parameters:\n"
+        "      template: 'traditional-json'\n"
+        f"      reportDir: '{report_dir}'\n"
+        f"      reportFile: '{report_file}'\n"
+    )
 
 
 def _is_safe_url_target(target: str) -> bool:
@@ -365,7 +463,12 @@ class NucleiWebSensor:
         binary = shutil.which(self._binary)
         if binary is None:
             return ToolResult(ok=False, note="nuclei not on PATH (install to enable web template scanning)")
-        argv = [binary, "-u", target, "-jsonl", "-silent", *self._extra_args]
+        # `-disable-update-check`: nuclei phones ProjectDiscovery's update host on startup by default.
+        # The live-executor nuclei builder already suppresses it; this sensor is nuclei's SECOND route
+        # into the engine and was missing it, so a template scan here contacted an outside host on
+        # every run — a breach of the no-egress limit that no gate would catch, because it is the
+        # tool's own default rather than anything the argv asked for.
+        argv = [binary, "-u", target, "-jsonl", "-silent", "-disable-update-check", *self._extra_args]
         try:
             proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; target is -u's value, guarded above
                 argv, capture_output=True, text=True, timeout=self._timeout_s, check=False)
@@ -417,7 +520,10 @@ class NucleiTemplateSensor:
         binary = shutil.which(self._binary)
         if binary is None:
             return ToolResult(ok=False, note="nuclei not on PATH (install to run the template corpus)")
-        argv = [binary, "-u", target, "-t", str(tpl), "-jsonl", "-silent"]
+        # `-disable-update-check`: same no-egress reason as the sensor above — nuclei's default
+        # startup update check contacts an outside host, and the template runner is a third route
+        # into the engine that must suppress it too.
+        argv = [binary, "-u", target, "-t", str(tpl), "-jsonl", "-silent", "-disable-update-check"]
         try:
             proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; target/templates are flag values, guarded
                 argv, capture_output=True, text=True, timeout=self._timeout_s, check=False)
@@ -475,8 +581,24 @@ class NucleiResultsImportSensor:
 class ZapWebSensor:
     """Drive OWASP ZAP (gated) against a single in-scope URL and mint its alerts as web leads. args:
     ``{"target": "https://app.example.com"}``. Active (Tier-2, ``ACTIVE_RECON``), scope-gated on
-    ``args['target']``. ZAP writes a JSON report to a temp file (``-quickout``); a missing report ->
-    a failed ToolResult."""
+    ``args['target']``. ZAP is driven by an AUTOMATION PLAN this sensor writes (``-autorun``): crawl,
+    drain the passive scanner, actively scan EVERY URL the crawl found, then write the traditional JSON
+    report ``parse_zap`` reads. A missing report -> a failed ToolResult.
+
+    IT USED TO DRIVE THE QUICK SCAN (``-quickurl``), AND THAT SCAN COULD NOT FIND AN INJECTION FROM A
+    BARE HOST. ZAP's quickstart add-on hands its active scanner the single sites-tree node the URL
+    resolved to (``AttackThread.run``; its ``setRecurse(true)`` is inert because that node is a leaf),
+    so the scanner logged ``Scanning 1 node(s)`` and every parameter-level rule sent zero requests —
+    measured against a loopback target whose ``/search?q=`` is reflected AND injectable, with the
+    spider's own fetch of that URL sitting in the same run. The sensor then minted no lead and told
+    the operator the scan was clean. The automation framework's ``activeScan`` job takes a CONTEXT, so
+    it attacks everything the crawl reached: same target, same tool, reflected-XSS and SQL-injection
+    leads on ``q`` minted into the world model, where the quick scan minted no injection lead at all.
+
+    Two consequences worth stating rather than discovering later: the plan is bounded in-tool (the
+    quick scan was not, so a real target could outlast ``timeout_s`` and be SIGKILLed with no report at
+    all), and a job that cannot reach the target ABORTS the plan (``failOnError``) so an unreachable
+    target produces a failure with a reason instead of an empty, perfectly clean-looking report."""
 
     name = "zap_web"
     tier = "T2"
@@ -506,18 +628,52 @@ class ZapWebSensor:
             return ToolResult(ok=False, note="ZAP not on PATH (install zap.sh/zaproxy to enable DAST scanning)")
         with tempfile.TemporaryDirectory() as tmp:
             report = Path(tmp) / "zap-report.json"
-            argv = [binary, "-cmd", "-quickurl", target, "-quickout", str(report)]
+            plan_text = _zap_plan(target, str(report.parent), report.name)
+            if plan_text is None:
+                return ToolResult(ok=False, note=(
+                    "zap_web target cannot be written into a ZAP automation plan (a quote, backslash "
+                    "or non-printable character in its path/query) — refusing rather than emitting a "
+                    "plan whose meaning depends on how a YAML reader unescapes it"))
+            plan = Path(tmp) / "vigil-zap-plan.yaml"
             try:
-                subprocess.run(  # noqa: S603 - fixed argv, no shell; target is -quickurl's value, guarded above
+                plan.write_text(plan_text, encoding="utf-8")
+            except OSError as e:
+                return ToolResult(ok=False, note=f"zap could not write its automation plan: {e}")
+            # ZAP starts its MAIN PROXY LISTENER even for a one-shot headless scan, and it defaults
+            # to port 8080 — very often already taken on an operator's own machine. When it is, ZAP
+            # exits non-zero after ~10 seconds with "Failed to start the main proxy: Address already in
+            # use" and writes no report, so this sensor reported "no report written" and the operator
+            # was told the scan found nothing rather than that it never ran. Pin the listener high and
+            # out of the way. Also pin ZAP's home inside the temp directory: without `-dir` it writes
+            # into the operator's own `~/.ZAP`, leaving state behind from a read-only probe.
+            argv = [binary, "-cmd", "-silent", "-notel",
+                    "-dir", str(Path(tmp) / "zap-home"),
+                    "-config", f"network.localServers.mainProxy.port={_ZAP_SENSOR_PROXY_PORT}",
+                    *_ZAP_NO_BROWSER,
+                    "-autorun", str(plan)]
+            try:
+                subprocess.run(  # noqa: S603 - fixed argv, no shell; the target reaches ZAP only through
+                    # the plan this sensor wrote, and only after _is_safe_url_target and _zap_plan_safe
                     argv, capture_output=True, text=True, timeout=self._timeout_s, check=False)
             except subprocess.TimeoutExpired:
                 return ToolResult(ok=False, note=f"zap timed out after {self._timeout_s}s")
             except OSError as e:
                 return ToolResult(ok=False, note=f"zap failed to launch: {e}")
-            try:
-                output = report.read_text(encoding="utf-8")
-            except OSError as e:
-                return ToolResult(ok=False, note=f"zap produced no JSON report at {report}: {e}")
+            # ZAP's report job appends `.json` to a `reportFile` that lacks it and leaves one that has
+            # it alone (measured, zap-2.17.0). Both are accepted so a change in that behaviour cannot
+            # leave the artifact one character away from where this reads and report "no report".
+            output = None
+            for candidate in (report, report.with_name(report.name + ".json")):
+                try:
+                    output = candidate.read_text(encoding="utf-8")
+                    break
+                except OSError:
+                    continue
+            if output is None:
+                return ToolResult(ok=False, note=(
+                    f"zap produced no JSON report at {report} — the plan aborted before the report job "
+                    f"(an unreachable target, a failed job, or a scan cut short). This is a FAILED "
+                    f"scan, not a clean one."))
         return ToolResult(ok=True, summary=f"zap scanned {target}", output={"json": output, "target": target})
 
     def normalize(self, result: ToolResult, ctx: ToolContext, *, seq: int) -> list[Observation]:

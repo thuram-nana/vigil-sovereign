@@ -64,6 +64,17 @@ DEFAULT_TOOL_VIEW: dict[str, list[str]] = {
     "sqlmap": ["exploitation", "post_exploitation"],
     "hydra": ["exploitation", "post_exploitation"],
     "curl": ["informational", "exploitation"],
+    # Web-application scanners driven by typed argv builders. Registering them HERE is what makes those
+    # builders reachable at all: this manifest is the fail-closed phase gate, so a builder that exists but
+    # is unlisted is denied in every phase — the tools screen would report the tool "controllable" while
+    # the engine refused every single call. That is the same false claim of control the admission gate
+    # exists to prevent, just moved one layer down, and it is how these three shipped unreachable.
+    # They are informational/exploitation scanners, not post-exploitation tooling. Each classifies A2 (no
+    # danger token), so under the A1 offense ceiling the conjunctive gate QUEUES them for owner approval:
+    # registering a tool here grants REACHABILITY, never autonomous fire.
+    "nikto": ["informational", "exploitation"],
+    "wapiti": ["informational", "exploitation"],
+    "zaproxy": ["informational", "exploitation"],
     # T1: the governed LOCAL terminal (executor.execute_terminal). Non-network, non-destructive, safe by
     # CONSTRUCTION (a read/inspect-only allowlist), so it is registered for the phase gate but is NOT in the
     # destructive view. It classifies A2 (no danger token) → under the A1 offense ceiling the conjunctive

@@ -12,7 +12,7 @@ This is the SINGLE SOURCE OF TRUTH shared by two consumers so they can never dri
 
 Only the OFFENSE side ever imports this module — the tools ARE the offense engine's, and
 the sovereign process must never import ``framework`` (the P5 two-env boundary). It is
-import-clean (stdlib only: ``os``/``sys``/``shutil``/``subprocess``/``re``) so importing
+import-clean (stdlib only: ``os``/``sys``/``shutil``/``subprocess``/``re``/``concurrent.futures``) so importing
 it is cheap and never pulls the scan/engage hot path.
 
 Doctrine (why every status here is REAL, never invented):
@@ -58,11 +58,13 @@ context only and are never probed on the host or installed by bootstrap.
 
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from typing import Optional
 
@@ -105,6 +107,13 @@ class ToolSpec:
                       degrades cleanly without (analysis backends, sensors, import adapters).
     ``version_args``  argv passed to the binary for a cheap version banner; ``None`` disables
                       the version probe (heavy/GUI tools we must not launch).
+    ``version_timeout_s``
+                      per-tool override of ``_VERSION_TIMEOUT_S`` for the banner probe. ``None``
+                      keeps the 2 s default, which is right for a native binary that prints a
+                      version and exits. A JVM tool does not: Joern's banner costs a full JVM +
+                      REPL start (~11 s measured), so at 2 s it timed out and the tool reported
+                      installed with NO version. Raised per-spec rather than globally on purpose
+                      — the default must stay tight so one slow tool cannot stall the roster.
     ``sandbox``       informational: provided by the Strix sandbox image, not the host.
     """
 
@@ -116,6 +125,7 @@ class ToolSpec:
     manual: str = ""
     optional: bool = True
     version_args: Optional[tuple[str, ...]] = ("--version",)
+    version_timeout_s: Optional[float] = None
     alt_binaries: tuple[str, ...] = ()
     sandbox: bool = False
     # ``wrong_markers`` — case-insensitive substrings that, if they appear in the version banner of the
@@ -146,11 +156,17 @@ HOST_TOOLS: tuple[ToolSpec, ...] = (
         purpose="Fast HTTP probing / tech fingerprint (live executor). ProjectDiscovery httpx "
                 "(the CLI, NOT the same-named Python HTTP client).",
         apt="httpx-toolkit", version_args=("-version",),
+        # Kali's `httpx-toolkit` package installs the REAL ProjectDiscovery binary under that name,
+        # precisely because the `httpx` name is taken by the Python HTTP client. Listing it here lets
+        # the shadow-aware resolver step over the impostor and find the genuine tool already present,
+        # instead of declaring a required tool unusable on a correctly-provisioned machine.
+        alt_binaries=("httpx-toolkit",),
         # a same-named Python `httpx` HTTP-client CLI commonly shadows ProjectDiscovery's on PATH; its
         # banner is one of these (ProjectDiscovery's `-version` prints a clean version, never these).
         wrong_markers=("command line client could not run", "options] url", "no such option",
                        "pip install"),
-        manual="Kali: sudo apt-get install -y httpx-toolkit  |  else: "
+        manual="Kali: sudo apt-get install -y httpx-toolkit (installs as `httpx-toolkit`, which is "
+               "found automatically)  |  else: "
                "go install github.com/projectdiscovery/httpx/cmd/httpx@latest  "
                "(if a Python 'httpx' shadows it, ensure the real one precedes it on PATH)",
     ),
@@ -190,6 +206,9 @@ HOST_TOOLS: tuple[ToolSpec, ...] = (
         name="joern", binary="joern", optional=True,
         purpose="Code-property-graph inter-procedural dataflow (deep source review).",
         version_args=("--version",),  # no apt/pip — installed out of band
+        # Joern's banner starts a JVM and its Scala REPL: ~11 s measured cold on this host,
+        # so the 2 s default timed it out and the roster showed it installed with no version.
+        version_timeout_s=60.0,
         manual="Install from https://joern.io (or set CRUCIBLE_JOERN_HOME to its dir).",
     ),
     # -- sensors / browser: read-only observation surfaces (optional=True) --------------------------
@@ -374,12 +393,41 @@ def _read_install_state(path: Optional[str]) -> dict[str, str]:
 
 def _resolve(spec: ToolSpec) -> Optional[str]:
     """Resolve the tool on PATH: the primary binary first, then each alternate name (the engine's
-    own resolution order). Returns the absolute path of the first hit, or ``None``."""
+    own resolution order). Returns the absolute path of the first USABLE hit, or ``None``.
+
+    Shadow-aware. This used to return the first PATH hit and stop, which made ``alt_binaries``
+    useless for exactly the case it was needed: on Kali the real ProjectDiscovery ``httpx`` installs
+    as ``httpx-toolkit`` while a same-named Python HTTP-client CLI occupies ``httpx``. The resolver
+    stopped at the impostor and reported the tool shadowed and unusable — on a machine where the real
+    one was installed the whole time. A tool that is present must not be reported absent.
+
+    So when ``wrong_markers`` is set, each candidate's banner is checked and a candidate identified
+    as a DIFFERENT tool is skipped in favour of the next name. If every candidate is an impostor the
+    first one is still returned, so the status stays the honest ``shadowed`` rather than ``missing``:
+    the operator needs to know a decoy is sitting on the name, not merely that nothing was found.
+    """
+    return _resolve_with_banner(spec)[0]
+
+
+def _resolve_with_banner(spec: ToolSpec) -> tuple[Optional[str], str]:
+    """:func:`_resolve`, also returning the version banner it read while disambiguating (``""`` when
+    it did not need to read one). The caller reuses that banner instead of re-running the probe — the
+    roster is resolved inside an HTTP request, so a second subprocess per collision tool is a cost
+    paid on every page load, and it was enough to time the tools endpoint out."""
+    impostor: tuple[Optional[str], str] = (None, "")
     for name in (spec.binary, *spec.alt_binaries):
         path = shutil.which(name)
-        if path:
-            return path
-    return None
+        if not path:
+            continue
+        if spec.wrong_markers:
+            raw = _probe_raw(path, spec.version_args, spec.version_timeout_s)
+            if raw and any(m in raw.lower() for m in spec.wrong_markers):
+                if impostor[0] is None:
+                    impostor = (path, raw)
+                continue
+            return path, raw
+        return path, ""
+    return impostor
 
 
 def _clean_version(raw: str) -> str:
@@ -395,26 +443,38 @@ def _clean_version(raw: str) -> str:
     return chosen[:_VERSION_CAP]
 
 
-def _probe_raw(binary_path: str, version_args: Optional[tuple[str, ...]]) -> str:
+def _probe_raw(binary_path: str, version_args: Optional[tuple[str, ...]],
+               timeout_s: Optional[float] = None) -> str:
     """Best-effort, read-only capture of the FULL version banner (stdout+stderr), ANSI-stripped.
-    ``version_args is None`` → skip (heavy/GUI tool). Never raises: a timeout / spawn error yields
-    ``""``. No shell; stdin is closed so a tool that would prompt can never hang the probe."""
+    ``version_args is None`` → skip (heavy/GUI tool). ``timeout_s`` overrides the default budget
+    for the tools whose banner is genuinely slow (see ``ToolSpec.version_timeout_s``). Never
+    raises: a timeout / spawn error yields ``""``. No shell; stdin is closed so a tool that would
+    prompt can never hang the probe."""
     if version_args is None:
         return ""
     try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv (resolved path + our flags), shell=False
-            [binary_path, *version_args],
-            capture_output=True, text=True, timeout=_VERSION_TIMEOUT_S,
-            stdin=subprocess.DEVNULL, check=False,
-        )
+        # Probe from a throwaway cwd. "Read-only" has to mean it: Joern's launcher
+        # creates a `workspace/` directory in whatever cwd it starts in, so reading
+        # its version from the engine's cwd littered the operator's repo (empty, and
+        # gitignored, but still a write from a probe documented as read-only). Every
+        # version probe uses an absolute binary path and a version flag, so none of
+        # them depends on cwd and a neutral one is always safe.
+        with tempfile.TemporaryDirectory(prefix="crucible-verprobe-") as td:
+            proc = subprocess.run(  # noqa: S603 - fixed argv (resolved path + our flags), shell=False
+                [binary_path, *version_args],
+                capture_output=True, text=True,
+                timeout=_VERSION_TIMEOUT_S if timeout_s is None else timeout_s,
+                stdin=subprocess.DEVNULL, check=False, cwd=td,
+            )
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return ""
     return _ANSI_RE.sub("", (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else ""))
 
 
-def _probe_version(binary_path: str, version_args: Optional[tuple[str, ...]]) -> str:
+def _probe_version(binary_path: str, version_args: Optional[tuple[str, ...]],
+                   timeout_s: Optional[float] = None) -> str:
     """The compact one-line version banner for display (wraps :func:`_probe_raw`)."""
-    return _clean_version(_probe_raw(binary_path, version_args))
+    return _clean_version(_probe_raw(binary_path, version_args, timeout_s))
 
 
 def probe_tool(spec: ToolSpec, *, with_version: bool = True,
@@ -432,11 +492,19 @@ def probe_tool(spec: ToolSpec, *, with_version: bool = True,
       * ``failed``      — not usable AND the installer's hint says it failed to install;
       * ``missing``     — not usable and no failed hint.
     """
-    path = _resolve(spec)
+    # `_resolve` already had to read a banner for a name-collision tool, in order to step over an
+    # impostor and find the real binary under an alternate name. Take that banner back rather than
+    # spawning the same probe a second time: this runs inside an HTTP request that probes the whole
+    # roster, and a duplicated subprocess per collision tool was enough to time the endpoint out.
+    path, resolved_raw = _resolve_with_banner(spec)
     on_path = path is not None
     # For a name-collision tool we MUST read the banner (even when with_version=False) to tell the real
     # tool from a same-named impostor on PATH — the banner is the disambiguator.
-    raw = _probe_raw(path, spec.version_args) if (on_path and (with_version or spec.wrong_markers)) else ""
+    if resolved_raw:
+        raw = resolved_raw
+    else:
+        raw = (_probe_raw(path, spec.version_args, spec.version_timeout_s)
+               if (on_path and (with_version or spec.wrong_markers)) else "")
     shadowed = bool(on_path and spec.wrong_markers and raw
                     and any(m in raw.lower() for m in spec.wrong_markers))
     installed = on_path and not shadowed
@@ -481,10 +549,40 @@ def probe_tools(*, with_version: bool = True,
     supported = bool(plat["supported"])
     state = install_state if install_state is not None else _read_install_state(state_path)
 
-    tools = [
-        probe_tool(spec, with_version=with_version, supported=supported, install_state=state)
-        for spec in HOST_TOOLS
-    ]
+    # Probed CONCURRENTLY. Each tool's probe spawns a subprocess and waits on it, so a serial sweep
+    # costs the SUM of every tool's start-up time — and that grows as the operator installs more.
+    # Measured here: 5.3s across the roster, of which semgrep alone was 1.9s, and the per-probe
+    # ceiling is 2s, so a fully-populated host could sit near half a minute. This report is rendered
+    # on a screen and re-probed on every refresh; a page that gets slower each time you install a
+    # tool is a page nobody refreshes. The probes are independent and read-only, so the wall time
+    # becomes the SLOWEST tool rather than the sum.
+    #
+    # Order is preserved (`executor.map`), because the report's ordering is part of its contract.
+    # A worker that raises would poison `map`, so each probe is wrapped: an unexpected failure
+    # degrades that ONE row to "missing" rather than taking down the whole report.
+    def _one(spec: ToolSpec) -> dict[str, object]:
+        try:
+            return probe_tool(spec, with_version=with_version, supported=supported, install_state=state)
+        except Exception:  # noqa: BLE001 — a probe is best-effort; never fail the whole report
+            pass
+        try:
+            return probe_tool(spec, with_version=False, supported=supported, install_state=state)
+        except Exception:  # noqa: BLE001
+            pass
+        # Both attempts failed, so this row is SYNTHESISED rather than dropped. `map` yields one result
+        # per spec and the summary counts them, so returning nothing here would silently shorten the
+        # roster — a tool that vanishes from the list reads as "not part of this build", which is a
+        # different and wrong claim from "we could not probe it". Fail toward NOT-READY, never toward a
+        # green row: an unprobeable tool is reported as missing.
+        return {
+            "name": spec.name, "binary": spec.binary, "purpose": spec.purpose,
+            "optional": spec.optional, "installed": False, "shadowed": False, "path": None,
+            "version": None, "status": "unsupported" if not supported else "missing",
+            "install_hint": install_hint(spec), "apt": spec.apt, "pip": spec.pip,
+        }
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(HOST_TOOLS) or 1)) as pool:
+        tools = list(pool.map(_one, HOST_TOOLS))
 
     def _count(status: str) -> int:
         return sum(1 for t in tools if t["status"] == status)
