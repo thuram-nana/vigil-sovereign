@@ -88,6 +88,30 @@
       ]
     },
     {
+      "description": "A daily TOKEN budget for every tool/API (the autonomous engine, chat, terminal, codefix, threat-model, fireteam, SIGIL, Strix, the vuln-feed and recon). Edit any limit here; when a tool goes over, the system WARNS and THROTTLES it (slows it) — it never hard-blocks a call. Limits are stored, not hard-coded, and take effect immediately.",
+      "group": "MANAGE",
+      "id": "budgets",
+      "label": "Token Budgets",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "token budget",
+        "token budgets",
+        "budget",
+        "budgets",
+        "spend",
+        "token limit",
+        "token cap",
+        "api tokens",
+        "throttle",
+        "rate limit",
+        "cost",
+        "tokens per tool",
+        "max tokens",
+        "per tool budget"
+      ]
+    },
+    {
       "description": "Authorization + the who/when/what usage-attestation ledger; provision a loopback authority (a remote charter needs an out-of-band ceremony).",
       "group": "MANAGE",
       "id": "charter",
@@ -512,5 +536,5 @@
       ]
     }
   ],
-  "source_sha": "88ea4c10619899516116651b5fdfcdc38c7efd9dc77117e93e332330501965df"
+  "source_sha": "381b2123bc8a514069034857ab388d63dce5d9bfe0a65ea2ee2e073d524f7bb8"
 }

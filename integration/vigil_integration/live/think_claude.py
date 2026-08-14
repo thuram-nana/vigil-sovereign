@@ -409,6 +409,23 @@ def _extract_text(resp: object) -> str:
 # ---------------------------------------------------------------------------------------------------
 
 
+# Per-tool TOKEN BUDGET (warn + throttle, never block). vigil_core is shared by both planes; guard the
+# import so a missing substrate never stops a think call — metering is advisory back-pressure, not a gate.
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import token_budget as _token_budget
+except Exception:                                          # noqa: BLE001
+    _token_budget = None
+
+
+def _tb_tool() -> str:
+    if _token_budget is None:
+        return "engine"
+    try:
+        return _token_budget.current_tool()
+    except Exception:                                      # noqa: BLE001
+        return "engine"
+
+
 def _invoke(client: Any, params: dict) -> Any:
     """Issue ONE Messages call, preferring STREAMING (``client.messages.stream(...).get_final_message()``)
     when the client supports it — streaming avoids request timeouts on long input / long output / high
@@ -431,6 +448,13 @@ def _think_via_client(client: Any, system: str, user: str, *, model: str, max_to
     response text is parsed by ``parse_decision`` (garbage/oversized → safest); any thinking blocks are
     ignored — only the JSON decision text is read. Secret-free: nothing here logs the request, the response,
     or any credential."""
+    tool = _tb_tool()
+    if _token_budget is not None:      # warn + throttle (bounded, never blocks) + clamp the output ceiling
+        try:
+            _token_budget.throttle(tool)
+            max_tokens = _token_budget.clamp_output(tool, max_tokens)
+        except Exception:  # noqa: BLE001 — metering must never break a think call
+            pass
     params = dict(
         model=model,
         max_tokens=max_tokens,
@@ -444,6 +468,11 @@ def _think_via_client(client: Any, system: str, user: str, *, model: str, max_to
     except Exception as exc:  # noqa: BLE001 — any SDK/transport error is a fail-closed pause, never raised
         logger.warning("live think call failed (%s) — fail-closed to safest action", type(exc).__name__)
         return _safest("the live think call failed", "the model call failed — how should I proceed?")
+    if _token_budget is not None:      # charge the ACTUAL tokens the call spent (from resp.usage)
+        try:
+            _token_budget.record_usage(tool, getattr(resp, "usage", None))
+        except Exception:  # noqa: BLE001
+            pass
     text = _extract_text(resp)
     if len(text) > _MAX_RESPONSE_CHARS:  # bound hostile oversized output before the parser sees it
         text = text[:_MAX_RESPONSE_CHARS]

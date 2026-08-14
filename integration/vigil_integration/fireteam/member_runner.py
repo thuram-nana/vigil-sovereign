@@ -51,6 +51,19 @@ def _member_state(member: FireteamMember, parent_objective: str, hints: tuple = 
     return AgentState(engagement_slug=member.wave_id, objective=obj[:1000], phase=member.phase)
 
 
+import contextlib as _contextlib
+# Attribute a fireteam member's think spend to the "fireteam" token budget (members reuse the parent's
+# think seam, which would otherwise charge the default "engine"). Guarded: a missing vigil_core is a no-op.
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import token_budget as _token_budget
+except Exception:                                          # noqa: BLE001
+    _token_budget = None
+
+
+def _tb_fireteam_scope():
+    return _token_budget.using_tool("fireteam") if _token_budget is not None else _contextlib.nullcontext()
+
+
 def build_member_runner(*, think: ThinkFn, run_tool: RunToolFn, parent_objective: str = "",
                         max_steps: Optional[int] = None) -> Callable[[FireteamMember, Any], MemberResult]:
     """Build a production ``MemberRunner``. ``think``/``run_tool`` are the parent's injected seams; the
@@ -72,7 +85,8 @@ def build_member_runner(*, think: ThinkFn, run_tool: RunToolFn, parent_objective
         while steps < limit:
             steps += 1
             try:
-                decision = think(state)
+                with _tb_fireteam_scope():           # this member's think charges the "fireteam" budget
+                    decision = think(state)
             except Exception as exc:  # noqa: BLE001 — a think error ends THIS member, never the wave
                 notes.append(f"think error (isolated): {type(exc).__name__}")
                 status = MemberStatus.ERROR

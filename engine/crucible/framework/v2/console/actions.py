@@ -969,6 +969,33 @@ def run_evolve_tick(slug: str) -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+def set_token_budget(body: dict) -> dict:
+    """Set ONE tool's TOKEN budget from the Token Budgets screen: ``limit`` (daily token/request cap),
+    ``mode`` (off / warn / throttle — never 'block'), ``warn_frac``, ``output_max`` (per-call output cap),
+    ``label``. Only the provided fields change. The value is stored in the shared vigil_core ledger the
+    engine reads, so the operator's edit takes effect immediately and is not hard-coded. Returns the full
+    updated tool list so the screen repaints. A bad field/mode is a clean error body, never a corrupt store."""
+    from vigil_core import token_budget as tb
+    body = body or {}
+    tool = str(body.get("tool") or "").strip()
+    if not tool:
+        return {"ok": False, "error": "a tool id is required"}
+    kw: dict = {}
+    for key, conv in (("limit", int), ("output_max", int), ("warn_frac", float),
+                      ("mode", str), ("label", str)):
+        val = body.get(key)
+        if val is not None and val != "":
+            try:
+                kw[key] = conv(val)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": f"invalid value for {key!r}"}
+    try:
+        tb.set_tool(tool, **kw)
+    except ValueError as e:      # e.g. an invalid mode like 'block' — never-block is enforced in the store
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "tools": [s.as_dict() for s in tb.list_status()]}
+
+
 def knowledge_gitsync(action: str) -> dict:
     """A6c/K6: run ``vigil knowledge status|sync`` from the Knowledge screen and surface the result —
     ESPECIALLY the secret-scan REFUSAL. ``status`` shows what would commit; ``sync`` regenerates the
@@ -1971,15 +1998,33 @@ def terminal_propose(intent, run_id=None, session_id=None) -> dict:
         user = (intent + "\n\nSESSION CONTEXT (untrusted reference data, already secret-redacted, JSON):\n"
                 + ctx_block)
 
+    # Per-tool TOKEN BUDGET for "terminal" (warn + throttle, never block) — a direct paid call that
+    # bypasses the kernel, so meter it explicitly. Guarded: metering never breaks the call.
+    try:
+        from vigil_core import token_budget as _tb
+    except Exception:  # noqa: BLE001
+        _tb = None
+    _term_mx = 1024
+    if _tb is not None:
+        try:
+            _tb.throttle("terminal")
+            _term_mx = _tb.clamp_output("terminal", 1024)
+        except Exception:  # noqa: BLE001
+            _tb = None
     try:
         client = anthropic.Anthropic(api_key=key)
         resp = client.messages.create(
-            model="claude-opus-5", max_tokens=1024,
+            model="claude-opus-5", max_tokens=_term_mx,
             system=_TERM_ROUTER_SYSTEM,
             messages=[{"role": "user", "content": user}],
         )
     except Exception as e:  # noqa: BLE001 — never surface the key; an API error is an honest refusal
         return {"ok": False, "error": f"the model could not be reached ({type(e).__name__}); type a command directly."}
+    if _tb is not None:
+        try:
+            _tb.record_usage("terminal", getattr(resp, "usage", None))
+        except Exception:  # noqa: BLE001
+            pass
 
     # Opus 5 safety classifiers can decline (HTTP 200, stop_reason == "refusal") — handle before reading content.
     if getattr(resp, "stop_reason", None) == "refusal":

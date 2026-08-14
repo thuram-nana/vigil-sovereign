@@ -331,12 +331,30 @@ class CodefixSession:
         client = self._client or _build_live_client(_resolve_key(None) or "")
         if client is None:
             return ""   # no API key / SDK → no proposal (honest, fail-closed)
+        # Per-tool TOKEN BUDGET for "codefix" (warn + throttle, never block) — a direct paid call that
+        # bypasses the kernel; meter it explicitly. Guarded: metering never breaks the coder.
+        try:
+            from vigil_core import token_budget as _tb
+        except Exception:  # noqa: BLE001
+            _tb = None
+        _mx = self.config.max_tokens
+        if _tb is not None:
+            try:
+                _tb.throttle("codefix")
+                _mx = _tb.clamp_output("codefix", self.config.max_tokens)
+            except Exception:  # noqa: BLE001
+                _tb = None
         try:
             resp = client.messages.create(
-                model=self.config.model, max_tokens=self.config.max_tokens,
+                model=self.config.model, max_tokens=_mx,
                 messages=[{"role": "user", "content": prompt}])
         except Exception:  # noqa: BLE001 — a coder failure degrades to no-patch (the loop is total)
             return ""
+        if _tb is not None:
+            try:
+                _tb.record_usage("codefix", getattr(resp, "usage", None))
+            except Exception:  # noqa: BLE001
+                pass
         return _extract_text(resp) or ""
 
 

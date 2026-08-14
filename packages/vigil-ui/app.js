@@ -129,6 +129,7 @@
       { id: "brain", label: "Brain", icon: "brain", ready: true },
       { id: "mcp", label: "MCP Servers", icon: "bolt", ready: true },
       { id: "system", label: "System & Services", icon: "gear", ready: true },
+      { id: "budgets", label: "Token Budgets", icon: "bolt", ready: true },
       { id: "compliance", label: "Compliance", icon: "shield", ready: true },
       { id: "assurance", label: "Assurance", icon: "find", ready: true },
       { id: "settings", label: "Settings", icon: "gear", owner: true, ready: true },
@@ -5843,6 +5844,82 @@
     load();
   }
 
+  // ---- Token Budgets (per-tool daily token caps, operator-editable; warn + throttle, never block) --
+  function renderBudgets(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Token Budgets"),
+        h("span.sub", null, "A daily token budget for every tool/API — edit any limit here. When a tool "
+          + "goes over, the system warns and throttles (slows) it; it never hard-blocks a call.")]),
+      h("div#budgets-body", null, h("div.empty", null, "Loading budgets…")),
+    ]);
+    loadBudgets();
+  }
+  function loadBudgets() {
+    V.getJSON(OFF("/api/token-budgets")).then(drawBudgets).catch(function (e) {
+      var host = V.$("#budgets-body"); if (!host) return;
+      V.mount(host, h("div.empty", null, [h("div.big", null, "Offense engine offline"),
+        h("p", null, "Could not load token budgets: " + ((e && e.message) || e))]));
+    });
+  }
+  function budgetLevelPill(level) {
+    if (level === "over") return V.pill("Over — throttling", "danger", null);
+    if (level === "warn") return V.pill("Near limit", "reconnect", null);
+    return V.pill("OK", "idle", null);
+  }
+  function budgetNum(n) { try { return Number(n || 0).toLocaleString(); } catch (e) { return String(n); } }
+  function drawBudgets(d) {
+    var host = V.$("#budgets-body"); if (!host) return;
+    var tools = (d && d.tools) || [];
+    if (!tools.length) {
+      V.mount(host, h("div.empty", null, [h("div.big", null, "No tools registered"),
+        h("p", null, (d && d.error) || "No token-spending tools are registered yet.")]));
+      return;
+    }
+    var cards = tools.map(function (t) {
+      var frac = Math.max(0, Math.min(1, t.frac || 0));
+      var fillCls = t.level === "over" ? "hi" : (t.level === "warn" ? "mid" : "");
+      var unit = t.kind === "requests" ? "requests" : "tokens";
+      var limitInput = h("input.input", { type: "number", min: "0", value: String(t.limit),
+        style: { width: "130px" } });
+      var modeSel = h("select.input", { style: { width: "120px" } },
+        ["throttle", "warn", "off"].map(function (m) {
+          return h("option", { value: m, selected: t.mode === m ? "selected" : null }, m);
+        }));
+      var outInput = t.kind === "requests" ? null
+        : h("input.input", { type: "number", min: "1", value: String(t.output_max), style: { width: "110px" } });
+      var save = h("button.btn.sm.primary", { onClick: function () {
+        var payload = { tool: t.tool, limit: limitInput.value, mode: modeSel.value };
+        if (outInput) payload.output_max = outInput.value;
+        save.disabled = true;
+        V.postJSON(OFF("/api/token-budgets"), payload).then(function (r) {
+          save.disabled = false;
+          if (r && r.error) { V.toast(r.error, true); return; }
+          V.toast(t.label + " budget saved");
+          drawBudgets({ tools: r.tools, doctrine: d.doctrine });   // repaint with the fresh numbers
+        }).catch(function (e) { save.disabled = false; V.toast(String(e), true); });
+      } }, "Save");
+      return h("div.card", null, [
+        h("div.card-h", null, [h("h3", null, t.label), h("span", { style: { flex: 1 } }),
+          budgetLevelPill(t.level)]),
+        h("div.hint", { style: { marginBottom: "6px" } },
+          budgetNum(t.used) + " / " + budgetNum(t.limit) + " " + unit + " today · "
+          + Math.round(frac * 100) + "%"),
+        h("div.bar", null, h("div.bar-fill" + (fillCls ? "." + fillCls : ""),
+          { style: { width: Math.round(frac * 100) + "%" } })),
+        h("div", { style: { display: "flex", gap: "12px", alignItems: "flex-end", flexWrap: "wrap", marginTop: "12px" } }, [
+          h("div", null, [h("div.label", { style: { marginBottom: "4px" } }, "Daily " + unit), limitInput]),
+          h("div", null, [h("div.label", { style: { marginBottom: "4px" } }, "When over"), modeSel]),
+          outInput ? h("div", null, [h("div.label", { style: { marginBottom: "4px" } }, "Max / call"), outInput]) : null,
+          save,
+        ]),
+      ]);
+    });
+    V.mount(host, [
+      h("div.hint", { style: { marginBottom: "12px" } }, (d && d.doctrine) || ""),
+      h("div.grid.cols-2", { style: { alignItems: "start" } }, cards),
+    ]);
+  }
+
   function renderStub(screen, item) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, item.label),
@@ -7242,6 +7319,7 @@
     if (id === "brain") { renderBrain(screen); return; }
     if (id === "mcp") { renderMcp(screen); return; }
     if (id === "system") { renderSystem(screen); return; }
+    if (id === "budgets") { renderBudgets(screen); return; }
     if (id === "compliance") { renderCompliance(screen); return; }
     if (id === "assurance") { renderAssurance(screen); return; }
     if (id === "report") { renderReport(screen); return; }

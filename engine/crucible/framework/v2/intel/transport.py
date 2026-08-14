@@ -219,6 +219,20 @@ class GuardedHttpTransport:
                 f"collector_hosts allowlist {self._hosts}. Recon sources must be "
                 f"explicitly allowlisted and disjoint from target scope."
             )
+        # Per-tool REQUEST budget (warn + throttle, never block) for this outbound API call. The refusal
+        # paths above raise before here, so only an ACTUAL network attempt is charged. Attributed via the
+        # tool contextvar — "recon" by default; the vuln-feed wraps its pull in using_tool("vulnfeed").
+        # Guarded: a missing vigil_core, or any metering error, never stops a fetch.
+        try:
+            from vigil_core import token_budget as _tb
+        except Exception:  # noqa: BLE001
+            _tb = None
+        _tool = _tb.current_tool("recon") if _tb is not None else "recon"
+        if _tb is not None:
+            try:
+                _tb.throttle(_tool)
+            except Exception:  # noqa: BLE001
+                pass
         client = self._ensure_client()
         try:
             resp = client.get(url)  # type: ignore[attr-defined]
@@ -231,6 +245,11 @@ class GuardedHttpTransport:
         except Exception as e:  # network / parse failure — recorded, never raised past here
             rec = RawRecord(source_kind=source_kind, query=query, endpoint=url,
                             fetched_seq=seq, ok=False, note=f"{type(e).__name__}: {e}")
+        if _tb is not None:
+            try:
+                _tb.record(_tool, 1)   # one outbound request spent (whether it 200'd or errored on the wire)
+            except Exception:  # noqa: BLE001
+                pass
         if self._capture_dir is not None and rec.ok:
             # X2: captured third-party HTTP (may carry PII) is owner-only.
             paths.secure_write(self._capture_dir / _fixture_name(source_kind, query),
