@@ -78,6 +78,18 @@ particular transitional address ranges as private when they are actually routabl
 Before it starts anything, the command checks that all four ports are free. If one is occupied it
 refuses to start rather than leaving half-started background programs behind.
 
+The switchboard also answers **two addresses of its own**, which it forwards to nobody. One reports
+which of the programs behind it are answering; the other starts the two attack-side ones. It is the
+only process that can honestly do either, because it serves the interface itself and therefore is
+still running when they are not, and because it is what started them in the first place. The request
+that starts them **names no command**: any body sent with it is discarded unread, and the instruction
+the switchboard runs is rebuilt from its own start-up configuration, so no path, port or command can
+ever travel in a request — anything else would be a way of running arbitrary programs wearing the
+costume of a button. Both addresses are behind the same checks as everything else, and starting
+something already running is a no-op that says so. As §8 records, **no screen offers this today**:
+the control exists in the interface's code but is placed nowhere, so in practice the operator still
+starts the attack side by typing.
+
 ### 1.3 An honest caveat about which interface you get
 
 There are, in fact, **three different web interfaces** committed in this system, plus one
@@ -85,7 +97,7 @@ terminal-based interface that comes from a third-party tool. (There are also two
 not interfaces for a person at all, meant instead for another program to use; they are described in
 §9.2.)
 
-The main product — the 28-screen application described in this chapter — is called **VIGIL COMMAND**.
+The main product — the 29-screen application described in this chapter — is called **VIGIL COMMAND**.
 It is assembled and served *by the `vigil up` switchboard*.
 
 If an operator instead points their browser directly at the internal offence console
@@ -127,14 +139,18 @@ is re-pointed at the operator's own machine.
 
 Before the individual screens, here is the frame that surrounds all of them. It never changes.
 
-**Left side — the navigation list.** Twenty-eight entries, grouped under three headings: **DO**
-(eleven entries), **MANAGE** (thirteen), **LEARN** (four).
+**Left side — the navigation list.** Twenty-nine entries, grouped under three headings: **DO**
+(eleven entries), **MANAGE** (fourteen), **LEARN** (four).
 
 **Top bar, from left to right:**
 
 - **Plane toggle** — three buttons: *All*, *Offense*, *Defense*. This filters the navigation list.
   "Offense" hides the defensive screen; "Defense" hides the attack-side screens. It is purely a
   view filter; it changes nothing about what the system is doing.
+- **The job chip** — the name of the job every screen is currently showing, or the words *All
+  engagements*. Clicking it opens the Engagement Library, which is where a different job is chosen
+  or the view is widened back to everything. It is described in full at the end of this section,
+  because it changes what the operator sees on nine of the twenty-nine screens.
 - **A "Search or run a command" box.** It carries a keyboard-shortcut hint printed as `⌘K` — the
   Macintosh command-key symbol followed by the letter K. (On a Windows or Linux keyboard the
   equivalent key is Control; the interface only ever prints the Macintosh symbol, which is itself a
@@ -166,10 +182,38 @@ dismiss button; a new interaction brings a dismissed card back. Voice and gestur
 **off by default** and must be started deliberately (`vigil up --with-voice` / `--with-gesture`).
 When enabled, spoken navigation can only move the operator to a screen that already exists in the
 navigation list — the code uses a strict list of known screen identifiers, so a malicious or
-malformed voice command cannot make the interface go somewhere unintended. Note for accuracy: local
-camera-based gesture control is *not* functional; gesture input comes from a paired phone companion.
+malformed voice command cannot make the interface go somewhere unintended. Note for accuracy: no
+gesture input reaches this card today. Local camera-based gesture control is *not* functional — the
+hand-tracking model is absent — and the phone-as-trackpad route, which is the design's answer to
+that, is built and tested on the desktop side but has nothing sending it hand movement. Chapter 14
+sets out what each is waiting on.
 
 **Small transient message strips ("toasts")** confirm actions.
+
+### One job at a time
+
+The interface used to show every run the machine had ever produced, on every screen, mixed together.
+It is now **scoped to one engagement** — the job the operator is actually working on — and the job
+chip in the top bar always says which.
+
+| Question | The answer |
+|---|---|
+| Which screens are scoped? | Nine: Live, Activity, Findings, Fixes, Proof Studio, Report, Compliance, Assurance, and the two per-engagement tabs of the Brain screen. The rest are not about a particular job. |
+| How does a job become the active one? | Launching a run makes that run's job the active one. Opening a job in the Engagement Library does the same. Nothing else changes it. |
+| What happens to everything else? | **Nothing.** Scoping hides rows; it deletes nothing, moves nothing and rewrites nothing. Every past job, run, finding and certificate stays exactly where it was. |
+| How does the operator get back? | Always. The chip leads to the library, the library has an *All engagements* button, and every screen that is empty *because* of the scope says so by name and offers the same way out. |
+| Does the browser decide which runs belong to a job? | No. The scope is a **filter**: the back end selects among the runs that already record that job as their own, so a screen can narrow what it lists and can never claim a run into a job it does not belong to. |
+
+Two consequences are worth stating for a reader who has seen software make this mistake. First,
+starting a new job leaves a **clean desk rather than a wiped one** — the new job's screens are
+honestly empty until it produces something, and each empty screen says which job it is showing and
+that the others are still on disk. A blank panel and a broken screen look identical unless the
+screen says which it is. Second, a link or a bookmark that names a run belonging to a *different*
+job is not silently swapped for a neighbouring one: the screen says the run is not part of the job
+in view, and offers to widen.
+
+The chosen job is remembered between visits, so a refresh or a restart lands the operator back on
+the work they were doing.
 
 ---
 
@@ -265,9 +309,20 @@ everyday equivalent is the difference between photocopying a file of papers and 
 the original through a glass panel.
 
 For every mode except the defensive one there is a **required tick-box**: *"I am authorized to test
-this target (I own it or have written permission)."* That declaration is recorded with the run. Every
-mode also offers an optional free-text **Objective** box, with the printed caution that it "guides
-the reasoning; never widens scope."
+this target (I own it or have written permission)."* The screen is now exact about what that
+tick-box is and is not, and the change is worth quoting because it removed a promise the software
+did not keep: the box **gates the wizard, is not sent with the launch, and is stored nowhere.** The
+binding authorisation is the signed charter and scope the engine enforces for that job — which is
+the only thing that could ever have been binding. The screen used to say the declaration was
+"recorded with the run"; nothing recorded it, and a reassurance no file keeps is worse than no
+reassurance.
+
+Every mode also offers an optional free-text **Objective** box, and it too now says something
+different depending on the mode, because it *does* something different. For a codebase review the
+objective is handed to the source-reading agent as its instruction — it really steers the work. For
+every other mode the gated engagement takes no free-text objective at all, so the screen says the
+text is recorded with the run for the operator's own record and **does not steer it**; depth and
+capability packs are what steer those. Both wordings carry the same caution: it never widens scope.
 
 **Step 3 — "Scope".** Scope means the list of machines the system is permitted to touch. For a
 network run against something other than this machine, the operator sees a list of authorised hosts
@@ -288,19 +343,96 @@ charter and authority; the web interface never passes scope to the engine as an 
 words, the operator cannot widen their own permissions by editing a form.
 
 **Step 4 — "How should it run?"** A depth choice (Quick / Standard / Deep, read live from the
-engine's own catalogue rather than hard-coded in the page). A tick-box, on by default, reading *"Let
-the AI choose the tools (recommended)"*; turning it off reveals a picker over the real catalogue of
-capabilities with their permission tiers. And a tick-box for *"Apply fixes after discovery"*, with a
-printed hint that fixes are **proposed** and then queue for approval.
+engine's own catalogue rather than hard-coded in the page). Then, depending on what is being
+assessed, either a set of **capability packs** or a **picker over this machine's real tools**. This
+step was rebuilt in this round, and two of the defects it fixed are worth setting out in full.
 
-**Step 5 — "Model & keys."** Shows the live status of the AI back end. A "Run keyless" tick-box for
-operating without a paid AI key. A **Session** selector (sessions are described on their own screen
-below). And, for a this-machine target with a session selected, a "Graph-backed run" option that
-routes the run so that its results are stored in that session's own knowledge graph, falling back to
-the ordinary path if the graph database is not available.
+*Capability packs, and the two things that used to go wrong.* A pack is not a tool; it is one
+already-gated option on the engagement command — a named bundle of checks. A tick-box, on by
+default, now reads *"Run the engine's standard set (recommended)"*. It used to read "Let the AI
+choose the tools", which was simply untrue: nothing chooses packs for the operator. On means no
+extra options are added and the engagement runs its standard audit; off reveals the real catalogue
+of packs with their permission tiers, and the printed note is that a pack can never widen authority
+— it only adds an option the gate already governs.
 
-**What happens on Launch.** The page sends the whole form to the back end, which starts a gated run.
-The operator is redirected to the Live screen for that run.
+- **The first defect: a selection that was accepted and then silently discarded.** The launcher used
+  to walk the chosen list and quietly append only what it recognised. A name it did not recognise
+  vanished, and the run started anyway, reporting *running*. In "run one tool" mode it was worse:
+  only the *first* entry was ever used, so a request naming an unrecognised item followed by a valid
+  one threw away the valid one as well, and a run the operator believed was driving a specific tool
+  started with no tool option at all. **An unrecognised capability is now a refusal, stated before
+  anything is started**, and the one-tool mode requires exactly one — because the alternative to
+  refusing is starting something narrower than what was asked for and calling it the same thing.
+- **The second defect: packs dropped entirely on the commonest target of all.** Only one of the
+  engine's several starting paths ever turns a pack into an option. A run against this machine —
+  which is the ordinary way an operator tries the product, and the target used for every local
+  proving-range exercise — goes to a different, self-contained scanner that has never taken pack
+  options at all. So did a graph-backed run, a codebase review and a defensive run. Five ticked packs
+  produced a run with none of them, answering *running*, with nothing anywhere saying the work was
+  narrower than the form that configured it. Two fixes, in opposite directions. The back end now
+  **names the gap**: it reports which packs were not applied and why, in the response and in the run's
+  own record, and the screen shows that message. And the wizard **stops asking for what cannot be
+  carried**: on those targets the pack picker is replaced by a plain statement of why there is
+  nothing to pick and what to do instead. What the screen offers and what the request sends are now
+  decided by one and the same rule, written once, so the two cannot drift apart again.
+
+*The tool picker.* Choosing "Run one tool" now lists **this host's actual tools, exactly as the
+engine's own roster reports them** — not capability packs, which is what the step used to offer.
+Each entry shows the tool's name, whether it is installed, what it is for, and — this is the new
+part — **how it is driven**: by its own command line, by a gated sensor, by the source-analysis
+pass, or as the scanner's headless browser. A tool this particular screen cannot start is **listed
+anyway, greyed, with the reason printed on it**, rather than hidden: not installed, not supported on
+this platform, not among the tools the system will claim to control, or — most often — no option on
+*this* starting path runs it on its own, followed by a list of what does drive it. The screen prints
+the arithmetic honestly: how many of the roster can be started here, out of how many there are.
+
+That number is small, and the chapter will not dress it up. On this machine the roster holds
+**thirteen tools, all installed, all admitted — and exactly one of them can be started from this
+screen as a single tool**: the headless browser, which one capability starts in order to confirm a
+browser-side scripting flaw by really executing it. The other twelve are driven by the engine during
+an engagement and are not startable on their own from the wizard, and the screen says so tool by
+tool. A reader who wants the fuller picture of what drives each tool should read chapter 12.
+
+Finally a tick-box that was renamed for the same reason as the others: *"Flag this run as one I want
+fixed"*. It used to read "Apply fixes after discovery", which read like scheduling work. Ticking it
+applies nothing; it is recorded with the run and shown on the Fixes screen, which lists the fixable
+findings and the gated ladder either way.
+
+**Step 5 — "Does this run need a model?"** This step used to be headed "Model & keys" and to offer a
+"Run keyless" tick-box. That box is gone, and its removal is a small lesson in the discipline this
+document keeps describing: it was accepted, written into the run's record, and read by nothing. The
+attack-side commands call no AI model at all, so those runs were already keyless whether or not the
+box was ticked; and a codebase review needs the source-reading agent's model whether or not it was.
+A control that changed nothing has been replaced by a **statement, per mode, of whether a model is
+involved at all**:
+
+| Mode | What the screen states |
+|---|---|
+| Scan a website / API, run one tool | Deterministic end to end — the engine calls no model. Findings come from the automatic tests, not from a model. |
+| Full autonomous suite | The audit is deterministic; the self-directing loop additionally takes one bounded **advisory** reasoning step per cycle, and with no AI back end it falls back to the engine's own deterministic advice and still completes. Advice never confirms a finding. |
+| Scan a codebase | **The model is the run** — the source-reading agent is the thing that reads the source. Without a working back end it has nothing to run. |
+| Cloud / Kubernetes posture, Defend an app | Deterministic. Neither calls a model. |
+
+The step also shows the live status of whichever AI back ends are configured, states that keys are
+never shown or entered here, and offers a **Session** selector (sessions have their own screen
+below). For a this-machine target with a session selected there is a "Graph-backed run" option that
+routes the run so its results are stored in that session's own knowledge graph. A cloud posture is
+offered no session at all, because its launcher takes none and offering one would have quietly
+detached the run instead of linking it.
+
+**What happens on Launch.** The page sends the whole form to the back end, which starts a gated run,
+and the operator is redirected to the Live screen for that run. Three further things now happen, and
+each exists so the operator is never left believing the run was something it was not:
+
+- **The new job becomes the active one**, so every scoped screen shows the work just started and
+  nothing else. The job used is the one the *server* reports — the one the run recorded for itself —
+  not the one the form asked for.
+- If capability packs could not be carried by the path that actually ran, **the message saying so is
+  shown**.
+- If a graph-backed run was asked for and the graph database was not available, the screen says the
+  run went to the ordinary engine instead. It falls back rather than failing, and it says so; a
+  silent fallback would leave the operator believing a knowledge graph had been written that was
+  never touched.
 
 **One field the wizard does not have, and it matters.** Most of a real application's interesting
 surface sits *behind a login*. The engine does contain the machinery for logging in and staying
@@ -308,7 +440,7 @@ logged in while it tests — it can hold a set of login cookies, perform a login
 the application has logged it out again, and log back in before retrying. That machinery is a
 building block inside the engine; it is used directly by the engine's own tests. **There is no field
 anywhere in these five steps where an operator can type a test account's username and password**, and
-none of the twenty-eight screens offers one. In practice this means a run launched from the wizard
+none of the twenty-nine screens offers one. In practice this means a run launched from the wizard
 against a login-protected application exercises the public, logged-out surface of that application.
 
 There is **one narrow exception, and it is a typed one.** The tests that ask "can user A read user
@@ -330,27 +462,213 @@ interface is honestly incomplete.
 
 ### 4.3 Chat
 
-*Subtitle: "Ask in plain language what to test — the agent launches gated, oracle-confirmed runs and
-saves the conversation on your machine."*
+*Subtitle: "Ask in plain language, or attach a zip, files and images and ask about them. Answers are
+leads; the gated run is what mints facts."*
 
-**What the operator sees.** A left column of saved conversations, each with its number of exchanges,
-and a "New chat" button. A conversation transcript in speech bubbles. Two owner-side dropdowns for
-the AI **model** and the reasoning **effort** level, each with its own apply button. At the bottom, a
-message box (Enter sends, Shift+Enter starts a new line), an optional target field, and a mode
-dropdown offering *auto*, *url / API / infra*, *codebase*, *suite (autonomous)*, and *single tool*.
+This screen changed more than any other in this round, and it is the one place in the product where
+an operator can hand over material that has never been near the engine and ask a question about it.
+It therefore gets the longest treatment in this chapter.
 
-**What the operator can do.** Type what they want tested in ordinary English. Change the AI model or
-effort level. If the agent decides to start a run, the reply bubble carries a **Watch live** button
-that jumps to the Live screen for that run.
+Every other screen is about **certainty** — things an automatic test has already confirmed. Chat is
+the room where **uncertainty** lives: where an operator says "that login flow smells wrong" before
+anything is proven, drops in a codebase they were handed an hour ago, and thinks out loud. Everything
+below follows from that, including the limits.
 
-**What happens as a result.** The message goes to the agent, which may answer or may launch a run.
-The conversation is saved on the operator's own machine.
+**What the operator sees.** A left column of saved conversations — each with its title, how many
+exchanges it holds, and, when it draws on other conversations, how many. A "New chat" button. The
+transcript in speech bubbles. Below the transcript: a strip of attached material, a **Draws on**
+panel, an optional target box, a mode dropdown (*auto*, *url / API / infra*, *codebase*, *suite
+(autonomous)*, *one tool*), an **Attach** button, and the message box (Enter sends, Shift+Enter
+starts a new line). Above the transcript sit two system-wide dropdowns, described at the end of this
+section because what they do is not what their position suggests.
 
-**The honesty note the screen prints itself:** every run is gated; scope is charter-signed; steps
-that touch the target wait for the operator's approval; the conversation is saved locally.
+#### What the operator can hand it, and how each behaves
 
-**Status: fully working.** If the owner side is offline, the model and effort controls degrade to an
-explanatory hint rather than silently failing.
+The distinction matters: some of these start work, some become material the conversation reads, and
+one does both.
+
+| What is handed over | What happens |
+|---|---|
+| **A web address** — typed in the target box, or simply pasted into the message | The screen asks the back end to start the same gated engagement the wizard starts, against that address. The reply is a pointer to the run and a **Watch live** button. Nothing here is answered by a model. |
+| **A folder on this machine** — likewise | The same, as a codebase review over that folder. A path is accepted only when it really exists and really is a folder, so a message that merely *mentions* a path stays a question rather than becoming a launch. |
+| **An archive** — dropped onto the transcript, chosen with **Attach**, or named as a path | Unpacked here, under the guards below, and attached to this conversation as material it can be asked about. An archive named as a *path* does both: it is unpacked and attached, **and** its extracted copy becomes the target of a gated codebase review. |
+| **Loose files and images** | Attached, and read when the conversation is asked something. |
+
+Every failure in that table produces a reply that says what was looked for and what was found
+instead — "I looked for this on this machine and there is nothing there"; "that is a file, not a
+folder or a supported archive"; "that is named like an archive, but its contents are not one I can
+read". Before this round, a path that was not a folder was passed on as though it were, and the run
+failed somewhere downstream with nothing on screen connecting the failure to the fact that the
+material was still packed.
+
+#### What happens to an upload
+
+The console refuses any single request larger than about a megabyte, and that limit is deliberately
+**not** raised for uploads — raising it would raise the ceiling for every other request the console
+answers. So a file is sliced in the browser and sent as an ordinary sequence of small requests, each
+one carrying the same session credential and the same anti-forgery marker as every other action.
+Cancelling tells the server, so the part-uploaded material is really discarded rather than left on
+disk until a sweep.
+
+When the last slice arrives the material is assembled, fingerprinted, and — if it is an archive —
+extracted. **What kind of thing it is gets decided by reading the first bytes of the file, never by
+its name**, so a document named as an archive is treated as the document it is, and an oddly named
+archive still works.
+
+#### What is refused, and why
+
+An archive is the most dangerous thing a person can be invited to upload, because a crafted one
+attacks the program that opens it. The extractor's rule is absolute and worth stating before the
+list: **a refusal throws the whole archive away.** Nothing is half-unpacked, because half-unpacked
+material is a lie about what the operator handed over. Each refusal comes back in plain English,
+naming the entry that caused it.
+
+| What is refused | Why it matters |
+|---|---|
+| **An entry that would be written outside the upload folder** | The classic archive attack: an entry whose path climbs out of the folder it is being unpacked into and overwrites something else on the machine. It is refused twice over — once when the path is read, and again by checking where the file would actually land. |
+| **An entry that is a link, a device or a pipe rather than a real file or folder** | A link is a signpost to somewhere else, and following one is how an extractor is tricked into writing outside its own folder. Only ordinary files and folders are accepted. The check does not rely on the archive's own claim about what an entry is, and it refuses a *folder* in the path that is a link, not merely a link at the end of it. |
+| **A decompression bomb** | A small archive that expands to something enormous. Two ceilings: a total size, and a ratio between what arrived and what came out. The ratio only begins to bind past a few megabytes of output, so an ordinary, efficiently compressed archive is never refused for merely being efficient. |
+| **An archive whose header understates its real size** | This is the subtle one. Every archive carries its own claim about how big each entry is, and a crafted archive lies. The obvious implementation trusts that claim, checks it, and only then reads — by which time the whole thing has been allocated. Here the claim is used only for a cheap early refusal; **the ceilings that actually bind are checked against the bytes as they really arrive**, block by block. An entry that keeps producing bytes past the limit is stopped at the limit, not after it. |
+| **A flood of entries** | An archive of tens of thousands of tiny files, which costs far more to unpack than to build. |
+| **Two entries with the same path** | Refused rather than one silently overwriting the other. Which one won would be the attacker's choice, not the operator's. |
+| **A path that is absurd in shape** | Too long, too deeply nested, or containing a character that is not printable. The last one is subtler than it sounds and is covered below. |
+| **An archive inside an archive** | Stored as it is, never opened. One level only. |
+
+Two more properties belong here, because they are what a reviewer would ask about next.
+
+**Nothing uploaded is ever executed.** Nothing is marked runnable — the permissions come from the
+system, never from the archive — nothing is placed anywhere a program would be looked for, and
+nothing is started. The only thing that can later act on those files is the gated codebase
+assessment, which the operator starts deliberately and which runs inside the sandbox with the
+ordinary approval gate in front of it.
+
+**Nothing is silently skipped.** An entry that cannot be handled is a refusal, not a quiet omission.
+An operator cannot check a total they were never shown, and a silently skipped file is how an
+unscanned secret leaves a building.
+
+#### What leaves the machine, and what does not
+
+Uploading does not send anything to a model. The material sits on the operator's own machine, in a
+folder only their own account can read, until they send a message that asks about it — and the first
+time that happens the screen **stops and asks**. The dialog names how many files, how many bytes and
+how many attachments are about to go, lists the file names, names the model they are going to, and
+states in as many words that nothing else on the machine goes with them — not the other
+conversations, not the findings, not the keys. It is answered once per attachment rather than once
+per message, so it informs without nagging. Removing an attachment is the way to stop it going, and
+removing really deletes it on the machine rather than merely taking the label off the row — because
+every answer in a conversation is given over everything that conversation still holds, and an
+attachment the screen said was gone but the machine had kept would keep going to the model on every
+later turn.
+
+Three protections travel with the material itself:
+
+- **Credential-shaped values are masked before anything leaves.** A password or key sitting in the
+  operator's own source does not go to the model. What survives is the *fact* of it: the file is
+  flagged as having had something masked, so "this file commits a credential" still reaches the
+  operator even though the credential does not leave the host.
+- **Uploaded text is fenced as quoted material.** The block is introduced as untrusted data that is
+  there to be analysed and never to be obeyed, each file gets its own label, and every quoted line is
+  prefixed so that no line of an uploaded file can ever occupy the position a heading occupies. The
+  reason this is not merely decoration: without it, a file — or even a crafted file *name* — could
+  forge a section boundary and impersonate the operator. The characters that count as a line break
+  for this purpose are the ones a *reader* honours, not merely the ordinary one, which is precisely
+  where a first attempt at this had two measurable holes.
+- **Instructions hidden in uploaded material are reported, not followed.** The model is told, in the
+  standing instruction it always receives, that anything looking like an instruction inside an
+  attached file is itself a finding to be quoted and reported.
+
+#### It says how much it read, and how much it did not
+
+A model's attention is finite, so a large codebase is read in part: the most security-relevant files
+are chosen first, and the rest lose the budget race. That is fine, and it must be said. **Silence
+implies whole-repository coverage, and that is a lie the operator cannot detect.**
+
+So every answer grounded in an attached codebase ends with the arithmetic — for example: *I read 47
+of 312 files in the attached codebase — 265 were not read (binary, over-long, or the reading budget
+ran out). Everything above covers only those 47.* When it did read everything, it says that instead.
+The same two numbers are given to the model, so it cannot describe a partial read as a review of the
+whole tree without contradicting what it was handed. Three details make the count trustworthy rather
+than decorative:
+
+- It is the number of files **the model actually received**, not the number the machine set out to
+  send. When the block has to be trimmed to fit, it is trimmed on a file boundary and the count is
+  corrected downward — a half-quoted file is not a file read.
+- The sentence lives **in the reply itself**, not in a note beside it. The screen redraws the
+  transcript from the saved record, so a caveat carried only alongside a reply is gone by the next
+  redraw, and a partial read that stops announcing itself reads from then on exactly like a complete
+  one.
+- A conversation holding only a screenshot makes **no coverage claim at all**, because "I read 0 of
+  1 files" about a picture is noise, and noise is how a statement that matters stops being read.
+
+And the honest route to completeness is offered, not merely mentioned: an answer that read an
+extracted codebase carries a **Run the gated scan on these files** button, which starts the ordinary
+gated assessment over the same files — the one that walks the whole tree and whose findings an
+automatic test either confirms or does not. The folder it points at is *computed* from the
+conversation's own identity rather than read out of a stored record, so nothing that could edit that
+record could aim a real scan at some other directory on the machine.
+
+#### An answer here is a LEAD, never a finding
+
+Every model-authored bubble carries a printed marker reading **"Lead — not a confirmed finding"**.
+The standing instruction the model receives forbids the words "confirmed" and "proven", forbids
+assigning a severity score as though the matter were settled, requires each observation to cite the
+file it came from, and states that an honest "I cannot tell from what is attached" is a correct
+answer while a plausible guess is a defect. The consent dialog says the same thing in its own words
+before anything is sent.
+
+This is the whole discipline of the product applied to its most tempting surface. The material is
+whatever the operator handed over, checked by nothing. Only an automatic test over real evidence
+makes a fact.
+
+#### Linking one conversation to another
+
+A conversation can be told to **draw on** other conversations, so that reasoning done last week is
+available as background this week. The panel under the transcript lists what this one draws on, with
+a cross beside each to disconnect, and a picker to add another. Four properties, all printed on the
+screen and all exercised by tests that run on this machine:
+
+| Property | What it means |
+|---|---|
+| **One-way** | This conversation draws on the other. The other is not changed, does not draw on this one, and cannot see it. Linking in the other direction is a separate, deliberate act. |
+| **Several at once** | A conversation may draw on many others — the limit is thirty-two — and each is removed individually. |
+| **Nothing is copied** | The link stores only the other conversation's identity. It is a permission to read at the moment of answering, not a merge. |
+| **Disconnecting takes effect immediately** | Because nothing was copied, there is no residue: the very next answer is given without the other conversation's history. |
+
+Two further limits are worth stating, because a reader would assume both the other way. A linked
+conversation's **uploaded files are declared but their contents are not shared**: the answer learns
+that the other conversation holds an upload, not what is inside it. And the borrowed history is
+bounded, says how much of itself was left out, and passes the same masking as everything else before
+it leaves the host — so a credential pasted into a conversation last week does not travel through a
+link this week.
+
+#### The two dropdowns above the transcript
+
+These set the model and the reasoning effort **for the engine as a whole** — the same controls as the
+Settings screen, taking effect the next time the system is started. They do **not** change the answer
+in this conversation, which comes from a model the console pins itself. Sitting unlabelled above a
+transcript, controls named "Use model" and "Apply effort" read as "answer me with this", which is the
+one thing they do not do; they are now named for what they change and print a line saying what they
+do not. If the owner side is offline they degrade to an explanatory hint rather than failing silently.
+
+#### Status, stated exactly
+
+**Working and actionable.** The upload path, the extraction refusals, the deletion, the linking and
+the coverage arithmetic are all exercised by tests that pass on this machine, and the upload path has
+also been driven through the real interface here — this machine's saved conversations include a real
+file uploaded in slices, recorded, and later removed, with the removal really deleting it.
+
+What is **not** established is the answering step against the live service: every test puts a
+stand-in in place of the model, so no request leaves the host during them, and no answer produced by
+the live model over uploaded material is recorded anywhere on this machine. The reasoning call
+itself is new in this round — before it, this screen could only launch a run or ask for a target.
+Without an AI key it says so plainly and keeps the gated run on offer; under a sovereignty setting
+that forbids anything leaving the host it refuses the model call outright and says the gated
+assessment still runs.
+
+One capability exists in the back end with no way to reach it from a screen: attaching a file that
+already sits on this machine *as an attachment*, by naming its path. The route is written but is not
+exposed, so today the way to hand over something already on disk is to name it in the target box —
+which, for an archive, unpacks it, attaches it, and starts a gated review of the extracted copy.
 
 ---
 
@@ -751,7 +1069,7 @@ back in and see whether its proofs still hold.
 
 ---
 
-## 5. Group MANAGE — the thirteen screens for running the system
+## 5. Group MANAGE — the fourteen screens for running the system
 
 ### 5.1 Sessions
 
@@ -764,6 +1082,14 @@ sessions, each with a small cross beside it to disconnect.
 **What the operator can do.** Create a session, rename it, connect it to another, disconnect,
 delete it from the list (reversible), or delete it permanently. These controls use the browser's own
 prompt and confirm dialogs rather than custom forms.
+
+**The same connection, seen from the other end.** A conversation on the Chat screen *is* a session,
+so the "draws on" rows here and the **Draws on** panel described in §4.3 are two views of one thing,
+with the same four properties: one-way, several at once, nothing copied, and disconnection effective
+immediately. The difference is presentation, and this screen is the weaker of the two — connecting
+from here means typing an identity into a browser prompt, while the Chat screen offers a searchable
+list of conversations by name. Neither can mint a fact: a connected session's knowledge arrives as
+**advisory prior context**, and only an automatic test over real evidence confirms anything.
 
 The permanent-delete wording deserves quoting because it is precise: it is removed from the history,
 but **the runs and the signed record are kept**. A system that let an operator erase its own audit
@@ -931,13 +1257,48 @@ program entirely.
 On a non-Linux host the screen states plainly that these are Linux packages and that nothing is being
 probed, rather than showing everything as missing.
 
-**A separately labelled card, "NOT HOST-INSTALLED"**, lists the tools that live inside the
-third-party agent's container image. The screen says they are neither probed nor installed on this
-machine and are listed for reference only.
+On this machine the screen currently reports **thirteen tools, all thirteen installed**, with none
+missing, failed or shadowed.
+
+**A separately labelled card, "NOT HOST-INSTALLED"**, lists the **twenty-four** tools that live
+inside the third-party agent's container image. The screen says they are neither probed nor installed
+on this machine and are listed for reference only, which remains exactly right: they are in the
+image, not on the host. Chapter 12 sets out what has since been established about that image itself.
 
 **The "tool consciousness" panel (advisory).** Four tiles — Adopted, Refused, Installed, Installable
-— and per-tool rows showing whether the system has a command-line handle on it and whether it has an
-agent skill for it, with a **Controllable** or **Refused** chip and the reason, plus signal markers.
+— and one row per tool, each carrying a verdict chip reading **Controllable** or **Refused** with the
+reason behind it. It carries more rows than the roster above it — eighteen on this machine — because
+it also lists the tools the third-party testing agent holds a written playbook for and which are not
+installed on this host. **All eighteen are currently marked controllable and none is refused**, which
+was not true earlier the same day; a reader should treat a full house as the result of the work
+described in the next two paragraphs rather than as the natural state of that panel.
+
+The vocabulary behind that verdict widened in this round, and the widening is the interesting part.
+The system will not claim to control a tool it has no way to drive, so a tool with nothing driving it
+is refused outright. It used to recognise only two ways of driving one: a written playbook the agent
+reads, or a typed builder that assembles and gates the command itself. But parts of the engine
+resolve and start tools on their own — a gated sensor does, the source-analysis pass does, and the
+scanner starts a headless browser to confirm a browser-side flaw by really executing it. Those tools
+were genuinely being driven and were being reported as undrivable. That is a reporting defect rather
+than a missing capability, and its effect was to show the operator installed tools marked *refused*
+while the engine was demonstrably running them.
+
+So the verdict chip now **names the surface** — *Controllable (its own command line)*, *(a gated
+sensor)*, *(the source-analysis pass)*, *(the headless browser)* — rather than merely asserting that
+the tool is controllable. The list of admitting surfaces is closed: a label that is not on it
+refuses, so "give it a name" can never become "admit everything". Two things are deliberately **not**
+counted as control, and the reasoning is worth quoting because it is what keeps the gate meaningful:
+being able to *read* another tool's report is not being able to drive it, and the offline benchmark
+harness does start rival scanners in order to score against them, but that is a measurement rig
+rather than the engagement pipeline — counting it would let this screen claim an engagement
+capability that does not exist.
+
+**One honest wrinkle on this screen.** The verdict chip carries the new vocabulary, but the panel's
+own printed explanation underneath it, and its per-tool signal markers, still name only the original
+two — a playbook and a typed builder. So a tool driven by a sensor is correctly labelled in its
+verdict and unmentioned in the explanation beside it. The complete, per-tool statement of what drives
+each one is on the New Assessment tool picker (§4.2), not here. It is stale wording rather than a
+wrong verdict, and it is listed with the other honest gaps in §8.
 
 **What the operator can do.** For an adopted-but-missing tool, two buttons:
 
@@ -1225,6 +1586,132 @@ It is the point.
 
 ---
 
+### 5.14 Engagement Library
+
+*Subtitle: "Every past job, most recently worked first — open one to get back to its runs, findings
+and proof."*
+
+This screen answers a question none of the others answer: **what did we do last spring?** Months
+after a piece of work, an operator usually remembers the customer's name and roughly when the work
+happened, and nothing else. Everything the system produced is still on the machine and still sealed —
+but the way back to it used to be an alphabetical list of folder names carrying no dates at all, and a
+job that had only ever been written into the signed record, without a folder of its own, did not
+appear on that list at all. The library is the way back in.
+
+**What the operator sees.** One table, one row per past job, **most recently worked on first**. Dates
+and times are shown in the reader's own time zone, and the screen prints which zone that is rather
+than leaving it to be guessed at.
+
+| Column | What it holds |
+|---|---|
+| **Job** | The human name, if one has been given, with the machine identity printed underneath it in small type — so the name a person chose and the identity the system works from are never mistaken for one another. A job that exists only as a folder on disk, with no entry in the tamper-evident record, is marked "not on the spine" (*spine* is this system's word for that record). |
+| **Last worked on** | The most recent real activity: an entry in the signed record, the moment a run started, or the time the authorisation document was last written. |
+| **First seen** | The earliest of those same three signals. |
+| **Kind** | What sort of work it was — a website or interface assessment, a codebase review, a single tool, the autonomous suite, a cloud or Kubernetes posture review, or a defensive run — read from each run's own record rather than inferred. |
+| **Subject** | What the work was pointed at, up to five entries. |
+| **Runs** | How many separate runs the job holds. |
+| **Findings** | How many findings are stored, and beside it — for a job recorded in the signed record — how many of those are proven facts rather than leads. |
+
+**Where those numbers come from, and what they are not.** The list is the union of two real sources on
+the machine — the signed record's own roster of engagements, and the folder of authorisation documents
+and evidence — together with the runs this interface itself launched, each filed under the job that
+that run recorded for *itself*. Two consequences are worth stating in plain terms. First, every date
+on this screen is derived from something that exists on disk, and **a job with no recorded activity is
+shown with a dash rather than back-dated to today**; the screen would rather admit it does not know
+than invent a plausible date. Second, a run belongs to a job because the run's own record says so, not
+because the request asked for it: **the browser cannot claim a run into a job it does not belong to.**
+
+Ordering is by most recent activity. Because the stored times are only accurate to the second, several
+jobs created by one command can carry the identical stamp; the tie is then broken by which was started
+more recently, and only as a last resort by identity, so the order is stable rather than flickering
+between two equally recent rows. When there are no past jobs at all the screen says so — "No past jobs
+yet" — and offers the New Assessment button instead of an empty table.
+
+**This screen is also the switch.** Because the interface is now scoped to one job at a time (§2),
+the library is where that job is chosen and where the view is widened back to everything. A line
+above the table says which it is — "Every screen is showing *Acme — Q3 external review* only", or
+"Every screen is showing all engagements. Open a job below to work on just that one" — and, when a
+job is in scope, an **All engagements** button beside it. Opening a job from the table, from a
+bookmark, or from a shared link makes it the active one. Widening is a presentation switch and
+nothing more: every job, run, finding and certificate stays exactly where it was.
+
+**Opening one job.** Clicking a row opens that job on its own. Four tiles: the machine identity,
+labelled *never changes*; when it was last worked on; how many runs it holds; how many findings, with
+how many of those oracle-proven. Then badges for the state a reader needs before trusting anything
+below them: charter on file or no charter, kill-switch tripped, on the signed record. Then a table of
+the runs inside the job — name, when it started, status, what it was pointed at, finding count — and
+against each run four buttons: **Findings**, **Evidence**, **Dossier**, **Rename**. The first two
+navigate into the screens described earlier in this chapter; the third downloads that run's dossier,
+the sealed package described in chapter 6.
+
+**What the operator can do.** Open a job, rename a job, rename a run, jump into a run's findings or
+its evidence, and download a run's dossier. Renaming uses the browser's own prompt box, as the
+Sessions screen does, and the prompt carries its own one-line disclaimer: *"The name is for you — it
+changes nothing that is signed."* Nothing else here changes anything. The screen cannot launch a run,
+cannot approve anything, and cannot alter a finding.
+
+**The load-bearing property: a rename is presentation only.** This is the part of the screen that this
+briefing exists to explain, so it is worth being precise about.
+
+Every past job has two names. The **machine identity** — a date-stamped identifier, or the short name
+the engagement was created under — is the name every certificate, every dossier and every entry in the
+signed record was written against. It never changes. The **human name** is a separate thing entirely:
+it is stored on its own, in one small file beside the interface's own records, keyed by that machine
+identity. Renaming writes one entry in that file and nothing else. **It touches no run's files, no
+evidence certificate, no part of the proof bundle and no entry in the tamper-evident record**, and it
+rewrites nothing that already exists. The consequence is the one a customer cares about: a job can be
+relabelled "Acme — Q3 external review" for the convenience of the people who have to find it again,
+and the proof package already handed to that customer still verifies, byte for byte, exactly as it
+did before.
+
+There is one place the human name deliberately does travel, and precision about it matters more than
+a clean slogan. If a **run** is renamed and its dossier is then downloaded *again*, the fresh archive
+is **titled** by the human name: the name heads the readable documents inside it, so that whoever
+opens the archive months later recognises the job instead of reading a date-stamped machine
+identifier. Titles are part of the readable material that the archive's own list of hashes covers, so
+that list is recomputed and the archive re-signed on every build, as it must be. What does not change
+is the proof: the sealed evidence inside is byte-identical either way, and its certificates carry the
+same fingerprints. Renaming a **job** does not travel even that far — only a run's name is carried
+into a download.
+
+That is not a claim resting on a comment in the code. It is exercised by tests that run on this
+machine and passed while this section was being written:
+
+| The test | What it establishes |
+|---|---|
+| **Change the stored name between two builds of the same run's dossier** | The proof re-verifies both times with the same verdict and the same certificate identity; the two archives are **byte-for-byte identical**; and neither name appears anywhere inside either archive. The test drives the packager directly, without the title the download button hands it, so what it pins is that nothing the packager gathers of its own accord can pick the name up. |
+| **Run the real offline verification a recipient runs** | Not a simulation of it: the pinned trust root, the signature checks, the hash chain, the artifact list and the deterministic re-firing of the checker, over two archives built while the stored name changed between them. Both must pass, with identical certificate fingerprints. |
+| **A deliberate control** | Make a genuine content change between two builds and the byte-identical check *must fail*; corrupt one entry in an archive and the tamper check *must fail*. Without this, the two tests above could be green because they were measuring nothing. |
+| **Photograph every file before and after** | A complete copy of every file the interface owns is taken before a rename and compared after it. The only thing permitted to differ is the file of names itself. |
+
+**Honest limits, stated plainly.** Four of them, and the first is the price of the property above.
+
+- **The human name is not signed.** It is convenience metadata held outside the tamper-evident record,
+  and nothing in the renaming path writes to that record. So the signed history does not show that a
+  job was renamed, or by whom. This is a deliberate trade: a name that *could* reach the signed
+  material is exactly the thing the design forbids, and one of the two cannot be had without losing
+  the other. What protects the name file is ordinary and worth naming honestly: it is readable only by
+  the account running the software, it is written in a way a crash cannot leave half-finished, and the
+  renaming request passes the same protections as every other action this interface can take — it is
+  not an owner-key act.
+- **The runs table lists the runs this interface launched.** A job driven entirely from the typed
+  commands still appears in the library, with real dates and counts read from the signed record, but
+  its detail view says so rather than showing an empty table: this job has an authorisation document
+  or a record entry, but no run launched from here yet.
+- **Refusals, not best guesses.** A malformed or unknown job identity is refused outright rather than
+  stored, a run can be named only if that run actually exists on disk, names are length-capped and
+  stripped of control characters, and the store of names is bounded — so repeated requests cannot grow
+  it without limit.
+- **The screenshot of this screen was taken in this round**, closing what had been a documentation
+  gap. The picture is therefore current; several older screens' pictures are not (§8).
+
+Everything on this screen is read from this machine. Nothing here reaches the network.
+
+**Status: read-only apart from the two rename actions — and neither of those changes anything that is
+signed.**
+
+---
+
 ## 6. Group LEARN — the four screens for understanding and staying current
 
 ### 6.1 Trust Center
@@ -1341,10 +1828,10 @@ assessment · Watching it live · Findings & evidence · Fixes · Arming live au
 PRs) · Defense — AEGIS · Approvals & Safety · Settings — keys & model · Brain — memory, benchmark &
 catalog · Deploying — local & hosted · Glossary.
 
-**An honest gap, worth stating plainly:** the manual covers thirteen topics, not all twenty-eight
-screens. There is currently **no manual section** for Terminal, Chat, Sessions, Proof Studio, Report,
-Compliance, Assurance, Charter & Attestation, API Keys, Knowledge Engine, MCP Servers, System &
-Services, Governance, Trust Center, Proof of Posture, or Replay Proof. Those screens carry their own
+**An honest gap, worth stating plainly:** the manual covers thirteen topics, not all twenty-nine
+screens. There is currently **no manual section** for Terminal, Chat, Sessions, Engagement Library,
+Proof Studio, Report, Compliance, Assurance, Charter & Attestation, API Keys, Knowledge Engine, MCP
+Servers, System & Services, Governance, Trust Center, Proof of Posture, or Replay Proof. Those screens carry their own
 in-screen explanatory text — which, as this tour shows, is substantial — but they are not written up
 in the manual.
 
@@ -1374,6 +1861,27 @@ the default.**
 | **Vulnerability leads** | Per vulnerability: a known-exploited or lead label, the identifier, severity, summary and source feed. | Read only. |
 | **Defensive knowledge catalog** | The defensive detection operators with their mapped attacker techniques and weakness types (first 200). | Read only. Labelled "Never facts." |
 | **knowledge/ folder → git** *(owner)* | — | **Status**; or **Regenerate + commit**, which regenerates the system map, scans the folder for secrets, and commits locally. |
+
+**What the "Learn from URL" button actually does.** That one row covers a whole subsystem, and a
+reader of this chapter should not have to guess at it. Pressing it hands the pasted web address to the
+sovereign side's own page-reading component, which fetches **public pages only, by ordinary retrieval,
+never anything a site owner would recognise as probing** — and which identifies itself with one fixed,
+never-varied label rather than disguising its traffic. Each fetch passes four gates before a connection
+opens: the address must be on the site the owner typed and nowhere else; every address that site name
+resolves to must be a public one, with the connection then pinned to it, which is what stops a web
+address being used to reach the machine's own private network; the site's own published rules for
+automated readers are respected, and are treated as *forbidding everything* if they cannot be read; and
+a minimum pause is taken between requests to the same site. The run is deliberately tiny — **at most
+four pages, one step from the address given** — because it happens while the operator waits, and the
+emergency stop is wired into it as a signal checked *between* page fetches, so a halt takes effect
+promptly rather than after the crawl would have ended anyway. The keystone is the grounded/advisory
+split named in the table: every claim goes through **the identical demote-only admission check that
+governs the owner's own memory**, so **nothing a page asserts ever becomes a fact** — a page is a
+source of quotations, never of truth, and what is served for a grounded claim is the page's own
+passage rather than the model's sentence about it. Chapter 14, "Learning from a page the owner points
+at", sets out the gates, the topic-based variant that reads a fixed list of public reference works, and
+the honest status of the route — including the fact that it has never been run against a live outside
+site on this machine.
 
 **The Brier score, in plain words.** It appears on the Self-evolve card and nowhere else in this
 chapter, and it is not a term a general reader will know. When the system predicts something, it does
@@ -1413,7 +1921,7 @@ did not find one might otherwise conclude the capability does not exist. It does
 This section covers them in three groups: the cloud and Kubernetes exploitation confirmations
 (§7.1), the safeguards around how the software itself is built and shipped (§7.2), and a set of
 seven further capabilities that are real, are in the software, and appear on none of the
-twenty-eight screens (§7.3).
+twenty-nine screens (§7.3).
 
 ### 7.1 The six cloud and Kubernetes exploitation confirmations
 
@@ -1425,7 +1933,7 @@ confirmations that a weakness was not merely *present* but actually *achieved*.
 | Confirmation | What it establishes, in plain terms |
 |---|---|
 | **Instance-metadata credential capture** | A cloud machine has an internal service that hands out credentials to whatever is running on it. This confirms a credential was actually retrieved from that service and actually worked — not that the service was reachable. |
-| **Exposed-secret validity** | A password or key found lying somewhere it should not be is only a real problem if it still works. This confirms the secret is currently valid, rather than expired or revoked. |
+| **Exposed-secret validity** | A password or key found lying somewhere it should not be is only a real problem if it still works. This confirms the secret is currently valid, rather than expired or revoked. It recognises two kinds of credential, and the two are at different stages — see below. |
 | **Google service-account impersonation** | One machine identity was able to act as a different, more privileged identity. |
 | **IAM privilege escalation** | A strict, achieved increase in privilege. The distinction matters: it confirms the step was taken, not that a path to it could be drawn on a diagram. |
 | **Kubernetes access control, tier one** | An anonymous, unauthenticated caller is bound to a dangerous built-in role on a container cluster. |
@@ -1441,11 +1949,17 @@ the same cluster — including the namespace's own default identity bound to the
 role, whose real rules do grant secret reads — correctly left as leads. What that run does not cover
 is
 discovering bindings across a whole cluster, and a managed provider's control plane (Amazon EKS,
-Google GKE, Azure AKS). The four cloud ones are proven offline with fixture evidence, meaning
-recorded sample data standing in for a live cloud account.
+Google GKE, Azure AKS). A third has since joined them: the **GitHub half** of exposed-secret
+validity is proven against the real GitHub service, using the operator's own credential against
+GitHub's own least-privileged identity endpoint, with the certificate re-verifying offline and a
+live bogus credential of the same shape correctly left as a lead. That capability's **Amazon Web
+Services half is not proven** — it is built and unit-tested but has never touched real Amazon
+infrastructure, and nothing from the GitHub run transfers to it. The remaining cloud ones are
+proven offline with fixture evidence, meaning recorded sample data standing in for a live cloud
+account.
 
 **There is no dedicated screen for any of them, and no dedicated typed command either.** This was
-checked directly: none of the twenty-eight screens names any of these capabilities, and the six
+checked directly: none of the twenty-nine screens names any of these capabilities, and the six
 verification modules are referenced nowhere outside their own folder and their own tests. They are
 internal verification paths, not buttons.
 
@@ -1463,14 +1977,17 @@ review. The wizard's own field hint states that the sensor "reads your imported 
 live account." There is no button in this product that says "run a cloud exploit", and this chapter
 will not imply there is one.
 
-**What remains deferred, stated exactly — and what no longer is.** For the four **cloud**
-capabilities, what has not yet happened is **real-world live fire against a third-party cloud
+**What remains deferred, stated exactly — and what no longer is.** For the remaining **cloud**
+capabilities — the metadata-credential capture, the Google service-account impersonation, the
+permission-escalation re-derivation, and the Amazon Web Services half of exposed-secret validity —
+what has not yet happened is **real-world live fire against a third-party cloud
 account**. That step waits on the customer supplying their own cloud credentials. The detection logic,
 the evidence handling, the certificates and the safety gates are all built and proven. The code says so
 in its own words: the module that would reach a live metadata service records in its own documentation
 that the network half is "deferred until an authorized lab credential is available."
 
-The **two Kubernetes** capabilities are no longer in that position. Both are proven against a **real
+The **two Kubernetes** capabilities are no longer in that position, and neither is the **GitHub half
+of exposed-secret validity**. Both Kubernetes ones are proven against a **real
 Kubernetes cluster**: a repository script stands up a genuine single-node cluster (k3s 1.31.5, in a
 container on the machine's own internal address) which the system creates, owns and destroys, plants
 known-dangerous and known-benign access rules in it, and adjudicates what the real Kubernetes interface
@@ -1482,10 +1999,12 @@ managed provider's control plane (Amazon EKS, Google GKE, Azure AKS).
 
 Two framings should both be avoided, because each is inaccurate in a different direction. Saying the
 capabilities are unfinished understates the system: they are built, gated, and proven. Saying the cloud
-ones have been field-proven in customer clouds overstates it: they have not been pointed at one. The
-accurate statement, and the one this document uses, is: **the Kubernetes confirmations are proven
-against a real cluster the system stands up itself; the cloud confirmations are built, gated, and
-proven offline, with live fire awaiting operator-supplied credentials, by design.**
+ones have been field-proven in customer clouds overstates it: none has been pointed at a customer's
+account. The accurate statement, and the one this document uses, is: **the Kubernetes confirmations
+are proven against a real cluster the system stands up itself; the GitHub half of exposed-secret
+validity is proven against the real GitHub service and its Amazon half is not; and the remaining cloud
+confirmations are built, gated, and proven offline, with live fire awaiting operator-supplied
+credentials, by design.**
 
 That design point is worth drawing out for a procurement reader, and the two halves show it from
 opposite sides. For cloud, it would have been technically easy to ship a demonstration against an
@@ -1505,7 +2024,7 @@ label, publishing a bill of materials for the software itself, and failing the b
 vulnerability is found in a dependency — are properties of the build pipeline, not features an
 operator clicks.
 
-Accordingly there is **no screen for them** among the twenty-eight, and no typed command for them
+Accordingly there is **no screen for them** among the twenty-nine, and no typed command for them
 either. Their evidence is the build pipeline's own record, and a reviewer should read the build
 configuration directly rather than look for a control in the interface. This work was still being
 delivered at the moment this chapter was written, and the state of a repository at a particular
@@ -1529,7 +2048,7 @@ Same subject matter, opposite directions. They should never be quoted as one ano
 
 ### 7.3 Seven further capabilities with no screen of their own
 
-These are real, working parts of the system that a reader touring the twenty-eight screens would
+These are real, working parts of the system that a reader touring the twenty-nine screens would
 never meet. Five are reached by typing a command; two are reached only from inside a run. None of
 them is a placeholder, and none of them is hidden — they simply were not given a page in the
 interface.
@@ -1616,7 +2135,7 @@ path.
 
 A briefing that lists only what works is not a briefing. This section lists every place in the
 *interface* where a screen shows something that does not do what a reader might reasonably assume,
-together with the interface's known gaps in coverage. It is a statement about the twenty-eight
+together with the interface's known gaps in coverage. It is a statement about the twenty-nine
 screens. It is not a claim that the system as a whole has no other limits — the capabilities that
 have no screen at all are set out in §7, and the ways of driving the system that are not screens at
 all are set out in §9 and §10.
@@ -1629,28 +2148,34 @@ all are set out in §9 and §10.
 | **The Governance screen** | Read-only by design. Destructive authorisations are minted and consumed only through the command line with multiple independent signatures. |
 | **The Charter screen** | Can provision a *this-machine* authority only. A remote charter requires an out-of-band ceremony on a host that holds the owner key. Its in-browser "is this host authorized?" check is labelled advisory; the gate is what enforces. |
 | **The Fixes screen** | Never opens a code-change request. That is a separate, off-by-default command-line capability requiring multi-party signed authorisation. |
-| **The Manual** | Covers 13 topics, not all 28 screens (the uncovered ones are listed in the Manual entry earlier in this chapter). |
+| **The Manual** | Covers 13 topics, not all 29 screens (the uncovered ones are listed in the Manual entry earlier in this chapter). |
 | **Credentials for a login-protected target** | The wizard has no field for a test account's username and password, and no screen offers one. A run launched from the interface therefore exercises the public, logged-out surface of an application. The engine contains the login-and-stay-logged-in machinery, and the typed commands accept a second identity for the "can user A read user B's data?" tests — but neither is reachable from a screen. |
-| **Cloud and Kubernetes exploitation** | Built and gated, with no screen and no typed command of its own. The two Kubernetes confirmations are proven against a real cluster the system stands up itself; the four cloud ones are proven offline with recorded sample evidence, with live fire against a real third-party cloud account still deferred. See the note below the table. |
+| **Cloud and Kubernetes exploitation** | Built and gated, with no screen and no typed command of its own. Three of the six have been fired at something real, and the three are not of equal weight — the two Kubernetes ones against a real cluster the system stands up, owns and destroys itself, which is real infrastructure but the project's own; and the GitHub half of exposed-secret validity against the real GitHub service, the only one of the six to have judged material from a real outside system. The rest, including that capability's Amazon half, are proven offline with recorded sample evidence, with live fire against a real third-party cloud account still deferred. See the note below the table. |
 | **Seven further capabilities** | The out-of-band relay, entitlement provisioning, target intake, importing another tool's results, social-engineering defence, the fuzzing engine and the request replayer all exist and none has a screen. Five have a typed command; two run only inside an engagement. Set out in full in §7.3. |
 | **Build and release safeguards** | A property of the build pipeline, not a screen. There is no control for them anywhere in the interface, by design. |
 | **The unified interface's reach** | Reachable only through `vigil up`. Of the three back-end programs, two serve pages of their own, and pointing a browser at either gets an older interface rather than this one. The third serves no pages at all. |
-| **Screenshots** | 32 screenshots exist on disk, covering all but three of the 28 screens, plus several sub-tabs and the cloud setup view. **No screenshot exists for MCP Servers, System & Services, or Proof of Posture** — the three most recently added screens. This is a documentation gap, not a functional one. |
-| **Local camera gesture control** | Not functional. Gesture input comes from a paired phone companion. |
+| **Screenshots** | **36 screenshots now exist on disk, and every one of the 29 screens has one** — the four that were missing (MCP Servers, System & Services, Proof of Posture, the Engagement Library) were taken in this round. The remaining six cover sub-tabs and the cloud setup view. The honest residue is age rather than absence: most were taken a fortnight ago, so the Chat and New Assessment pictures show those screens as they were before the changes described in §4.2 and §4.3. |
+| **Starting the attack side from a screen** | Half built, and the missing half is the visible one. The switchboard that serves the interface now answers two addresses of its own — say which programs behind it are answering, and start the two attack-side ones — behind the same machine-only, address, session-key and anti-forgery checks as everything else, and with **no command, path or port travelling in the request** (§1.2). The browser-side indicator and its Start button are written but are **placed on no screen**: nothing displays them, they carry no styling, and the System & Services screen still tells the operator to start the attack side in a terminal. Neither half has an automated test. So the control exists in the code and is not reachable by a person today. |
+| **The Tools screen's driver wording** | The per-tool verdict chip names the new, wider vocabulary correctly; the printed explanation and the signal markers beside it still name only the original two ways of driving a tool. Stale wording, not a wrong verdict. The complete per-tool statement is on the New Assessment tool picker. |
+| **Attaching a file already on the machine** | A conversation can be handed material by upload or by naming an archive as its target. Naming a file *as an attachment*, without also starting a run, exists in the back end but is not exposed as a route or a control. |
+| **What a single tool run can actually start** | The New Assessment tool picker lists this host's whole roster and says how each tool is driven, but of the thirteen tools installed here exactly **one** — the headless browser — can be started from that screen as a single tool. The other twelve are driven by the engine during an engagement. The screen states this itself, tool by tool and as a count. |
+| **Gesture control, by camera or by phone** | Neither route produces movement. The local camera route is not functional (the hand-tracking model is absent); the phone-as-trackpad route is built and tested on the desktop side but has nothing sending it hand movement. Chapter 14 lists what each is waiting on. |
 | **The telemetry collector** | Off by default. The Assurance screen says "collector not running" rather than showing zeros. |
 | **Vulnerability-feed egress** | Off by default. Both the one-shot pull and the recurring pull are conscious opt-ins, gated by the emergency stop. |
 | **Accessibility and browser support** | **Not assessed.** No accessibility standard is claimed, no audit has been carried out, and no supported-browser list is published anywhere in the software or its documentation. See the note below the table. |
-| **Documentation drift** | Two internal reference documents are stale on the screen count: both still say "21 screens". **The verified number, agreed by three independent lists that are checked against each other automatically, is 28.** |
+| **Documentation drift** | Five internal reference documents are stale on the screen count, at two different wrong figures: the interface package's own read-me and the internal knowledge note still say twenty-one; the repository's front page, the exhaustive feature catalogue and the working note that tells a developer how to add a screen still say twenty-eight. Older programme records quote twenty-five and twenty-six, but those are dated accounts of the count on the day rather than claims about the software as it now stands. **The verified number, agreed by three independent lists that are checked against each other automatically, is 29.** |
 
 **On the cloud row.** All six cloud and Kubernetes exploitation confirmations are complete and part
 of the released software, and they are wired end to end. The two Kubernetes ones are proven against a
 real single-node cluster the system creates, owns and destroys — dangerous binding confirmed and
 re-verified offline, benign ones correctly left as leads — with cluster-wide enumeration and managed
-provider control planes (EKS, GKE, AKS) explicitly outside what that run shows. The four cloud ones are
-proven offline with recorded sample data standing in for a live cloud account; what has not happened
-for them is live fire against a real third-party cloud account, which waits on the customer supplying
-their own cloud credentials. There is no screen and no typed command for any of the six; they reach the
-operator through the ordinary confirmed-finding path.
+provider control planes (EKS, GKE, AKS) explicitly outside what that run shows. The GitHub half of
+exposed-secret validity is proven against the real GitHub service, with its Amazon Web Services half
+built, unit-tested and never exercised against real Amazon infrastructure — nothing from the GitHub
+run transfers to it. The remaining cloud ones are proven offline with recorded sample data standing in
+for a live cloud account; what has not happened for them is live fire against a real third-party cloud
+account, which waits on the customer supplying their own cloud credentials. There is no screen and no
+typed command for any of the six; they reach the operator through the ordinary confirmed-finding path.
 The full account, including why the remaining deferral is deliberate, is in §7.1.
 
 **On the accessibility row, stated carefully.** The interface does carry some of the standard
@@ -1667,7 +2192,7 @@ accessibility conformance statement; the honest position today is that one has n
 the navigation list in the application code, the routing logic in the same file, and a
 human-maintained screen map used by the voice assistant. An automated check fails the build if the
 three sets diverge, applies a guard so that a duplicated or unreadable entry cannot silently vanish,
-and requires at least one spoken synonym per screen. All three lists currently contain 28 entries;
+and requires at least one spoken synonym per screen. All three lists currently contain 29 entries;
 this was independently counted during the writing of this chapter. The two stale documents both say
 21, in five places between them. There is also a "22" in circulation, and it is worth separating: 22
 is not a stale figure for the modern interface at all — it is the **correct** count of screens in the
@@ -1677,7 +2202,7 @@ older offence console described in §9. The two numbers refer to two different p
 
 ## 9. The other ways into the system
 
-The twenty-eight screens are one way in. The typed commands in §10 are a second. There are three
+The twenty-nine screens are one way in. The typed commands in §10 are a second. There are three
 more human interfaces in the box that are not the product interface, and two **programmatic** ways in
 — routes intended for another piece of software rather than a person. A reviewer inventorying what
 can be talked to, and an integrator asking "can we drive this from our own systems", both need the
@@ -1697,12 +2222,21 @@ content-security policy the modern interface uses, which is why the modern polic
 applied to it. *Inventoried from source; not exercised at runtime during the preparation of this
 chapter.*
 
-**The legacy SIGIL cockpit** — a single page with five panels, served on the internal sovereign port:
+**The SIGIL cockpit's own page** — a single page with five panels, served on the internal sovereign
+port:
 an approval queue with approve/deny buttons; agent activity, budgets and ingest lag; a capabilities
 panel with toggles; a live event stream where every row is chipped *anchored*, *tail* or *broken*;
 and a detail overlay that, when a record is clicked, fetches it and shows an *integrity verified* or
 *INTEGRITY BROKEN* chip along with the reason. *Inventoried from source; not exercised at runtime
 during the preparation of this chapter.*
+
+**One distinction matters here and chapter 14 settles it.** The word "legacy" applies to this *page*,
+not to the program that serves it. The cockpit program is the sovereign half's live back end: `vigil
+up` starts it first and refuses to continue if it does not come up, and the modern interface makes
+sixteen calls into it — including the single owner-signed channel through which every owner-plane
+change in the whole interface passes. So the accurate statement is that **the cockpit program is
+current and load-bearing; its own five-panel page is a superseded front end that is still shipped and
+still served.** Chapter 14, section 8.3, sets out the evidence.
 
 **The Strix terminal interface** — a third-party, Apache-licensed agentic pentest tool that has been
 vendored into the repository (that is, a copy of somebody else's software kept inside this one) and
@@ -1770,13 +2304,14 @@ One more thing belongs here, because a reader asking about "the back end" will l
 chapter is where the interface is described.
 
 Every screen in this chapter is a **client**. It draws nothing from its own knowledge; it asks the
-back end and displays the answer. There are **73 distinct addresses** it can ask — 68 on the offence
+back end and displays the answer. There are **81 distinct addresses** it can ask — 76 on the offence
 side and 5 on the sovereign (owner) side, counted by reading the interface code — and each one
 corresponds to something in
 this tour: the run list, one run's findings, its evidence, its coverage, its attack graph, the
 compliance mapping, the drift comparison, the posture certificates, the tool inventory, the
-capability catalogue, the chat conversations, the terminal's dry-run verdict, the defensive gateway's
-status, the approvals queue, the settings, and so on.
+capability catalogue, the chat conversations and the pieces of an upload, the terminal's dry-run
+verdict, the defensive gateway's status, the approvals queue, the settings, and so on. (The
+switchboard's own two addresses, described in §1.2, are not among them: no screen calls either.)
 
 Two consequences follow, and both are load-bearing.
 
@@ -1970,6 +2505,9 @@ controls, not testing controls.
 | **Pushing the knowledge folder to a remote repository** | **Command line only** | The screen commits locally; pushing is a separate deliberate act. |
 | **Supplying a test account's login for an authenticated scan** | **Command line, and only for one family of tests** | No screen has a field for it. The typed commands accept a second identity for the "can user A read user B's data?" tests, and nothing more. The general login-and-stay-logged-in machinery exists inside the engine but is not exposed by any screen or any option. |
 | Checking readiness before a session | **Either** | `vigil doctor` and the System & Services screen show the same report. |
+| **Starting the system, or restarting the offence side after it has stopped** | **Command line** | `vigil up` brings the whole thing up. The launcher's own switchboard will also restart the offence side on request — a fixed, named action whose command comes from the launcher's own configuration and never from the request — but no screen offers that control today, so in practice this is still a terminal act (§8). |
+| **Working on one job at a time** | **Screen** | The job chip and the Engagement Library scope every screen to one job and widen back again. There is no typed equivalent, and none is needed: scoping is presentation and changes nothing the commands act on. |
+| **Asking a question about a codebase nobody has scanned yet** | **Screen** | Only the Chat screen takes an upload. The answer is a lead; the typed commands are what turn it into a fact. |
 | Re-checking a proof someone sent you | **Screen** | The Replay Proof screen takes a pasted report and needs nothing else. |
 | Automating anything on a schedule | **Command line** | Every verb is scriptable; screens are not. |
 | **Driving the system from another piece of software** | **The gated on-machine service** | It runs already under `vigil up`, and can be started on its own with `vigil crucible api`. It gives a program the same reads and the same gated actions, on this machine only. See §9.2. |
@@ -2000,10 +2538,11 @@ To make the tour concrete, here is a plausible first hour, using only actions ve
    this-machine authority. If they intend to test a remote system, they instead copy the printed
    ceremony command and run it on the machine that holds the owner key.
 6. They press **New Assessment** and walk the five steps — choose *Scan a website / API*, enter the
-   address, tick the authorisation declaration, set the scope, choose a depth, choose a model — and
-   press **Launch assessment**.
-7. They land on **Live** and watch the reasoning graph fill in. When the safety button in the top bar
-   changes to "N waiting for you", they approve or deny in place.
+   address, tick the authorisation declaration, set the scope, choose a depth, and read the line
+   telling them whether this kind of run uses a model at all — and press **Launch assessment**.
+7. They land on **Live** and watch the reasoning graph fill in. The job chip in the top bar now names
+   the job they just started, and every screen from here on shows that job and nothing else. When the
+   safety button changes to "N waiting for you", they approve or deny in place.
 8. When the run finishes they open **Findings**, read the confirmed items, and press **Re-verify this
    run (offline)** to watch the system re-check its own conclusions with no traffic sent.
 9. They open **Coverage** and read the blind-spot legend, so they know what was *not* examined.
@@ -2016,11 +2555,14 @@ To make the tour concrete, here is a plausible first hour, using only actions ve
 Step 11 is the step everything before it exists to make possible: a result the customer can check
 for themselves, on their own machine, without taking our word for anything.
 
-Two things a first-hour operator should know that this sequence does not show. If the application
+Three things a first-hour operator should know that this sequence does not show. If the application
 being tested sits behind a login, the wizard has nowhere to put a test account, so the run will
-cover the logged-out surface only (§4.2). And if the target is somewhere other than this machine,
+cover the logged-out surface only (§4.2). If the target is somewhere other than this machine,
 certain findings that depend on the target calling out to a listener need that listener to be
-running and named in the signed authorisation first (§7.3).
+running and named in the signed authorisation first (§7.3). And there is a shorter, looser first
+half-hour than this one: drop a codebase into **Chat** and ask what looks wrong. That answer is a
+lead, it says how many files it read, and the button underneath it starts exactly the run described
+in step 6 over the same files (§4.3).
 
 ---
 
@@ -2035,15 +2577,17 @@ and which a general reader can ignore entirely.
 
 | Question a reader asks | The answer |
 |---|---|
-| How many screens is an operator learning? | **28** — and the number is not a guess: three separate lists inside the software must agree, and an automatic check fails the build if they do not. |
+| How many screens is an operator learning? | **29** — and the number is not a guess: three separate lists inside the software must agree, and an automatic check fails the build if they do not. |
 | How many of those can change anything only with the owner's key? | **4** — Approvals & Safety, Charter & Attestation, API Keys, Settings. |
-| How many controls look functional but are not? | **1** — the command palette, which shows a "on the roadmap" message. Everything else on every screen does what it appears to do. |
+| How many controls look functional but are not? | **1** — the command palette, which shows a "on the roadmap" message. Everything else on every screen does what it appears to do. A second control, the one that would start the offence side, is written in the interface's code but placed on no screen, so it is invisible rather than misleading (§8). |
+| Which screens show only the job being worked on? | **9 of 29** — Live, Activity, Findings, Fixes, Proof Studio, Report, Compliance, Assurance and two tabs of Brain. Scoping hides rows and deletes nothing, and every scoped screen offers the way back to all engagements. |
+| Of this host's security tools, how many can be started as a single tool from a screen? | **1 of 13** — the headless browser. The other twelve are driven by the engine during an engagement, and the picker says so for each one rather than hiding them. |
 | How much of what the system can do has no screen at all? | **7 further capabilities** (§7.3) plus the **6 cloud and Kubernetes confirmations** (§7.1). Of those thirteen, **0** have a screen; five have a typed command; the rest run inside an engagement or reach the operator as an ordinary confirmed finding. |
 | What can an outside AI assistant do through this system? | **2 read-only capabilities by default**, and the operator can widen that list deliberately. Anything not on the list is refused. |
 | What can another piece of software drive? | **2 programmatic ways in**, both off until started, both on this machine only: the gated on-machine service and the tool server for an external AI (§9.2). |
 | What can the owner's side be asked to do at all? | **25 kinds of action.** Anything else is refused outright, not merely denied. |
 | Has the interface been assessed for accessibility? | **No.** Twelve assistive-software markings exist in the code; no standard is claimed and no audit has been done. |
-| How much of the software is documented for the operator inside the product? | **13 manual sections**, covering thirteen topics rather than all twenty-eight screens. |
+| How much of the software is documented for the operator inside the product? | **13 manual sections**, covering thirteen topics rather than all twenty-nine screens. |
 
 **Inventory counts, for a reviewer checking this chapter against the software.**
 
@@ -2051,10 +2595,12 @@ and which a general reader can ignore entirely.
 |---|---|
 | Web interfaces in the repository | 3, plus 1 terminal interface copied in from a third party |
 | Sub-tabs inside screens | 11 (5 in Findings, 6 in Brain) |
-| Distinct back-end addresses the screens call | 73 — 68 on the offence side, 5 on the owner's side |
+| Distinct back-end addresses the screens call | 81 — 76 on the offence side, 5 on the owner's side. Two further addresses are answered by the launcher's own switchboard rather than by a back end (plane status, and starting the offence side); no screen calls either today. |
 | Screens in the older offence console | 22 |
 | Panels in the older owner-side cockpit | 5 |
-| Screenshots on disk | 32 |
+| Screenshots on disk | 36 — one for each of the 29 screens, plus 7 sub-views |
+| Tools in this host's roster | 13, all installed; 24 more inside the third-party agent's container image, listed for reference and not installed here |
+| Ways of driving a tool the admission gate recognises | 4 named surfaces — its own command line (a playbook or a typed builder), a gated sensor, the source-analysis pass, the headless browser — up from 2 |
 | `vigil` native command verbs | 26, plus 5 that hand off to another console |
 | Subcommands behind those 5 | 78 in total — 31 offence, 38 owner-side, 3 defensive, 6 network gate. All are listed in §10.2. |
 
@@ -2062,7 +2608,7 @@ Every number in both tables was read out of the source code during the writing o
 
 ---
 
-## 13. The single idea behind all twenty-eight screens
+## 13. The single idea behind all twenty-nine screens
 
 If a reader remembers one thing from this chapter, it should be this. Every screen in this system
 does one of exactly three things: it **shows evidence**, it **requests a signature**, or it
@@ -2075,8 +2621,15 @@ fixed, deterministic, non-AI checker can do that, and every screen that displays
 which checker did so.
 
 That is why the honest gaps in this chapter — a placeholder button, a manual that covers thirteen
-topics rather than twenty-eight, three screens without a screenshot, no field for a test account's
-login, no accessibility audit, seven working capabilities with no page of their own, and a cloud
-capability that is built and proven but not yet fired at a live third-party account — can be listed
-openly. They are gaps in convenience and in coverage of the field record. None of them changes what
-the system is willing to call proven.
+topics rather than twenty-nine, a control for starting the offence side that is written but placed on
+no screen, screenshots that are complete but in places older than the screens they show, no field for
+a test account's login, no accessibility audit, seven working capabilities with no page of their own,
+and cloud capabilities that are built and proven but not yet fired at a live third-party account —
+can be listed openly. They are gaps in convenience and in coverage of the field record. None of them
+changes what the system is willing to call proven.
+
+The newest surface in the product is the clearest illustration of that last sentence. An operator can
+now drop a customer's codebase into a conversation and ask what is wrong with it, and get a reasoned
+answer in seconds. That answer is marked a lead on its face, states how many files it read and how
+many it did not, and carries a button to the gated scan that walks the rest — because the difference
+between an opinion and a fact is the only thing this product actually sells.

@@ -5,11 +5,21 @@ background. Every statement in it was checked against the working software. Wher
 but has not yet been used against a live outside system, it says so. Where something is deliberately
 not built, it says that too.*
 
-*The chapters were written against the software as it stood on 12 August 2026, at the recorded
-version `1487e03a`; several chapters were then revised the same day against version `dc2994d6`, which
-is the version that includes the build-and-release safeguards described in Chapter 1. Those version
-markers are recorded so that any statement here can be re-checked against the exact software it
-describes.*
+*This edition describes the software as it stood on **13 August 2026**, at the recorded version
+`05b81e9f`. Two earlier versions are named because parts of the text were first written against them:
+`1487e03a`, of 12 August 2026, against which the first draft of chapters 1 to 13 was written, and
+`dc2994d6` of the same day, which is the version that first included the build-and-release safeguards
+described in Chapter 1. Everything was then re-checked against `05b81e9f`, and Chapter 14 was written
+new against it. Those version markers are recorded so that any statement here can be re-checked
+against the exact software it describes.*
+
+*What changed at the current version, so that a reader comparing editions can see it at a glance: a
+second cloud capability was fired at something real, and it is the first of them to have judged
+material from a genuinely outside system; an honest count appeared of how strong
+the evidence behind each of the system's 38 confirming checkers actually is; a plain-language case
+file became part of every delivered archive; an anti-replay guard was added to the owner's signed
+decisions; the interface reached twenty-nine screens; and Chapter 14 was added, covering the half of
+the product that holds the owner's key rather than the half that attacks.*
 
 ---
 
@@ -47,6 +57,9 @@ is finished and what is not.
 4. **Chapter 6** — evidence: how it is collected, sealed and independently re-checked.
 5. **Chapter 13** — the defensive side, source-code review, and encrypted connections.
 6. **Chapter 12** — the external tools it drives, and the practical prerequisites.
+7. **Chapter 14** — the sovereign half: the part that holds the owner's key, keeps the owner's
+   memory, and governs the offensive engine — and an honest account of which of its capabilities are
+   actually running.
 
 ### If you are in procurement
 
@@ -67,6 +80,8 @@ is finished and what is not.
    evidence does and does not prove, evidence retention, and a reviewer's checklist.
 4. **Chapter 5, Part 4** — which claims the system is permitted to state as a proved *absence*, and
    why that is deliberately harder than proving a problem exists.
+5. **Chapter 14, sections 1 and 2** — where the authority to start, stop and attest actually sits,
+   and why the record that holds it cannot be quietly edited.
 
 ### Three things to know before you start
 
@@ -85,7 +100,7 @@ is finished and what is not.
 ### The companion file
 
 A separate front-matter page, `00-index.md`, sits alongside this document in the same folder. It
-carries a single consolidated status ledger covering all thirteen chapters at once, a note on how the
+carries a single consolidated status ledger covering all fourteen chapters at once, a note on how the
 briefing was written, and instructions for re-deriving the load-bearing numbers from the software
 directly. A reader who wants one page of status rather than one chapter should start there.
 
@@ -126,6 +141,15 @@ looks again.
 exports, the signed proof for every proven finding, the tamper-evident record of everything the
 system did, and a fingerprint for every item, so that altering any part of it is detectable.
 
+**The other half.** The product is not only an attacking engine. It ships as two deliberately
+separated halves running as two separate programs, and the second one — which holds the owner's
+signing key, keeps the owner's working memory as a tamper-evident record, and decides whether the
+first one may act at all — contains no attacking capability whatsoever. That separation is what makes
+the guarantees above worth anything: the half that attacks holds no key with which to forge a record,
+and cannot be loaded into the half that does. Chapter 14 describes that half in full, including an
+honest account of which of its capabilities are actually running on the machine this was written on
+and which are built, tested, and waiting on hardware or software that is not installed.
+
 **What bounds it.** Nothing touches a target without a signed written authorisation naming that
 target. Every action passes a permission check in which every condition must hold at once, and any
 failure — or any error — is a refusal. Actions are sorted into four danger tiers; the dangerous ones
@@ -140,14 +164,30 @@ local target, not proven in the field. A signed benchmark on that application re
 positives, no false positives and no misses, against comparison tools scoring zero, two and zero true
 positives with zero, seven and eight false positives; the benchmark document's own fairness caveats
 are carried forward in Chapter 1 and should be read with it. One live external run against a
-vendor-published deliberately vulnerable test site is recorded. Six cloud and container-platform
-exploitation confirmations are complete and part of the released software: the two
-container-platform (Kubernetes) ones are proven against a real Kubernetes cluster the system stands
-up, owns and destroys itself, while the four cloud ones are proven against recorded sample data with
-no internet connection, and what remains for those four is the act of pointing them at a live
-third-party cloud account, which waits on that customer's own credentials by design, because the
-system is built not to obtain a credential any other way. Safeguards over the system's own build were
-folded into the released software on the day this briefing was written, with one inventory file
+vendor-published deliberately vulnerable test site is recorded.
+
+The sharpest question to ask of a system like this is not how many things it can check for, but how
+much of that has ever been tried against something real. Of its 38 kinds of confirming checker,
+**three** have judged material a real outside system produced, **two** material from real
+infrastructure the system builds and destroys for the purpose, **thirteen** material a real program
+on the project's own machine produced, and **twenty** only saved sample material. Chapter 1 sets that
+count out in full, including the one convention a stricter reader would apply differently.
+
+Six cloud and container-platform exploitation confirmations are complete and part of the released
+software, and three of the six have now been fired at something real, though not all at the same
+kind of thing: the two container-platform (Kubernetes) ones against a real Kubernetes cluster the
+system stands up, owns and destroys itself — real infrastructure, but the project's own rather than a
+third party's estate — and the GitHub half of the exposed-secret check against the real GitHub
+service, the only one of the six to have judged material from a real outside system, using the
+evaluator's own credential against the least-privileged call that service offers. That
+third one splits, and the split is not smoothed over anywhere in this document: the same capability's
+Amazon Web Services half has never touched real Amazon infrastructure, and nothing from the GitHub
+run transfers to it. The remaining cloud confirmations are proven against recorded sample data with
+no internet connection, and what remains for them is the act of pointing them at a live third-party
+cloud account, which waits on that customer's own credentials by design, because the system is built
+not to obtain a credential any other way.
+
+Safeguards over the system's own build are part of the released software, with one inventory file
 inside the offensive engine still a self-declared placeholder. Several further capabilities are
 scaffolds — the outline exists and the unimplemented part returns a clear error rather than a
 plausible-looking answer — and each is named individually rather than folded into a general claim of
@@ -317,7 +357,7 @@ technically true.
 - [2. The furniture that appears on every screen](#2-the-furniture-that-appears-on-every-screen)
 - [3. Two words that appear on almost every screen: FACT and LEAD](#3-two-words-that-appear-on-almost-every-screen-fact-and-lead)
 - [4. Group DO — the eleven screens for doing the work](#4-group-do--the-eleven-screens-for-doing-the-work)
-- [5. Group MANAGE — the thirteen screens for running the system](#5-group-manage--the-thirteen-screens-for-running-the-system)
+- [5. Group MANAGE — the fourteen screens for running the system](#5-group-manage--the-fourteen-screens-for-running-the-system)
 - [6. Group LEARN — the four screens for understanding and staying current](#6-group-learn--the-four-screens-for-understanding-and-staying-current)
 - [7. Capabilities that have no screen at all](#7-capabilities-that-have-no-screen-at-all)
 - [8. Where the interface is honestly incomplete](#8-where-the-interface-is-honestly-incomplete)
@@ -325,9 +365,9 @@ technically true.
 - [10. The command line — the same system, typed instead of clicked](#10-the-command-line--the-same-system-typed-instead-of-clicked)
 - [11. What a first session actually looks like](#11-what-a-first-session-actually-looks-like)
 - [12. Summary of verified counts](#12-summary-of-verified-counts)
-- [13. The single idea behind all twenty-eight screens](#13-the-single-idea-behind-all-twenty-eight-screens)
+- [13. The single idea behind all twenty-nine screens](#13-the-single-idea-behind-all-twenty-nine-screens)
 
-**[Chapter 10. The Knowledge Graph: Building A Picture Of The Target](#chapter-10-the-knowledge-graph-building-a-picture-of-the-target)**
+**[Chapter 10. The Target Knowledge Graph: Building A Picture Of The Attack](#chapter-10-the-target-knowledge-graph-building-a-picture-of-the-attack)**
 
 - [1. Why the system draws a map at all](#1-why-the-system-draws-a-map-at-all)
 - [2. The two building blocks: things, and connections between things](#2-the-two-building-blocks-things-and-connections-between-things)
@@ -342,7 +382,7 @@ technically true.
 - [11. Chokepoints: which single fix breaks the most attacks](#11-chokepoints-which-single-fix-breaks-the-most-attacks)
 - [12. Keeping the map honest](#12-keeping-the-map-honest)
 - [13. What the operator actually sees](#13-what-the-operator-actually-sees)
-- [14. Four different pictures of the same work, named honestly](#14-four-different-pictures-of-the-same-work-named-honestly)
+- [14. Five different pictures, named honestly](#14-five-different-pictures-named-honestly)
 - [15. Per-job maps, and memory across jobs](#15-per-job-maps-and-memory-across-jobs)
 - [16. The software supply chain on the same map](#16-the-software-supply-chain-on-the-same-map)
 - [17. What is fully working, what is built but not yet fired at a live third party](#17-what-is-fully-working-what-is-built-but-not-yet-fired-at-a-live-third-party)
@@ -379,6 +419,22 @@ technically true.
 - [Part 5 — Proving A Fix Actually Worked](#part-5--proving-a-fix-actually-worked)
 - [What A Reviewer Should Take Away](#what-a-reviewer-should-take-away)
 
+**[Chapter 14. The Sovereign Side, In Full](#chapter-14-the-sovereign-side-in-full)**
+
+- [1. Why there is a sovereign side at all](#1-why-there-is-a-sovereign-side-at-all)
+- [2. The record as memory](#2-the-record-as-memory)
+- [3. The knowledge graph, and the nightly pass that keeps it true](#3-the-knowledge-graph-and-the-nightly-pass-that-keeps-it-true)
+- [4. Recall by meaning](#4-recall-by-meaning)
+- [5. The agents — and exactly how many of them there are](#5-the-agents--and-exactly-how-many-of-them-there-are)
+- [6. Seeing the screen, and why the reading is not trusted](#6-seeing-the-screen-and-why-the-reading-is-not-trusted)
+- [7. Speaking to it, and pointing at it](#7-speaking-to-it-and-pointing-at-it)
+- [8. The cockpit and the status overlay](#8-the-cockpit-and-the-status-overlay)
+- [9. The memory server — giving any assistant cited recall](#9-the-memory-server--giving-any-assistant-cited-recall)
+- [10. The mesh, and the phone](#10-the-mesh-and-the-phone)
+- [11. What is proven on one platform, and what is a seam](#11-what-is-proven-on-one-platform-and-what-is-a-seam)
+- [12. Learning from a page the owner points at](#12-learning-from-a-page-the-owner-points-at)
+- [13. Honest status: what is working, what is built but not live, and what is absent](#13-honest-status-what-is-working-what-is-built-but-not-live-and-what-is-absent)
+
 **[Glossary: Every Term In Plain English](#glossary-every-term-in-plain-english)**
 
 - [1. The four words the system is allowed to say](#1-the-four-words-the-system-is-allowed-to-say)
@@ -397,18 +453,38 @@ technically true.
 
 ---
 
+
 ## Chapter 1. What This System Is, And The Problem It Solves
 
-*Every statement in this chapter was checked against the working code. The chapters were written
-against the repository as it stood at version `1487e03a` on 12 August 2026; this chapter was then
-revised against version `dc2994d6` the same day, which is the version that includes the
-build-and-release safeguards described in section 9.4. Where something is built but has not yet been
-used against a live third-party system, it says so.*
+*Chapter 1 of the VIGIL briefing — a set of fourteen chapters written for a senior reader with no
+software background. Every statement in this chapter was checked against the working code. The
+chapters were written against the repository as it stood at version `1487e03a` on 12 August 2026;
+this chapter was then revised against version `dc2994d6` the same day, which is the version that
+includes the build-and-release safeguards described in section 9.4. It was revised a second time on
+13 August 2026 against version `05b81e9f`, which is the version described from here on. That second
+revision changed the status picture and nothing else of substance: a second result against a real
+outside system (section 9.3), an honest count of how strong the evidence behind each checker actually
+is (section 9.2), the plain-language case file now built into the delivered archive (section 7.1),
+and two further refusals that landed alongside them (sections 8.2 and 8.3). A third revision, running
+into 14 August 2026, added a permanent **proving range** on the operator's own machine, described in
+section 2.9, on which the system's instruments are made to demonstrate that they can stay silent as
+well as speak; and an honest account, in section 9.8, of how far the system's control over its
+outside tools has actually been proven. That account began considerably weaker than the interface was
+reporting. It now stands at **ten proving results across nine tools, every one of them passing** — the
+tenth added when the password-guessing tool was finally made to attack a real login form rather than
+only the simpler challenge a browser answers on the user's behalf. Every gap was closed by building
+the missing part rather than by softening the words. The smaller figures this chapter carried along
+the way — three tools proven, then six, then nine — were accurate on the day each was written, and the
+progression is left visible on the page rather than tidied into a single confident number, because a
+document that shows its own movement is easier to trust than one that appears to have always been
+right. Where something is built but has not yet been used against a live third-party system, it says
+so.*
 
-*One navigation note. This chapter carries the whole argument, and it ends (section 11) with its own
-suggested reading order and an account of how the briefing was written and how to check it. The
-consolidated status ledger covering all thirteen chapters at once is in the companion page
-`00-index.md` described above.*
+*Two navigation notes. A full contents list for the set, with a suggested reading order and a note on
+how the briefing was written, is at the end of this chapter (section 11). The set also has front
+matter — `00-index.md`, "How To Read This Briefing" — which carries the same contents list, a
+consolidated glossary, and a single master status table covering all fourteen chapters at once. A
+reader who wants one page rather than one chapter should start there.*
 
 ---
 
@@ -480,12 +556,54 @@ credentials it was not given.
 **Status, stated plainly.** The core proving machinery is built and has been run from end to end. The
 six cloud and Kubernetes exploitation confirmations are complete and are part of the released
 software. ("Kubernetes" is the standard system for running and coordinating large numbers of
-software containers; it is the control layer under most modern cloud deployments.) The two
-Kubernetes ones
-have been proven against a real Kubernetes cluster that the system stands up, owns and destroys
-itself. The four cloud ones have been proven against saved evidence with no internet connection, and
-what remains for those four is the act of pointing them at a live third-party cloud account, which
-waits on that customer's own credentials, by design.
+software containers; it is the control layer under most modern cloud deployments.) **Three of the six
+have now been fired at something real rather than at saved evidence, and the three are not of equal
+weight.** The two Kubernetes ones have been proven against a real Kubernetes cluster that the system
+stands up, owns and destroys itself — real infrastructure, but the project's own, not a third party's
+estate. The third — proving that an exposed secret is a *currently valid, working*
+credential — is the only one of the six to have judged material from a real outside system: it has
+been proven against the real GitHub service, using the operator's own credential,
+for the one type of credential that test covers; the same capability's Amazon Web Services half is
+built but has never been pointed at real Amazon infrastructure, and nothing about the GitHub result
+carries across to it. The remaining confirmations have been proven against saved evidence with no
+internet connection, and what remains for them is the act of pointing them at a live third-party
+cloud account, which waits on that customer's own credentials, by design. One of those remaining
+confirmations is a deliberate permanent exception: the identity privilege-escalation one never
+carries out the escalation it is establishing, so what it awaits is a real set of permission rules to
+read, not a live attack. Section 9.3 sets all of this out capability by capability.
+
+Across the system as a whole the honest count is this. Of the 38 kinds of checker, **3** have been
+run over material that a real outside system produced, **2** over material from real infrastructure
+the system creates and destroys itself, **13** over material a real program on the system's own
+machine produced, and **20** only over saved sample material. Section 9.2 sets that count out in
+full, including the one place where a stricter reader would reasonably move two of them and make the
+figures 3, 2, 11 and 22.
+
+**How the instruments themselves are checked, and what that exposed.** A detector that only ever says
+"found something" is worthless, so every test the system relies on must also be shown to stay
+**silent** where the weakness is absent. The system now has a permanent place to demonstrate that: six
+deliberately vulnerable applications running on the operator's own machine — the five published ones
+pinned by their exact contents, so none can change underneath a result — five of them shown to hold
+the weakness by putting a harmless request beside an attacking one, and the sixth honestly recorded as
+**not probed** rather than credited with a weakness nobody demonstrated. Section 2.9 describes it, and
+it matters beyond its own subject, because running things rather than inspecting them found a series
+of faults that had been invisible for months. A scanner whose output the system could not read, so
+every scan silently produced nothing. A tool that re-reported a real weakness against a hardened
+control and thereby manufactured a **false positive**. A web scanner that, pointed at a plain web
+address, examined only the page it started on and returned a clean report identical to the sound
+control's — a clean report that meant "I did not look", which is the worst thing a security tool can
+produce. A tool that was disguising itself as a different random browser on every request, in a system
+whose entire promise is that the operator can find its traffic in their own records. A scanner
+reaching out to two different outsiders — one for results, one to fetch a database — and the safeguard
+written to stop it, which the tool's own vocabulary defeated. And a tool called by one fixed program
+name, so a machine that installs it under one of its other names would have been told the tool was
+usable and then failed. Section 9.8 lists all of it. It also states the honest position on the
+system's control of its own outside tools: nine tools can have a command line built for them, and the
+**ten proving results over those nine now all pass** — the password-guessing tool has two, because
+attacking a real login form and answering a browser's own challenge share almost nothing. That is a
+statement about the instruments, not about anybody's estate, and seven of the ten reached it only
+after the faults in section 9.8 were found and fixed.
+
 Safeguards over the system's own build and release — pinning exactly which third-party software the
 system is built from, and blocking a build that pulls in a critical known vulnerability — were folded
 into the released software during the day this was written; section 9.4 gives the exact position,
@@ -497,9 +615,9 @@ section 9, and none is presented as a completed field deployment.
 - **Licensing.** The licence shipped with this software excludes government and public-sector use
   from its free terms. Any use by, for, on behalf of, or funded by a government body requires a
   separate commercial licence from the copyright holder. This is a commercial matter, not a technical
-  one, and it is the first thing a procurement reader should settle. Note that chapter 12 — the
-  chapter that lists what an operator needs in order to run the system — does not repeat this point;
-  section 6.1 below is where it lives.
+  one, and it is the first thing a procurement reader should settle. Section 6.1 below sets it out in
+  full; chapter 12, the chapter that lists what an operator needs in order to run the system, now
+  states it as well, at the head of both its requirements section and its one-page checklist.
 - **A built-in refusal to test government hosts.** The software ships with a component designed to
   refuse `.gov`, `.mil`, `.edu` and `.int` addresses outright. Section 6.2 states exactly what it is,
   what an agency would have to change to test its own estate, and — importantly — the honest finding
@@ -807,10 +925,16 @@ of the target are graded by a shared labelling function instead. So the honest d
 several real checkpoints, including report generation — not one universal choke point". It should not
 be described as the latter.
 
-A reader comparing chapters should know that the component's own source file still carries an
-out-of-date note calling itself "caller-less" and "exercised only by its tests". That note is stale;
-the call sites above are real and were read directly. Chapters 4 and 6 of this briefing describe the
-position correctly. Stages 1, 2, 3, 5 and 6 above involve no such qualification.
+A reader comparing chapters should know that this position was, until recently, misdescribed by the
+component's own source file, which carried an out-of-date note calling itself "caller-less" and
+"exercised only by its tests" long after real parts of the running system had been connected to it.
+That note has since been corrected, and an automatic test now fails the build if such a phrase
+reappears while the component does have real callers — and, in the other direction, if a module that
+does call it is dropped from the list. The project treats a note that outlives its phase as the same
+class of defect as an overclaim, because it understates what is true. If an older copy of this
+briefing, or of a companion chapter, still repeats the "caller-less" note, that copy is behind.
+Chapters 4 and 6 of this briefing describe the position correctly. Stages 1, 2, 3, 5 and 6 above
+involve no such qualification.
 
 #### 2.8 The four words
 
@@ -840,6 +964,104 @@ software, is *provenance*: simply the record of a thing's origin, like the owner
 to a painting.) If that origin is the AI itself, the finding is demoted to a LEAD *even if a checker
 fires over it* — because evidence shaped by the AI is an AI-influenced route to a fact. Only evidence
 captured by the system's own governed execution path qualifies.
+
+#### 2.9 The control that must stay silent — and the proving range it runs on
+
+Everything above concerns what happens when a checker fires. The harder question is what happens when
+it does not, and it is the question most security products never answer about themselves.
+
+**A detector that only ever says "found something" is worthless.** It cannot be told apart from a
+detector that says "found something" no matter where it is pointed — and there is exactly one
+experiment that tells them apart: point the same detector at a place where the weakness is *absent*
+and require it to stay quiet. That experiment has a name, and it is worth a government reader
+learning it, because it is the single question that separates a measuring instrument from a rubber
+stamp. It is called a **negative control**.
+
+The logic is the logic of a laboratory blank. A laboratory that only ever tested real samples, and
+reported a positive on every one, would be believed until the day somebody sent it a tube of
+distilled water. So a serious laboratory runs the blank alongside the sample, every time. The blank
+is not paperwork. **The blank is what makes the positive mean anything.**
+
+This system applies the rule in both directions, and both are worth naming, because they answer
+different questions:
+
+| The control | The question it answers |
+|---|---|
+| A **positive** control — a twin known to be weak, which the test must flag | Was the instrument working at all? |
+| A **negative** control — a twin known to be sound, which the test must leave alone | Is the instrument reacting to the weakness, or to everything? |
+
+There is a third condition, easy to overlook, which does most of the real work. **Silence only counts
+as evidence when the instrument can be shown to have been running while it stayed silent.** A scanner
+that never reached the sound twin also reports nothing, and reports it in identical words. So each
+control run must additionally demonstrate that it was alive: that the scanner still found the
+harmless things it was always going to find, still explored the site, still tested the field it was
+asked to test. Silence from a working instrument is a result. Silence from a dead one is the absence
+of a result, and nothing in the output distinguishes the two.
+
+That third condition is not a theoretical nicety, and section 9.8 records the day it stopped being
+one. Pointed at a plain web address, one of the web scanners crawled the site, found the page where
+the weakness lived, and then attacked only the page it had started on — sending not a single request
+at the parameter that actually carried the flaw. It returned a report identical to the sound
+control's. **A clean report that means "I did not look" is the worst output a security tool can
+produce**, because it is indistinguishable, to everyone downstream, from the one output the whole
+product exists to earn: a clean report that means "I looked, and there is nothing there."
+
+**Where those controls are run.** The operator's own machine now carries a permanent **proving range**
+built for this purpose. It consists of six deliberately vulnerable applications — programs written and
+published to be attacked, so that testing tools can be measured against a known answer. Five of the
+six are published openly by their authors for exactly that purpose and are widely used for training
+and tool evaluation: OWASP Juice Shop, the Damn Vulnerable Web Application, OWASP WebGoat, OWASP
+Mutillidae, and a deliberately vulnerable programming interface called VAmPI. The sixth is this
+project's own small target. Four properties matter, and each is the sort of thing an agency should
+look for before believing any measurement:
+
+- **Everything runs locally, on the operator's own machine.** Nothing belonging to anyone else is
+  touched, and no public practice site on the internet is contacted. The written authorisation for
+  this work names each application individually.
+- **Each of the five published applications is pinned by content digest** — that is, by a fingerprint
+  of its exact contents rather than by a name. A name is a movable label: whoever publishes the
+  application can point it at different contents tomorrow, and every result ever measured against it
+  silently stops being reproducible, with nothing for anyone to notice. A fingerprint cannot move —
+  either what arrives matches it or the range refuses to start, and a starting check confirms that no
+  entry has been added without one. The sixth needs no fingerprint: it is a small program held in
+  this project's own repository, where its exact contents are already a matter of record.
+- **The confinement is built in rather than remembered** — it holds by construction rather than by
+  convention. The file that records the range **cannot express a host address** at all; only one piece
+  of code turns a range entry into a running application, and it writes the machine's own internal
+  address in itself. After start-up the confinement is re-read from the container system's own view,
+  then from the machine's list of listening connections — and then *measured*: the range tries to
+  reach the application from the machine's outward-facing address and requires the attempt to be
+  **refused**. A confinement one has only read about is a claim. A connection that is refused is a
+  measurement.
+- **Each application is verified by difference, never by assertion.** The range does not ask an
+  application whether it is vulnerable. It sends a harmless request and an attacking one and compares
+  the two answers. On one of the applications the ordinary search returns 46 products and the attacked
+  search returns 56 — the same 46, plus 10 the application deliberately conceals. That difference is
+  the evidence. "The reply contained the word *error*" is not.
+
+**And one of the six reports that it was not probed.** One application keeps its weaknesses behind a
+per-lesson state that only exists after a user registers and starts that lesson, so no single
+unauthenticated request could establish anything about them. The range therefore brings it up, confirms
+it answers, and says in as many words that it has **not** demonstrated a weakness in it. That is not a
+loose end: the range's own consistency check refuses a target that has neither a probe nor a written
+reason for having none, so "not probed" cannot be arrived at silently. **An honest "not probed" is
+worth more than a weakness nobody demonstrated**, and this briefing would rather report the awkward
+row than a tidier one.
+
+The same discipline is applied to the tools that read source code rather than network traffic. For
+those, the range generates two bodies of code: one seeded with deliberate weaknesses and fabricated
+credentials in the shapes such tools look for, and a **clean twin** — the same application written
+safely, with no credentials in it at all. Anything reported against the twin is, by construction, a
+false alarm. Both bodies of code carry a recorded fingerprint that is re-checked every time they are
+generated, so an edit to the generator cannot quietly change the material a tool was scored against.
+
+**What the range does and does not establish, stated plainly.** It establishes that the system's
+instruments work: that a tool really runs, really finds the planted weakness, that the system can
+really read what the tool returned, and that the same tool stays quiet on sound material while
+demonstrably still running. It establishes nothing whatever about any customer's systems. And nothing
+a third-party tool reports on the range is a fact in this system's sense — those results enter as
+leads, exactly as they would in a real job, and only a checker over first-party evidence mints a fact.
+Section 9.8 gives the honest status of that work, including how much of it is finished.
 
 ---
 
@@ -1109,11 +1331,12 @@ files themselves (`LICENSE` and `LICENSE-COMMERCIAL.md` in the repository), and 
 is a commercial matter to settle with the copyright holder, not a technical one.
 
 **Where else to look.** Chapter 12 is the chapter a buyer would naturally read to build a shopping
-list of what is needed to run the system: hardware, credentials, external tools, and so on. It does
-**not** mention licensing. Within the thirteen chapters, this section is the only place the licensing
-position is stated; the set's front matter (`00-index.md`, section 9.1) repeats it for the same
-reason. A procurement reader should carry it forward into any requirements list themselves, because
-no chapter will do it for them.
+list of what is needed to run the system: hardware, credentials, external tools, and so on. It now
+covers the licensing position too, in its section 2.1 and again in its one-page checklist, where it
+is placed **before** everything else on the grounds that it is a conversation to start early rather
+than a formality to tidy up later. So a procurement reader will meet this point in both places; the
+set's front matter (`00-index.md`, section 9.1) states it a third time. Earlier drafts of this
+chapter said chapter 12 was silent on licensing. That was true when written and is no longer.
 
 #### 6.2 A built-in refusal to test government hosts — and what an agency would have to change
 
@@ -1199,6 +1422,17 @@ A completed engagement can be packaged into a single archive file with one comma
 code that builds it, that archive contains:
 
 - **Three written reports** (below).
+- **A plain-language case file**: nine documents, numbered so that the reading order is obvious from
+  the file names alone — a start-here page, an executive summary, the approach and scope (including
+  what was *not* examined), the proven findings, the unproven leads, the catalogue of what the system
+  can confirm and where this run stood against it, what to do about the findings, how to verify the
+  package yourself, and a glossary. These are built from the same graded findings as the three
+  reports below, so the two cannot disagree about what was proven. Three rules are written into the
+  code that produces them: meaning before mechanism; state the limits out loud; and never assert what
+  was not measured — where a value was not recorded, the documents say "not recorded" rather than
+  filling the gap. If that rendering fails for any reason, the archive still carries its machine
+  records and its proof, and notes plainly that the case file is missing rather than shipping the gap
+  in silence.
 - **Machine-readable exports** of the findings, in two standard formats (JSON, and SARIF — a format
   that software-development tools can read directly, so findings can be loaded straight into an
   engineering team's own systems).
@@ -1288,6 +1522,7 @@ protect.
 | The system never makes itself reachable from the public internet. A deployment placed behind a public web address without an access key is refused outright. | The deployment guard, and the interface's rule of listening only on the address the machine uses to talk to itself. |
 | The checker that tests whether a cloud identity could grant itself more power deliberately never *performs* that escalation. It re-derives the answer from the saved configuration instead. | That evidence source's own design note: a defensive verification checker never executes the attack it is verifying. |
 | Attempting to slip past a customer's own protective filters is off by default, must be switched on for a specific engagement, is capped in volume, runs through the governed execution path, and is framed as a way to demonstrate that a filter *can* be bypassed — not as a weapon for going further. Getting past the filter is not itself a finding unless a checker then fires. | The evasion module's own documentation. |
+| The autonomous testing agent's ability to run arbitrary commands is governed by a permission check that is on by default and cannot be skipped by accident. If that check cannot be connected for any reason, the run **stops** rather than continuing ungoverned. There is exactly one way to run without it, and it is a deliberate, visible setting the operator has to set on purpose. | The gate on the agent's command shell. Its own code records why this was changed: the previous version quietly carried on when the gate failed to connect, which produced an ungoverned command shell with no signal at all to the operator — in its own words, "an accident, not a decision, and indistinguishable from a healthy governed run". |
 
 #### 8.3 Refusals that protect the operator
 
@@ -1300,6 +1535,7 @@ protect.
 | Signing keys are used for signing only when the system is first set up. The running system only ever *checks* signatures; it does not hold the means to create new ones. | The cryptography module's stated split. |
 | The system does not obtain credentials it was not given. For cloud testing, access exists only because the account owner supplied it. | The design of the cloud capabilities — and the direct reason testing against live third-party accounts is deferred. |
 | Where a component is missing, the system says so rather than simulating it. A required tool that is present but is actually a different program of the same name is reported as such, not as installed; an optional database that is not running causes its output to be left out with a clear message. | The tool registry and the database connector, whose code comment states that it never fakes a connection. |
+| Where the system is allowed to send its reasoning is governed by a sovereignty setting with four levels, consulted **before** any connection to an AI model is built. At the most restrictive level nothing leaves the machine: only models running locally may be used, the connection is refused before it is created, and the AI vendor's software is never even loaded. The middle levels permit only providers within a stated jurisdiction, and then — on an explicit written declaration by the operator — a service contracted not to retain data. An unrecognised level name, an unrecognised model service, a policy that cannot be loaded, or a failure inside the check itself each resolve to a refusal, never to permission. The level can also be locked at start-up, so that a later change to the machine's settings cannot loosen it part-way through a job. | The model-egress gate and the sovereignty policy. **One thing an operator must know:** when nothing is configured, the level in force is the most permissive one — it is the development default. A deployment that requires sovereignty has to set it, and should lock it. |
 
 ---
 
@@ -1335,17 +1571,41 @@ than quietly tidying it away, is what the project's own rules require.
 
 - The core proving pipeline: propose, capture, check automatically, admit, sign, re-verify with no
   internet connection.
-- The 15 general-purpose checker types against a live web target. (These 15 are the frozen fallback
-  set described in section 2.3. They are not the same thing as the 11 standard opening checks that
-  chapter 3 describes a run as always performing — that is a different list, of tests to *try*, not of
-  checkers that confirm.) The project ships a negative control for this: pointed at a deliberately
-  *safe* version of the same application, the confirmation step returns nothing — demonstrating that
-  the confirming authority does not rubber-stamp.
-- Network reachability, encryption weakness, software-version-in-advisory-range, and the web
-  achieved-state checks against real captures.
+- The 15 general-purpose checker types. (These 15 are the frozen fallback set described in section
+  2.3. They are not the same thing as the 11 standard opening checks that chapter 3 describes a run
+  as always performing — that is a different list, of tests to *try*, not of checkers that confirm.)
+  Twelve of the fifteen have been run over material that a real running system produced. The other
+  three have only ever been run over saved sample material: the two that reach their verdict by
+  statistics rather than by direct observation, and the one that checks whether an installed version
+  falls inside a published advisory's affected range. Section 9.2 gives the equivalent count for all
+  38 checker types, and names the one of these twelve where a stricter reader would reasonably
+  disagree — a cloud checker exercised against a simulator rather than a real cloud account. The
+  project ships a negative control for this: pointed at a deliberately *safe*
+  version of the same application, the confirmation step returns nothing — demonstrating that the
+  confirming authority does not rubber-stamp.
+- Network reachability, encryption weakness and the web achieved-state checks against real
+  captures. The version-in-advisory-range check is deliberately not in that list: it is one of the
+  three named above, and while it is fully built and able to state a proven finding, the material it
+  judges is a list of installed components the operator supplies, and every run so far has judged a
+  sample list.
 - The permission gates; the signed record that can be added to but never quietly edited; the usage
   record and the ability to replay it; the dossier; and the route by which a recipient re-checks
   everything without an internet connection.
+- The proving range described in section 2.9: six deliberately vulnerable applications on the
+  operator's own machine, five of them pinned by content fingerprint, five of them shown to hold their
+  weakness by comparing a harmless request with an attacking one — and the sixth honestly reported as
+  not probed. Its purpose is to make the system's *instruments* demonstrate that they stay silent where
+  there is nothing to find. It proves nothing about any customer's systems, and nothing it produces is
+  a fact in this system's sense.
+- **Ten proving results across the nine outside tools whose command lines the engine composes itself,
+  every one of them passing** on that range: the engine built the command, the tool ran against a live
+  target, an engine reader turned what came back into the system's own record, the planted weakness was
+  reported where it was planted, and the same driver stayed silent on a sound control that was
+  demonstrably still being tested. Nine tools and ten results because the password-guessing tool has
+  one for each of the two quite different kinds of login it can attack, the second of them a real login
+  form. Section 9.8 gives the honest bounds: it is a statement about the instruments and not about
+  anybody's estate, everything those tools report remains a lead, and two of the nine cannot be reached
+  by the ordinary route as the production wiring stands today.
 - A signed, reproducible benchmark run on the project's own machine on 4 August 2026. On a
   purpose-built application with 11 planted weaknesses and 5 deliberately safe controls, the engine
   reported 11 true positives, 0 false positives and 0 misses; the three comparison tools scored 0, 2
@@ -1367,8 +1627,61 @@ producing two automatically confirmed findings, re-verified offline two out of t
 deliberately altered byte correctly rejected. That record is reported in the project's own
 documentation; I read the claim, not the run.
 
-#### 9.3 Cloud and Kubernetes exploitation: complete; Kubernetes proven against a real cluster,
-cloud awaiting the customer's credentials
+Two further live exercises have since been added, and both differ from that
+record in a way that matters: each is a script kept in the repository, which a sceptic can run for
+themselves, rather than an account of a past run that has to be taken on trust. They differ from each
+other too, and the difference is the whole point of the grades below. One stands up a real Kubernetes
+cluster — infrastructure the project itself builds and destroys — and puts what that cluster returns
+through the whole path. The other reaches a genuinely outside system: it uses the operator's own
+GitHub credential against the real GitHub service. Both are described in section 9.3.
+Neither is run as part of the automatic tests, and that is deliberate: there are no credentials
+there, and a live test that invents a result when it cannot actually run is worse than no live test
+at all. Each script instead insists on every one of its expectations and stops with an error if any
+of them fails.
+
+**The honest count, checker by checker.** The sharpest question to ask about a system like this is
+not "how many things can it check for" but "how much of that has ever been tried against something
+real". Each of the 38 checker types is counted below exactly once, at the strongest evidence it has
+ever been run over, so the four figures add up to 38.
+
+| How strong the evidence behind it is | Count | Which ones |
+|---|---|---|
+| Run over material a **real outside system** produced | **3** | Two general-purpose web checkers — one that compares how a system answers a true statement against a false one, one that establishes that a state which should have been unreachable was reached — from the external run recorded above; plus the exposed-secret validity checker, from the GitHub script. |
+| Run over material from **real infrastructure the system creates and owns** | **2** | The two Kubernetes access-control checkers, against the real cluster described in section 9.3. |
+| Run over material a **real program on this machine** produced — a real network connection, a real web browser, a real compiled program | **13** | Listed individually in chapter 5. |
+| Run only over **saved sample material** | **20** | Listed individually in chapter 5. |
+
+Four qualifications, because a bare count invites two opposite misreadings.
+
+- **The last row is not twenty blind spots.** Two of the twenty judge the *request the system sent*
+  rather than the answer that came back, so a real connection would add nothing to what they prove.
+  Six re-derive a configuration file offline and make no network call at all by design; for those,
+  "saved sample material" and "a real export from a real customer" differ only in who wrote the file.
+  Two reach their verdict by statistics rather than by observation, so what matters is whether the
+  procedure is correct — and the saved material exercises the cases where it must *refuse*. One more,
+  the identity privilege-escalation checker, will never move, because it never performs the
+  escalation it is verifying and so has no live form to await; section 9.3 explains that position.
+  That leaves nine which genuinely await either a real capture or a real deployment to run over: two
+  cloud confirmations waiting on a customer's credentials, the two that prove a login credential is
+  forgeable from a captured artefact offline, the four defensive checkers that judge an operator's
+  own application and its records, and the check that an installed version falls inside a published
+  advisory's affected range. Chapter 5 grades all 38 individually and reaches the same four totals
+  by its own route.
+- **Two of the thirteen deserve an asterisk.** They were exercised against a cloud simulator that
+  runs inside the same program rather than against a real cloud provider. That is materially better
+  than a hand-written file — it drives the real cloud-provider code path and the real shapes of
+  answer, including deliberately misleading cases — and materially weaker than a real account. A
+  reader who declines to credit a simulator should read the four figures as **3, 2, 11 and 22**. This
+  briefing credits it, and states the convention here rather than leaving it buried.
+- **The three in the top row are not equally strong.** Two of them rest on the run recorded in the
+  project's own documentation, which this briefing read as a claim rather than watched. The third,
+  the GitHub one, is a script anyone can run against their own account. That is the higher standard,
+  and it is the one the project should be held to for the rest.
+- **A count of evidence strength is not a count of coverage.** These figures say how firmly each
+  checker has been exercised. They say nothing about how much of a given customer's estate a run
+  would reach — that is what the coverage certificate in section 3.4 is for.
+
+#### 9.3 Cloud and Kubernetes exploitation: complete; three fired at something real, the rest awaiting the customer's credentials
 
 Six capabilities covering cloud and Kubernetes exploitation are **complete and part of the released
 software**. (Kubernetes, as noted in the short version above, is the standard system for running and
@@ -1386,14 +1699,18 @@ deployments.) They are:
 
 All six are connected from end to end: the detection logic, the evidence handling, the verdict
 routing, the certificates, the entry in the permanent record and the safety gates are all built and
-registered. The two Kubernetes confirmations have been proven against a **real Kubernetes cluster**;
-the four cloud ones are proven against recorded sample data with no internet connection. None of them
-carries any recorded engineering gap — and under this repository's own enforcement rule, a gap between
-what a capability does today and what it must eventually do *must* name the concrete work that closes
-it, or an automated test fails. All six record no such work outstanding.
+registered. Three of the six have now been fired at something real, and the three are not of equal
+weight: the two Kubernetes ones against a **real Kubernetes cluster the system stands up, owns and
+destroys itself** — real infrastructure, but the project's own rather than a third party's estate —
+and exposed-secret validity against the **real GitHub service**, which is the only one of the six to
+have judged material produced by a real outside system. The rest are proven against recorded sample
+data with no internet connection. None of the
+six carries any recorded engineering gap — and under this repository's own enforcement rule, a gap
+between what a capability does today and what it must eventually do *must* name the concrete work
+that closes it, or an automated test fails. All six record no such work outstanding.
 
-**The two Kubernetes confirmations are no longer waiting. The four cloud ones are.** That
-distinction is recent, so it is set out precisely rather than summarised.
+**Three of the six are no longer waiting. The rest are.** That distinction is recent, and one of the
+three is true of only part of its capability, so it is set out precisely rather than summarised.
 
 *Kubernetes.* Both tiers are now proven against a **real Kubernetes cluster** rather than against
 recorded sample data. A script in the repository stands up a genuine single-node cluster — k3s version
@@ -1412,24 +1729,60 @@ of them fails, so it is a proof rather than a demonstration — and because the 
 rather than borrowed, a customer, an auditor or a sceptic can re-run the whole thing on their own
 machine and watch it happen.
 
-Two things that run does **not** cover, stated so the claim is not read wider than it is. First, the
+Three things that run does **not** cover, stated so the claim is not read wider than it is. First, the
 script reads the objects it planted, by name; it does not exercise a scope-gated **enumeration**
 capability that discovers access rules across a whole cluster under authorisation. Second, the cluster
 is one the system stood up itself, so a **managed provider's control plane** — Amazon EKS, Google GKE,
 Azure AKS — is not exercised: the same Kubernetes interface, reached by a different access path.
+Third, the evidence was captured with the standard Kubernetes command-line tool and handed to the
+checking path, rather than collected by the system's own permission-gated collector. That collector
+exists, is restricted, and refuses outright unless the cluster it actually connected to is one the
+operator declared in writing — but the software library it needs is not installed on this machine, so
+it was not the thing exercised here.
 
-*Cloud.* For the four cloud confirmations, what remains deferred is still the act of pointing them at
-a live third-party cloud account. That waits on the customer supplying their own cloud credentials. It
-is a deliberate design position, not an unfinished feature: a credential is a thing only the account
-owner can supply, and the system is built not to obtain one any other way.
+*Exposed-secret validity.* This capability answers a question that matters more than it sounds: a
+secret found lying about in a file, a page or a code repository *looks* alarming, but the only
+question that counts is whether it still works. The capability has now been proven against the real
+GitHub service. A script in the repository takes the operator's own GitHub credential from the
+standard GitHub command-line tool, passes it straight into the harness without ever writing it to a
+file, placing it where the machine's process list would show it, or putting it in the environment,
+and drives the real, permission-gated production component over the real network against GitHub's own
+least-privileged identity endpoint — the call that reads who you are and changes nothing. The valid
+credential is confirmed from a genuine reply by the real service, and the signed certificate
+re-verifies offline. Three controls in the same run are correctly *not* confirmed, and they are the
+point of the exercise rather than a footnote: a fake credential of the same *shape*, sent live to the
+same real endpoint, which GitHub itself rejects — establishing against the real provider that looking
+like a credential is not the same as being one; the same confirmed capture with its confirming
+address swapped for an attacker-controlled host, and for a look-alike address, which must not be
+allowed to manufacture a fact; and the same capture where the credential and the confirming call no
+longer refer to the same secret. The permission gates are exercised on the same live path too: with
+the emergency stop tripped, and with the target outside the authorised scope, the run halts before
+any network call is made at all.
 
-The honest sentence, which should not be softened in either direction: *for the four cloud
+Two limits on that result, and the first must not be blurred. **Only the GitHub half of this
+capability is proven live.** The same capability's Amazon Web Services half — recognising an Amazon
+access key and confirming it against Amazon's own identity service — is built, and its
+request-signing code is checked against Amazon's own independent implementation, but it has **never**
+been run against real Amazon infrastructure. It still needs a real access key that only the account
+owner can supply, and nothing about the GitHub run transfers to it. Second, this capability
+*validates* a credential the operator supplied; it does not go hunting for exposed secrets across a
+customer's estate. That is a different capability and it is not covered here.
+
+*The rest.* For the remaining cloud confirmations — the metadata-credential capture and the Google
+service-account impersonation — what remains deferred is still the act of pointing them at a live
+third-party cloud account. That waits on the customer supplying their own cloud credentials. It is a
+deliberate design position, not an unfinished feature: a credential is a thing only the account owner
+can supply, and the system is built not to obtain one any other way.
+
+The honest sentence, which should not be softened in either direction: *for the remaining cloud
 confirmations the logic, the evidence handling, the certificates and the safety gates are built and
 proven against recorded sample data, and pointing them at a live third-party cloud account awaits that
 customer's own credentials; for the two Kubernetes confirmations the same machinery has been run
-against a real cluster and held.* Describing any of the six as "unfinished" understates the system.
-Describing the cloud ones as "field-proven in customer clouds"
-overstates it.
+against a real cluster and held; and for exposed-secret validity it has been run against a real
+outside provider and held, for one of the two kinds of credential it recognises.* Describing any of
+the six as "unfinished" understates the system. Describing the remaining cloud ones as "field-proven
+in customer clouds" overstates it. Describing exposed-secret validity as live-proven without naming
+which half overstates it too.
 
 Four properties of these six capabilities are worth stating for a security-conscious reader, because
 they are what makes the deferral safe rather than merely pending:
@@ -1448,14 +1801,25 @@ they are what makes the deferral safe rather than merely pending:
   authorise everyone's account. A wildcard or blank entry authorises nothing.
 - **The transport must prove where it went.** The checker requires evidence of which address each
   call actually reached, that encryption was verified, and that no proxy or redirect intervened. A
-  hand-written record can never become a fact.
+  hand-written record can never become a fact. Until the work described in this section, those facts
+  about the connection could only ever be supplied by a stand-in used in testing — which is the
+  precise reason no cloud capability had ever fired against a real provider. There is now a real
+  network binding, and its single rule is that every one of those facts is *derived from the
+  connection* rather than asserted: encryption counts as verified only when the connection really
+  carries a validated certificate; "no proxy" is recorded only when the software can positively
+  demonstrate it could not have used one; a redirect is reported rather than followed; the address is
+  read from the live connection while the answer is still arriving, rather than looked up again
+  afterwards; and an over-long reply is marked as cut short and never interpreted, so a truncated —
+  and therefore unsound — answer can never reach a checker. Each of those, when it cannot be
+  established, takes the value that makes the checker **refuse**.
 
 One of the six must be described differently, and this distinction matters. The **identity privilege
 escalation** capability is offline **by design, permanently**. It re-derives the escalation from the
 operator's own retained configuration and compares what the identity could reach before and after. It
 never executes the escalation, and never will — the project's stated principle is that a defensive
 verification tool does not perform the attack it is verifying. It is not awaiting live fire in the
-sense the three remaining cloud confirmations are: not performing the action *is* the design.
+sense the cloud confirmations still awaiting a customer's credentials are: not performing the action
+*is* the design.
 
 **But one clause must be added, or a reader will take that too far.** This capability still needs a
 real capture of a real account's permission rules to work on. That capture comes from the customer's
@@ -1570,7 +1934,8 @@ result, and each names what it is waiting for.
 
 | Capability | Waiting on |
 |---|---|
-| Collecting the security configuration of cloud accounts (AWS, Azure, Google Cloud) and Kubernetes clusters | Read-only credentials that only the account owner can supply. |
+| Confirming that an exposed **Amazon Web Services** access key is a valid, working credential — the other half of the capability whose GitHub half is proven live in section 9.3 | A real access key that only the account owner can supply. The code is built and its request-signing is checked against Amazon's own independent implementation, but it has never been run against real Amazon infrastructure. |
+| Collecting the security configuration of cloud accounts (AWS, Azure, Google Cloud) and Kubernetes clusters | Read-only credentials that only the account owner can supply. For Kubernetes there is a second prerequisite: the permission-gated collector needs a software library that is not installed on the machine this briefing was written on, which is why the live cluster run in section 9.3 captured its evidence with the standard command-line tool instead. |
 | The part of the automatic-fix feature that proposes an actual change to a customer's code | The operator setting up the several signing keys required, and an access token for the code-hosting service. |
 | Treating the output of AI red-teaming tools as a source of fact | Those tools are not present in this environment and could not be installed, because the environment has no network access. |
 | A live external graph database and a live telemetry collector — two optional external services | The services themselves being set up and running. The equivalent local store, which keeps the same data in files on the machine, is built and works; asking for the external one when it is absent produces a clear error rather than quietly falling back. |
@@ -1630,6 +1995,297 @@ fabricated answer.
   matches the description, and the project says so. Each proof ships with a deliberately broken twin
   that the proof-checker must report as failing, so the check cannot be passing for empty reasons.
 
+#### 9.8 The outside tools: how far control over them is actually proven
+
+Alongside its own checkers, the system drives a set of well-known outside security tools. This section
+gives the honest position on that, because the honest position turned out to be materially weaker than
+what the system's own interface was reporting — and because the way that was discovered is itself the
+most useful thing in the section.
+
+**The tools are now present, and were verified by running them.** Thirteen tools sit on the operator's
+own machine, and the last three of them arrived on the day of this revision. **Twelve** were confirmed
+by launching them and reading the version each printed, rather than by observing that a file of that
+name exists — a distinction that matters more than it sounds, because on this kind of machine a
+different program of the same name commonly occupies the one an operator expects, and the system now
+steps past such an impostor to find the genuine tool rather than declaring the tool unusable. The
+thirteenth is a graphical program the system deliberately never launches merely to read a version, so
+its presence is established by resolving the program itself.
+
+Separately, the system ships a **sealed working environment** — a pre-packaged operating environment,
+of the kind described in section 8.2, in which the vendored third-party agent runs its jobs — carrying
+a further twenty-four tools. **That environment had never been built**, and the instruction the project
+published for building it could not have produced it on any machine. It has now been **built for the
+first time**, and all twenty-four tools inside it were confirmed present by running each one. Getting
+there required fixing two faults in the build itself, and both are worth recording because neither
+could have been found by reading:
+
+- **The published build command could never have worked.** It was recorded in three separate places
+  and named the wrong starting folder — the *build context*, meaning the set of files the build is
+  allowed to see — so it failed partway through on a file it could not find. Nobody had ever run it.
+- **One step of the build resolved a tool version over the network at build time**, asking the
+  internet which release was newest while the build was running. That had two consequences. It made
+  two builds a day apart produce different contents, which defeats the point of pinning everything
+  else, as section 9.4 describes; and, because the request carried no credentials, it ran into the
+  publisher's hourly limit for anonymous requests, came back empty, turned the download that followed
+  it into a not-found error, and killed the build two-thirds of the way through — with a message that
+  named the download rather than the limit that caused it. The version is now written down in the
+  recipe and is changed deliberately.
+
+**How the system says it drives a tool, and the three it was refusing wrongly.** The screen that lists
+the tools applies a deliberate rule: a tool is admitted to the working set only if the system has some
+way of actually driving it, and one it cannot drive is refused with a stated reason rather than listed
+as available. The rule was right; its knowledge was incomplete. It knew of only two ways a tool could
+be driven — from a written command-line playbook the AI reads, and from a typed argument builder the
+engine composes itself — and reported both of them under one label. The engine in fact drives tools
+three further ways as well: through a **sensor**, through a **source-code analyser**, and through the
+**headless browser** it uses to confirm weaknesses that appear only once a page has run.
+
+The consequence was that **three tools the engine visibly launches during ordinary work were being
+refused as undrivable** — the one that captures network traffic, the one that performs deep analysis
+of source code, and the browser — because an engine-side driver was the only route each of them had.
+The screen now recognises every route, and — the improvement that matters most to a reader — it states
+**how each tool is driven** under four labels rather than merely stating that it is driven. A tool the
+engine launches itself as part of a scan is a different kind of control from a tool whose command line
+the AI composes from written instructions, and an operator deserves to see which of the two they have.
+The lists behind those labels are not maintained by hand: an automatic check reads the real source of
+each driver and fails the build if a tool has been added to one and forgotten here.
+
+**The tool that would have failed on somebody else's machine.** A related fault sat one level below
+that screen, and it is worth setting out because it is the kind that never shows up on the machine it
+was written on. Some security tools install under more than one program name: the version packaged by
+one operating system uses one name, the version published by the tool's own authors uses another. The
+system keeps a catalogue recording, for each tool, every name it is known to install under — and the
+screen that reports which tools are present resolves through that catalogue correctly. Two of the
+command builders did not. They called the tool by a single fixed name. On the machine this was written
+on that name happened to be right, so everything looked well; on a machine where the operator had
+installed the same tool from its authors instead, the screen would have reported the tool present and
+controllable and every attempt to run it would have failed to start. The two builders now resolve
+through the recorded names, record in the permanent run record which of the names actually ran, and
+refuse — naming every name they tried — when none is installed. And because the fault had already
+occurred once and been fixed in a way too narrow to catch its second occurrence one builder away, the
+guard was rewritten to cover the whole class: **an automatic check now compares every builder's
+invocation against the catalogue and fails the build on any disagreement** — a tool that exists today,
+or one added tomorrow.
+
+**The part to be most careful about: how much of this is actually proven.** Nine of the tools have a
+**typed command builder** — code inside the engine that constructs and validates that tool's command
+line itself, rather than letting the AI write it. A builder that produces a plausible-looking command
+line proves nothing at all, so the standard applied here is deliberately severe. Five things must all
+hold, and a result is refused if any one of them is missing:
+
+| The condition | Why it is there |
+|---|---|
+| **The engine builds the command**, not the exercise | An exercise that writes its own command line is testing itself |
+| **The tool actually runs** against a live target and returns real output | The commonest failure in this whole area is a driver that has never once been run |
+| **That output is read back into the engine's own record** | A tool whose output nothing in the system can read has not been driven end to end, however well it ran |
+| **The planted weakness is reported where it was planted** | Otherwise the run proves only that the tool executed |
+| **The same driver stays silent on a sound control that is demonstrably still being tested** | The negative control, plus the liveness condition from section 2.9 — silence from a dead instrument is not evidence |
+
+**Where the nine stood at the start of the day**, because the distance travelled is the part worth
+knowing and because the starting position was materially weaker than the interface implied:
+
+| Of the nine tools with a typed command builder | Count | The position that morning |
+|---|---|---|
+| Proven all the way through against a live target | **3** | The port scanner, the template-driven vulnerability scanner, and the injection confirmation tool. These met every condition above, negative control included. |
+| Had **no way for the system to read their output at all** | **3** | The engine could build the command and launch the tool — and then discarded every byte it returned. The tool ran, the run appeared to succeed, and nothing whatever reached the system. |
+| Had **never been executed** | **3** | These three were listed by the interface as controllable while the engine's own permission manifest — the list that decides which tools may run in each phase of a job — did not name them at all, so every attempt to call them was refused. They shipped unreachable. |
+
+**Where they stand now: ten proving results across the nine tools, and every one of them passes.**
+Readers were written for the first three, from the output the real programs actually emit rather than
+from their documentation; the second three were given a route through the permission manifest and a
+proving result of their own. The last run of the exercise on this machine drove every one, each
+against the weak target and then against the sound control, and every expectation held.
+
+**Ten results and nine tools, because one tool needed two.** The password-guessing tool can attack two
+quite different kinds of login, and inside the tool they share almost no machinery. One is the plain
+challenge a browser answers on the user's behalf — the small grey box that appears before a page
+loads. The other is an ordinary login form on a web page, which is what practically every real service
+actually uses, and which requires the tool to submit the form, read the page that comes back, and
+decide from its wording whether the password worked. For a long while only the first of the two had a
+control to be tested against, so the table showed one confident green line for a tool that had never
+been shown to work against the commoner and harder of its two jobs. The capability had been built and
+tested against a saved copy of the tool's own output long before it met a real form. **Testing what a
+command line looks like is how a driver that has never worked gets shipped.** It now has a result of
+its own: a real login form on a control server, a real password recovered from it, and — on the
+hardened twin — the same attack completing and recovering nothing.
+
+That second result required an extra safeguard worth describing, because it is the sharpest instance
+in this chapter of the third condition in section 2.9. Measured on this machine, the password-guessing
+tool attacking a twin whose login page had been *removed altogether* prints exactly the same console
+output as a correct negative control: the module engaged, the attack completed, no password found, no
+error of any kind. Its own reporting cannot tell "I tried every password and none worked" apart from
+"I never reached a login page." So the control server is asked instead. It counts what actually
+arrived, and the result holds only if the login form processed every password the attacker offered,
+including the one that cracks the weak twin, and refused all of them. **Only the target knows whether
+it was ever asked to check a password.**
+
+Both of that tool's results carry one further check, which is worth naming because it concerns
+something an agency will care about independently: **a password the tool recovers must not end up in
+what the system keeps.** The tool cracks a real password and prints it, and that raw printout is the
+material a checker would examine, so it stays as it is. But the two things the system *retains* — the
+observations it derives and the signed record of the run — are searched, on every one of the four
+runs, for the credentials the exercise handed the tool. If the search cannot be performed conclusively
+— because the captured output was truncated, say — the result fails rather than passes. An invariant
+that cannot be checked is not an invariant that holds.
+
+The intermediate states are worth recording because each step was a real fault found and fixed rather
+than a threshold lowered: the first run of the exercise proved one driver, a later one three, a later
+one six, then nine, and the last one all ten.
+
+**Do not read that as "the system drives nine tools in the field."** Four limits travel with the
+claim, and chapter 12 sets them out in full. The targets are deliberately vulnerable applications on
+the operator's own machine, so **none of this is a result about anybody's estate**. Everything those
+nine tools report is a lead and never a fact. The exercise needs the local range standing, so it is
+run deliberately by a person rather than on every change — though it does report any builder that
+has no proving result, so a new driver cannot arrive unproven and unnoticed. And two of the nine, the
+two destructive ones, cannot be reached by the ordinary route at all as the production wiring stands
+today: the exercise supplies the extra authorisation itself and prints a note saying it had to,
+which is a gap in *reaching* those two drivers rather than a hole in the gate that stopped them. A
+reader who wants the number for themselves can obtain it directly: the proving exercise asserts
+every one of its expectations and stops with an error the moment reality stops matching the claim.
+Section 11.1 says how to run it.
+
+##### 9.8.1 The safeguard that was itself wrong — the strongest argument in this document
+
+One of the findings belongs on its own, because it is not a fault in a tool. It is a fault in a
+*safeguard*, and it is the clearest demonstration in this briefing of why a system should check its own
+claims by running them rather than by reading them.
+
+The written authorisation governing all of this work carries a hard limit: **nothing may leave the
+machine**. No tool, no name lookup, no callback. Everything is local; that is the entire point of a
+range on the operator's own hardware.
+
+One of the web-application scanners broke that limit by default, and nobody had noticed because it
+took no decision to do so. Left to pick its own set of tests, it ran one that asks an **outside
+service — a web address belonging to the tool's own authors** — to report back what it had seen.
+Every scan, against every target, was quietly talking to a third party.
+
+Removing that one test was not enough, and the second discovery is the useful one. A different test
+in the same default set reaches a **different outside address, for an entirely different reason**: it
+wants a reference database of technology signatures, finds no copy stored locally, and downloads one.
+It is nobody's idea of a test that phones home. It waits for no callback and needs no accomplice. It
+simply fetches a file from a stranger's server, on its own initiative, on every run.
+
+So the system was given a guard: a list of the tests that must never be run. **And that guard was
+itself unsound.** The setting it policed is not a list of test names. It is a small language, and it
+also accepts **group names** — ordinary words such as "all" and "common" — which the tool expands into
+sets of tests by itself. Measured against the installed version: asking for "all" produces thirty-six
+tests, including all three of the forbidden ones; asking for "common" produces sixteen, including one
+of them. Both are perfectly ordinary words. Neither matched anything on the list of forbidden names.
+**The entire prohibition could have been reopened with three letters**, while the test written to
+prevent exactly that went on passing, because it had only ever tried the literal names.
+
+The guard is now the other way round: a list of what is **allowed**. Every test on it has been read
+individually and confirmed to attack only the target it was pointed at, with no outside party
+involved anywhere. Everything else is refused outright — a group name, an unfamiliar test, or a test
+that a future version of the tool has not yet invented.
+
+**The general lesson, which a reader will meet again in other systems: a list of forbidden things is
+not a guard when the vocabulary belongs to somebody else.** The tool decides what its own words mean,
+and it can add new ones in any release. A list of permitted things is a guard, because an unfamiliar
+word fails it by default rather than passing through it.
+
+One honest cost of that choice is worth recording, because the project paid it within hours. The
+refusal is **total**: one unrecognised word cancels the whole request rather than narrowing it. So a
+*safe* test accidentally left off the permitted list is a defect too, not a cautious default. Exactly
+that happened — one ordinary test was omitted, and a scanner that had been proven end to end went
+straight to a flat refusal, whose stated reason named the arguments rather than the list that had
+rejected them. The test was read, confirmed to contact nobody, and added.
+
+##### 9.8.2 Measurement, not assertion: how "nothing leaves the machine" was established
+
+"Nothing leaves the machine" is precisely the kind of claim this briefing will not make by
+inspection, and the reason is the whole subject of this section: both of the contacts above were
+behaviour the tools chose for themselves, so neither appeared anywhere in the system's own
+instructions for a reviewer to find.
+
+So it was measured. The engine's own commands were run inside an **isolated network in which the only
+route off the machine's own internal address leads nowhere at all**, with every packet recorded on the
+way. Anything a tool tried to send to the outside world had nowhere to go and was captured.
+
+A trap that catches nothing is worth exactly as much as a detector that only ever fires, so the trap
+was itself controlled *before* it was believed: it was pointed at two occasions where a leak was known
+to be present, and required to see each one. It did.
+
+| The two deliberate leaks | What each one establishes |
+|---|---|
+| An ordinary look-up of a name on the internet, made on purpose. The trap recorded **exactly the two enquiries such a look-up makes**, and nothing else. | The trap can see the smallest thing anyone would want it to see, and it does not invent traffic that was never sent. Both halves matter: a trap that over-counts is as useless as one that misses. |
+| A scan run with **one of the guards deliberately taken out**. One web scanner ships a test that drives a **real browser**, and the browser, on starting, looks up an address belonging to its own vendor: **sixteen such lookups in a single forty-one-second scan.** | The scanner's own two quieten-down settings do not cover this and were never going to: they suppress the *tool* contacting its authors, and a browser contacting its vendor is a different thing entirely. The browser is now pointed at a program location that cannot exist, so none starts. Repeated with the guard back in place: **zero packets left the machine**, the scan still reported the weakness it was there to find, and the only thing lost was one test that could not have run under this authorisation at all. |
+
+Only then was the trap's silence worth anything — and the trap then caught something **nobody was
+looking for**. A second tool runs a built-in **check for a newer version of itself** before it has sent
+a single packet at the target: it contacts two outside services, which cost four name look-ups per run
+on a machine that remembers previous answers and six on one that does not. Switch on the command-line
+setting that suppresses that check and the count is zero. That setting had been carried as a matter of
+tidiness; it is **load-bearing rather than cosmetic**, and this is how that was established rather than
+assumed.
+
+Every figure above comes from that measurement rather than from anything written in the software, so a
+reader checking them should re-run the measurement rather than search the code for the numbers. Two
+limits belong with the result and none should be trimmed. The trap is an exercise a person runs, not
+part of the automated build; what the build checks is narrower and more durable — that the exact
+commands still carry those settings, **now pinned for every one of the three tools concerned**, the
+last of the three having gone unpinned until this was written. The measurement was made on this machine
+against these versions of these tools, and a new version can acquire a new outbound habit, so the only
+way to know is to measure again. As for the tool whose version check the trap caught unlooked-for: the
+suppressing setting now travels on **all three of its routes into the engine** — the typed command
+builder, the scanning component, and the template runner — and each of the three is pinned by its own
+automated test, so a future edit that dropped it on any route would fail the build. The traffic it
+would otherwise send goes to that tool's own publisher and carries nothing whatever about the target,
+and it is written down here rather than left for a reader to find.
+
+##### 9.8.3 The defects found by running things rather than reading them
+
+Not one of the faults below was visible to the system's own automated tests; each was invisible to
+unit tests that examined the *shape* of a command rather than what happened when it was issued, and
+each was found by running the thing. They are set out as a credibility asset rather than as an
+embarrassment: a project that finds these and prints them is in a materially better position than one
+that has never looked.
+
+| What was found | What it teaches |
+|---|---|
+| A scanner whose output the system could not read. Every scan produced no observations at all, while the run reported success. | **A command that looks correct is not a working tool.** The command line was well-formed; it simply asked the tool for its human-readable output while the reader expected the machine-readable form. |
+| A tool that **re-reported a confirmed weakness** from one application against a *different, hardened* one, thereby **manufacturing a false positive**. The tool keeps a stored session filed under the machine's name; on this machine every practice application shares one name, so a genuine result about one was resumed from that stored session and re-served as a result about another. | A result that is a replay of stored state is not a measurement in *either* direction. It is at once a false alarm about the sound target and a fabricated confirmation about it, and nothing in the output says so. This is exactly the failure a negative control exists to catch — and it is what caught it. |
+| A scanner that opened a network listener on a port already in use, exited about ten seconds later, and wrote no report. The system reported that the scan had found nothing. | **A silent no-op is indistinguishable from a clean result**, which is the single confusion this whole product exists to prevent. The operator was told there was nothing there, when the truth was that nothing had been looked at. |
+| **A scanner that only ever examined its starting point.** Given a plain web address, it crawled the site, found the page carrying the weakness — and then attacked only the page it had been handed, sending **not one request** at the parameter where the flaw actually was. It returned a clean report identical to the sound control's. Given the full address *including* the parameter, the very same command found the injection. Multiplying its time budget fivefold changed nothing: the limit was structural, not temporal. | **The worst output a security tool can produce is a clean report that means "I did not look"**, because nothing downstream can tell it apart from the one output the product exists to earn. The scanner is now driven by an explicit scan plan — crawl first, then attack **everything the crawl found** rather than the one page it started from. On the same target and the same budget the observations rose from none of that kind to fifteen, including both an injection of script and an injection of database instructions. It also now **fails loudly** when it cannot reach the target at all, rather than producing an empty report that reads as clean. |
+| **A tool impersonating a different random browser on every request** — a setting it turns on by itself, which nobody had written down anywhere. | This is the exact inversion of what the system promises. An authorised test must be **correlatable**: the operator has to be able to look through their own records afterwards and pick out precisely which traffic was the test's. A tool quietly behaving like an evader, inside a system whose whole claim is that it is authorised and auditable, is a defect even though it breaks no rule and trips no gate. It now identifies itself by name on every request, with the same identity the rest of the engine uses, so a defender sees one consistent actor instead of a crowd of invented visitors. **The system is auditable precisely because it does not hide.** |
+| **A tool contacting outsiders, twice over — and the safeguard against it defeated by the tool's own vocabulary.** Set out in full in section 9.8.1 above. | **A list of forbidden things is not a guard when the vocabulary belongs to somebody else.** The permitted list replaced it. |
+| **A tool invoked by one fixed program name** while the system's own catalogue records the other names it installs under. The screen therefore reported it usable on a machine where every run of it would have failed to start. | A claim about a tool has to be true on *somebody else's* machine, not just on the one it was written on. This had already happened once and been fixed too narrowly to catch its recurrence one component away, so the guard now covers the whole class: any tool whose invocation disagrees with the catalogue fails the build. |
+| Three tools the interface listed as controllable while the engine refused every single call. | A claim of control has to hold at *every* layer. Refusing a tool honestly on one screen while a different component silently blocks it is the same false claim of control, moved one level down. |
+| A capability the operator selected being accepted and then silently discarded — and, in the single-tool mode, an unrecognised selection throwing away the valid one behind it, so the run started with no capability at all. | A request that cannot be honoured must be **refused by name, before anything starts**. The alternative is what happened here: the operator watches a run they believe is doing one thing, and the report looks complete while the work was narrower than they were told. |
+| Whole capability selections dropped on several routes — including the one an operator uses most often, a quick scan of a target on their own machine. | The same lesson at a larger scale. The system now states, both in the run's own permanent record and in what it hands back to the screen, exactly which selections **were not applied**, which were, and why. |
+
+**What every one of them has in common, and why an agency should weigh it.** They divide into two
+kinds, and neither kind could have been found by reading.
+
+Several were **defaults** — behaviour the tool chose for itself, which therefore appeared nowhere in
+this system's own instructions to be read at all. The random browser identity, the two outside
+contacts, and the scanner that attacked only the page it was handed are all of that kind: nobody wrote
+them, nobody chose them, and no amount of reviewing the commands the system issues would have shown
+them, because they are not in those commands.
+
+The rest were **assumptions that happened to be true on the machine they were written on** — a program
+name that was right here and wrong elsewhere, a stored session that collides only when every target
+shares one address, an output format the reader expected and the command never asked for. Each is
+correct in exactly the environment it was authored in, which is precisely the environment its author
+tests in.
+
+**Both kinds are invisible to inspection and visible only to execution**, which is why every automated
+test passed over them and why they surfaced within hours once the tools were actually run against
+targets with known answers. A reader assessing any security product should ask of it the question this
+exercise asked here: not "what does the documentation say the tool does", but **"what happened the
+last time somebody ran it and checked?"** The number of faults matters far less than whether the
+question was ever asked — and whether the answers were printed or quietly corrected.
+
+**Two things this work does not change**, stated so the section is not read more widely than it
+deserves. First, the count of checkers in section 9.2 is untouched: nothing an outside tool reports is
+a fact in this system — on the proving range or anywhere else. Such results enter as leads at
+deliberately low confidence, and only a checker over first-party evidence mints a fact. That is
+precisely why weak control over the tools was an honesty problem rather than a soundness one: no false
+finding could have reached a report through this route, but the interface was describing a capability
+the engine did not have. Second, none of this is evidence about any customer's estate. It is evidence
+about the instruments.
+
 ---
 
 ### 10. Why this design is worth the cost
@@ -1684,6 +2340,22 @@ table below says how.
 | The registry rules are enforced at run time | A dedicated test file runs on every code change. Its own limits are documented: it validates the declarations and the admission behaviour; it does **not** prove that every path through the system routes via admission. That last property rests on adversarial human review and is marked as such. |
 | The categorical refusal list has no connection to the live path (section 6.2) | Search the repository for `assert_not_hard_blocked` and observe that the only references are its own definition, its tests, and documentation. |
 | The anti-hallucination component *is* used at real points (section 2.7) | Search the code for `admit_finding` and `admit_for_report` and read the places that call them. |
+| The Kubernetes result against a real cluster (section 9.3) | Run `tools/livefire/k8s_rbac_livefire.sh`. It needs the container software Docker, downloads a real Kubernetes distribution, prints the cluster's real version and every expectation it checks, and exits with an error if any of them fails. |
+| The GitHub result against the real provider, and the fact that only half of that capability is proven (section 9.3) | Run `tools/livefire/secret_github_livefire.sh` with your own GitHub account signed in; it skips cleanly and says so if you are not signed in. Its own opening comment states, unprompted, which half it does not cover. |
+| Which capabilities have been fired at something real and which have not (section 9.2) | Read the `limitation` field of each entry in `docs/capability-matrix/evidence-branches.json`. Each one states in its own words what has and has not been exercised live, including the split between the GitHub and Amazon halves. |
+| Neither live result is run by the automatic tests (section 9.2) | Read the same two scripts' opening comments, which state the reason: there are no credentials in the automated environment, and a live test that fabricates a result when it cannot run is worse than none. |
+| The most permissive sovereignty level is the one in force by default (section 8.3) | Read the function that resolves the level from the machine's settings in `engine/crucible/framework/v2/kernel/sovereignty.py`: with nothing configured it returns the permissive level, and with an unrecognised name it returns the strictest. |
+| The nine documents in the case file, and what happens if they cannot be produced (section 7.1) | Read the list at the top of `engine/crucible/framework/v2/report/case_file.py`, then the point in `report/dossier.py` where it is built into the archive and the note recorded if it fails. |
+| The proving range: six applications, five pinned by content fingerprint, one honestly not probed (section 2.9) | Read `tools/livefire/range_targets.json`, then run `tools/livefire/range.sh up all` and `tools/livefire/range.sh verify`. The verify step prints, for each application, the harmless request beside the attacking one and the difference between them, and prints `NOT PROBED` with its written reason for the one that is not probed. |
+| That the range's confinement is enforced rather than remembered (section 2.9) | Read the four assertions in `tools/livefire/range_targets.py` — the file cannot express an address, and the binding is re-read from the container system, then from the machine's listening sockets, then measured by requiring a connection from the machine's outward-facing address to be refused. |
+| That a target without a weakness probe must carry a written reason (section 2.9) | Run `python3 tools/livefire/range_targets.py check`, then delete the explanatory note from the manifest entry and run it again. |
+| The clean twin used to score source-code tools, and its recorded fingerprint (section 2.9) | Run `tools/livefire/range.sh up src`; it regenerates both bodies of code and fails if either fingerprint no longer matches the one recorded in the manifest. |
+| The ten proving results over the nine typed command builders (section 9.8) | Run `tools/livefire/tool_drivers_livefire.sh`. It drives each one through the engine's own executor twice — once against the weak target, once against the sound control — and prints, per result, whether it ran, whether an engine reader could parse its output, and whether it stayed silent on the control. It exits with an error the moment an expectation fails, and it reports any builder that has no proving result at all. |
+| That the password-guessing tool is proven against a real login form, not only against a browser's own challenge (section 9.8) | The same exercise. Two of its ten results name that tool, one per kind of login. The form result additionally reads the control server's own counters, so its silence is confirmed by what the target saw rather than only by what the tool printed. |
+| That the guard on the scanner's tests is a permitted list rather than a forbidden one (section 9.8.1) | Read `integration/tests/test_wapiti_no_egress.py`. It asks for the group names "all" and "common" and requires the whole request to be refused; reverting the guard to a list of forbidden names makes that test fail while everything else stays green. |
+| That every tool is invoked under a name the catalogue records (section 9.8) | Read `integration/tests/test_builder_binary_resolution.py`. It derives the check from the catalogue itself, so it covers tools added in future, and it carries its own controls that fail if the check has quietly stopped reading anything. |
+| The four ways the system can drive a tool, and the three that were wrongly refused (section 9.8) | Read `engine/crucible/framework/v2/tools/profile.py`; the drift-guard tests beside it read the real source of each driver and fail the build if the lists disagree. |
+| The twenty-four tools in the sealed working environment (section 9.8) | Build it with `docker compose --profile strix build strix-sandbox`, then run each name in `SANDBOX_TOOLS` in `engine/crucible/framework/v2/tools/registry.py` inside the image. |
 
 Two rows in that table are unfavourable to the product. They are included because the project's
 governing rule is that a claim must be true today, and where a claim is not yet true the gap must be
@@ -1692,12 +2364,12 @@ system whose value rests on not overstating cannot itself overstate.
 
 #### 11.2 The rest of the briefing
 
-This chapter is one of thirteen. It is the entry point; the others go deeper on a single subject
+This chapter is one of fourteen. It is the entry point; the others go deeper on a single subject
 each and can be read in any order.
 
 | Chapter | Subject | What it answers |
 |---|---|---|
-| **1** *(this one)* | What this is, and the problem it solves | Why the system exists, the one central idea, the licensing and government-host conditions, and the honest status of everything. |
+| **1** *(this one)* | What this is, and the problem it solves | Why the system exists, the one central idea, why a detector must be shown to stay silent as well as to speak, the licensing and government-host conditions, and the honest status of everything. |
 | **2** | The parts of the system, and how they fit together | What CRUCIBLE, AEGIS, SIGIL, STRIX, the gateway and the shared core each are; the wall between the offensive and personal halves; what runs where. |
 | **3** | How a security assessment runs, from start to finish | The eleven stages of a job, from the written authorisation through discovery, testing, confirmation and reporting to re-testing after the fix. |
 | **4** | Leads and facts: how the system decides something is real | The single most important distinction in the product, examined closely: the four verdicts, the journey of a claim, and exactly what this approach cannot do. |
@@ -1705,11 +2377,12 @@ each and can be read in any order.
 | **6** | Evidence: how it is collected, shown, and independently re-checked | What counts as evidence, how it is sealed, the four checks a certificate must pass, and how to hand a package to an independent third party. |
 | **7** | Signatures and keys: who vouches for a result | What a digital signature is, what exactly gets signed, who holds which key, the trust root, and rotation and revocation. |
 | **8** | Safety, authorisation, and what the system refuses to do | The written authorisation, scope enforcement, permission tiers, approvals, the emergency stop, and the audit trail. **The authoritative account of the government-host refusal discussed in section 6.2 is here, in its section 2.5.** |
-| **9** | Every screen, and how an operator uses it | A tour of all 28 screens of the interface, plus the command line and the other three interfaces. |
-| **10** | The knowledge graph: building a picture of the target | How the system assembles a map of an estate, works out chains of attack, and identifies the single fixes that break the most attacks. |
+| **9** | Every screen, and how an operator uses it | A tour of all 29 screens of the interface, plus the command line and the other three interfaces. |
+| **10** | The target knowledge graph: building a picture of the attack | How the system assembles a map of an estate, works out chains of attack, and identifies the single fixes that break the most attacks. It is called the *target* knowledge graph because there are three different maps in this system, and chapter 14 describes a second one. |
 | **11** | The automated assistants, and how the system improves | Every AI agent, its job and its hard limits; how the system learns; and the strict bounds on what learning is allowed to change. |
-| **12** | The tools it uses, and what you need to run it | The catalogue of external tools, the credentials and keys an operator must supply, and the practical prerequisites. Note that it does **not** cover licensing; section 6.1 above is the only chapter section that does. |
+| **12** | The tools it uses, and what you need to run it | The catalogue of external tools, the credentials and keys an operator must supply, and the practical prerequisites — including the licensing position, which its section 2.1 now covers in full alongside section 6.1 above. |
 | **13** | The defensive side, source-code review, and network handling | What AEGIS proves from a customer's own logs, how source code is reviewed, encrypted connections and certificates, and how a fix is proven to have worked. |
+| **14** | The sovereign side, in full | The other half of the product: the part that holds the owner's key, keeps the owner's memory as a tamper-evident record, governs the offensive engine, and contains no attacking capability at all. Voice, gesture, the phone companion, the memory server, and an honest account of which of those is actually running. |
 
 **A suggested route for a reader with limited time.** Roughly a two-hour read, covering the argument,
 the guarantees and the limits, in this order:
@@ -1727,10 +2400,14 @@ the guarantees and the limits, in this order:
   proceeds.
 - **What can it actually find?** Chapter 5 for the full catalogue, chapter 10 for how individual
   findings are assembled into a picture of an estate.
+- **How do you know its instruments work at all?** Section 2.9 above, on negative controls and the
+  proving range, then section 9.8 on how far its control over the outside tools has been proven.
 - **Who vouches for a result, and what if a key is lost?** Chapter 7.
 - **How much of this is the AI, and what is it allowed to do?** Chapter 11.
 - **What does an operator see and press?** Chapter 9.
 - **What does it do for defence, for source code, and for encrypted connections?** Chapter 13.
+- **What is the other half of the product — the part that holds the key rather than the one that
+  attacks?** Chapter 14.
 
 ---
 
@@ -1795,6 +2472,7 @@ department.
 | **The integration layer** | The operations floor | The connective tissue: the `vigil` command, the safety gates, the bridge where a suggestion becomes a proven fact, and the running loop that drives an assessment from start to finish. |
 | **The gateway** | The guarded exit door | A network barrier that decides which packets are allowed to leave the machine at all. |
 | **The interfaces** | The front desk | The web screens and the command line through which a human drives everything. |
+| **The live-fire harnesses** | The proving ground | Not part of the running system, but part of what is shipped: two runnable scripts that point a finished capability at something real instead of at saved evidence — one at a real outside service, one at real infrastructure the project stands up and destroys — assert exactly what should and should not happen, and can be re-run by a customer or an auditor on their own machine. |
 
 Everything in that table exists as real code in one single repository. Every claim in
 this chapter was read out of that code or out of the project's own documents.
@@ -1954,7 +2632,7 @@ rest of the engine exists to feed them.
 | The evidence layer | Sealed evidence: certificates over confirmed findings, the hash chain, the manifest of raw files, and the packaging for offline audit. |
 | Machine attestation | Produces a signed statement about the machine the engine is running on — what it is and that its own files are unaltered. Honest limit, stated in its own code: today's statement is produced in software (optionally helped by the machine's security chip). The versions that would use special processor hardware to prove the same thing more strongly are deliberately written to refuse rather than to pretend. |
 | The external-tool roster | The single catalogue of the outside command-line tools the engine can drive, together with a live check of which are actually installed on this machine. The same roster is used by the installer and by the "Tools" screen, so what the screen shows and what the installer installs cannot drift apart. |
-| Reporting | The generated technical report, the client dossier, per-finding "how to check this yourself" instructions, and standards mapping. |
+| Reporting | The generated technical report, the client dossier, per-finding "how to check this yourself" instructions, standards mapping, and the **case file** — a numbered pack of plain-English documents written for the non-specialist who receives a dossier. Described below the tables. |
 | Target intake | Turns a single web address into a fully prepared engagement folder — a draft authorisation document, a draft threat model, a draft attack tree, and a fingerprint of the target's technology. It does this with a deliberately polite, capped, unauthenticated look at the public files a site publishes about itself. It never removes a gate: nothing is prepared without the operator's attested authorisation, and no active testing happens until the operator signs the authorisation document. |
 | Importers | Ingest another vendor's report — from the common scanners and proxies, or a generic findings file — into the system's own map as leads. The doctrine is applied without exception: a third party's finding is marked as unverified, is never recorded as a proven finding, and becomes one only if one of this system's own checkers re-proves it. Re-importing the same report twice changes nothing. |
 | The capability registry | One machine-readable catalogue over the engine's several separate rosters (sensors, internal tools, checkers, operators, commands), so an outside integrator can discover what capabilities exist, what each produces, and what permission tier each needs — without changing how any of them run. Listing a capability is not permission to use it. |
@@ -1984,10 +2662,86 @@ different route, so the claim "everything crosses this one barrier" is not yet t
 Chapters 4 and 6 describe it in exactly these terms; this chapter is consistent with
 them deliberately.
 
-*Third, the component's own written comment inside the code is out of date* — it still
-describes itself as connected to nothing but its tests, which understates it. Both the
-overstatement and the understatement are recorded here so that a reader who goes to the
-code and finds the comment is not misled in either direction.
+*Third, the component's own written comment inside the code used to be out of date* — it
+described itself as connected to nothing but its tests, long after real parts of the running
+system had been wired to it. That has been corrected: the comment now lists its callers, and
+an automated test fails the build in **both** directions — if the retired "connected to
+nothing but its tests" phrasing reappears while those callers exist, and equally if a module
+that does call it is dropped from the list. The project treats a note that outlives its phase
+as the same class of defect as an overclaim, because it understates what is true. Both the
+overstatement and the former understatement are recorded here so that a reader who goes to
+the code is not misled in either direction.
+
+**The case file, because it is the part a reader of this briefing would actually be
+handed.** A dossier already proved things; until recently it did not *explain* them. It
+held a machine-readable export and a cryptographic proof bundle — exactly the right
+evidence and, in the words of the code, "exactly the wrong reading material for the people
+a dossier is usually handed to." The case-file builder writes the part they read. It is
+generated into every dossier, and it is **nine numbered documents**, numbered so that the
+reading order is obvious from the file names:
+
+| File | What it contains |
+|---|---|
+| `00-START-HERE.html` | The one page to open first. It explains every other file in the archive. |
+| `01-executive-summary.md` | What was done, what was found, what it means, what to do first. |
+| `02-approach-and-scope.md` | How the work was done — and what was **not** examined. |
+| `03-findings.md` | Every proven finding, in plain language. |
+| `04-leads.md` | What was observed or suspected but **not** proven. |
+| `05-what-was-looked-for.md` | Every weakness category the engine can confirm, and this run's position against each. |
+| `06-what-to-do.md` | The remediation order, prioritised. |
+| `07-verify-it-yourself.md` | The exact commands to re-check the result, and what a pass and a failure look like. |
+| `08-glossary.md` | Every technical term used anywhere in the dossier. |
+
+Every one of the nine is written on every build, including when it has nothing to report,
+because "a document that says 'none' is information; a missing document is a gap the reader
+has to wonder about."
+
+Three rules run through the whole pack, and they are the same doctrine as the rest of the
+system: *meaning before mechanism* — every section opens with what something means for the
+organisation and only then how it works; *say the limits out loud* — a proven finding states
+what it proves **and** what it does not, and a section on what was tested is followed
+immediately by what was not; and *never assert what was not measured* — where a value was
+not recorded, the documents print "not recorded" rather than a plausible-looking figure.
+The builder is a pure calculation over the run's own recorded facts: no clock, no
+randomness, no reaching out to anything.
+
+Four supporting modules do the work behind it, and one of them carries the most important
+honesty control in the pack:
+
+- **The catalogue** answers the question a list of findings cannot: three findings out of
+  three categories examined is a very different document from three out of ninety. It is
+  derived **from the engine's own registry of weakness categories**, not from a
+  hand-written list, so a category added to the engine appears on the next build and one
+  removed disappears. Its status column has exactly three values — *confirmed*, *reported*
+  (a lead), and *not recorded*. There is deliberately **no "examined and found clean"
+  state**, because the run record does not support one: a scan writes down what it found,
+  not the list of checks it attempted. Inferring "examined and clean" from an absence would
+  convert a gap in the record into an assurance, which the code names as "the single most
+  dangerous thing a security document can do." The missing capability is written down as a
+  specific, fixable gap rather than left vague.
+- **The plain-language vocabulary** holds one shared set of sentences translating the
+  engine's internal terms, so the finding write-ups and the catalogue cannot describe the
+  same category two different ways. Its descriptions are generic, long-established
+  knowledge about a *kind* of weakness, and the documents keep that strictly apart from
+  what was demonstrated on the system examined. Where no description is on file it says so
+  and reproduces the engine's own wording rather than inventing a friendlier one.
+- **The run facts** module reads only what the run actually wrote — start, finish,
+  duration, settings, and what those settings mean was *not* covered. Anything with no
+  recorded source is printed as "not recorded"; nothing is estimated or back-calculated.
+  Times are in UTC and labelled as such, because the recipient of a dossier is often in a
+  different country from the machine that produced it.
+- **The authorisation reader** locates and reports the engagement charter — who authorised
+  the work, which systems, what was out of scope. The rule it enforces is that a missing
+  charter must be *stated*, never omitted: "a dossier without this section documents
+  activity that a lawyer cannot distinguish from an attack."
+
+An operator may attach a human name to a run — "Acme, Q3 external review" — and that name
+appears as the title of these documents in a pack built afterwards. It is presentation only:
+it is stored in one side-car file of its own, and there is no code path from it to a
+certificate, an evidence digest, the sealed proof bundle or the signed record. The pack's own
+list of hashes covers its documents, titles included, so a pack rebuilt under a new name is a
+different file — but the proof inside it, and every certificate already delivered, re-verify
+to exactly the same result.
 
 CRUCIBLE is driven from the command line and currently exposes **31** sub-commands.
 When an AI model operates it, it does so under a written standing doctrine — a
@@ -2084,6 +2838,32 @@ Its main pieces:
   Two properties matter. First, classification is by whole words, not fragments, so
   "overwrite" is not mistaken for "write". Second, **anything the classifier does not
   recognise falls to the strictest tier**. Unknown means dangerous.
+
+- **The signed governance ledgers.** Five kinds of record, appended to the same
+  tamper-evident history, decide the live state of the system's own controls: whether the
+  emergency stop is engaged, which assistants have been promoted to act with less
+  supervision, which capabilities are switched on, which devices are permitted to approve
+  things, and what each machine in the owner's mesh declares it can do. Each is signed by
+  the owner, and the newest record wins.
+
+  That last property carried a defect worth describing, because it is a good illustration
+  of a class of problem signatures alone do not solve, and it was closed. An *old* record is
+  still a genuinely signed record. Re-appending one verbatim would therefore resurrect a
+  state the owner had since revoked — a promotion that had been withdrawn, a capability that
+  had been switched off, a device that had been de-authorised — and every check the system
+  had would pass, because the signature really is the owner's and the chain really does
+  extend cleanly. Each of the five now carries the moment it was issued **inside** the signed
+  material, so it cannot be re-stamped, and each keeps a high-water mark of the newest record
+  it has honoured. A record at or below that mark is ignored as a replay.
+
+  Two details show the care taken. Only the *dangerous* direction is guarded: engaging the
+  emergency stop, disabling a capability, withdrawing a promotion and revoking a device all
+  carry a fixed lowest value and are honoured exactly as before — because putting a freshness
+  guard on a fail-*safe* direction would turn it into a fail-*open* one, where an attacker
+  could suppress a revocation by replaying nothing at all. And the freshness value is parsed
+  defensively even though it is signed, because a signature makes a value authentic, not
+  sane: a "not a number" would poison the guard permanently, so it and infinity are both
+  mapped to the bottom rather than trusted.
 
 - **The agent mesh.** A set of specialised assistants, each with a permanent ceiling on
   how dangerous an action it may ever take. They include a memory archivist, a
@@ -2261,7 +3041,42 @@ a hundred informal connections nobody can audit.
 | The attack-chain memory | A picture of how findings link into chains, built only from the signed record and kept strictly separate from it. It marks confirmed and merely-suspected items differently; a refuted lead is retired rather than deleted, so the history of what was believed remains visible. Nothing read out of this picture can grant a permission or create a fact. |
 | Telemetry and tracing | An emit-only operational record of what the engine did and how long it took, tied to the identity of the signed record entries so an operator can follow a trace and an auditor can follow the record and the two line up. Two events are first-class: every refusal by the permission gate, and every confirmation or refutation by a checker. |
 | The brain slot | A socket into which a different reasoning engine can be plugged. The code states its own limits: a plugged-in reasoning engine is propose-only, computes no facts, self-authorises nothing, and touches no network. |
+| The live network transport | The real network connection through which the cloud and exposed-secret confirmations reach the outside world — and, until recently, the missing piece. Each of those confirmations was written against a *seam*: a named joint where a real connection would be plugged in. For a period the only thing ever plugged into that joint was a stand-in used by the tests, which is exactly why none of those confirmations had ever fired against a real provider. This is the real binding, and it is described in its own right below the table. |
 | The live layer | The unified running engine and its connectors to real tools, real gates, the real record, and the optional external services. |
+
+**A note on the live network transport, because it is the difference between "built" and
+"has actually fired."** Several of the system's cloud confirmations depend on facts about
+the *connection itself* — was the encryption genuinely verified, could anything have sat
+in the middle, which machine actually answered. A checker refuses to confirm unless those
+facts hold. The defining rule of this component is that every one of them is **derived
+from the connection, never asserted**:
+
+- **Encryption verified** counts as true only when the request was an encrypted one, the
+  connection really carries an encryption session, that session yields a certificate from
+  the far end — which a computer only produces when the certificate chain was actually
+  validated — and the local settings really are set to validate. Any step that cannot be
+  established makes it false.
+- **No intermediary** is recorded only when the software can be positively shown unable to
+  have one: it was built to ignore the machine's ambient proxy configuration entirely and
+  carries no proxy routes of its own. "We could not tell" is recorded as *there might have
+  been one* — the honest negative that makes the checker refuse.
+- **A redirection is reported, not followed.** Being sent somewhere else is evidence about
+  the target, not an instruction to chase.
+- **The far end's address is read from the live connection** while the answer is still
+  arriving, rather than looked up again afterwards. A second look-up can return a different
+  address than the one the bytes came from, which would be evidence about the wrong thing.
+- **The answer is read up to a fixed limit**, and an over-long one is marked as cut short
+  and is never interpreted. Half an answer cannot honestly establish an identity, and a
+  partial reading would be evidence about bytes the system does not have.
+
+Every field fails to the value that makes the checker **refuse** rather than the value that
+lets it fire. Where a credential must be used to make a confirming call, it is bound into
+the connection through a factory the runner calls with the exact secret it fingerprinted,
+so the fingerprint stamped on the confirming call cannot silently describe a different
+credential from the one that authenticated. The connection also identifies itself with a
+fixed, recognisable label naming this as an authorised owner-test, so the operator — and
+the provider — can find exactly this traffic in their own logs. There is no rotation and no
+disguise.
 
 **A note on channel binding, because it addresses a limit this briefing states
 repeatedly.** Re-running a checker over saved evidence proves that the verdict follows
@@ -2317,14 +3132,14 @@ chapter and the next:
 
 | Interface | What it is | Where it listens |
 |---|---|---|
-| **VIGIL COMMAND** | The primary product interface: a single application of 28 screens covering assessment, live monitoring, findings, proof, reports, fixes, defence, approvals, charter, keys, tools, system status, compliance, assurance, governance, trust centre, manual, and knowledge. | Served by the `vigil up` reverse proxy at `127.0.0.1:8770` |
+| **VIGIL COMMAND** | The primary product interface: a single application of 29 screens covering assessment, live monitoring, findings, proof, reports, fixes, defence, approvals, charter, keys, tools, system status, compliance, assurance, governance, the engagement library, trust centre, manual, and knowledge. | Served by the `vigil up` reverse proxy at `127.0.0.1:8770` |
 | **The CRUCIBLE operations console** (older) | A 22-screen console from an earlier generation, still present and still served when the console is hit directly. It began as a purely read-only view; it has since gained a set of operator action buttons (see the note below). | `127.0.0.1:8787` |
 | **The SIGIL cockpit** (older) | A single minimal page from an earlier generation. | `127.0.0.1:8733` |
 | **The STRIX terminal interface** | The vendored third-party tool's own text interface. | The terminal |
 
 **On the older console's actions.** Its own module description still calls it
 "read-only", which is now only half true, and an agency reader should have the accurate
-picture. It today carries **31** operator action routes. What they do is
+picture. It today carries **33** operator action routes. What they do is
 tightly bounded, and the code says so: launching an assessment hands the request to the
 *same* gated command-line machinery a hand-typed engagement uses, spawned as a separate
 program; it cannot widen scope (scope comes from the signed authorisation document and
@@ -2333,13 +3148,29 @@ is refused; re-verifying a report is pure recomputation over retained evidence a
 no traffic; and the console can *trip* the emergency stop but deliberately has no way to
 *clear* it, because clearing must be a deliberate act elsewhere. Every action route also
 refuses a request that did not come from the console's own page in the operator's
-browser.
+browser, and the console will not serve any of its programmatic addresses without a
+credential at all — there is no configuration, not an unset variable and not a blank one,
+under which that requirement switches itself off.
+
+Two of the thirty-three are the newest and are worth naming, because they are an
+instructive example of the system's own rule applied to something as mundane as a name.
+The console keeps an **engagement library**: the list of past jobs, so an operator coming
+back months later can find work by a human name — "Acme, Q3 external review" — rather than
+by a machine identity such as `20260812-143355-118`. Those two routes attach that name to
+an engagement or to a single run. The name is stored in one side-car file of its own, keyed
+by the unchanged machine identity, and nothing in that code path writes into a run folder,
+an evidence certificate, the sealed proof bundle or the signed record. Renaming therefore
+writes exactly one file and rewrites nothing that already exists, so every proof already
+delivered still re-verifies to byte-identical results. A run's name has one deliberate onward
+use: a dossier downloaded after that run is renamed is titled by the human name, which changes
+how the pack reads and nothing about what it proves. The human name is presentation; the
+identity and the proof are untouched.
 
 **An honest note on the version read for this briefing.** The project's own packaging
-contract says the unified 28-screen interface should also be copied into the two older
+contract says the unified 29-screen interface should also be copied into the two older
 interfaces' directories. In the version read here, that copy has not happened — a change
 that did it was added to the released software and then withdrawn again, because it
-broke the sovereign side's tests. The practical consequence: the 28-screen interface is
+broke the sovereign side's tests. The practical consequence: the 29-screen interface is
 reachable **only** through the `vigil up` command. Opening the console or the cockpit
 directly gives the older interface instead.
 
@@ -2400,6 +3231,87 @@ ungoverned. This is deliberate, so that a development copy works without ceremon
 means an agency deployment that wants the "a stolen copy is inert" property must
 provision the trust root, or set the enforcement flag, as a deployment step. The
 interface shows which state the machine is in, labelled "governed" or "ungoverned".
+
+#### 3.11 The live-fire harnesses — the parts that prove the parts
+
+**In one line:** two runnable scripts that point a finished capability at something real —
+one at a real outside service, one at real infrastructure the project stands up and destroys
+— assert exactly what should and should not happen, and can be re-run by anyone.
+
+Most of what a security product claims about itself is proven against *recorded sample
+data* — realistic material written by hand, standing in for the real thing. That proves the
+logic. It does not prove that the capability has ever touched a real system. These two
+scripts close that distance, and they are deliberately built as **proofs rather than
+demonstrations**: every expectation in them is asserted, and the script exits with an error
+if any one of them fails.
+
+There are exactly two of them in the repository today, both under `tools/livefire/`, and
+each is a shell script paired with a program:
+
+| Harness | What it fires at | What it proves |
+|---|---|---|
+| Kubernetes access control | A real single-node Kubernetes cluster the script itself creates, in a container reachable only on this machine's own address, and destroys afterwards | Both Kubernetes confirmations, over bytes a real Kubernetes interface produced |
+| Exposed-secret validity | The real, public `api.github.com`, using the operator's own credential against the operator's own identity | The GitHub row of the exposed-secret confirmation, over bytes the real provider returned |
+
+**The Kubernetes harness.** It downloads and starts a real cluster, waits for it to become
+ready, plants four access rules in it — one genuinely dangerous and three benign — captures
+what the real interface returns for each, and puts those real bytes through the ordinary
+production path. Then it destroys the cluster. Two engineering details are worth naming
+because they are what separate a proof from a demonstration. First, it does not merely
+report; it *asserts*, and any deviation is an error. Second, it **refuses to draw a
+conclusion at all** until the cluster has finished assembling its built-in roles: those
+roles' permissions are not written into the object, they are filled in by the cluster
+shortly after start-up, and reading one too early returns an empty rule list. An empty rule
+list would make the most important control pass for entirely the wrong reason — because
+nothing was read, rather than because the control held. Section 8 sets out what the four
+planted rules were and which were confirmed.
+
+**The GitHub harness.** It drives the real capture machinery over the real network
+connection described in section 3.7, against the least-privileged call the provider offers:
+"who am I?", which reads an identity and changes nothing. Four things happen in a single
+run: a valid credential is confirmed and its certificate re-verifies with no network; a
+bogus credential of the *same shape*, sent live to the same real address, is answered by
+the provider itself with a rejection and correctly remains a lead — the difference between
+looking like a credential and being one, measured against the real provider rather than
+assumed; the same confirmed capture stops being a fact the instant its confirming address is
+swapped for an attacker's host or a look-alike, and the machinery's own outbound-safety
+floor refuses to send the live credential there in the first place; and a capture whose
+credential and confirming call carry different fingerprints — "some other secret
+authenticated" — is likewise not confirmed. The two refusal gates are exercised for real on
+the same live path: with the emergency stop tripped, and with the scope check denying, the
+run stops before any network call is made and produces nothing to adjudicate.
+
+**The credential never touches the disk.** It is piped straight into the harness, so it is
+never written to a file, never placed where the machine's process list would show it, and
+never put into the environment. The script contains no command tracing anywhere, because
+tracing would print the credential. The harness then asserts that the credential does not
+appear in the capture, in the checker's working record, or in the signed certificate.
+
+**Neither harness runs in the automated build, and that is deliberate.** There are no
+credentials in the build environment, and — in the project's own words — "a live-fire that
+fabricates a result when it cannot run is worse than no live-fire." The GitHub one detects
+a missing or unauthenticated credential and stops cleanly, saying so, rather than reporting
+anything.
+
+**Why they matter more than a vendor demonstration.** Both were built so that the customer,
+the auditor or a sceptical evaluator runs the identical script on their own machine and
+watches the identical result, rather than taking anyone's word for it. The Kubernetes one
+borrows nobody's infrastructure; the GitHub one borrows nobody's account.
+
+**What neither harness covers, said plainly.** Each stops slightly short of the complete
+production path, and the difference should be stated here rather than left to be discovered.
+The Kubernetes one captures using the ordinary Kubernetes command-line tool inside the shell
+script and hands the resulting evidence straight to the confirmation machinery; it does not
+travel through the system's own gated, scope-checked reader for a live cluster. That reader
+exists and refuses unless the cluster it actually reached is one the operator declared in
+writing, but the software it needs is not installed on the machine this briefing was written
+on, so it was not exercised. The GitHub one *does* drive the real production capture
+machinery over the real network connection — the stronger of the two — but on its
+*permitted* legs the permission check and the scope check were stand-ins supplied by the
+harness rather than a signed authorisation document read from disk. The *refusal* legs were
+genuine, which is what demonstrates that the gate bites; no signed authorisation was loaded
+in that run. Section 8 covers separately what the Kubernetes result does and does not
+establish about clusters in general.
 
 ---
 
@@ -2635,7 +3547,8 @@ what, and where". Everything below is on the operator's own disk.
 | The session registry | Named lines of work: a name the operator chose plus pointers to the runs that belong to it. It stores operator free text and pointers, never a secret | One small structured file per session; the folder is owner-only and the files are owner-only |
 | The per-session map | A graph view of one session, for the screens and for handover | One file per session, rebuilt from the record |
 | Keys and secrets | The owner key, the offensive side's own record key, the governance key, and any configured credentials | Owner-only files; encrypted at rest when the machine's security chip vault is set up (see 7.5) |
-| Reports, certificates and audit packages | The output the operator hands to someone else | Ordinary files under the engagement folder |
+| The engagement-library labels | The human names an operator has attached to past jobs, so work can be found again by name months later | One small owner-only side-car file under the console's own folder, keyed by the unchanged machine identity. It reaches no certificate and no proof bundle, and renaming rewrites nothing that already exists; a run's name does title a dossier downloaded afterwards |
+| Reports, certificates and audit packages | The output the operator hands to someone else, including the nine-document case file | Ordinary files under the engagement folder |
 
 A word used above: a **projection** is a copy of information rearranged into a more
 convenient shape. The per-session map is a projection of the signed record. That has a
@@ -2664,7 +3577,7 @@ bound to a private or tunnel address, and never to a publicly reachable one (see
 
 | Surface | What it offers | Notes |
 |---|---|---|
-| The operations console (`:8787`) | **36** read-only addresses returning structured data — status, engagements, runs, sessions, benchmark, memory, tools, capabilities, defensive status, telemetry, certificates, posture, governance, coverage, world model, reports, and more — plus a live event stream that tails the log | Also carries the **31** operator action routes described in section 3.9 |
+| The operations console (`:8787`) | **37** read-only addresses returning structured data — status, engagements, runs, sessions, the engagement library, benchmark, memory, tools, capabilities, defensive status, telemetry, certificates, posture, governance, coverage, world model, reports, and more — plus a live event stream that tails the log | Every one requires the console's session credential. Also carries the **33** operator action routes described in section 3.9 |
 | The gated action interface (`:8799`) | A small deliberate interface for an operator's own software: read the status, engagements, runs, one engagement's authority, report, world model, evidence and intelligence; and two actions — invoke a tool, or import another tool's report | Every action goes through the same fail-closed authority, entitlement, scope and egress chain as a local action. It runs only if the operator starts it, and exposes no ungated capability |
 | The unified proxy (`:8770`) | The single origin a human points a browser at. It forwards `/sovereign/*` to the cockpit, `/offense/api/v1/*` to the gated action interface, and everything else under `/offense/*` to the console | Pure standard-library code that imports neither trust domain, so one program never holds both |
 | The model-context server | Lets other AI tools call this engine's safe capabilities | Runs over a direct program-to-program channel, not a network port |
@@ -2768,7 +3681,7 @@ operator an explicit four-rung ladder, selected by a single setting:
 
 | Setting | What is permitted | Trade-off, as stated in the code |
 |---|---|---|
-| **Air-gapped** | Locally-run models only. Cloud models are refused at start-up. ("Air-gapped" is the security term for a machine with no connection to any outside network at all — as if separated by a gap of air.) | Highest sovereignty; lowest reasoning quality. |
+| **Air-gapped** | Locally-run models only. A cloud model is refused *before the client that would call it is constructed*. ("Air-gapped" is the security term for a machine with no connection to any outside network at all — as if separated by a gap of air.) | Highest sovereignty; lowest reasoning quality. |
 | **Sovereign cloud** | Local, plus models hosted in a named jurisdiction (a major cloud provider's model service with a regional restriction, or a European provider). Direct consumer model interfaces are refused. | Frontier quality with data-residency guarantees. |
 | **Trusted cloud** | Adds enterprise offerings with contractual zero-data-retention, and requires the operator to attest explicitly that the key in use is such a key. Direct consumer interfaces are still refused. | Contractual rather than jurisdictional assurance. |
 | **Permissive** | Anything. This is the development default. | No policy enforcement. |
@@ -2777,6 +3690,56 @@ An unrecognised model backend is conservatively treated as the least sovereign c
 so it is refused under every restrictive setting. Locally-hosted options include a
 self-hosted model server, a local model runner, and a deterministic replay mode that
 needs no model at all.
+
+**Where the setting is enforced, and what "refused" means precisely.** This is worth
+stating exactly, because it recently changed. The setting used to govern the engine's
+own catalogue of model backends but *not* the model call inside the running assessment
+loop — so an operator could configure a sovereign tier and still have the path that
+actually drives an engagement reach a cloud model. That gap is closed. The setting is now
+consulted at every place in the offensive half that can call a model:
+
+| Where a model can be called | What now happens under a restrictive setting |
+|---|---|
+| The engine's model-backend catalogue — every backend the reasoning functions use | The tier is checked inside the routine that builds a backend, before the vendor's software library is loaded |
+| The reasoning loop's "propose the next step" call during a live assessment | Checked before the client is built; on a refusal the step becomes an inert pause that asks the operator |
+| The code-fix proposer | Same check, same refusal |
+| The operations console's natural-language command box | Refused with the policy's own message; the ordinary typed command line is unaffected, because it does not use a model at all |
+
+"Refused" is literal rather than cosmetic. The check happens **before the model client is
+constructed and before the vendor's software library is even loaded**, so on a refusal
+nothing is imported, nothing is built, and no bytes leave the machine. The code's own
+words for this are that "the client is never constructed, the SDK is never imported, and
+nothing leaves the host."
+
+It is fail-closed at four separate points, and each one is a decision someone had to make
+the safe way round: an unrecognised setting name resolves to the *strictest* tier, not the
+most permissive; an unrecognised model backend is classified as the least sovereign
+category; if the policy code cannot be loaded at all, then any configured tier refuses
+rather than proceeding unchecked; and an error *inside* the gate is itself a refusal, never
+a permission. A refusal does not crash the assessment — it returns the safest available
+action, a pause that asks the operator what to do, carrying the policy's own explanation of
+which tier refused and which setting would change it.
+
+Three bounds on that statement, all of which matter:
+
+- **An optional seal.** By default the setting is re-read on each call, which is convenient
+  in development but means a change to the machine's configuration mid-assessment would
+  take effect immediately. A separate opt-in setting latches the tier once for the life of
+  the running program, so a later change cannot relax it part-way through a job. It can
+  only pin the tier, never loosen it.
+- **It governs the offensive half.** The sovereign side's own optional use of a model — the
+  feature that describes a screen or camera image — is not on this ladder, and should not
+  be described as if it were. It is governed separately and, in one respect, more strictly:
+  sending a private image off the machine is classified as an externally-visible action
+  under the A0–A3 tiers, and it will not upload until an owner approval exists that is
+  bound by fingerprint to that exact image and that exact question, so the approval of one
+  upload cannot be replayed to authorise another.
+- **The vendored third-party agent is not on this ladder either.** STRIX (section 3.6) has
+  its own separate model setting, and its code contains no reference to this policy at all.
+  Its containment is of a different kind — it runs inside the disposable container whose only
+  route out is the gateway — but an agency intending to enforce a model-sovereignty policy
+  should treat the vendored agent's model choice as a separate configuration item to be set,
+  not as something the ladder covers for them.
 
 #### 7.3 No credential is strictly required to run
 
@@ -2871,15 +3834,22 @@ any particular live account.
 - The two-environment separation and every mechanism that enforces it.
 - The shared integrity core: chain, signatures, canonical formatting, the gate, the
   danger classifier, key storage, the anti-rollback floor.
-- The offensive engine, its checkers, and its evidence and reporting layers. (The
-  anti-fabrication barrier is real and in use, but it is *bounded* rather than universal;
-  it therefore appears in its own group below rather than here.)
+- The offensive engine, its checkers, and its evidence and reporting layers — including the
+  nine-document plain-English case file that is generated into every dossier (section 3.3).
+  (The anti-fabrication barrier is real and in use, but it is *bounded* rather than
+  universal; it therefore appears in its own group below rather than here.)
+- The real network connection through which the cloud and exposed-secret confirmations reach
+  the outside world (section 3.7), and the two live-fire harnesses that drive them
+  (section 3.11). This is a recent and consequential change: until it existed, the only thing
+  ever plugged into that joint was a stand-in used by the tests, which is precisely why none
+  of those capabilities had ever fired at a real provider. Both harnesses have now been run —
+  one against a real Kubernetes cluster, one against the real GitHub service.
 - The gate chain, the emergency stop, the permission tiers, the approval queue with
   single-use owner-signed tokens, and the exit-door gateway.
 - The sovereign side's record, its permission kernel, and its agent mesh.
 - The sealed evidence package and the standalone offline verifiers, which contain no
   VIGIL code at all and re-implement the published format from its specification.
-- The unified 28-screen interface, reachable through the bring-up command.
+- The unified 29-screen interface, reachable through the bring-up command.
 - The machine-checked models of the four core rules, together with their deliberately
   broken twins and the document mapping each model to the code it abstracts. All four
   models and all four broken twins are checked automatically on every change, as a
@@ -2921,9 +3891,10 @@ the released software and they run on every proposed change to it.
   documents, with two confirmed findings re-verified offline; that record was read as a
   documented claim in this pass, not re-executed.
 
-**The six cloud and Kubernetes exploitation confirmations: complete. The two Kubernetes
-ones are proven against a real cluster; the four cloud ones await the customer's
-credentials.**
+**The six cloud and Kubernetes exploitation confirmations: complete. Three of the six have
+now been fired at real infrastructure — though one of those three only for one of the two
+kinds of credential it handles. The other three await the customer's credentials, and one of
+them never fires at anything, by design.**
 
 This item is set out at length rather than listed in a table, because it is the single
 part of the system most easily misrepresented — and it can be misrepresented in either
@@ -2937,7 +3908,7 @@ confirmations that a weakness was not merely present but actually *achieved*:
 | Confirmation | What it establishes, in plain terms |
 |---|---|
 | **Instance-metadata credential capture** | A machine running in a cloud has an internal service that hands out credentials to whatever is running on it. This confirms a credential was actually retrieved from that service and actually worked — not merely that the service could be reached. |
-| **Exposed-secret validity** | A password or key found lying somewhere it should not be is only a real problem if it still works. This confirms the secret is currently valid, by using it once to ask "who am I?", rather than assuming it is live. |
+| **Exposed-secret validity** | A password or key found lying somewhere it should not be is only a real problem if it still works. This confirms the secret is currently valid, by using it once to ask "who am I?", rather than assuming it is live. It covers two kinds of credential, and the two are at different stages — see below, because the difference must not be blurred. |
 | **Google service-account impersonation** | One machine identity was able to obtain a working token as a different, more privileged identity, and that token was confirmed with one call. |
 | **Identity privilege escalation** | The captured permission rules, read together with the limits that are supposed to constrain them, unconditionally permit a named identity to gain privilege it should not have. |
 | **Kubernetes access control, tier one** | On a container cluster, an anonymous, unauthenticated caller is bound to a dangerous built-in role. |
@@ -2971,12 +3942,38 @@ rules across a whole cluster; and the cluster is one the system stood up itself,
 **managed provider's control plane** (Amazon EKS, Google GKE, Azure AKS) — the same
 interface reached by a different access path — is not exercised.
 
-**Cloud: what is deferred, and why.** For the four cloud capabilities, what has not yet
-happened is **real-world live fire against a third-party cloud account**. That step waits
-on the customer supplying their own read-only cloud credentials. The detection logic, the
-evidence handling, the certificates and the safety gates are all built and proven; only
-the act of pointing them at a live third-party account is pending, by design. The capture
-modules say so in their own written notes, in almost these words.
+**Exposed-secret validity: proven against a real third-party provider — for one kind of
+credential, and not the other.** This is the sharpest honesty point in the chapter and it
+must not be smoothed over, in either direction.
+
+The confirmation covers two kinds of credential: a GitHub personal access token, and an
+Amazon Web Services access key. **The GitHub one has been fired at the real, public
+`api.github.com`.** The harness described in section 3.11 drives the real capture machinery
+over the real network connection, using the operator's own credential against the operator's
+own identity, and the result is confirmed with a certificate that re-verifies offline. Three
+controls were measured in the same run against the same real provider: a bogus credential of
+the identical *shape*, sent live, was rejected by GitHub itself and correctly remained a
+lead — structure is not validity, and here that is measured rather than assumed; the same
+confirmed capture stopped being a fact the instant its confirming address was swapped for an
+attacker's host or a look-alike, with the machinery's own outbound-safety floor refusing to
+send the live credential there at all; and a capture whose credential and confirming call
+carried different fingerprints was likewise not confirmed. Both refusal gates were exercised
+on the same live path and stopped the run before any network call was made.
+
+**The Amazon row of the same capability has never touched real Amazon Web Services.** Its
+dispatch and its request-signing are built and proven — the signing implementation is checked
+against Amazon's own independently-written one — but it still needs a real, customer-supplied
+access key. **Nothing from the GitHub run transfers to it.** Anyone quoting this briefing
+should name the row rather than the capability.
+
+**Cloud: what is deferred, and why.** For the remaining cloud capabilities — metadata
+credential capture, Google service-account impersonation, identity privilege escalation, and
+the Amazon row just described — what has not yet happened is **real-world live fire against a
+third-party cloud account**. That step waits on the customer supplying their own read-only
+cloud credentials. The detection logic, the evidence handling, the certificates and the
+safety gates are all built and proven; only the act of pointing them at a live third-party
+account is pending, by design. The capture modules say so in their own written notes, in
+almost these words.
 
 One of the four — identity privilege escalation — is different in an instructive way, and
 the difference should not be glossed. It reasons over a *captured copy* of the permission
@@ -2988,19 +3985,27 @@ credentials. What it will never need is to actually take the privileged step.
 Two framings should both be avoided because each is wrong in a different direction.
 Saying the capabilities are unfinished understates the system: they are built, gated, and
 proven. Saying the cloud ones have been field-proven in customer clouds overstates it:
-they have not been pointed at one. The accurate statement, used throughout this briefing,
-is: **the two Kubernetes confirmations are proven against a real cluster the system
-stands up itself; the four cloud ones are built, gated, and proven offline, with live fire
-awaiting customer-supplied credentials, by design.**
+most have not been pointed at one. The accurate statement, used throughout this briefing,
+is: **the two Kubernetes confirmations are proven against a real cluster the system stands
+up itself; the GitHub row of exposed-secret validity is proven against the real, public
+GitHub service; and the remaining cloud work — metadata credential capture, Google
+service-account impersonation, identity privilege escalation, and the Amazon row of
+exposed-secret validity — is built, gated, and proven offline, with live fire awaiting
+customer-supplied credentials, by design.**
 
-There is a design point worth drawing out for a procurement reader, and the two halves
-illustrate it from opposite sides. For cloud, it would have been easy to demonstrate
-against an account of our own and call the matter field-proven; that was not done, because
-a demonstration on an account the customer cannot re-create is a claim, not
-evidence. For Kubernetes the same principle pointed the other way: a cluster *can* be
+There is a design point worth drawing out for a procurement reader, and the three parts
+illustrate it from different sides. For the remaining cloud capabilities it would have been
+easy to demonstrate against an account of our own and call the matter field-proven; that was
+not done, because a demonstration on an account the customer cannot re-create is a claim,
+not evidence. For Kubernetes the same principle pointed the other way: a cluster *can* be
 created from nothing in a few seconds on any machine, so the proof was built to create
 one — and the value of that proof is precisely that the customer, or an auditor, can run
-the identical script and watch the identical result, rather than take our word for it.
+the identical script and watch the identical result, rather than take our word for it. The
+GitHub proof is the same test applied to a service nobody can stand up themselves: it was
+built to use *the evaluator's own* account and the least-privileged call the service offers,
+so it too can be re-run by anyone, on their own credential, without borrowing ours. The
+common rule in all three is that a proof only counts if the person being asked to believe it
+can reproduce it.
 
 **Other things built, but deliberately not yet fired against live third-party systems:**
 
@@ -3091,7 +4096,8 @@ The technical words used in this chapter:
 | **m-of-n** | Several named key-holders, of whom a set number must agree. A vault needing two managers' keys at once. |
 | **Pull request** | The software industry's term for a proposed code change raised so a human can review it before it becomes part of the software. |
 | **Kubernetes** | The standard software for running large numbers of containers across many machines. |
-| **Live fire** | Running a capability against a real system rather than against a stand-in. The Kubernetes confirmations are proven this way against a real cluster the system creates itself; the cloud confirmations are complete and proven against stand-in data, and await live fire on the customer's own account by design. |
+| **Live fire** | Running a capability against a real system rather than against a stand-in. Three confirmations are proven this way today: both Kubernetes ones, against a real cluster the system creates and destroys itself, and the GitHub row of exposed-secret validity, against the real public GitHub service. The remaining cloud confirmations are complete and proven against stand-in data, and await live fire on the customer's own account by design. |
+| **Case file** | The pack of nine numbered plain-English documents generated into every dossier, written for the non-specialist who receives it: what was done, what was found, what was **not** examined, what to do, and how to check the result independently. |
 | **Recorded sample data** (the software calls it a *fixture*) | Saved, realistic data used in place of a live system, so a test proves the logic without touching anyone's account. Like testing a smoke alarm with a test button rather than a fire. |
 | **Fingerprint** (of a file, a message or an image) | A short value computed from the content, such that any change to the content changes the value. Used throughout to detect substitution. Sometimes called a hash or a digest. |
 | **Bill of materials** | A published list of everything inside a piece of software, item by item, with versions. The ingredients list on the packet. |
@@ -3443,6 +4449,52 @@ A note to avoid confusion: the word "session" is also used inside the project fo
 something unrelated — redacted transcripts of the engineering sessions that built the
 software, kept under a separate `knowledge/sessions` folder. Those are development
 history, not assessments.
+
+#### Run, session, engagement — three words that are not synonyms
+
+Three words in this chapter sound interchangeable and are not, and the interface now groups
+work by all three. A reader who runs them together will misread both the screens and the
+report, so they are separated here once.
+
+| Word | What it is | How it is named | Can it change a finding or open a gate? |
+|---|---|---|---|
+| **Run** | One execution of the engine against one subject: a start, a finish, a status, its own findings and its own evidence. It is the only one of the three that sends any traffic anywhere. | A machine identity stamped with the date, the time and a sequence number | It is where findings are *made*. Everything the system proves, it proves inside a run |
+| **Session** | The thread of work that links runs together, with the conversation and the rebuilt picture — the subject of this section. | A short name the operator chooses | **No.** Creating, renaming, connecting or deleting one changes nothing |
+| **Engagement** | The named piece of client work: one authorisation over one subject, which may hold many sessions and many runs across months. It is what a charter authorises and what the final report is about. | A short machine-safe name shared by the charter, the working folder and the permanent record | **No.** The charter beneath it authorises; the name itself decides nothing |
+
+**The engagement is the one an operator comes back to months later**, and it now has a
+screen of its own — an Engagement Library listing every past job, most recently worked
+first, with real dates and times, what kind of operation each was, what subject it was
+pointed at, and how many runs and findings it holds, with the proven count shown separately.
+Three properties of that screen matter, because each one is a restraint:
+
+- **Nothing on it is invented.** The list is the union of two real sources: the permanent
+  signed record's own roster of jobs, and the folder of charters and working material on
+  disk. Every date shown is derived from something actually on disk. A job with no activity
+  at all is shown honestly as having none, and is never back-dated to look recent.
+- **Renaming cannot invalidate a proof.** A human name — "Acme, Q3 external review" — is
+  stored in one small file beside the machine identity, and nothing on that path writes into
+  a run's folder, an evidence certificate, the sealed proof bundle or the signed record. It
+  rewrites nothing that already exists, so a package already delivered still verifies exactly
+  as it did. One effect is deliberate: a case file downloaded *after* a run is renamed is
+  titled by the human name, so the person opening it months later recognises the job. The
+  proof inside is identical either way. The screen states the property on the page: renaming
+  "touches no signed byte, so every certificate still verifies".
+- **Membership cannot be asserted.** Which runs belong to which job is decided by what each
+  run recorded about itself at the time it ran, not by anything the person browsing can
+  claim. Nobody can move a run into a job it does not belong to from the screen.
+
+From a job the operator clicks through to its runs, and from a run to its findings, its
+evidence and its dossier. What the library adds is **navigation, not authority** — the same
+property the session has, for the same reason.
+
+**A fourth meaning, on the other side of the wall.** The owner's personal side uses the word
+"session" for something different again: one ingested conversation with an AI assistant. The
+owner's own working history is read into their permanent personal record — each conversation,
+and each delegated helper's transcript as a titled session of its own — and mirrored as a
+node in the owner's personal memory. Those are a record of the owner's past work, not of an
+assessment. They hold no findings and touch no target, and they are different again from the
+folder of development transcripts mentioned just above.
 
 ---
 
@@ -3946,6 +4998,118 @@ in the default engage/scan flow — it is an opt-in operator/engine capability".
 screen of its own or a command of its own. They are built, tested, and gated by construction;
 they are not yet a button an operator presses.
 
+#### The outside agent, and where it fits in a job
+
+Everything in this stage so far is the engine's own machinery: fixed tests, fired by fixed
+code, into positions the mapping stage found. One of the four named parts of the system is
+not like that at all. It is a complete third-party penetration-testing agent — somebody
+else's product, kept as a copy inside this one — that works the way a human tester works:
+think, choose a tool, run it, read what came back, go round again. Chapter 2 describes what
+it is, what is in its toolbox and where it runs. This section places it in the job: when an
+operator reaches for it, what a run using it looks like, and what its output is worth.
+
+**When an operator reaches for it.** There are two routes to it, and they are not the same.
+
+| Route | What it starts | What it is for |
+|---|---|---|
+| The **"scan a codebase"** choice in the assessment wizard | The agent, running without a terminal display, pointed at a folder of source code on the operator's machine or at a repository address, with the operator's written objective handed to it as its instruction | A body of source code. The engine's own tests need something that answers on the network — an address to walk, forms to fill, parameters to nudge. Source code answers nothing, so the fixed tests have nothing to fire at |
+| The **passthrough command** | The vendored tool directly, in the offensive environment, with the operator's own arguments passed through untouched | Anything the operator wants to point it at. The tool itself accepts a web address, a domain name, a numeric network address, a repository or a local folder. The wizard offers only the source-code case; the command line offers the rest |
+
+Its planning is genuinely its own. It decides which classes of weakness to hunt, and it
+spawns its own helper agents to hunt them in parallel. The system does not constrain that
+choice at all. What the system constrains is the moment anything is **executed** — which is
+the subject of the gate described two paragraphs below.
+
+**What a run with it looks like.** Not like an engine run. Four differences meet the
+operator immediately:
+
+- **It needs a container.** The agent will not run without one, and the console checks for
+  the container system before starting rather than hanging: if it is not running, the run is
+  refused with a message saying so. The container is built from a Kali Linux base pinned to
+  an exact content fingerprint rather than a moving label, so two builds a week apart cannot
+  quietly ship different tools into the box that executes offensive actions.
+- **It costs model time.** The agent is driven step by step by a large language model, and
+  every step of the loop is a call to it. The models it names as recommended are all
+  commercial hosted ones, so in the default configuration every step costs money; the
+  settings screen can route it to a different provider. The engine's own measured
+  11-second benchmark run, quoted below, used no artificial intelligence at all. These are
+  different cost shapes and an agency budgeting for both should not average them.
+- **There is no live picture.** An engine run streams every action onto the Live screen as
+  it happens. This one reports inside its own sandbox, and the run is recorded as having no
+  stream at all. Rather than show an empty timeline, the interface says so: *"a codebase run
+  reports inside its sandbox — no re-checkable web report is captured here."*
+- **Its findings do not land on the permanent signed record.** That has a visible downstream
+  consequence, and the system does not paper over it: the automated repair ladder in stage 10
+  **refuses** to act on such a run, and its refusal names exactly what is missing and what
+  would produce it — the same job run through the engine's own governed path, which does
+  write the signed record.
+
+**What it produces are leads, not facts.** This is the single most important sentence about
+it, and chapter 2 explains the mechanism. The operational consequence is what matters here: a
+person reading the agent's own report is reading **suspicion**, and the number of things it
+reports is not the number of things proved. Nothing it writes is carried into the assessment
+report as a finding on its own word. The system's own deployment guidance instructs the
+operator to treat its results as investigative leads to confirm.
+
+**One thing it does can cross into proof, and it is not anything it says.** The distinction
+is between the agent's narrative — its account of what it did and what it concluded, which
+nothing can re-check — and a *demonstration*, meaning something that actually performs the
+attack against the target. When a demonstration runs, the capture machinery records what the
+target itself sent back: real response bytes, attached by the capture path and never by the
+model. Those bytes are screened for dangerous content first, and then handed to a checker
+exactly as any other evidence would be. If the checker fires, the result is a fact and
+crosses into the signed record; if it does not, the honest answer is recorded — not
+reproduced — and it stays a lead. The operator sees the three outcomes counted on the Proof
+Studio screen, one card per attempt, and the offline-verifiable bundle can only be exported
+when at least one fact exists. Two limits belong with that: the automatic capture works by
+correlating the exchange out of the intercepting proxy's own records, so the proxy has to be
+in the loop for it to happen, and **no run of this agent has been performed on the machine
+this briefing was written on** — no run of that kind appears in the console's stored history.
+One obstacle that used to stand in the way is gone: the sealed working environment such a run
+requires had never been built anywhere, and could not have been built from the instruction the
+project published, and it has since been built here for the first time. So what is missing now
+is the run, not the means to start one. The route is built and tested. It has not been
+exercised here.
+
+**Its shell is the most dangerous surface in the system, and the gate in front of it fails
+closed.** Everything the agent does that runs a program — every command-line tool it invokes,
+the browser it drives — passes through one thing: a shell that can run any command at all.
+The project treats that as the most dangerous surface anywhere in the system, and gates
+exactly it. Every call to that shell is classified at the top danger level, which means it
+never runs automatically: the exact command is published as a pending request, and it runs
+only if the owner signs a single-use approval bound to that exact command. The agent's
+other built-in tools — its notes, its to-do list, its report writer and its skill loader
+among them — are left to run freely, so the agent stays useful rather than frozen. If no
+approval authority has been set up, the shell call is refused. And the waiting window is zero
+by default, which has a blunt practical meaning worth stating: **an unattended run of this
+agent gets nothing past the shell gate.** The operator either watches it and signs, or sets a
+waiting window deliberately.
+
+Stated precisely, that gate covers **arbitrary command execution**, which is not the same as
+covering everything. Chapter 8, section 4.5 names every tool it leaves running automatically;
+most of them are inert — private reasoning, notes, a to-do list, a report writer. Three are
+not inert: they act outside the agent's own head without an owner's signature, and an agency
+assessing this system is entitled to know what bounds each one instead.
+
+| The tool that bypasses the shell gate | What bounds it instead |
+|---|---|
+| A web search | The container's network arrangement described in chapter 2 |
+| A replay of an already-captured request back at the target, through the intercepting proxy | The same network arrangement, and the fact that the request was already captured |
+| A patch tool that edits files directly | The container: the agent is given this file-editing capability unconditionally and it is classified as safe to run automatically, so it writes without an owner's signature — but it writes inside the agent's own container, not on the operator's machine |
+
+The shell gate is a gate on running programs, not a gate on everything the agent can do.
+
+The fail-closed part is the one to hold on to. If the gate cannot be attached at all — a
+wiring fault, a broken installation, anything — the run **stops**. It does not carry on
+ungated. The code gives the reason in one line:
+
+> A broken gate is not an opt-out; the run stops instead.
+
+There are exactly two ways a run proceeds without the gate, and both are deliberate: an
+explicit setting that switches it off, and running the outside tool entirely on its own,
+outside this system, where there is no governed run to protect. Chapter 8, section 4.5 sets
+the mechanism out in full.
+
 #### How the system decides what to try first
 
 There is a learning component that ranks which test is most likely to land on a target that
@@ -4380,6 +5544,16 @@ The **dossier** is one step further: a single self-contained archive holding the
 reports, the machine-readable exports, the offline-verifiable proof bundle, the scrubbed
 engagement log, the signed record chain, any drift record, and a readable index page.
 
+It also carries the **case file**: nine numbered plain-language documents written for the
+non-specialist who receives the archive — a start-here page, an executive summary, the
+approach and scope (including what was *not* examined), the proven findings, the unproven
+leads, the catalogue of what the engine can confirm with this run's position against each,
+what to do about the findings, how to verify the package yourself, and a glossary. They are
+built from the same graded findings as the three reports, so the two cannot disagree about
+what was proven, and where a value was not recorded they print "not recorded" rather than
+filling the gap. If that rendering fails for any reason, the archive still ships with its
+machine records and its proof intact and notes plainly that the case file is missing.
+
 Four properties, taken from the code's own description:
 
 - **Tamper-evident.** A manifest lists every entry with its hash; a multi-signature over
@@ -4649,12 +5823,22 @@ its own ledger of it. The relevant entries for the workflow described in this ch
   itself more power than it started with, and both tiers of container-platform access control
   (an anonymous caller bound to a dangerous role, and a dangerous permission or the default
   identity granted rights it should not have) — are written, reviewed, folded into the
-  released software and wired from end to end. The **two container-platform (Kubernetes)**
-  ones are proven against a real single-node cluster the system stands up, owns and destroys
-  itself: the dangerous binding is confirmed with a certificate that re-verifies offline, and
-  the benign arrangements in the same cluster are correctly left as leads. The **four cloud**
-  ones are proven offline against recorded sample data standing in for a live cloud account.
-  What has *not* happened for those four is the final step of pointing them at a live
+  released software and wired from end to end. **Three of the six have now been fired at
+  something real, and the three are not of equal weight.** The **two container-platform
+  (Kubernetes)** ones are proven against a real single-node cluster the system stands up, owns
+  and destroys itself — real infrastructure, but the project's own rather than a third party's:
+  the dangerous binding is confirmed with a certificate that re-verifies offline, and the benign
+  arrangements in the same cluster are correctly left as leads. The third, and the only one of
+  the six to have judged material from a real outside system, is **exposed-secret validity**,
+  which has been run against the real GitHub service using the operator's own credential
+  against GitHub's own least-privileged identity endpoint — confirmed, its certificate
+  re-verified offline, while a bogus credential of the same shape sent live to the same real
+  address was rejected by GitHub itself and correctly stayed a lead. **That one splits, and the
+  split must not be blurred:** only the GitHub half of that capability is proven live; its
+  Amazon Web Services half is built and unit-tested but has never touched real Amazon
+  infrastructure, and nothing from the GitHub run transfers to it. The remaining cloud
+  confirmations are proven offline against recorded sample data standing in for a live cloud
+  account. What has *not* happened for those is the final step of pointing them at a live
   third-party cloud account; that is the entry in the next list, and it waits on the
   customer's own credentials by design.
 - **The safeguards around how this software is built and shipped.** These protect the supply
@@ -4684,12 +5868,12 @@ the real thing — and live use awaits credentials the operator must supply, by 
 
 | Capability | What is blocking live use |
 |---|---|
-| **Live fire** for the **four cloud** exploitation confirmations. The software itself is complete, merged and proven offline — see the entry in the list above; what is outstanding is only the act of pointing it at a live third-party cloud account. (The **two Kubernetes** confirmations are no longer on this list: both are proven against a real single-node cluster the system stands up, owns and destroys itself, with the dangerous binding confirmed and re-verified offline and the benign ones correctly not confirmed. What that run does not cover is enumeration of bindings across a cluster, and a managed provider's control plane such as EKS, GKE or AKS.) | Waiting on the customer supplying their own cloud credentials for an authorised laboratory account. One of the four, the identity-privilege-escalation confirmation, is a different case worth stating precisely: it never performs the escalation, so there is nothing about it that awaits a live attack — but it still has to be given a real export of an account's permission rules, and obtaining that from a real account still needs the customer's read-only credentials |
+| **Live fire** against a real third-party cloud account, for the cloud exploitation confirmations that still await it: the metadata-credential capture, the Google service-account impersonation, the identity-privilege-escalation re-derivation, and the **Amazon Web Services half** of exposed-secret validity. The software itself is complete, merged and proven offline — see the entry in the list above; what is outstanding is only the act of pointing it at a live third-party cloud account. (Three confirmations are no longer on this list: the **two Kubernetes** ones, proven against a real single-node cluster the system stands up, owns and destroys itself, with the dangerous binding confirmed and re-verified offline and the benign ones correctly not confirmed; and the **GitHub half** of exposed-secret validity, proven against the real GitHub service. What the Kubernetes run does not cover is enumeration of bindings across a cluster, and a managed provider's control plane such as EKS, GKE or AKS.) | Waiting on the customer supplying their own cloud credentials for an authorised laboratory account. One of them, the identity-privilege-escalation confirmation, is a different case worth stating precisely: it never performs the escalation, so there is nothing about it that awaits a live attack — but it still has to be given a real export of an account's permission rules, and obtaining that from a real account still needs the customer's read-only credentials |
 | Cloud posture collectors for the three major providers and Kubernetes | Waiting on operator-supplied read-only credentials; all validated by live probes when present |
 | The destructive automated-fix leg that raises a proposed code change | Operator must provision the several signing keys and a platform access token |
 | Artificial-intelligence red-teaming tools as a source of facts | Those tools are absent from this environment. The routing that would govern them is built: a deterministic check can confirm; another AI acting as a judge is **always** recorded as a lead |
 | The live external graph database and telemetry service | The client software is built and the local fallback works; the external service is not deployed |
-| A live connection to an outside tool server | The description file and its validation are built; the connecting client is pending. (This uses the **Model Context Protocol**, an open convention for letting an AI system call tools that live outside it.) |
+| A live connection to an outside tool server | The description file and its validation are built; the connecting client is pending. (This uses the **Model Context Protocol**, an open convention for letting an AI system call tools that live outside it.) This is the *outbound* direction — VIGIL calling somebody else's tools. The opposite direction is a different thing and is not pending: the sovereign side's own memory server offers eight read-only tools to an assistant the owner already uses, and chapter 14 records it as live. |
 
 Two capabilities in this chapter belong in this category as well, and are described where
 they appear: the **fuzzing engine** and the **replay tool** (section 8) are built, tested and
@@ -5366,10 +6550,12 @@ labelled analyst commentary. The design principle is stated in the code: the
 operator loses framing, never information.
 
 **An honest note about how widely this layer is applied.** This component was
-originally written as a standalone building block, and a comment inside it still
-says it is only exercised by its own tests. **That comment is now out of date**,
-and this briefing states what is actually true in the code rather than what the
-comment says. The layer has real call sites today, including:
+originally written as a standalone building block, and a comment inside it used to
+say it was only exercised by its own tests. **That comment has been corrected**, and
+an automated test now fails the build in both directions — if the retired "no
+callers" phrasing comes back while the callers exist, and equally if a module that
+does call the layer is dropped from the list the comment keeps. The layer has real
+call sites today, including:
 
 - every confirmed finding during a live engagement run, checked against the
   system's accumulated picture of the target;
@@ -6088,8 +7274,8 @@ window by window alongside the named work that would change it.
 layer with real call sites — the engagement run, report generation, the defensive
 pipeline, the grounding critic, the refusal component and an agent tool — but it
 is not the single point through which every claim in the system passes. Section 4,
-stage 5 gives the detail, including the fact that the module's own internal
-comment understates its current use.
+stage 5 gives the detail, including the automated test that stops the module's own
+internal comment from ever again understating — or overstating — its current use.
 
 **Re-execution proves a binding, not the world — and there is in-house work aimed
 directly at that.** This limit needs stating carefully, because it is the one the
@@ -6145,10 +7331,12 @@ So the limit as stated stands today. But it is treated by the project as a targe
 to be closed, not as a permanent excuse, and a reader should ask about progress on
 it rather than assume it is unattended.
 
-**The four cloud exploitation capabilities are built and proven offline but have
-not yet been fired at a live third-party account. The two cluster ones have now
-been proven against a real cluster.** This is the most important honesty statement
-in the chapter, and it is stated the way the project's own records state it.
+**Three of the six cloud and cluster exploitation capabilities have now been fired
+at something real — one of them at a genuinely outside system, the other two at
+infrastructure the project stands up and destroys itself. The rest are built and
+proven offline but have not yet been fired at a live third-party account.** This is the most important honesty
+statement in the chapter, and it is stated the way the project's own records state
+it.
 
 Six confirmation capabilities cover this ground: capturing a cloud
 instance-metadata credential; confirming that an exposed secret is still valid;
@@ -6159,28 +7347,47 @@ are complete and wired end to end**: the component that performs the capture, th
 evidence route, the admission rules, the certificate minting, and the writing into
 the system's internal map.
 
-The four cloud ones are proven using recorded sample data standing in for a real
-cloud account, and their proofs re-verify offline like any other. The two cluster
-ones are proven against a **real Kubernetes cluster**: a repository script stands
-up a genuine single-node cluster the system creates, owns and destroys, plants
-known-dangerous *and* known-benign permission arrangements in it, captures what the
-real cluster interface returns, and adjudicates those bytes through the ordinary
-production path — the anonymous privileged attachment confirmed with a certificate
-that re-verifies offline, and the benign arrangements in the same cluster correctly
-left as leads. What that run does not cover is a scope-gated capability that
-*enumerates* permission arrangements across a whole cluster, and a managed
-provider's control plane such as Amazon EKS, Google GKE or Azure AKS.
+The two cluster ones are proven against a **real Kubernetes cluster**: a repository
+script stands up a genuine single-node cluster the system creates, owns and
+destroys, plants known-dangerous *and* known-benign permission arrangements in it,
+captures what the real cluster interface returns, and adjudicates those bytes
+through the ordinary production path — the anonymous privileged attachment confirmed
+with a certificate that re-verifies offline, and the benign arrangements in the same
+cluster correctly left as leads. What that run does not cover is a scope-gated
+capability that *enumerates* permission arrangements across a whole cluster, and a
+managed provider's control plane such as Amazon EKS, Google GKE or Azure AKS.
 
-What remains deferred for three of them is the act of **pointing them at a live
-third-party cloud account**. That waits on the customer supplying their own
-credentials — a laboratory cloud credential. The detection logic, the evidence
-handling, the certificates and the safety gates are all built and proven; only the
-live firing is pending, by design. The project's own note is unambiguous, and this
-chapter repeats rather than softens it: there is no live fact yet for those
-capabilities. Under the project's own enforcement rule — that any gap between
-current and intended capability must name the engineering work that closes it, or a
-test fails — none of these six carries any named engineering gap. The remaining
-deferral is operational, not technical.
+The third capability proven against something real is **confirming that an exposed
+secret is still valid**, and it splits inside itself in a way that must not be
+blurred. Its **GitHub half is proven against the real GitHub service**: a second
+repository script drives the real, permission-gated component over a real network
+connection, using the operator's own credential against GitHub's own
+least-privileged identity endpoint, and the certificate re-verifies offline. Three
+controls in the same run correctly do *not* confirm — a bogus credential of the
+same shape, sent live to the same real address and rejected by GitHub itself; the
+same capture with its confirming address swapped for an attacker-controlled host
+and for a look-alike; and a capture whose credential and confirming call carry
+different fingerprints. Its **Amazon Web Services half is not proven at all**: it is
+built and unit-tested, its request-signing checked against Amazon's own independent
+implementation, but it has never been exercised against real Amazon infrastructure,
+it still needs an access key only the account owner can issue, and nothing from the
+GitHub run transfers to it.
+
+The remaining cloud confirmations — the metadata-credential capture, the Google
+service-account impersonation, the Amazon half just described, and the
+permission-escalation re-derivation — are proven using recorded sample data standing
+in for a real cloud account, and their proofs re-verify offline like any other.
+
+What remains deferred for them is the act of **pointing them at a live third-party
+cloud account**. That waits on the customer supplying their own credentials — a
+laboratory cloud credential. The detection logic, the evidence handling, the
+certificates and the safety gates are all built and proven; only the live firing is
+pending, by design. The project's own note is unambiguous, and this chapter repeats
+rather than softens it: there is no live fact yet for those capabilities. Under the
+project's own enforcement rule — that any gap between current and intended capability
+must name the engineering work that closes it, or a test fails — none of these six
+carries any named engineering gap. The remaining deferral is operational, not
+technical.
 
 The permission-escalation capability must be described differently and is not
 "awaiting live fire". It is a deliberate offline re-derivation over the customer's
@@ -6257,13 +7464,18 @@ scope.
     does not prove that the evidence reflects the live target. The countermeasure
     for that is built as a working mechanism, but its independent witness is the
     system's own software today, not an outside party.
-  - The four cloud exploitation capabilities are complete, wired end to end and
-    proven offline against recorded sample data, but have not yet been fired at a
-    live third-party account. That waits on a customer supplying their own cloud
-    credentials. The two cluster ones are no longer in that position: they are
-    proven against a real Kubernetes cluster the system stands up, owns and
-    destroys itself. None of the six carries any outstanding engineering work; the
-    remaining deferral is operational, not technical.
+  - Three of the six cloud and cluster exploitation capabilities have been fired at
+    something real, and the three are not of equal weight: the two cluster ones
+    against a real Kubernetes cluster the system stands up, owns and destroys
+    itself, which is real infrastructure but the project's own; and the **GitHub
+    half** of the exposed-secret check against the real GitHub service, the only one
+    of the six to have judged material from a real outside system. The rest — including the
+    **Amazon half** of that same check, to which nothing from the GitHub run
+    transfers — are complete, wired end to end and proven offline against recorded
+    sample data, but have not yet been fired at a live third-party account. That
+    waits on a customer supplying their own cloud credentials. None of the six
+    carries any outstanding engineering work; the remaining deferral is
+    operational, not technical.
   - The demotion-only firewall is a working layer with real call sites rather than
     a single universal gateway.
 
@@ -6312,7 +7524,10 @@ written, because that work reached the released version on 12 August 2026.
 *Version reference for a technical reviewer: the main body was read at revision
 `1487e03a` of the source code; section 9.2 was re-checked at revision `dc2994d6`,
 the point at which the build-and-release safeguards became part of the released
-software.*
+software. Section 10 was revised again on 13 August 2026 at revision `05b81e9f`,
+which is the version in which the exposed-secret check's GitHub half became proven
+against a real outside provider, and in which the claim-checking layer's own
+internal comment was corrected and pinned by an automated test.*
 
 ---
 
@@ -6349,6 +7564,15 @@ different lists exist. The 85 names are the master list used by the main testing
 customer's own artificial-intelligence feature is done by a separate component that uses the security
 industry's own published list of AI weaknesses, which has 14 categories. Those 14 are *not* part of
 the 85, and the chapter says so again where they appear.
+
+A ninth number does not fit in that table, because it is a breakdown rather than a count, and it is
+probably the most useful thing in this chapter for anyone deciding how much weight to place on a
+particular capability. Of the 38 decision procedures, **3** have been exercised against a real
+third-party system on the public internet, **2** against real infrastructure the system builds and
+destroys for the purpose, **13** against a real program running over a real network connection on the
+testing machine itself, and **20** only against evidence a person wrote by hand. Part 2 sets that out
+procedure by procedure, with the software's own internal name for each one beside it so an auditor can
+reconcile this chapter against the source code line by line.
 
 ---
 
@@ -6815,8 +8039,12 @@ controls how services inside such a platform talk to each other.
 
 **Honest limits.** These are important and specific.
 
-- All four judge a **captured export**, not a live cluster. An export is a partial, point-in-time
-  snapshot of what was handed to the system.
+- All four judge a **capture**, never the live cluster itself. The tests make no call of their own;
+  they read what was handed to them, which is a partial, point-in-time snapshot. That is a statement
+  about the *test*, not about where the snapshot came from: for the two container-platform access
+  tests, the snapshot has been taken from a genuine running cluster and the resulting verdicts were
+  measured against configurations planted in it (Part 2 sets out that run). What no single capture can
+  do is speak for parts of the cluster it did not include.
 - The benchmark test ignores advisory "warn" results — those become LEADs for human review — and
   refuses to fire when a failure carries no captured value or where the captured value actually shows
   the *secure* setting.
@@ -6836,7 +8064,11 @@ controls how services inside such a platform talk to each other.
   "near-zero-false-positive fix". That is the engineers' stated design intention, and this briefing
   repeats it as an intention. It is **not** a measured false-alarm rate: no such measurement exists in
   the project, and none is claimed here. What can be checked is the mechanism — the gate above, written
-  out in full, and the list of cases the test refuses to fire on.
+  out in full, and the list of cases the test refuses to fire on. What has since been *demonstrated*,
+  which is a different and weaker thing than a rate, is that on a real cluster the gate held: the
+  namespace default identity bound to the built-in `admin` role, whose real rules genuinely do grant
+  the reading of secrets, was correctly not reported, alongside two other harmless configurations. Four
+  named cases on one cluster is evidence that the mechanism works as described. It is not a statistic.
 - The mesh test proves what the configuration **declares**, not the effective runtime behaviour.
   Policy precedence, namespace and workload selectors, and more specific overriding policies are not
   evaluated. Where a setting is absent and would be inherited from a parent, the system does not
@@ -7093,6 +8325,25 @@ of these 38. It is supplied to that component from outside rather than being par
 is why Family 15 says a result becomes a proven finding only when *that* component returns a signed
 reference to the evidence. The 38 below are the procedures the main testing engine uses.
 
+The 38 are set out in six groups, and the groups are the same divisions the source code itself uses.
+The counts add up exactly, and are stated here so the sections that follow can be checked against them:
+
+| Group | Count | Where it appears below |
+|---|---:|---|
+| The core, general-purpose set | 15 | immediately below |
+| Defensive tests for AI features and automated abuse | 4 | after the two statistical tests |
+| Request-only parse-proofs | 3 | after those |
+| Posture tests — offline re-derivation over a retained document | 8 | after those |
+| Structural-forgery tests — offline, over one captured artefact | 2 | after those |
+| Live-capture tests — the exploitation-confirmation tier | 6 | last |
+| **Total** | **38** | |
+
+Two further structural facts, both re-derived from the registry for this chapter rather than taken
+from a document. Every one of the 38 is reachable by at least one of the 85 weakness types — there are
+no orphaned procedures sitting unused in the code. And the mapping is far from one-to-one: the
+achieved-state test alone is the confirming procedure for **28** of the 85 types, which is why so many
+entries in Part 1 name it.
+
 #### The core 15 — the general-purpose set
 
 | Test | What it establishes | What it deliberately does not establish |
@@ -7165,7 +8416,7 @@ is exactly the thing that fools a simpler comparison.
 | Command break-out | A submitted value contains an unambiguous command-execution construct. | Exploitation. |
 | NoSQL operator break-out | A known database query operator was injected as a *key* where a plain value was expected. | Exploitation. The list of recognised operators is curated to exclude legitimate document keys and dual-purpose ones. |
 
-#### The ten posture tests — offline re-derivation over a retained document
+#### The eight posture tests — offline re-derivation over a retained document
 
 Each of these reads a document the operator supplied or the system captured earlier, and re-derives a
 conclusion from it. **None of them makes any live call.**
@@ -7173,15 +8424,25 @@ conclusion from it. **None of them makes any live call.**
 | Test | What it establishes | Bounded to |
 |---|---|---|
 | Platform benchmark (Kubernetes) | A control-plane benchmark check hard-failed with a concrete dangerous flag in the captured value. | The parsed export, never the live cluster. Advisory "warn" results become LEADs. |
-| Anonymous role binding (Kubernetes) | An anonymous identity is bound to a dangerous built-in administrative role. | The bindings present in the supplied export. |
-| Permission-rule grant (Kubernetes) | The role's actual rules grant a dangerous capability to an attacker-occupiable identity, with the role-reference link independently re-checked rather than trusted. | Rules that are authoritative — either fetched live from the platform, or a static file with no rule-aggregation directive. Aggregated static rules stay LEADs. |
+| Anonymous role binding (Kubernetes) | An anonymous identity is bound to a dangerous built-in administrative role. | The bindings present in the supplied export or capture. This is the one posture test whose evidence has come from a real cluster: see the live-fire record later in this part. |
 | Cloud achieved state | One cloud control is in an explicitly unsafe state, evaluated in a fixed rule order. | The represented state. An ambiguous attribute is recorded as unknown, never guessed as unsafe. |
 | Service mesh configuration | The mesh configuration declares a permissive state. | What is *declared*, not the effective runtime behaviour. |
 | Pipeline configuration | The automated build instructions contain one of three dangerous constructs: a third-party build step referred to by a movable label rather than a fixed version, so the supplier can silently change what runs; a step that fetches and runs code from an outside contribution while holding secrets that can write to the customer's systems; or a step that pastes text from an outside contribution straight into a command the machine will execute. | The one build-instruction file examined. |
 | Mobile artefact | The application embeds a private key that genuinely loads and is unencrypted. | This single rule. Every other mobile signal remains a LEAD by design. |
 | Email policy | The published domain policy permits spoofing. | Published policy only, never message-level verification. |
 | Identity record | A privileged identity with multi-factor authentication provably absent, or a stale or never-rotated credential. | Strictly typed literal fields in the export. An absent field causes refusal. |
-| Structural token forgery / structural assertion forgery | A captured sign-on token or assertion is forgeable from the artefact alone. | Coarse structural checks only. Checking the signature mathematics itself — which first requires reproducing the document-tidying step described in Family 6 — is out of scope unless the operator opts in by supplying trusted certificates and installing the required library. |
+
+#### The two structural-forgery tests — offline, over one captured artefact
+
+These are separated from the posture tests above because they judge a *single captured artefact* — one
+sign-on token, one login assertion — rather than a configuration document, and because the software
+holds them as two distinct procedures with two distinct version numbers, so a result minted by one can
+never be re-checked by the other.
+
+| Test | What it establishes | Bounded to |
+|---|---|---|
+| Structural token forgery | A captured access token is forgeable by anyone holding it: it declares "no signature", its signature is exactly recomputable from a weak or supplied secret, or a signature meant to be checked with a public key verifies when that public key is used as the secret instead. | The token alone, offline, with no traffic sent. A normal token whose key is unknown does not fire. Login assertions in the older enterprise format are deliberately not attempted by this test. |
+| Structural assertion forgery | A captured login assertion is unsigned, or every signature reference in it points at something other than the identity actually being consumed, or it carries the known document-shuffling shape. | Coarse structural checks only. Checking the signature mathematics itself — which first requires reproducing the document-tidying step described in Family 6 — is out of scope unless the operator opts in by supplying trusted certificates and installing the required library. |
 
 #### The six live-capture tests — the exploitation-confirmation tier
 
@@ -7196,7 +8457,198 @@ evidence with a name no scan produces.
 | Secret validity | An exposed secret authenticated as a real identity, fingerprint-bound to the confirming call, over a verified connection with no proxy and no redirect, at an endpoint on a fixed approved list. | Claims validity, not where the secret came from. Never inspects or stores the secret's contents. |
 | Service-identity impersonation | A short-lived credential was minted **as** a named target identity, and a confirming call at an approved introspection endpoint echoed **that same** identity, fingerprint-bound to the minting. | An echo of a *different* identity does not confirm. A minted-but-unconfirmed credential stays a LEAD. |
 | Escalation primitive | The retained configuration unconditionally permits a named escalation manoeuvre that strictly increases reach, shown by an explicit before-and-after comparison. | Does not establish that anyone executed it. Fails closed on every ambiguity. |
-| Permission-rule verb grant | See the Kubernetes family above. | Whether it will confirm at all depends on *who* holds the dangerous power (Family 10 sets out the gate). Everything outside that narrow gate stays a LEAD. |
+| Permission-rule verb grant | A role binding **and, separately, the role the binding names**, prove a dangerous permission is granted to an identity an attacker could realistically occupy. The link between the two — a binding only names a role; the actual rules live in a different object — is re-checked rather than trusted, exactly and with no tolerance for an empty field. | Rules that are authoritative: fetched live from the platform, or a static file with no rule-aggregation directive (aggregated static rules stay LEADs). Whether it will confirm at all then depends on *who* holds the dangerous power — Family 10 sets out that gate in full, and everything outside it stays a LEAD. |
+
+#### The six cloud and container exploitation confirmations
+
+**A word on the arithmetic first, because two groups of six now sit next to each other and they are not
+the same six.** The group immediately above is a grouping of the *software's decision procedures*: the
+six that judge a live capture. The group below is a grouping of *capabilities*: the six cloud and
+container exploitation confirmations, delivered as one body of work. Five of the six appear in the
+table above. The sixth — the name-matching tier of the container-platform access check — is filed with
+the posture tests, because it re-derives its verdict offline from a retained record exactly as they do.
+Conversely, the anonymous-fetch test appears in the table above but is not part of this body of work.
+Both groupings are faithful to the code; they simply cut it along different lines.
+
+What these six have in common is the strength of the claim. They do not ask whether a configuration
+*looks* dangerous. They confirm that a dangerous effect was actually achieved: a credential was taken
+and used, a leaked key still works, one identity acted as another, a permission set really does permit
+an account to give itself more power, an unauthenticated stranger really is bound to administrative
+rights.
+
+Because the claim is so much stronger, each one carries an **anti-laundering gate**: a specific,
+named condition whose whole purpose is to stop a false confirmation being manufactured by pointing the
+system at a server the attacker controls, or by pairing two pieces of evidence that do not belong
+together. The gate is the part a technical evaluator should look at, so it is given its own column.
+
+The container platform accounts for two of the six, because it is checked at two strengths: a
+name-matching tier, which recognises a dangerous built-in role by its name, and a rule-parsing tier,
+which reads what the role actually permits. Family 10 lists both.
+
+| Confirmation | What it establishes | The gate that stops a false confirmation | Fired against something real? |
+|---|---|---|---|
+| **Metadata credential capture** | Cloud machine credentials were retrieved from the internal metadata service *and* proven usable by a successful identity call. | The credential's recorded source address is parsed with a real address parser, and its **host** must be the metadata endpoint. Never a text match — so a look-alike hostname, an address hidden in a query parameter, or a credentials file on disk is not a metadata reach. | **No.** Built, wired end to end and proven against hand-written evidence. There is no live proven fact, and none is claimed. |
+| **Exposed-secret validity** | An exposed secret is still valid, because a confirming call authenticated with it as a real identity. | The confirming call must land on an endpoint on a fixed, per-secret-type approved list, and a fingerprint binds that call to the captured secret. Where the secret came from is deliberately *not* a firing condition: the claim is validity, not provenance. | **Yes — for one of its two secret types only.** See the split immediately below this table. |
+| **Service-identity impersonation** | One account minted a short-lived credential *as* a different named service identity, and an independent check confirmed the new credential really carries that identity. | Entirely on the confirming side: an approved provider introspection endpoint, over a verified encrypted connection with no proxy and no redirect, and the identity echoed back must **equal** the named target. An echo of a *different* identity does not confirm. | **No.** Built and proven against hand-written evidence; live use deferred pending operator-provisioned cloud credentials. |
+| **Escalation primitive** | The retained permission configuration unconditionally permits a specific, named escalation manoeuvre that **strictly increases** what an account can reach. | An explicit before-and-after comparison of two reachability calculations: the target must be reachable after the manoeuvre and provably *not* reachable before it. A condition, an exclusion, an explicit denial, a restricting boundary and a wildcard that does not cover the target each contribute nothing at all. | **Not applicable, permanently and by design.** Performing the escalation is deliberately not part of this capability — a defensive verification test never executes the escalation it describes. This row is not waiting on anything. |
+| **Anonymous privileged binding** (container platform, name-matching tier) | An unauthenticated identity is bound to a dangerous built-in administrative role. | Typed matching on both halves. Something merely *named* like an anonymous account, an anonymous binding to a harmless or custom role, and a locally scoped role that merely happens to be *called* "admin" all fail to fire. | **Yes.** Against a real cluster the system creates and owns — see below. |
+| **Dangerous permission grant** (container platform, rule-parsing tier) | The role's *actual* permission rules grant a dangerous capability to an identity an attacker could occupy. | The subject gate set out in Family 10, plus an exact re-check of the link from the binding to the role object. | **Yes.** Same run. |
+
+**The one split that must not be blurred.** Exposed-secret validity recognises two kinds of secret. The
+**code-hosting access token** kind has been proven against the real provider. The **cloud access key**
+kind has **not**: its collection path and its cryptographically signed confirming call are built and
+proven by their own tests — the request-signing implementation checked against an independent one — but
+have **never** been exercised against a real cloud account. That row still requires a real,
+operator-provisioned key, and **nothing about the proven run transfers to it.**
+
+##### What the two live-fire runs actually did
+
+**The container platform.** A script in the repository pulls a real Kubernetes distribution (k3s
+1.31.5), starts a genuine single-node cluster bound to the testing machine's own internal address,
+plants four access configurations in it — some dangerous, some deliberately harmless — captures what
+the real platform interface returns, adjudicates those real bytes through the production path, and
+destroys the cluster. Five judgements are made over those bytes. The two genuinely dangerous ones are
+confirmed and their certificates re-verify offline; the three harmless ones correctly do not confirm.
+The decisive case is the last of the three: the platform's default identity
+for a namespace, bound to the standard built-in `admin` role — the single most common legitimate
+delegation in Kubernetes, and one whose *real* rules genuinely do grant the reading of secrets. The
+script prints the rules it actually read and requires that case to stay a lead. A naive detector would
+report it as critical on a completely ordinary cluster. Two details show this is a proof rather than a
+demonstration: every expectation is asserted and the script exits with an error on any deviation, and
+it refuses to draw any conclusion at all if the cluster has not finished assembling its built-in roles,
+because an empty role would let the important control pass for the wrong reason — nothing read, rather
+than the gate holding.
+
+**The code-hosting provider.** A second script takes the operator's own credential from their already
+authenticated command-line tool, passes it in through the program's input rather than writing it to
+disk, to a command line or to the environment, and drives the real collection step over the real
+network against the provider's own least-privileged identity endpoint. Four things happen in one run: a
+valid credential is confirmed and its certificate re-verifies offline; a bogus credential *of the same
+shape* is sent live to the same real endpoint and the provider itself answers "unauthorised", so it
+correctly stays a lead — structure is not validity, measured against the real provider rather than
+argued; the same confirmed capture with its confirming endpoint swapped to an attacker-controlled host,
+and again to a look-alike host, is not confirmed, which is the anti-laundering gate doing its work; and
+the same capture with mismatched fingerprints is not confirmed. Both scripts are reproducible by a
+third party on their own machine, which is what makes these claims re-checkable rather than merely
+reported.
+
+**What neither run covered, stated plainly.** The container-platform run captured through the
+platform's ordinary command-line client and fed those bytes to the adjudication step; it did not go
+through the system's own gated sensor for live clusters. That sensor exists and refuses unless the
+platform address it loaded is one the operator declared, but the software library it needs is not
+installed in the environment this briefing was written from. A capability that *discovers* access
+bindings across a whole cluster is not covered either — the script reads objects it planted, by name —
+and neither is a managed cloud provider's control plane. The code-hosting run did drive the real
+production collection step over the real network, which is the stronger of the two, but its permission
+gate and scope gate were stand-ins supplied by the test harness rather than a signed authorisation
+document. The *refusal* paths were genuinely exercised — a tripped emergency stop and a refusing gate
+each correctly produced nothing to adjudicate — so the gate is proven to bite; but no signed
+authorisation was loaded in that run.
+
+**The change that made any of this possible.** Until recently every one of these collection steps
+reached the network through a stand-in used only in testing, which is precisely why no cloud capability
+had ever fired against a real provider. The real network binding now exists, and its governing rule is
+that every fact about the connection is **derived from the connection, never asserted**: encryption
+counts as verified only when the request was encrypted, the connection really carries an encryption
+session, that session yields a certificate that was actually validated, and the checking was genuinely
+switched on; "no proxy was involved" is recorded only when the client can be affirmatively shown unable
+to interpose one; a redirect is *reported* rather than followed; the address of the machine that
+answered is read from the live connection rather than looked up again afterwards, because a second
+lookup can return a different address from the one the bytes came from; and an over-long response is
+recorded as cut short and never parsed, so a truncated identity answer can never reach a test. Every
+one of those fields fails to the value that makes the test **refuse**.
+
+#### Which of the 38 have been proved against something real
+
+This is the table to read before placing weight on any single capability. Each of the 38 procedures is
+listed once, with the software's own internal name beside it so the list can be reconciled against the
+source code, and with the **strongest evidence that has ever been put through it**. Four grades are
+used, in descending order of what they demonstrate:
+
+| Grade | Means |
+|---|---|
+| **Outside system** | The procedure has judged bytes produced by a real third-party system on the public internet. |
+| **Own infrastructure** | It has judged bytes produced by real infrastructure the system itself builds, uses and destroys. |
+| **Real local process** | It has judged bytes produced by a real program over a real network connection on the testing machine — a real browser, a real compiled binary, a real encrypted handshake, a real server. |
+| **Fixtures only** | It has only ever judged evidence a person wrote by hand. |
+
+A grade is a statement about *evidence*, not about quality. A fixture-only procedure is not
+unreviewed — every one is covered by tests, including tests of the cases it must refuse — but nothing
+outside this project has yet been put through it.
+
+How the grades below were established: each of the thirteen "real local process" grades was re-checked
+while this chapter was being written, by running the harness that earns it on this machine — the real
+browser, the real compiled crashing program, the real encrypted handshake, the real port-scanning tool,
+the real callback round trip, the real in-line gateway, the labelled application. The three
+outside-system and two own-infrastructure grades rest on recorded runs and on the scripts that produced
+them. Those scripts are in the repository and a reader can run them, given the prerequisites each one
+states: a container runtime for the cluster, and an authenticated account with the provider for the
+credential.
+
+| Test, as this chapter names it | The software's own name | Group | Strongest evidence to date |
+|---|---|---|---|
+| Response differencing | `differential_response` | core | **Outside system** — a public vendor-run test site on the internet |
+| Achieved state | `achieved_state` | core | **Outside system** — the same run |
+| Secret validity | `secret_credential_validity` | live capture | **Outside system** — the real code-hosting provider (one of its two secret types) |
+| Anonymous role binding | `k8s_workload_posture` | posture | **Own infrastructure** — a real Kubernetes cluster the system creates and destroys |
+| Permission-rule verb grant | `k8s_rbac_verb_grant` | live capture | **Own infrastructure** — the same cluster |
+| Marker reached a sink | `side_effect` | core | Real local process — the labelled test application over a real local connection |
+| Error signature | `error_signature` | core | Real local process — the same application |
+| Evaluation | `evaluation` | core | Real local process — the same application |
+| Executable-position reflection | `reflection_context` | core | Real local process — the same application |
+| Out-of-band callback | `oob_callback` | core | Real local process — a genuine callback round trip, which correctly does not fire against a wrong key or a fabricated contact |
+| Memory-safety crash marker | `sanitizer_signal` | core | Real local process — a C program the system compiles itself and runs on a crashing input |
+| Browser execution | `dom_execution` | core | Real local process — a real headless browser driven against a local page; the safely written twin produces nothing |
+| Connection handshake | `service_reachability` | core | Real local process — a real local listener, and the real system port-scanning tool run through the gated runner |
+| Encryption weakness | `tls_weakness` | core | Real local process — a real encrypted handshake |
+| Permission path | `policy_path` | core | Real local process — the real cloud programming library against an in-process simulator (see the caveat below) |
+| Cloud achieved state | `cloud_posture` | posture | Real local process — the same simulator (see the caveat below) |
+| Anonymous fetch | `active_exposure` | live capture | Real local process — a real local server and a genuine credential-free request |
+| SQL break-out | `sql_injection_breakout` | request-only | Real local process — the in-line protective gateway over real local connections |
+| Statistical timing test | `timing` | core | Fixtures only |
+| Statistical yes/no probing | `boolean_inference` | core | Fixtures only |
+| Version range membership | `version_range` | core | Fixtures only |
+| Prompt-injection differential | `prompt_injection` | defensive | Fixtures only |
+| Canary disclosure | `system_prompt_disclosure` | defensive | Fixtures only |
+| Honeypot fetch | `automated_access` | defensive | Fixtures only |
+| Credential stuffing | `credential_stuffing` | defensive | Fixtures only |
+| Command break-out | `command_injection_breakout` | request-only | Fixtures only |
+| NoSQL operator break-out | `nosql_injection_breakout` | request-only | Fixtures only |
+| Platform benchmark | `k8s_posture` | posture | Fixtures only |
+| Service mesh configuration | `mesh_posture` | posture | Fixtures only |
+| Pipeline configuration | `cicd_posture` | posture | Fixtures only |
+| Mobile artefact | `mobile_posture` | posture | Fixtures only |
+| Email policy | `email_auth_posture` | posture | Fixtures only |
+| Identity record | `identity_posture` | posture | Fixtures only |
+| Structural token forgery | `sso_assertion_forgery` | forgery | Fixtures only |
+| Structural assertion forgery | `saml_structural_forgery` | forgery | Fixtures only |
+| Metadata credential capture | `imds_credential_capture` | live capture | Fixtures only |
+| Service-identity impersonation | `gcp_sa_impersonation` | live capture | Fixtures only |
+| Escalation primitive | `iam_escalation_primitive` | live capture | Fixtures only — and permanently so by design, as explained above |
+
+**The totals: 3 outside systems, 2 own infrastructure, 13 real local processes, 20 fixtures only.**
+They sum to 38. If the question asked is instead "how many have ever judged bytes from a real network
+connection of any kind", the answer is 18 — the thirteen local ones, plus all five graded above them.
+Response differencing and achieved state were exercised locally as well as externally; exposed-secret
+validity ran over a real connection to the code-hosting provider; and the two Kubernetes ones read from
+a real cluster's own control interface over a real connection.
+
+**The caveat a sceptical evaluator will find, volunteered here.** Two of the thirteen — the cloud
+permission path and the cloud achieved state — earn that grade through an *in-process simulator* of a
+cloud provider. That is materially better than a hand-written file, because it drives the real cloud
+programming library along its real code path and returns real response shapes, including the
+deliberately adversarial cases the test seeds (an access-control setting that is overridden and so must
+*not* count, a permission narrowed by a condition and so must *not* count). It is also materially
+weaker than a real cloud account, because nothing leaves the machine. A reader who prefers not to
+credit an in-process simulator should move those two down, making the totals 3 / 2 / 11 / 22 and the
+figure in the paragraph above 16. Both conventions are honest; this chapter states which one it used.
+
+**And the one number behind the "real local process" grade for the web tests.** The labelled
+application referred to above plants eleven weaknesses of known kinds and ships five deliberately safe
+look-alikes that must never be reported. Re-run on the machine this chapter was written on, the system
+found all eleven, reported none of the five, and produced no other findings: eleven correct, none
+missed, no false alarms. That is a soundness result on one small corpus, not a claim about coverage of
+the world.
 
 ---
 
@@ -7388,9 +8840,12 @@ clean.
 
 #### The six windows whose negative is deliberately not targeted
 
-Six evidence windows (covering five capability areas — the container-platform permission area
-contributes two of the six) explicitly record that a proven negative is *not* their
-goal, with a written argument. The argument is the same in each case and is worth stating in plain
+Six evidence windows explicitly record that a proven negative is *not* their goal, with a written
+argument. They are exactly the six cloud and container exploitation confirmations set out at the end of
+Part 2 — windows 21 to 26 in the table above, though listed there in a different order. That is not a
+coincidence: the reason they cannot state a negative is the same reason they can state such a strong
+positive. The
+argument is the same in each case and is worth stating in plain
 terms: these are confirmations of an **achieved effect** over a single, scoped capture. Proving the
 *absence* of a capturable credential, a valid secret, an impersonation path, a dangerous binding, or
 an escalation path is a fundamentally different capability — it requires an enumeration of the whole
@@ -7478,21 +8933,25 @@ fails closed and is never certified as fixed.
 
 This section exists because of the project's own written rule: a capability may never be abandoned by
 quietly narrowing the claim, and equally, a claim may never run ahead of what has actually been done.
-An agency reading this should be able to tell the two apart at a glance.
+An agency reading this should be able to tell the two apart at a glance. The procedure-by-procedure
+version of the same question — which of the 38 decision procedures has ever judged evidence produced by
+a real system, and how real that system was — is the graded table at the end of Part 2.
 
 | Capability | Honest status |
 |---|---|
-| The core 15 tests against a live web target | **Fully working end to end.** The system stands up a real, deliberately vulnerable application on the local machine and confirms findings against it. Pointed at a safely written twin of the same application, it correctly returns nothing — a shipped negative control demonstrating the confirming authority does not simply rubber-stamp. |
-| Service reachability, encryption weakness, version-range membership and the web achieved-state windows | **Working against real captures**, and the first two are among the six windows that may also state a proven negative. |
+| The core 15 tests against a live web target | **Fully working end to end.** The system stands up a real, deliberately vulnerable application on the local machine and confirms findings against it. Pointed at a safely written twin of the same application, it correctly returns nothing — a shipped negative control demonstrating the confirming authority does not simply rubber-stamp. Precisely, twelve of the fifteen have judged material a real running system produced; the graded table at the end of Part 2 names the other three, and the row below covers one of them. |
+| Service reachability, encryption weakness and the web achieved-state windows | **Working against real captures**, and the first two are among the six windows that may also state a proven negative. |
+| Version-range membership | **Built, and able to state a proven finding** — but the material it judges is a list of installed components the operator supplies rather than something captured from a live target, and every run so far has judged a sample list. It is one of the three general-purpose windows that has never judged material a real running system produced. |
 | Cloud metadata credential capture | **Built and proven offline. Real-network live fire is deliberately deferred**, pending an operator-provisioned laboratory credential. The collection step, the evidence window, the verdict route, the certificate issuance and the world-model projection are all built and proven against fixtures. In the project's own words: *there is no live proven fact yet.* |
-| Exposed-secret validity | Same position: producer, verdict and certificate wiring **complete and proven offline**; live fire deferred pending an operator-provisioned credential. |
+| Exposed-secret validity | **Split, and the split matters.** For **code-hosting access tokens: proven against the real provider.** The real collection step ran over the real network against the provider's own identity endpoint; the valid credential was confirmed and its certificate re-verifies offline, while three controls in the same run correctly did not confirm — a bogus credential of the same shape, sent live to the same real endpoint and rejected by the provider itself; the same capture with its confirming endpoint pointed at an attacker-controlled host and at a look-alike host; and the same capture with mismatched fingerprints. For **cloud access keys: not proven.** That path and its cryptographically signed confirming call are built and proven by their own tests, but have never touched a real cloud account, and nothing from the proven run transfers to them. Two limits on the proven run: its permission and scope gates were harness-supplied stand-ins rather than a signed authorisation document (the *refusal* paths were genuinely exercised), and the capability validates a credential the operator supplies — it does not go looking for exposed secrets. |
 | Cloud service-identity impersonation | Same position: **offline-wired, live fire deferred** pending operator-provisioned cloud credentials. |
+| The real network binding underneath the cloud capabilities | **Newly built, and the reason the two proven runs above were possible at all.** Until it existed, every one of these collection steps reached the network through a stand-in used only in testing — which is exactly why no cloud capability had ever fired against a real provider. Its rule is that every property of the connection is derived from the connection rather than asserted, and every property fails to the value that makes the confirming test refuse. Set out in Part 2. |
 | Kubernetes permission tests (both tiers) | **No longer deferred: proven against a real Kubernetes cluster.** A repository script stands up a genuine single-node cluster (k3s 1.31.5, in a container on the machine's own internal address) that the system creates, owns and destroys; plants dangerous and benign access rules; captures what the real Kubernetes interface returns; and adjudicates those bytes through the production path. The anonymous-caller-bound-to-administrator case is confirmed and its certificate re-verifies offline; the benign cases — including the namespace default identity bound to the built-in `admin` role, whose real rules *do* grant secret reads — correctly stay leads. The script asserts every expectation and exits non-zero on any deviation, and a third party can re-run it. **Not covered by that run:** a scope-gated *enumeration* capability that discovers bindings across a cluster (the script reads the objects it planted, by name), and a managed provider's control plane (EKS, GKE, AKS). |
 | Cloud escalation primitive | Pure offline re-derivation over the operator's own retained policy documents. Live fire is **deliberately not part of this capability at all** — a defensive verification test never executes the escalation it describes. |
 | The cryptographic escalation of the sign-on assertion test | **Dormant unless** the operator supplies trusted identity-provider certificates *and* the required library is installed. Checking the signature mathematics itself, which requires reproducing the document-tidying step described in Family 6, is explicitly out of scope. |
 | Offensively testing a customer's own AI feature (Family 15) | **Built and proven by its own tests; never yet run for real here.** The category table, the routing that keeps an AI judge's opinion from ever becoming a fact, the boundary that runs the outside tool as a separate program, and the fail-closed behaviour are all in place. The four AI red-teaming tools themselves are **absent from this environment and could not be installed, because the machine has no route to the internet.** No proven finding has been produced from them here. Live use is deferred until an operator provisions the tools. |
 | The relay needed to confirm invisible weaknesses against a **remote** target | **Built, with its own command to run it, and gated**: the engagement runner refuses a relay whose address is not on the authorisation document. Standing one up is the operator's action, on a host they own. Without it, the four callback-based checks are skipped against a remote target — and reported as skipped, never as clean. |
-| The claim-checking layer that re-runs every proof a claim cites | **Built and in real use, but not yet the single checkpoint every claim crosses.** It is called at genuine points in the running system: when findings are written into the system's internal map of the target, when a report is generated, when the defensive side admits a result, and when the reviewing components check an agent's work. What it is **not**, today, is one universal gate through which every claim in the system must pass — the internal map's own admission check reaches the same conclusion by a shared route rather than by calling this layer. It can only ever take a claim *down*; it can never promote one the confirming test refused. A note for reviewers reading the source alongside this briefing: the module's own opening comment still describes it as having no callers yet, and that comment is out of date — the callers exist. |
+| The claim-checking layer that re-runs every proof a claim cites | **Built and in real use, but not yet the single checkpoint every claim crosses.** It is called at genuine points in the running system: when findings are written into the system's internal map of the target, when a report is generated, when the defensive side admits a result, and when the reviewing components check an agent's work. What it is **not**, today, is one universal gate through which every claim in the system must pass — the internal map's own admission check reaches the same conclusion by a shared route rather than by calling this layer. It can only ever take a claim *down*; it can never promote one the confirming test refused. A note for reviewers reading the source alongside this briefing: the module's opening comment used to describe it as having no callers yet; that has been corrected, and an automated test now fails the build both if the retired phrasing returns and if a real caller is dropped from the list the comment keeps. |
 | Staying logged in while testing an application behind a login | **Built and working inside the testing engine**: it holds the session, notices when it has been dropped, logs in again and repeats the request. The honest gap is not in the capability but in how an operator reaches it — in the version read for this briefing there is no field for a target application's username and password on the assessment wizard or on the command that launches an engagement, so it is configured in the engine directly. |
 | The two measurements that are not among the 85 — session-token predictability and exposure to future quantum decryption | **Built, deterministic and reported.** Neither is judged by one of the 38 decision procedures, so neither produces a proven finding. Both are reported as leads with their own stated boundaries, which are set out in families 3 and 8. This is a deliberate classification, not an oversight. |
 | The build-and-release safeguards on the system's own supply chain | **Delivered and merged into the main line of the repository**, on the day this chapter was written: fingerprinted dependency locks proven to install under fingerprint checking, container images pinned by content rather than by a movable label, an ingredients list per environment, and a vulnerability gate that blocks on CRITICAL and has a negative control proving it can fail. Set out in full in Family 11. This is a statement about how the system is built, not a test performed against a customer. |
@@ -7583,11 +9042,29 @@ means the library can grow without changing the engine. Their distribution acros
 | **Total** | **172** |
 
 Within those families the coverage includes database-engine-specific variants for five major database
-products, eleven distinct page-template engines, both Windows and Unix command variants, obfuscated
-forms of the widely exploited Java logging vulnerability, and twenty framework-exposure paths covering
+products, ten named page-template engines plus one engine-agnostic entry that is always tried, both
+Windows and Unix command variants, obfuscated forms of the widely exploited Java logging
+vulnerability, and twenty framework-exposure paths covering
 source-control directories, environment files, diagnostic and management endpoints, search and
 container registries, content-management user listings, interface specification documents, and
 application log and route files.
+
+Two things govern when a library entry actually fires. Each entry carries a condition describing the
+technology it applies to, so an attack written for one database product is not fired at a different
+one; and every entry is judged by the same automatic decision procedures as the built-in checks, so
+adding to the library widens what is *looked for* without changing what may be *proved*.
+
+**An honest note about when those 172 were actually used.** The library is switched on per run: an
+assessment either uses the built-in checks alone, or the built-in checks plus the library. Until this
+was corrected, an assessment launched from the system's own interface accepted the instruction to use
+the library and then silently discarded it — the setting appeared exactly once in the file, in the list
+of things the function accepted, and was never read again. Nothing failed, no error appeared, and the
+resulting report looked entirely reasonable; it was simply drawn from a narrower set of attacks than a
+reader would assume. The interface now passes the instruction through. It is recorded here rather than
+quietly fixed because it is precisely the failure this chapter's own discipline exists to catch: a gap
+in coverage is invisible in a result. That is the same argument Part 4 makes about a silent smoke
+detector, and it is why coverage has to be *recorded* rather than inferred from the absence of
+findings.
 
 **The third inventory: many variations of one attack, triaged automatically.** The checks above each
 send a *fixed* test input for a given weakness. There is a second axis to any real assessment: sending
@@ -7793,7 +9270,8 @@ This chapter explains, in ordinary language, how that works in practice. It cove
 
 1. What "evidence" actually means here, and how it is captured and stored.
 2. How evidence is sealed so that tampering is detectable.
-3. What a **finding report** contains for a human reader.
+3. What a **finding report** contains for a human reader, and what is inside the
+   downloadable **case file** an operator hands to somebody else.
 4. What an **evidence certificate** is, and the four independent things it proves.
 5. How a completely independent third party — with no access to this system, no
    internet connection, and no reason to trust the operator — can confirm a result on
@@ -7895,10 +9373,13 @@ kinds of automatic test** and a vocabulary of **85 named weakness classes**, eac
 to the specific tests that are allowed to confirm it.[^rev]
 
 [^rev]: Software is identified by a short code for the exact snapshot of the source it was
-built from. Sections 1 to 11 were read at snapshot `1487e03a`. Section 12 describes work
+built from. Sections 1 to 11 were first read at snapshot `1487e03a`. Section 12 describes work
 that reached the released software while this chapter was being written, and was read at
-snapshots `dc2994d6` and `ff790b80`. They are recorded so that a reader can re-derive
-every count in this chapter from exactly the same source the author used.
+snapshots `dc2994d6` and `ff790b80`. **This revision — the rebuilt case file in section 6.2,
+the two worked examples in section 4.4, the statement of what a signature does and does not
+establish in section 3.3, and the corrections to section 11 — was read at snapshot
+`05b81e9f`.** They are recorded so that a reader can re-derive every count in this chapter
+from exactly the same source the author used.
 
 **One term used constantly below: an "evidence branch".** The project's own word for a
 single, named route by which a particular kind of claim is allowed to be proved — in
@@ -8124,6 +9605,50 @@ Three further properties:
   forgery technique, and the fix came out of a deliberately adversarial internal review
   that went four levels deep.
 
+##### What a signature establishes, and what it does not
+
+This is the distinction most often lost when a signed document reaches a non-specialist
+reader, so it is worth stating flatly.
+
+A valid signature establishes exactly two things:
+
+1. **Integrity.** The signed bytes are the bytes that were signed. Alter one character
+   anywhere and the check fails.
+2. **Possession of a key.** Whoever produced the signature held the private half of a public
+   key listed in the trust root, and enough *distinct* holders did so to meet the threshold.
+
+It establishes **nothing at all about who that was**. A key is a number. Nothing inside the
+mathematics ties a number to an organisation, a person, or a legal entity. That link is
+supplied entirely from outside the cryptography — by the out-of-band fingerprint comparison
+described in section 7.2 — and then only to the extent that the party you asked for the
+fingerprint really is the party you meant to ask.
+
+The system says this in its own words rather than leaving a reader to infer it. The
+verification document inside every signed pack carries a section headed *"What the signature
+does and does not establish"*, which states that a valid signature shows the pack has not been
+altered since it was sealed and that whoever sealed it held the private key behind the printed
+fingerprint — and that it "does **not**, by itself, tell you who that was."
+
+**One caveat specific to how packs are produced today, because it materially changes what a
+signature is worth.** The signing authority for a downloadable pack is resolved from a
+governance-key location supplied by whoever asked for the pack. When no such location is
+given, the authority is provisioned *inside the run's own working directory*, so every
+engagement mints its own trust root and prints its own fingerprint. The pack detects that case
+and prints an extra warning of its own: the fingerprint identifies *this* pack's signer; it is
+not a standing identity against which future packs can be checked; ask the sender to publish a
+fingerprint for each pack and compare each one. **A dossier downloaded from the operator's own
+interface is built this way today** — the interface passes no governance-key location — so
+those packs carry the caveat. A pack built from the command line with an explicit key location
+does not. The project's own internal review names the change that would settle it: have the
+interface pass one stable operator key location, so that a single trust root signs every pack
+and the out-of-band fingerprint becomes something an organisation publishes **once**. Its
+summary of the difference is exact — it is "the difference between *integrity only* and
+*provably from this operator*."
+
+Finally, and separately from origin: a signature says nothing whatever about whether the
+*verdict* is correct. A signer can be perfectly authentic and still be wrong, or lying. That
+is what check 4 in the next section exists for, and section 8.2 returns to it.
+
 #### 3.4 The chain: you cannot quietly delete a finding
 
 An individual sealed certificate proves that *that* finding was not altered. It does not,
@@ -8257,6 +9782,144 @@ rather than a re-implementation:
 5. **Claim-grounding.** The test that fired must be a valid confirmer *for the class being
    claimed*. This is the step that defeats relabelling.
 
+#### 4.4 Two worked examples: real evidence, re-checked
+
+The four checks are easier to weigh when they have been applied to evidence that came out of
+a real system rather than out of a fixture somebody wrote by hand — in one of the two cases
+below a real outside service, in the other real infrastructure the project stands up and
+destroys itself. Two such runs
+exist in the repository. Both are scripts a third party can run on their own machine. They
+are described here as worked examples of the *re-checking*; what they do and do not establish
+as capability claims is the subject of section 11.
+
+Three points apply to both.
+
+- **Neither runs in the automated build**, deliberately. There are no credentials in the
+  build environment, and — in the project's own reasoning — a live-fire that fabricates a
+  result when it cannot actually run is worse than no live-fire at all. The GitHub script
+  detects a missing or unauthenticated command-line tool and skips cleanly rather than
+  reporting anything.
+- **Every expectation is asserted and a deviation exits with an error.** Both harnesses say
+  the same thing in their own comments: a live-fire script that only prints and never fails
+  is a demonstration, not a proof.
+- **The controls are the point.** In each run, the arrangements that *must not* be confirmed
+  are exercised through the identical production path as the one that must. A detector that
+  only ever says "found something" establishes nothing.
+
+One shared point of precision about the four checks. Neither of these certificates carries a
+manifest of raw files, so check 3 — artifact integrity — has nothing to check in these two
+cases and is satisfied vacuously. That is not a loophole. A certificate that *claims* raw
+files, verified in a place where those files are not available, fails closed and is reported
+unsound; it never passes on the strength of the other three.
+
+##### Kubernetes: a real cluster the system creates, owns and destroys
+
+*Kubernetes* is the industry-standard software for running application containers across a
+fleet of machines; *RBAC* is its permission system, expressed as named roles granted to
+identities.
+
+A script in the repository (`tools/livefire/k8s_rbac_livefire.sh`) starts a genuine
+single-node Kubernetes cluster — k3s version 1.31.5, in a container, reachable only on the
+machine's own internal address — plants four access rules in it, captures what the real
+Kubernetes interface returns for each, feeds those real bytes to the same code that runs in
+an ordinary assessment, and then destroys the cluster. It never touches infrastructure it
+does not own, which is precisely why anybody can repeat it without borrowing an account.
+
+Five adjudications are made over the captured bytes:
+
+| What was planted in the real cluster | Result | Why that result matters |
+|---|---|---|
+| The anonymous, unauthenticated user bound to the full administrative role | **Confirmed**, and its signed certificate **re-verified offline** | The genuine problem: anyone at all is an administrator |
+| The anonymous user bound to the harmless built-in read-only role | Not confirmed | Being anonymous is not by itself dangerous |
+| A named user bound to the full administrative role | Not confirmed | A real administrator is not a finding |
+| The anonymous user bound to the full administrative role, judged this time by reading the role's **own rules** rather than matching its name | **Confirmed**, and its certificate **re-verified offline** | Rules are parsed, not names matched |
+| The namespace's default identity bound to the built-in `admin` role inside one namespace | Not confirmed | The control that matters — see below |
+
+The last row is the whole argument. On this cluster the built-in `admin` role genuinely
+grants read access to secrets, and the harness prints the permission list it actually read
+rather than asserting it. "Let this application own its own namespace" is the single most
+common legitimate delegation in Kubernetes. A detector without a subject test would flag it
+as critical on a completely ordinary cluster, and would be wrong.
+
+One further detail shows the harness is a proof rather than a demonstration. Kubernetes
+assembles the permissions of its built-in roles a few seconds after a cluster starts. If that
+assembly has not finished, the role reads as empty — and an empty role would make the control
+above pass *for the wrong reason*, because nothing was read rather than because the gate held.
+The harness detects that state and **refuses to draw any conclusion**, exiting with an error
+and telling the operator to re-run.
+
+**What this run did not exercise.** The capture was taken with the ordinary Kubernetes
+command-line tool inside the script, and handed to the adjudication code directly. It did not
+travel through the permission-gated live sensor, whose own client library is not installed on
+the machine used for this briefing. Nor did it cover discovery of access rules across a whole
+cluster — the script reads the objects it planted, by name — or a managed provider's control
+plane (Amazon EKS, Google GKE, Azure AKS), which is the same interface reached by a different
+access path.
+
+##### GitHub: a real third-party provider on the public internet
+
+The second run (`tools/livefire/secret_github_livefire.sh`) is the stronger of the two,
+because it drove the **real production component over a real network connection to a real
+third-party service** — `api.github.com`. That matters beyond this one capability: until the
+network binding underneath it was written, every one of these components reached the network
+through a stand-in used only in testing, which is why none of them had ever fired against a
+real provider.
+
+The capability being exercised is: *an exposed credential found lying around is a currently
+working one*, established by making one call that the credential itself authenticates.
+
+The arrangement is deliberately narrow and self-limiting. The credential is the operator's
+own, obtained from their own command-line tool and piped straight into the harness on the
+standard input — never written to a file, never placed in a command line where another user
+of the machine could read it, never put into the environment. The call made with it is
+GitHub's own identity endpoint, the least-privileged call the interface offers: it reads who
+you are and changes nothing.
+
+The run asserts each of the following about the real connection, and fails if any is untrue:
+
+- the confirming call really returned a success status from GitHub;
+- a peer address was recorded from the live socket that carried the response, rather than
+  looked up again afterwards;
+- encryption was genuinely verified on that connection;
+- no intermediary was interposed and no redirection was followed;
+- the endpoint reached was GitHub's own identity address;
+- the credential and the confirming call carry the same one-way fingerprint, binding the call
+  to the exact credential that was captured;
+- and the credential itself appears **nowhere** in the retained capture, nowhere in the
+  retained evidence the test judged, and nowhere in the signed certificate.
+
+The valid credential was confirmed, and **its signed certificate re-verified offline**.
+
+Four things in the same run were correctly *not* confirmed, and they are the substance of the
+exercise:
+
+| Control | Outcome |
+|---|---|
+| A bogus credential of the correct *shape*, sent **live** to the same real endpoint | GitHub itself rejected it. Correctly left a lead — structure is not validity, measured against the real provider rather than argued |
+| The same confirmed capture, with the confirming call relabelled as having gone to an attacker-controlled address | Not confirmed. This is the anti-laundering rule: if any address could confirm a credential, anyone who controlled one could manufacture facts |
+| The same again, with an address that merely *looks* like GitHub's by adding a suffix | Not confirmed |
+| The same capture with the credential and the confirming call carrying **different** fingerprints — the "some other secret authenticated" case | Not confirmed |
+
+Two further legs exercise the safety gates on the same live path: with the emergency stop
+tripped, and with the scope check refusing, the run stops **before any network call is made
+at all** and produces no capture. A refusal that produces nothing leaves nothing to launder.
+Separately, the component's own outbound restriction refuses to send the live credential to
+an address outside its permitted list in the first place, so the laundering control did not
+have to be demonstrated by actually sending anybody's credential anywhere.
+
+**What this run did not exercise, stated exactly.** It proves the GitHub row of that
+capability and nothing else; the harness prints that conclusion itself at the end. The
+Amazon Web Services row of the same capability is built and unit-tested — its request signing
+was checked against an independent implementation — but has **never** been exercised against
+real AWS, still requires a real access key that an operator would have to provide, and
+**nothing about the GitHub run transfers to it**. Two further gaps are recorded in the
+project's own register: credential types outside the two the recogniser knows, and a
+component that would *discover* exposed credentials across an authorised surface — this
+harness validates a credential the operator supplied, it does not hunt for one. Finally, the
+permission check and the scope check in that run were stand-ins supplied by the harness
+rather than a signed authorisation document. Their *refusal* paths were genuinely exercised,
+so the gate is proved to bite; but no signed engagement charter was loaded in that run.
+
 ---
 
 ### 5. What a finding report contains for a human reader
@@ -8361,7 +10024,11 @@ visible rather than buried. The relevant screens:
   this view sends nothing to the system under test.
 - **Client Report.** Described in the interface as "A LIVE, always-current report: every
   finding is re-verified OFFLINE on load, so a FACT is a re-checkable certificate — not a
-  stale PDF, and not the AI's word." One button downloads the complete dossier.
+  stale PDF, and not the AI's word." One button downloads the complete case file described in
+  section 6.2. The pack is titled with whatever human name the operator gave the engagement in
+  the interface — "Acme, Q3 external review" rather than a machine identifier — which is stored
+  in a side-car file of its own, reaches no certificate, no retained evidence and no manifest,
+  and can therefore be changed as often as the operator likes without touching a single proof.
 - **Proof Studio.** Exports a client-verifiable bundle. On success it displays the bundle
   location, the trust-root fingerprint with the instruction to publish it through a
   separate channel, and the exact command a third party runs to verify offline.
@@ -8391,7 +10058,7 @@ centre — need structured data rather than prose. The following are produced.
 | Proof bundle | A directory | The signed certificates plus chain and signed head, the public trust root, the re-verifiable report, and the raw captured bytes. This is the package a third party verifies. |
 | Proof-Carrying Finding certificates | A data file per finding, with a published description of its exact layout | The portable per-finding format. Its published layout descriptions are generated from the real code, not written by hand, so the specification cannot drift away from what the software actually produces. |
 | A signed statement in the industry's own formats | Three published standards used together — see below | Lets other organisations' software-inventory tools read a finding from this system without special handling. A confirmed finding is recorded as "affected"; an unconfirmed lead is recorded as "under investigation" and is **never** asserted as "affected". |
-| Run dossier | A single `.zip` archive | Everything a run produced, in one tamper-evident archive. Detailed below. |
+| Run dossier (the case file) | A single `.zip` archive | Everything a run produced, in one tamper-evident archive, together with nine numbered plain-language documents written for a reader with no technical background. Detailed below. |
 | Drift record | JSON | The difference in the proven-fact set between two runs. |
 | Coverage certificate | Signed JSON | What was actually exercised. See section 9. |
 | Posture certificate | Signed JSON | The clean result. See section 9. |
@@ -8416,26 +10083,156 @@ materials) is a machine-readable ingredients list for a piece of software, and
 **CycloneDX** is one of the two widely used published formats for writing one. Both are
 returned to in section 12.
 
-#### 6.2 The one-click dossier
+#### 6.2 The one-click case file
 
 The dossier is designed for the moment an operator has to hand the whole engagement to
-somebody else. It is a single self-contained `.zip` containing, where present:
+somebody else. It is a single self-contained `.zip`.
 
-- the three human reports;
-- the structured data export and the build-system export described above;
-- the complete offline-verifiable proof bundle;
-- the engagement log, with secrets scrubbed;
-- the transcript of any commands run through the governed terminal, redacted at source
-  and scrubbed again;
-- the governance-signed record chain;
-- any drift record;
-- a readable `index.html` summarising exactly what the run produced;
-- a `README.md`;
-- a `MANIFEST.json` listing every entry with its fingerprint;
-- and, when a governance signer is available, a `MANIFEST.sig.json` (a threshold
-  signature over the manifest bytes) and a `TRUST-ROOT-FINGERPRINT.txt`.
+**It was rebuilt in the version read for this revision, and the rebuild is the most
+consequential change to it.** Before the rebuild the archive already proved things — it held
+the engineering reports, the machine-readable exports and the cryptographic proof bundle —
+but it did not *explain* them. The new module's own assessment of that state is worth quoting:
+a machine-readable export and a cryptographic proof bundle are "exactly the right evidence and
+exactly the wrong reading material for the people a dossier is usually handed to — a
+regulator, an auditor, a government official, a client executive." The rebuild adds the part
+those readers actually read: **nine numbered plain-language documents at the top level of the
+archive**, numbered so that the reading order is obvious from the file names alone.
 
-Four properties make it usable as an evidential artifact:
+Three rules are written into the code and run through all nine:
+
+- **Meaning before mechanism.** Every section opens with what something means for the
+  organisation, and only then describes how it works.
+- **Say the limits out loud.** A proven finding states what it proves *and* what it does not.
+  A section on what was tested is followed immediately by what was not. The absence of a
+  finding is never allowed to read as evidence of safety.
+- **Never assert what was not measured.** Times, counts and settings come from what the run
+  actually recorded. Where a value was not recorded, the document prints "not recorded"
+  rather than filling the gap.
+
+All nine are written on every build, even when a document has nothing to report, on the
+stated reasoning that a document saying "none" is information whereas a missing document is a
+gap the reader has to wonder about. If the plain-language rendering fails for any reason, the
+archive still ships with the machine records and the proof bundle intact, and a note in the
+archive records that the case file could not be rendered — the readable half can never cost
+the archive its proof.
+
+##### The nine numbered documents
+
+| File | What it contains |
+|---|---|
+| `00-START-HERE.html` | The one page to open. The essentials of the engagement (what was examined, when it started and finished, how long it took, when the pack was produced, the internal reference, whether it is signed); a three-way count of what was found; an explicit panel headed *what this pack does not say*; the reading order for everything else; the three checks a recipient can run; the fingerprint of the signing authority where one exists; and a table listing **every single file in the archive** with a one-sentence explanation of what it is. |
+| `01-executive-summary.md` | What was done, what was found, what it means for the organisation, and what to do first. It defines the three grades of finding *before* giving any number, states what the pack does not tell you, and closes with "how much you can trust this document" — which says plainly whether a re-checkable evidence bundle is included and whether the pack is signed. |
+| `02-approach-and-scope.md` | How the work was done. The standard of proof in four numbered steps; exactly what was examined, with the recorded counts of pages explored, inputs examined and test requests sent; the instruction that was run, reproduced verbatim so the work can be repeated; and then **what was NOT examined**, split into limits imposed by the settings that were used and limits inherent in that kind of examination. The closing line of that section is the point of it: "The correct reading of a clean result in any of these areas is *not examined*, not *found to be safe*." |
+| `03-findings.md` | Every proven finding, in plain language. Each entry answers the same six questions: what it is, why it matters here, how it was proved, what it does **not** prove, what to do, and how to check the fix worked. Each also separates the general description of the category from what was actually established on this system, with a note saying in terms that the two are different. |
+| `04-leads.md` | What was observed or suspected but not proven, kept apart so it cannot be overstated — split into *observed but not exploited* (seen directly in the system's own replies; the observation is reliable, no consequence is claimed) and *suspected, not proven* (a question, not a conclusion). |
+| `05-what-was-looked-for.md` | The catalogue: every weakness category the engine is able to confirm, with this engagement's position against each. Described further below. |
+| `06-what-to-do.md` | The recommended order of work in four stages — fix what was proven, close the observed gaps, resolve what is unproven, then confirm and re-examine — with the reasoning behind the ordering stated so it can be checked or overruled. Only proven findings enter the priority order. |
+| `07-verify-it-yourself.md` | The three checks, with the exact commands and what a pass and a failure look like. Described further below. |
+| `08-glossary.md` | Every technical term used anywhere in the pack, in alphabetical order, explained without assuming a technical background. Twenty-nine standing entries, plus one generated entry for each automatic test this particular run used, so the promise holds for *this* pack rather than in general. An entry that would point at a file the archive does not contain is dropped rather than left dangling. |
+
+**The catalogue document is worth singling out**, because it is what lets a reader judge what
+the *silence* means. Three findings out of three categories examined is a very different
+document from three out of ninety, and the findings alone do not distinguish them. The
+catalogue lists all **85** weakness categories the engine can confirm, grouped into fourteen
+families (with a fifteenth catch-all so nothing is dropped for want of a family), naming for
+each the deterministic checks able to confirm it and the published control frameworks a
+weakness of that category would implicate. It is generated from the engine's own registry
+when the pack is built, not written by hand, so it cannot quietly overstate what the engine
+can do.
+
+Its status column has exactly three values — *confirmed*, *reported but not confirmed*, and
+*not recorded* — and **there is deliberately no "examined and found clean" state**. The
+reason is stated in the code: a scan writes what it found, not the list of checks it
+attempted, so inferring "examined and clean" from the absence of a finding would convert a
+gap in the record into an assurance, which the module calls "the single most dangerous thing
+a security document can do". The specific engineering that would close that gap is named
+rather than left vague: the scan would have to write out the set of checks it attempted
+alongside the findings it already writes.
+
+##### Everything else in the archive
+
+The archive is not only the case file. The following table is the complete set of entries the
+build knows how to produce, drawn from the code that explains them, so that nothing in a
+delivered pack is unaccounted for. Entries marked *conditional* appear only when the run
+produced the underlying material.
+
+| Entry | What it is | Always present? |
+|---|---|---|
+| `index.html` | The same case summarised on one technical page for a security engineer. The numbered documents cover the same ground. | Yes |
+| `README.md` | A short technical description of the archive, for whoever receives the file itself. | Yes |
+| `MANIFEST.json` | The list of every file in the pack with its fingerprint. Check 1 uses it. | Yes |
+| `MANIFEST.sig.json` | The threshold signature over that list. Check 2 uses it. | Conditional — only when a governance signer was resolvable |
+| `TRUST-ROOT-FINGERPRINT.txt` | The fingerprint of the signing authority, for the separate-channel comparison. | Conditional — same |
+| `reports/executive.md`, `reports/technical.md`, `reports/remediation-roadmap.md` | The engineering reports described in section 5.2, for the technical team that will make the changes. | Conditional — when the renderers produced them |
+| `appendix/report.json` | The examination's own machine-readable record of every finding: the source the written documents were produced from. | Conditional |
+| `appendix/report.sarif` | The same findings in SARIF, the standard format other security tooling loads automatically. | Conditional |
+| `appendix/catalogue.json` | The machine-readable form of the category catalogue, with the full standards mapping for every category. | Yes, whenever the catalogue could be built |
+| `proof-bundle/reverifiable.json` | The retained evidence for each proven finding, in the form the open-source verifier reads. | Conditional — only when something was proven |
+| `proof-bundle/evidence-bundle.json` | The sealed record of each proof, with its digital signature. | Conditional |
+| `proof-bundle/trust-root.json` | The public keys entitled to sign, and how many must sign. | Conditional |
+| `proof-bundle/TRUST-ROOT-FINGERPRINT.txt` | The fingerprint of those keys. | Conditional |
+| `proof-bundle/README.md` | Technical notes accompanying the evidence bundle. | Conditional |
+| `proof-bundle/HOW-TO-VERIFY.md` | The engineer-facing version of check 3. | Conditional |
+| `proof-bundle/evidence/…` | The raw captured requests and replies — the bytes the automatic checks re-examine, kept exactly as recorded. | Conditional |
+| `logs/engagement-log.jsonl` | The engine's own activity log for the examination, with passwords and keys removed. | Conditional |
+| `logs/terminal-transcript.jsonl` | A signed record of commands the operator ran by hand through the governed terminal, redacted at source and scrubbed again. | Conditional |
+| `spine/…` | The tamper-evident event record in which each entry is cryptographically linked to the one before it. | Conditional |
+| `drift/drift.json` | The record of changes detected in the examined system between examinations. | Conditional |
+
+Any entry not on that list still gets an explanation on the front page, generated from the
+folder it sits in, with a final fallback for a file at the top level — so the promise that
+every file in the archive is accounted for holds by construction rather than by having
+remembered every name. The project enforces it with a test that builds a real archive and
+fails if any entry is missing from the front page, and with a second test that mints a proof
+bundle first, so the first test cannot pass merely because the common case happens to be
+covered. A companion test fails the build if any document points at a file the archive does
+not contain.
+
+##### The three checks the recipient runs
+
+`07-verify-it-yourself.md` sets out three checks and is explicit that they are independent —
+one can pass while another fails, and each failure means something different. None of them
+contacts the examined system and none needs an internet connection.
+
+| Check | The question it answers | What a pass does **not** mean |
+|---|---|---|
+| **1. Contents** | Has anything in this pack been altered since it was produced? Recompute every fingerprint in `MANIFEST.json` and compare. | Only that the pack is internally consistent. Somebody who altered a file could have rewritten the list to match. That is what check 2 is for. |
+| **2. Signature** | Is the pack sealed, and does the seal belong to a key the sender has independently vouched for? | See section 3.3: it establishes integrity and possession of a key, not identity. The document says so in those terms, and prints the separate-channel step as the one that must not be skipped. |
+| **3. Proof** | Do the findings actually follow from the retained evidence? Re-derive every proven finding on your own machine. | Nothing about the system's condition today. It re-checks evidence captured during the examination window, so it will keep passing after the weaknesses are fixed. Only a fresh examination answers that, and the document says so. |
+
+The commands for checks 1 and 2 are printed in full in the document and are short enough to
+read in a minute. Check 1 uses nothing but Python's own standard library; check 2 additionally
+needs one widely used cryptography package, and the document says so and gives the one-line
+installation command. The document closes by pointing out that all three can be handed to any
+competent technical person, "including one with no connection to this organisation and no
+access to its systems" — which is the reason the evidence is packaged this way at all.
+
+Where the pack is unsigned, check 2's section does not go quiet; it states positively that no
+signing key was available, that check 1 still detects alteration, and that nothing in the pack
+can establish who produced it.
+
+**One correction this chapter must make against the pack's own text.** Both the front page and
+the verification document describe check 3 as running "the checking program" that travels
+"inside `proof-bundle/`". That is not accurate, and a reader should not be surprised at the
+point of use. The evidence bundle contains the sealed certificates, the retained evidence, the
+raw captured bytes, the public keys, their fingerprint, and two explanatory documents — and no
+verifying program. The command the document prints is the open-source verifier's own command,
+which the recipient must obtain separately, exactly as section 7.4 of this chapter describes
+for every other route to the reproduction step. The evidence bundle's own longer-standing
+`README.md` states this correctly: what the recipient trusts is "the operator's governance
+public key … and the open-source `framework.v2` verifier, which you obtain and audit
+separately." Nothing about the *strength* of check 3 changes — obtaining and auditing an
+open-source verifier once is the ordinary cost, and it is what removes dependence on the
+signer's honesty. What changes is only the expectation of convenience, and the plain-language
+documents are, on this one point, ahead of what the archive ships. The project's own internal
+review of the case file already names the fix — copy the existing standalone verifier, the one
+described in section 7.3 that imports none of this system's code and proves it, into the
+evidence bundle beside the two documents already there — and observes that until it is done,
+"the auditor is told to install VIGIL's own engine: defensible, but not *verify without my
+system*." This chapter states the position as it stands rather than reproducing the pack's
+wording.
+
+##### The properties that make it usable as an evidential artifact
 
 1. **Tamper-evident.** Flip any byte in any entry and the manifest check fails. Re-sign
    the whole thing under a different key and the fingerprint pin (section 7.2) refuses.
@@ -8447,6 +10244,21 @@ Four properties make it usable as an evidential artifact:
    its artifact rather than escaping the archive.
 4. **Deterministic.** Sorted entries, a fixed archive timestamp, and no clock in the
    fingerprinted content. Two builds over the same inputs produce identical manifest fingerprints.
+5. **Self-consistent about what it contains.** A pack with no proof bundle does not advertise
+   one anywhere. This is enforced rather than reviewed: a test builds an archive with findings
+   but no bundle and fails if any document promises one, and a companion test proves the
+   detector is not vacuous by checking that the claim *is* made when a bundle really is
+   present.
+6. **Presentation is separated from proof.** A run can be given a human name — "a Ministry of
+   Health Q3 external review" rather than a machine identifier — and that name appears on the
+   front page and in the summary of a pack built afterwards. It is confined to the readable
+   documents: it never reaches a certificate, the sealed proof bundle, or any claim made about
+   a finding. It is not therefore invisible to the archive's own integrity: the list of hashes
+   covers every document in the pack, titles included, as it must, and is re-signed on each
+   build. The property that matters is pinned by a test that changes the stored name between
+   two builds of the same run and re-verifies the proof bundle from the outside both times:
+   sound both times, with identical chain fingerprints. **Renaming therefore cannot invalidate
+   a proof** — it can only change how a freshly built pack reads.
 
 A run with no proven fact carries no proof bundle, and the dossier says so plainly. A lead
 is a lead.
@@ -8583,7 +10395,14 @@ So the honest summary of what a third party can establish alone is:
 
 #### 7.5 The external-audit package
 
-For a formal audit there is a purpose-built package containing:
+This is a **different artifact from the case file of section 6.2**, and the distinction is worth
+keeping. The case file is the whole engagement packaged for a recipient — reports, machine records,
+logs and proofs, with the plain-language documents on top. The audit package is narrower and
+purpose-built for a formal audit: the proofs, the evidence they bind to, the scope they were
+bounded by, and the standalone checking program, with nothing else in the way. An organisation may
+be handed either, or both.
+
+For a formal audit the package contains:
 
 - the signed certificates with the chain and signed head;
 - the retained evidence that the binding check re-fingerprints and compares against;
@@ -9192,15 +11011,23 @@ operations as well as to findings:
 ### 11. Honest status: what is working, what is proven offline, and what is deferred
 
 The heading is deliberately flat, because the honest position is mixed and a reader skimming
-headings should not take away a stronger claim than the text supports — or a weaker one. **None of
-the four cloud confirmations described below has been pointed at a live third-party cloud account.
-The two container-platform ones have been run against a real Kubernetes cluster: one the system
-creates and owns, rather than one belonging to anybody else.** All six are built and wired end to
-end. Of the four cloud ones, proven against recorded sample data, three wait on a customer supplying
-credentials to their own account, while the fourth deliberately never carries out the action it
-detects, which 11.1 explains. The web-facing tests, the signing and certificate machinery, and the
-packaging are a different matter entirely, and the table below says which is which, one line at a
-time.
+headings should not take away a stronger claim than the text supports — or a weaker one. All six of
+the cloud and container-platform confirmations are built and wired end to end. Where each one has
+actually been fired differs, and the difference is the whole point of this section:
+
+- **The two container-platform ones have been run against a real Kubernetes cluster** — one the
+  system creates, owns and destroys, rather than one belonging to anybody else.
+- **One row of one cloud capability has been fired at a real third-party service on the public
+  internet**: the GitHub row of the exposed-credential check, against `api.github.com`. Its Amazon
+  Web Services row has not, and nothing from the GitHub run transfers to it.
+- **The remaining three cloud confirmations have not been pointed at a live third-party cloud
+  account.** Two of them — taking a credential from a cloud machine's own credential service, and
+  Google Cloud identity impersonation — wait on a customer supplying credentials to their own
+  account. The third, the permission-escalation check, deliberately never carries out the action
+  it detects, which 11.1 explains.
+
+The web-facing tests, the signing and certificate machinery, and the packaging are a different
+matter entirely, and the table below says which is which, one line at a time.
 
 The project maintains an explicit ledger distinguishing three states: fully working end to end;
 built and proven offline but not yet exercised against a live third-party system; and deliberately
@@ -9234,8 +11061,11 @@ setting looked wrong:
 
 Each has its own deterministic offline test plus a capture-and-admission component owned by this
 system. All six are wired end to end. The **two Kubernetes** confirmations (5 and 6 above) are proven
-against a **real Kubernetes cluster**; the **four cloud** ones are proven offline against **recorded
-sample data standing in for the real thing**.
+against a **real Kubernetes cluster**. Of the **four cloud** ones, number 2 has one row proven
+against a **real third-party provider** and one row proven only offline; numbers 1, 3 and 4 are
+proven offline against **recorded sample data standing in for the real thing**. Both live-fire runs
+are described as worked examples in section 4.4; this section states what they do and do not settle
+as capability claims.
 
 **Kubernetes, stated exactly.** A script in the repository stands up a real single-node cluster — k3s
 version 1.31.5, in a container reachable only on the machine's own internal address — which the system
@@ -9254,11 +11084,26 @@ rules across a whole cluster (the script reads the objects it planted, by name),
 provider's control plane** — Amazon EKS, Google GKE, Azure AKS — which is the same interface reached by
 a different access path.
 
-What remains outstanding for the four **cloud** confirmations is **use against a real third-party cloud
-account**, which waits on the customer supplying their own cloud credentials. The detection logic, the
-evidence handling, the certificates and the safety gates are all built and proven. Only the act of
-pointing them at a live third-party account is pending, and that is by design: this system does not
-acquire other people's cloud credentials for itself.
+**The exposed-credential check, stated exactly, because it is the one that splits.** This capability
+recognises two kinds of leaked credential. Its **GitHub row is live-fire proven against the real
+`api.github.com`**: a second repository script drives the real permission-gated component over the
+real network connection, using the operator's own credential against the operator's own
+least-privileged identity endpoint, confirms the credential and re-verifies the resulting certificate
+offline — while a bogus credential of the same shape, sent live to the same real endpoint, is
+rejected by GitHub itself and correctly left a lead. Section 4.4 sets out the run and its four
+controls. **Its Amazon Web Services row is not.** That row's dispatch and its signed confirming call
+are built and unit-tested — the request signing checked against an independent implementation — but
+have never been exercised against real AWS, still require a real access key an operator would have to
+provide, and **nothing about the GitHub run transfers to them.** The project's own register says this
+in those terms, and so does the harness, in its closing line.
+
+What remains outstanding for the other two **cloud** confirmations — taking a credential from a
+cloud machine's own credential service, and Google Cloud identity impersonation — is **use against a
+real third-party cloud account**, which waits on the customer supplying their own cloud credentials.
+The detection logic, the evidence handling, the certificates and the safety gates are all built and
+proven. Only the act of pointing them at a live third-party account is pending, and that is by
+design: this system does not acquire other people's cloud credentials for itself. The permission-
+escalation check is different again, and the second bullet below explains why.
 
 Two consequences a procurement or oversight reader should take from that:
 
@@ -9284,14 +11129,15 @@ assessment that reads an imported inventory rather than the live account.
 | The core automatic tests against a live web target | **Working end to end.** The test harness stands up a real vulnerable application on the local machine and confirms findings against it. Pointed at a safe twin of the same application, it returns nothing — a shipped negative control proving the authority does not rubber-stamp. |
 | Network reachability, encryption weakness, vulnerable dependency, and the web achieved-state windows | **Fact-capable against real captures**; reachability and TLS are also clean-capable. |
 | Signing, certificates, chain, and offline re-verification | **Working.** Exercised by the standalone conformance test in an environment where none of this software is importable. |
-| The dossier, proof bundle, and audit package | **Working**, including the honest unsigned labelling when no governance signer is available. |
+| The dossier, proof bundle, and audit package | **Working**, including the honest unsigned labelling when no governance signer is available. The archive now carries the nine numbered plain-language documents described in section 6.2, and a test suite pins the promises it makes about itself: every document present, every file in the archive accounted for on the front page, no document pointing at a file the archive does not contain, no claim of an evidence bundle when none is embedded, and two builds over the same inputs producing identical output. |
+| The network binding underneath the cloud and credential capabilities | **Working, and new in the version read for this revision.** Until it was written, every one of those components reached the network through a stand-in used only in testing — which is exactly why none of them had ever fired against a real provider. Each fact it reports about a connection is **derived from that connection rather than asserted**: encryption counts as verified only when the connection really produced a validated certificate; "no intermediary" is recorded only when the client can be shown affirmatively unable to have one; a redirection is *reported* rather than followed; the peer address is read from the live socket rather than looked up again afterwards; and an over-long reply is marked truncated and never parsed. Every one of those fails to the value that makes the automatic test **refuse**, never to the one that lets it fire. |
 | Taking a credential from a cloud machine's own credential service | **Built and proven offline against recorded sample data; not yet fired at a live third-party cloud account**, which waits on the customer supplying a laboratory credential of their own. Every part is built: the component that runs it, the observation window, the admission route, the certificate, and the entry on the system's internal map. In the project's own words: "There is no live FACT yet." |
-| Confirming an exposed secret is a currently working credential | Same: **complete and proven offline against recorded sample data; live use deferred** on a credential the customer supplies. |
+| Confirming an exposed secret is a currently working credential | **Split, and the split must not be blurred.** The **GitHub row is live-fire proven against the real `api.github.com`** — the real permission-gated component over the real network connection, using the operator's own credential against the operator's own identity endpoint; the credential confirmed, its certificate re-verified offline, and a live bogus credential of the same shape rejected by GitHub itself and left a lead. The **Amazon Web Services row is built and unit-proven but has never touched real AWS**; it still requires an access key the operator supplies, and nothing from the GitHub run transfers to it. Not covered by either: credential types outside the two the recogniser knows, and any component that would *discover* exposed credentials rather than validate one the operator supplied. |
 | Google Cloud identity impersonation | Same: **built and wired offline; live use deferred** on credentials the customer supplies. |
 | Container-platform role-binding and verb-grant confirmation (both tiers) | **Proven against a real Kubernetes cluster**, not only offline: a repository script stands up a genuine single-node cluster the system owns and destroys, plants dangerous and benign access rules, and adjudicates the real API responses through the production path — the dangerous binding confirmed with a certificate that re-verifies offline, the benign ones (including the namespace default identity bound to the built-in `admin` role, whose real rules do grant secret reads) correctly left as leads. Not covered by that run: enumeration of bindings across a cluster, and a managed provider's control plane (EKS, GKE, AKS). |
 | Proving an identity can escalate its own permissions | A pure offline re-derivation over the operator's own retained permissions document, which **deliberately never performs the escalation** — a defensive verification test does not carry out the attack it is detecting. This one is not "awaiting live use"; not firing it is the design. |
 | The stronger single-sign-on signature check | **Dormant** unless the operator supplies trusted identity-provider certificates and an optional library is available. The full, notoriously intricate rules for reducing a signed identity document to a single agreed byte-for-byte form before checking its signature are explicitly out of scope, and the chapter on identity says so too. |
-| The general-purpose claim firewall | Its own documentation states it is currently the **primitive**, exercised by its tests, with runtime wiring phased in. It is **not today a universal gate that every claim in the system crosses.** The report layer *does* route every finding through it at render time. |
+| The general-purpose claim firewall | **In real production use, and honestly bounded.** Its own documentation used to describe it as a primitive exercised only by its tests; that phrasing has been retired, and an automated test now fails the build both if it returns and if a genuine caller is dropped from the list the documentation keeps. It is **not today a universal gate that every claim in the system crosses** — writes into the internal map of the target reach the same judgement by a different route — and the documentation states that bound itself, machine-checked in the other direction too. The report layer *does* route every finding through it at render time. |
 | Independent witnesses and external time anchoring | Transport and protocol **working**; genuine independence of the witnesses is a **deployment trust assumption** the code cannot prove, and is recorded as an open item. |
 | Keys sealed at rest to hardware | **Working** where a Trusted Platform Module is present; the deployment guide is explicit that without one, keys are plaintext at rest, that this is acceptable on a trusted single-user machine and not on a shared host, and that the bootstrap prints a loud warning rather than silently degrading. |
 
@@ -9339,12 +11185,13 @@ those four checks without taking anybody's word for them.
 Three boundaries belong in this same place rather than further down, so that nobody reads the five
 subsections as a claim of completeness:
 
-1. **The eight older build jobs still install loose version ranges rather than the fixed lists.**
-   So the fixed lists are *checked* on every proposed change, but they are not yet what those older
-   jobs *test against*. Converting them is named as the next follow-up and was deliberately kept out
-   of this change rather than smuggled into it.
-2. **Only the new gate's own external build steps are pinned to exact versions.** The eight older
-   jobs still refer to theirs by a movable label. Same reason.
+1. **Every job in the main pipeline that installs dependencies still installs loose version ranges
+   rather than the fixed lists** — eight of the eleven jobs do so. The fixed lists are therefore
+   *checked* on every proposed change, but they are not yet what those jobs *test against*.
+   Converting them is named as the next follow-up and was deliberately kept out of this change
+   rather than smuggled into it.
+2. **Only the new gate's own external build steps are pinned to exact versions.** Every other job
+   still refers to its borrowed steps by a movable label. Same reason.
 3. **The vulnerability gate blocks on the most severe class of finding, and had none to block on the
    day it landed.** It did report eight findings of the next severity down, across three packages,
    all advisory and none suppressed. The project's own document singles out one of them as "a real,
@@ -9521,8 +11368,8 @@ the new gate, every one of them is pinned to an exact, immutable version identif
 movable label, with the human-readable version left beside it as a comment, and a test asserts this
 stays true.
 
-The boundary, repeated from the status note above: **this applies to the new gate only.** The eight
-older build jobs still refer to their external steps by movable label. Converting them is a separate
+The boundary, repeated from the status note above: **this applies to the new gate only.** Every
+other build job still refers to its external steps by movable label. Converting them is a separate
 change with a wider blast radius — one wrong identifier and every job in the repository fails at once
 — and it was deliberately kept out rather than smuggled in.
 
@@ -9531,9 +11378,9 @@ change with a wider blast radius — one wrong identifier and every job in the r
 The project's own document includes a section titled "what this does not prove", which is the correct
 instinct. Reproduced in substance:
 
-- **The eight older build jobs still install loose version ranges** rather than the fixed lists. So
-  the lists are *checked* on every proposed change but are not yet what those jobs *test against*.
-  Named as the next follow-up.
+- **Every build job that installs dependencies still installs loose version ranges** rather than the
+  fixed lists — eight of the eleven. So the lists are *checked* on every proposed change but are not
+  yet what those jobs *test against*. Named as the next follow-up.
 - **Software ecosystems other than Python** present in the tree are scanned for vulnerabilities but
   are not regenerated or fingerprint-verified by this gate; they are somebody else's artifacts.
 - **Fingerprints prove a file did not change between being chosen and being installed. They do not
@@ -9580,7 +11427,10 @@ direction. A reader should not read a claim about one as a claim about the other
 ### 13. A reviewer's checklist
 
 If you are handed a result from this system and asked to form an independent view, this is the
-procedure:
+procedure. If what you were handed is the case file described in section 6.2, its own
+`07-verify-it-yourself.md` already contains steps 1 to 4 below with the exact commands filled in,
+and `00-START-HERE.html` lists every file in the archive; you can work from those and use this list
+as a cross-check.
 
 1. **Obtain the trust-root fingerprint from the operator through a channel independent of the
    package** — their published register, a contractual annex, a separately signed communication.
@@ -9628,6 +11478,21 @@ procedure:
   that removing, adding, reordering, or substituting an older report is detectable.
 - A certificate is sound only if **all four** of authenticity, binding, artifact integrity, and
   reproduction hold.
+- A signature establishes **integrity and possession of a key — never identity**. Nothing in the
+  mathematics ties a key to an organisation; that link comes from comparing a fingerprint obtained
+  through a separate channel, and only holds to the extent the party asked is the party meant. The
+  packs say so themselves, and a pack whose signing key was minted inside the engagement's own
+  working directory prints an extra warning that its fingerprint identifies that pack's signer and
+  is not a standing identity.
+- The downloadable **case file** now carries nine numbered plain-language documents alongside the
+  machine records and the proof bundle, a front page that accounts for **every file in the
+  archive**, a catalogue of all 85 weakness categories the engine can confirm with this
+  engagement's position against each — and no "examined and found clean" state, because the run
+  record does not support one. Three checks are set out with their exact commands, and each is
+  stated with what a pass does *not* mean. A third party can run all three offline and with no
+  access to the operator's systems: checks 1 and 2 need nothing beyond the pack itself, and check
+  3 additionally needs the open-source verifier, obtained separately — which the pack's own
+  wording currently understates, and section 6.2 corrects.
 - A **completely independent third party**, offline, with none of this software installed, can
   establish authenticity, binding, integrity, chain and anti-rollback using a standalone verifier
   built from a published specification — provided they pin the trust-root fingerprint obtained out
@@ -9659,23 +11524,27 @@ procedure:
   cluster** the system stands up, owns and destroys itself — the dangerous binding confirmed with a
   certificate that re-verifies offline, the benign ones in the same cluster correctly left as leads
   — with cluster-wide discovery of bindings and a managed provider's control plane (Amazon EKS,
-  Google GKE, Azure AKS) outside what that run shows. The four cloud ones are proven offline against
-  recorded sample data standing in for the real thing, and **three of them await use against a real
-  third-party cloud account**, which waits on the customer supplying credentials to their own
-  account — the detection logic, evidence handling, certificates and safety gates are all built and
-  proven, and only the act of pointing them at a live outside account is pending. The fourth, the
-  permission-escalation check, deliberately never carries out the escalation at all; that is a
-  design decision rather than a gap. **None of the six can fire during an ordinary scan**, by two
-  independent mechanisms. Other capabilities are similarly labelled as
-  built-but-not-yet-used-against-a-live-outside-system in the registry, in the code, and in this
-  chapter.
+  Google GKE, Azure AKS) outside what that run shows. Of the four cloud ones, the **GitHub row of
+  the exposed-credential check is proven against the real `api.github.com`** — confirmed, its
+  certificate re-verified offline, and a live bogus credential of the same shape rejected by GitHub
+  itself and left a lead — while **the Amazon Web Services row of that same check has never touched
+  real AWS and nothing from the GitHub run transfers to it.** Two more are proven offline against
+  recorded sample data and **await use against a real third-party cloud account**, which waits on
+  the customer supplying credentials to their own account; the detection logic, evidence handling,
+  certificates and safety gates are all built and proven, and only the act of pointing them at a
+  live outside account is pending. The fourth, the permission-escalation check, deliberately never
+  carries out the escalation at all; that is a design decision rather than a gap. Both live-fire
+  runs are set out as worked examples in section 4.4, including what each did **not** exercise.
+  **None of the six can fire during an ordinary scan**, by two independent mechanisms. Other
+  capabilities are similarly labelled as built-but-not-yet-used-against-a-live-outside-system in the
+  registry, in the code, and in this chapter.
 - The system's **own build** is hardened on the same principle: starting images pinned by content
   rather than by a movable name, packages pinned to exact files by cryptographic fingerprint, a
   generated bill of materials cross-checked against that fixed list, and a vulnerability gate that
   blocks a change on a CRITICAL finding while reporting HIGH in full — with a planted-vulnerability
   self-test proving the gate is capable of firing. **That work is part of the released software**,
   accepted into it on the day this chapter was written. Section 12 gives the boundaries that still
-  apply — chiefly that eight older build jobs have not yet been converted onto the fixed dependency
+  apply — chiefly that the other build jobs have not yet been converted onto the fixed dependency
   lists — and the commands to re-check every claim in it independently.
 
 ---
@@ -9712,8 +11581,21 @@ running it rather than by the software.
 If you are assessing a live installation rather than reading for background, turn first to
 **section 13**. It is a short numbered list of the questions the software cannot answer for
 you, because the answers are facts about a particular installation and the people running it,
-not facts about code. Section 4 carries the full inventory of every key in one table — where
-each one sits, who can read it, what it vouches for, and what breaks if it is lost.
+not facts about code. **Section 4** carries the full inventory of every key in one table — where
+each one sits, who can read it, what it vouches for, and what breaks if it is lost — followed by
+a second table saying, for each signed thing, exactly what an outsider needs and what performs
+the check. **Appendix A** lists every purpose label in the source exhaustively, so the claims in
+this chapter can be checked against the code rather than against a summary.
+
+One part of this chapter describes work delivered in the current release and is worth flagging at
+the front, because it corrects a belief a reader would reasonably have formed from everything
+above: **a genuine signature was not, on its own, enough**. The owner's decisions about what the
+system may do are stored as signed entries in an append-only record, and an old, genuinely signed
+entry could be added to that record a second time to resurrect a permission the owner had since
+withdrawn — a revoked phone re-armed as an approver, a halted system un-halted. Nothing was
+forged; the replayed entry carried the owner's real signature. The guard that closes this, and
+the reasoning behind why only one direction of each decision is guarded, is at the end of
+**section 11**, under "Replaying a single signed permission".
 
 ---
 
@@ -9814,11 +11696,28 @@ below it cannot fail and its green tick therefore means nothing.
 — rated high — in the very signature library this chapter rests on. The project's own version
 ceiling forbade taking the fix, so the gate reported it as advisory and it was written down as
 follow-up work rather than quietly ignored. Raising that ceiling and moving every declaration
-onto the fixed release was then done as its own separate change, which is being delivered now.
-The same run recorded no critical findings and eight high ones, most of them inside the
-third-party agent that this project keeps a copy of rather than in its own code. That is the
-honest shape of the control: **critical stops the line; high is surfaced, tracked and fixed
-deliberately, not suppressed.**
+onto the fixed release was then done as its own separate change, and **that change has now
+landed.** Every first-party declaration of the signature library names the fixed release: the
+engine's requirement, the shared core's, the sovereign side's pinned version, and the input to
+the sovereign lock file. The same run recorded no critical findings and eight high ones, most of
+them inside the third-party agent that this project keeps a copy of rather than in its own code.
+That is the honest shape of the control: **critical stops the line; high is surfaced, tracked and
+fixed deliberately, not suppressed.**
+
+Two qualifications on that, because a briefing that claimed the flaw was simply "gone" would be
+overstating it.
+
+- **The copy of the third-party agent still lags.** The project's own supply-chain document
+  records that the vendored agent's lock file still names an older release of the signature
+  library, along with two other advisory findings. That copy is not what signs anything in this
+  chapter — the signing paths use the first-party declarations — but it is in the tree, and the
+  gate reports it every run rather than hiding it.
+- **A declaration is not an installation.** I checked the two virtual environments on the machine
+  this was written on. The offensive one has the fixed release installed. The sovereign one still
+  had the previous release installed at the time of writing. That is a property of one machine
+  that has not been rebuilt since the change, not of the code — but it is exactly the kind of gap
+  an assessor should check on the host in front of them rather than infer from a requirements
+  file.
 
 ---
 
@@ -9829,19 +11728,27 @@ that someone might later have to rely on.
 
 | Signed object | What it is, in plain words |
 |---|---|
+| **The engagement authority** | The signed charter that arms a run at all: which hosts are in scope, from when until when, whether destructive actions are permitted, and how many actions the run may take. A run refuses to start on an unsigned or altered one. This is the document that turns "the software is installed" into "the software is permitted to act here". |
 | **Evidence certificate** | One per confirmed weakness. It carries the fingerprint of the exact evidence collected, which automatic test confirmed it, the list of raw files kept, and a plain-language note on how to re-check it. |
 | **Chained record entries and the signed "head"** | The running log of certificates, plus a signed summary that fixes how many entries exist and what the last one was. This is what makes silently rewriting history detectable. |
 | **Usage ledger** | Who ran the tool, when, and what they pointed it at. Every entry is signed and linked to the one before it. |
 | **Execution records** | Every command run through the governed local terminal or the sandbox produces a signed, secret-scrubbed record of what ran. |
-| **Transparency checkpoints and witness counter-signatures** | A public summary of the log's state at a moment in time, and other parties' counter-signatures on it. |
-| **Remediation certificates** | The signed statement that a previously proven weakness is now fixed, re-derived by running the original test again and requiring it to stay silent. |
+| **Permission-kernel action records** | On the owner's side, every single tool invocation the permission kernel decides about — the time, the tool, a fingerprint of its arguments, the permission tier, the decision, who approved, and a fingerprint of the result — written as a record that is both individually signed and chained to the one before it. Section 10 describes the chaining. |
+| **Governance events** | The owner's signed decisions about what the system itself may do, written onto the owner's own record: tripping and clearing the emergency stop, granting and withdrawing an agent's permission to act without asking, switching a physical capability such as gesture or voice control on and off, authorising and revoking a phone as an approver, a host advertising what it is capable of, and opening or closing the sovereign gate the offensive side is designed to pass before it acts. These are the records section 11 describes the replay guard for. Two of them — the host advertisement and that sovereign gate — are record types with no production writer yet; both are noted where they appear below. |
+| **Device request envelopes** | Every request the owner's phone makes to the desktop, and every approval it gives, signed by the phone's own key. There is no shared password on the wire: the signature *is* the authentication. |
+| **Transparency checkpoints and witness counter-signatures** | A public summary of the log's state at a moment in time, and other parties' counter-signatures on it. Three separate signed forms exist and are deliberately kept apart: a producer's signed submission asking a witness to counter-sign, a witness's plain counter-signature, and a witness's counter-signature that also commits to the time it saw the summary. |
+| **Remediation certificates** | The signed statement that a previously proven weakness is now fixed, re-derived by running the original test again and requiring it to stay silent. Three related signed objects sit around it: the fix statement itself, a re-proof certificate produced each time the check is repeated, and a signed freshness challenge that stops an old re-proof being passed off as a recent one. |
 | **Posture certificates** | The signed statement that, over a specific bounded surface, an applicable test had a live channel and did *not* fire. |
 | **Authority-envelope certificates** | The signed statement that the automated operator stayed inside its authorised bounds. |
 | **Owner delegations** | The owner's signed statement that a particular working key is allowed to act in a particular role, for a particular scope, until a particular time. |
 | **Per-action approval tokens** | The owner's signed permission for one specific queued action. |
 | **Destruction authorisations** | The multi-party signed permission for one specific irreversible action. |
-| **Identity attestations and capabilities** | The owner's signed statement of what counts as "the real target", and a signed, narrowable permission slip letting an outside auditor re-run a check legally. |
+| **Identity attestations and capabilities** | The owner's signed statement of what counts as "the real target", and a signed, narrowable permission slip letting an outside auditor re-run a check legally. A third signed object in the same family proves that whoever presents such a slip really is its holder, rather than someone who copied it. |
 | **Detection certificates** | Signed results from the defensive side of the system. |
+| **Call-back receipts** | Some weaknesses can only be shown by making the target reach out to a listener the system controls. When that happens the listener signs a receipt for the connection it received, so the fact that the target called out is provable later from the receipt rather than from an assertion. |
+| **Channel-binding co-signatures** | A separate party's signature tying a captured response to one specific encrypted session, so that a reader does not have to take the producer's word that the target sent those bytes. Section 11 states honestly what this does and does not currently establish. |
+| **The anti-rollback floor and the witness roster** | Two small owner-signed control files: the high-water mark of how far the record has ever got (section 11), and the list of outside witnesses the owner accepts. |
+| **Self-improvement proposals** | When the system proposes a change to its own code, the approval that lets that change merge is a signature over the proposal's content — its target, the change type, and a fingerprint of the patch. Because the signature covers the content and not the whole document, a later status or timestamp change does not invalidate it, and an approval cannot be moved onto a different proposal. |
 | **Dossier manifests** | The list of file fingerprints inside a downloadable evidence package. |
 | **Supply-chain statements** | Signed machine-readable statements about whether a known published flaw in some third-party component actually affects this software. They use two open formats built for that job: **OpenVEX** (short for "Vulnerability Exploitability eXchange" — an agreed way of publishing "this published flaw does / does not actually affect our product"), carried inside a **SCITT**-style signed statement ("Supply Chain Integrity, Transparency and Trust", an internet-standards effort for signed, independently checkable supply-chain claims). One part of the standard's compact binary encoding is deliberately not built; section 11 says so. These statements are about *published flaws in components*; the separate safeguards that control what the software is built from in the first place are in section 1. |
 | **Capability grants** (the code calls them "entitlements") | A signed permission slip saying which of the system's more dangerous capabilities a particular institution may run, on which machines, from which date until which date, and — if the issuer chooses to narrow it that far — under which named operator. Inside the level granted, the issuer may also list a shorter set of specific capabilities, so a grant can be cut to the minimum a job needs. It is signed by the authorised signers named in the deployment's trust list, meeting whatever number that list requires — several signers, not one, in a properly separated deployment. Section 4 explains the whole arrangement and says who holds those keys; section 6 covers what happens if they are lost. |
@@ -9853,9 +11760,11 @@ A seal that just says "approved" is dangerous. If the same seal is used on passp
 cheques, an approved passport becomes an approved cheque.
 
 The system avoids this by mixing a short fixed **purpose label** into the bytes before
-signing. A signature made for one purpose mathematically cannot verify as another. These
-labels are held in one shared registry so that no two parts of the system can drift into using
-the same label by accident. Ten document types have their own label today:
+signing. A signature made for one purpose mathematically cannot verify as another.
+
+Ten of these labels — the ones that cross the boundary between the two halves of the system, and
+so must never drift into two spellings — are held in **one shared registry**, so that two parts
+of the system cannot independently invent the same label. Those ten are:
 
 - evidence certificates and the signed summaries that cap the record,
 - the owner-side anti-rollback floor (section 11 explains what that is),
@@ -9868,15 +11777,34 @@ the same label by accident. Ten document types have their own label today:
 - a narrowing of an existing permission slip,
 - proof that the holder of a permission slip really is its holder.
 
-The exact machine-readable label text for each of these is in Appendix A, for an assessor who
-wants to check the code against this list. A general reader does not need it.
+**The shared registry is not the whole population.** Counting every purpose label actually
+present in the source, there are **twenty-four distinct signing labels** and two further labels
+used to separate fingerprints rather than signatures. The other fourteen signing labels are
+declared next to the code that uses them, and each carries a comment naming what it must not be
+confusable with. Appendix A lists all twenty-six exhaustively, with the exact machine-readable
+text of each, so an assessor can check the code against this chapter rather than against a
+sample. A general reader does not need that table; the property it establishes is the whole
+point, and it is one sentence long: *no signature in this system can be lifted out of the
+purpose it was made for.*
 
-The same registry is honest about the places where this labelling is *not* yet applied. The
-offence-side engagement log and the usage ledger sign a plain fingerprint with no purpose
-label; they are kept apart by the fact that the fingerprints of different content are
-different, not by a label. The registry's own notes call a per-purpose label on each of those
-"the natural next hardening". That is an accurate description of a gap, written down by the
-people who built it.
+**Where the labelling is not applied, and what is used instead.** The shared registry is honest
+about this in its own notes rather than leaving it to be discovered. Three surfaces sign
+without a purpose label:
+
+- the offensive engagement log and the usage ledger each sign a plain content fingerprint — a
+  fixed-length string of hexadecimal digits — so what keeps them apart is that the fingerprints of
+  different content are different, not a label;
+- the owner-side governance events sign a canonical rendering of a small structured object,
+  which is a different *shape* from a fingerprint string and therefore cannot be confused with
+  one, but is not separated from other structured objects by a label.
+
+I found one further case the registry does not mention: the manifest inside a downloadable
+evidence package is signed over its own raw bytes, with no purpose label. In practice those bytes
+are a distinctively formatted structured document that no other signing path produces, so the
+same shape argument applies — but it is one more place where separation rests on shape rather
+than on an explicit label. The registry's own notes call adding a per-purpose label to these
+surfaces "the natural next hardening". That is an accurate description of a gap, written down by
+the people who built it.
 
 ---
 
@@ -10128,12 +12056,17 @@ account that created it open, and which is encrypted at rest once the hardware v
 |---|---|---|---|---|
 | **Owner key** (the root of everything) | Owner-only file under the owner's home directory on the sovereign side (`~/.sigil/spine/keys/`) | The owner's own account on that one machine | Approvals, delegations to every other key, the owner-side record's summary and its anti-rollback floor, governance decisions | The most serious loss. Nothing already signed becomes invalid, but no new delegation or approval can be signed until a new owner key is created — and every party who pinned the old owner key must be given the new one. Recoverable only from the encrypted off-box backup (section 6). |
 | **Record data key** | Owner-only file beside the owner key | The owner's account | Nothing — it is an encryption key, not a signing key. It scrambles the contents of the owner-side record. | The stored record cannot be read back. Included in the off-box backup. |
+| **Permission-kernel key** | A file beside the permission kernel's own action log, under the owner's home directory (`~/.sigil/warden/keys`). Created automatically the first time the kernel opens | The account the kernel runs as | Every action record the permission kernel writes — one per tool invocation — and the signed summary that fixes the log's length | The existing action log can no longer be verified. It is **not** in the off-box backup, so treat the action log as a local audit trail rather than as recoverable evidence. Nothing already published elsewhere is affected. |
+| **Device keys** (the owner's phone, and any other approving device) | On the device itself. The device generates its own key and **never holds the owner key** | Each device separately | Each request that device makes to the desktop, and each approval it gives to a queued action | That device can no longer request or approve anything. The owner revokes it and pairs a replacement. Nothing else is affected. A revocation must itself be owner-signed, but once signed it carries no freshness requirement of any kind, so a lost phone can always be disarmed (section 11). |
 | **Engagement-record key** (called the "spine" key in code) | Owner-only file in the working directory of the offensive engine (`offense-spine.key`) | The account running the offensive engine | The running log of an engagement, the record of every command executed, and defensive detection certificates | The existing engagement log cannot be continued: a new key does not verify the earlier lines of the same log file. Start a fresh engagement and re-issue the owner delegation (section 6). |
 | **Governance key** | Owner-only file in the same working directory (`offense-governance.key`) | The account running the offensive engine | Evidence certificates for confirmed weaknesses, and the engagement's authority record | Already-issued certificates still verify (they are checked against the public half, which travels with the evidence). New certificates need a new key plus a new owner delegation. |
 | **Operator key** | Owner-only file under `~/.vigil/attestation/` | The account running the offensive engine | The usage ledger: who ran the tool, when, against what | The existing usage ledger cannot be extended by the new key. Past entries still verify against the retained public half. |
 | **Approval signing key** | Not stored at all. Printed once when created; the operator keeps it and supplies it through an environment variable (`VIGIL_APPROVAL_OWNER_KEY`) | Whoever the operator gave it to | One queued action at a time | Re-run the provisioning command with the override flag. This rotates the key and voids any approvals signed by the old one. |
 | **Irreversible-action signing keys** (owner plus co-signers) | Not stored. Printed once at creation; the owner's copy is supplied through an environment variable (`VIGIL_DESTRUCTION_OWNER_KEY`), co-signers keep theirs on their own machines | Each holder separately | One irreversible action at a time; several holders must sign | Re-run provisioning and distribute a fresh set. Nothing already done is affected — these authorise a single action each and are single-use. |
 | **Self-witness key for the continuous re-checking log** | Owner-only file in the offensive working directory (`reprove-witness.key`) | The account running that service | Its own counter-signatures on the continuous re-proof log | That log's continuity claim restarts from the new key. |
+| **Witness keys** (one per outside witness) | On each witness's own machine, in an owner-only file it creates on first run and then keeps. A witness that minted a fresh key per request would be worthless, so persistence is deliberate | Each witness operator separately | That witness's counter-signature that a new published summary genuinely continues the previous one it saw — and, in the timed form, the time at which it saw it | That witness drops out of the quorum. If enough drop out that the required number can no longer be met, no new summary can be witnessed until replacements are enrolled. Past counter-signatures still verify. |
+| **Producer submission key** | The producing side, alongside its other working keys | The account running the producer | The producer's own signature on a request asking a witness to counter-sign. It exists so a witness can tell a genuine submission from anything else that reaches its network port, and refuse the rest at the door | New submissions are refused by any witness that pinned the old key, until the new key is distributed. Nothing already witnessed is affected. |
+| **Notary key** | On a notary's machine | The notary operator | A co-signature tying a captured response to one specific encrypted session — the mechanism that is meant to let a reader stop trusting the producer's report of the wire | The independent leg of that evidence is lost; the rest of the evidence package is unaffected. Section 11 states honestly that today the shipped notary is software this system runs, so this key does not yet establish independence. |
 | **Capability-grant signing keys** ("authorisers") | Deliberately **not** on any machine that runs the system. The project's own guidance calls them "the institution's crown jewels" and says they belong on a separate issuing machine, ideally inside a dedicated sealed key device that performs signatures without ever revealing the key | The issuing institution only | Capability grants and revocation lists (section 2) | New grants cannot be issued until enough authorisers are restored or replaced, and the trust list on each deployment has to be re-provisioned. Existing unexpired grants keep working. |
 | **Capability trust list** (public, not a secret — listed here because losing it matters) | A small file in the deployment's own permission folder, which can be pointed at a read-only mount or a separately protected path | Written by the operator at set-up; readable by the account running the engine | Nothing. It is the list of authorisers the deployment recognises, and the number of them that must agree. Everything else about capability grants is measured against it | Deleting it does not break any signature — but it switches capability enforcement **off** unless the deployment's enforcement setting is explicitly pinned on. Re-install it from the institution's copy. A damaged file, unlike a missing one, denies every gated function. |
 | **Sealed master key** (the key that encrypts all the above at rest) | Never on disk in usable form. Sealed inside the machine's hardware security chip; only two scrambled files, useless anywhere else, sit on disk | Nobody — it can only be used, on that one machine, through the chip | Nothing. It is an encryption key. | Everything it sealed becomes unreadable on that machine (that is the point). Recovery is from the off-box backup, which is encrypted under a passphrase instead. See section 6. |
@@ -10148,6 +12081,65 @@ Two observations worth drawing out of that table:
 - **Only two keys have no recovery path other than the off-box backup**: the owner key and the
   master key that seals things to one machine. Everything else can be regenerated and
   re-blessed by the owner.
+- **The backup does not cover everything, and the table shows which.** The permission kernel's
+  own key — the one signing the log of every tool invocation — is not in it, and neither are the
+  three offensive working keys. Losing any of those costs the continuity of a local log, not any
+  published evidence. Section 6.2 states the boundary in full.
+
+#### Every stored secret is sealed under its own purpose
+
+Section 5 explains that one master key wraps everything held at rest. That is not the whole
+arrangement. Each stored secret is also bound, at the moment it is sealed, to a short label
+naming *which* secret it is. The label is folded into the mathematics of the sealing, so a blob
+sealed as one thing cannot be opened as another even with the correct master key. An attacker who
+could swap two files on disk therefore cannot make the system read the operator's key where it
+expects the governance key; the swap simply fails to open.
+
+Nine such labels exist in the source, one for each thing the system holds at rest:
+
+| Sealed item | Kept where |
+|---|---|
+| The owner private key | Sovereign side |
+| The key that encrypts the owner-side record | Sovereign side |
+| Individual fields inside that record | Sovereign side |
+| Service credentials such as an API key | Sovereign side |
+| The whole encrypted off-machine backup | Wherever the operator puts it |
+| The offensive engagement-record key | Offensive side |
+| The offensive governance key | Offensive side |
+| The operator key | Offensive side |
+| The self-witness key for the continuous re-checking log | Offensive side |
+
+The comments in the source say why each label is distinct in almost identical words each time:
+"a blob sealed here can never be opened as another secret". It is the same discipline as the
+purpose labels on signatures in section 2, applied to storage instead of to signing.
+
+#### How an outsider checks each signed thing
+
+The point of all of this is that someone who does not work for the operator can check the claims.
+The table below says, for each signed object, what an outside checker needs and what performs the
+check. "Public keys only" means no private key of any kind is required.
+
+| Signed object | What an outsider needs | What performs the check |
+|---|---|---|
+| Evidence certificate | The evidence package, the trust-root fingerprint received separately (section 9), and public keys only | The standalone checker `verify_pcf.py`, which imports none of this system's code. Or the system's own `verify_certificate`, which additionally re-runs the original test |
+| Chained record entries and the signed head | The saved chain files and public keys only | The same standalone checker, or the system's own bundle verifier |
+| Owner-side personal record | The record files and the owner public key | The sovereign side's own `sigil verify` |
+| Offensive engagement record | The saved record, the owner public key, and the owner-signed delegation naming the working key | `vigil verify`, which derives the key it trusts from the delegation rather than being handed one |
+| Engine reasoning chain | Two small saved files plus the owner-signed delegation | The same command's blackboard check, which reads only those files and public keys — no database, no engine |
+| Usage ledger | The ledger file and the retained operator public key | `vigil verify-ledger`. Honestly noted: this one is **not** tied back to the owner today |
+| Continuous re-proof log | The log, its signed summary, and trust anchors the checker pins itself | Its own verifier. Also not owner-tied today; the anchors must be supplied out of band |
+| Remediation and re-proof certificates | The fix-lifecycle package and public keys only | The standalone checker `verify_vf.py`, again importing none of this system's code |
+| Permission-kernel action records | The action log and the kernel's recorded public key | The kernel's own verify routine |
+| Transparency checkpoints | The published summaries and each witness's public key | `verify_witnessed` for "a quorum signed", and a separate `verify_split_view_resistant` for the stronger claim — deliberately two functions, so a caller must state which claim it is making |
+| Channel-binding co-signature | The captured response and the notary public key, pinned out of band | `verify_channel_binding_evidence` |
+| Capability grants and revocation lists | The grant, the list, and the deployment's trust list | The engine's own gate, which runs the checks in the fixed order given earlier in this section |
+| Dossier manifest | The downloaded package | Recompute each file's fingerprint against the manifest, then check the signatures against the trust root the package carries — and compare that trust root's fingerprint against the one received separately |
+
+**The one thing no standalone checker does** is re-run the original automatic test. That needs the
+test's own code, which lives inside the engine. So an outsider working with the standalone
+checkers alone establishes origin, integrity, binding and chain continuity; reproducing the
+finding itself requires the software. Both standalone files say this in their own opening
+comments rather than letting a reader assume otherwise.
 
 ---
 
@@ -10312,6 +12304,9 @@ Three honest limits on the backup:
 | **The owner key**, with a backup available | Everything already signed still verifies | Restore the backup onto the replacement machine, then run the verification command against the restored copy to confirm the recovered owner signature. |
 | **The owner key**, with no backup | Everything already signed still verifies, forever, against the old public key | There is no recovery path. A new owner identity must be created; every party who pinned the old owner key must be given the new one out of band; and every delegation must be re-issued. Be aware of one sharp edge: the software does not treat a missing owner key as an error — the next owner-signing command simply creates a new one. Nothing announces "the owner key is gone", so an operator can rotate their own trust root by accident. Keeping the backup is the guard against this. |
 | **The machine, or the TPM chip in it** | Everything already published still verifies | The sealed copies on that disk are permanently unreadable, by design. Restore the off-box backup onto the new machine. Without a backup, the record and the owner key are gone; published evidence is unaffected. |
+| **The permission kernel's own key** | Everything already published elsewhere still verifies | The kernel creates a fresh one automatically the next time it opens. The existing action log cannot be verified under it, and there is no backup — that log is a local audit trail. If it matters to you as evidence, archive it before this can happen, and note the log's length and last fingerprint somewhere outside the machine. |
+| **A device key** (a lost or stolen phone) | Everything else is unaffected | Revoke the device on the owner's side, then pair a replacement. The revocation is honoured from the moment it is written; the desktop bridge recomputes the authorised set on every single request rather than caching it, so a revoke bites immediately rather than at the next restart. |
+| **A witness key** | Every counter-signature that witness already gave still verifies | Enrol a replacement witness and re-publish the roster. If losses take the set below the required number, no new summary can be witnessed until that is fixed — which is the intended behaviour of a several-must-sign scheme. |
 | **The engagement-record key** | Everything already signed still verifies | Generate a fresh one (it is created automatically when absent), export its public half, and have the owner re-issue the delegation. Do not try to continue the old engagement's log with a new key — the earlier lines of that file will not verify under it. Start a new engagement. |
 | **The governance key** | Every previously issued evidence certificate still verifies | Generate a fresh one, export its public half, have the owner re-issue the delegation, and publish the new key-list fingerprint alongside the old one. |
 | **An approval or irreversible-action signing key** | Nothing already done is affected | Re-run the relevant provisioning command and distribute the new keys. Approvals signed by the old key stop being accepted; that is the intended effect. |
@@ -10676,6 +12671,12 @@ inconvenient finding was recorded. They replace today's log with the older, shor
 signed version and replace today's summary with the older, genuinely signed summary. Every
 signature checks out. The record has been silently rewound.
 
+The same weakness has a second, sharper form: instead of rewinding the whole record, replay one
+old signed *permission* into an otherwise honest record. That form, and the guard added for it,
+are covered at the end of this section under "Replaying a single signed permission". A reader
+short of time should go there first, because it is the form that affects who is allowed to do
+what, rather than what is on file.
+
 #### Defence one: a durable floor
 
 The system keeps a small **high-water floor** file recording the highest state the record has
@@ -10808,6 +12809,135 @@ tension. The safe reading, and the one consistent with both, is: **the mechanism
 independence it would provide is not established until a third-party authority is
 configured.**
 
+#### Replaying a single signed permission
+
+Everything above concerns the *record* being rewound. This concerns a *permission* being
+resurrected, and it is the more consequential of the two, because it changes what the system is
+allowed to do rather than what it has written down. It was closed by a change delivered in this
+release.
+
+**How the owner's decisions are stored.** The owner's side does not keep a settings file saying
+what is currently switched on. It keeps an append-only record, and each of the owner's decisions
+is a signed entry in it. To find out whether the emergency stop is currently tripped, or whether a
+particular agent is currently allowed to act without asking, the system reads that record from the
+beginning and applies each verified entry in turn. The last valid entry wins. This is the right
+design: there is no separate settings file for an attacker to edit, every decision is signed, and
+the whole history of who allowed what and when is preserved and tamper-evident.
+
+**Why a genuine signature was not enough.** A signature answers "who wrote this". It does not
+answer "when does this count" or "how many times does this count". Consider the sequence a
+security officer would expect to be safe:
+
+1. The owner authorises the phone as an approver. That is a genuine, owner-signed entry.
+2. Months later, the phone is lost. The owner revokes it. That is another genuine, owner-signed
+   entry, and after it the phone approves nothing.
+
+Now suppose someone who can append to that record — not forge a signature, merely add a line —
+kept a copy of step 1. They append those exact bytes again, unchanged. Every check the system had
+passes. The signature is real, because it *is* the owner's real signature. The record's internal
+chain of fingerprints extends cleanly, because a genuine new line has genuinely been added. And
+the reading rule says the last valid entry wins — so the phone is authorised again.
+
+Three plausible-sounding fixes do not work, and the source explains each:
+
+- **Refusing a signature seen before** fails, because the signature method used here is
+  deterministic. If the owner legitimately grants, revokes, and grants again, the second genuine
+  grant produces byte-for-byte the same signature as the first. A duplicate filter would swallow a
+  real decision.
+- **Using the entry's position in the record** fails, because the position is assigned when the
+  line is appended, after signing. A replayed line simply receives a fresh, higher position.
+- **Reading a clock inside the checking code** fails for a subtler reason. A timestamp the
+  checking module generates itself is a timestamp an attacker replaying that module's own output
+  can rely on. The authority over "when" has to sit with whoever holds the owner key.
+
+**What was changed.** Each of these decisions now carries an issue time *inside the signed part*
+of the entry — not beside it, where it could be re-stamped without breaking the signature. And the
+reading rule now keeps a high-water mark: for each thing being decided about, it remembers the
+highest issue time it has ever honoured. An entry counts only if its issue time is strictly higher
+than that mark, and honouring one raises the mark past it, so an entry cannot even be replayed
+against itself.
+
+The issue time is supplied by whoever holds the owner key, not read by the module. On the command
+line, the operator's own terminal stamps it. In the web interface, the *server* stamps it, and the
+source says exactly why it is not taken from the browser: a caller-chosen value could be set
+absurdly far in the future, which would pin the high-water mark so high that the owner could never
+issue a real decision again, or absurdly low, which would render the guard useless.
+
+**Which decisions are covered.** Five kinds of record gained the guard in this change. A sixth —
+the sovereign gate the offensive side is designed to pass before it acts — already had it, and was
+the pattern the other five were built to match. That sixth carries the same honest note as the host
+advertisement above: it is built, tested and guarded, and it has no caller in the shipped commands
+or interfaces, so it is a record type the system knows how to write and read safely and does not
+write in normal operation. Chapter 14 sets out what the offensive side does pass instead.
+
+| Decision record | What a replay would have resurrected |
+|---|---|
+| Clearing the emergency stop | A halted system, un-halted |
+| Granting an agent permission to act without asking | A withdrawn permission, restored |
+| Switching a physical capability on — gesture control, voice control, or the drafting of proposed lessons | A capability the owner had switched off, back on |
+| Authorising a device as an approver | A lost, stolen or sold phone, re-armed as a full approver |
+| A host advertising what it is capable of | Capabilities a machine had truthfully given up — including the ability to drive keyboard and mouse input, and to stream a camera — reinstated |
+
+The device row is the one to lead with in a briefing. That single list of authorised devices is
+what six separate parts of the system consult before accepting an approval — the source names
+them: the approval queue itself, the gesture remote-arm path, the desktop bridge, the automated
+actor gate, the operator gate, and the outbound-data gate. Reading the tree I found a seventh, the
+gate on accepting a proposed lesson into the system's own knowledge. One replayed line would have
+re-armed a revoked phone across all of them at once.
+
+**Only the dangerous direction is guarded, and that is deliberate.** Tripping the emergency stop,
+withdrawing an agent's permission, switching a capability off, and revoking a device are the
+*safe* directions. Those carry a fixed issue time and are subject to no freshness test at all.
+Two of them go further and are honoured even without a valid signature — tripping the emergency
+stop, and switching a capability off — on the same reasoning: a forged halt is at worst a
+nuisance, while a halt that fails to land is a real loss of control. The other two, withdrawing an
+agent's permission and revoking a device, do still require the owner's signature; the source notes
+that difference rather than treating the four as one rule. The reasoning behind all of this is
+worth stating plainly to an official, because it looks
+at first like an omission: if a revocation had to be fresher than everything before it, then a
+revocation issued from a machine with a lagging clock would be silently ignored — and a security
+control that can fail to switch something *off* is far worse than one that can be replayed to
+switch something off twice. Replaying a revocation merely revokes an already-revoked thing.
+Guarding a fail-safe direction would convert it into a fail-open one.
+
+One row does not follow that pattern, and the source explains why: a host advertising its own
+capabilities has no safe direction, because an advertisement is the only kind of entry there is.
+So every advertisement is checked for freshness.
+
+Two honest notes on that last row. First, the guard is real code with real tests, but the
+advertisement function has **no caller in the shipped commands or interfaces** — the only callers
+anywhere in the source are its own tests. So it is a record type the system knows how
+to write and how to read safely, and does not currently write in normal operation. Second, the
+capabilities it would resurrect are not trivial ones: they include the ability to drive keyboard
+and mouse input on a machine, and to stream its camera. Guarding the record before it has a
+production writer is the right order to do things in, and it should be described that way rather
+than as a defence in daily use.
+
+**Fail-closed against a signed but nonsensical value.** The owner can sign any number, including a
+malformed or infinite one. The parser that reads the issue time treats anything unparseable, and
+anything not a finite number, as the lowest possible value. The source names the specific danger
+this avoids, and it is a good illustration of how a guard can be turned into its opposite: a
+"not-a-number" value stored as the high-water mark would make every subsequent comparison against
+it false, so *every* later replay would be accepted. An infinite value would do the reverse and
+permanently brick the ability to issue a real decision. Both are mapped to the bottom instead, so
+such an entry is honoured at most once and then blocks its own replay.
+
+**One detail that shows the guard was checked against the rest of the system.** There is separate,
+partly-built work to *prune* the record — archiving old entries away and replacing them with a
+folded summary of what they established, so the file does not grow without bound. That summary now
+carries the high-water marks. Had it not, the first prune would have reset every mark to zero and
+made every archived permission replayable again: the guard would have been silently undone by
+unrelated housekeeping. The comment saying so appears at each of the five sites. Worth noting for
+accuracy: the pruning machinery is present but the shipped version prunes nothing, so this is a
+gap closed before it could open rather than one closed after the fact.
+
+**Status.** Built and covered by its own test suite, which I ran: 67 tests, all passing. The
+guard is enforced in the reading path, which is the path every decision goes through, so it is
+active for any deployment running this version. What it protects against is an attacker who can
+*append* to the owner's record — for instance a compromised component with write access to it —
+not one who has the owner's private key. Someone holding the owner key does not need to replay
+anything; they can sign a fresh decision.
+
 #### Deferred by name
 
 Anchoring a checkpoint fingerprint into the Bitcoin blockchain via OpenTimestamps is designed
@@ -10823,19 +12953,21 @@ governance root plus witnesses, which the project describes in-repo as stronger.
 |---|---|
 | Ed25519 signing and verification through a standard maintained library | **Fully working.** |
 | Rejection of weak and non-standard public keys | **Fully working**, with a documented adversarial-review origin. |
-| Purpose labels preventing a signature being reused across contexts | **Working** for the ten labelled document types; explicitly **not yet applied** to the offensive engagement record and usage ledger, which the registry names as the next hardening. |
+| Purpose labels preventing a signature being reused across contexts | **Working** for twenty-four distinct signing purposes, ten of them held in a shared registry and the rest declared beside the code that uses them (Appendix A lists all of them). Explicitly **not applied** to three surfaces — the offensive engagement record, the usage ledger and the owner-side governance events — which the registry names as the next hardening, plus the evidence-package manifest, which it does not name. On all four, separation rests on the shape of what is signed rather than on a label. |
+| Anti-replay guard on the owner's signed decisions | **Working**, delivered in this release. Five kinds of decision record gained an issue time inside the signed part and a per-item high-water mark; a sixth already had one. Only the dangerous direction is guarded, deliberately. Covered by its own test suite, which I ran: 67 tests, all passing. It defends against an attacker who can append to the owner's record, not against one holding the owner's private key. |
+| Permission-kernel action log: every tool invocation individually signed and chained | **Working.** Present and populated on the machine this was written on. Its key is **not** included in the off-box backup, so treat the action log as a local audit trail rather than as recoverable evidence. |
 | Evidence certificates: authenticity, binding, file integrity, reproduction, claim grounding, known shape | **Fully working.** |
-| Chained record with signed head; detection of deletion, reorder, alteration, truncation, suppression, injection | **Fully working.** |
+| Chained record with signed head; detection of deletion, reorder, alteration, truncation, suppression, injection | **Fully working as a mechanism.** Not exercised on the owner's own record here: on the machine this was written on the chain links cleanly over sixteen entries, but nothing has signed a head, so on that host growth and truncation are not yet distinguishable. Signing one is a single operator command. |
 | Standalone offline checkers with no dependency on this system | **Fully working**, with the honest exception that they cannot re-run the original test. |
 | Out-of-band trust-root pinning, refusing a self-supplied trust root | **Fully working**, including a deliberately non-green "unpinned" state in the interface. |
 | Owner delegation ceremony tying working keys back to the owner | **Working**, with a human step (authenticating the identity file) that is stated, not hidden. |
 | Per-action owner approval: action-bound, key-pinned, time-bounded, single-use | **Fully working.** |
 | Several-must-approve gate for irreversible actions | **Built and tested; not yet fired in the field.** Live use awaits operator-provisioned quorum keys and a repository token. |
-| Encryption of keys at rest under a hardware-sealed master key | **Working where a TPM is present and set up**; falls back to owner-only unencrypted files with a loud warning where it is not. Not verified on any specific deployment host. |
+| Encryption of keys at rest under a hardware-sealed master key | **Built and fail-closed. Not active on the machine this was written on.** The TPM chip is present, but the standard command-line tools that reach it are not installed, so no master key has been provisioned and no sealed store exists. The owner private key on that host is 44 bytes of plaintext behind file permissions only — owner-read-only, in an owner-only directory. This is exactly the posture the code documents as the default before the vault is set up, and it reports the unsealed state rather than hiding it. Nothing here is a defect in the software; it is a one-time operator setup step that has not been performed on this host. **Do not describe at-rest encryption as active in this deployment.** |
 | Signed, host-bound, expiring capability grants gating the most dangerous functions | **Working**, and honestly bounded: enforcement switches on once a deployment provisions a trust list of authorised signers. With no trust list provisioned the deployment is "ungoverned" — the baseline runs, gated functions are permitted, and every such grant is logged as a warning. A government deployment should provision the trust list; an assessor should check that it has. |
 | Binding a capability grant to particular machines, and optionally to a named operator | **Working.** A gated function is refused when the running machine cannot present an identifier the grant was bound to. The software does not itself measure the hardware: it consumes an attested identity the deployment supplies, and falls back to the machine's installation identifier or, weakest, its hostname. How strong that binding really is depends on which of the three a deployment relies on. |
 | Withdrawing a capability grant before it expires | **Working** — a signed revocation list, protected against an older list being replayed over a newer one, and a grant may be issued so that a missing list denies it outright. Two honest limits: the issuing institution must deliver the new list to the deployment (nothing fetches it), and the decision is re-evaluated when the software next starts, not mid-run. |
-| Build and release safeguards: exact-version and fingerprint locking of every third-party package, content-pinned base images, a generated parts list checked back against the lock, and a gate that blocks on critical published flaws | **Working and part of the released software**, enforced automatically on every proposed change, with a deliberately planted failing case run first to prove the gate can still refuse. Honestly bounded: it blocks on **critical** findings only. High findings are reported and tracked rather than suppressed — including one in this chapter's own signature library, whose fix is being delivered now. |
+| Build and release safeguards: exact-version and fingerprint locking of every third-party package, content-pinned base images, a generated parts list checked back against the lock, and a gate that blocks on critical published flaws | **Working and part of the released software**, enforced automatically on every proposed change, with a deliberately planted failing case run first to prove the gate can still refuse. Honestly bounded: it blocks on **critical** findings only. High findings are reported and tracked rather than suppressed — including one in this chapter's own signature library, whose fix **has now been delivered** across every first-party declaration. Two residuals, both stated rather than smoothed over: the vendored copy of the third-party agent still names an older release, and on the machine this was written on the sovereign virtual environment had not yet been rebuilt onto the fixed one. |
 | Encrypted, signed, off-machine backup of the owner key and the owner-side record | **Working**, verified before anything is written on restore. It is a manual command — **nothing schedules it**. |
 | Key escrow or a vendor-held recovery copy | **Does not exist, by design.** The backup and its passphrase are the only recovery path. |
 | Documented replacement procedure for each key | **Supported by the commands described in section 6.4**; the owner key has no rotation command and is replaced by re-issuing every delegation from a new identity. |
@@ -10894,7 +13026,28 @@ a deployment rather than about code:
 15. **Ask separately about the build.** Which version of the signature library is installed
     here; does your build refuse a change that carries a critical published flaw; and can you
     show a run where that gate actually refused something? A gate that has never refused
-    anything and a gate that cannot refuse anything look identical from the outside.
+    anything and a gate that cannot refuse anything look identical from the outside. Ask for the
+    *installed* version on this host, not the version named in a requirements file — the two can
+    differ on a machine that has not been rebuilt, and on the machine this chapter was written on
+    they did.
+16. **Who or what can append to the owner's record, other than the owner?** The replay guard of
+    section 11 exists because appending is a weaker capability than signing, and a genuine
+    signature does not on its own establish that an entry still counts. Ask which components hold
+    write access to that record, and treat each of them as part of the trusted base.
+17. **Are the clocks on the machines that issue owner decisions correct and monotonic?** The
+    freshness value that makes the replay guard work is supplied by whoever holds the owner key,
+    from that machine's clock. A clock that jumps backwards on the issuing machine will cause a
+    legitimate later decision to be refused as stale until the clock catches up. This is a
+    fail-safe direction — a refusal, not a false approval — but an operator should know it can
+    happen, and should not be surprised into thinking the system is broken.
+18. **Is your permission-kernel action log part of your backup and retention plan?** It is
+    individually signed and chained, and it is the record of every tool invocation. It is
+    deliberately *not* in the encrypted off-box backup, so if it matters to you as evidence, you
+    have to archive it yourself.
+19. **Where does the evidence for a completed engagement live once the engagement is over?** The
+    off-box backup covers the owner's side. Finished evidence packages are ordinary files and are
+    the operator's to archive, the way any other case record would be. Ask to see where they go
+    and how long they are kept.
 
 ---
 
@@ -10902,8 +13055,14 @@ a deployment rather than about code:
 
 Section 2 explains why every signature carries a short fixed label naming what it is for, so
 that a signature made for one purpose can never be accepted as another. A general reader does
-not need this table. It is here so that an assessor can check the list in section 2 against the
-code, where these labels are held in one shared registry.
+not need these tables. They are here so that an assessor can check the claims in section 2
+against the code, exhaustively rather than against a sample. Every label below was read out of
+the source; none is inferred from documentation.
+
+#### A.1 The ten held in the shared registry
+
+These are the labels that cross the boundary between the two halves of the system, and are
+therefore kept in one place so the two halves cannot drift into two spellings of one purpose.
 
 | Purpose label in the code | What it seals |
 |---|---|
@@ -10918,10 +13077,67 @@ code, where these labels are held in one shared registry.
 | `vigil-capability-attenuation-v1` | A narrowing of an existing permission slip |
 | `vigil-capability-wielder-pop-v1` | Proof that the holder of a permission slip really is its holder |
 
-The registry also records, in the same place, the two records that carry **no** such label
-today — the offensive engagement record and the usage ledger — and calls adding one "the
-natural next hardening". Section 2 states that gap in the body text rather than leaving it to
-this appendix.
+#### A.2 The fourteen declared beside the code that uses them
+
+Each of these is declared next to its own use, and each carries a comment naming what it must
+not be confusable with.
+
+| Purpose label in the code | What it seals |
+|---|---|
+| `crucible-authority-v1` | The signed engagement authority — scope, dates, budget, whether destructive actions are permitted |
+| `crucible-entitlement-v1` | A capability grant: which of the dangerous functions an institution may run, on which machines, until when |
+| `crucible-revocation-v1` | The signed list of capability grants that have been withdrawn |
+| `crucible-proposal-v1` | An approval of a proposed change to the system's own code, signed over the proposal's content |
+| `vigil-peraction-approval-v1` | The owner's permission for one specific queued action |
+| `vigil-oob-receipt-v1` | A receipt for a connection the target made to a listener the system controls |
+| `vigil-zktls-channel-binding-v1` | A notary's co-signature tying captured bytes to one encrypted session |
+| `vigil-authority-envelope-v1` | The statement that the automated operator stayed inside its bounds |
+| `vigil-remediation-cert-v2` | The certificate that a proven weakness is now fixed |
+| `vigil-remediation-prove-cert-v1` | One re-proof that the fix still holds |
+| `vigil-remediation-freshness-challenge-v1` | The challenge that stops an old re-proof being passed off as recent |
+| `vigil-attestation-witness-time-v1` | A witness counter-signature that also commits to the time it observed the summary — deliberately distinct from the plain counter-signature above, so a timeless one can never be presented as a timed one |
+| `vigil-witness-producer-submit-v1` | The producer's own signature on a request asking a witness to counter-sign |
+| `vigil-remediation-v1` | The fix oracle's signed statement that the original test stayed silent against the patched build |
+
+#### A.3 Two further labels that separate fingerprints rather than signatures
+
+These are not signing labels. They are mixed into a fingerprint so that the result is not a bare
+hash of a secret — a bare hash of a low-entropy secret could be confirmed by guessing — and so
+that fingerprints belonging to two different capabilities can never collide even for identical
+input.
+
+| Label in the code | What it separates |
+|---|---|
+| `vigil.e1.imds.credential-fingerprint.v1` | The fingerprint binding a captured cloud instance credential to the call that proved it usable |
+| `vigil.e5.secret.credential-fingerprint.v1` | The fingerprint binding a captured exposed secret to the call that proved it valid |
+
+#### A.4 The at-rest sealing labels
+
+Section 4 explains that each stored secret is bound to a label naming which secret it is, so a
+blob sealed as one thing cannot be opened as another. All sealing shares one outer domain,
+`vigil-core/sealing/v1`, with these nine per-item labels folded in beneath it.
+
+| Label in the code | What it binds |
+|---|---|
+| `sigil/owner.priv` | The owner private key |
+| `sigil/spine.dek` | The key that encrypts the owner-side record |
+| `sigil/spine-field/v1` | Individual fields inside that record |
+| `sigil/secrets.kv` | Service credentials, such as an API key |
+| `sigil/backup/v1` | The encrypted off-machine backup |
+| `vigil/offense-spine.key` | The offensive engagement-record key |
+| `vigil/offense-governance.key` | The offensive governance key |
+| `vigil/operator.key` | The operator key behind the usage ledger |
+| `vigil-reprove-self-witness-v1` | The self-witness key for the continuous re-checking log |
+
+#### A.5 What carries no label
+
+For completeness, the four signing surfaces that carry no purpose label, restating section 2:
+the offensive engagement record, the usage ledger, the owner-side governance events, and the
+manifest inside a downloadable evidence package. The first three are named as a gap by the
+registry itself, which calls closing them "the natural next hardening". The fourth I found by
+reading the code and did not find named anywhere as a gap. On all four, what keeps signatures
+apart is the shape of what is signed — a fixed-length fingerprint string, or a structured object
+of a particular form — rather than an explicit label.
 
 ---
 
@@ -11111,14 +13327,18 @@ specific account, project, subscription, or cluster. The rules the code enforces
 
 **Where this stands in practice.** This gate, and the six cloud and
 container-cluster confirmations that sit behind it, are built and wired end to
-end. The two container-cluster (Kubernetes) ones are proven against a real
-Kubernetes cluster the system stands up, owns and destroys itself. The four cloud
-ones are proven offline against fixed sample evidence and have **not** been run
-against a live cloud account belonging to a third party. That step needs two
-things from the customer: their own cloud credentials, and their account named in
-the cloud-scope block of a signed charter. Until both exist, the safe answer the
-gate gives is "not authorised", which is the correct one. Item 11 in section 14
-states this in full.
+end. Three of the six have been fired at something real, and the three are not of
+equal weight: the two container-cluster (Kubernetes) ones against a real Kubernetes
+cluster the system stands up, owns and destroys itself, which is real infrastructure
+but the project's own; and the GitHub half of the exposed-secret check against the
+real GitHub service, the only one of the six to have judged material from a real
+outside system. The rest — including that check's Amazon
+Web Services half — are proven offline against fixed sample evidence and have
+**not** been run against a live cloud account belonging to a third party. That step
+needs two things from the customer: their own cloud credentials, and their account
+named in the cloud-scope block of a signed charter. Until both exist, the safe
+answer the gate gives is "not authorised", which is the correct one. Item 11 in
+section 14 states this in full.
 
 #### 1.5 A record of who used the tool is created *before* anything runs
 
@@ -11442,54 +13662,306 @@ points to the charter scope and the network block list as the controls that cove
 those. So even a fully wired categorical block would not stop a government system
 being reached by its number rather than its name.
 
+#### 2.6 The whole gate chain, in order
+
+Section 2.1 described one gate. It is not the only one, and the honest picture is
+that there is no single gate at all. There are four distinct chains for four
+distinct kinds of action, plus the network boundary underneath all of them and a
+separate check on the system's own model calls. Anyone who merges them into one
+will end up with a picture an engineer can falsify, so they are set out here
+together.
+
+**A request the engine sends to a target — five gates, in this order.**
+
+| # | Gate | Refuses when |
+|---:|---|---|
+| 1 | Authority and emergency stop | The engagement is halted, expired, out of scope, destructive without permission, or out of budget — the six checks of section 2.1, run before any traffic so that a stop takes effect at the very next action. |
+| 2 | Scope | The target is not in the signed charter. The refusal is counted as well as recorded. |
+| 3 | Destructive confirmation | The request is classified destructive and the operator declines — **or does not answer in time**. |
+| 4 | Budget | The engagement's request budget is exhausted. |
+| 5 | Rate limit | It never refuses. It waits, for as long as the posture in section 7.1 requires. |
+
+Three details inside gate 1 are worth having. The emergency stop is re-read from
+disk on **every** action and works on its own, without a full authorisation
+document behind it. The other five checks of section 2.1 run only when a signed
+authorisation is actually loaded. And that is not a way to slip past them: if a
+signed authorisation was *expected* — because automatic loading was requested and
+a trust anchor was pinned — but none could be loaded or verified, the action is
+refused outright, on the stated reasoning that the whole chain of time bounds,
+action limits and destructive constraints must never silently switch itself off.
+
+The order is described in the code as load-bearing, and both of the engine's
+request paths call the same function to run it. The reason is stated plainly: a
+new confirmation mode must not be able to become a hole in the safety stack by
+acquiring its own copy of the sequence.
+
+The same chain is re-run on every **redirect**. A web server can answer a request
+by saying "go and ask this other address instead", and without a second check an
+in-scope address could bounce the tool onto an out-of-scope one — an internal
+service, a third party, or the cloud metadata address of section 2.3. The code
+names that gap and closes it: every hop is gated exactly as the first request was.
+
+**A registered tool or sensor — five gates.**
+
+| # | Gate | Note |
+|---:|---|---|
+| 1 | Emergency stop | Checked first, as everywhere. |
+| 2 | Licence | Against the capability the tool itself declares — the entitlement system of section 3.2. |
+| 3 | Charter scope | Only when the tool names a concrete host. It reads two conventional field names, so a *sensor* that gathers from a host is scope-checked exactly as an attacking tool is. |
+| 4 | Destructive confirmation | |
+| 5 | Outbound address list | Only when the tool declares which hosts it will reach. |
+
+Two properties here are worth stating on their own. Every gate is fail-closed: a
+refusal, **or an error inside a gate**, refuses the invocation and the tool never
+runs. And the intention is written to the permanent record **before** the gates
+run, so a call that was refused appears on the record alongside the ones that
+succeeded.
+
+**The composed decision that both halves of the system share — three conditions,
+all of which must hold.** This is the piece of code the project calls its gate of
+record. It lives in the neutral shared core, so the sovereign half and the
+offensive half use the same one rather than two that could drift.
+
+| # | Condition | Refuses when |
+|---:|---|---|
+| 1 | The engagement authority | Anything in the six checks of section 2.1 says no. It is checked first because its emergency-stop step is the absolute stop. |
+| 2 | The danger tier | The classifier's outcome is anything other than an explicit `auto`. |
+| 3 | The multi-party quorum, for destructive actions only | There is no quorum, or no destruction gate was wired at all, or the gate errored. |
+
+Four refusal behaviours in that composition are pinned by tests, and each closes a
+specific way a safety check quietly stops working:
+
+- A condition that throws an error is a refusal, never a caught-and-continued
+  pass.
+- The destructive condition is checked for the value *exactly* true, not merely
+  for something true-ish. A buggy or hostile gate returning the text "no", or the
+  number 1, cannot open an irreversible action.
+- An *unrecognised* tier outcome is a refusal. Only the literal word `auto` opens
+  the gate, so a future outcome added by a later change can never silently allow.
+- A destructive action with no destruction gate wired at all is a refusal, not a
+  fall-through.
+
+**A cloud or container-cluster capture — two gates, before any network traffic at
+all.** These are the six confirmations described in section 1.4.
+
+| # | Gate | Effect of a refusal |
+|---:|---|---|
+| 1 | The danger-tier authorisation, plus the emergency stop | Returns a **refused** result and **no capture**. |
+| 2 | The cloud scope check of section 1.4 | The same. |
+
+The design note is the point, and it is short: a refusal produces nothing to
+adjudicate, so there is nothing to launder. No network call is even constructed,
+let alone sent, until both gates have passed.
+
+**Underneath all four chains** sits the network boundary of sections 2.3 and 2.4 —
+the permanently denied address ranges that no charter can unlock, the host
+firewall that drops packets without reading words, and the filtering proxy outside
+the sandbox's control.
+
+**Alongside all four** sits one further check that is not about the target at all:
+the sovereignty gate on the system's own model calls, described in section 3.3. It
+governs where the system's reasoning happens rather than what it may attack, and
+it refuses before a model client is constructed.
+
 ---
 
 ### 3. Permission tiers: sorting actions by how much damage they could do
 
 Every action the AI wants to take is classified into one of four danger levels
-before anything else happens. The classifier is a small, fast, AI-free program.
+before anything else happens. The classifier is a small, fast, AI-free program. It
+reads the *name* of the action and nothing else — not the target, not the
+arguments, and none of the text the AI wrote to justify it.
 
-| Tier | What it covers | What happens |
-|---|---|---|
-| **A0** | Observing and answering only, and only for a fixed list of known-safe words: read, search, query, get, list, status, view, inspect, and similar. | Runs automatically. |
-| **A1** | Reversible internal changes: draft, note, report, commit, branch, tag. | Runs automatically, and is recorded. |
-| **A2** | Anything visible outside the system: send, email, publish, post, upload, export, download, sync, and bulk movement of data. | **Queued for a human to approve.** |
-| **A3** | Destructive actions, financial operations, key and restore operations — **and any action touching dangerous material at all**: secrets, credentials, tokens, keys, identity and access policies, firewall rules, roles, grants, and anything named production, root, admin, or vault. | **Explicit approval required.** Never automatic. |
+| Tier | What it covers | What it permits | What it requires |
+|---|---|---|---|
+| **A0** | Observing and answering only, and only for a fixed list of known-safe words: read, search, query, get, list, status, view, inspect, and similar. | Runs immediately, without being queued. | Nothing beyond the name matching the safe list. |
+| **A1** | Reversible internal changes: draft, note, report, commit, branch, tag. | Runs immediately, and is recorded. | Nothing beyond the classification — but on the offensive side the minimum tier described in 3.1 lifts every tool above this, so nothing offensive ever runs at A1. |
+| **A2** | Anything visible outside the system: send, email, publish, post, upload, export, download, sync, and bulk movement of data. | Does not run until a human approves. | An approval — by default a signed, single-use permission slip for that one action (section 4.2). |
+| **A3** | Destructive actions, financial operations, key and restore operations — **and any action touching dangerous material at all**: secrets, credentials, tokens, keys, identity and access policies, firewall rules, roles, grants, and anything named production, root, admin, or vault. | Never runs automatically, under any setting. | The same explicit, per-action authorisation, and — where the action is irreversible — the multi-party quorum of section 5. |
 
-Four design decisions in this classifier deserve attention:
+The program has three names for those outcomes rather than four: `auto` covers
+both A0 and A1, `queued` is A2, and `explicit-required` is A3.
+
+#### The complete vocabulary
+
+The classifier is a dictionary, and the whole dictionary is short enough to print.
+None of the lists below is a sample. These are all the words there are, and a name
+matching none of them is treated as maximally dangerous. The counts were taken
+from the source.
+
+**A3 — seventy-five words.** Any one of them, anywhere in the name, makes the
+action A3. They fall into five groups.
+
+| Group | How many | The words |
+|---|---:|---|
+| Destructive verbs | 28 | push, deploy, delete, destroy, drop, remove, purge, wipe, truncate, overwrite, erase, format, kill, shutdown, reboot, reset, disable, enable, override, force, sudo, exec, eval, chmod, chown, patch, install, uninstall |
+| Cryptography and reversal | 6 | encrypt, decrypt, restore, revert, rollback, recover |
+| Money | 12 | spend, purchase, pay, payment, transaction, transfer, refund, invoice, allocate, budget, release, sign |
+| Dangerous material, whatever the verb | 24 | secret, secrets, credential, credentials, token, tokens, key, keys, iam, policy, firewall, acl, role, grant, revoke, rotate, escalate, infra, prod, production, env, master, root, admin |
+| Secret stores | 5 | vault, keyring, keychain, keystore, hsm |
+
+Note what the fourth and fifth groups do. Most of those words are *nouns* — the
+material itself rather than an action on it — and they make an action A3 no matter
+what is being done to them. "Read the secrets" is not a read. "Get the budget" is
+not a get. "Read the vault" is not a read. The code's own test file pins exactly
+those three cases, along with `credentials.get` and `keyring.get`.
+
+**A2 — twenty words.** send, email, smtp, publish, post, message, outbound,
+webhook, sms, notify, share, upload, invite, calendar, tweet, dm, export, dump,
+download, sync.
+
+Two of them deserve a note. `export` and `dump` sit here because bulk movement of
+a private store out of the system has to be seen by a person, even though nothing
+is destroyed by it.
+
+**A1 — twelve words.** write, note, brief, report, draft, alert, consolidate,
+commit, branch, annotate, tag, label.
+
+One word is deliberately *absent* and the code explains why: `snapshot`. Taking a
+snapshot sounds harmless, but restoring one silently reverts the system's state.
+So `restore` is A3, and a bare snapshot-create is left to fall through to A3
+rather than risk it running by itself.
+
+**A0 — seventeen safe verbs, plus eight exact names.** The verbs: read, search,
+query, get, list, status, recall, observe, answer, view, show, find, frame, peek,
+describe, inspect, lookup.
+
+They are verbs only, never nouns, and the code states the reason: a safe *noun* on
+this list would let "encrypt the memory store" reach the automatic tier because
+the target happened to be a harmless one.
+
+The eight exact names are read-only memory tools written out literally rather than
+recognised by verb: `memory.search`, `graph.query`, `ingest.status`,
+`graph.entity`, `episodic.range`, `threads.open`, `commitments.due`,
+`contradictions.pending`. The first three would reach A0 on their verb anyway. The
+other five contain no safe verb at all, and without the literal listing they would
+fall to A3 — which shows the direction the design errs in even for its own
+housekeeping tools.
+
+**Seven exact names for gesture control.** Where the system is permitted to drive
+a mouse and keyboard on the operator's own machine, there is no honest verb for
+"inject input", so seven names are listed literally: four pointer actions — move,
+click, scroll and drag — at A1, and three at A2, namely typing, key combinations,
+and launching an application. These are checked *after* the danger pass, so
+`hid.pointer.delete` is already A3 before the list is consulted. And the ordinary
+words `move`, `type` and `click` are deliberately kept out of the dictionary
+altogether, so `file.move` and `data.type` still fall to A3.
+
+#### The order the classifier works in
+
+The order is the design, so it is worth setting out step by step.
+
+1. Split the name into whole words — on full stops, underscores, hyphens,
+   slashes, spaces, and on four invisible control characters — then lowercase it.
+2. No words at all? A3.
+3. Any A3 word? A3. This is checked before everything else.
+4. Any A2 word? A2.
+5. Any A1 word? A1.
+6. An exact gesture name? A1 or A2, as listed above.
+7. An exact safe tool name, or any A0 verb? A0.
+8. Anything else whatsoever? A3.
+
+Four design decisions inside that sequence deserve attention:
 
 - **Danger is checked first.** An action touching a credential is A3 no matter how
   innocent the verb is. "Read the vault" is not a read; it is A3.
 - **Anything unknown falls to A3.** The classifier uses a *positive* list of safe
   words. It does not try to list dangerous words and let everything else through.
   An unrecognised action, an empty one, or one it cannot parse is treated as
-  maximally dangerous.
+  maximally dangerous. This is the single most important property in the section:
+  the absence of danger is not sufficient for automatic execution. A name has to
+  be positively recognised as safe, or it is treated as maximally dangerous.
 - **Matching is by whole word, never by fragment.** The action name is split on
   punctuation and spaces before matching, so `overwrite` is not mistaken for
   `write` and `forget` is not mistaken for `get`.
 - **Hidden control characters cannot smuggle anything past.** The splitting also
   breaks on the invisible separator characters, so an action name with a dangerous
-  word hidden behind one of them still classifies as A3.
+  word hidden behind one of them still classifies as A3. Both copies of the
+  classifier carry the same short argument for why extra splitting is always safe:
+  every word in the dictionary is itself free of separators, so splitting more
+  aggressively can only ever *expose* a dangerous word, never break one in half
+  and hide it.
+
+#### What a refusal looks like
+
+The gate that consumes the tier returns one of exactly three outcomes, and the
+difference between them matters to an operator reading a log.
+
+| Outcome | When | What happens |
+|---|---|---|
+| `auto` | The tier is at or below both the automatic bar (A1) and the ceiling in force | The call runs. |
+| `queue` | The tier is A2 or above, or above the ceiling | The call stops and waits for a person. A valid, single-use, owner-signed slip for this exact call lets it run once. With no signing authority provisioned, or no slip inside the time window, it is blocked. |
+| `deny` | An empty name, or a name on a hard block list | An error is raised at once. It never runs, and it never even queues. |
+
+Every branch fails toward refusal. A classifier that returns something the gate
+does not recognise is treated as A3. A floor value the gate does not recognise is
+treated as A3. The optional version of the classifier that runs the sovereign
+kernel as a separate program treats a missing program, a timeout, a non-zero exit
+and unreadable output all as A3 — and it refuses to run a bare `sigil-kernel`
+name found on the system's search path at all, on the stated reasoning that an
+attacker who placed a program of that name there would then be the one deciding
+the tiers. An approval step that throws an error is a block, not a pass.
+
+#### The one file that can change a tier, and the direction it can move it
+
+The sovereign kernel reads a plain-text file of per-tool overrides
+(`~/.sigil/warden/tools.json`), so an owner can mark a particular tool as more
+sensitive than its name suggests. That file is unsigned, and anything able to
+write files on the machine could edit it.
+
+It is safe anyway, because the override is **raise-only**: the effective tier is
+the *higher* of the pin and the inferred tier. An attacker who pins the
+code-push tool down to the automatic tier still gets A3, and the code's own test
+asserts exactly that. Two keys differing only in capitalisation resolve to the
+higher of the two rather than to whichever the program happened to read last. A
+malformed or missing file is ignored, and inference governs alone.
+
+The code records the matching limit honestly rather than hiding it: because the
+file is unsigned, *lowering* a tier is not available through it at all. Legitimate
+de-escalation would need a signed mechanism, and none exists.
 
 There is a second version of this classifier written in a different programming
 language, used by the personal/sovereign half of the system. The two are kept
 identical by testing both against a shared set of reference cases, so they cannot
 silently drift apart and start disagreeing about what is dangerous.
 
+Deciding is only half of what the sovereign kernel does. After the caller has run
+or blocked the tool, the kernel appends a signed, chained record of what happened
+— the agent, the tool, a fingerprint of the arguments, the tier, the decision, the
+approver, a fingerprint of the result, and the time. Its own header states the
+boundary: it "never executes tools itself; it decides and it records". Section 9
+covers what that record is worth.
+
 #### 3.1 The rule that makes offensive tools safe
 
 On the offensive side, two additional rules apply on top of the tiers.
 
 **A ceiling.** The automatic-approval ceiling for offensive work defaults to
-**A1**. Since every offensive tool classifies at A2 or above, the practical
-consequence is that **an autonomous agent can never fire an offensive tool by
-itself.** It always queues for a human.
+**A1**. Since the floor described next lifts every offensive tool to A2 or above,
+the two settings together mean that **an autonomous agent can never fire an
+offensive tool by itself.** It always queues for a human.
 
 **A floor that only ever raises.** A separate guard imposes a minimum tier
 (default A2) on offensive tools, and it is written so that it can only ever move
 a tool *up* the danger scale, never down. The reason is concrete: an offensive
-action with a read-shaped name, such as `http.get`, would otherwise classify as
-A0 and run automatically.
+action with a read-shaped name, such as `http.get`, `dns.query` or `port.list`,
+contains a safe verb and would otherwise classify as A0 and run automatically.
+
+So three separate mechanisms can move an action's tier, and all three are
+one-directional. The override file raises. The floor raises. The ceiling caps what
+may run without a person. Nothing in the system lowers a tier.
+
+**Which classifier actually runs during an engagement.** The offensive side does
+not call the sovereign kernel program for this. It uses a small function inside
+its own process, and the honest description is this. The *dangerous* half is not
+local: it imports the shared classifier and asks it the single question "does this
+name carry one of the seventy-five dangerous words?", so a dangerous name can
+never be rated differently on the two sides of the system. The *benign* half is
+local and deliberately coarse — a curated list of eight danger-free
+reconnaissance tool names (`nmap`, `httpx`, `nuclei`, `ffuf`, `curl`,
+`subfinder`, `gau`, `katana`) rates A1, and every other name rates A2. Since the
+floor and ceiling then decide the outcome, the only thing the local half changes
+in practice is the label written into the record.
 
 There is also a **tool-to-phase manifest**: each tool is listed against the phases
 of work in which it may be used at all, and a tool not listed for the current
@@ -11595,6 +14067,95 @@ the request-replay tool, and the defensive gateway's active-blocking mode. Where
 the licence is absent in a governed deployment, the defensive side says so on the
 screen — it reports itself as downgraded rather than pretending to block.
 
+#### 3.3 A third ladder: where the system's own thinking is allowed to happen
+
+The two ladders above govern what the system may do. A third governs something an
+agency will care about at least as much: **where the system's own reasoning
+physically takes place, and therefore where the customer's data goes.**
+
+The reasoning inside this system is done by a large language model. Some models
+run on the operator's own machine. Others run on somebody else's computers,
+reached over the internet, which means that whatever is put in front of them —
+including details of the customer's systems and their weaknesses — leaves the
+building. That is a sovereignty question rather than an authorisation one, and it
+has its own separate ladder with its own separate refusal.
+
+The operator picks one of four tiers by setting a single environment value.
+
+| Tier | What it permits | What it refuses |
+|---|---|---|
+| **AIR_GAPPED** | Local models only. | Every cloud model, refused **at construction** — before a client object is built, before the vendor's software library is even loaded, and therefore before anything could be sent. |
+| **SOVEREIGN_CLOUD** | Local models, plus cloud models running on jurisdictionally bounded infrastructure where the operator chooses the region. | The direct consumer model interfaces. |
+| **TRUSTED_CLOUD** | The above, plus a frontier model offering under a zero-data-retention contract. | The direct consumer model interfaces, still. |
+| **PERMISSIVE** | Everything. | Nothing. This is the development default. |
+
+The ladder exists in four rungs rather than as an on/off switch for a reason the
+code states: most government workloads need *jurisdictional* sovereignty — data
+residency, regional infrastructure, contractual handling — rather than pure local
+operation, and forcing that choice to be binary would push it underground.
+
+**Every model the system knows about is placed on the ladder by name.** There are
+thirteen, and this list is exhaustive:
+
+| Class | The models in it | Permitted from |
+|---|---|---|
+| Local — runs on the operator's own machine, no network egress | Ollama, vLLM, llama.cpp, TGI, a generic self-hosted endpoint, and a dry-run stub with no network at all | AIR_GAPPED upward |
+| Jurisdictionally bounded cloud | Amazon Bedrock, Google Vertex AI, Mistral's platform | SOVEREIGN_CLOUD upward |
+| Contractually bounded cloud | The zero-data-retention Anthropic offering | TRUSTED_CLOUD upward |
+| Ordinary cloud, with no special data-handling agreement | The direct Anthropic interface, the Claude Code interface, and a bring-your-own Azure OpenAI resource | PERMISSIVE only |
+
+**It fails closed in four separate places**, and this is a good worked example of
+the house style:
+
+- **An unrecognised tier name resolves to AIR_GAPPED**, the strictest one — not to
+  the most permissive, and not to an error. A typo in the setting tightens the
+  system rather than loosening it.
+- **An unrecognised model name is classified as ordinary cloud**, so it is refused
+  under every sovereign tier. A model the policy has never heard of does not get
+  the benefit of the doubt.
+- **If the policy code itself cannot be loaded** by the process making the call,
+  and any sovereign tier is configured, the call is refused — the stated reasoning
+  being that the process cannot prove the egress is permitted, so it must not
+  perform it. If no tier is configured at all, the policy would have resolved to
+  PERMISSIVE anyway, so behaviour is unchanged. The code names the property
+  directly: this can over-refuse, and it can never under-refuse.
+- **If the gate itself throws an error**, that is a refusal, never a permission.
+
+One further detail is the difference between a control and a gesture. The refusal
+is delivered by *returning the safest available action* rather than by crashing,
+so that the reasoning loop stays intact and the operator gets an explanation. The
+enforcement is still real, and the source says so in one sentence: the client is
+never constructed, the vendor's software library is never imported, and nothing
+leaves the host.
+
+**The zero-data-retention step is an attestation, not a proof.** Moving a direct
+model interface out of the ordinary-cloud class and into the contractually bounded
+one is done by the operator setting a flag that says "this key is covered by a
+zero-data-retention agreement". The code labels it an attestation in as many
+words. The system cannot check the contract. It records the operator's claim and
+behaves accordingly.
+
+**There is an optional seal.** By default the tier is re-read from the environment
+on each call, which is convenient while developing but means a change made
+part-way through a long-running process takes effect immediately. Setting a
+further value latches the tier once for the lifetime of the process, so a later
+change cannot relax it mid-engagement. The seal can only ever pin the tier; it can
+never loosen it.
+
+**Where the check is made.** Four places in the system construct a model client,
+and all four consult the same policy first: the reasoning step behind a live
+engagement, the automated code-fix component, the console's chat-style terminal,
+and the engine's own model-backend factory. That last one places the check before
+the import, so under a strict tier the system never even loads the cloud vendors'
+software in order to probe whether it is available.
+
+**The honest limit, and it is the same shape as the licensing one in 3.2.** With
+nothing configured, the default tier is **PERMISSIVE**, which the code itself
+describes as equivalent to no policy enforcement. A freshly installed system does
+not restrict where its reasoning happens. Choosing a tier is a deployment act, and
+an agency should treat it as part of accepting the system rather than as optional
+tuning. Item 16 of section 14 records this.
+
 ---
 
 ### 4. The approval queue: where a human says yes
@@ -11683,6 +14244,51 @@ default**: no opt-in is required, and a queued shell command runs only once the
 owner has signed a single-use permission slip for that exact command. Every other
 tool inside that agent's sandbox runs automatically; the shell is the chokepoint.
 
+**Exactly two names are gated, and the choice is deliberate.** The gate does not
+use the general danger classifier of section 3 here. It uses a two-line rule: the
+two names that start a command and feed a running one — `exec_command` and
+`write_stdin` — are treated as the most dangerous tier, and every other name the
+agent can call is treated as the safest. The reason is stated in the code and is
+worth understanding, because it is a design choice rather than an omission. Every
+command-line invocation the agent makes flows through `exec_command`, and
+`write_stdin` types into a process an earlier `exec_command` already started. So
+gating those two gates *all arbitrary execution*, while the agent's other tools
+keep working and the agent remains functional. Applying the general offensive
+classifier instead would rate almost every name as needing approval, which under
+an always-on gate would stop the agent doing anything at all.
+
+**What that leaves running automatically.** Naming those tools is more honest than
+calling them "benign". Besides the shell, the vendored agent's tree holds twelve
+other tool families. Eleven of them are things the agent calls by name, and every
+one of those runs without an approval under this gate: private reasoning, notes, a
+to-do list, web search, file patching, reporting, image viewing, skill loading, a
+finish signal, spawning and co-ordinating sub-agents, and six tools over the
+intercepting web proxy — listing captured requests, viewing one, replaying one,
+listing the site map, viewing an entry in it, and reading the proxy's own scope
+rules.
+
+The twelfth is browser automation, and it is the interesting one, because it is
+**not** an exception that slips past. It is not a named tool at all. It is a
+command-line program installed in the sandbox, and the agent drives it through
+`exec_command` — so every browser action the agent takes queues for approval like
+any other command.
+
+The replay tool is the one to look at hardest, since it re-sends a captured
+request. It is an ordinary function call rather than a command, so this gate does
+not see it. Something else bounds it: the gate deliberately judges a tool by its
+**class and name, never by its target**, because deciding what a request may reach
+is the job of the network boundary in sections 2.3 and 2.4. A replayed request
+still has to get past the firewall and the filtering proxy, and those do not care
+which tool sent it.
+
+**The gate's own settings.** For this one surface the minimum tier is set to the
+lowest value and the automatic ceiling to A1, which is what allows the agent's
+other tools to run while the two shell names — rated at the top tier — land above
+the ceiling and queue. The permission slip the owner signs is bound to the actual
+arguments of the actual call, not to the static definition of the tool, so what
+the owner sees and signs for is the real command. An earlier version bound a
+constant here; that was found by the project's own adversarial review and fixed.
+
 **How the gate behaves when it cannot be attached: it fails closed.** This was
 until recently the one place in this briefing where a safety property was weaker
 than a plain reading would suggest. It no longer is, and the change is worth
@@ -11713,7 +14319,11 @@ operator would use to run without the gate on purpose. There are therefore exact
    case.
 
 Any third outcome — a broken installation, a version mismatch, a bug introduced by a
-future change — now stops the run instead of proceeding without the gate.
+future change — now stops the run instead of proceeding without the gate. The
+narrowing is visible in the code at the point where the gate is attached: the only
+failure still tolerated there is the specific one that means "this project's
+package is not installed at all", which is case 2 above. Every other failure
+travels up and stops the run.
 
 So the claim can be made in its strong form: **turning the gate off is a deliberate
 and visible act, and so is running without it; neither happens silently.** The gate
@@ -12520,7 +15130,7 @@ fails the build rather than producing a confident-looking, wrong bill of materia
   yet everywhere.** A build step borrowed from a third party runs with the project's
   build credentials, so a moving label pointing at that borrowed step is a real risk.
   In the supply-chain job every such step is pinned to an exact commit identifier, and
-  an automated test enforces it. **The eight pre-existing build jobs still refer to
+  an automated test enforces it. **Every job in the main pipeline still refers to
   those helpers by moving label.** The project states this scope limit in its own test
   and records converting the rest as its first follow-up: a wrong identifier fails
   every job in the repository at once, so it was kept out of the change that
@@ -12685,9 +15295,9 @@ relevant to safety and control.
     application on the operator's own machine, plus a vendor-published practice
     target on the public internet.** The project states in its own words that this
     is "proven on a local target, not proven in the field".
-11. **The four cloud confirmations have not been fired at a live third-party
-    account, and that is waiting on the customer. The two container-cluster ones
-    have been fired, at a real cluster.** All six are built and wired end to end:
+11. **Three of the six cloud and container-cluster confirmations have been fired at
+    something real; the rest are waiting on the customer.** All six are built and
+    wired end to end:
     capturing a credential from a cloud server's metadata service, checking whether
     an exposed secret is actually valid, impersonating a cloud service account,
     escalating permissions through an access-policy weakness, and both tiers of
@@ -12699,8 +15309,14 @@ relevant to safety and control.
     the dangerous binding is confirmed and its certificate re-verifies offline,
     while benign bindings in the same cluster are correctly left as leads. What
     that run does not cover is discovering bindings across a whole cluster, and a
-    managed provider's control plane (Amazon EKS, Google GKE, Azure AKS). For the
-    four cloud confirmations the evidence is fixed sample evidence, and what has
+    managed provider's control plane (Amazon EKS, Google GKE, Azure AKS). The third
+    is the exposed-secret check, and it splits: its **GitHub half** has been run
+    against the real GitHub service, using the operator's own credential against
+    GitHub's own least-privileged identity endpoint, with the certificate
+    re-verifying offline and a live bogus credential of the same shape correctly
+    left as a lead; its **Amazon Web Services half has never touched real Amazon
+    infrastructure**, and nothing from the GitHub run transfers to it. For the
+    remaining confirmations the evidence is fixed sample evidence, and what has
     not happened is the act of pointing them at a live cloud account belonging to a
     third party, because that requires the customer to provide their own cloud
     credentials and to name the account in the signed charter's cloud-scope block.
@@ -12720,6 +15336,13 @@ relevant to safety and control.
 15. **No independent third-party security assessment of this system exists.** The
     project names this as one of its irreducible gaps, prepares an audit package
     for one, and states plainly that it cannot itself be the third party.
+16. **The sovereignty tier that governs where the system's own reasoning happens
+    defaults to unrestricted.** The four-tier ladder in section 3.3 is real,
+    enforced at four separate places, and fails closed in four separate ways —
+    but with nothing configured it resolves to the tier the code itself describes
+    as equivalent to no enforcement. Choosing a tier is a deployment act. This is
+    the same shape of caveat as item 3, and an agency should check both on the
+    machine it is accepting rather than assume either.
 
 ---
 
@@ -12750,6 +15373,16 @@ be run.
   named power with a yes or no beside it. On an unprovisioned machine it will say,
   in as many words, that the deployment is ungoverned — which is the honest answer
   and the one worth checking first.
+- **Ask the system where it is allowed to think.** The engine's `status` command
+  prints a governance block: the sovereignty tier in force, whether that tier has
+  been latched immutable for the process, and the licensing state beside it. On an
+  unconfigured machine it prints the unrestricted tier and an unenforced licence,
+  which are the two facts sections 3.3 and 3.2 say to expect.
+- **Read the danger dictionary.** The whole tier classifier is one short source
+  file of word lists, reproduced in full in section 3. Count the words yourself.
+  Then check that the second copy, written in a different programming language for
+  the other half of the system, matches it — both are tested against one shared
+  file of reference cases, which is also readable.
 - **Trace the categorical block yourself.** Search the whole repository for the
   name of the government/military block. Outside the module and its own test file
   you will find two lines that make it importable and nothing that calls it. This
@@ -12757,8 +15390,12 @@ be run.
   and it takes one search to confirm.
 - **Confirm the vendored agent's shell gate actually attached.** Run a shell
   command through that agent on the deployed machine and check that it appears in
-  the approval queue. If it runs without appearing, the gate did not attach — and
-  nothing would have told you.
+  the approval queue. Since the attachment was made fail-closed (§4.5), a wiring
+  failure stops the run with an error naming the gate rather than proceeding
+  ungated — so a run that completes without any command reaching the queue means
+  either that the explicit opt-out setting is in force or that the vendored tool is
+  being run outside this system. Check which; both are deliberate, and neither
+  should be a surprise on a governed deployment.
 - **Read the ingredients list.** The two lock files are plain text, one line per
   component, each with an exact version and a fingerprint. The build's own policy
   document states the threshold, the current scan result, and every exception with
@@ -12857,6 +15494,18 @@ particular transitional address ranges as private when they are actually routabl
 Before it starts anything, the command checks that all four ports are free. If one is occupied it
 refuses to start rather than leaving half-started background programs behind.
 
+The switchboard also answers **two addresses of its own**, which it forwards to nobody. One reports
+which of the programs behind it are answering; the other starts the two attack-side ones. It is the
+only process that can honestly do either, because it serves the interface itself and therefore is
+still running when they are not, and because it is what started them in the first place. The request
+that starts them **names no command**: any body sent with it is discarded unread, and the instruction
+the switchboard runs is rebuilt from its own start-up configuration, so no path, port or command can
+ever travel in a request — anything else would be a way of running arbitrary programs wearing the
+costume of a button. Both addresses are behind the same checks as everything else, and starting
+something already running is a no-op that says so. As §8 records, **no screen offers this today**:
+the control exists in the interface's code but is placed nowhere, so in practice the operator still
+starts the attack side by typing.
+
 #### 1.3 An honest caveat about which interface you get
 
 There are, in fact, **three different web interfaces** committed in this system, plus one
@@ -12864,7 +15513,7 @@ terminal-based interface that comes from a third-party tool. (There are also two
 not interfaces for a person at all, meant instead for another program to use; they are described in
 §9.2.)
 
-The main product — the 28-screen application described in this chapter — is called **VIGIL COMMAND**.
+The main product — the 29-screen application described in this chapter — is called **VIGIL COMMAND**.
 It is assembled and served *by the `vigil up` switchboard*.
 
 If an operator instead points their browser directly at the internal offence console
@@ -12906,14 +15555,18 @@ is re-pointed at the operator's own machine.
 
 Before the individual screens, here is the frame that surrounds all of them. It never changes.
 
-**Left side — the navigation list.** Twenty-eight entries, grouped under three headings: **DO**
-(eleven entries), **MANAGE** (thirteen), **LEARN** (four).
+**Left side — the navigation list.** Twenty-nine entries, grouped under three headings: **DO**
+(eleven entries), **MANAGE** (fourteen), **LEARN** (four).
 
 **Top bar, from left to right:**
 
 - **Plane toggle** — three buttons: *All*, *Offense*, *Defense*. This filters the navigation list.
   "Offense" hides the defensive screen; "Defense" hides the attack-side screens. It is purely a
   view filter; it changes nothing about what the system is doing.
+- **The job chip** — the name of the job every screen is currently showing, or the words *All
+  engagements*. Clicking it opens the Engagement Library, which is where a different job is chosen
+  or the view is widened back to everything. It is described in full at the end of this section,
+  because it changes what the operator sees on nine of the twenty-nine screens.
 - **A "Search or run a command" box.** It carries a keyboard-shortcut hint printed as `⌘K` — the
   Macintosh command-key symbol followed by the letter K. (On a Windows or Linux keyboard the
   equivalent key is Control; the interface only ever prints the Macintosh symbol, which is itself a
@@ -12945,10 +15598,38 @@ dismiss button; a new interaction brings a dismissed card back. Voice and gestur
 **off by default** and must be started deliberately (`vigil up --with-voice` / `--with-gesture`).
 When enabled, spoken navigation can only move the operator to a screen that already exists in the
 navigation list — the code uses a strict list of known screen identifiers, so a malicious or
-malformed voice command cannot make the interface go somewhere unintended. Note for accuracy: local
-camera-based gesture control is *not* functional; gesture input comes from a paired phone companion.
+malformed voice command cannot make the interface go somewhere unintended. Note for accuracy: no
+gesture input reaches this card today. Local camera-based gesture control is *not* functional — the
+hand-tracking model is absent — and the phone-as-trackpad route, which is the design's answer to
+that, is built and tested on the desktop side but has nothing sending it hand movement. Chapter 14
+sets out what each is waiting on.
 
 **Small transient message strips ("toasts")** confirm actions.
+
+#### One job at a time
+
+The interface used to show every run the machine had ever produced, on every screen, mixed together.
+It is now **scoped to one engagement** — the job the operator is actually working on — and the job
+chip in the top bar always says which.
+
+| Question | The answer |
+|---|---|
+| Which screens are scoped? | Nine: Live, Activity, Findings, Fixes, Proof Studio, Report, Compliance, Assurance, and the two per-engagement tabs of the Brain screen. The rest are not about a particular job. |
+| How does a job become the active one? | Launching a run makes that run's job the active one. Opening a job in the Engagement Library does the same. Nothing else changes it. |
+| What happens to everything else? | **Nothing.** Scoping hides rows; it deletes nothing, moves nothing and rewrites nothing. Every past job, run, finding and certificate stays exactly where it was. |
+| How does the operator get back? | Always. The chip leads to the library, the library has an *All engagements* button, and every screen that is empty *because* of the scope says so by name and offers the same way out. |
+| Does the browser decide which runs belong to a job? | No. The scope is a **filter**: the back end selects among the runs that already record that job as their own, so a screen can narrow what it lists and can never claim a run into a job it does not belong to. |
+
+Two consequences are worth stating for a reader who has seen software make this mistake. First,
+starting a new job leaves a **clean desk rather than a wiped one** — the new job's screens are
+honestly empty until it produces something, and each empty screen says which job it is showing and
+that the others are still on disk. A blank panel and a broken screen look identical unless the
+screen says which it is. Second, a link or a bookmark that names a run belonging to a *different*
+job is not silently swapped for a neighbouring one: the screen says the run is not part of the job
+in view, and offers to widen.
+
+The chosen job is remembered between visits, so a refresh or a restart lands the operator back on
+the work they were doing.
 
 ---
 
@@ -13044,9 +15725,20 @@ everyday equivalent is the difference between photocopying a file of papers and 
 the original through a glass panel.
 
 For every mode except the defensive one there is a **required tick-box**: *"I am authorized to test
-this target (I own it or have written permission)."* That declaration is recorded with the run. Every
-mode also offers an optional free-text **Objective** box, with the printed caution that it "guides
-the reasoning; never widens scope."
+this target (I own it or have written permission)."* The screen is now exact about what that
+tick-box is and is not, and the change is worth quoting because it removed a promise the software
+did not keep: the box **gates the wizard, is not sent with the launch, and is stored nowhere.** The
+binding authorisation is the signed charter and scope the engine enforces for that job — which is
+the only thing that could ever have been binding. The screen used to say the declaration was
+"recorded with the run"; nothing recorded it, and a reassurance no file keeps is worse than no
+reassurance.
+
+Every mode also offers an optional free-text **Objective** box, and it too now says something
+different depending on the mode, because it *does* something different. For a codebase review the
+objective is handed to the source-reading agent as its instruction — it really steers the work. For
+every other mode the gated engagement takes no free-text objective at all, so the screen says the
+text is recorded with the run for the operator's own record and **does not steer it**; depth and
+capability packs are what steer those. Both wordings carry the same caution: it never widens scope.
 
 **Step 3 — "Scope".** Scope means the list of machines the system is permitted to touch. For a
 network run against something other than this machine, the operator sees a list of authorised hosts
@@ -13067,19 +15759,96 @@ charter and authority; the web interface never passes scope to the engine as an 
 words, the operator cannot widen their own permissions by editing a form.
 
 **Step 4 — "How should it run?"** A depth choice (Quick / Standard / Deep, read live from the
-engine's own catalogue rather than hard-coded in the page). A tick-box, on by default, reading *"Let
-the AI choose the tools (recommended)"*; turning it off reveals a picker over the real catalogue of
-capabilities with their permission tiers. And a tick-box for *"Apply fixes after discovery"*, with a
-printed hint that fixes are **proposed** and then queue for approval.
+engine's own catalogue rather than hard-coded in the page). Then, depending on what is being
+assessed, either a set of **capability packs** or a **picker over this machine's real tools**. This
+step was rebuilt in this round, and two of the defects it fixed are worth setting out in full.
 
-**Step 5 — "Model & keys."** Shows the live status of the AI back end. A "Run keyless" tick-box for
-operating without a paid AI key. A **Session** selector (sessions are described on their own screen
-below). And, for a this-machine target with a session selected, a "Graph-backed run" option that
-routes the run so that its results are stored in that session's own knowledge graph, falling back to
-the ordinary path if the graph database is not available.
+*Capability packs, and the two things that used to go wrong.* A pack is not a tool; it is one
+already-gated option on the engagement command — a named bundle of checks. A tick-box, on by
+default, now reads *"Run the engine's standard set (recommended)"*. It used to read "Let the AI
+choose the tools", which was simply untrue: nothing chooses packs for the operator. On means no
+extra options are added and the engagement runs its standard audit; off reveals the real catalogue
+of packs with their permission tiers, and the printed note is that a pack can never widen authority
+— it only adds an option the gate already governs.
 
-**What happens on Launch.** The page sends the whole form to the back end, which starts a gated run.
-The operator is redirected to the Live screen for that run.
+- **The first defect: a selection that was accepted and then silently discarded.** The launcher used
+  to walk the chosen list and quietly append only what it recognised. A name it did not recognise
+  vanished, and the run started anyway, reporting *running*. In "run one tool" mode it was worse:
+  only the *first* entry was ever used, so a request naming an unrecognised item followed by a valid
+  one threw away the valid one as well, and a run the operator believed was driving a specific tool
+  started with no tool option at all. **An unrecognised capability is now a refusal, stated before
+  anything is started**, and the one-tool mode requires exactly one — because the alternative to
+  refusing is starting something narrower than what was asked for and calling it the same thing.
+- **The second defect: packs dropped entirely on the commonest target of all.** Only one of the
+  engine's several starting paths ever turns a pack into an option. A run against this machine —
+  which is the ordinary way an operator tries the product, and the target used for every local
+  proving-range exercise — goes to a different, self-contained scanner that has never taken pack
+  options at all. So did a graph-backed run, a codebase review and a defensive run. Five ticked packs
+  produced a run with none of them, answering *running*, with nothing anywhere saying the work was
+  narrower than the form that configured it. Two fixes, in opposite directions. The back end now
+  **names the gap**: it reports which packs were not applied and why, in the response and in the run's
+  own record, and the screen shows that message. And the wizard **stops asking for what cannot be
+  carried**: on those targets the pack picker is replaced by a plain statement of why there is
+  nothing to pick and what to do instead. What the screen offers and what the request sends are now
+  decided by one and the same rule, written once, so the two cannot drift apart again.
+
+*The tool picker.* Choosing "Run one tool" now lists **this host's actual tools, exactly as the
+engine's own roster reports them** — not capability packs, which is what the step used to offer.
+Each entry shows the tool's name, whether it is installed, what it is for, and — this is the new
+part — **how it is driven**: by its own command line, by a gated sensor, by the source-analysis
+pass, or as the scanner's headless browser. A tool this particular screen cannot start is **listed
+anyway, greyed, with the reason printed on it**, rather than hidden: not installed, not supported on
+this platform, not among the tools the system will claim to control, or — most often — no option on
+*this* starting path runs it on its own, followed by a list of what does drive it. The screen prints
+the arithmetic honestly: how many of the roster can be started here, out of how many there are.
+
+That number is small, and the chapter will not dress it up. On this machine the roster holds
+**thirteen tools, all installed, all admitted — and exactly one of them can be started from this
+screen as a single tool**: the headless browser, which one capability starts in order to confirm a
+browser-side scripting flaw by really executing it. The other twelve are driven by the engine during
+an engagement and are not startable on their own from the wizard, and the screen says so tool by
+tool. A reader who wants the fuller picture of what drives each tool should read chapter 12.
+
+Finally a tick-box that was renamed for the same reason as the others: *"Flag this run as one I want
+fixed"*. It used to read "Apply fixes after discovery", which read like scheduling work. Ticking it
+applies nothing; it is recorded with the run and shown on the Fixes screen, which lists the fixable
+findings and the gated ladder either way.
+
+**Step 5 — "Does this run need a model?"** This step used to be headed "Model & keys" and to offer a
+"Run keyless" tick-box. That box is gone, and its removal is a small lesson in the discipline this
+document keeps describing: it was accepted, written into the run's record, and read by nothing. The
+attack-side commands call no AI model at all, so those runs were already keyless whether or not the
+box was ticked; and a codebase review needs the source-reading agent's model whether or not it was.
+A control that changed nothing has been replaced by a **statement, per mode, of whether a model is
+involved at all**:
+
+| Mode | What the screen states |
+|---|---|
+| Scan a website / API, run one tool | Deterministic end to end — the engine calls no model. Findings come from the automatic tests, not from a model. |
+| Full autonomous suite | The audit is deterministic; the self-directing loop additionally takes one bounded **advisory** reasoning step per cycle, and with no AI back end it falls back to the engine's own deterministic advice and still completes. Advice never confirms a finding. |
+| Scan a codebase | **The model is the run** — the source-reading agent is the thing that reads the source. Without a working back end it has nothing to run. |
+| Cloud / Kubernetes posture, Defend an app | Deterministic. Neither calls a model. |
+
+The step also shows the live status of whichever AI back ends are configured, states that keys are
+never shown or entered here, and offers a **Session** selector (sessions have their own screen
+below). For a this-machine target with a session selected there is a "Graph-backed run" option that
+routes the run so its results are stored in that session's own knowledge graph. A cloud posture is
+offered no session at all, because its launcher takes none and offering one would have quietly
+detached the run instead of linking it.
+
+**What happens on Launch.** The page sends the whole form to the back end, which starts a gated run,
+and the operator is redirected to the Live screen for that run. Three further things now happen, and
+each exists so the operator is never left believing the run was something it was not:
+
+- **The new job becomes the active one**, so every scoped screen shows the work just started and
+  nothing else. The job used is the one the *server* reports — the one the run recorded for itself —
+  not the one the form asked for.
+- If capability packs could not be carried by the path that actually ran, **the message saying so is
+  shown**.
+- If a graph-backed run was asked for and the graph database was not available, the screen says the
+  run went to the ordinary engine instead. It falls back rather than failing, and it says so; a
+  silent fallback would leave the operator believing a knowledge graph had been written that was
+  never touched.
 
 **One field the wizard does not have, and it matters.** Most of a real application's interesting
 surface sits *behind a login*. The engine does contain the machinery for logging in and staying
@@ -13087,7 +15856,7 @@ logged in while it tests — it can hold a set of login cookies, perform a login
 the application has logged it out again, and log back in before retrying. That machinery is a
 building block inside the engine; it is used directly by the engine's own tests. **There is no field
 anywhere in these five steps where an operator can type a test account's username and password**, and
-none of the twenty-eight screens offers one. In practice this means a run launched from the wizard
+none of the twenty-nine screens offers one. In practice this means a run launched from the wizard
 against a login-protected application exercises the public, logged-out surface of that application.
 
 There is **one narrow exception, and it is a typed one.** The tests that ask "can user A read user
@@ -13109,27 +15878,213 @@ interface is honestly incomplete.
 
 #### 4.3 Chat
 
-*Subtitle: "Ask in plain language what to test — the agent launches gated, oracle-confirmed runs and
-saves the conversation on your machine."*
+*Subtitle: "Ask in plain language, or attach a zip, files and images and ask about them. Answers are
+leads; the gated run is what mints facts."*
 
-**What the operator sees.** A left column of saved conversations, each with its number of exchanges,
-and a "New chat" button. A conversation transcript in speech bubbles. Two owner-side dropdowns for
-the AI **model** and the reasoning **effort** level, each with its own apply button. At the bottom, a
-message box (Enter sends, Shift+Enter starts a new line), an optional target field, and a mode
-dropdown offering *auto*, *url / API / infra*, *codebase*, *suite (autonomous)*, and *single tool*.
+This screen changed more than any other in this round, and it is the one place in the product where
+an operator can hand over material that has never been near the engine and ask a question about it.
+It therefore gets the longest treatment in this chapter.
 
-**What the operator can do.** Type what they want tested in ordinary English. Change the AI model or
-effort level. If the agent decides to start a run, the reply bubble carries a **Watch live** button
-that jumps to the Live screen for that run.
+Every other screen is about **certainty** — things an automatic test has already confirmed. Chat is
+the room where **uncertainty** lives: where an operator says "that login flow smells wrong" before
+anything is proven, drops in a codebase they were handed an hour ago, and thinks out loud. Everything
+below follows from that, including the limits.
 
-**What happens as a result.** The message goes to the agent, which may answer or may launch a run.
-The conversation is saved on the operator's own machine.
+**What the operator sees.** A left column of saved conversations — each with its title, how many
+exchanges it holds, and, when it draws on other conversations, how many. A "New chat" button. The
+transcript in speech bubbles. Below the transcript: a strip of attached material, a **Draws on**
+panel, an optional target box, a mode dropdown (*auto*, *url / API / infra*, *codebase*, *suite
+(autonomous)*, *one tool*), an **Attach** button, and the message box (Enter sends, Shift+Enter
+starts a new line). Above the transcript sit two system-wide dropdowns, described at the end of this
+section because what they do is not what their position suggests.
 
-**The honesty note the screen prints itself:** every run is gated; scope is charter-signed; steps
-that touch the target wait for the operator's approval; the conversation is saved locally.
+##### What the operator can hand it, and how each behaves
 
-**Status: fully working.** If the owner side is offline, the model and effort controls degrade to an
-explanatory hint rather than silently failing.
+The distinction matters: some of these start work, some become material the conversation reads, and
+one does both.
+
+| What is handed over | What happens |
+|---|---|
+| **A web address** — typed in the target box, or simply pasted into the message | The screen asks the back end to start the same gated engagement the wizard starts, against that address. The reply is a pointer to the run and a **Watch live** button. Nothing here is answered by a model. |
+| **A folder on this machine** — likewise | The same, as a codebase review over that folder. A path is accepted only when it really exists and really is a folder, so a message that merely *mentions* a path stays a question rather than becoming a launch. |
+| **An archive** — dropped onto the transcript, chosen with **Attach**, or named as a path | Unpacked here, under the guards below, and attached to this conversation as material it can be asked about. An archive named as a *path* does both: it is unpacked and attached, **and** its extracted copy becomes the target of a gated codebase review. |
+| **Loose files and images** | Attached, and read when the conversation is asked something. |
+
+Every failure in that table produces a reply that says what was looked for and what was found
+instead — "I looked for this on this machine and there is nothing there"; "that is a file, not a
+folder or a supported archive"; "that is named like an archive, but its contents are not one I can
+read". Before this round, a path that was not a folder was passed on as though it were, and the run
+failed somewhere downstream with nothing on screen connecting the failure to the fact that the
+material was still packed.
+
+##### What happens to an upload
+
+The console refuses any single request larger than about a megabyte, and that limit is deliberately
+**not** raised for uploads — raising it would raise the ceiling for every other request the console
+answers. So a file is sliced in the browser and sent as an ordinary sequence of small requests, each
+one carrying the same session credential and the same anti-forgery marker as every other action.
+Cancelling tells the server, so the part-uploaded material is really discarded rather than left on
+disk until a sweep.
+
+When the last slice arrives the material is assembled, fingerprinted, and — if it is an archive —
+extracted. **What kind of thing it is gets decided by reading the first bytes of the file, never by
+its name**, so a document named as an archive is treated as the document it is, and an oddly named
+archive still works.
+
+##### What is refused, and why
+
+An archive is the most dangerous thing a person can be invited to upload, because a crafted one
+attacks the program that opens it. The extractor's rule is absolute and worth stating before the
+list: **a refusal throws the whole archive away.** Nothing is half-unpacked, because half-unpacked
+material is a lie about what the operator handed over. Each refusal comes back in plain English,
+naming the entry that caused it.
+
+| What is refused | Why it matters |
+|---|---|
+| **An entry that would be written outside the upload folder** | The classic archive attack: an entry whose path climbs out of the folder it is being unpacked into and overwrites something else on the machine. It is refused twice over — once when the path is read, and again by checking where the file would actually land. |
+| **An entry that is a link, a device or a pipe rather than a real file or folder** | A link is a signpost to somewhere else, and following one is how an extractor is tricked into writing outside its own folder. Only ordinary files and folders are accepted. The check does not rely on the archive's own claim about what an entry is, and it refuses a *folder* in the path that is a link, not merely a link at the end of it. |
+| **A decompression bomb** | A small archive that expands to something enormous. Two ceilings: a total size, and a ratio between what arrived and what came out. The ratio only begins to bind past a few megabytes of output, so an ordinary, efficiently compressed archive is never refused for merely being efficient. |
+| **An archive whose header understates its real size** | This is the subtle one. Every archive carries its own claim about how big each entry is, and a crafted archive lies. The obvious implementation trusts that claim, checks it, and only then reads — by which time the whole thing has been allocated. Here the claim is used only for a cheap early refusal; **the ceilings that actually bind are checked against the bytes as they really arrive**, block by block. An entry that keeps producing bytes past the limit is stopped at the limit, not after it. |
+| **A flood of entries** | An archive of tens of thousands of tiny files, which costs far more to unpack than to build. |
+| **Two entries with the same path** | Refused rather than one silently overwriting the other. Which one won would be the attacker's choice, not the operator's. |
+| **A path that is absurd in shape** | Too long, too deeply nested, or containing a character that is not printable. The last one is subtler than it sounds and is covered below. |
+| **An archive inside an archive** | Stored as it is, never opened. One level only. |
+
+Two more properties belong here, because they are what a reviewer would ask about next.
+
+**Nothing uploaded is ever executed.** Nothing is marked runnable — the permissions come from the
+system, never from the archive — nothing is placed anywhere a program would be looked for, and
+nothing is started. The only thing that can later act on those files is the gated codebase
+assessment, which the operator starts deliberately and which runs inside the sandbox with the
+ordinary approval gate in front of it.
+
+**Nothing is silently skipped.** An entry that cannot be handled is a refusal, not a quiet omission.
+An operator cannot check a total they were never shown, and a silently skipped file is how an
+unscanned secret leaves a building.
+
+##### What leaves the machine, and what does not
+
+Uploading does not send anything to a model. The material sits on the operator's own machine, in a
+folder only their own account can read, until they send a message that asks about it — and the first
+time that happens the screen **stops and asks**. The dialog names how many files, how many bytes and
+how many attachments are about to go, lists the file names, names the model they are going to, and
+states in as many words that nothing else on the machine goes with them — not the other
+conversations, not the findings, not the keys. It is answered once per attachment rather than once
+per message, so it informs without nagging. Removing an attachment is the way to stop it going, and
+removing really deletes it on the machine rather than merely taking the label off the row — because
+every answer in a conversation is given over everything that conversation still holds, and an
+attachment the screen said was gone but the machine had kept would keep going to the model on every
+later turn.
+
+Three protections travel with the material itself:
+
+- **Credential-shaped values are masked before anything leaves.** A password or key sitting in the
+  operator's own source does not go to the model. What survives is the *fact* of it: the file is
+  flagged as having had something masked, so "this file commits a credential" still reaches the
+  operator even though the credential does not leave the host.
+- **Uploaded text is fenced as quoted material.** The block is introduced as untrusted data that is
+  there to be analysed and never to be obeyed, each file gets its own label, and every quoted line is
+  prefixed so that no line of an uploaded file can ever occupy the position a heading occupies. The
+  reason this is not merely decoration: without it, a file — or even a crafted file *name* — could
+  forge a section boundary and impersonate the operator. The characters that count as a line break
+  for this purpose are the ones a *reader* honours, not merely the ordinary one, which is precisely
+  where a first attempt at this had two measurable holes.
+- **Instructions hidden in uploaded material are reported, not followed.** The model is told, in the
+  standing instruction it always receives, that anything looking like an instruction inside an
+  attached file is itself a finding to be quoted and reported.
+
+##### It says how much it read, and how much it did not
+
+A model's attention is finite, so a large codebase is read in part: the most security-relevant files
+are chosen first, and the rest lose the budget race. That is fine, and it must be said. **Silence
+implies whole-repository coverage, and that is a lie the operator cannot detect.**
+
+So every answer grounded in an attached codebase ends with the arithmetic — for example: *I read 47
+of 312 files in the attached codebase — 265 were not read (binary, over-long, or the reading budget
+ran out). Everything above covers only those 47.* When it did read everything, it says that instead.
+The same two numbers are given to the model, so it cannot describe a partial read as a review of the
+whole tree without contradicting what it was handed. Three details make the count trustworthy rather
+than decorative:
+
+- It is the number of files **the model actually received**, not the number the machine set out to
+  send. When the block has to be trimmed to fit, it is trimmed on a file boundary and the count is
+  corrected downward — a half-quoted file is not a file read.
+- The sentence lives **in the reply itself**, not in a note beside it. The screen redraws the
+  transcript from the saved record, so a caveat carried only alongside a reply is gone by the next
+  redraw, and a partial read that stops announcing itself reads from then on exactly like a complete
+  one.
+- A conversation holding only a screenshot makes **no coverage claim at all**, because "I read 0 of
+  1 files" about a picture is noise, and noise is how a statement that matters stops being read.
+
+And the honest route to completeness is offered, not merely mentioned: an answer that read an
+extracted codebase carries a **Run the gated scan on these files** button, which starts the ordinary
+gated assessment over the same files — the one that walks the whole tree and whose findings an
+automatic test either confirms or does not. The folder it points at is *computed* from the
+conversation's own identity rather than read out of a stored record, so nothing that could edit that
+record could aim a real scan at some other directory on the machine.
+
+##### An answer here is a LEAD, never a finding
+
+Every model-authored bubble carries a printed marker reading **"Lead — not a confirmed finding"**.
+The standing instruction the model receives forbids the words "confirmed" and "proven", forbids
+assigning a severity score as though the matter were settled, requires each observation to cite the
+file it came from, and states that an honest "I cannot tell from what is attached" is a correct
+answer while a plausible guess is a defect. The consent dialog says the same thing in its own words
+before anything is sent.
+
+This is the whole discipline of the product applied to its most tempting surface. The material is
+whatever the operator handed over, checked by nothing. Only an automatic test over real evidence
+makes a fact.
+
+##### Linking one conversation to another
+
+A conversation can be told to **draw on** other conversations, so that reasoning done last week is
+available as background this week. The panel under the transcript lists what this one draws on, with
+a cross beside each to disconnect, and a picker to add another. Four properties, all printed on the
+screen and all exercised by tests that run on this machine:
+
+| Property | What it means |
+|---|---|
+| **One-way** | This conversation draws on the other. The other is not changed, does not draw on this one, and cannot see it. Linking in the other direction is a separate, deliberate act. |
+| **Several at once** | A conversation may draw on many others — the limit is thirty-two — and each is removed individually. |
+| **Nothing is copied** | The link stores only the other conversation's identity. It is a permission to read at the moment of answering, not a merge. |
+| **Disconnecting takes effect immediately** | Because nothing was copied, there is no residue: the very next answer is given without the other conversation's history. |
+
+Two further limits are worth stating, because a reader would assume both the other way. A linked
+conversation's **uploaded files are declared but their contents are not shared**: the answer learns
+that the other conversation holds an upload, not what is inside it. And the borrowed history is
+bounded, says how much of itself was left out, and passes the same masking as everything else before
+it leaves the host — so a credential pasted into a conversation last week does not travel through a
+link this week.
+
+##### The two dropdowns above the transcript
+
+These set the model and the reasoning effort **for the engine as a whole** — the same controls as the
+Settings screen, taking effect the next time the system is started. They do **not** change the answer
+in this conversation, which comes from a model the console pins itself. Sitting unlabelled above a
+transcript, controls named "Use model" and "Apply effort" read as "answer me with this", which is the
+one thing they do not do; they are now named for what they change and print a line saying what they
+do not. If the owner side is offline they degrade to an explanatory hint rather than failing silently.
+
+##### Status, stated exactly
+
+**Working and actionable.** The upload path, the extraction refusals, the deletion, the linking and
+the coverage arithmetic are all exercised by tests that pass on this machine, and the upload path has
+also been driven through the real interface here — this machine's saved conversations include a real
+file uploaded in slices, recorded, and later removed, with the removal really deleting it.
+
+What is **not** established is the answering step against the live service: every test puts a
+stand-in in place of the model, so no request leaves the host during them, and no answer produced by
+the live model over uploaded material is recorded anywhere on this machine. The reasoning call
+itself is new in this round — before it, this screen could only launch a run or ask for a target.
+Without an AI key it says so plainly and keeps the gated run on offer; under a sovereignty setting
+that forbids anything leaving the host it refuses the model call outright and says the gated
+assessment still runs.
+
+One capability exists in the back end with no way to reach it from a screen: attaching a file that
+already sits on this machine *as an attachment*, by naming its path. The route is written but is not
+exposed, so today the way to hand over something already on disk is to name it in the target box —
+which, for an archive, unpacks it, attaches it, and starts a gated review of the extracted copy.
 
 ---
 
@@ -13530,7 +16485,7 @@ back in and see whether its proofs still hold.
 
 ---
 
-### 5. Group MANAGE — the thirteen screens for running the system
+### 5. Group MANAGE — the fourteen screens for running the system
 
 #### 5.1 Sessions
 
@@ -13543,6 +16498,14 @@ sessions, each with a small cross beside it to disconnect.
 **What the operator can do.** Create a session, rename it, connect it to another, disconnect,
 delete it from the list (reversible), or delete it permanently. These controls use the browser's own
 prompt and confirm dialogs rather than custom forms.
+
+**The same connection, seen from the other end.** A conversation on the Chat screen *is* a session,
+so the "draws on" rows here and the **Draws on** panel described in §4.3 are two views of one thing,
+with the same four properties: one-way, several at once, nothing copied, and disconnection effective
+immediately. The difference is presentation, and this screen is the weaker of the two — connecting
+from here means typing an identity into a browser prompt, while the Chat screen offers a searchable
+list of conversations by name. Neither can mint a fact: a connected session's knowledge arrives as
+**advisory prior context**, and only an automatic test over real evidence confirms anything.
 
 The permanent-delete wording deserves quoting because it is precise: it is removed from the history,
 but **the runs and the signed record are kept**. A system that let an operator erase its own audit
@@ -13710,13 +16673,48 @@ program entirely.
 On a non-Linux host the screen states plainly that these are Linux packages and that nothing is being
 probed, rather than showing everything as missing.
 
-**A separately labelled card, "NOT HOST-INSTALLED"**, lists the tools that live inside the
-third-party agent's container image. The screen says they are neither probed nor installed on this
-machine and are listed for reference only.
+On this machine the screen currently reports **thirteen tools, all thirteen installed**, with none
+missing, failed or shadowed.
+
+**A separately labelled card, "NOT HOST-INSTALLED"**, lists the **twenty-four** tools that live
+inside the third-party agent's container image. The screen says they are neither probed nor installed
+on this machine and are listed for reference only, which remains exactly right: they are in the
+image, not on the host. Chapter 12 sets out what has since been established about that image itself.
 
 **The "tool consciousness" panel (advisory).** Four tiles — Adopted, Refused, Installed, Installable
-— and per-tool rows showing whether the system has a command-line handle on it and whether it has an
-agent skill for it, with a **Controllable** or **Refused** chip and the reason, plus signal markers.
+— and one row per tool, each carrying a verdict chip reading **Controllable** or **Refused** with the
+reason behind it. It carries more rows than the roster above it — eighteen on this machine — because
+it also lists the tools the third-party testing agent holds a written playbook for and which are not
+installed on this host. **All eighteen are currently marked controllable and none is refused**, which
+was not true earlier the same day; a reader should treat a full house as the result of the work
+described in the next two paragraphs rather than as the natural state of that panel.
+
+The vocabulary behind that verdict widened in this round, and the widening is the interesting part.
+The system will not claim to control a tool it has no way to drive, so a tool with nothing driving it
+is refused outright. It used to recognise only two ways of driving one: a written playbook the agent
+reads, or a typed builder that assembles and gates the command itself. But parts of the engine
+resolve and start tools on their own — a gated sensor does, the source-analysis pass does, and the
+scanner starts a headless browser to confirm a browser-side flaw by really executing it. Those tools
+were genuinely being driven and were being reported as undrivable. That is a reporting defect rather
+than a missing capability, and its effect was to show the operator installed tools marked *refused*
+while the engine was demonstrably running them.
+
+So the verdict chip now **names the surface** — *Controllable (its own command line)*, *(a gated
+sensor)*, *(the source-analysis pass)*, *(the headless browser)* — rather than merely asserting that
+the tool is controllable. The list of admitting surfaces is closed: a label that is not on it
+refuses, so "give it a name" can never become "admit everything". Two things are deliberately **not**
+counted as control, and the reasoning is worth quoting because it is what keeps the gate meaningful:
+being able to *read* another tool's report is not being able to drive it, and the offline benchmark
+harness does start rival scanners in order to score against them, but that is a measurement rig
+rather than the engagement pipeline — counting it would let this screen claim an engagement
+capability that does not exist.
+
+**One honest wrinkle on this screen.** The verdict chip carries the new vocabulary, but the panel's
+own printed explanation underneath it, and its per-tool signal markers, still name only the original
+two — a playbook and a typed builder. So a tool driven by a sensor is correctly labelled in its
+verdict and unmentioned in the explanation beside it. The complete, per-tool statement of what drives
+each one is on the New Assessment tool picker (§4.2), not here. It is stale wording rather than a
+wrong verdict, and it is listed with the other honest gaps in §8.
 
 **What the operator can do.** For an adopted-but-missing tool, two buttons:
 
@@ -14004,6 +17002,132 @@ It is the point.
 
 ---
 
+#### 5.14 Engagement Library
+
+*Subtitle: "Every past job, most recently worked first — open one to get back to its runs, findings
+and proof."*
+
+This screen answers a question none of the others answer: **what did we do last spring?** Months
+after a piece of work, an operator usually remembers the customer's name and roughly when the work
+happened, and nothing else. Everything the system produced is still on the machine and still sealed —
+but the way back to it used to be an alphabetical list of folder names carrying no dates at all, and a
+job that had only ever been written into the signed record, without a folder of its own, did not
+appear on that list at all. The library is the way back in.
+
+**What the operator sees.** One table, one row per past job, **most recently worked on first**. Dates
+and times are shown in the reader's own time zone, and the screen prints which zone that is rather
+than leaving it to be guessed at.
+
+| Column | What it holds |
+|---|---|
+| **Job** | The human name, if one has been given, with the machine identity printed underneath it in small type — so the name a person chose and the identity the system works from are never mistaken for one another. A job that exists only as a folder on disk, with no entry in the tamper-evident record, is marked "not on the spine" (*spine* is this system's word for that record). |
+| **Last worked on** | The most recent real activity: an entry in the signed record, the moment a run started, or the time the authorisation document was last written. |
+| **First seen** | The earliest of those same three signals. |
+| **Kind** | What sort of work it was — a website or interface assessment, a codebase review, a single tool, the autonomous suite, a cloud or Kubernetes posture review, or a defensive run — read from each run's own record rather than inferred. |
+| **Subject** | What the work was pointed at, up to five entries. |
+| **Runs** | How many separate runs the job holds. |
+| **Findings** | How many findings are stored, and beside it — for a job recorded in the signed record — how many of those are proven facts rather than leads. |
+
+**Where those numbers come from, and what they are not.** The list is the union of two real sources on
+the machine — the signed record's own roster of engagements, and the folder of authorisation documents
+and evidence — together with the runs this interface itself launched, each filed under the job that
+that run recorded for *itself*. Two consequences are worth stating in plain terms. First, every date
+on this screen is derived from something that exists on disk, and **a job with no recorded activity is
+shown with a dash rather than back-dated to today**; the screen would rather admit it does not know
+than invent a plausible date. Second, a run belongs to a job because the run's own record says so, not
+because the request asked for it: **the browser cannot claim a run into a job it does not belong to.**
+
+Ordering is by most recent activity. Because the stored times are only accurate to the second, several
+jobs created by one command can carry the identical stamp; the tie is then broken by which was started
+more recently, and only as a last resort by identity, so the order is stable rather than flickering
+between two equally recent rows. When there are no past jobs at all the screen says so — "No past jobs
+yet" — and offers the New Assessment button instead of an empty table.
+
+**This screen is also the switch.** Because the interface is now scoped to one job at a time (§2),
+the library is where that job is chosen and where the view is widened back to everything. A line
+above the table says which it is — "Every screen is showing *Acme — Q3 external review* only", or
+"Every screen is showing all engagements. Open a job below to work on just that one" — and, when a
+job is in scope, an **All engagements** button beside it. Opening a job from the table, from a
+bookmark, or from a shared link makes it the active one. Widening is a presentation switch and
+nothing more: every job, run, finding and certificate stays exactly where it was.
+
+**Opening one job.** Clicking a row opens that job on its own. Four tiles: the machine identity,
+labelled *never changes*; when it was last worked on; how many runs it holds; how many findings, with
+how many of those oracle-proven. Then badges for the state a reader needs before trusting anything
+below them: charter on file or no charter, kill-switch tripped, on the signed record. Then a table of
+the runs inside the job — name, when it started, status, what it was pointed at, finding count — and
+against each run four buttons: **Findings**, **Evidence**, **Dossier**, **Rename**. The first two
+navigate into the screens described earlier in this chapter; the third downloads that run's dossier,
+the sealed package described in chapter 6.
+
+**What the operator can do.** Open a job, rename a job, rename a run, jump into a run's findings or
+its evidence, and download a run's dossier. Renaming uses the browser's own prompt box, as the
+Sessions screen does, and the prompt carries its own one-line disclaimer: *"The name is for you — it
+changes nothing that is signed."* Nothing else here changes anything. The screen cannot launch a run,
+cannot approve anything, and cannot alter a finding.
+
+**The load-bearing property: a rename is presentation only.** This is the part of the screen that this
+briefing exists to explain, so it is worth being precise about.
+
+Every past job has two names. The **machine identity** — a date-stamped identifier, or the short name
+the engagement was created under — is the name every certificate, every dossier and every entry in the
+signed record was written against. It never changes. The **human name** is a separate thing entirely:
+it is stored on its own, in one small file beside the interface's own records, keyed by that machine
+identity. Renaming writes one entry in that file and nothing else. **It touches no run's files, no
+evidence certificate, no part of the proof bundle and no entry in the tamper-evident record**, and it
+rewrites nothing that already exists. The consequence is the one a customer cares about: a job can be
+relabelled "Acme — Q3 external review" for the convenience of the people who have to find it again,
+and the proof package already handed to that customer still verifies, byte for byte, exactly as it
+did before.
+
+There is one place the human name deliberately does travel, and precision about it matters more than
+a clean slogan. If a **run** is renamed and its dossier is then downloaded *again*, the fresh archive
+is **titled** by the human name: the name heads the readable documents inside it, so that whoever
+opens the archive months later recognises the job instead of reading a date-stamped machine
+identifier. Titles are part of the readable material that the archive's own list of hashes covers, so
+that list is recomputed and the archive re-signed on every build, as it must be. What does not change
+is the proof: the sealed evidence inside is byte-identical either way, and its certificates carry the
+same fingerprints. Renaming a **job** does not travel even that far — only a run's name is carried
+into a download.
+
+That is not a claim resting on a comment in the code. It is exercised by tests that run on this
+machine and passed while this section was being written:
+
+| The test | What it establishes |
+|---|---|
+| **Change the stored name between two builds of the same run's dossier** | The proof re-verifies both times with the same verdict and the same certificate identity; the two archives are **byte-for-byte identical**; and neither name appears anywhere inside either archive. The test drives the packager directly, without the title the download button hands it, so what it pins is that nothing the packager gathers of its own accord can pick the name up. |
+| **Run the real offline verification a recipient runs** | Not a simulation of it: the pinned trust root, the signature checks, the hash chain, the artifact list and the deterministic re-firing of the checker, over two archives built while the stored name changed between them. Both must pass, with identical certificate fingerprints. |
+| **A deliberate control** | Make a genuine content change between two builds and the byte-identical check *must fail*; corrupt one entry in an archive and the tamper check *must fail*. Without this, the two tests above could be green because they were measuring nothing. |
+| **Photograph every file before and after** | A complete copy of every file the interface owns is taken before a rename and compared after it. The only thing permitted to differ is the file of names itself. |
+
+**Honest limits, stated plainly.** Four of them, and the first is the price of the property above.
+
+- **The human name is not signed.** It is convenience metadata held outside the tamper-evident record,
+  and nothing in the renaming path writes to that record. So the signed history does not show that a
+  job was renamed, or by whom. This is a deliberate trade: a name that *could* reach the signed
+  material is exactly the thing the design forbids, and one of the two cannot be had without losing
+  the other. What protects the name file is ordinary and worth naming honestly: it is readable only by
+  the account running the software, it is written in a way a crash cannot leave half-finished, and the
+  renaming request passes the same protections as every other action this interface can take — it is
+  not an owner-key act.
+- **The runs table lists the runs this interface launched.** A job driven entirely from the typed
+  commands still appears in the library, with real dates and counts read from the signed record, but
+  its detail view says so rather than showing an empty table: this job has an authorisation document
+  or a record entry, but no run launched from here yet.
+- **Refusals, not best guesses.** A malformed or unknown job identity is refused outright rather than
+  stored, a run can be named only if that run actually exists on disk, names are length-capped and
+  stripped of control characters, and the store of names is bounded — so repeated requests cannot grow
+  it without limit.
+- **The screenshot of this screen was taken in this round**, closing what had been a documentation
+  gap. The picture is therefore current; several older screens' pictures are not (§8).
+
+Everything on this screen is read from this machine. Nothing here reaches the network.
+
+**Status: read-only apart from the two rename actions — and neither of those changes anything that is
+signed.**
+
+---
+
 ### 6. Group LEARN — the four screens for understanding and staying current
 
 #### 6.1 Trust Center
@@ -14120,10 +17244,10 @@ assessment · Watching it live · Findings & evidence · Fixes · Arming live au
 PRs) · Defense — AEGIS · Approvals & Safety · Settings — keys & model · Brain — memory, benchmark &
 catalog · Deploying — local & hosted · Glossary.
 
-**An honest gap, worth stating plainly:** the manual covers thirteen topics, not all twenty-eight
-screens. There is currently **no manual section** for Terminal, Chat, Sessions, Proof Studio, Report,
-Compliance, Assurance, Charter & Attestation, API Keys, Knowledge Engine, MCP Servers, System &
-Services, Governance, Trust Center, Proof of Posture, or Replay Proof. Those screens carry their own
+**An honest gap, worth stating plainly:** the manual covers thirteen topics, not all twenty-nine
+screens. There is currently **no manual section** for Terminal, Chat, Sessions, Engagement Library,
+Proof Studio, Report, Compliance, Assurance, Charter & Attestation, API Keys, Knowledge Engine, MCP
+Servers, System & Services, Governance, Trust Center, Proof of Posture, or Replay Proof. Those screens carry their own
 in-screen explanatory text — which, as this tour shows, is substantial — but they are not written up
 in the manual.
 
@@ -14153,6 +17277,27 @@ the default.**
 | **Vulnerability leads** | Per vulnerability: a known-exploited or lead label, the identifier, severity, summary and source feed. | Read only. |
 | **Defensive knowledge catalog** | The defensive detection operators with their mapped attacker techniques and weakness types (first 200). | Read only. Labelled "Never facts." |
 | **knowledge/ folder → git** *(owner)* | — | **Status**; or **Regenerate + commit**, which regenerates the system map, scans the folder for secrets, and commits locally. |
+
+**What the "Learn from URL" button actually does.** That one row covers a whole subsystem, and a
+reader of this chapter should not have to guess at it. Pressing it hands the pasted web address to the
+sovereign side's own page-reading component, which fetches **public pages only, by ordinary retrieval,
+never anything a site owner would recognise as probing** — and which identifies itself with one fixed,
+never-varied label rather than disguising its traffic. Each fetch passes four gates before a connection
+opens: the address must be on the site the owner typed and nowhere else; every address that site name
+resolves to must be a public one, with the connection then pinned to it, which is what stops a web
+address being used to reach the machine's own private network; the site's own published rules for
+automated readers are respected, and are treated as *forbidding everything* if they cannot be read; and
+a minimum pause is taken between requests to the same site. The run is deliberately tiny — **at most
+four pages, one step from the address given** — because it happens while the operator waits, and the
+emergency stop is wired into it as a signal checked *between* page fetches, so a halt takes effect
+promptly rather than after the crawl would have ended anyway. The keystone is the grounded/advisory
+split named in the table: every claim goes through **the identical demote-only admission check that
+governs the owner's own memory**, so **nothing a page asserts ever becomes a fact** — a page is a
+source of quotations, never of truth, and what is served for a grounded claim is the page's own
+passage rather than the model's sentence about it. Chapter 14, "Learning from a page the owner points
+at", sets out the gates, the topic-based variant that reads a fixed list of public reference works, and
+the honest status of the route — including the fact that it has never been run against a live outside
+site on this machine.
 
 **The Brier score, in plain words.** It appears on the Self-evolve card and nowhere else in this
 chapter, and it is not a term a general reader will know. When the system predicts something, it does
@@ -14192,7 +17337,7 @@ did not find one might otherwise conclude the capability does not exist. It does
 This section covers them in three groups: the cloud and Kubernetes exploitation confirmations
 (§7.1), the safeguards around how the software itself is built and shipped (§7.2), and a set of
 seven further capabilities that are real, are in the software, and appear on none of the
-twenty-eight screens (§7.3).
+twenty-nine screens (§7.3).
 
 #### 7.1 The six cloud and Kubernetes exploitation confirmations
 
@@ -14204,7 +17349,7 @@ confirmations that a weakness was not merely *present* but actually *achieved*.
 | Confirmation | What it establishes, in plain terms |
 |---|---|
 | **Instance-metadata credential capture** | A cloud machine has an internal service that hands out credentials to whatever is running on it. This confirms a credential was actually retrieved from that service and actually worked — not that the service was reachable. |
-| **Exposed-secret validity** | A password or key found lying somewhere it should not be is only a real problem if it still works. This confirms the secret is currently valid, rather than expired or revoked. |
+| **Exposed-secret validity** | A password or key found lying somewhere it should not be is only a real problem if it still works. This confirms the secret is currently valid, rather than expired or revoked. It recognises two kinds of credential, and the two are at different stages — see below. |
 | **Google service-account impersonation** | One machine identity was able to act as a different, more privileged identity. |
 | **IAM privilege escalation** | A strict, achieved increase in privilege. The distinction matters: it confirms the step was taken, not that a path to it could be drawn on a diagram. |
 | **Kubernetes access control, tier one** | An anonymous, unauthenticated caller is bound to a dangerous built-in role on a container cluster. |
@@ -14220,11 +17365,17 @@ the same cluster — including the namespace's own default identity bound to the
 role, whose real rules do grant secret reads — correctly left as leads. What that run does not cover
 is
 discovering bindings across a whole cluster, and a managed provider's control plane (Amazon EKS,
-Google GKE, Azure AKS). The four cloud ones are proven offline with fixture evidence, meaning
-recorded sample data standing in for a live cloud account.
+Google GKE, Azure AKS). A third has since joined them: the **GitHub half** of exposed-secret
+validity is proven against the real GitHub service, using the operator's own credential against
+GitHub's own least-privileged identity endpoint, with the certificate re-verifying offline and a
+live bogus credential of the same shape correctly left as a lead. That capability's **Amazon Web
+Services half is not proven** — it is built and unit-tested but has never touched real Amazon
+infrastructure, and nothing from the GitHub run transfers to it. The remaining cloud ones are
+proven offline with fixture evidence, meaning recorded sample data standing in for a live cloud
+account.
 
 **There is no dedicated screen for any of them, and no dedicated typed command either.** This was
-checked directly: none of the twenty-eight screens names any of these capabilities, and the six
+checked directly: none of the twenty-nine screens names any of these capabilities, and the six
 verification modules are referenced nowhere outside their own folder and their own tests. They are
 internal verification paths, not buttons.
 
@@ -14242,14 +17393,17 @@ review. The wizard's own field hint states that the sensor "reads your imported 
 live account." There is no button in this product that says "run a cloud exploit", and this chapter
 will not imply there is one.
 
-**What remains deferred, stated exactly — and what no longer is.** For the four **cloud**
-capabilities, what has not yet happened is **real-world live fire against a third-party cloud
+**What remains deferred, stated exactly — and what no longer is.** For the remaining **cloud**
+capabilities — the metadata-credential capture, the Google service-account impersonation, the
+permission-escalation re-derivation, and the Amazon Web Services half of exposed-secret validity —
+what has not yet happened is **real-world live fire against a third-party cloud
 account**. That step waits on the customer supplying their own cloud credentials. The detection logic,
 the evidence handling, the certificates and the safety gates are all built and proven. The code says so
 in its own words: the module that would reach a live metadata service records in its own documentation
 that the network half is "deferred until an authorized lab credential is available."
 
-The **two Kubernetes** capabilities are no longer in that position. Both are proven against a **real
+The **two Kubernetes** capabilities are no longer in that position, and neither is the **GitHub half
+of exposed-secret validity**. Both Kubernetes ones are proven against a **real
 Kubernetes cluster**: a repository script stands up a genuine single-node cluster (k3s 1.31.5, in a
 container on the machine's own internal address) which the system creates, owns and destroys, plants
 known-dangerous and known-benign access rules in it, and adjudicates what the real Kubernetes interface
@@ -14261,10 +17415,12 @@ managed provider's control plane (Amazon EKS, Google GKE, Azure AKS).
 
 Two framings should both be avoided, because each is inaccurate in a different direction. Saying the
 capabilities are unfinished understates the system: they are built, gated, and proven. Saying the cloud
-ones have been field-proven in customer clouds overstates it: they have not been pointed at one. The
-accurate statement, and the one this document uses, is: **the Kubernetes confirmations are proven
-against a real cluster the system stands up itself; the cloud confirmations are built, gated, and
-proven offline, with live fire awaiting operator-supplied credentials, by design.**
+ones have been field-proven in customer clouds overstates it: none has been pointed at a customer's
+account. The accurate statement, and the one this document uses, is: **the Kubernetes confirmations
+are proven against a real cluster the system stands up itself; the GitHub half of exposed-secret
+validity is proven against the real GitHub service and its Amazon half is not; and the remaining cloud
+confirmations are built, gated, and proven offline, with live fire awaiting operator-supplied
+credentials, by design.**
 
 That design point is worth drawing out for a procurement reader, and the two halves show it from
 opposite sides. For cloud, it would have been technically easy to ship a demonstration against an
@@ -14284,7 +17440,7 @@ label, publishing a bill of materials for the software itself, and failing the b
 vulnerability is found in a dependency — are properties of the build pipeline, not features an
 operator clicks.
 
-Accordingly there is **no screen for them** among the twenty-eight, and no typed command for them
+Accordingly there is **no screen for them** among the twenty-nine, and no typed command for them
 either. Their evidence is the build pipeline's own record, and a reviewer should read the build
 configuration directly rather than look for a control in the interface. This work was still being
 delivered at the moment this chapter was written, and the state of a repository at a particular
@@ -14308,7 +17464,7 @@ Same subject matter, opposite directions. They should never be quoted as one ano
 
 #### 7.3 Seven further capabilities with no screen of their own
 
-These are real, working parts of the system that a reader touring the twenty-eight screens would
+These are real, working parts of the system that a reader touring the twenty-nine screens would
 never meet. Five are reached by typing a command; two are reached only from inside a run. None of
 them is a placeholder, and none of them is hidden — they simply were not given a page in the
 interface.
@@ -14395,7 +17551,7 @@ path.
 
 A briefing that lists only what works is not a briefing. This section lists every place in the
 *interface* where a screen shows something that does not do what a reader might reasonably assume,
-together with the interface's known gaps in coverage. It is a statement about the twenty-eight
+together with the interface's known gaps in coverage. It is a statement about the twenty-nine
 screens. It is not a claim that the system as a whole has no other limits — the capabilities that
 have no screen at all are set out in §7, and the ways of driving the system that are not screens at
 all are set out in §9 and §10.
@@ -14408,28 +17564,34 @@ all are set out in §9 and §10.
 | **The Governance screen** | Read-only by design. Destructive authorisations are minted and consumed only through the command line with multiple independent signatures. |
 | **The Charter screen** | Can provision a *this-machine* authority only. A remote charter requires an out-of-band ceremony on a host that holds the owner key. Its in-browser "is this host authorized?" check is labelled advisory; the gate is what enforces. |
 | **The Fixes screen** | Never opens a code-change request. That is a separate, off-by-default command-line capability requiring multi-party signed authorisation. |
-| **The Manual** | Covers 13 topics, not all 28 screens (the uncovered ones are listed in the Manual entry earlier in this chapter). |
+| **The Manual** | Covers 13 topics, not all 29 screens (the uncovered ones are listed in the Manual entry earlier in this chapter). |
 | **Credentials for a login-protected target** | The wizard has no field for a test account's username and password, and no screen offers one. A run launched from the interface therefore exercises the public, logged-out surface of an application. The engine contains the login-and-stay-logged-in machinery, and the typed commands accept a second identity for the "can user A read user B's data?" tests — but neither is reachable from a screen. |
-| **Cloud and Kubernetes exploitation** | Built and gated, with no screen and no typed command of its own. The two Kubernetes confirmations are proven against a real cluster the system stands up itself; the four cloud ones are proven offline with recorded sample evidence, with live fire against a real third-party cloud account still deferred. See the note below the table. |
+| **Cloud and Kubernetes exploitation** | Built and gated, with no screen and no typed command of its own. Three of the six have been fired at something real, and the three are not of equal weight — the two Kubernetes ones against a real cluster the system stands up, owns and destroys itself, which is real infrastructure but the project's own; and the GitHub half of exposed-secret validity against the real GitHub service, the only one of the six to have judged material from a real outside system. The rest, including that capability's Amazon half, are proven offline with recorded sample evidence, with live fire against a real third-party cloud account still deferred. See the note below the table. |
 | **Seven further capabilities** | The out-of-band relay, entitlement provisioning, target intake, importing another tool's results, social-engineering defence, the fuzzing engine and the request replayer all exist and none has a screen. Five have a typed command; two run only inside an engagement. Set out in full in §7.3. |
 | **Build and release safeguards** | A property of the build pipeline, not a screen. There is no control for them anywhere in the interface, by design. |
 | **The unified interface's reach** | Reachable only through `vigil up`. Of the three back-end programs, two serve pages of their own, and pointing a browser at either gets an older interface rather than this one. The third serves no pages at all. |
-| **Screenshots** | 32 screenshots exist on disk, covering all but three of the 28 screens, plus several sub-tabs and the cloud setup view. **No screenshot exists for MCP Servers, System & Services, or Proof of Posture** — the three most recently added screens. This is a documentation gap, not a functional one. |
-| **Local camera gesture control** | Not functional. Gesture input comes from a paired phone companion. |
+| **Screenshots** | **36 screenshots now exist on disk, and every one of the 29 screens has one** — the four that were missing (MCP Servers, System & Services, Proof of Posture, the Engagement Library) were taken in this round. The remaining six cover sub-tabs and the cloud setup view. The honest residue is age rather than absence: most were taken a fortnight ago, so the Chat and New Assessment pictures show those screens as they were before the changes described in §4.2 and §4.3. |
+| **Starting the attack side from a screen** | Half built, and the missing half is the visible one. The switchboard that serves the interface now answers two addresses of its own — say which programs behind it are answering, and start the two attack-side ones — behind the same machine-only, address, session-key and anti-forgery checks as everything else, and with **no command, path or port travelling in the request** (§1.2). The browser-side indicator and its Start button are written but are **placed on no screen**: nothing displays them, they carry no styling, and the System & Services screen still tells the operator to start the attack side in a terminal. Neither half has an automated test. So the control exists in the code and is not reachable by a person today. |
+| **The Tools screen's driver wording** | The per-tool verdict chip names the new, wider vocabulary correctly; the printed explanation and the signal markers beside it still name only the original two ways of driving a tool. Stale wording, not a wrong verdict. The complete per-tool statement is on the New Assessment tool picker. |
+| **Attaching a file already on the machine** | A conversation can be handed material by upload or by naming an archive as its target. Naming a file *as an attachment*, without also starting a run, exists in the back end but is not exposed as a route or a control. |
+| **What a single tool run can actually start** | The New Assessment tool picker lists this host's whole roster and says how each tool is driven, but of the thirteen tools installed here exactly **one** — the headless browser — can be started from that screen as a single tool. The other twelve are driven by the engine during an engagement. The screen states this itself, tool by tool and as a count. |
+| **Gesture control, by camera or by phone** | Neither route produces movement. The local camera route is not functional (the hand-tracking model is absent); the phone-as-trackpad route is built and tested on the desktop side but has nothing sending it hand movement. Chapter 14 lists what each is waiting on. |
 | **The telemetry collector** | Off by default. The Assurance screen says "collector not running" rather than showing zeros. |
 | **Vulnerability-feed egress** | Off by default. Both the one-shot pull and the recurring pull are conscious opt-ins, gated by the emergency stop. |
 | **Accessibility and browser support** | **Not assessed.** No accessibility standard is claimed, no audit has been carried out, and no supported-browser list is published anywhere in the software or its documentation. See the note below the table. |
-| **Documentation drift** | Two internal reference documents are stale on the screen count: both still say "21 screens". **The verified number, agreed by three independent lists that are checked against each other automatically, is 28.** |
+| **Documentation drift** | Five internal reference documents are stale on the screen count, at two different wrong figures: the interface package's own read-me and the internal knowledge note still say twenty-one; the repository's front page, the exhaustive feature catalogue and the working note that tells a developer how to add a screen still say twenty-eight. Older programme records quote twenty-five and twenty-six, but those are dated accounts of the count on the day rather than claims about the software as it now stands. **The verified number, agreed by three independent lists that are checked against each other automatically, is 29.** |
 
 **On the cloud row.** All six cloud and Kubernetes exploitation confirmations are complete and part
 of the released software, and they are wired end to end. The two Kubernetes ones are proven against a
 real single-node cluster the system creates, owns and destroys — dangerous binding confirmed and
 re-verified offline, benign ones correctly left as leads — with cluster-wide enumeration and managed
-provider control planes (EKS, GKE, AKS) explicitly outside what that run shows. The four cloud ones are
-proven offline with recorded sample data standing in for a live cloud account; what has not happened
-for them is live fire against a real third-party cloud account, which waits on the customer supplying
-their own cloud credentials. There is no screen and no typed command for any of the six; they reach the
-operator through the ordinary confirmed-finding path.
+provider control planes (EKS, GKE, AKS) explicitly outside what that run shows. The GitHub half of
+exposed-secret validity is proven against the real GitHub service, with its Amazon Web Services half
+built, unit-tested and never exercised against real Amazon infrastructure — nothing from the GitHub
+run transfers to it. The remaining cloud ones are proven offline with recorded sample data standing in
+for a live cloud account; what has not happened for them is live fire against a real third-party cloud
+account, which waits on the customer supplying their own cloud credentials. There is no screen and no
+typed command for any of the six; they reach the operator through the ordinary confirmed-finding path.
 The full account, including why the remaining deferral is deliberate, is in §7.1.
 
 **On the accessibility row, stated carefully.** The interface does carry some of the standard
@@ -14446,7 +17608,7 @@ accessibility conformance statement; the honest position today is that one has n
 the navigation list in the application code, the routing logic in the same file, and a
 human-maintained screen map used by the voice assistant. An automated check fails the build if the
 three sets diverge, applies a guard so that a duplicated or unreadable entry cannot silently vanish,
-and requires at least one spoken synonym per screen. All three lists currently contain 28 entries;
+and requires at least one spoken synonym per screen. All three lists currently contain 29 entries;
 this was independently counted during the writing of this chapter. The two stale documents both say
 21, in five places between them. There is also a "22" in circulation, and it is worth separating: 22
 is not a stale figure for the modern interface at all — it is the **correct** count of screens in the
@@ -14456,7 +17618,7 @@ older offence console described in §9. The two numbers refer to two different p
 
 ### 9. The other ways into the system
 
-The twenty-eight screens are one way in. The typed commands in §10 are a second. There are three
+The twenty-nine screens are one way in. The typed commands in §10 are a second. There are three
 more human interfaces in the box that are not the product interface, and two **programmatic** ways in
 — routes intended for another piece of software rather than a person. A reviewer inventorying what
 can be talked to, and an integrator asking "can we drive this from our own systems", both need the
@@ -14476,12 +17638,21 @@ content-security policy the modern interface uses, which is why the modern polic
 applied to it. *Inventoried from source; not exercised at runtime during the preparation of this
 chapter.*
 
-**The legacy SIGIL cockpit** — a single page with five panels, served on the internal sovereign port:
+**The SIGIL cockpit's own page** — a single page with five panels, served on the internal sovereign
+port:
 an approval queue with approve/deny buttons; agent activity, budgets and ingest lag; a capabilities
 panel with toggles; a live event stream where every row is chipped *anchored*, *tail* or *broken*;
 and a detail overlay that, when a record is clicked, fetches it and shows an *integrity verified* or
 *INTEGRITY BROKEN* chip along with the reason. *Inventoried from source; not exercised at runtime
 during the preparation of this chapter.*
+
+**One distinction matters here and chapter 14 settles it.** The word "legacy" applies to this *page*,
+not to the program that serves it. The cockpit program is the sovereign half's live back end: `vigil
+up` starts it first and refuses to continue if it does not come up, and the modern interface makes
+sixteen calls into it — including the single owner-signed channel through which every owner-plane
+change in the whole interface passes. So the accurate statement is that **the cockpit program is
+current and load-bearing; its own five-panel page is a superseded front end that is still shipped and
+still served.** Chapter 14, section 8.3, sets out the evidence.
 
 **The Strix terminal interface** — a third-party, Apache-licensed agentic pentest tool that has been
 vendored into the repository (that is, a copy of somebody else's software kept inside this one) and
@@ -14549,13 +17720,14 @@ One more thing belongs here, because a reader asking about "the back end" will l
 chapter is where the interface is described.
 
 Every screen in this chapter is a **client**. It draws nothing from its own knowledge; it asks the
-back end and displays the answer. There are **73 distinct addresses** it can ask — 68 on the offence
+back end and displays the answer. There are **81 distinct addresses** it can ask — 76 on the offence
 side and 5 on the sovereign (owner) side, counted by reading the interface code — and each one
 corresponds to something in
 this tour: the run list, one run's findings, its evidence, its coverage, its attack graph, the
 compliance mapping, the drift comparison, the posture certificates, the tool inventory, the
-capability catalogue, the chat conversations, the terminal's dry-run verdict, the defensive gateway's
-status, the approvals queue, the settings, and so on.
+capability catalogue, the chat conversations and the pieces of an upload, the terminal's dry-run
+verdict, the defensive gateway's status, the approvals queue, the settings, and so on. (The
+switchboard's own two addresses, described in §1.2, are not among them: no screen calls either.)
 
 Two consequences follow, and both are load-bearing.
 
@@ -14749,6 +17921,9 @@ controls, not testing controls.
 | **Pushing the knowledge folder to a remote repository** | **Command line only** | The screen commits locally; pushing is a separate deliberate act. |
 | **Supplying a test account's login for an authenticated scan** | **Command line, and only for one family of tests** | No screen has a field for it. The typed commands accept a second identity for the "can user A read user B's data?" tests, and nothing more. The general login-and-stay-logged-in machinery exists inside the engine but is not exposed by any screen or any option. |
 | Checking readiness before a session | **Either** | `vigil doctor` and the System & Services screen show the same report. |
+| **Starting the system, or restarting the offence side after it has stopped** | **Command line** | `vigil up` brings the whole thing up. The launcher's own switchboard will also restart the offence side on request — a fixed, named action whose command comes from the launcher's own configuration and never from the request — but no screen offers that control today, so in practice this is still a terminal act (§8). |
+| **Working on one job at a time** | **Screen** | The job chip and the Engagement Library scope every screen to one job and widen back again. There is no typed equivalent, and none is needed: scoping is presentation and changes nothing the commands act on. |
+| **Asking a question about a codebase nobody has scanned yet** | **Screen** | Only the Chat screen takes an upload. The answer is a lead; the typed commands are what turn it into a fact. |
 | Re-checking a proof someone sent you | **Screen** | The Replay Proof screen takes a pasted report and needs nothing else. |
 | Automating anything on a schedule | **Command line** | Every verb is scriptable; screens are not. |
 | **Driving the system from another piece of software** | **The gated on-machine service** | It runs already under `vigil up`, and can be started on its own with `vigil crucible api`. It gives a program the same reads and the same gated actions, on this machine only. See §9.2. |
@@ -14779,10 +17954,11 @@ To make the tour concrete, here is a plausible first hour, using only actions ve
    this-machine authority. If they intend to test a remote system, they instead copy the printed
    ceremony command and run it on the machine that holds the owner key.
 6. They press **New Assessment** and walk the five steps — choose *Scan a website / API*, enter the
-   address, tick the authorisation declaration, set the scope, choose a depth, choose a model — and
-   press **Launch assessment**.
-7. They land on **Live** and watch the reasoning graph fill in. When the safety button in the top bar
-   changes to "N waiting for you", they approve or deny in place.
+   address, tick the authorisation declaration, set the scope, choose a depth, and read the line
+   telling them whether this kind of run uses a model at all — and press **Launch assessment**.
+7. They land on **Live** and watch the reasoning graph fill in. The job chip in the top bar now names
+   the job they just started, and every screen from here on shows that job and nothing else. When the
+   safety button changes to "N waiting for you", they approve or deny in place.
 8. When the run finishes they open **Findings**, read the confirmed items, and press **Re-verify this
    run (offline)** to watch the system re-check its own conclusions with no traffic sent.
 9. They open **Coverage** and read the blind-spot legend, so they know what was *not* examined.
@@ -14795,11 +17971,14 @@ To make the tour concrete, here is a plausible first hour, using only actions ve
 Step 11 is the step everything before it exists to make possible: a result the customer can check
 for themselves, on their own machine, without taking our word for anything.
 
-Two things a first-hour operator should know that this sequence does not show. If the application
+Three things a first-hour operator should know that this sequence does not show. If the application
 being tested sits behind a login, the wizard has nowhere to put a test account, so the run will
-cover the logged-out surface only (§4.2). And if the target is somewhere other than this machine,
+cover the logged-out surface only (§4.2). If the target is somewhere other than this machine,
 certain findings that depend on the target calling out to a listener need that listener to be
-running and named in the signed authorisation first (§7.3).
+running and named in the signed authorisation first (§7.3). And there is a shorter, looser first
+half-hour than this one: drop a codebase into **Chat** and ask what looks wrong. That answer is a
+lead, it says how many files it read, and the button underneath it starts exactly the run described
+in step 6 over the same files (§4.3).
 
 ---
 
@@ -14814,15 +17993,17 @@ and which a general reader can ignore entirely.
 
 | Question a reader asks | The answer |
 |---|---|
-| How many screens is an operator learning? | **28** — and the number is not a guess: three separate lists inside the software must agree, and an automatic check fails the build if they do not. |
+| How many screens is an operator learning? | **29** — and the number is not a guess: three separate lists inside the software must agree, and an automatic check fails the build if they do not. |
 | How many of those can change anything only with the owner's key? | **4** — Approvals & Safety, Charter & Attestation, API Keys, Settings. |
-| How many controls look functional but are not? | **1** — the command palette, which shows a "on the roadmap" message. Everything else on every screen does what it appears to do. |
+| How many controls look functional but are not? | **1** — the command palette, which shows a "on the roadmap" message. Everything else on every screen does what it appears to do. A second control, the one that would start the offence side, is written in the interface's code but placed on no screen, so it is invisible rather than misleading (§8). |
+| Which screens show only the job being worked on? | **9 of 29** — Live, Activity, Findings, Fixes, Proof Studio, Report, Compliance, Assurance and two tabs of Brain. Scoping hides rows and deletes nothing, and every scoped screen offers the way back to all engagements. |
+| Of this host's security tools, how many can be started as a single tool from a screen? | **1 of 13** — the headless browser. The other twelve are driven by the engine during an engagement, and the picker says so for each one rather than hiding them. |
 | How much of what the system can do has no screen at all? | **7 further capabilities** (§7.3) plus the **6 cloud and Kubernetes confirmations** (§7.1). Of those thirteen, **0** have a screen; five have a typed command; the rest run inside an engagement or reach the operator as an ordinary confirmed finding. |
 | What can an outside AI assistant do through this system? | **2 read-only capabilities by default**, and the operator can widen that list deliberately. Anything not on the list is refused. |
 | What can another piece of software drive? | **2 programmatic ways in**, both off until started, both on this machine only: the gated on-machine service and the tool server for an external AI (§9.2). |
 | What can the owner's side be asked to do at all? | **25 kinds of action.** Anything else is refused outright, not merely denied. |
 | Has the interface been assessed for accessibility? | **No.** Twelve assistive-software markings exist in the code; no standard is claimed and no audit has been done. |
-| How much of the software is documented for the operator inside the product? | **13 manual sections**, covering thirteen topics rather than all twenty-eight screens. |
+| How much of the software is documented for the operator inside the product? | **13 manual sections**, covering thirteen topics rather than all twenty-nine screens. |
 
 **Inventory counts, for a reviewer checking this chapter against the software.**
 
@@ -14830,10 +18011,12 @@ and which a general reader can ignore entirely.
 |---|---|
 | Web interfaces in the repository | 3, plus 1 terminal interface copied in from a third party |
 | Sub-tabs inside screens | 11 (5 in Findings, 6 in Brain) |
-| Distinct back-end addresses the screens call | 73 — 68 on the offence side, 5 on the owner's side |
+| Distinct back-end addresses the screens call | 81 — 76 on the offence side, 5 on the owner's side. Two further addresses are answered by the launcher's own switchboard rather than by a back end (plane status, and starting the offence side); no screen calls either today. |
 | Screens in the older offence console | 22 |
 | Panels in the older owner-side cockpit | 5 |
-| Screenshots on disk | 32 |
+| Screenshots on disk | 36 — one for each of the 29 screens, plus 7 sub-views |
+| Tools in this host's roster | 13, all installed; 24 more inside the third-party agent's container image, listed for reference and not installed here |
+| Ways of driving a tool the admission gate recognises | 4 named surfaces — its own command line (a playbook or a typed builder), a gated sensor, the source-analysis pass, the headless browser — up from 2 |
 | `vigil` native command verbs | 26, plus 5 that hand off to another console |
 | Subcommands behind those 5 | 78 in total — 31 offence, 38 owner-side, 3 defensive, 6 network gate. All are listed in §10.2. |
 
@@ -14841,7 +18024,7 @@ Every number in both tables was read out of the source code during the writing o
 
 ---
 
-### 13. The single idea behind all twenty-eight screens
+### 13. The single idea behind all twenty-nine screens
 
 If a reader remembers one thing from this chapter, it should be this. Every screen in this system
 does one of exactly three things: it **shows evidence**, it **requests a signature**, or it
@@ -14854,15 +18037,22 @@ fixed, deterministic, non-AI checker can do that, and every screen that displays
 which checker did so.
 
 That is why the honest gaps in this chapter — a placeholder button, a manual that covers thirteen
-topics rather than twenty-eight, three screens without a screenshot, no field for a test account's
-login, no accessibility audit, seven working capabilities with no page of their own, and a cloud
-capability that is built and proven but not yet fired at a live third-party account — can be listed
-openly. They are gaps in convenience and in coverage of the field record. None of them changes what
-the system is willing to call proven.
+topics rather than twenty-nine, a control for starting the offence side that is written but placed on
+no screen, screenshots that are complete but in places older than the screens they show, no field for
+a test account's login, no accessibility audit, seven working capabilities with no page of their own,
+and cloud capabilities that are built and proven but not yet fired at a live third-party account —
+can be listed openly. They are gaps in convenience and in coverage of the field record. None of them
+changes what the system is willing to call proven.
+
+The newest surface in the product is the clearest illustration of that last sentence. An operator can
+now drop a customer's codebase into a conversation and ask what is wrong with it, and get a reasoned
+answer in seconds. That answer is marked a lead on its face, states how many files it read and how
+many it did not, and carries a button to the gated scan that walks the rest — because the difference
+between an opinion and a fact is the only thing this product actually sells.
 
 ---
 
-## Chapter 10. The Knowledge Graph: Building A Picture Of The Target
+## Chapter 10. The Target Knowledge Graph: Building A Picture Of The Attack
 
 ### 1. Why the system draws a map at all
 
@@ -15311,10 +18501,13 @@ contents.
 #### 6.4 The six cloud and Kubernetes confirmations
 
 The system also models the achieved effect of six cloud and container-platform
-confirmations. All six are wired end to end. The four **cloud** ones are proven
-offline against **recorded sample data standing in for the real thing** — evidence
-files written to the exact shape a real cloud account produces, kept on file and
-replayed through the same checks whenever anybody wants to see the proof again. The
+confirmations. All six are wired end to end. Of the four **cloud** ones, the GitHub
+half of exposed-secret validity is proven against the **real GitHub service**, driven
+by a repository script over a real network connection. The other three, and that same
+capability's Amazon Web Services half, are proven offline against **recorded sample
+data standing in for the real thing** — evidence files written to the exact shape a
+real cloud account produces, kept on file and replayed through the same checks
+whenever anybody wants to see the proof again. The
 two **Kubernetes** ones are proven against a **real cluster**: a repository script
 stands up a genuine single-node cluster that the system creates, owns and destroys,
 plants known-dangerous and known-benign access rules in it, and adjudicates what the
@@ -15563,8 +18756,12 @@ are untouched. It can add routes; it can never remove or alter a finding.
 One point of honesty to carry forward. The mechanism described in this section is
 built and tested. What it can actually *surface* on a live customer estate depends
 on the cloud and Kubernetes confirmations that feed it, and their live-fire status
-is stated plainly in section 17: the two Kubernetes ones are proven against a real
-cluster the system stands up itself, and the four cloud ones are proven against
+is stated plainly in section 17: three of the six have been fired at something real
+— the two Kubernetes ones against a real cluster the system stands up, owns and
+destroys itself, which is the project's own infrastructure rather than a third
+party's, and the GitHub half of the exposed-secret check against the real GitHub
+service, the only one of the six to have judged material from a real outside system
+— while the rest, including that check's Amazon Web Services half, are proven against
 recorded sample data standing in for a real cloud account, with pointing them at a
 live third-party cloud account still waiting on the customer supplying their own
 credentials.
@@ -16000,11 +19197,19 @@ warning rather than silently producing an empty analysis.
 
 ---
 
-### 14. Four different pictures of the same work, named honestly
+### 14. Five different pictures, named honestly
 
 The word "graph" appears in more than one place in this system, and it would be easy
 to conflate them. They are distinct components with different sources and different
 jobs.[^5]
+
+Four of them are views of the same work: one engagement, against a target the owner
+has been authorised to test. Those four are set out immediately below. The fifth is
+not a view of that work at all — it sits on the sovereign side of the wall, its
+subject is the owner rather than a target, and it is described at the end of this
+section. **Merging the fifth with the other four is the most misleading mistake a
+reader of this chapter could make**, which is why it is named here rather than left
+to be met four chapters later.
 
 | | What it is | What it answers |
 |---|---|---|
@@ -16059,6 +19264,91 @@ The code's own phrase for this is that it "never fakes a connection".
 
 **The built-in store is the default and requires no external database.** Nothing in
 this chapter depends on the external one.
+
+**The fifth picture, and the one that must never be merged with the others.**
+Everything above is a view of an engagement. There is one more graph in this system,
+and it is not a view of an engagement at all. It belongs to the sovereign side — the
+half of the system that runs the owner's own affairs and performs no offensive work —
+and it is that half's memory.[^6]
+
+Its subject is the owner. It holds the projects the owner works in, the working
+sessions they have had, the documents they have kept, and the code commits they have
+made, together with which project each of those belongs to. That is the whole of it.
+**Nothing on it is a machine, an address, a credential, a defensive control, a
+weakness or an attacker.** It has no routes, no chokepoints, no blast radius and no
+crown jewels, because it is not a map of anywhere an intruder could stand. The traffic
+does not run the other way either: nothing about the owner's own working history
+appears on the attack map this chapter describes.
+
+| | The attack map — this chapter | The owner's record — chapter 14 |
+|---|---|---|
+| **Whose estate it describes** | Someone else's, under a signed charter | The owner's own |
+| **What it is built from** | The signed record of one engagement | The sovereign side's own signed journal |
+| **What is on it** | Machines, services, identities, credentials, defensive controls, confirmed weaknesses | Projects, working sessions, documents, code commits |
+| **What a connection means** | Reachability and trust — who can get to what | Containment — which project a thing belongs to |
+| **How sure it is** | Every entry carries one of the four grounding labels of section 3.1, and a belief that can fall | Every entry is derived mechanically; there is no belief number on it at all |
+| **The question it answers** | *What is reachable, and what would it cost us?* | *What has the owner already done, and where is it written down?* |
+| **Where it runs** | Inside the offensive engine | Inside the sovereign side — a different process, a different place on disk |
+
+**The difference in the trust rules is sharper than the difference in the contents.**
+The attack map is deliberately permissive about what it will hold. It admits entries
+at all four grounding labels of section 3.1, including entries an
+artificial-intelligence component merely suggested, and its honesty comes from
+labelling them and from refusing to let a poorly grounded entry carry weight it has
+not earned.
+
+The owner's record works the other way round. Its structural layer admits only what
+can be derived mechanically from the signed journal: read the journal in order, count
+what is there, write down what was counted. There is no extraction step and no
+judgement — and so there is nothing for a belief number to measure. Richer entries
+have been designed and are deliberately left out: people, organisations, decisions,
+commitments, and the relation of one record contradicting another are, in the code's
+own words, *"intentionally absent until a grounded producer exists for them"* — that
+is, until something exists that can produce them with a proof attached. A briefing
+usually has to explain why a component is thinner than its design document. Here the
+thinness *is* the design, and the missing rows are a refusal rather than a backlog.
+
+**What the two share is discipline, and it is the same discipline.** Both are one-way
+projections from a signed record. Neither is a source of truth. Both can be discarded
+and rebuilt from the record they came from. Both make every entry cite the exact
+record entry that produced it — by position and by fingerprint — so any answer can be
+walked back to tamper-evident memory. On the owner's side there is one honest
+exception, set out in full in chapter 14: the project entry is a tally over the things
+inside it rather than something any single record minted, so it carries no citation of
+its own and is walked back through the sessions, documents and commits it contains.
+Both refuse to fabricate: asked about a name it
+does not hold, the owner's record replies that it has no entry matching that name,
+rather than composing one. And neither can authorise anything. The owner's record is
+opened for reading only; a statement that would write to it is refused twice over,
+once by an explicit check on the request and once because the connection itself was
+opened read-only; and no gate, no approval and no permission decision anywhere in the
+system consults it.
+
+**They never meet.** The two halves run as separate operating-system processes out of
+separate installed environments, and the offensive engine is simply not present in the
+personal one — which is why the separation does not rest on anyone remembering to
+enforce it. On top of that absence sits a guard, and chapter 14 gives its honest
+measure: as each of the personal side's main subsystems loads, it scans what is already
+in memory and refuses to continue if anything offensive is there — in the words of the
+error it raises, a "sovereignty violation". Two limits belong with it. The guard is
+fitted to those main subsystems one by one rather than to the personal side as a whole,
+and the memory graph this section describes is not one of the places it is fitted. And
+it looks at what is loaded at that moment, so it catches offensive code already present
+rather than code arriving later. The guard is the smoke alarm; the wall is the absence
+and the process boundary. There is therefore no path by which the attack map could read
+the owner's private history, and none by which the owner's history could acquire a
+target's.
+
+**Honest status.** The owner's record graph is live on the machine examined for this
+briefing: a built copy exists, derived from the sovereign journal, and it records how
+far through that journal it had read, so a reader can tell whether it is current or
+has fallen behind. Its derivation step is covered by a test that replays the same
+journal twice and requires the two results to be identical. Rebuilding it is a command
+the owner runs, not a background service: it refreshes when asked, and the interface
+reports the gap between the picture and the journal rather than hiding it. Chapter 14
+gives the full account of that side — what it is made of, what the nightly
+consolidation pass does with it, and what it is allowed to say. This section exists
+only so that a reader of *this* chapter never merges the two.
 
 ---
 
@@ -16224,8 +19514,9 @@ central claim, and a national agency reader must never be misled about them.
   and the engagement is byte-for-byte what it was before. A failure inside it can
   never alter a finding or a verdict. What it can actually *surface* on a live
   customer estate depends on the cloud and Kubernetes confirmations listed below,
-  whose own live-fire status — proven for Kubernetes, still pending for cloud — is
-  stated there.
+  whose own live-fire status — proven for Kubernetes and for the GitHub half of the
+  exposed-secret check, still pending for the rest of the cloud work — is stated
+  there.
 - Crown jewels, the optional worth file and its safe fallback, blast radius,
   chokepoint detection including exact single-point-of-failure detection,
   value-weighted ranking, and the counterfactual.
@@ -16237,8 +19528,9 @@ central claim, and a national agency reader must never be misled about them.
   cross-engagement memory store, and the append-only shortening of the
   reasoning-chain record described in section 14.
 
-**Kubernetes proven against a real cluster; cloud live fire against third-party
-accounts still pending, by design.** The six cloud and Kubernetes confirmations
+**Three of the six fired at something real — one at an outside system, two at the
+project's own infrastructure; live fire against a
+third-party cloud account still pending for the rest, by design.** The six cloud and Kubernetes confirmations
 described in section 6.4 — metadata credential capture, exposed-secret validity,
 Google Cloud service-account impersonation, cloud permission escalation, and both
 tiers of Kubernetes permission checking — are wired end to end. For each of them the
@@ -16256,12 +19548,26 @@ role whose real rules do grant secret reads, correctly stay leads. What that run
 not cover is a scope-gated *enumeration* capability discovering bindings across a
 cluster, and a managed provider's control plane (Amazon EKS, Google GKE, Azure AKS).
 
-For the **four cloud** confirmations the proof is offline, against recorded sample
+A third has since joined them, and it splits inside itself. **Exposed-secret
+validity** recognises two kinds of leaked credential. Its **GitHub half is proven
+against the real GitHub service** — a second repository script drives the real,
+permission-gated component over a real network connection, using the operator's own
+credential against GitHub's own least-privileged identity endpoint; the credential is
+confirmed, the certificate re-verifies offline, and a bogus credential of the same
+shape sent live to the same real address is rejected by GitHub itself and correctly
+stays a lead. Its **Amazon Web Services half is not proven at all**: built,
+unit-tested, never exercised against real Amazon infrastructure, still needing an
+access key only the account owner can issue, and **nothing from the GitHub run
+transfers to it.**
+
+For the **remaining cloud** confirmations — metadata credential capture, Google
+Cloud service-account impersonation, cloud permission escalation, and that Amazon
+half — the proof is offline, against recorded sample
 data standing in for the real thing — evidence files written to the exact shape a
 real cloud account produces, and, to say it once more plainly, written for the
 purpose rather than harvested from anybody's live cloud account.
 
-What remains outstanding is a single, specific, operational thing: **pointing the
+What remains outstanding is a single, specific, operational thing: **pointing those
 cloud confirmations at a live third-party cloud account.** That waits on the customer
 supplying their own credentials. The system's own machine-readable capability
 registry records no engineering work outstanding against them; the remaining deferral
@@ -16290,9 +19596,10 @@ report is rendered, when a finding is written onto this map, at the end of an
 engagement, by the reviewing components, and by the defensive gateway before it
 issues a certificate. It is **not** a single checkpoint that every claim in the
 system crosses; in particular, individual writes to this map are classified by the
-shared grounding rule rather than routed through it. Section 12.4 also records that
-the written note inside that component's own source file still understates its use
-and should be corrected at source.
+shared grounding rule rather than routed through it. The written note inside that
+component's own source file used to understate its use; it has since been corrected,
+and an automated test now fails the build both if the retired "no callers" phrasing
+returns and if a genuine caller is dropped from the list that note keeps.
 
 ---
 
@@ -16370,10 +19677,20 @@ uniform model rather than raising.
 
 [^5]: The four live at `engine/crucible/framework/v2/worldmodel/` (the asset map),
 `integration/vigil_integration/graph/` (the attack-chain view),
-`integration/vigil_integration/graph/store.py` (the per-job partition) and
+`engine/crucible/framework/v2/graph/` (the per-job partition — in the engine, not
+beside the attack-chain view) and
 `integration/vigil_integration/chainast/` (the reasoning-chain structure). The
 second route search of section 7.4 is `framework/v2/scanner/lateral.py`, called
 from `framework/v2/engage.py`.
+
+[^6]: The fifth picture — the sovereign side's own graph — lives at
+`apps/sigil/sigil/graph/`: the node and edge definitions in `graph/schema.py`, the
+replay-into-a-fresh-copy-and-swap rebuild in `graph/rebuild.py`, and the read-only
+query layer in `graph/query.py`. The determinism and provenance test is
+`apps/sigil/tests/test_graph.py`. The refusal to load offensive code into a sovereign
+process is `assert_no_offense` in `apps/sigil/sigil/reuse/`; a checker should expect to
+find it called from the personal side's main subsystems and not from `graph/`, which is
+the limit stated above.
 
 ---
 
@@ -16490,21 +19807,28 @@ offensive machinery.
 #### How many automated workers there are, in total
 
 Chapter 9 gives the reader a screen count so the shape of the interface can be held in mind. The same
-is useful here. The figures below were counted directly from the code while this chapter was written,
-and the counting rule is stated so a reviewer can repeat it.
+is useful here. The figures below were counted directly from the code while this chapter was written.
+The counting rule, so a reviewer can repeat it: one for every worker that carries a name of its own in
+the code and is a permanent part of the system, wherever in the tree that worker happens to sit.
+Anything created for a single job, and anything that is not a worker at all, is not counted.
 
 | Group | Count | What was counted |
 |---|---:|---|
 | Investigation team — agents proper | **8** | The eight classes in the offensive agents folder that are built as agents: recon, hypothesis, exploit, critique, reporter, memory, the critic panel, and reflection. |
 | Investigation team — further automated workers in the same folder | **3** | The refusal decision, the chain builder, and the impact re-proof layer. These do a worker's job but are not written as agent classes, so they are counted separately rather than quietly folded in. |
 | The owner's personal mesh | **9** | Nine named agents, listed individually in section 4. |
+| The perception assistant | **1** | PERCEPTION, which answers questions about the owner's own screen and camera. It is built on the same foundation as the nine and declares its own name and its own ceiling, but it sits beside the screen-capture code rather than inside the mesh folder, so it gets a line of its own rather than being folded into the row above. Section 4 returns to it. |
 | The connective layer | **4** | The general reasoning body; the parallel-team member; the one included proposal-only planner; and the vendored third-party agentic tool. |
-| **Total named, permanent automated workers** | **24** | |
+| **Total named, permanent automated workers** | **25** | |
 
-Three notes keep that number honest.
+Four notes keep that number honest.
 
+- The nine of the mesh plus the perception assistant are the **ten named identities that can write to
+  the owner's record**, which is the figure section 4 and chapter 14 both use. It is the same ten,
+  counted for a different purpose: this table counts every automated worker in the product, while that
+  one counts only the workers on the owner's own side.
 - The critic panel is counted as **one** agent, but it runs **three** separate reviewing lenses inside
-  itself. Counting lenses instead would give 26.
+  itself. Counting lenses instead would give 27.
 - The parallel-team member is counted as **one**, because it is a template rather than a named
   personality: a wave is capped at five members with at most three running at once, and the members
   are created for the job and then finish.
@@ -16891,6 +20215,16 @@ Every agent proposes actions carrying a tier, and every agent also has its own *
 applies automatically only if it is at or below the automatic bar **and** at or below that agent's own
 ceiling. The default ceiling for a new agent is A1.
 
+**A note on the count, so a reader who counts differently does not think the document is sloppy.**
+Nine assistant types live in the folder the system calls its agent mesh, and those nine are the ones
+set out below. There is a **tenth** named identity that does not live in that folder: the perception
+assistant, **PERCEPTION**, which answers questions about the owner's own screen and camera. It is
+built on the same foundation as the other nine — the same base class, the same routing through the
+governor, the same outcome written to the same record — and declares its own name and its own ceiling
+of A1. It simply sits alongside the screen-capture code it serves. The honest formulation is
+therefore **nine assistants in the mesh, plus a perception assistant: ten named identities that can
+write to the owner's record.** Chapter 14, sections 5 and 6, covers PERCEPTION in full.
+
 #### The nine agents
 
 | Agent | Its job | Its ceiling and hard limits |
@@ -16900,7 +20234,7 @@ ceiling. The default ceiling for a new agent is A1.
 | **STEWARD** | Personal operations: the morning briefing, the commitment ledger, recurring admin. The briefing lists due commitments, open threads, flagged contradictions, and a recent-activity summary. | Ceiling A2 — calendar writes queue until trust is granted. **Every line in the briefing is cited to a specific record number**, and it is composed only from grounded memory. |
 | **ENVOY** | Communications: triages inbound messages into urgent, normal, informational, or spam, and **drafts** outbound replies. | Ceiling A2, hard, with **no promotion path ever**. Enforced structurally: there is no method in it that transmits anything. There is deliberately no send function. It writes draft records marked "awaiting-approval". A human sends them, or does not. |
 | **ARTIFICER** | Engineering: drives a headless coding assistant against a code repository to own a coding task end to end. | Ceiling A2. **It never pushes code**, and it **runs the tests before claiming it is done**. Set out below, under "Three more of the nine, in a little more detail". |
-| **SCHOLAR** | Research and analysis: long-horizon research and sourced synthesis. | Ceiling A1 — research touches no external state. Its discipline is evidential: every claim must carry a source **and a verbatim quote**, and the quote must actually appear in the cited source and be specific enough to matter. A claim that does not verify against its own source is **demoted, not asserted**. |
+| **SCHOLAR** | Research and analysis: long-horizon research and sourced synthesis. | Ceiling A1 — research touches no external state. Its discipline is evidential: every claim must carry a source **and a verbatim quote**, and the quote must actually appear in the cited source and be specific enough to matter. A claim that does not verify against its own source is **demoted, not asserted**. It also reads the public web; that mode is set out below, under "SCHOLAR reading the public web". |
 | **BASTION** | Defensive posture over the owner's **own** infrastructure only: certificate expiry, dependency vulnerability exposure, uptime. | Ceiling A1 — it observes and never fixes anything. **No exploitation, no port sweep, no third-party target.** Set out below, under "A word on BASTION". |
 | **OPERATOR** | Opens folders and files and runs terminal commands on request, one transaction at a time. | Ceiling A2. It is the agent that touches the owner's own machine, so it carries the most machinery of any of the nine. Its rules are set out in full below, under "The OPERATOR in detail". |
 | **DELEGATE** | The owner's account and identity manager: manages the owner's own credentials and, with per-action approval, creates accounts, logs in, fills forms, submits. | Ceiling A2, and permanently barred from ever being promoted. It is the agent that acts in the world under the owner's name, so its rules are also set out in full below, under "The DELEGATE in detail". |
@@ -16949,6 +20283,51 @@ inside a published advisory's affected range. If the version or the advisory's b
 with certainty, the result is *no finding* — recorded honestly as something not assessed, rather than
 guessed at in either direction.
 
+#### SCHOLAR reading the public web
+
+SCHOLAR has a second mode, for questions whose answers are on public web pages rather than in
+documents the owner already holds. It is described here rather than as a tenth row in the table
+above, because **it is not a tenth agent**. The same agent does the work, under the same name on the
+permanent record, at the same A1 ceiling, through the same budgets, the same emergency stop and the
+same approval wiring. Someone auditing the record for a separate web-crawling identity would find
+none, because there is none.
+
+The mode deserves its own explanation for a different reason. Fetching pages from the open internet
+is the point at which a research assistant is most easily turned into something else — a scanner, a
+nuisance to somebody else's server, or a way to reach machines inside the owner's own network. Each
+of those is closed off separately, and each closure is checkable.
+
+| The risk | What bounds it |
+|---|---|
+| **Reading somewhere the owner never authorised** | A list of permitted sites, declared by the owner. **An empty list permits nothing at all** — the default is refusal, not permission. Matching is on the exact site name unless the owner deliberately opts in to including its sub-sites, and the code is candid that the widening is computed crudely, by taking the last two parts of the name, which is wider than intended for names under a two-part country suffix. The narrow default is the one to rely on. |
+| **Being steered onto a machine inside the owner's own network** | This is the attack called server-side request forgery: persuading a program that fetches web addresses to fetch an internal one on the attacker's behalf. Every name is looked up once, and *every* address it resolves to must be an ordinary public internet address — anything private, loopback, link-local, reserved, or in the carrier-shared range is refused before a connection is opened. The connection is then pinned to the exact address that was checked, so a name that changes its answer between the check and the fetch cannot redirect it. Redirections are not followed at all. Proxy settings in the surrounding environment are ignored, so routing cannot be diverted from outside. This check is applied on **every** page, not only the first. |
+| **Ignoring what a site asks of visitors** | The standing instructions a site publishes for automated visitors are themselves fetched through the same gate, then obeyed. A page the site excludes is dropped and recorded as a skip — never fetched. If those instructions cannot be read unambiguously, because the site errors, refuses, or asks for a slow-down, **the whole site is treated as excluded for that run**. A site that publishes none is treated as open, which is the ordinary convention. |
+| **Overwhelming somebody else's server** | One request at a time per site, with a minimum interval between them. Where a site publishes its own requested delay, that raises the floor rather than being traded off against it. The code's own word for this is "politeness, never evasion". |
+| **Becoming an attack tool** | Only plain retrieval requests are ever made: no forms, no logins, nothing submitted. The label the program presents to each website is fixed and says in plain words that it is authorised owner research; it is never varied to disguise the traffic. And the whole component refuses to load at all if any offensive module has been loaded into the same process. |
+| **Misrepresenting how much was actually read** | The crawl is bounded by a page budget, a depth limit and a per-site cap. **Every address that entered the queue and was then not fetched is written down with its reason** — out of scope, excluded by the site, over the per-site cap, a failed fetch, or simply beyond the page budget. The stated reason: a silent cap would misrepresent coverage. One kind of address never enters the queue and is therefore not itemised: links found on a page that has already reached the depth limit are neither followed nor listed, because the depth limit is a bound set before the crawl starts rather than a budget that runs out during it. On the owner's "learn from this address" path that limit is one hop from the starting page, so the recorded reasons are an honest account of the queue, not a list of every link the crawl ever saw. |
+
+Then comes the part that matters most for this document. **A web page is a stranger's assertion, and
+nothing a stranger asserts becomes a fact here.** Every page fetched is written to the permanent
+record as its own citable entry. Every claim then produced from those pages passes the identical
+admission gate described earlier for the owner's memory — the same code, not a similar one. A claim
+is admitted only if it cites one of the pages fetched for this very question, its quotation appears
+word for word in the page as re-read *from the record* rather than from the model's own copy, and the
+quotation is specific enough to carry meaning. What the owner is then shown is the quotation itself,
+with the record number and the address it came from. Anything that fails is kept, labelled advisory,
+reported alongside, and counted. The gate can only demote; it has no path that promotes.
+
+**It can be stopped part-way.** The owner-facing "learn from this web address" path hands the
+emergency stop to the crawler as a check made between pages, so a stop takes effect within one page
+rather than at the end of the job. That wiring belongs to that path; a crawl started by another
+caller runs to its budget unless that caller supplies the same hook.
+
+**Status, stated exactly.** The scope check, the address vetting, the site-instruction handling, the
+rate limiting, the crawl bounds and the grounding gate are built and covered by tests that run
+without a network. On the machine this chapter was checked against, the permanent record contains no
+fetched-page entry of any kind, so **this mode has not been run against a live outside website
+here**. Nothing about its logic depends on a network to be verified; what has not happened is the
+field exercise.
+
 #### The OPERATOR in detail
 
 This is the agent that opens files and runs commands on the owner's own computer. Everything about it
@@ -16982,6 +20361,20 @@ everything.
 **Undo.** Before it changes a file, the agent saves the original contents, so it can put them back.
 When a restore does not work, or when a command that cannot be undone has already run, it says so
 plainly instead of reporting success.
+
+**There are two governed terminals in this system, and they are not the same design.** Chapter 9
+describes the other one — a screen on the offensive side where an operator types a command, or asks
+in plain English and is offered one. That path is bounded by **what may run at all**: a fixed list of
+local read-and-print programs, no shell, nothing that writes a file, nothing that reaches the
+network. On it, changing the machine or reaching the network is impossible by construction rather
+than merely forbidden. The OPERATOR described here is bounded the other way round, because its whole
+purpose is to read and change files on the owner's own computer. It therefore bounds **where** — the
+two rings — and **how much consequence each step carries**, and it treats *any* terminal command as
+the highest consequence level there is. That means an explicit owner approval, bound to that exact
+previewed command, every time; and at that level there is no promotion to automatic available at all,
+so no amount of accumulated trust converts it into something that runs by itself. Neither is a
+general-purpose terminal. One cannot touch the machine; the other can, and therefore can never move
+without a signature.
 
 #### The DELEGATE in detail
 
@@ -17402,6 +20795,57 @@ Another explicitly refuses to fabricate: a proposal's code change is left **empt
 fills it, on the stated basis that describing a change precisely without pretending to have written
 code you did not write is the honest output.
 
+##### Deep-learn — one accepted lead becomes three pieces of guidance
+
+There is one further learning step, and it is the one an outsider is most likely to mistake for the
+system teaching itself to attack. It is called deep-learn. **What it produces is writing, not
+capability.**
+
+Its input is a single vulnerability lead — a published advisory about a weakness in some piece of
+software — either one the owner has approved through the signed cross-boundary path described in the
+next section, which ends in exactly this step, or one an operator names from the intelligence a job
+already holds. Its output is three short advisory documents:
+
+| Document | What it says |
+|---|---|
+| **FIND** | Where to look. Which product and version the advisory affects, how severe it is rated, whether it is recorded as being exploited in the wild, and what would need mapping: the reachable entry points, and the inputs that reach the affected code. It states on its own face that it is a lead, and that confirming anything requires an automatic test firing over data a real target produced. |
+| **DETECT** | How the system would recognise this weakness if it were present. This is the only one of the three with any mechanical consequence, and it splits two ways — set out below. |
+| **PREVENT** | How to stop it. Patch or upgrade the affected component, and apply the input-handling, output-handling and least-privilege measures appropriate to that family of weakness. It ends by saying that it is guidance, not a guarantee: it authorises no change and confirms no fix. |
+
+**None of the three carries authority of any kind.** Their headers deliberately have no permission
+level and no authority field. The code states the rule in seven words — "a skill is guidance, it
+authorises nothing" — and the documents are exactly that: things a person or an agent may read. They
+open no gate, run no tool, and mint nothing.
+
+The DETECT document is where the honesty lives, because it splits according to what the system can
+actually do:
+
+- Where the weakness belongs to a family the automatic tests can already adjudicate, the document
+  **names those existing tests** and says plainly that a fact is minted only when such a test fires
+  over data a real target produced. The document points at the test; it does not itself confirm
+  anything. As a defence against drift, every name it emits is checked against the real register of
+  tests, and a name that does not correspond to one raises an error rather than being written down.
+- Where the family is one the system cannot yet adjudicate, the document says so, and deep-learn
+  drafts a **proposal for a real, deterministic new test** — described precisely, with the code
+  change left empty. That proposal enters the same merge gate described above: the deployment must
+  hold the capability, the candidate build must pass its tests, and a threshold number of governance
+  authorisers must sign the exact content — and even then a person applies it. The proposal may never
+  ask for a test whose judgment is a language model's opinion.
+
+**The load-bearing negative: deep-learn does not move the system's calibrated confidence at all.**
+The reason is stated in one line in the code and it is the sharpest sentence in this whole area — a
+vulnerability the system has learned *about* is not a test outcome. The running expectations
+described in section 7.3 are recorded after the fact from things that actually happened; feeding them
+something merely read about would corrupt them, and the system would then grow more confident because
+it had done more reading. So learning about a weakness moves no number. It produces guidance, and
+guidance is ranked alongside other guidance.
+
+Two properties a reviewer should note. Deep-learn is **deterministic**: the time is passed into it
+rather than read from a clock, so the same lead deep-learns into the same three documents every time,
+and two people can compare results. And it is **refused outright while the emergency stop is engaged**
+for that job — checked before anything is started, so nothing is even launched under a stop, and
+checked again inside the step that does the work.
+
 ##### The one place where the system does build a new check for itself
 
 There is a component that goes one step further than a written proposal, and because "the tool writes
@@ -17621,10 +21065,12 @@ identical in both places; the difference is that the map's write path *applies t
 firewall *re-runs the proof*.
 
 One more honest note, because it is the kind of thing a reviewer will find. The component's own
-internal comment still describes it as a building block exercised only by its own tests. **That
-comment is out of date**, and this chapter states what the code does rather than what the comment
-says. Chapter 4 gives the fuller treatment, and the same discrepancy has been flagged to the
-engineers.
+internal comment used to describe it as a building block exercised only by its own tests. **That
+comment has since been corrected**, and an automated test now fails the build in both directions —
+if the retired "only exercised by its tests" phrasing comes back while real callers exist, and
+equally if a module that does call it is dropped from the list the comment keeps. The project
+treats a note that outlives its phase as the same class of defect as an overclaim. Chapter 4 gives
+the fuller treatment.
 
 ---
 
@@ -17919,6 +21365,31 @@ run rather than pretend.
 | `wapiti` | Scans a web application for common weaknesses. |
 | `zaproxy` | A well-known open-source web application scanner. |
 
+**All thirteen are present on the machine this chapter was written on — thirteen
+out of thirteen.** That was not true a day earlier. The last three to go in were
+the two source-code analysers and the ZAP scanner, and they are the three that do
+not arrive through the ordinary software catalogue: `semgrep` is an ordinary
+Python program, `joern` ships only as a large release archive, and `zaproxy` is
+packaged for this operating system but the packaged form needs administrator
+rights, while the project also publishes a portable archive that installs under
+an ordinary user account.
+
+Those three awkward cases got a small provisioning step of their own, and three
+properties of it matter more than the tools it happens to install:
+
+- **No administrator rights are used or required.** Everything lands inside the
+  operator's own home directory. An organisation that does not give analysts
+  administrator rights on their machines can still complete the roster.
+- **A download is checked against the publisher's own checksum before it is
+  installed, and a mismatch refuses rather than proceeds.** Where a publisher
+  ships no checksum at all, the step says so out loud rather than implying a
+  verification it did not perform. These are security tools being placed on a
+  security practitioner's machine; an unverified one is worse than a missing one.
+- **It is safe to re-run and it overwrites nothing.** A tool already present is
+  skipped — and presence is decided by *running* it, not by finding its name,
+  because a broken installation can leave a working-looking pointer to a program
+  that is not there.
+
 A few details in this roster are worth a government reader's attention, because
 each one is a small refusal to overstate.
 
@@ -17945,12 +21416,432 @@ each one is a small refusal to overstate.
 - **A missing tool never stops the setup.** It is recorded with the exact command
   the operator needs to run, and installation continues.
 
-#### 1.4 The tools inside the isolated container
+#### 1.4 The four ways a tool can be driven — and the refusal that keeps the list honest
+
+The roster above answers one question: *is this program on the machine?* It does
+not answer the question that matters more: *can this system actually operate it?*
+Those are different questions, and blurring them is how a product comes to claim
+control it does not have.
+
+So the second question is asked separately, and it is answered by naming the
+route rather than by ticking a box. There are four routes in, and the first of
+them has two quite different forms:
+
+| The route in | What it actually is | Reported as |
+|---|---|---|
+| A written playbook | A short instruction sheet on that tool's command line, written by a person, which the AI reads before proposing a command. The knowledge lives in prose the model consults. | driven from the command line |
+| A typed argument builder | The system assembles the command itself from a fixed template, checking every value it is handed and refusing anything it does not recognise. No command shell is involved, so nothing can be smuggled in through an argument. | driven from the command line |
+| A sensor | A read-only observation component inside the system finds the program and runs it as part of an engagement, under the same permission chain as every other action. | driven by a sensor |
+| An analyser | A source-code analysis component runs the program over a body of code and reads its result. | driven by an analyser |
+| The browser | The page-rendering component launches a web browser without a window, so a page can be seen exactly as a real browser would render it. | driven by the browser |
+
+The difference between the first two is worth holding onto, because it is the
+difference between two levels of assurance. With a playbook, a language model
+proposes a command line and the system inspects it. With a typed builder, **the
+model never writes a command line at all**: it names a tool and supplies values,
+and the system builds the command. That is the strongest of the routes, and
+section 1.5 is entirely about how far it has actually been proven.
+
+**A tool with none of those routes is refused, by name, with a reason given.**
+The system will not list a program as part of its arsenal when it has no way to
+operate it. That refusal is the feature, not the limitation: the alternative —
+treating "the program is installed" as "we drive it" — is exactly the sort of
+claim that cannot be checked and that turns out, when someone finally checks, to
+be false. The list of acceptable answers is closed, so a label nobody has taught
+the gate about refuses rather than admits. Inventing a new word cannot widen the
+arsenal.
+
+Two things deliberately do **not** count as driving a tool, and that boundary is
+what gives the refusal its teeth:
+
+- **Being able to read a tool's report is not control.** Reading somebody else's
+  output proves nothing about being able to produce it. Section 1.8 describes
+  that import route, which is a genuinely useful capability and a different one.
+- **The offline benchmark harness does not count either.** It launches rival
+  scanners in order to score this system against them, as section 1.11
+  describes. That is a measuring rig, not an engagement capability: it is not
+  scope-gated, it is not offered to the AI as a tool, and it can be switched off
+  entirely. Counting it would let the screen advertise a capability that does not
+  exist.
+
+**The defect this exposed.** Until recently the gate knew about only two of those
+routes — the playbook and the typed builder. Everything the engine resolves and
+launches *itself* was invisible to it. The consequence showed up on the operator's
+own screen: six installed tools reported as impossible to drive.
+
+For three of them the report was simply wrong. Those three were **refused as
+undrivable while the engine was already driving them** — the packet-capture tool
+through a sensor, the deep source-code analyser through an analyser, and the
+headless browser through the browser driver. The gate had no
+vocabulary for those three routes, so it denied they existed. The other three
+refusals were correct at the time, and were put right the other way round: by
+building the missing route, which is the subject of the next section. The screen
+now states *how* each tool is driven rather than merely that it is, which is both
+the more useful statement and the harder one to fake.
+
+One boundary on all of this, because it is easy to over-read in the optimistic
+direction. Admission is **advisory**: it says what may be adopted or proposed,
+and it authorises nothing. Every actual execution still passes the full
+permission chain, and none of it turns a tool's output into a proven finding.
+The rule in section 1.1 is untouched.
+
+#### 1.5 What has actually been driven, end to end — the honest count
+
+**Nine of the thirteen have a typed argument builder**: `nmap`, `httpx`,
+`nuclei`, `ffuf`, `sqlmap`, `hydra`, `nikto`, `wapiti` and `zaproxy`. Three of
+those nine — `nikto`, `wapiti` and `zaproxy` — were built in the same piece of
+work that fixed the gate described above; before it, they were among the tools
+honestly reported as undrivable.
+
+A builder that produces a plausible-looking command line proves nothing at all.
+Checking the *text* of a command is how an organisation ships a driver that has
+never once worked. So the nine are put through a separate proving run against live
+targets on the operator's own machine, one driver at a time, and the word "proven"
+is reserved for five things holding together. A driver missing any one of them is
+reported as unproven, by name:
+
+1. **The system built the command.** Every run goes through the engine's own
+   executor, under the real permission gate and a real signed authority. The
+   exercise never writes a command line itself; if it did, it would be testing
+   itself.
+2. **The tool really ran**, against a live target, and returned real bytes — and
+   that target was still answering when the run ended. A target that falls over
+   part-way through produces exactly what a driver that found nothing produces, so
+   without that check the exercise would blame the system's reader for a target
+   that was no longer there. It has happened, which is why the check exists.
+3. **Those bytes were read back into the system's own record** by one of the
+   system's own readers — never by a pattern written for the occasion. A tool
+   that runs but whose output nothing in the system can read is *not* driven end
+   to end, and is reported as a failure naming the reader that is missing.
+4. **The planted weakness was reported** — through that reader, on the target that
+   actually has it. Not "the tool printed something": the weakness has to arrive
+   in the system's own record, under the name the system files that class of
+   weakness under, or the tool's finding could never line up with anything else.
+5. **It stayed silent where the weakness was absent.** The same driver, the same
+   shape of arguments, pointed at a hardened twin of the same surface, where it
+   must report nothing. And that silence is itself controlled: each run has to
+   show the tool was demonstrably still working on the clean target — still
+   discovering the harmless page, still testing the same parameter, still
+   completing its attack without a connection error. Silence is only evidence
+   when you can show the tool was working while it stayed silent.
+
+**Ten results across those nine tools, and every one of the ten now passes.** Nine
+tools and ten results because the password-guessing tool earns one result for each
+of the two kinds of login it can attack, and the two share almost nothing inside
+the tool. The first is the plain challenge a browser puts up in a small grey box.
+The second is **a real login form** — the kind practically every service on the
+internet actually uses. That one needs the address of the login page, the shape of
+what the form submits, and the exact wording the site shows on a failed attempt,
+and it has to read the reply to decide whether a password worked. The capability
+had been built and checked against a stored transcript of the tool's output long
+before it ever met a real form. Checking a transcript is another way of shipping a
+driver that has never worked, so it now has a result of its own, printed under its
+own name.
+
+The form result carries one safeguard the other nine do not need, and the reason
+generalises well beyond this tool. Measured on this machine, the password-guessing
+tool attacking a login page **that had been removed entirely** prints exactly what a
+correct clean result prints: the right attack mode engaged, the tally completed,
+nothing cracked, no error of any kind. The tool's own output cannot tell "it tried
+and failed" apart from "there was nothing to try". So the clean control counts its
+own side of the conversation, and the result is accepted only when the target itself
+confirms three things: that the login attempts arrived, that the guessable password
+was among the ones offered, and that not one of them was accepted. Only the target
+knows it was asked.
+
+And because those two results hand a real password to a real tool, both of them
+search what the system *keeps* — the observations its reader produced, and the
+signed record of the run — for that password, and fail if it is present, or if the
+search could not be completed conclusively. An invariant nobody could check is not
+an invariant that holds. The tool's raw output is the evidence the system's own
+checks read and stays exactly as it came; what must never carry a credential is
+what gets written down.
+
+**What "a live target" means here.** The operator now runs a small proving range
+on their own machine: six targets, of which five are well-known applications
+published by security organisations specifically to be attacked in training —
+OWASP Juice Shop, the Damn Vulnerable Web Application, WebGoat, Mutillidae and a
+deliberately vulnerable web interface called VAmPI. The sixth is the project's own
+small vulnerable application, which needs no download at all. Four properties make
+this a range rather than a pile of containers:
+
+- **Each published target is pinned by content digest** — by a fingerprint of the
+  exact contents, not by a name like "latest" that can be repointed underneath
+  you. A range whose targets can be swapped is a range whose past results mean
+  nothing.
+- **It is loopback by construction, not by convention.** The file that lists the
+  targets *cannot express a host address at all* — the only thing it records is
+  port numbers, and the one piece of code that turns them into a running container
+  writes the machine's own internal address itself. The binding is then re-checked,
+  after start, against the container system's own view and the machine's own list
+  of listening sockets.
+- **A weakness is verified by difference**, not by assertion: for each target the
+  range sends a harmless request beside an attacking one and compares the two. On
+  the project's own application, a benign search term returns one row and an
+  injected one returns three. That is the evidence that the weakness is really
+  there — which matters, because if it were not, a tool reporting nothing would be
+  *right*, and reading a driver failure into that would be a mistake.
+- **One of the six honestly claims nothing.** WebGoat's weaknesses sit behind
+  per-lesson state that only exists after a user registers and starts a lesson, so
+  no single unauthenticated request could demonstrate one. The range brings it up,
+  asserts that it answers, and records "not probed" rather than a weakness it did
+  not show. Rounding six up to six-out-of-six would have been exactly the overclaim
+  the range exists to prevent.
+
+**Where this stands.** All ten results satisfy all five conditions. That is not an
+assertion from a document: it is what a run of the exercise on this machine
+produced, and anyone with the local range standing can run it again and read the
+same table. It was also not true a day earlier, and the intermediate states are
+worth knowing, because they are the reason the exercise exists at all. The first
+run proved **one** driver. A later one, three. A later one, six — as the three
+missing builders were written and given rows of their own. Then nine. The run
+behind this paragraph, all ten. Every step was a real defect found and fixed, never
+a threshold being lowered.
+
+**Four limits on that claim, none of which a reader should skip.**
+
+- **The targets are local.** They are deliberately vulnerable applications the
+  operator runs on their own machine, bound to the machine's own internal
+  address, plus hardened twins the exercise itself serves. Nothing outside the
+  machine is contacted. **This is a proving range, not a customer estate, and
+  none of it is a live external result.**
+- **Everything those nine tools produce is a lead.** The exercise proves the
+  plumbing — built, ran, read, and told the difference — not that any weakness
+  exists anywhere. A finding still requires the system's own fixed test over its
+  own evidence, and the exercise says exactly that in its own output.
+- **It is not part of the automated build.** It needs the local range standing,
+  so it is run deliberately by a person rather than on every change. It does
+  report every builder that has no row of its own, so a new driver cannot arrive
+  unproven and unnoticed.
+- **Two of the nine cannot be reached by the ordinary path at all, and the
+  exercise says so rather than quietly working around it.** The two destructive
+  tools — the database-injection tool and the password-guessing tool — are gated
+  harder than anything else in the system, and as the production wiring stands
+  today the ordinary route cannot reach them: the authority that route mints does
+  not permit destructive actions, and the per-action multi-person authorisation
+  the gate demands is not passed to it. The exercise supplies both itself,
+  deliberately, and prints a note saying it had to. That is a gap in *reaching*
+  those two drivers. It is not a hole in the gate — the gate refused, correctly,
+  and its refusal is the thing that had to be worked around.
+
+**What running it found.** Every defect below was invisible to unit tests — the
+automated checks that exercise one piece of code at a time, with the outside world
+replaced by a stand-in. They share one property: each produced a run that looked
+like a success. Five are summarised in the table; five more are set out afterwards
+at greater length, because each of those carries a lesson that outlives the tool it
+was found in.
+
+| What was actually wrong | What it looked like from outside |
+|---|---|
+| The port scanner's command asked for the human-readable output, and the only reader the system has for that tool reads the structured form. | Every scan driven that way parsed to nothing. The tool ran, found the open service, and the system saw an empty result — with no error anywhere to say so. One flag fixed it. |
+| The database-injection tool keeps a stored session keyed by the *host name*. On a local range every target shares one host name. | A weakness confirmed on one port was resumed from that stored session and re-reported against a **different, hardened** port, and the system's own reader turned it into a real observation about a target that had none. **That is a false positive minted internally, which is the most damaging failure this kind of system can have.** Forcing a fresh session each run fixed it. |
+| Three tools had no reader at all: the content fuzzer, the fast web prober and the password-guessing tool. | The engine launched them and discarded every byte they produced. Nothing failed and nothing errored; the tool worked, and the system simply never heard the answer. All three now have readers. |
+| One tool's name resolved to an unrelated program that happens to share it — a well-known collision on this operating system. | The driver could never reach the tool it was written for, and the symptom looked exactly like a boring target. The roster already recorded the other name the real tool installs under; the executor now honours that record rather than guessing at one. |
+| The web scanner starts a listening port that is very often already in use, and exits about ten seconds later without writing a report. | The system saw a process that had run to completion and produced nothing. A silent no-op scan is worse than a refusal: nothing fires, and nothing explains why. The listener is now pinned out of the way. |
+
+**A clean report that meant "I did not look."** One of the three web scanners was
+being driven through its own one-shot "quick scan" mode. Given a bare host name,
+that mode attacks exactly the one page it was handed and nothing else. So on a
+target whose weakness sits on a page reached by following a link, the scanner's
+crawler found that page and fetched it twice with a harmless value — and the
+attacking stage then sent **no requests to it at all**. The report came back clean,
+and byte-for-byte identical to the report from the hardened twin that genuinely has
+nothing wrong with it. Raising the time budget fivefold produced the identical
+report again: the limit was never time, it was structural. Handed the full address
+*including* the parameter, the very same command found two injection weaknesses.
+
+It now drives a written scan plan instead — crawl the site, wait for the passive
+analysis to drain, actively attack **every address the crawl found**, then write the
+report. On the same target with the same budget, the number of pages actually
+attacked went from one to five, and both injection weaknesses on that parameter
+appear where the previous form produced neither: the system's reader turned the new
+report into fifteen observations, against none of either kind before. The system's
+own scanning component, which drives the same tool by a different route, carried the
+identical defect and was corrected the same way.
+
+Two things follow that are worth taking away from this chapter. First, **a clean
+report that actually means "I did not look" is the worst output a security tool can
+produce.** It is indistinguishable from the good kind unless you are also told what
+was examined — which is why this system records the coverage alongside the result,
+and why its reports refuse to write "examined and found clean" anywhere. Second, a
+plan whose first job cannot reach the target now stops, with a reason, instead of
+running on to produce an empty and perfectly well-formed clean report. That
+distinction is the only thing that makes an empty report evidence at all.
+
+**A tool that was impersonating a different browser on every request.** The fast web
+prober ships with a "random user agent" setting turned on **by default** — the user
+agent being the short line of text a program sends to identify itself to a web
+server. With it on, every probe went out claiming to be a different ordinary
+visitor.
+
+That is the exact inversion of what this system promises. An authorised test is
+meant to be **correlatable**: the operator must be able to search their own server
+logs afterwards and pick out, without ambiguity, which traffic was the test's. The
+system's own operating rules state it in as many words — you are not evading the
+defender, you are working for them. A tool behaving like an evasive one, inside a
+system whose entire claim is that it is authorised and auditable, is a defect even
+though it breaks no rule and trips no gate. It stayed invisible for exactly that
+reason: it was a default, not a flag anybody had written down.
+
+The probe now identifies itself with one fixed line naming the engine and stating
+that this is an authorised owner-test — the same identity every other part of the
+system already sends, so a defender sees one consistent actor rather than a crowd of
+invented browsers. An automatic build check fails if that line is ever dropped or
+stops naming the engine.
+
+Why this matters to a government reader in particular: everything else in this
+document — the signed record, the retained evidence, the independent re-checking —
+rests on the traffic being attributable to the test. **The system is auditable
+precisely because it does not hide.** A tool that hides by default quietly removes
+the tested organisation's ability to hold the test to account, and it does so
+without anybody having decided to.
+
+**A tool that was contacting a third party, twice over — and a guard that could be
+walked around.** The web-application scanner runs a set of attack "modules", and
+with no set named it runs the tool author's own defaults. One of those defaults
+tests for a class of weakness that can only be confirmed out of band, and it does
+that by **asking a server belonging to the tool's author** whether anything called
+in. This was seen in the tool's own console output during a live run, and that
+server was reachable from the machine. None of the system's ordinary defences covers
+it: the scope restriction constrains where the tool is *pointed*, not a host the
+tool decides to contact on its own initiative.
+
+Removing that module was not enough. The replacement was a module set declared here
+rather than inherited — and one member of that declared-safe set turned out to reach
+a **different** outside host, a public code-hosting site, to download a technology
+database whenever it cannot find a local copy. Under this system's pinned settings
+directory it can never find one, so that download was certain rather than possible.
+A module set is not safe because somebody declared it safe: every member has to be
+read and checked for a host of its own.
+
+Then the guard itself failed. It was a **blocklist** — a list of forbidden module
+names, checked against what the caller asked for. But the tool's module option is
+not a list of module names. It is a small language that also accepts **preset group
+names, which the tool expands itself.** Measured against the installed version:
+asking for "all" was accepted and expanded to thirty-six modules, including all
+three offenders; asking for "common" was accepted and expanded to sixteen, including
+the first. Three letters reopened a limit the engagement's authorisation treats as
+inviolable — and the test written to prevent exactly this went on passing, because
+it had only ever tried literal module names.
+
+The guard is now an **allowlist**: nineteen modules, each one read and confirmed to
+attack only the target it was pointed at. A preset group name, an unknown module, or
+a module a future release of the tool adds is refused. **The general rule deserves
+stating on its own, because it reaches far beyond this tool: a blocklist over a
+vocabulary you do not control is not a guard.** You cannot enumerate what somebody
+else is free to add.
+
+One honest footnote, because it is the price of choosing an allowlist. Refusal here
+is total: if any single name in a request is not on the list, the whole scan is
+cancelled rather than narrowed. The first version of the list omitted one perfectly
+safe module that the tool runs by default, and the effect was not a slightly smaller
+scan — it was a driver that had been proven end to end becoming unprovable, with a
+failure message that talked about arguments rather than about the list. An allowlist
+that omits something safe is a defect, not a conservative default.
+
+**A tool that would have failed on somebody else's machine.** The system keeps a
+catalogue of the tools it drives, and for each one it records every program name
+that tool is known to install under — because the same tool arrives under different
+names depending on where you obtained it. The Tools screen uses that record, so it
+correctly reported one of the web scanners as present and usable on a machine
+carrying only the publisher's own name for it.
+
+The command builder did not use the record. It named one program: the name the
+operating system's packaged version happens to use. On a machine where that scanner
+had been installed from its publisher instead, the screen said "usable" and every
+run of it would have failed to start. This is the same defect the fast web prober
+had already produced on this very machine — where the plain name belongs to an
+unrelated program that shares it — and it sat a couple of hundred lines away,
+unnoticed, because the check written after the first one checked only the tool that
+had broken.
+
+Both now resolve through the recorded names, in the recorded order, and the
+**absolute location of the program that actually ran** goes into the signed record —
+so a run can be read afterwards as "this exact program produced these bytes". A
+program under a name nobody recorded is never a fallback: if none of the recorded
+names is present, the run is refused, and the refusal names every name it tried and
+what to install.
+
+And the check is now general. For **every** tool the system can build a command for,
+an automatic build check reads the catalogue's own source and compares it against
+what the executing code believes — the names, their order, the flag used to ask the
+program its version, the markers that identify an impostor of the same name, and
+even the package named in the refusal message. Any disagreement fails the build.
+Two further halves catch what a paper comparison would miss: one installs *only* the
+last recorded name and requires the builder to reach it, and one removes every name
+and requires a loud refusal rather than a silent failure to start. A set of
+deliberate mutations then proves the check actually fires. A guard nobody has seen
+fail is not a guard.
+
+**How "nothing left the machine" was established: by measurement, not assertion.**
+The claim that a local run contacts nothing outside the machine is easy to write and
+hard to earn. It was earned by building a trap: the command is run inside a private
+network compartment whose only route off the machine is a dead end, and every packet
+that tries to leave is captured and counted.
+
+A trap must first be shown capable of catching something, or "nothing was seen"
+means nothing at all. Two deliberate leaks established that it could. The first was
+an ordinary name look-up made on purpose: the trap recorded exactly the two
+enquiries such a look-up makes, and no more. The second was a scan run with one of
+the guards deliberately removed — sixteen enquiries in a single forty-one-second
+scan, every one of them for a browser vendor's settings service — because that
+scanner ships a rule which drives a **real web browser**, and a browser contacts
+its own vendor on start-up. With the guard back in place: zero packets, the scan
+still succeeding, and the report still carrying the cross-site-scripting alert it
+had before. The scan loses one rule, and that rule could not have run under this
+engagement's rules anyway.
+
+The same trap then caught something nobody was looking for. **One scanner's start-up
+check for a newer version of itself contacts two outside services before it has sent
+a single packet at the target** — four name look-ups per run on a machine that
+caches the answers, six on one that does not. Switch the suppressing setting on and
+the count is zero. That setting had looked like housekeeping; it is load-bearing,
+and this is how that was established rather than assumed.
+
+Two limits belong with that result, and none should be trimmed. The trap is an
+exercise a person runs, not part of the automated build; what the build checks is
+narrower and more durable — that the exact commands still carry those settings,
+now pinned for every one of the three tools concerned, the last of them having gone
+unpinned until this was written. The measurement was made on this machine against
+these versions of these tools, and a new version can acquire a new outbound habit,
+so the only way to know is to measure again. As for the scanner whose version check
+the trap caught unlooked-for: the suppressing setting now travels on **all three**
+of its routes into the engine — the typed command builder, the scanning component,
+and the template runner — and each of the three is pinned by its own automated test,
+so a future edit that dropped it on any route would fail the build. The traffic it
+would otherwise send goes to the tool's own publisher and carries nothing about the
+target, and it is written down here rather than left for a reader to find.
+
+#### 1.6 The tools inside the isolated container
 
 There is a third, separate list: the tools that live **inside an isolated
-container** — a sealed, disposable Linux environment — used by an optional
-autonomous testing agent. These are *not* installed on the operator's computer,
-are never checked for on it, and are never installed by the setup process.
+container**, used by an optional autonomous testing agent. These are *not*
+installed on the operator's computer, are never checked for on it, and are never
+installed by the setup process.
+
+**What a container image is, in plain terms.** An *image* is a complete, frozen
+copy of a small Linux system, with a fixed set of programs already installed
+inside it, kept as a single object on disk. Starting one gives you a throwaway
+machine that borrows the host's processor and memory but not its files, not its
+network and not its identity. When it stops, everything inside it is gone. The
+recipe for building the image is a plain text file that a reviewer can read, and
+the image is built from that recipe on the operator's own machine rather than
+downloaded ready-made.
+
+**Why these tools live in a container rather than on the machine.** Four reasons,
+and they are worth stating because "we put it in a container" is often said and
+rarely explained:
+
+- The optional agent is the one part of the system allowed to run commands of its
+  own devising. Giving it a disposable machine rather than the operator's own is
+  the entire point.
+- A container's network can be taken away at the operating-system level, which is
+  a far stronger boundary than asking a program not to make connections.
+- Twenty-four programs is a large, permanent change to make to an analyst's
+  machine in support of one optional feature. In the container they arrive and
+  leave together.
+- Everyone gets the same tools at the same versions. On the host, what you have
+  depends on what your operating system's catalogue happens to ship today.
 
 There are 24 of them. **You do not need to recognise these names.** They are set
 out here only so that an operator, an auditor or a security officer can know
@@ -17967,8 +21858,58 @@ what they are for:
 - *Listing software components and their known flaws:* `trivy`.
 - *Browsing and recording web traffic:* `chromium`, `caido-cli`.
 
-Using this surface requires container software (Docker) and a locally built
-image. It is entirely optional.
+**The image has now been built, for the first time, and every one of the 24 tools
+inside it was verified present by running it.** That distinction is the whole
+point of saying so: the list above is no longer a reading of the recipe, which is
+a statement about intent. Each program was executed inside the finished image and
+answered — the port scanner printed its version, the two secret scanners printed
+theirs, the browser printed its own, and so on through all twenty-four. It is a
+large object, around seven and a half gigabytes, which is a real consideration for
+whoever provisions the build machine.
+
+One detail from that verification is worth passing on rather than smoothing over,
+because an operator will meet it. The port scanner will not run inside the
+container unless the container is granted the raw-network privilege it needs;
+without that grant the program is present, is found, and refuses to start. That
+is the container boundary working as intended — a sealed environment does not
+hand out network privileges by default — but it means "the tool is in the image"
+and "the tool can do its job in your configuration" are two different statements,
+and only the first is settled by the list above.
+
+Building it also uncovered two defects in the recipe, both of them the kind that
+only appear when somebody actually runs the thing.
+
+**1. The build instructions were wrong, so the documented command could never have worked.**
+The starting directory a build is given is called its *build context*, and this
+one was wrong. The recipe copies two files out of the vendored tool's own folder,
+and those two sit in different parts of it, so they only resolve together when the
+build context is one level up. It was set one level down. Pointed there, the build
+always failed at the first of the two copies, saying the file did not exist. The
+command was written down in three separate places — the container definition, the
+installation script and the deployment guide — and had never once been run to
+completion on any machine. That is why an earlier note in this briefing correctly
+recorded the image as unbuilt: it was, and no reader following the documented
+instructions could have built it.
+
+**2. One step asked the internet what the latest version of a tool was, while the
+image was being built.** Both of its consequences were observed rather than
+theorised. The request is unauthenticated and the service that answers it counts
+requests per machine, so provisioning other tools on the same machine used up the
+allowance; the request was then refused, the answer came back empty, the download
+turned into a not-found error, and the build died two-thirds of the way through.
+Separately and more seriously, a step that asks "what is the latest?" produces a
+**different image every time the answer changes**. The version is now written
+down in the recipe and changed deliberately.
+
+That second one is worth a plain definition, because it is the whole reason the
+fix matters. **Reproducible means that building the same recipe twice gives you
+the same thing both times** — so that what your reviewers examined is what your
+operators run, and any difference between two builds is a signal rather than
+noise. The base this image is built on was already pinned to an exact content
+fingerprint; a pinned base carrying floating tools is only half a supply chain.
+
+Using this surface requires container software (Docker) and this locally built
+image. It remains entirely optional: nothing else in the system needs it.
 
 The system's own deployment guide states the honest caveat about this agent
 plainly: **its output is leads, not proven facts.** The evidence and
@@ -17976,15 +21917,29 @@ proof-checking machinery that turns a finding into a signed, re-checkable fact
 does not run over the agent's output. The guide instructs the reader to treat
 those results as investigative leads to confirm.
 
-#### 1.5 The narrow gate through which network tools are actually run
+#### 1.7 The narrow gate through which network tools are actually run
 
-Even the six required tools cannot be run freely. The part of the system that
-executes them accepts exactly six programs — `nmap`, `nuclei`, `httpx`, `ffuf`,
-`sqlmap`, `hydra` — and builds each command line itself from a fixed template.
-There is no free-form command. There is no command shell involved, so there is
-no way to smuggle extra instructions into an argument. Where a password would
-otherwise appear on a command line, it is masked in the signed record of what
-was run.
+Even the tools on the roster cannot be run freely. The part of the system that
+executes them accepts exactly nine programs — `nmap`, `nuclei`, `httpx`, `ffuf`,
+`sqlmap`, `hydra`, `nikto`, `wapiti` and `zaproxy`, the nine with a typed
+argument builder — and builds each command line itself from a fixed template. A
+name not on that list is refused; there is no shape of request that runs
+something the system has not been taught. There is no free-form command. There is
+no command shell involved, so there is no way to smuggle extra instructions into
+an argument. Where a password would otherwise appear on a command line, it is
+masked in the signed record of what was run.
+
+Four of those nine — the content scanner and the three web scanners — do not
+print anything a machine can read; they write their real output to a file. For
+those, the system chooses the file's location itself, inside a private directory
+it owns, and reads the result back as the tool's output. The operator, the AI and
+the caller never name that file. Two small precautions around it are worth
+noting, because both defend against something specific: the location is cleared
+before each run, so a report left behind by an earlier run can never be read back
+as this one's result; and the directory is re-checked on every use to confirm it
+is a real directory owned by this account and readable by nobody else, so another
+user of the same machine cannot redirect a scanner's report somewhere of their
+choosing. If either check fails, the tool does not run.
 
 Two additional, non-network execution routes exist and pass through the same
 gate:
@@ -18005,7 +21960,7 @@ Both of these route to the same approval machinery as everything else, and both
 sit above the automatic-approval ceiling, meaning they queue for a human by
 default.
 
-#### 1.6 Reading a report produced by a tool you already run
+#### 1.8 Reading a report produced by a tool you already run
 
 Everything above is about tools this system *runs*. There is a second, quieter
 route that matters to any organisation with an existing security toolchain: this
@@ -18033,7 +21988,7 @@ does this fit alongside the tools we already have?" It fits by treating them
 exactly as it treats its own: as sources of suggestions, whose claims are only as
 good as the evidence the system can collect for itself.
 
-#### 1.7 A general bridge for other tools — and its honest limit
+#### 1.9 A general bridge for other tools — and its honest limit
 
 The system includes a general-purpose bridge designed so that *any* external tool
 can be plugged in and still produce a proven fact. The bridge runs in a strict
@@ -18072,12 +22027,14 @@ against a deliberately started local service, producing exactly one signed,
 independently confirmed fact — with a closed or non-reproducing port correctly
 becoming a lead rather than a fact. The container-based execution route is built
 and produces the real command line, but its live container run depends on
-container software and a tool image being present. A set of AI-red-teaming tools
+container software and a tool image being present — **a different image from the
+autonomous agent's sandbox image in section 1.6, and building that one does not
+close this.** A set of AI-red-teaming tools
 that the bridge is designed to accept are simply **absent from the current
 environment**, and the code says explicitly that it does not mint facts from
 them.
 
-#### 1.8 Other people's software kept inside this one, and deliberately not run
+#### 1.10 Other people's software kept inside this one, and deliberately not run
 
 Two code bases written by other projects are kept inside this system's own source
 code. (In the software trade this is called *vendoring* — keeping your own copy of
@@ -18107,7 +22064,7 @@ time.) The two are treated very differently from each other.
   vendored copy is meant to behave exactly as its authors shipped it. Chapter 8
   covers this gate in full.
 
-#### 1.9 How the system was measured against those same tools
+#### 1.11 How the system was measured against those same tools
 
 The project ran a direct comparison on its own machine against a purpose-built
 web application containing **11 deliberately planted weaknesses** and **5
@@ -18174,6 +22131,29 @@ key configured and no scripted plan supplied, an operation still starts, still
 records who authorised it, and then **completes having proposed nothing**. It
 never invents activity to fill the silence.
 
+What you get with nothing bought is not a stub, either. The weakness checks
+themselves ship in the box: the built-in checks, plus a written library of **172
+declarative checks spanning 23 categories of weakness** — data the system reads,
+not a service it calls. The largest groups are database injection by true/false
+inference (21), information exposure (20), cross-site scripting (18) and command
+injection (17). None of it needs a key, an account, or a connection to any vendor.
+
+One honest note belongs here, because it is exactly the kind of defect this
+chapter exists to surface rather than bury. Until recently, a scan launched from
+the **interface** took a "use the check library" setting from the operator, and
+that selection was **accepted and then discarded** without a word, so every
+console-launched scan ran the built-in checks only and never the 172-entry
+library. Nothing failed, nothing errored, and the report
+looked reasonable — it was simply drawn from a narrower set of checks than the
+operator had asked for. That has been found and fixed: the launcher now passes the
+setting through to the scan it starts. The fix is small; the lesson worth carrying
+into an evaluation is not. A silent coverage gap produces a perfectly
+plausible-looking report, which is why coverage has to be measured rather than
+assumed. It is also why the reports this system produces refuse to record
+"examined and found clean" anywhere: a scan writes down what it found, not the
+list of checks it attempted, so the absence of a finding is recorded as *not
+recorded* rather than as a clean result.
+
 Sections 2.2 onwards are therefore a ladder of what each extra thing *buys you*,
 not a list of blockers.
 
@@ -18215,7 +22195,7 @@ route.
 Two related points, both stated in the project's own licence documents:
 
 - **The third-party components keep their own licences.** The automated
-  penetration-testing tool described in section 1.8 remains under the Apache 2.0
+  penetration-testing tool described in section 1.10 remains under the Apache 2.0
   licence; some adapted portions remain under the MIT licence; the AI-red-teaming
   subprocess tools keep their own upstream terms. None of these are changed by
   the dual licence above, and the attribution file lists them.
@@ -18238,7 +22218,7 @@ reading, that a licensing conversation is required rather than optional.
 | A Linux computer | The security tools it drives are Linux packages. | On any other operating system the tools are reported "unsupported" and nothing is installed or faked. The rest of the system is unaffected. |
 | Python version 3.12 or 3.13 | Builds both halves of the system. | **Hard stop.** Setup refuses to continue. |
 | The Rust toolchain | Builds the small, fast component that classifies how risky each action is. | Setup offers to install it for you, at user level, with your consent. |
-| Container software (Docker) with compose | Runs the optional memory database and the optional knowledge graph; **required** for the optional autonomous agent. | Optional for the core. The memory database falls back to an embedded, file-based mode. |
+| Container software (Docker) with compose | Runs the optional memory database and the optional external home for the per-job graph view; **required** for the optional autonomous agent, and for re-running the Kubernetes proof described in section 2.11 yourself. | Optional for the core. The memory database falls back to an embedded, file-based mode, and the graph view to a built-in file-based store. |
 | A security chip (TPM) plus its tools | Encrypts stored keys so they are useless if the disk is moved to another machine. | Optional. Without it, keys are stored unencrypted on disk. Setup prints a loud warning; it never quietly weakens protection without telling you. See section 2.6, step 4, and section 2.7. |
 
 ##### What it costs to run — stated honestly, including the silences
@@ -18443,6 +22423,45 @@ should be carried into planning: the relay handles call-backs that arrive as web
 requests. A call-back that is only a name look-up, with no web request following
 it, needs a name-service relay, which is described in the code as a future
 extension rather than something quietly implied to work today.
+
+##### Which cloud capabilities need a credential of your own, and which need nothing
+
+Six of the system's confirmations concern cloud and container platforms. Section
+2.11 describes what each one proves. What matters here is narrower and is
+routinely blurred in security marketing: **what must you supply for each, and
+what has actually been run.** They differ sharply, so they are set out one at a
+time rather than as a group.
+
+| Capability | What you must supply | What has been run so far |
+|---|---|---|
+| Kubernetes — an anonymous caller, with no login at all, attached to a dangerous administrative role | **Nothing but container software**, plus one download of a public container image. The system stands up its own throwaway single-node cluster on the machine's own internal address, plants the rules, reads what the real Kubernetes interface returns, and destroys the cluster afterwards. | **Run against a real cluster** (k3s version 1.31.5) that the system creates and owns. The dangerous binding is confirmed and its certificate re-checks with no network; the benign ones in the same cluster correctly stay leads. |
+| Kubernetes — a role that genuinely grants dangerous powers, proven by reading the role's real rules rather than trusting its name | Same: nothing but container software. | Same run, same outcome. Every expectation is checked and the harness stops with an error on any deviation, so it is a re-checkable proof rather than a demonstration. |
+| An exposed secret is a **currently working** credential — the **GitHub** case | **Your own GitHub account**, through the GitHub command-line tool, and outbound access to `api.github.com`. No cloud vendor, no purchase, and no account you do not already own. The credential is piped into the harness on its input stream: never written to a file, never placed on a command line where the machine's own process list would show it, never put into the environment. | **Run against the real `api.github.com`.** A valid credential is confirmed and its certificate re-checks offline; a bogus credential of the same *shape*, sent live to the same real address, is refused by GitHub itself and correctly stays a lead. |
+| The same capability — the **Amazon** case | A real Amazon access key that only your organisation can issue. | **Built and unit-tested only. It has never touched real Amazon Web Services, and nothing from the GitHub run transfers to it.** |
+| A credential taken from a cloud machine's own credential service, and proven usable | A laboratory cloud credential and an instance to run against, both of which only you can provide. | Built and wired end to end; proven offline against recorded sample data. There is no live result. |
+| One Google Cloud identity acting as another | Google Cloud credentials, which only you can issue. | Built and wired; proven offline against recorded sample data. There is no live result. |
+| An identity's permissions letting it give itself more power than it started with | **An export of your own permission policy** — the identity's own statements, any restricting boundary, and any organisation-wide policy. Obtaining that export needs read-only cloud credentials or your administrator; *judging* it needs no live credential at all. | Built and proven offline. Deliberately **never** live-fired, and never will be: a verification tool does not carry out the escalation it is proving. Do not describe this one as awaiting anything. |
+
+Three limits on that table, stated because each is easy to over-read in the
+optimistic direction:
+
+- The exposed-secret capability recognises exactly **two** kinds of secret today:
+  a GitHub personal access token and an Amazon access key. Anything else — a
+  Google service-account file, a chat-platform token, a value sitting in a secrets
+  manager — is outside the recognised set and produces nothing.
+- The proven GitHub run **validates a credential the operator hands it. It does
+  not go looking for one.** A component that searches an authorised surface for
+  exposed secrets and then validates what it finds is not part of what has been
+  proven.
+- The permissions-escalation judgement is bounded by the export you give it. If a
+  policy attached to the *resource* rather than to the identity would have
+  cancelled the permission, and that policy is not in your export, the system
+  cannot know. It says so rather than assuming.
+
+The ordinary read-only **posture** review of an Amazon, Azure, Google Cloud or
+Kubernetes environment — a different thing from the six confirmations, and the
+thing most buyers picture first — needs the corresponding read-only credential
+from the table earlier in this section, and nothing else.
 
 #### 2.4 Keys you generate yourself, not buy
 
@@ -18669,7 +22688,7 @@ which optional services are running. It changes nothing.
 and prints a single web address for the local machine, including a one-time
 session token. That address is the only thing a human points a browser at; it
 federates the two halves of the system behind one origin. The main interface has
-28 screens, including a Tools screen that shows, live, exactly which security
+29 screens, including a Tools screen that shows, live, exactly which security
 tools are present on this machine and which are missing, with a copyable install
 command for each.
 
@@ -18799,10 +22818,10 @@ anything you cannot simply rebuild:
 | Location | What is in it | Rebuildable? |
 |---|---|---|
 | The sovereign home directory (`~/.sigil` by default) | The owner keys, the sealed key store, the signed record chain of everything the assistant half has done, the anti-rollback floor file, the configuration, and the cached memory | **No.** This is the irreplaceable part. |
-| The working directory inside the installation (`.vigil-live`) | The offensive half's own signing identities, its signed record chain, its sessions, its usage ledger, the local knowledge graph, and the interface state | **No.** |
+| The working directory inside the installation (`.vigil-live`) | The offensive half's own signing identities, its signed record chain, its sessions, its usage ledger, and the interface state. The per-job graph view also lives here, and it is the one item in this row that *is* rebuildable: it is a one-way projection of the signed record, and replaying that record produces an identical graph | **No** — except the graph view. |
 | The engagement folders (one folder per engagement, under a `targets` directory) | Each engagement's signed charter, its threat model and attack tree, the collected evidence, the findings, the notes and the reports | **No.** |
 | The two built software environments and the compiled component | The installed software itself | **Yes** — rebuilt by re-running the setup script. |
-| The optional container services | The memory database and the knowledge graph | **Yes.** The knowledge graph is never a source of truth: it is a rebuilt view, and replaying the signed records twice produces an identical graph. The memory database holds searchable copies of material that came from those same records. |
+| The optional container services | The memory database and the external home for the per-job graph view | **Yes.** That graph view is never a source of truth: it is a rebuilt view, and replaying the signed records twice produces an identical graph. The memory database holds searchable copies of material that came from those same records. |
 
 ##### Backup
 
@@ -18958,7 +22977,8 @@ This deserves to be stated without hedging.
   to refuse before anything is sent. Every field is scrubbed for secrets twice —
   once when the record is created and again at the moment of export — and the
   free-text fields are scrubbed at that boundary too.
-- The knowledge graph, if you run one on your own infrastructure. It holds no
+- The per-job graph view, if you run its external home on your own infrastructure.
+  This is the picture of one engagement, not the owner's private memory. It holds no
   secret and grants no permission; it is a rebuildable projection of the signed
   history.
 
@@ -18976,6 +22996,22 @@ This deserves to be stated without hedging.
    | Sovereign cloud | Your own hardware, plus cloud AI with a regional/jurisdictional restriction (Amazon Bedrock, Google Vertex, Mistral). Direct consumer AI accounts are refused. | Frontier reasoning quality with data-residency guarantees. |
    | Trusted cloud | Adds enterprise and zero-data-retention arrangements. Requires an explicit operator attestation. | Requires a contract with the provider. |
    | Permissive | Anything. The development default. | No policy enforcement. |
+
+   Three properties decide whether that ladder is a policy or a control, and all
+   three are in the code rather than in a settings document. First, **the rung is
+   consulted before the model client is built.** On a refusal the client is never
+   constructed, the provider's software library is never even loaded, and — in the
+   source's own words — "nothing leaves the host." Second, it is fail-closed at
+   every step: an unrecognised rung name resolves to the strictest rung, an
+   unrecognised provider name is classified as an ordinary cloud provider and
+   refused under every sovereign rung, a policy module that cannot be loaded
+   refuses whenever a rung is configured at all, and an error *inside the gate
+   itself* is a refusal rather than a permission. Third, there is an optional
+   **seal**: switch it on and the rung is latched for the life of the running
+   process, so a change to the machine's settings part-way through an operation
+   cannot relax it. The seal only pins; it never loosens. Without it, the rung is
+   re-read on each call, which is convenient during development and is the wrong
+   posture for a long-running production process.
 
    There is an important honesty note here, written into the code itself:
    zero-data-retention enrolment is **an organisational contract with the
@@ -19030,6 +23066,18 @@ This deserves to be stated without hedging.
    the code is explicit that this scan is a safety net, not a guarantee, and that
    the operator is still expected to redact.
 
+9. **The two reproducible proof runs, if you choose to re-run them yourself.**
+   These are not part of an operation; they exist so that a customer or an auditor
+   can re-check a claim rather than accept it. The Kubernetes one downloads a
+   public container image once and then talks only to a cluster running on your own
+   machine. The exposed-secret one sends your own GitHub credential to
+   `api.github.com` and nowhere else: the runner refuses, as a matter of
+   construction, to send a live credential anywhere except that credential type's
+   own confirming address, over an encrypted connection. That refusal exists to
+   protect your credential, and it sits alongside — not instead of — the separate
+   rule that stops an attacker-controlled address from being used to manufacture a
+   proven finding.
+
 **Nothing else leaves.** There is no measurement data sent back to a vendor, and
 no cloud control plane. There is also no licence check-in: the licensing
 obligation described in section 2.1 is a legal agreement, not something the
@@ -19054,10 +23102,21 @@ build therefore records a cryptographic fingerprint of the exact file for every
 component, and installation refuses the entire set if any single file does not
 match. There are two such lists, one for each of the two isolated halves of the
 system, because those halves must never share an interpreter and so cannot share
-a resolution. The specification for the sovereign half also carries the rule that
-keeps the halves apart in writing: nothing in it may pull in the offensive
-engine, and that absence is what makes the offence-free guarantee hold by
-construction rather than by good intentions.
+a resolution. The offensive half's list pins **26** third-party components; the
+sovereign half's pins **56**; every single entry on both carries at least one
+file fingerprint. The refusal is all-or-nothing by design: the installer rejects
+the whole file if one line lacks a fingerprint, which is the property that makes
+an unfingerprinted line an outright failure rather than a small weakening. The
+specification for the sovereign half also carries the rule that keeps the halves
+apart in writing: nothing in it may pull in the offensive engine, and that
+absence is what makes the offence-free guarantee hold by construction rather than
+by good intentions.
+
+Two honest boundaries on that control. It covers **third-party** components only
+— the system's own packages are installed directly from the source tree and have
+no registry file to fingerprint. And the lists are specific to one version of
+Python (3.13); regenerating them under another version produces a different
+result, which is why the build pins the version it regenerates under.
 
 **2. Container base images pinned to content, not to a moving label.** A label
 such as "Python 3.13, slim" is a *pointer*, not a thing. It means "whatever the
@@ -19065,7 +23124,11 @@ registry happens to serve when you download." If that pointer is moved — by th
 upstream maintainer or by an attacker — what ships changes silently, in the
 project's own words "with no diff, no review and no signal." Every base image in
 the repository is now pinned to a content fingerprint, which the container
-software verifies or the download fails.
+software verifies or the download fails. Concretely: the checker inventories
+**nine image references across the repository's container definition files, and
+all eight that come from a public registry are pinned by content**; the ninth is
+an image built from this repository itself, which has no upstream fingerprint
+because its origin is the source tree.
 
 A small dedicated checker enforces this in three deliberately different modes: an
 offline test, a build-blocking command, and a **networked drift report** that
@@ -19080,12 +23143,25 @@ fingerprint because their origin is the source tree itself. Two floating
 "latest"-style settings were removed outright, because a moving pointer hidden
 behind a configuration variable "is the exact drift this pinning exists to stop."
 
+*And the same standard, applied when an image was actually built for the first
+time, found the control was only half-applied.* The recipe for the autonomous
+agent's tool image had its base pinned to an exact fingerprint, but one step
+inside it still asked the internet, at build time, what the latest version of a
+tool was — so two builds a day apart would ship different contents. That version
+is now written down and changed deliberately. A second defect in the same recipe
+had prevented anyone from finding this sooner: the build instructions pointed at
+the wrong starting directory, so the command documented in three places had never
+completed on any machine. Section 1.6 sets both out in full. The lesson
+generalises beyond this repository: **a pinned base carrying floating tools is
+only half a supply chain, and a build command nobody has run is not a control.**
+
 **3. A software bill of materials.** This is an itemised inventory, in a standard
-published format, of every component that goes into the build — the equivalent of
-an ingredients list. It is generated from the pinned list and then **cross-checked
-against that list component by component**, so the inventory cannot quietly
-disagree with what actually installs. It is produced and published as an output
-of every build, where a customer or an auditor can take it.
+published format (CycloneDX), of every component that goes into the build — the
+equivalent of an ingredients list. It is generated from the pinned list and then
+**cross-checked against that list component by component**, so the inventory
+cannot quietly disagree with what actually installs. Two are produced, one for
+each half of the system, and both are published as an output of every build,
+where a customer or an auditor can take them.
 
 **4. A vulnerability gate that blocks on the most severe class.** Every build
 scans the whole repository against a public vulnerability database. The threshold
@@ -19095,6 +23171,18 @@ directly in the file: "A gate whose allow-list has to grow without limit to stay
 green is theatre; a gate that blocks on CRITICAL and reports HIGH keeps meaning
 something." Every exception must carry a written justification, and an automated
 test enforces that rule rather than trusting reviewers to notice.
+
+**Today the exception list is empty.** Not "short" — empty. The file that would
+hold exceptions currently records that nothing is suppressed and that the gate is
+therefore unconditioned: every finding of the most severe class fails the build.
+The format required of any future exception is worth knowing, because it is what
+stops an allow-list from becoming a quiet dumping ground: the entry must name the
+component, must give one of five permitted reasons (upstream has published no
+fix; the vulnerable path is not reachable in how this repository uses the
+component; it is present only in test or vendored material; the advisory is
+disputed upstream; the scanner misidentified it), and must state the concrete
+condition under which the suppression should end. The file's own instruction is
+the right summary: "a suppression is a decision with an owner, not paperwork."
 
 Two further details show the standard being applied to the safeguards themselves.
 The scanner is installed pinned both by version *and* by the fingerprint of its
@@ -19106,6 +23194,56 @@ without expanding the runtime feature set."
 
 The static half of these checks runs with no network at all, so an organisation
 in a restricted environment can still verify for itself that the work was done.
+
+**A worked example: the first vulnerability the gate surfaced was fixed, not
+excused.** The scan reported a high-severity advisory against the cryptography
+library — the library that performs every signature this system produces and
+checks. The response was to raise the requirement past it in **both** halves: the
+offensive half now requires at least version 50 (and below 51), the shared core
+and the sovereign specification require at least version 50, and the assistant
+half is pinned at exactly 50.0.0. Ten files changed. Two things follow that an
+operations team needs to know. First, an existing installation does not upgrade
+itself — the requirement is what a *fresh* installation enforces, so an
+already-built environment must be rebuilt by re-running the setup script to pick
+the new version up; on the machine this chapter was written on, the sovereign
+half's built environment was still carrying the older version for exactly that
+reason. Second, and stated because it is the kind of thing an evaluator will find
+on their own: the **vendored third-party penetration-testing tool keeps its own
+separate dependency list, and that list still carries the older library**, as well
+as older versions of two other components with advisories of the same class. Those
+are reported in full by every build and none of them is suppressed. They are also
+the reason the blocking threshold sits where it does, which the policy document
+explains rather than hides: a threshold that blocked on the high class over a
+vendored third-party toolchain would need an exception list long enough that
+nobody reads it, and an exception list nobody reads launders findings instead of
+recording them.
+
+**Where the gate actually sits in the release process.** A control that runs but
+is not required to pass is a report, not a gate, so the position on the shared
+code repository is worth stating exactly, and it was read from the repository's
+own settings rather than from a document. The main line of code is protected:
+**nine checks are required to pass before a change can be merged**, and the
+supply-chain gate described above is one of the nine. The other eight cover the
+shared integrity substrate, the offensive core, the autonomous agent's runtime,
+the assistant half's permission gates, the outbound-traffic gate, the separation
+of the two halves, the machine-checked mathematical model of the core rules, and
+the durability of the permission kernel. Rewriting history on that line and
+deleting it are both disabled.
+
+Three things are **not** switched on, and a procurement officer should have them
+volunteered rather than discover them:
+
+- **Administrators are exempt.** A repository administrator can merge without the
+  nine checks passing. On a single-maintainer project that is a documented
+  posture, not an oversight — but it means "nine required checks" is a statement
+  about the ordinary path, not about every possible path.
+- **Review by a second person is not required** by the repository's settings.
+- **Signed commits are not required** by the repository's settings.
+
+An organisation that needs those three properties can switch them on in its own
+copy; they are settings, not code changes. The point of stating them here is that
+the assurance you get from the automated checks is real, and the assurance you get
+from mandatory human review is not currently claimed.
 
 **Current state, stated honestly.** An earlier version of this chapter reported
 this work as written and working but **not yet folded into the released version of
@@ -19187,13 +23325,15 @@ component list against stored vulnerability data and produce a proven finding
 about that target; that is a product feature, described earlier in this chapter.
 The four safeguards above are about securing **this system's own** build.
 
-#### 2.11 Honest status: built, but not yet fired at a live outside system
+#### 2.11 Honest status: what has been fired at a live outside system, and what has not
 
 This project maintains a written doctrine that an overstated claim is corrected by
 building the capability up, never by quietly softening the words. In that spirit,
 the following are genuinely built and tested but have **not** been exercised
 against a live third-party system, and must never be presented as completed field
-deployments.
+deployments. There is now one exception to that heading, and it is set out first
+because it is the most significant status change in this chapter: one confirmation
+has been run against a real third-party system on the public internet.
 
 **The cloud and Kubernetes capabilities deserve a paragraph rather than a table
 row, because the position is precise and easy to get wrong in either direction.**
@@ -19213,41 +23353,82 @@ merely that a setting looked wrong:
 6. On the same platform, a role genuinely grants dangerous powers, proven by
    reading the role's actual rules rather than trusting its name.
 
-The four **cloud** confirmations — numbers 1 to 4 above — are proven **offline,
-against recorded sample data**. (Recorded sample data means exactly what it sounds
-like: a saved, realistic copy of what a cloud account would have replied, kept on
-file so the test can be run and re-run without touching anybody's real account. It
-is the software equivalent of a laboratory running a known reference sample through
-its instrument to prove the instrument reads correctly.) The two **Kubernetes**
-confirmations — numbers 5 and 6 — are no longer in that position. They are proven
-against a real single-node cluster, k3s version 1.31.5, running in a container on
-the machine's own internal address, which the system stands up, owns and destroys
-itself. It plants known-dangerous and known-benign access rules in that cluster,
-captures what the real Kubernetes interface returns, and puts those bytes through
-the ordinary path: checker, admission, certificate, offline re-verification. The
-dangerous binding is confirmed and its certificate re-verifies with no network; the
-benign ones in the same cluster stay leads, including the namespace's own default
-identity bound to the built-in `admin` role, whose real rules do grant secret reads
-— the commonest legitimate arrangement in Kubernetes, and the one a careless
-detector would wrongly call critical. For all six, the detection logic, the evidence
-handling, the certificates and the safety gates are built and proven.
+Those six do **not** share one status, and an earlier version of this chapter was
+wrong to group them. They now stand in four different places, and the differences
+are the whole point.
 
-**What remains deferred, for the four cloud confirmations, is one thing only:
-pointing them at a live third-party cloud account.** That waits on the customer
-supplying their own cloud credentials, and it is deferred by design — a credential
-is a thing only the account owner can issue, and the system is deliberately built
-not to obtain one any other way. For the two Kubernetes confirmations nothing
-external is waited on; what that run does not cover is a scope-gated capability
-that discovers access rules across a whole cluster, and a managed provider's
-control plane (Amazon EKS, Google GKE, Azure AKS).
+**Proven against a real cluster the system creates and owns — numbers 5 and 6.**
+The two Kubernetes confirmations are proven against a real single-node cluster,
+k3s version 1.31.5, running in a container on the machine's own internal address,
+which the system stands up, owns and destroys itself. It plants known-dangerous
+and known-benign access rules in that cluster, captures what the real Kubernetes
+interface returns, and puts those bytes through the ordinary path: checker,
+admission, certificate, offline re-verification. The dangerous binding is confirmed
+and its certificate re-verifies with no network; the benign ones in the same
+cluster stay leads, including the namespace's own default identity bound to the
+built-in `admin` role, whose real rules do grant secret reads — the commonest
+legitimate arrangement in Kubernetes, and the one a careless detector would
+wrongly call critical. Nothing external is waited on here: any evaluator with
+container software can re-run it.
+
+**Proven against a real outside system on the public internet — half of number
+2.** The exposed-secret confirmation has been run against the real
+`api.github.com`, using the operator's own GitHub credential against their own
+identity endpoint — the least-privileged call that interface offers, which reads
+who you are and changes nothing. That is the first time any of these
+confirmations has adjudicated bytes produced by a third-party system the operator
+does not control. A valid credential is confirmed and its certificate re-verifies
+offline. In the same run, three controls correctly produce nothing: a bogus
+credential of the same *shape*, sent live to the same real address, which GitHub
+itself refuses; the same confirmed capture with its confirming address swapped for
+an attacker-controlled host and for a look-alike host; and the same capture where
+the credential and the confirming call do not match each other. The harness checks
+every one of those expectations and fails if any of them deviates, and anyone can
+re-run it on their own machine with their own account.
+
+**Built but never fired at anything real — the other half of number 2.** The same
+capability has a second case, for Amazon access keys. Its dispatch and its signed
+confirming call are built and unit-tested, **but it has never been exercised
+against real Amazon Web Services, it still needs a real access key that only the
+account owner can issue, and nothing from the GitHub run transfers to it.** This
+is a row-level split inside one capability, and blurring it would be the exact
+kind of overclaim this chapter exists to avoid.
+
+**Proven offline against recorded sample data — numbers 1, 3 and 4.** (Recorded
+sample data means exactly what it sounds like: a saved, realistic copy of what a
+cloud account would have replied, kept on file so the test can be run and re-run
+without touching anybody's real account. It is the software equivalent of a
+laboratory running a known reference sample through its instrument to prove the
+instrument reads correctly.) Numbers 1 and 3 — the credential taken from a cloud
+machine's own credential service, and one Google Cloud identity acting as another
+— are complete, wired end to end, and waiting on one thing only: a credential the
+customer must issue. Number 4, the permissions-escalation judgement, is a
+different case that must not be lumped in with them: it is a re-derivation over an
+export of your own permission policy, makes no cloud call at all, and will
+**never** be live-fired, because a verification tool does not carry out the
+escalation it is proving. Do not describe number 4 as awaiting anything.
+
+For all six, the detection logic, the evidence handling, the certificates and the
+safety gates are built and proven.
+
+What the two real runs do **not** cover is worth naming too. Neither exercises a
+capability that goes looking: the Kubernetes harness reads objects it planted
+itself, and the GitHub harness validates a credential the operator handed it. A
+scope-gated component that discovers access rules across a whole cluster, or
+searches an authorised surface for exposed secrets, is separate work and is not
+part of what has been proven. Nor is a managed provider's Kubernetes control plane
+(Amazon EKS, Google GKE, Azure AKS), whose access rules are the same interface but
+whose access path was not exercised.
 
 The accurate sentence, which should be used wherever this comes up, is: *built and
 gated throughout; the two Kubernetes confirmations proven against a real cluster
-the system creates itself, the four cloud ones proven offline, their first use
-against a real, live cloud account awaiting the customer's own credentials, by
-design.* Calling these capabilities unfinished would understate the system. Calling
-the cloud ones proven in customer clouds would overstate it. Both errors mislead,
-in opposite directions.
+the system creates itself; the exposed-secret confirmation proven against the real
+GitHub interface for GitHub credentials only, and not for Amazon ones; the
+metadata-credential and Google-identity confirmations proven offline and awaiting
+the customer's own credentials, by design; and the permissions-escalation
+confirmation proven offline and deliberately never live-fired.* Calling these
+capabilities unfinished would understate the system. Calling them proven in
+customer clouds would overstate it. Both errors mislead, in opposite directions.
 
 Five safety properties are shared by all six, and they answer the obvious concern
 about letting an automated system anywhere near a cloud credential:
@@ -19262,9 +23443,13 @@ about letting an automated system anywhere near a cloud credential:
    memory and then discarded. What is retained is a redacted structural record,
    the fingerprint, and non-secret provenance — and the certificate still
    re-checks offline afterwards. For the Kubernetes tests the retained record
-   carries only permission metadata, never the token used to read the cluster.
+   carries only permission metadata, never the token used to read the cluster. In
+   the GitHub run the harness goes further and *checks* that the credential does
+   not appear in the capture, in the material the judging test reads, or in the
+   signed certificate.
 4. **Authorisation and scope are checked before any network activity.** An
-   unauthorised or out-of-scope call refuses before a single packet leaves.
+   unauthorised or out-of-scope call refuses before a single packet leaves. There
+   is nothing to adjudicate on a refusal, so there is nothing to launder.
 5. **The connection must prove itself.** The network layer must report which
    address it actually reached, whether encryption was verified, and whether any
    proxy or redirect intervened; the judging test *requires* a verified encrypted
@@ -19272,11 +23457,27 @@ about letting an automated system anywhere near a cloud credential:
    become a proven finding, because the evidence of where the calls actually went
    originates only in the live runner.
 
+One piece of engineering history belongs with that fifth property, because it
+explains why the GitHub run matters more than it might appear. Until it landed,
+**every one of these capabilities reached the network through a stand-in used for
+testing** — there was no real network binding at all, which is precisely why none
+of them had ever fired against a real provider. The real binding now exists, and
+its governing rule is that every claim about the connection is *derived from the
+connection* rather than asserted: encryption counts as verified only when the
+request really was encrypted, the connection really carries an encryption session,
+that session really yields the other end's certificate, and the checking really was
+switched on. "No proxy involved" is recorded only when the client can be shown
+unable to interpose one. A redirect is *reported* rather than followed. The address
+is read from the live connection rather than looked up again afterwards, because a
+second look-up can return a different answer than the one the data came from. Every
+one of those degrades, on any doubt, to the value that makes the judging test
+refuse.
+
 With that stated, the remaining honest deferrals are:
 
 | Capability | Status | What is blocking live use |
 |---|---|---|
-| The six cloud and Kubernetes exploitation confirmations | **In the released software.** The two Kubernetes ones are **proven against a real cluster** the system stands up, owns and destroys; the four cloud ones are **proven offline against recorded sample data** | For the four cloud confirmations, real-world use against a live third-party cloud account remains. For the two Kubernetes ones, nothing external is blocking: what that run does not cover is enumeration of bindings across a cluster and a managed provider's control plane (EKS, GKE, AKS). |
+| The six cloud and Kubernetes exploitation confirmations | **In the released software**, at four different levels of proof. The two Kubernetes ones are **proven against a real cluster** the system stands up, owns and destroys. The exposed-secret one is **proven against the real GitHub interface** for GitHub credentials — and **not proven at all** for Amazon ones. The metadata-credential and Google-identity ones are **proven offline against recorded sample data**. The permissions-escalation one is **proven offline and deliberately never live-fired**. | The Amazon case of the exposed-secret confirmation needs a real Amazon access key. The metadata-credential and Google-identity ones need the customer's own cloud credentials. The permissions-escalation one is blocked by nothing and never will be live-fired, by design. For the two Kubernetes ones, nothing external is blocking: what that run does not cover is enumeration of bindings across a cluster and a managed provider's control plane (EKS, GKE, AKS). |
 | AI red-teaming tools as a source of proven facts | Built, not yet run live | Those tools are absent from the current environment and there is no network access to install them. The code explicitly does not mint facts from them. |
 | Running an external tool inside the pinned-network container | Built, not yet run live | Needs container software, the isolated network, and a tool image present. |
 | Speaking live to an external tool-server | The manifest and validation layer are built; the live client is a pending piece | Described in the code as the one remaining seam. |
@@ -19317,7 +23518,10 @@ With that stated, the remaining honest deferrals are:
   a human still reads, edits and signs it.)
 - A signed authority minted from that charter on a trusted machine that holds the
   owner key.
-- The six required security tools installed (the Tools screen shows you).
+- The six required security tools installed (the Tools screen shows you, live).
+  The seven optional ones widen what can be examined rather than gate it; three of
+  those seven install without administrator rights, under the operator's own
+  account.
 - An approval authority minted, so queued actions can be signed one at a time.
 - **Test accounts on the target application**, if any of its interesting surface
   is behind a login — two identities at different privilege levels if you want
@@ -19332,7 +23536,7 @@ With that stated, the remaining honest deferrals are:
 
 - Nothing needs to be switched off. The system can read the report another tool
   produced, without running that tool at all: eight input formats are accepted, and
-  they are listed in section 1.6.
+  they are listed in section 1.8.
 - What comes in that way arrives as a **lead**, labelled with where it came from,
   and is re-proved by the system's own test wherever one applies. A claim that
   cannot be re-proved stays a labelled lead and says so. Nothing is recorded as a
@@ -19379,7 +23583,15 @@ With that stated, the remaining honest deferrals are:
 - Container software — for the isolated agent, the container-based tool runner
   and the optional services.
 - Read-only cloud credentials — for cloud and Kubernetes posture checks, and for
-  the first real use of the four cloud confirmations.
+  the first real use of the metadata-credential and Google-identity confirmations.
+  A real Amazon access key, separately, for the Amazon case of the exposed-secret
+  confirmation. Neither Kubernetes confirmation needs any of this.
+- Container software and the ability to download one public container image — if
+  you want to re-run the Kubernetes proof yourself rather than take it on trust.
+  An authenticated GitHub command-line tool and outbound access to
+  `api.github.com` — if you want to re-run the exposed-secret proof yourself, with
+  your own account. Both harnesses skip cleanly and say so when their
+  prerequisites are absent; neither invents a result it could not produce.
 - A source-code-host token plus multi-signature keys — for automatic fix pull
   requests.
 - A graph database — for the visual knowledge map.
@@ -19394,7 +23606,7 @@ inputs, not as missing features.
 | What | Why the system cannot supply it |
 |---|---|
 | Written authorisation to test a system | Only the system's owner can grant it. The charter is where it is recorded, and nothing runs without one. |
-| Cloud credentials for live cloud testing | Only the account owner can issue a credential, and the system is designed not to obtain one any other way. This is the single remaining blocker for the first real use of the four cloud confirmations. The two Kubernetes confirmations do not need it — the system stands up a cluster of its own. |
+| Cloud credentials for live cloud testing | Only the account owner can issue a credential, and the system is designed not to obtain one any other way. It is the remaining blocker for the metadata-credential and Google-identity confirmations, and for the Amazon case of the exposed-secret one. It is **not** a blocker for the two Kubernetes confirmations — the system stands up a cluster of its own — nor for the GitHub case of the exposed-secret confirmation, which needs only your own GitHub account, nor for the permissions-escalation judgement, which reads an export and makes no call. |
 | Genuinely separate holders of the multi-signature keys | The code can require several distinct keys. It cannot verify that different people hold them. |
 | A security chip, or a virtual equivalent | Without it, keys sit unencrypted on disk. Acceptable on a trusted single-user machine, inadequate on a shared or hosted one. Setup warns loudly rather than degrading silently. |
 | Independently operated witnesses | The protocol and a deployable witness service are built and working. Independence is a deployment arrangement, and the project's own trust document says plainly that distinct keys are not distinct operators. |
@@ -19615,6 +23827,36 @@ There is one honest warning for a specific kind of customer. Applications whose 
 purpose is to accept code — paste bins, developer question-and-answer sites, bug trackers —
 legitimately carry attack syntax as ordinary user content. The guide says plainly: run
 those in watch-only mode and review before enforcing.
+
+#### Why growing the offensive engine cannot change what the firewall blocks
+
+The reuse described above raises the obvious opposite worry. The offensive engine keeps
+growing: a run of new confirmations for cloud and Kubernetes attacks was completed on
+12 August 2026. If the defensive side runs the offensive side's checkers, does the firewall
+quietly start blocking more things every time the offensive side learns a new trick?
+
+It does not, and the arrangement that prevents it is structural rather than a promise of
+care.
+
+When a finding arrives carrying a weakness category the system does not recognise, it is
+tested against a **fallback** set of checkers. That fallback set is **frozen**: it is the
+fifteen checkers that existed before the defensive and cloud families were added, and it is
+deliberately *not* derived from the full list. Had it been derived, every later addition
+would have quietly widened the set that every unrecognised finding is tested against. The
+other twenty-three checkers — the four inward-facing detections, the three request-only
+break-out judgements, the eight configuration-posture checks, the two document-forgery
+checks and the six live-capture checks — are reachable **only** through their own explicit
+category entry, and every one of those entries is keyed on a kind of evidence an ordinary
+web scan never produces.
+
+Two tests hold this in place, and they are deliberately different in kind so that one
+refactoring cannot defeat both. One asserts the arithmetic. The other **writes out the
+fifteen permitted names by hand**, so a drift fails the build with an explicit list of what
+moved rather than against a set the test itself recomputed. The same file also pins the
+benchmark result as a fixed row — eleven true findings, no false alarms, no misses — so an
+addition that shifted the engine's measured behaviour by even one finding would fail before
+it could be merged. That file was amended, visibly and by hand, for each new checker added
+in August. The fifteen did not move, and the benchmark row did not move.
 
 #### What AEGIS deliberately refuses to block, and why that is a feature
 
@@ -19954,8 +24196,23 @@ both and they have different trust properties.
 | What its output is worth | Leads, by design. A single deep-analysis finding can be turned into a testable question for the running system. | Leads. The deployment guide says it in one line — *"strix output is **leads, not FACTs**"* — and explains why: the machinery that turns a finding into a signed proven fact does not run over this agent's output at all. |
 | What you get at the end | A merged, de-duplicated report, plus which analysers ran and which were skipped and why. | A report produced inside the agent's own sandbox. The interface says so on screen: a codebase run produces no re-checkable web report of the kind a live web assessment produces. |
 
-Two further facts about the wizard route, both verified in the code:
+Three further facts about the wizard route, all verified in the code:
 
+- **The agent's ability to run arbitrary commands is governed, and since 12 August 2026 that
+  governance fails closed.** The agent has exactly one route to a command line, and the
+  product's authorisation layer classifies that one route — and only that one — as maximally
+  dangerous, so each invocation of it stops and waits for a single-use, owner-signed approval
+  covering that exact call. If no approval authority has been set up at all, the call is
+  blocked rather than allowed through. Every other tool the agent has (thinking, notes, web
+  search, patch application, reporting) is left to run freely, so the agent stays useful while
+  its shell is held. This is on by default for any governed run. What changed in August is the
+  failure behaviour: the wiring code previously caught *any* error while attaching the
+  governor and carried on with the agent ungoverned, on the reasoning that a wiring fault
+  must never stop a scan. Its replacement states the problem in its own words — the effect
+  was "an UNGATED shell with NO signal to the operator — an accident, not a decision, and
+  indistinguishable from a healthy governed run." A wiring failure now halts the run. There
+  remains exactly one way to run ungoverned: a single named setting an operator has to switch
+  off deliberately, which leaves a visible, auditable record of the choice.
 - The interface **pre-checks for Docker before launching** — it looks for the Docker command
   and asks the Docker service whether it is alive, with an eight-second limit — and returns
   a plain error naming the reason rather than hanging. It also runs the agent in headless
@@ -20147,6 +24404,31 @@ The safety rails on the loop are real and worth listing:
 - There is a hard budget on model calls (default five), because each one costs real time and
   money.
 - **The loop sends no traffic to any target.** It reads source and reasons about it.
+- **Since 13 August 2026, a jurisdiction setting decides whether the model call may leave the
+  machine at all** — and it is decided *before* the AI provider's software is even loaded.
+
+That last rail deserves its own paragraph, because for an organisation with data-residency
+obligations it is the one that matters most about source review: this step is the point at
+which a customer's actual program text would be sent to an AI model.
+
+The product carries four **sovereignty tiers**, an operator setting that says where a model
+call is allowed to go. *Air-gapped* permits locally-run models only. *Sovereign cloud* adds
+model services that run inside a defined legal jurisdiction. *Trusted cloud* additionally
+allows a hosted service that contractually retains no data, and only on an explicit operator
+attestation. *Permissive* allows anything. The tier is consulted at the moment the system
+chooses which model to talk to, before the provider's software library is imported and
+before any client is built, so under a strict tier nothing is constructed, nothing is
+imported, and nothing leaves the host. Across the places where a model is called, four
+separate failure paths all resolve to refusal: an unrecognised tier name resolves to the
+*strictest* tier; an unrecognised model service is treated as ordinary public cloud and
+refused under every strict tier; a policy that cannot be read at all refuses whenever a tier
+is configured; and an error raised inside the check itself is a refusal, never a permission.
+There is an optional latch that fixes the tier for the life of the process, so a later
+change to the machine's settings cannot loosen it mid-run.
+
+**The honest qualification: the shipped default is permissive.** With no tier configured, the
+deployment behaves as it always did. This is a control an operator turns on, not a property
+a customer gets by installing the product, and an evaluator should ask to see it set.
 
 #### Where the source-review output goes
 
@@ -20209,13 +24491,45 @@ delivered software. Four pieces, in plain words:
   vulnerability?" without needing VIGIL's cooperation.
 - **A release gate blocks on a critical vulnerability.** Before a change can be accepted, an
   automated step scans those locked dependency lists. If it finds a vulnerability rated
-  CRITICAL, the change is refused rather than flagged for later. The gate carries a self-test
-  that deliberately fires it, so a silently broken gate cannot pass as a clean one.
+  CRITICAL, the change is refused rather than flagged for later. Vulnerabilities rated HIGH
+  are reported in full but do not block — the policy is written down and the reason given: a
+  gate whose exception list has to grow without limit to stay green stops meaning anything.
+  There are, at the time of writing, **no exceptions on that list at all**, and every future
+  entry is required by a test to carry a written justification, a named reason from a fixed
+  set, and the condition that should end it. The gate carries a self-test that deliberately
+  fires it, so a silently broken gate cannot pass as a clean one.
 
 **Status, stated plainly.** All four exist in the released software today. They were accepted
 into the released version on 12 August 2026, and the automated build gate now runs against
 every proposed change. Chapter 6 gives the detail and the honest account of what these
 safeguards do *not* prove.
+
+Three further points landed alongside them and belong here, because they are what makes the
+above enforceable rather than merely present.
+
+- **A known-vulnerable cryptography library was replaced, in both halves of the product.**
+  The outside library that performs every signature and every encryption operation on the
+  Python side of the system was moved past a published high-severity vulnerability; the change
+  was accepted on 12 August 2026, in the offensive engine, the shared core and the sovereign
+  half alike. A security product that lags its own cryptography library is in no position to
+  lecture anyone about dependencies.
+- **The gate is a required check, not an advisory one.** The repository's main branch is
+  protected, and nine automated checks — including the supply-chain gate — must pass before a
+  change can be merged. Rewriting or deleting the branch's history is disabled. Three honest
+  gaps go with that, and an evaluator should be told them rather than left to find them:
+  repository administrators are **exempt** from the required checks; independent review of a
+  change by a second person is **not** required by the configuration; and commit signatures
+  are **not** required. The checks are real; the human process around them rests on the
+  operator's own discipline.
+- **The two subsystems described in this chapter are now covered by those checks.** Until
+  13 August 2026, eight areas of the codebase had test suites that were never run by the
+  automated build — among them the source-analysis subsystem described in this Part and the
+  detection-engineering subsystem described in Part 1. Both now run on every proposed change.
+  The way that was done is itself the point: a test path that matches no files at all leaves
+  the build green and the log looking like coverage, so the build first runs each newly added
+  path in a mode that only *collects* tests, treats "collected nothing" and "path does not
+  exist" as hard errors, and prints the count each path actually contributed. Coverage that
+  cannot be counted is not claimed.
 
 ---
 
@@ -20257,6 +24571,17 @@ open-source component this was adapted from originally did.
   explicit approval applies an edit.
 - **It never stages everything.** Only explicit, path-validated files are committed. A
   wildcard path is refused, and an empty set of edits never raises a change proposal.
+
+A third property was added on 13 August 2026, and it matters to any organisation that cannot
+let its source code leave its own premises. The step that comes before the ladder — proposing
+the fix in the first place — is a call to an AI model, and what that call carries is **real
+source text from the organisation's own repository**. It now passes the same jurisdiction
+check described in Part 2: the sovereignty tier is consulted before the model provider's
+software is loaded and before any client is built, so under a strict tier no client exists and
+nothing leaves the machine. A refusal degrades to "no proposal" — exactly as a missing key to
+the model service already did — rather than to an unguarded call, so the loop still finishes
+cleanly and never patches on a refusal. The same honest qualification carries over: the
+shipped default is permissive, so this is a control an operator sets.
 
 Every action is recorded with the sensitive arguments scrubbed out, so no credential ever
 reaches the audit trail, and stage numbering comes from a counter rather than a clock, so
@@ -20401,22 +24726,96 @@ the discipline: when it runs over an encrypted connection it *records in the fin
 that the other end's identity was not validated, and it refuses to call the result a
 confirmed session hijack without a genuine authenticated session.
 
-**Elsewhere, validation is required rather than disabled.** One of the cloud capabilities
-described in other chapters proves that a credential was taken from a cloud machine's own
-credential service *and that the credential really worked*. The step that collects that
-evidence must report that certificate checking was on, that nothing sat in the middle of
-the connection, and that no redirection was followed — and the checker that judges the
-result **requires** all three before it will confirm anything. Evidence gathered over a
-sloppy connection cannot become a proven fact. The two settings are opposites for good
-reasons, and both are written down.
+**Elsewhere, validation is required rather than disabled.** One family of cloud capabilities
+described in other chapters proves that a credential really worked — that it was accepted by
+the provider as a live identity. The step that collects that evidence must report that
+certificate checking was on, that nothing sat in the middle of the connection, and that no
+redirection was followed — and the checker that judges the result **requires** all three
+before it will confirm anything. Evidence gathered over a sloppy connection cannot become a
+proven fact. The two settings are opposites for good reasons, and both are written down.
 
-The honest status of that cloud capability, in the same words the rest of this briefing
-uses: the detection logic, the evidence handling, the certificates and the safety gates are
-**built and proven against recorded sample data**. What remains deferred is the act of
-pointing them at a live third-party cloud account, and that waits on the customer supplying
-their own cloud credentials — a thing only the account holder can supply, and which the
-system is deliberately built not to obtain any other way. Calling it unfinished understates
-the system; calling it field-proven in a customer's cloud overstates it.
+#### The real network binding, and the first run against a real outside provider
+
+That requirement was enforced from the day it was written, but until 13 August 2026 it had
+never been exercised, because **the only things that had ever supplied those connection facts
+were stand-ins written for the tests**. The code that actually makes such a request — the piece
+that joins these cloud capabilities to a real network — did not exist. The module that closes
+the gap says so in its own opening lines: that absence is "exactly why no [cloud] runner had
+ever fired against a real provider."
+
+The rule the new code holds itself to is one sentence: **every connection fact is derived from
+the connection, never asserted.** Concretely:
+
+- "Certificate checking was on" is recorded only when the request was over HTTPS, the
+  connection genuinely carries an encrypted session, that session yields a peer certificate at
+  all (which it does not unless the chain was validated), and the client's own settings are
+  genuinely in verifying mode. Any step that cannot be established records the negative.
+- "Nothing sat in the middle" is recorded only when the client can be *affirmatively shown*
+  unable to route through an intermediary — it was built ignoring the machine's ambient proxy
+  settings and carries no intermediary of its own. If that cannot be shown, the record says an
+  intermediary was possible, which is the answer that makes the checker refuse.
+- "No redirection was followed" is guaranteed by construction: the client does not follow
+  redirections, so a redirect is *reported* rather than obeyed.
+- The other end's address is read **from the live socket carrying the response**, not looked up
+  again afterwards. A later lookup can return a different address from the one the bytes
+  actually came from, which would be evidence about the wrong thing.
+- The response is read up to a fixed limit. A response over that limit is marked truncated and
+  is **not** parsed, so a partial — and therefore unsound — identity answer can never reach a
+  checker.
+
+The discipline is that **no field ever falls back to the permissive value**. A missing
+connection, an error while inspecting it, an unencrypted address, an over-long response: each
+degrades to the value that makes the checker refuse, never to the one that lets it confirm.
+
+**And one of these capabilities has now been exercised against a real third party.** On
+13 August 2026 the exposed-credential capability — "this leaked secret is not merely
+well-formed, it is *valid*" — was run against the real GitHub API. Four things happened in the
+same run, and the three that did *not* confirm are the ones worth reading:
+
+| What was tried | What happened |
+|---|---|
+| The operator's own genuine credential, against the operator's own least-privileged identity address | **Confirmed**, and the signed certificate re-checks offline |
+| A bogus credential of the same *shape*, sent live to the same real address | GitHub itself answered "unauthorised" — correctly left an unproven lead. Structure is not validity, and here that is measured against the real provider rather than assumed |
+| The same confirmed capture, with the address that would confirm it swapped for an attacker's host, and again for a near-identical lookalike name | Not confirmed. If any address could confirm a secret, anyone who controlled an address could manufacture facts. The collecting step separately refuses to send a live credential anywhere but that credential type's own confirming address, so the credential is protected as well as the verdict |
+| The same capture where the credential and the confirming call carry *different* fingerprints — "some other secret authenticated" | Not confirmed |
+
+The credential was piped into the harness on standard input from the operator's own logged-in
+session. It is never written to a file, never placed where a process listing would show it, and
+never put into the environment; the harness asserts it appears in neither the capture, nor the
+evidence, nor the signed certificate. The harness asserts every one of its expectations and
+exits with a failure code on any deviation, and a third party can re-run it on their own
+machine with their own account. That last property is what makes this a re-checkable claim
+rather than a demonstration.
+
+The same run also exercised the two gates that sit in front of any such capture, in the
+direction that matters: with the stop switch tripped, and again with the target ruled out of
+scope, the run **refused and produced no capture at all**. That is the design point stated in
+the source — a refusal leaves nothing to adjudicate, so there is nothing that could later be
+laundered into a fact.
+
+**What that run does not cover, stated exactly.**
+
+- **Only the GitHub row.** The Amazon Web Services row of the same capability is built and
+  unit-tested — its request-signing code was checked against Amazon's own independent
+  implementation — but has **never** been exercised against real AWS. It still needs a real,
+  operator-provided access key, and **nothing about the GitHub run transfers to it.**
+- **Not credential types outside the two it recognises**, and **not a hunt for exposed
+  credentials** across a customer's estate: the harness validates a credential the operator
+  handed it, it does not go looking for one.
+- **The two gates were harness-supplied stand-ins, not a signed engagement charter.** The
+  permitting and scope objects in that run were written into the harness, and the harness says
+  so in its own comments. Their *refusing* behaviour was genuinely exercised, as just
+  described, so the seam is proven to bite — but a signed charter was not loaded, and nobody
+  should read this run as proving the charter machinery end to end.
+
+The sibling capability — proving a credential was taken from a cloud machine's own credential
+service — remains where the rest of this briefing places it: the detection logic, the evidence
+handling, the certificates and the safety gates are **built and proven against recorded sample
+data**, and it now has a real network binding underneath it, but it has **not** been pointed at
+a live cloud account. That waits on the customer supplying their own cloud credentials — a
+thing only the account holder can supply, and which the system is deliberately built not to
+obtain any other way. Calling it unfinished understates the system; calling it field-proven in
+a customer's cloud overstates it.
 
 #### An identity that survives certificate renewal
 
@@ -20686,8 +25085,18 @@ Everything else is excluded, each with a written reason:
 | Memory-error sanitiser signals | One sub-case — a thread data race detected at run time — is not reliably reproducible, so the whole family is excluded as unaudited rather than partly trusted. |
 | Version range, privilege path, all posture families, single-sign-on forgery, automated access | These are offline or configuration judgements, not a live re-test with a freshness marker. They are outside this mode's scope. |
 | Service reachability, active exposure, TLS weakness | Connection-level classes whose liveness control has not been soundly defined yet. Excluded until it is. |
+| The cloud and Kubernetes achieved-effect families — metadata-credential capture, exposed-credential validity, service-account impersonation, permission escalation, Kubernetes permission grant, anonymous reachability | No family-specific reason is written for these, and that is the honest description: they are simply not on the closed allow-list, so they land in the same catch-all refusal as anything unaudited, and the code returns its generic "not a sound negative" note. A sound rule for "this credential no longer works" or "that permission grant is gone" is a separate piece of reasoning nobody has done. |
 | Races, timing desynchronisation, request smuggling | Genuinely non-reproducible phenomena: a real vulnerability may simply not manifest on a given attempt, so "silent across N attempts" is unsound. |
 | Any unrecognised family | Fail-closed. |
+
+The cloud and Kubernetes row is worth pausing on, because it shows the allow-list working in
+the direction that costs the vendor something. Six confirmations for cloud and Kubernetes
+attacks were added to the offensive engine on 12 August 2026. **Not one of them was added to
+this allow-list**, so not one of them can currently produce a "the fix worked" verdict from
+silence — checked directly for this chapter, family by family. The allow-list is closed, so
+the new families fell straight through to the refusal branch, which is what fail-closed means
+when it is real rather than decorative. A vendor optimising for the demonstration would have
+widened the list; widening it would have been a claim nobody had earned.
 
 Two further conditions are written into the code as load-bearing and must not be relaxed:
 the differential-response family qualifies **only** because no certifiable class currently
@@ -20794,22 +25203,2172 @@ The table below is a summary; the detail behind each cell is in the Part above.
 
 | Area | Fully working today | Built, awaiting something from the customer or the world | Deliberately not attempted |
 |---|---|---|---|
-| **Defensive firewall (AEGIS)** | Watch-only and enforcing modes; seven proof-backed inline block classes; graduated soft responses; certificates that re-check offline; kill switch; three integration routes with a stated detection set each | Enforcement in a governed deployment needs the internal blocking permission granted, otherwise it downgrades to watch-only and says so | Blocking server-side request forgery, XML external entity attacks, or error-based database injection inline — each needs out-of-band confirmation a single response cannot supply |
+| **Defensive firewall (AEGIS)** | Watch-only and enforcing modes; seven proof-backed inline block classes; graduated soft responses; certificates that re-check offline; kill switch; three integration routes with a stated detection set each; a frozen fifteen-checker fallback and two name-pinned build tests, so growing the offensive engine provably cannot change what the firewall blocks | Enforcement in a governed deployment needs the internal blocking permission granted, otherwise it downgrades to watch-only and says so | Blocking server-side request forgery, XML external entity attacks, or error-based database injection inline — each needs out-of-band confirmation a single response cannot supply |
 | **Inward-facing detections** | Four — prompt-instruction leakage, prompt injection, automated access, credential stuffing — each with a stated false-positive control. Three of the four need the route where the application hands over its own records; automated access also runs inline, once a decoy address is seeded | — | Detecting "human-mimicking bots", single-input evasion, and membership inference. These are documented as permanently lead-only |
 | **Social-engineering defence** | Nine offline indicators over an inbound message, a weighted score, five risk bands, a recommendation, and a command that can gate a mail pipeline | Machine-learning or AI classifiers on top are described as what a production deployment adds | Any generation of phishing or impersonation content; detection of faked audio or video |
 | **Detection Mirror** | Twelve checks over web access, authentication, and connection logs, each with a benign twin; certificates that re-check offline; downgrade to lead if a certificate fails | Four whole domains (outbound command-and-control, directory/identity, cloud audit, session) are honest placeholders that name the missing data source | Nothing is fabricated for a domain with no log source |
-| **Detection engineering** | Sigma-subset rule evaluation over your own logs; gap report; candidate rules for every miss; ATT&CK mapping | — | Any working bypass for a named commercial defence product; any evasion recipe; any claim to model a specific log-and-alert platform |
-| **Source-code review** | Thirteen built-in patterns, each scoped to the languages it applies to, matched across a default walk of fifteen source-file types and always available; fourteen shipped dataflow rules when Semgrep is present; Joern when provisioned; a Python symbol index; conversion of findings into testable questions; permission gate, kill switch, budget | Semgrep and Joern must be installed by the deployment; absence is reported, never hidden. The symbol index covers Python only | Treating a static finding as proof. Static analysis output is a lead by design |
+| **Detection engineering** | Sigma-subset rule evaluation over your own logs; gap report; candidate rules for every miss; ATT&CK mapping; its test suite now runs on every proposed change to the product | — | Any working bypass for a named commercial defence product; any evasion recipe; any claim to model a specific log-and-alert platform |
+| **Source-code review** | Thirteen built-in patterns, each scoped to the languages it applies to, matched across a default walk of fifteen source-file types and always available; fourteen shipped dataflow rules when Semgrep is present; Joern when provisioned; a Python symbol index; conversion of findings into testable questions; permission gate, kill switch, budget; the AI review step's model call now passes a jurisdiction check before any provider software is loaded; its test suite now runs on every proposed change to the product | Semgrep and Joern must be installed by the deployment; absence is reported, never hidden. The symbol index covers Python only. The jurisdiction tier ships **permissive** by default — it is a control the operator sets, not one the customer inherits | Treating a static finding as proof. Static analysis output is a lead by design |
+| **The agent-driven "scan a codebase" route** | The agent's single route to a command line is held for per-call, single-use, owner-signed approval while its other tools run freely; on by default; since 12 August 2026 a wiring failure halts the run rather than silently leaving that surface ungoverned | Requires Docker; the run happens inside a disposable container and produces no re-checkable web report | Treating the agent's output as anything but leads — the machinery that mints a signed proven fact does not run over it |
 | **Dependency review** | Vulnerable dependencies are proven by the system's own version comparator against a pinned advisory snapshot, and re-check offline | Saying "no vulnerable dependency" — as opposed to "this one is vulnerable" — needs non-pinned constraints resolved and snapshot coverage recorded; named as outstanding work | Trusting any scanner's own vulnerability match |
-| **Fix production** | Propose; apply into a disposable clone; sandbox build; timeout-rejects approval; explicit file staging only | The leg that raises a real change proposal is off by default and requires multi-signature keys the operator must first provision, plus a repository token — a capability, not a field deployment | Applying a fix to a lead. Only proven findings are eligible |
+| **Fix production** | Propose; apply into a disposable clone; sandbox build; timeout-rejects approval; explicit file staging only; the proposal step's model call — the one carrying real repository source — passes the jurisdiction check, and a refusal degrades to "no proposal" | The leg that raises a real change proposal is off by default and requires multi-signature keys the operator must first provision, plus a repository token — a capability, not a field deployment. The jurisdiction tier ships permissive by default | Applying a fix to a lead. Only proven findings are eligible |
 | **TLS and certificates** | Own gated handshake; four deprecated protocols and fourteen weak-cipher markers; broken-hash and undersized-key certificate checks; observed-key fingerprint; quantum-exposure classification; offline re-check; one of only six routes permitted to say CLEAN | Session-bound evidence with a notary co-signature is built and tested, but needs a handshake-participating toolchain and an independent notary operator before it proves producer-unforgeability | Enumerating every legacy cipher a server might accept if asked differently — the limit is registered, not hidden |
+| **Connection provenance for cloud credential checks** | A real network binding that derives every connection fact from the connection itself and never from an assertion, with every unestablishable fact defaulting to refusal; exercised against the real GitHub API on 13 August 2026, including live negative controls and an anti-laundering control, with the certificate re-checking offline | The Amazon Web Services row of the same capability is built and unit-tested but has **never** been run against real AWS, and nothing from the GitHub run transfers to it; the metadata-credential capability likewise awaits an operator-provided cloud credential | Obtaining a customer's cloud credentials by any route other than the customer handing them over |
 | **Network manners** | Recognisable identifying header forced on, including through the manual replay tool; posture-based pacing; six gates per request; permanently forbidden address ranges; resolve-once-and-pin; certificate checking left on for the system's own outbound calls | — | Stealth, identity rotation, traffic shaping to evade detection. The system is built to be found in your logs |
-| **Fix verification** | Four signed answers; controls for liveness, freshness, positive control and repetition; a 13-family allow-list with every exclusion reasoned; a remediation certificate cross-bound to the original proof; a stand-alone third-party verifier needing no product code | Continuous re-proof ships as a one-shot runner plus scheduled-job definitions; it becomes an operating property once the schedule is enabled on a host | Claiming a remediation at the higher freshness level. Once the vulnerable path is removed nothing can travel through it, so the system caps lower and returns INCONCLUSIVE to anyone demanding more |
+| **Fix verification** | Four signed answers; controls for liveness, freshness, positive control and repetition; a 13-family allow-list with every exclusion reasoned; a remediation certificate cross-bound to the original proof; a stand-alone third-party verifier needing no product code | Continuous re-proof ships as a one-shot runner plus scheduled-job definitions; it becomes an operating property once the schedule is enabled on a host. A sound "it stopped working" rule for the new cloud and Kubernetes families has not been written, so they cannot be certified this way | Claiming a remediation at the higher freshness level. Once the vulnerable path is removed nothing can travel through it, so the system caps lower and returns INCONCLUSIVE to anyone demanding more. Widening the allow-list to cover the six confirmations added in August — none was added, and the closed list refused them |
 
 The single sentence that connects all four subjects in this chapter: **nothing here asks you
 to trust the tool.** A block, a detection, a fix, and a "this is now safe" claim each arrive
 with the evidence attached and a repeatable procedure for checking it — and where a claim
 cannot be earned that way, the system says so rather than making it.
+
+---
+
+## Chapter 14. The Sovereign Side, In Full
+
+### 1. Why there is a sovereign side at all
+
+
+#### 1.1 The problem it solves, before any mechanism
+
+An offensive testing engine is a powerful thing to have running on a network. Someone has to be
+able to say *start*, *stop*, *not that target*, and *yes, this finding is now part of the official
+record* — and that someone must not be the engine itself. If the same running program holds both
+the attacking capability and the authority to authorise attacking, then anyone who subverts the
+attacking half has, in the same motion, taken the authority. There is nothing left to appeal to.
+
+So the authority is put somewhere else: in a second system, on the same machine, that holds the
+owner's signing key and has **no offensive capability of any kind**. That second system is called
+SIGIL, and it is what this chapter is about.
+
+Once such a system exists, a second use for it becomes obvious. The person running an engagement
+needs to remember what was done and decided — not in their head, and not in a chat window that
+forgets between sessions, but in something durable they can search and cite months later. They
+also need a safe, governed way to let an assistant touch their own files, their own terminal, and
+their own accounts. Building that inside the attacking program would be indefensible. Building it
+inside the key-holding program, which is already the trusted half, is the natural place for it.
+
+**SIGIL is therefore two things at once: the owner's personal assistant, and the offensive
+engine's governor.** Those two jobs share one property — both need the owner's key, and neither
+may ever be able to run an attack.
+
+#### 1.2 What the personal half is, in the owner's terms
+
+The project's own one-line description is *a local-first, sovereign personal AI orchestrator*.
+Translated: an assistant that runs on hardware the owner controls, keeps its memory on that
+machine, and never needs an outside service to answer a question about the owner's own history.
+
+It is driven from four places — by voice, from a local web cockpit in a browser, from inside any AI
+coding session through a memory bridge, and from a phone over a private network link. Every one of
+those routes lands in the same permission machinery; none of them is a privileged back door. The
+later sections of this chapter take each in turn. (The project's own summary line adds a fifth, a
+keyboard-shortcut palette. In the code the palette is a command-line interface, and a global
+keyboard shortcut is listed in the permission kernel's own notes as a later phase that has not been
+built — so this briefing counts four.)
+
+The project states five governing rules for it. In its own words, and translated immediately:
+
+| The rule, as written | What it means |
+|---|---|
+| "Every action carries a proof of authorization." | Nothing happens because an assistant decided it should. Something happens because a check that the assistant does not control said it may. |
+| "Memory is append-only." | The record is added to, never rewritten. A correction is a new entry, and the old one stays visible. |
+| "Local-first." | The record, the keys, the search index and the entity map all live on the owner's own machine. The record, the keys and the entity map sit in a directory only the owner's account can open; on this machine the search index is the exception, and section 2.6 says why. |
+| "Cascade, not monolith." | Cheap and local first; an expensive frontier model only when the cheap route is not good enough, and only through a gate. |
+| "Prove, don't guess." | An answer cites the exact stored entry it came from. An uncited claim is shown as commentary, not asserted as fact. |
+
+Then a sixth line, marked non-negotiable: **SIGIL has no offensive capability.** That is not a
+promise about intent. It is a statement about what code is present, and the rest of this section
+explains why the difference matters more than it might sound.
+
+#### 1.3 The governing half — what "authority" actually consists of
+
+The sovereign side is built to hold a permission latch the offensive engine must pass before it
+acts, kept on the sovereign side's own record, and that latch behaves in a deliberately lopsided
+way:
+
+- **Its resting state is "no."** With nothing on the record at all, the answer is no. There is no
+  configuration in which it starts out permissive.
+- **Only the owner can say yes,** and the yes must be bound to exactly the job being run — it
+  names that authorised engagement and carries a fingerprint of the authorisation document — and
+  it carries an expiry time. A permission granted for one job authorises nothing for another. An
+  expired permission authorises nothing at all.
+- **Anyone can say no.** Closing the latch is the safe direction, so a closing event counts
+  whoever produced it. Opening it is the dangerous direction, so an opening event counts only if
+  it verifies against the owner's stored key.
+- **A yes cannot be reused.** Each permission carries an issue time, and the check refuses any
+  permission whose issue time does not exceed the highest already seen — so a genuine permission,
+  captured and replayed after a shutdown, reopens nothing.
+- **The answer is never remembered.** Because the permission expires, a cached "open" would
+  outlive its own validity — nothing is appended to the record at the moment of expiry to
+  invalidate it. So the check is re-derived from the record every single time it is asked.
+
+**One limit belongs with that description, and it is the same limit chapter 7 states about the
+host-advertisement record.** The latch is real code, with real tests and a build job of its own that
+must pass before any change is accepted — but **it has no caller in the shipped commands or
+interfaces.** Nothing on the offensive side reads it today, and no shipped command opens or closes
+it. What the offensive engine does pass before every action is the separate authorisation chain
+chapters 3 and 8 describe, and that chain runs on the offensive side: the signed engagement
+authority, the danger-tier classifier, an emergency stop of its own, and — for anything irreversible
+— the several-must-approve gate. One of those four is genuinely sovereign in origin even though it
+runs there: the danger-tier classifier is a single shared component, faithful to the sovereign
+permission kernel, precisely so the two halves cannot drift into disagreeing about what counts as
+dangerous. So the sovereign latch is the designed governing seam, built and guarded ahead of the
+production writer that will use it. It is not a control operating in daily use, and this briefing
+does not describe it as one.
+
+Alongside it sit the emergency stop, the queue of actions waiting for the owner's signature, and
+the desk that receives confirmed findings from the offensive side and files them into the personal
+record — and those three are wired and in use. Chapters 7 and 8 cover the signing and the
+authorisation machinery in full; what matters here is the shape the design is built to. **The
+powerful half asks. The half with the key answers. The half with the key cannot attack anything.**
+The third of those is enforced today by the code that is present. The first two are enforced today
+for approvals and for the findings desk, and are built-but-unwired for the latch above.
+
+#### 1.4 The wall, seen from the operator's chair
+
+Chapter 2 sets out the six mechanisms that keep the two halves apart. This section describes the
+same wall from the other side of the desk: what the operator does, what they can never
+accidentally do, and what it costs them.
+
+**What the operator installs.** Two separate program environments, built from two explicit lists.
+One list contains the shared integrity core, the personal system, and the connective layer. The
+other contains the shared core, the offensive engine, the vendored third-party agent, the exit
+gateway, and the same connective layer. The offensive packages are simply **not present** in the
+first list.
+
+**What the operator types.** One command word, then a subsystem name. A small routing module —
+written so that it imports neither half — looks the name up in a fixed table and starts the
+correct program as a **separate operating-system process**. There is no flag that changes which
+environment a verb runs in. Routing is decided by the table, not by anything the operator or a
+compromised process can influence at the time.
+
+**What the operator can never do by accident.** They cannot start a session that has both halves
+loaded, because the routing table has no entry that would produce one. They cannot enable the
+offensive engine inside the personal environment, because **there is no setting for it** — the
+code is not installed there. They cannot pass one side's code into the other's process through the
+environment, because the variables that could do that are stripped when one side starts the other,
+and the key that authorises destructive code changes is deleted outright from an offensive child's
+environment.
+
+**Why "cannot be loaded" is stronger than "must not be loaded."** A policy needs three things to
+work: a place where it is checked, a person who configured it correctly, and no pressure to waive
+it. All three fail eventually. Absence needs none of them. The distinction is between a locked
+door and a building that has no such room. Asking the personal environment to load an offensive
+module produces the same result as asking it to load a program that was never written: it is not
+there.
+
+On top of that absence sits a guard — a check that runs when each of the personal system's
+subsystems is loaded. There are twelve such checkpoints, one at the entrance to each subsystem:
+among them the agent mesh, the governor, the voice and gesture pipelines, the device registry, the
+memory bridge, the nightly consolidation pass, the web-reading path, the perception layer and the
+cockpit. Each scans the list of modules already loaded into the running process and raises an error
+if any belongs to either forbidden family: the offensive engine, or the vendored third-party agent. The guard is not the wall. **The guard is the smoke
+alarm that proves the wall is still there** — and, because it fails closed, a process that somehow
+did contain both halves would stop rather than continue.
+
+An alarm that never sounds is indistinguishable from an alarm that does not work, so the test suite
+deliberately loads an offensive module and requires the guard to fire. Without that negative
+control the guard could be passing for the trivial reason that it does nothing.
+
+**What it costs.** Real friction, accepted deliberately.
+
+| The cost | What it means day to day |
+|---|---|
+| Two environments to build, and two to keep updated | A dependency upgrade is done twice. A half-built environment produces a clear refusal and an instruction, not a confusing failure. |
+| No shared memory between the halves | Nothing can be handed across as a live object. Anything crossing must be written as a file of inert data and read back. |
+| No single script can do both jobs | Automation that spans the two halves has to be written as two programs and a file between them. |
+| A confirmed finding takes extra steps to become part of the personal record | It is packaged, signed, carried across as data, checked against a trust root the owner blessed, and only then written under the owner's own signature. |
+
+That last row is the point of the whole arrangement, stated as a cost. **The offensive side proves
+what was found; the owner's side attests when it entered the personal record. Neither can forge
+the other's half.**
+
+---
+
+### 2. The record as memory
+
+
+#### 2.1 One object, two jobs
+
+Chapter 7 describes the record as a tamper-evident ledger — a chain in which each entry fixes a
+fingerprint of the one before it, capped by a signed statement of how many entries exist. All of
+that is true and is not repeated here.
+
+What that chapter does not say is that **the same object is the system's memory.** There is no
+separate database of "what the owner has been doing" sitting beside the ledger. The ledger *is*
+the memory. When the assistant answers a question about a decision made in March, it is reading
+entries out of the same append-only file whose integrity the chapter on signing is describing, and
+it hands back the entry number so the answer can be checked.
+
+That choice has a consequence worth stating plainly: **a memory that cannot be quietly edited is a
+memory whose answers can be audited.** If an assistant could revise its own recollection, a
+citation would prove nothing. Here a citation is a position in a chain, and altering that position
+breaks the chain at exactly that point.
+
+#### 2.2 What actually goes into it
+
+Four sources feed the record from the outside world.
+
+| Source | What is captured | How it stays current |
+|---|---|---|
+| **The owner's AI coding sessions** | Each session's transcript, read line by line rather than loaded whole, and split into separate typed entries: what was said, the assistant's reasoning, each tool request, each tool result. Bookkeeping noise is filtered out. | A per-file counter records how many entries of that transcript are already stored, so a re-run resumes rather than re-reading a growing file from the top. |
+| **Sub-assistant transcripts** | The full working record of assistants spawned inside a session — the detail of delegated work that never appears in the parent conversation. Each becomes its own titled, recallable thread, with the parent session recorded on every entry. | The same per-file counter. |
+| **Version-control commits** | Commit messages, subject and body, from an allow-listed set of code repositories, appended oldest-first so the record's numbering tracks chronology. | Live: a small hook installed in each repository runs on every commit and every merge. Each repository's last-recorded commit is remembered, so the hook appends only what is new. |
+| **Curated documents** | The owner's own hand-written programme notes, split into overlapping passages so the whole document is searchable, not just its opening. | **Not automatic and not de-duplicated.** This source is opt-in on the command line, and running it again appends the passages again. |
+
+That last cell is a correction to the project's own summary, which describes all four sources as
+incremental and repeatable without duplication. Three of them are. The curated-document pass is
+not: it has no counter, and the write path performs no duplicate detection, so a second run with
+that option produces a second copy of every passage. It is the one source that is a deliberate
+manual act rather than a background one, which limits the exposure — but the briefing should not
+repeat the tidier claim.
+
+Everything the system does to itself also lands in the same record: agent proposals, refusals,
+governance events, the morning brief, approvals and their resolutions, drafts, research reports,
+fetched web pages, terminal transactions, and the periodic cross-anchoring of the authorisation
+kernel's own log. There are twenty-three defined kinds of entry in total. **There is no side
+channel — an action that leaves no entry did not happen as far as every downstream view is
+concerned.**
+
+#### 2.3 How large it is — and what this machine actually shows
+
+The project's own documentation describes a record holding upwards of 43,000 entries. That figure
+is real, and it is also a figure about *one machine after months of use*, not a property of the
+software. The record grows with what is fed into it.
+
+Because this briefing's value rests on being checkable, here is what the status check on the
+machine this was written on reports, in full:
+
+| What the check reports | Value |
+|---|---|
+| Entries in the live record file | **16** |
+| Next entry number to be issued | 16 |
+| Passages held in the meaning-search index | **13,667** |
+| Highest entry number that index has seen | **43,350** |
+| Entry number at which the entity map was last rebuilt | **43,332** |
+| Chain integrity | Passes — "16 entries link cleanly" |
+| Signed cap on the record | **Absent** — the check says so, and names the command that would create one |
+
+Those numbers do not agree, and the honest reading is that **the record file in use today is not
+the one the two derived views were built from.** At some point the live file was replaced or
+reset; the search index and the entity map, which live outside it, kept what they had. The entity
+map's stored health note still says it was in step with a record of 43,332 entries, covering one
+project, 160 sessions, 534 commits and 16 documents.
+
+Two things are worth taking from that rather than glossing over it.
+
+**First, the system reports both numbers side by side instead of reconciling them.** The status
+tool prints the live count and the index's high-water mark as separate facts, and prints in plain
+words that no signed cap is present. A design that quietly showed one number would have hidden
+exactly the discrepancy that matters. This is the same discipline the rest of the briefing
+praises, applied to the system's own health.
+
+**Second, a lower index count is normal even in a healthy installation.** The search index is a
+*filtered* view by choice: only entry kinds worth recalling by meaning are embedded — messages,
+decisions, commitments, documents, session headers, briefs and commits. Raw tool requests and tool
+results, which the code notes make up roughly two-thirds of a coding transcript and are bulky and
+of low recall value, are deliberately left out and reached instead by asking for a range of entry
+numbers. So the index is expected to hold fewer items than the record. The 16-versus-43,350 gap on
+this machine is a different matter and is not that.
+
+#### 2.4 Nothing is edited — only superseded
+
+Every entry can carry a pointer to an earlier entry that it replaces. Both remain in the file, in
+their original positions, and the newer one wins when a view is derived. There is no update
+operation and no delete operation on the write path.
+
+This is not a theoretical property; it is how ordinary corrections are handled:
+
+- When the infrastructure checker finds that a previously reported certificate or dependency
+  problem has been fixed, it writes a **resolution that supersedes the stale finding**, so the
+  morning brief shows the current state and a fixed problem does not linger as though it were
+  live.
+- When a queued action is approved or denied, the resolution supersedes the queued entry.
+- When a paired device is withdrawn, the withdrawal supersedes its authorisation.
+- When a file change is rolled back, the rollback entry supersedes the entry that carried out the
+  change.
+
+In every case the earlier entry is still there to read. **What changes is which entry is
+current — never what the older entry says.**
+
+**On deletion, the honest position.** The project has built the machinery for a cold-archive
+prune: copying a sealed prefix of the record into an archive, folding everything that prefix
+carried into one signed summary entry, and verifying that the archive can be re-attached. Every
+part of that is present and tested — and it is **deliberately not wired up**. The code says so
+itself: nothing in the archive machinery deletes a live entry or commits a new head, and the
+loader that would read a folded summary returns the empty value universally, so every consumer
+still scans from the very beginning of the record. **As shipped, no entry is ever removed.** The
+remaining step, the crash-safe switchover that would actually delete, is held back behind explicit
+owner sign-off.
+
+There is one blunt exception that belongs in the same paragraph for honesty's sake: the owner can
+run a reset that clears the record file, the ingestion counters and the search index outright. It
+is an explicit, named command, not something an assistant can reach, and it deliberately does
+**not** lower the durable anti-rollback mark that sits outside the record directory — so a reset
+followed by a re-sign will report a rollback rather than passing quietly, until the owner
+deliberately re-seeds that mark.
+
+#### 2.5 Everything else is a view, thrown away and rebuilt
+
+The record is the only source of truth. The two things built on top of it — an entity map of
+projects, sessions, documents and commits, and a search index that finds passages by meaning —
+are **projections**: derived views that can be deleted and reconstructed from the record they were
+built from, and that no one is allowed to edit directly.
+
+The entity map is rebuilt by replaying the record from the beginning, in entry order, into a fresh
+empty database, and then putting the finished copy in place of the old one, so no reader ever sees
+a half-built view. Section 3.3 sets out exactly what that swap does and does not guarantee. Two
+properties make the map trustworthy:
+
+- **The derivation is extraction-free.** No language model is involved in building it. The map is
+  assembled by structural rules over what the entries already say, which is why the same record
+  always produces the same map. A test in the suite replays one record twice and requires the two
+  derived results to be identical. (What that test pins is the derivation step; nothing in the
+  project claims two database files are byte-for-byte identical.)
+- **Every node cites its origin.** Each entity carries the entry number and entry fingerprint that
+  produced it, so an answer taken from the map can be traced back to a line of the record and read
+  in its original context.
+
+The map also carries its own honesty check: it stores the highest entry number it replayed
+alongside the record's current head, and reports whether the two match. That is the field which,
+on the machine described above, shows the view to be stale — and it shows it because the check
+exists.
+
+The search index follows the same rule from the other direction: one point per eligible entry,
+keyed by that entry's number and carrying its fingerprint, so **every retrieval is citable**. It
+is built incrementally, only over entries above the last one indexed. And it refuses one specific
+lie: if the index's backend is unreachable, the code raises an error rather than reporting "I have
+indexed nothing" — because reporting an outage as emptiness would silently trigger a complete
+re-embedding of the whole corpus. Sections 3 and 4 of this chapter take the map and the index in
+detail.
+
+#### 2.6 What the record looks like on disk
+
+The whole of the personal system's state lives in one directory readable only by the owner's own
+account: the record, the keys, the entity map, the working caches.
+
+**The search index is the exception on this machine, and an assessor should know it.** The owner has
+moved it into a small search server of its own, reached over a loopback port that carries no password
+or key of any kind, and its files are written by that server rather than by the owner's account. Every
+indexed passage keeps a copy of the entry's text, so any account on this machine — not only the
+owner's — can read the indexed text straight off that port, whatever the directory's permissions say.
+That is a property of how this deployment was configured, not of the design; the shipped default keeps
+the index in a file inside the same private directory, with no server and no port at all.
+
+The content of an entry can additionally be encrypted at rest, field by field — the human text is
+sealed while the bookkeeping fields stay readable, so the safety checks that scan the record for
+things like the emergency-stop state keep working without any key at all, and the integrity chain
+still verifies without one because the fingerprint covers the stored form. **This is opt-in and it
+is off unless a key vault has been provisioned**; with no vault, entries are stored as plain text
+exactly as before. On the machine described above no vault is provisioned, and the entries are
+plain text.
+
+### 3. The knowledge graph, and the nightly pass that keeps it true
+
+
+#### 3.1 What a graph is for, before any mechanism
+
+The owner's record is a single line of entries in the order they happened — the right shape for
+proving nothing has been altered, and the wrong shape for answering a question. "What have I done on
+this project?" cannot be answered by reading forty thousand entries from the beginning.
+
+So the sovereign side keeps a second thing beside the record: **a small map of the named things the
+record talks about, and how they connect.** It holds four kinds of thing and one kind of connection.
+
+| The thing | What it is in plain words |
+|---|---|
+| **A project** | A body of work — in practice one code repository and everything done in it. |
+| **A working session** | One sitting at the machine with an assistant, first message to last, with a title. |
+| **A document** | A curated note or reference the owner deliberately put into memory. |
+| **A commit** | One saved change to the code, with author, date and one-line subject. |
+
+The only connection recorded is **belongs to this project** — nothing cleverer, and section 3.5
+explains why that absence is deliberate. On the machine this briefing was written on, the map holds
+**one project, 160 working sessions, 534 commits and 16 documents, joined by 710 connections, over
+10,061 counted messages** — what it returned when queried during the writing of this section.
+
+#### 3.2 The map is a mirror, and never a source
+
+**The map is not a place where facts are stored. It is a picture regenerated from the record.** It is
+built by replaying the record from the first entry to the most recent, counting what it sees, and
+writing the result into a fresh, empty database. Nothing is written into it that was not read out of
+the record a moment earlier. Three consequences follow, and all three matter to an assessor.
+
+**It can be thrown away without loss — as long as the record it was replayed from is still there.**
+Delete the map and nothing is gone; rebuild it from that record and it comes back. Anything that can
+be destroyed and regenerated at will cannot be where the truth lives. **That condition does not hold
+on this machine**, and it is the one caveat an assessor must carry out of this section: the map here
+was replayed from a record of 43,332 entries, and the record now sitting at the standard location is
+a different, sixteen-entry file. Deleting the map on this machine would not be undone by a rebuild.
+Section 2.3 sets out how that drift arose and how the system reports it.
+
+**It contains no judgement.** No model reads anything during a rebuild. There is no extraction, no
+inference, no summarising: the rebuild counts and links, it does not interpret. That is why two
+rebuilds over the same record produce the same map. The project's test pins the step that guarantees
+it — one record replayed twice, with the derived entities required to come out identical — rather
+than comparing two finished database files.
+
+**It can therefore be checked by a stranger.** An assessor who does not trust the map can rebuild it
+from the record it was replayed from and compare; a discrepancy there would be a fault in the
+software, not a difference of opinion. On this machine that comparison is not available, for the
+reason just given — the record at the standard location is no longer the one the map came from.
+
+#### 3.3 The swap, and what happens if the power fails halfway through
+
+A rebuild does not touch the map in use. It builds an entirely new one alongside, under a staging
+name, and only when that is complete does it put the new one in place with a single rename.
+
+The code's own comment calls this an "atomic-ish swap", and the honest description is weaker than
+*atomic* implies: the old copy is removed immediately before the rename, so there is a brief moment
+when no map is in place. **What a reader gets in that moment is not a partial answer but a refusal**
+— the reading path checks the map exists and, when it does not, replies that the graph has not been
+built yet and names the command that rebuilds it.
+
+Two failures are worth naming. If the owner's sealing key is locked, entries cannot be read and the
+rebuild fails — **before the old map is torn down**, not after. And if power is lost between the
+removal and the rename, the map is simply absent until the next rebuild: nothing is lost that the
+record the rebuild was reading cannot produce again — which, on this machine, is the qualification
+section 3.2 just made.
+
+#### 3.4 Every answer points back at the record
+
+Each session, document and commit in the map carries two extra fields: **the number of the record
+entry that first produced it, and that entry's fingerprint.** They are why a map answer is worth
+anything — the reader can take the number, go back to the record, read the original entry and confirm
+the fingerprint matches. Asking the map about a project returns its sessions, commits and documents
+each carrying a record number, so every line of the answer can be checked against a tamper-evident
+source.
+
+**One honest exception.** The project itself carries no record number. It holds a name and four
+tallies — how many sessions, commits, documents and messages belong to it — and could not sensibly
+carry an anchor, because it is not minted by any single entry; it is a count over the others. The
+exact claim is therefore that **every session, document and commit cites the record entry that minted
+it, and the project is a tally over those, resolvable through its members rather than in its own
+right.** The system's internal note that each structural node stores an anchor is a shade broader
+than the code delivers, and this document follows the code.
+
+The map can also be questioned directly, in a query language, by the owner and by any assistant the
+owner has connected to their memory — and that reading path has two independent guards. A word filter
+refuses any question containing a word that creates, changes or deletes, erring heavily toward
+refusing. Behind it, **the map is opened read-only**, so a question that slipped past the filter would
+still be refused by the database itself. The first guard is convenience; the second is the guarantee.
+
+#### 3.5 What the map deliberately does not have — and why that is the evidence
+
+A reader who has seen other "knowledge graph" products will notice what is missing. There is no
+*person*. No *organisation*. No *decision*. No *commitment*. No *contradicts* link, no *depends on*
+link, no *was decided in* link. The whole semantic layer such products lead with is absent — on
+purpose, and the code says so in the same breath as it lists the missing kinds: they are
+**intentionally absent until a grounded producer exists for them.**
+
+Translated: a thing may appear in this map only if it can be derived from the record mechanically,
+without a model's judgement. A commit is in the record; counting it is arithmetic. A *person* is not
+— deciding that two mentions of a name refer to one human being is interpretation, and interpretation
+is what this map exists to be free of. Until a producer exists that can mint such a thing under the
+same prove-don't-guess discipline as everything else, the kind does not exist at all.
+
+**For this audience, that absence is the strongest evidence in the section.** A system that ships a
+weaker version of the impressive feature, marked approximate, is asking to be trusted. One that
+declines to ship it, and writes down why, has told the assessor something about every other claim in
+the document. The constraint is the product.
+
+One consequence must be stated so it is not mistaken later: **the facts the nightly pass promotes —
+decisions, commitments, contradictions — live on the record and are served from the record, not as
+entries in the map.**
+
+#### 3.6 The nightly pass, in six moves
+
+The agent that owns memory runs one pass over everything added since it last ran. It has six moves
+and does nothing else. Five of them produce its findings; the sixth closes the book on them.
+
+| Move | What happens |
+|---|---|
+| **Extract** | A reader — a model, or an offline keyword matcher — goes over a window of the owner's own conversational entries and proposes candidate durable facts: decisions taken, commitments made, things named, positions reversed. |
+| **Gate** | Every candidate is checked by re-reading the record. This is the whole of section 3.7, and the only thing in the pass that decides anything. |
+| **Promote or demote** | A candidate that passes becomes a new, permanently recorded fact. One that fails is **also written down** — as an honest refusal, with the reason. |
+| **Flag** | Where the record shows the owner reversing an earlier position, that opposition is recorded as a flagged contradiction naming both sides. |
+| **Brief** | A short readable summary: open loops, commitments with due dates, contradictions awaiting review — composed only from facts that passed the gate, each cited. |
+| **Seal** | The pass re-signs the record's head with the owner's key and advances the durable anti-rollback mark that sits outside the record directory. This is the move an agency should notice: it is what makes everything the pass just wrote tamper-evident from that moment on, and it is on by default — the shipped nightly service runs the pass without turning it off. Neither the signature nor the mark exists on this machine today, which is the same drift section 2.3 reports: the record they would have covered was replaced after the last pass ran. |
+
+Two structural details matter. The pass fixes the record's high-water mark before it starts, so **it
+can never feed its own output back into itself** as fresh evidence; and it works in bounded batches,
+so the window the checker verifies against is **exactly the window the reader was shown** — a
+citation to anything outside it is, by definition, invented.
+
+#### 3.7 The centrepiece: the gate grounds the quote, not the sentence
+
+Here is the design almost everyone builds first, and why it fails. A model reads the owner's records
+and writes a one-line summary of what it found; to make sure the summary is not invented, the system
+checks that the words of the summary all appear in the record it cites. That sounds airtight. It is
+not, and the project proved it is not with a red-team re-check on its own code.
+
+Take a real entry: *"we have decided we should NOT deploy to prod on friday."* Now the model's
+summary: *"deploy to prod on friday."* Every word of it appears in the record, so it passes the
+containment check cleanly. **It also means precisely the opposite of what the owner said.** All the
+extractor had to do was drop one word; reordering does the same job. The code states the finding in
+one sentence: a token-subset check over the model's statement **is not entailment**.
+
+The fix is not a better checker. The fix is to stop serving the model's sentence at all.
+
+**What the gate certifies, and what the system then hands to the owner, is the verbatim span of the
+owner's own record** — the actual words, negation and word order intact. The model's summary
+survives, but only in an advisory slot beside the fact, never presented as the finding. The code's
+own sentence is the clearest statement of the guarantee in the sovereign half:
+
+> "By certifying and serving the verbatim quote instead, a fabricated or inverted statement can never
+> be presented as a grounded fact — **the owner only ever sees their own words.**"
+
+In plain English: **on this path the assistant is structurally incapable of telling the owner
+something the owner did not say.** It can fail to find things; it can offer a useless quotation. What
+it cannot do is compose a sentence and have that sentence served as the owner's own history. The
+project's test suite carries this exact attack: the inverted summary above is fed in, and the test
+asserts that what comes back still contains the word "not" and that the model's sentence appears only
+as an advisory summary.
+
+**What it takes to ground.** A candidate is admitted only if all three of these hold.
+
+| Condition | In plain words |
+|---|---|
+| **It cites, and cites inside the window** | It must name the record entries it rests on, and every one must be inside the exact batch the reader was shown. Citing an entry it was never given is a fabricated citation, full stop. |
+| **The quotation is really there** | The cited entry is **re-fetched from the record** — never the reader's copy of it — and the quotation must appear word for word. What is served is the record's own text, not the reader's transcription. |
+| **The quotation is specific enough to mean something** | It must carry at least two substantial words, not common filler. A trivial fragment that appears everywhere grounds nothing. |
+
+A flagged contradiction is held to a higher bar than anything else: it must verify **two distinct
+record entries**, with a real quotation from each side, because a claim that the owner contradicted
+themselves is a claim about two moments and needs evidence from both.
+
+**The gate can only ever demote.** No input to it can turn a failing candidate into a passing one. The
+model's own confidence score is carried along and written down beside the fact, and takes no part
+whatever in the decision — a candidate offered with total confidence and no verifiable quotation is
+refused exactly as firmly as a diffident one. Where a fact does carry a strength number, that number
+is a **corroboration count — one, plus the number of distinct record entries that independently
+re-verified it**. It comes from the record, not from the model's self-assessment.
+
+**A demotion is recorded, not discarded.** A failed candidate is written to the record as a refusal
+carrying the reason — cited outside the window; quotation not found; quotation too trivial — so the
+owner can see what was proposed and rejected, and how much.
+
+**And demote-only does not mean demote-permanently.** The pass keeps two separate ledgers, things
+already promoted and things already refused, so that a fact refused on one run can still be promoted
+on a later run if better evidence turns up.
+
+#### 3.8 What the pass will not do
+
+**It flags contradictions; it never settles them.** A contradiction record names the conflicting
+entries and the quotations from each side, and stops. Which position stands is the owner's decision.
+
+**It does not guess at contradictions structurally.** The obvious cheap trick — two decisions about
+the same subject means a contradiction — is rejected in the code as unsound, because it cannot
+distinguish reversing a decision from restating it. Only opposition the reader actually judged, and
+the gate then verified on both sides, is flagged.
+
+**It never removes anything from the record.** Deleting a source entry sits at the highest
+consequence level and the agent's own account of how often that happens is "effectively never".
+Everything the pass writes is an addition; a revised fact supersedes an earlier one by pointing at it,
+and both remain. Its ceiling is the reversible-internal-act level. Everything it *finds* becomes an
+entry — facts, refusals, contradiction flags, a brief. The only two things it writes anywhere else
+are the sixth move above: the signature over the record's head, and the anti-rollback mark. Both are
+seals over what is already there; neither is a claim about the owner.
+
+#### 3.9 What is running here, and what is not
+
+**The scheduled nightly run is shipped, not installed here.** The system ships a service definition
+and a timer that runs the pass at 03:17 local time, catches up on the next wake if the machine was
+off, and staggers the start by up to fifteen minutes so a fleet does not stampede. On the machine
+this briefing was written on, **that timer is not installed** — the check for it returns "not found"
+— and the pass has been run by hand, its position marker recording entry 43,332 as the last one
+consolidated. The nightly cadence is a documented option the owner enables, not a running fact of
+this installation.
+
+**The default reader is deliberately weak.** The owner chooses who does the extracting: a headless
+run of a coding assistant on their existing subscription, a metered interface, a wholly local model,
+an offline keyword matcher, or a recorded fixture used in tests. **The default is the offline keyword
+matcher**, because it costs nothing and sends nothing anywhere; the code calls it a conservative weak
+fallback and names the assistant-driven reader as the real one. That is the right default for a
+system whose gate treats the reader as untrusted anyway — but out of the box the pass finds cue
+phrases, not nuance.
+
+**On this machine the pass has produced no live facts.** Asked for the owner's open loops during the
+writing of this section, the system returned an empty list and said so — which, given that the record
+at the standard location currently holds sixteen entries beginning on 29 July 2026, is the correct
+answer rather than a fault.
+
+**The same gate is reused elsewhere.** Every claim a fetched web page produces runs through this
+identical check, so nothing a page asserts becomes a fact either. One admission desk, not one per
+feature.
+
+---
+
+### 4. Recall by meaning
+
+
+#### 4.1 The two ways to find something
+
+Searching by word finds what was written. Searching by **meaning** finds what was meant — so that a
+question about "the decision on where to keep the vectors" finds the conversation that said "let's go
+with the embedded store", which shares almost no words with it.
+
+The mechanism in one sentence: a small language model turns each record entry into a list of 384
+numbers standing for its meaning, the question is turned into a list the same way, and entries whose
+lists point in nearly the same direction as the question's are the answer. Nothing is being reasoned
+about — it is a geometric comparison.
+
+#### 4.2 It runs on the owner's own processor, and costs nothing per question
+
+**The model that does the converting runs on this machine's ordinary processor.** No graphics card is
+required, and no request is made to any outside service, on indexing or on asking. There is no
+per-question charge, no rate limit, no account, and no third party who learns what the owner asked
+their own memory. The code says it in six words: *no API, no GPU, no cost.*
+
+**One honest qualification.** The model file is not conjured from nothing: about 65 megabytes is
+downloaded from a public model repository the first time it is needed, and kept in whatever cache
+directory the embedding library has been pointed at. **By default that directory sits under the
+machine's temporary path, which on this machine is held in memory and emptied at every restart** — so
+the fetch repeated on 13 August even though the index itself had been built on 17 July. The accurate
+claim is therefore **one fetch of a fixed file per restart, and nothing crossing the boundary in
+between**, not "never touches the network at all" and not "fetched once, forever". For a sealed
+deployment there are two steps, not one: bring that file in on media, *and* point the cache at a
+directory that survives a reboot. Do only the first and the machine will reach for the network again
+on its next start.
+
+**Where the numbers are kept is also on the machine.** The shipped default is a file-backed store
+running inside the program itself — no server, no container, no port. On the machine used here the
+owner has instead configured a small search server on the loopback address, the same machine talking
+to itself. Both are local; neither sends anything out. They differ in who on the machine can read
+them, though, and section 2.6 sets that out: the server's port asks for no password, so the indexed
+text is readable by any account on this host, which the shipped file-backed store is not.
+
+#### 4.3 Not everything is indexed for meaning
+
+Only the entry kinds worth recalling by meaning are converted: messages, promoted decisions and
+commitments, documents, session titles, briefs and commits. The raw traffic of an assistant using its
+tools — the majority of any working transcript by volume, and almost worthless as recall — is
+deliberately **not** indexed. It is not lost; it stays on the record, read directly by asking for a
+range of entries around a known point. On this machine the meaning index holds **13,667 entries**,
+roughly a third of the record it was built from, which is what that policy predicts.
+
+#### 4.4 An absent topic returns "no grounded match", not an invention
+
+This is the honesty property of the section, and it is enforced in code rather than asked for in a
+prompt. Every result carries a similarity score, and the system holds two thresholds set against the
+measured behaviour of this particular model: results below the lower one are discarded as noise, and
+**if the best surviving result is below the higher one, the system reports that memory has nothing.**
+
+What it returns in that case is not a bare empty list for an assistant to fill in from imagination.
+It is an empty list **plus an instruction**: no strongly-grounded match; do not fabricate; tell the
+owner memory has nothing solid on this, and suggest rephrasing. The refusal is the payload.
+
+Both directions were exercised live while this section was being written:
+
+| The question asked | What came back |
+|---|---|
+| How the consolidation gate grounds a quotation | Eight real record entries, with entry numbers, fingerprints, dates, sessions and similarity scores running from 0.79 down to 0.71 |
+| The migratory patterns of the Arctic tern | No results, and the instruction not to fabricate |
+
+The second row is the one that matters. **The characteristic failure of an assistant with a memory is
+answering confidently about something it has no record of.** Here that outcome is not discouraged but
+unavailable: the search layer hands back a refusal instead of thin material.
+
+#### 4.5 Every hit is citable
+
+A result is not a paragraph of text. It is a record entry, arriving with its entry number, its
+fingerprint, when it happened, which session and project it belongs to, its similarity score and its
+text — so an assistant answering from it can cite it and the person reading the answer can check it.
+The tool says exactly that in the description the assistant reads: each result is a tamper-evident
+record entry, cite its number when you answer.
+
+#### 4.6 The limits, stated plainly
+
+**Similarity is not support.** A high score means a passage is *about* the same thing as the
+question; it does not mean the passage *supports* any claim about it. All the grounding work is done
+by the gate in section 3. Recall by meaning is how material is found, never why it is believed.
+
+**The thresholds are calibrated, not proven.** The code records that with this model in-corpus
+questions score around 0.72 to 0.78 and absent topics around 0.55 to 0.62, and the cut sits between
+them. That is a well-grounded engineering judgement about one specific model, not a mathematical
+guarantee; swapping the model would mean re-measuring both numbers.
+
+**The index is a view, and on this machine it is a view of an earlier record.** Like the map in
+section 3, it can be rebuilt from the record — and the state of this machine makes the point
+concrete: **the record file at the standard location currently holds sixteen entries and begins on 29
+July 2026, while the map was built on 17 July from a record that ran to entry 43,332 and the meaning
+index holds entries up to number 43,350.** The views and the record are out of step, and a recall hit
+here returns entry numbers that cannot presently be resolved against the record at that path.
+
+That is the architecture behaving as designed, not a defect being confessed, because **both views
+publish their own staleness**: the map compares the highest entry it replayed against the record's
+current head, and the memory-health tool reports the record's size and the index's high-water mark
+side by side — which is how the discrepancy above was found. A system whose derived views can
+silently disagree with the source can be quietly wrong; this one is built so that the disagreement is
+a number on the screen.
+
+### 5. The agents — and exactly how many of them there are
+
+
+The sovereign side does its work through a small set of named assistants. Each writes its own name
+onto every record it produces, and each carries a permanent **ceiling** — the highest level of
+consequence it may ever reach, whatever it is asked to do and whoever asks. Chapter 11 already sets
+that roster out properly: what each assistant is for, what it may never do, and the full rules for
+the two most consequential of them.
+
+**This section does not repeat chapter 11.** It gives a reader arriving here a place to look, and
+settles two questions of fact chapter 11 leaves open: how many of these assistants there actually
+are, and whether one of them exists at all.
+
+#### The roster, at a glance
+
+A reminder, not a treatment. The third column is the one thing it adds to chapter 11's version:
+whether an assistant runs in the routine sweep or only when a person asks for it.
+
+| Assistant | Ceiling | Runs | In one line |
+|---|---|---|---|
+| **ARCHIVIST** | A1 | On request | Consolidates the record: promotes what is grounded in the owner's own words, demotes what is not. |
+| **SENTINEL** | A1 | Routine sweep | Watches; reports only what clears an importance threshold and a per-run alert budget. |
+| **STEWARD** | A2 | Routine sweep | Composes the unprompted morning briefing, every line cited to a record number. |
+| **ENVOY** | A2, never promotable | Routine sweep | Sorts inbound messages and **drafts** outbound ones. There is no send function in it. |
+| **SCHOLAR** | A1 | On request | Sourced research. A claim whose quotation is not verbatim in its cited source is demoted, not asserted. |
+| **ARTIFICER** | A2 | On request | Drives a coding assistant in a separate copy of the repository. Runs the tests before claiming success; never pushes. |
+| **BASTION** | A1 | Routine sweep, if an inventory exists | Checks the owner's own listed infrastructure. Observes; never fixes. |
+| **OPERATOR** | A2 | On request | Files and terminal on the owner's own machine, one approved transaction at a time. |
+| **DELEGATE** | A2, never promotable | On request | Acts under the owner's name — accounts, logins, forms — with a fresh approval per action. |
+| **PERCEPTION** | A1 | On request | Answers screen and camera questions. Captured text is authoritative; the model's reading stays advisory. |
+
+Two of the ten sit on a frozen list barring them from ever being granted more autonomy: ENVOY and
+DELEGATE. The comment beside that list is blunt — outbound actions and account actions "stay
+human-gated forever."
+
+#### Where the full treatment is
+
+**Chapter 11, section 4** carries the real roster: a job-and-limits table, then full sub-sections on
+SENTINEL's discipline of not crying wolf, ARTIFICER's rule about running the tests, BASTION's limits
+as a defensive scanner, and the chapter's two longest treatments — OPERATOR's six-step transaction
+and DELEGATE's per-action approvals. Read that section first.
+
+#### The count: ten named identities, of which chapter 11 covers nine
+
+Chapter 11 says nine, and for what it describes, nine is right — but the number needs stating
+precisely, because a reader who counts differently will think the document is sloppy.
+
+Nine assistant types live in the folder the system calls its agent mesh: ARCHIVIST, SENTINEL,
+STEWARD, ENVOY, SCHOLAR, ARTIFICER, BASTION, OPERATOR and DELEGATE. Those are the nine chapter 11
+describes.
+
+There is a **tenth** named identity. The perception assistant is built on exactly the same
+foundation as the other nine — the same base class, the same routing through the governor, the same
+outcome written to the same record — and it declares its own name, **PERCEPTION**, and its own
+ceiling, A1. It simply lives in a different folder, alongside the screen-capture and camera code it
+serves. Nothing about it is second-class: a record it writes carries its name the way a record from
+SENTINEL carries SENTINEL's.
+
+The honest formulation, and the one this chapter uses, is: **nine assistants in the mesh, plus a
+perception assistant — ten named identities that can write to the owner's record.** Chapter 11
+originally named only the nine; it now carries the same note, so the two chapters agree, and the
+perception section of this chapter gives the full treatment.
+
+#### The one that does not exist: there is no separate web-research assistant
+
+A reader looking at the system's own architecture diagram, or at the folder of web-crawling code,
+may reasonably conclude there is an eleventh assistant devoted to research on the open web — the
+project's diagram even gives it a name of its own.
+
+**There is not.** The web-research component is built as a *specialisation of SCHOLAR*. It adds one
+capability — crawl a scoped set of public pages, store each fetched page as its own cited record,
+then push every resulting claim through the identical demote-only admission check the nightly
+consolidation uses — and inherits everything else. Critically, it **declares no name of its own**,
+so every record it writes is signed as SCHOLAR's. It runs at SCHOLAR's A1, and it has no entry on
+the frozen no-promotion list because it is not a separate thing to promote.
+
+The practical consequence for an auditor: searching the record, the promotion policy, or the list of
+never-promotable assistants for a distinct web-research name returns nothing at all. **Describe it
+as SCHOLAR's web-research mode.** Describing it as its own assistant would put a component in this
+briefing that does not exist in the software — the one kind of error this document cannot afford.
+
+---
+
+### 6. Seeing the screen, and why the reading is not trusted
+
+
+The sovereign side can look at the owner's own screen, or at a frame from the owner's own camera, and
+answer a question about it. That sounds like the most ordinary feature in the chapter, and it carries
+the most careful rules about truth in the whole system — because looking at a picture is the one place
+where a machine is most likely to describe something that is not there.
+
+Two quite different things happen when a frame is captured. First, software reads the letters out of
+the picture — **optical character recognition**, usually shortened to OCR, the technology behind
+scanning a document and getting editable text back. Second, an AI **vision model** — a model that takes
+an image and describes it in ordinary prose — is asked what it sees. The system treats those two
+outputs as different *kinds* of thing, permanently, and never lets one become the other.
+
+#### 6.1 The rule, written into the code three times
+
+**The captured text is authoritative. The model's reading is advisory.** That single sentence is
+written into three separate parts of the perception code — the subsystem's own front page, the agent
+that answers the question, and the small module that decides what may be called grounded. It is stated
+in the code as:
+
+> "the CAPTURED TEXT … is the AUTHORITATIVE ground truth; the VLM's visual reading is ADVISORY only,
+> never asserted as the screen's content."
+
+In plain terms: the words the OCR actually read off the picture are what the answer is made of. The
+vision model's prose is shown, but it is shown under a heading that says it is a guess about the image
+and has not been checked against anything.
+
+This is the same discipline the research agent uses on documents — serve the quote, never the
+paraphrase — applied to a picture, and it is what that discipline looks like when the source is a
+screen rather than a web page.
+
+#### 6.2 A lead, and what it takes to become a grounded claim
+
+When the vision model says *"a Firefox window, a laptop, a coffee mug"*, each of those objects is a
+**lead** — a thing worth looking into, asserted by nobody. A lead is promoted to a **grounded claim**
+only if the same distinctive word appears, letter for letter, in the text the OCR read off the frame.
+Words too short or too common to mean anything — under three characters, or ordinary connecting words —
+do not count for this purpose, which is the same rule the memory system uses when it decides whether a
+quote is specific enough to be worth anything.
+
+And here is the part that matters most, and that most systems get wrong. A promoted claim is **phrased
+as corroboration, never as a fact about the world**. The code's own example is the wording it produces:
+
+> "corroborated by on-screen text 'Firefox'"
+
+— never *"there is physically a Firefox."* The distinction is not pedantry. All the system has actually
+established is that the word appeared on the screen: not that a browser is running, not that the window
+is real rather than a picture of a window. The claim is kept exactly as strong as the evidence behind
+it, and no stronger.
+
+The answer the owner gets back is a short document with three clearly separated parts:
+
+| Part of the answer | What it contains | What it is worth |
+|---|---|---|
+| **On-screen text** | The lines the OCR read, reproduced verbatim | Authoritative. This is the ground truth the answer is made of. |
+| **Corroborated objects** | Each object the model named that the captured text independently confirms, each carrying the actual on-screen words that confirm it | Grounded, and phrased as corroboration — never as a statement about the physical world. |
+| **The model's visual reading** | The vision model's prose, whole and unedited | **Advisory.** Labelled in the answer itself as a guess about the image, not verified against captured text. |
+
+They are never merged. There is no fourth section in which a helpful summary blends them together.
+
+#### 6.3 With no captured text, nothing is grounded — by construction
+
+If the OCR read nothing — a photograph with no writing in it, a machine with no OCR software installed,
+a failed read — then there is nothing to corroborate against, and **every object the model named stays
+a lead**. Not some of them; all of them. An image-only frame can never produce a grounded claim, in any
+circumstance, because the half of the design that does the grounding produced nothing.
+
+The answer says so on its face. Instead of the authoritative section it prints a line stating that no
+text was captured, that the frame was image-only, and that there is therefore nothing grounded to
+serve. The one-line label written onto the permanent record is equally blunt: an image with an
+unverified reading and no OCR.
+
+This is worth pausing on, because it is the shape of the whole system in miniature. When the trusted
+input is missing, the output does not quietly fall back to the untrusted one. **It falls back to saying
+less.**
+
+#### 6.4 Text on a screen can be hostile
+
+A screen is not a neutral surface. It shows web pages, emails and documents written by other people,
+some of whom would be delighted if what they wrote could be mistaken for the system's own conclusions.
+This is the attack usually called prompt injection: put words on a surface an AI reads, and get them
+treated as instructions or as findings.
+
+The perception answer defends against it with a small, very effective piece of formatting discipline.
+No line that anyone outside the machine could have influenced is allowed to start at the left-hand
+margin. Only the program's own lines go there — the title, the section headings, and the line
+recording which frame this was and how much text came off it. **Every captured line and every line of
+the model's reading is written with a short indent guard in front of it**, so a line of screen text
+can never begin at the margin. A page that contains the exact heading "On-screen text (authoritative — captured verbatim from
+the frame)" therefore appears in the answer indented and quoted, as content, and does not become a
+section boundary. The boundary is unforgeable not because the system checks for forgery attempts, but
+because the forged version is structurally incapable of occupying the position that matters.
+
+The vision model's own prose is indented the same way, and the code is explicit about why: the reading
+is *the most attacker-influenceable channel of the three* — a compromised local model, or an honest
+model faithfully transcribing hostile words it saw on the screen, both arrive by that route. Two tests
+in the suite construct exactly that attack — a hostile reading containing both heading lines verbatim —
+and confirm that the finished answer contains precisely one real authoritative heading and that the
+hostile copies appear indented, as quoted content.
+
+One further detail about what gets stored. The permanent record of a perception carries the captured
+text, the model's reading, the corroborated objects and the leads as **sealed fields** — encrypted at
+rest, so an auditor reading the log without the key sees that a perception happened and how much text
+was involved, but not what was on the owner's screen. The short label that stays readable is
+deliberately a description of the event, never a sample of its content.
+
+#### 6.5 Ambient watching — and the fact that nothing leaves an unchanged screen
+
+There is a second mode, in which the system watches a stream of frames rather than answering one
+question. It is **opt-in**: it does not run unless it is started. Starting it and stopping it each
+write a marker to the permanent record, so a period of ambient watching is visible afterwards as a
+bounded, timestamped span with a count of how many times it escalated.
+
+The mechanism that makes it tolerable is the definition of "something changed". It is not a comparison
+of the pixels — comparing pixels means a cursor blink or a compression artefact counts as a change, and
+a watcher that fires on everything is a watcher that has to send everything somewhere. Instead the
+comparison is over **the distinctive words the OCR read**: a change is a meaningful divergence in that
+set of words, or the arrival of enough new words to matter even on a busy screen. A single new warning
+line on a screen already full of text still fires; the same screen re-rendered slightly differently
+does not.
+
+**That improvement is only available where the OCR produced words.** With no text on either frame the
+comparison falls back to comparing the raw images, which is exactly the cruder behaviour it was
+written to replace — a re-rendered screen then does count as a change. On this machine, where no OCR
+is installed, the fallback is what would run, so the ambient loop here has the older behaviour and not
+the better one.
+
+The consequence is the sentence worth remembering: **an unchanged frame produces nothing at all.** No
+reading, no record, no request. It does not leave the machine, because nothing is done with it.
+
+The ambient loop also refuses outright to run with a model that uploads. Not "asks first" — refuses,
+and writes the refusal to the record. Continuous watching and off-machine upload are never combined on
+an automatic path.
+
+**An honest limit the reader should have.** Ambient watching has no shipped way to start it: no
+command-line switch, no button in the interface. It exists as a capability other code can call, and it
+is exercised by the test suite. And "indicator" in the code's own description means a marker written to
+the permanent log at start and stop — not a lamp on the machine and not a light on a camera. A reader
+who pictured a hardware indicator should replace that picture with an audit-trail entry.
+
+#### 6.6 Recall — "where did I last see that?"
+
+The most useful thing built on top of all this is a question the owner can ask their own machine:
+*where did I last see this?* The system searches its perception history, finds the most recent event
+whose **captured text** contains the subject, and serves back the actual line — the owner's own screen
+text, verbatim — with the record number it came from, the time, and the frame's fingerprint. It reads
+history and writes nothing.
+
+It never serves the vision model's reading. A thing the model once claimed to see, which the OCR never
+confirmed, is not a sighting and cannot be recalled as one.
+
+There is one further restriction that is easy to miss and is exactly right. **All of the subject's
+distinctive words must appear on a single line.** The test that pins this behaviour uses a frame
+containing "AWS console open" on one line and "far below: secret bucket keys" on another, and asks for
+"AWS bucket". Both words are somewhere on that screen. The answer is *no sighting*, because the only
+thing recall is permitted to hand back is a verbatim line, and no line on that screen shows what was
+asked about. Serving either line would misrepresent the frame. The same request against a screen
+showing "AWS bucket browser view" returns that line, because that line genuinely contains the subject.
+
+#### 6.7 Sending a frame to an outside model: the egress gate
+
+There are two vision models in the design. One runs entirely on the owner's own machine and sends
+nothing anywhere. The other is a frontier model — better at describing images, and reached by
+**uploading the picture to another company's service**. The code refuses to treat that as a quality
+setting:
+
+> "Sending a screen/camera frame to the frontier … VLM uploads private bytes off the owned machine —
+> that is A2 data-egress, not a free 'try local then frontier' quality bump."
+
+In plain words: a screenshot of the owner's desktop may contain anything that was open at that moment.
+Sending it out is an externally visible act with consequences that cannot be taken back, and it is
+classified as one.
+
+**The classification is worked out, not declared.** The perception agent does not get to state how
+serious the upload is. The name of the action is handed to the same fail-closed classifier the rest of
+the system uses, and that classifier answers. Run directly against the classifier on this machine, the
+upload action returns the externally-visible tier with the verdict *queued* — the agent's own opinion
+never enters into it. If the classifier cannot be reached at all, the answer is the most restricted
+tier, not the least.
+
+**The approval is bound to that exact upload.** Before anything is sent, the system computes a
+fingerprint over the image's fingerprint together with the question being asked, and the owner's
+approval must match it. An approval of a *different* upload — a different screen, or the same screen
+with a different question — does not match and authorises nothing. There is no general "yes, you may
+use the frontier model" permission to be obtained once and reused.
+
+**Absent an approval, the request queues and nothing is uploaded.** The request is written to the
+permanent record as awaiting approval, and what comes back is that awaiting-approval record rather
+than a description of the frame. The part that makes the gate liveable is that **the local reading
+path is untouched**: the owner runs the ordinary on-machine question and gets the on-machine answer,
+exactly as they would have. What waiting costs them is the outside model's opinion, and nothing else,
+until they have said yes to that specific frame.
+
+Two structural refusals sit around the gate. The ordinary question-answering path and the ambient loop
+both check the model they were handed and **refuse an uploading model outright**, writing a note or a
+refusal rather than performing the upload. So the only route to an upload is the gated one; there is no
+second door to close.
+
+And one property that is stronger than a rule, because it cannot be granted away. Trust in this system
+can be extended to an agent over time, letting some of its externally-visible work go through without
+asking. That mechanism requires the action to be at or below the agent's **permanent ceiling**. The
+perception agent's ceiling is the reversible-internal-act level, and an upload sits one level above it.
+**No grant of trust can therefore ever make a frame upload automatic** — not by promoting the agent,
+not by any setting. Each upload needs its own approval, permanently. Under the emergency stop a *new*
+upload is not even queued: it is refused outright and the refusal recorded, while the local,
+on-machine perception keeps working, because observation is the one thing the halt is designed to
+leave alive. **One boundary of the stop should be stated exactly, because an agency will plan around
+it.** The halt is what stops a request from being *raised*; it is not consulted again when an upload
+the owner has already approved is carried out. So engaging the stop does not by itself cancel an
+approval already given for a particular frame — the way to withdraw that is to withdraw the approval,
+not to pull the halt.
+
+Who may sign the approval: the owner's own key, or a device key the owner has explicitly authorised —
+which is how an approval can be given from the paired phone. The device ledger and what the phone can
+and cannot do are covered later in this chapter.
+
+#### 6.8 What is actually running on this machine — and why the gap is safe
+
+Everything above is built and tested. Nineteen tests cover this subsystem specifically, and they pass:
+that an image-only frame grounds nothing; that hostile screen text and a hostile model reading cannot
+forge a section boundary; that a queued upload uploads nothing; that an upload runs only after a
+verified approval bound to that exact frame and question; that an approval of a different upload does
+not authorise it; that both automatic paths refuse an uploading model; that jitter is not a change but
+a small meaningful addition is; and that scattered words are not a sighting.
+
+What is **not** live is the hardware and software chain that feeds it. Checked directly on this
+machine:
+
+| What perception needs | State on this machine | Consequence |
+|---|---|---|
+| Something to take a screenshot | **Present** — one of the four utilities the capture code recognises is installed, and a graphical display is running | The grab step is available here. It has not been exercised: capturing the operator's own screen to prove a documentation point is not a reasonable thing to do. |
+| A camera | **Present** — a USB camera is attached, and the video tool the code uses is installed | Same: available, deliberately not exercised. |
+| **OCR software** | **ABSENT** | **This is the one that matters.** No OCR means no captured text, which means no authoritative half, which means **nothing can be grounded at all**. |
+| A local vision model | **ABSENT** | The on-machine advisory reading comes back empty rather than invented. |
+| The operating system's own description of the screen | **Not wired** | The richest source of screen text — what the accessibility layer knows about every window and button, without any character recognition at all — is a documented, deliberately unfinished seam. |
+
+So the honest status is: **built, tested, and not live on this machine** — and the missing piece is
+precisely the authoritative one.
+
+That is a worse-sounding sentence than it deserves to be, because of what the failure actually produces.
+A perception system whose reader is missing does not describe screens badly. It describes screens
+**advisorily** — every object the model names stays a lead, the answer prints "no text captured", and
+the record says plainly that this was an unverified reading with no OCR. There is no configuration in
+which a missing sensor produces a confident false statement about what was on the owner's screen. The
+grounding rule was written so that absence degrades into silence rather than into invention, and on
+this machine that is not a claim about the design — it is the observable behaviour.
+
+**What this section does not establish.** It does not establish that the OCR, once installed, reads any
+particular screen correctly; character recognition makes its own mistakes, and a mistake it makes
+becomes part of the authoritative half. It does not establish that a corroborated object is physically
+present — only that its name appeared in the text read off the frame. It does not establish that an
+approved frontier reading is accurate; that reading stays labelled advisory after the upload exactly as
+it was before. And it says nothing about any screen but the owner's own: this subsystem observes the
+owner's own screen and the owner's own camera, and has no path to any other.
+
+### 7. Speaking to it, and pointing at it
+
+
+There are two ways to reach the sovereign side that are not a keyboard: talking to it, and moving a
+hand in front of a camera. Both sound like novelties. They are neither novelties nor conveniences —
+they are **control surfaces**, and the only question that matters about a control surface is what
+authority it carries.
+
+The answer, in both cases, is **none of its own**. A spoken request is not a faster route to a
+dangerous action; it is the same route with a microphone bolted to the front. A gesture is not a
+shortcut past the approval queue; it is a pointer movement inside a session the owner had to unlock
+with a key. What follows elaborates those two sentences, and says frankly which parts are running on
+this machine and which are not.
+
+---
+
+#### Voice is not a privileged channel
+
+This is the load-bearing property, and it belongs before any description of microphones. When speech
+is recognised, the resulting text is handed to **the same program that handles a typed request** — the
+small, fast component that classifies what is being asked, decides what permission level it needs, and
+writes a signed entry into the tamper-evident record of actions. The code's own summary: "voice is
+just another interface onto the one authorized path."
+
+The consequence is precise. **Saying something out loud buys exactly what typing it would buy.** If
+the classified action is at one of the two automatic levels, it runs and a signed record is written.
+If it is at either gated level it does not run: a record is written marking it awaiting approval, and
+the spoken reply is a plain refusal — the action needs approval and was not carried out. A spoken
+sentence cannot reach a level a typed sentence could not.
+
+Three further details are worth an assessor's attention:
+
+- **The record is written either way.** A permitted action and a blocked one both produce a chained,
+  signed entry. If that entry cannot be written the program does not shrug: it prints a loud integrity
+  warning and exits with a failure code, so no wrapper can read the result as a clean success. "The
+  action happened but was not audited" is treated as an incident, not a logging inconvenience.
+- **The program that does this can be fingerprint-checked before it runs.** Once the owner has taken
+  its fingerprint, it is compared against that owner-signed fingerprint on every use, and a binary
+  that fails the check **is not executed at all**; the spoken reply says so and tells the owner how to
+  re-fingerprint it deliberately. The check is opt-in, and **on the machine this chapter was checked
+  against no fingerprint has been taken**: with none on file the system prints a loud warning that the
+  program is unpinned and then runs it unverified. That is the documented posture before setup rather
+  than a silent failure, and it is one owner command away from being switched on — but until it is,
+  this particular protection is present and dormant here.
+- **There is a separate switch for voice alone.** The live microphone loop refuses to start when the
+  owner-signed voice setting is off, and is checked again mid-conversation, so turning voice off
+  part-way through stops it. Typed requests are deliberately *not* affected — turning off voice
+  control never breaks the keyboard.
+
+An honest scope note, because it is easy to imagine more than is there. With an ordinary spoken
+sentence that program does one of three things: answers from the owner's own memory, escalates to a
+reasoning model, or records the request as an intent for the agent mesh to pick up. **It holds no
+general-purpose tool executors of its own.** The things that actually touch files, terminals, accounts
+and infrastructure are the agents, each with its own ceiling and approval path. Voice reaches those
+the way everything else does — by asking, and waiting.
+
+#### The pipeline, and why it can be tested with no audio hardware
+
+The speech loop is a four-state machine:
+
+| State | What is happening | How it leaves |
+|---|---|---|
+| **Waiting** | Nothing is being captured for meaning. | A trigger moves it to listening. |
+| **Listening** | Audio is being collected as an utterance. | Enough trailing silence after real speech ends it; a timeout with no speech at all returns it to waiting; an absolute cap always ends it. |
+| **Thinking** | The captured audio is transcribed and handed to the permission-gated path. | Immediately, once there is an answer. |
+| **Speaking** | The answer is being played back in chunks. | Playback finishes; **or the owner starts talking over it**. |
+
+Talking over the assistant mid-answer — "barge-in" — is the acceptance bar the design set itself, and
+it is handled with deliberate stubbornness: a single cough or click does not abort the answer. Only
+**four consecutive frames of detected speech** count as a genuine interruption, at which point
+playback is cancelled and the machine returns to listening, keeping the frames that caused the
+interruption so the first words are not lost.
+
+The property that matters for evaluation is this: **the machine is driven one small frame of audio at
+a time — twenty thousandths of a second each — and every one of its timings is counted in frames
+rather than read from a clock.** Nothing in it depends on real time passing, and it holds no audio or
+machine-learning components itself; those are supplied from outside. So the whole behaviour is
+reproducible with no microphone and no speaker: feed it a recorded file, or a scripted list of "this
+frame is speech, this one is not", and it does the same thing every time.
+
+That is not theoretical. On this machine, with no working audio path in the loop and no hand-tracking
+model installed, **ninety-six tests covering the speech and gesture pipelines run and pass** —
+including the interruption behaviour, the absolute listening cap, and the case where the detector is
+stuck reporting speech on ambient noise.
+
+**The honest limit on real hardware.** In a room with an open microphone and a real speaker, the
+assistant hears itself, and the code says so plainly rather than hiding it: interruption handling
+needs acoustic echo cancellation or output ducking, and without either the live loop should be run
+**half-duplex** — microphone muted while speaking. The doctrine sentence is blunt about where the fix
+lives: "hysteresis alone does not defeat sustained self-echo — echo cancellation is the real fix and
+is a runtime and hardware concern, not a state-machine one." **The state machine is finished; the room
+is not solved.**
+
+#### Navigating by voice — the narrowest capability in the system
+
+There is one thing a spoken phrase can do that a typed one usually would not: change which screen the
+owner is looking at. It deserves precision, because it is the smallest capability in this document and
+its smallness is the point.
+
+**What it does:** on an unambiguous command naming a known screen, it writes one signal into the
+owner's record, which the interface is watching, and the owner's own browser switches screens. That is
+the entire effect.
+
+**What it does not do**, in the code's words: "it runs no tool, touches no target, and cannot type or
+launch." It reaches nothing outside the browser tab the owner already has open.
+
+**When it is allowed:** only while the voice setting is on and the emergency stop is off. If either
+fails, the phrase is not treated as navigation at all — it falls through to the ordinary path, which
+applies its own gate. Navigation can never be a way round the switch or the stop.
+
+**How strictly it matches.** One leading verb is stripped ("open", "show me", "go to", "switch to" and
+a few more), then a trailing "screen", "page" or "tab"; the remainder must then match a screen's short
+name, its printed label, or one of its listed alternative names — **exactly**. And then the decisive
+rule:
+
+> **Zero matches, or more than one match, produces no navigation at all.**
+
+An ambiguous phrase does not guess and does not pick a favourite; it is handed on as an ordinary
+question. That is what stops it hijacking real speech: a sentence that merely contains the word
+"findings" is a question about findings, not a command to open a screen.
+
+**Where the list of screens comes from.** Not from the model, and not from anything the speaker says.
+It is a committed list of the interface's real screens, checked in the build against the interface's
+own navigation menu, so — in the code's words — the system "can only navigate to screens that actually
+exist." The browser applies the same discipline at the other end: an incoming screen name is checked
+against its own list of known screens before anything moves, so an unrecognised or malicious name
+navigates nowhere.
+
+**One separation worth naming here.** The on-screen indicator showing whether the assistant is idle,
+listening, thinking or speaking changes several times a sentence, and that churn is **never** written
+to the signed record; it goes to a small owner-only file instead. *Audit* is what was authorised and
+done; *telemetry* is what a light on the front panel shows.
+
+#### Voice: what is built, what needs hardware, what is not built
+
+| Component | Honest status |
+|---|---|
+| The four-state machine, full-duplex handling, interruption | **Built and tested**, offline, against recorded audio files and scripted frames. |
+| Detecting that someone is speaking | **Built and working** — a simple loudness measure with no model. A better model-based detector is an optional upgrade; **its library is not installed on this machine**. |
+| **Hands-free wake word** | **NOT BUILT.** What is there fires after a few consecutive loud frames. The code calls it "a stand-in for the real custom-'SIGIL' … model (which needs training data)." Loudness is not word recognition. **"Say SIGIL and it wakes up" does not exist.** The optional real wake-word library is also not installed here. |
+| Turning speech into text | A cloud service is the command-line default. A local transcription model is supported, but **it is not installed in the sovereign environment on this machine** — and the small model it would load was never fully downloaded, so even where the library is present the weights are a half-finished file. On this host the local route therefore falls through to a visible placeholder saying no model is installed. **It does not invent a transcript.** |
+| Turning text into speech | The cloud service is the default; a local alternative exists in the code but **its library is not installed here**; the honest fallback is silence of realistic length, so the loop still runs and can still be interrupted. |
+| The live microphone loop | **Cannot start on this machine.** The optional audio-device package is not installed in the sovereign environment, so the live loop cannot open a microphone or a speaker regardless of what hardware is attached. Everything above was exercised through files and scripted frames. |
+
+**The sovereignty point an agency will care about most.** The cloud transcription option sends the
+**captured audio** off the machine; the cloud speech option sends the **reply text** off the machine.
+Both are third-party services, both are the current command-line defaults, and a key for them is
+configured on this host. The code marks each with an explicit note that a third party is involved and
+names the local alternative. **Neither is required by the design** — a local transcription model and
+a local synthesiser are both supported, and the silent fallback is always available.
+
+**But neither local option can run on the machine this chapter was checked against, and that must be
+said plainly, because it is the sentence an agency will act on.** The transcription library is not
+installed in the sovereign environment the shipped command actually uses; the small model it would
+load was never fully downloaded, so even the copy of the library that does exist elsewhere on this
+host has nothing to load; and the local synthesiser's library is not installed either. The local
+route therefore returns the honest placeholder rather than a transcript, and the local speech route
+returns silence. **On this host the only working speech services are the two commercial ones.** Both
+gaps close with a package installation and a completed download — this is a deployment gap, not a
+design gap — but until they are closed, sovereignty over voice is a property of the design and not of
+this deployment, and a deployment that leaves the defaults alone is sending audio to a commercial
+provider. That must be a decision rather than an accident.
+
+---
+
+#### Pointing at it: the one sentence to remember
+
+> **A gesture alone can never type a password or launch a program.**
+
+That is not a policy in a manual; it is the shape of the code, and it comes from two enforcement
+layers that must be read together.
+
+**Layer one: nothing is injected outside an owner-armed session.** Arming locally **requires the owner
+key** — there is no way to arm it without the owner identity — and arming writes a signed record, so
+the fact that gesture control was authorised at a particular moment is itself tamper-evident evidence,
+with the indicator lit while it lasts. The session lives only in the memory of the owner's own running
+process, carries a deadline, and ends on disarm, on losing sight of the hand, or on expiry. **With no
+live session, injection is refused.** If the owner has turned the gesture setting off, arming is
+refused outright, loudly, and the refusal is recorded.
+
+**Layer two: every intent's permission level is worked out, never declared.** Each gesture is turned
+into an honest name for what it would do, and that name is classified by the same fail-closed
+component that classifies everything else on the sovereign side. The result:
+
+| Gesture intent | Level | What happens |
+|---|---|---|
+| Pointer move | Reversible internal act | Injected inside the live session. Not recorded individually — see below. |
+| Click | Reversible internal act | Injected inside the live session, and recorded. |
+| Scroll | Reversible internal act | Injected inside the live session, and recorded. |
+| Drag | Reversible internal act | Injected inside the live session, and recorded. |
+| **Typing text** | **Externally visible** | **Queued for a verified owner or device approval bound to that exact action. Never injected automatically.** |
+| **A key combination** | **Externally visible** | **Queued, as above.** |
+| **Launching an application** | **Externally visible** | **Queued, as above.** |
+
+The classifier's design is what makes this hold. Input injection has no honest safe verb in its
+vocabulary, so it is **dangerous by default**; the four pointer names and three keyboard names are
+exact-name exceptions checked **after** the dangerous-word pass, so a dangerous word anywhere in a
+name always wins. The bare words "move" and "type" are deliberately never added to the general
+vocabulary, so an unrelated tool whose name contains them stays at the strictest level.
+
+A limit stronger than the design claims, found by reading the injection routine itself: **no gesture can
+reach the keyboard at all.** The routine that reaches the operating system has branches only for move,
+drag, click and scroll, and nothing anywhere in the system carries out an approved typing intent. A
+queued item is therefore a *record of an intent*, not a keystroke waiting on a timer — approving it
+releases no stored password into the keyboard, because nothing would carry it out.
+
+Be precise about what that does and does not say, because a checker will look. The input layer
+underneath *does* have a typing method and a key-combination method, and on this machine the tool they
+would drive is installed — so those two are code that exists and would work if something called them.
+Nothing does: no gesture path calls either one. Launching an application is absent in the stronger
+sense — no input layer implements it at all.
+
+#### Ambiguity does nothing
+
+A gesture becomes an intent only after passing a debouncing machine built on the same frame-counted
+principle as the speech loop. A discrete gesture fires only after **four consecutive identical
+readings** that are both **confidently classified** and **clearly ahead of the runner-up
+interpretation**, followed by a cooldown before another can fire. If confidence is low, or the best
+and second-best interpretations are close, the reading is treated as neutral, the counter resets and
+**nothing happens**. Eight frames with no hand in view produce a "hand lost" signal and the session
+disarms itself.
+
+The audit discipline mirrors the speech layer. Arming, disarming and discrete actions go on the signed
+record; pointer movements at thirty frames a second do not, because records at that rate would
+overwhelm an append-only log, so they are treated as telemetry. And when the underlying input
+mechanism cannot actually inject anything, the record does not lie about it: it says the action was
+**not** injected because the input path is inert. **A log entry claiming an injection that physically
+did not happen is treated as a defect, not an acceptable approximation.**
+
+#### Five ways a live gesture session dies within a frame or two
+
+Every frame, before anything can be injected, five conditions are checked in order. Each is bounded to
+roughly one or two frames — **not to the session deadline** — so an owner who wants it stopped does
+not wait.
+
+| What the owner (or the system) does | What happens |
+|---|---|
+| Engages the emergency stop — including from the phone | Session disarms; nothing is injected. |
+| Turns the gesture setting off, from the interface, the command line or the phone | Session disarms; nothing is injected. |
+| Revokes the device that armed the session — a lost or stolen phone | That device's in-flight session disarms immediately, rather than running to its deadline. |
+| Nothing is armed | Injection refused. |
+| The session's deadline passes | Session disarms. |
+
+The mechanism is worth a sentence, because it is why the guarantee is real rather than aspirational:
+the checks re-read the record **only when the record has grown**, and engaging the stop, flipping the
+setting or revoking a device each *append* something — which is exactly what triggers the re-read. A
+pure stream of pointer movements appends nothing, so a thirty-frames-a-second loop does no repeated
+scanning at all. Every one of these checks fails toward *stopping*: if the system cannot determine
+whether a device is still authorised, it treats it as revoked.
+
+#### The honest status of gesture — the largest caveat in this chapter
+
+**On-box camera gesture control is not operational, and this document will not describe it as though
+it were.** Three independent confirmations, all in the code:
+
+1. The hand-tracking stage reports itself as working only when a checksum-pinned model file is present.
+   When it is not, its detection routine is a **documented no-op that always returns an empty result**
+   — never a fabricated hand.
+2. The daemon that would run the camera loop warns loudly at startup that local camera gesture is not
+   operational for want of a model, and that "the loop will process frames but can never fire a
+   gesture intent."
+3. The project's own feature inventory states flatly that local camera gesture is not functional and
+   that gesture input is the phone companion.
+
+**Verified on this machine: the model directory does not exist.** The runtime that would execute such
+a model is installed; there is no model for it to run.
+
+Three further limits a sceptical reader would find:
+
+- **There is no shipped command that starts the local gesture daemon.** The function exists and is
+  driven by the test suite; the sovereign command-line interface offers no verb that launches it. The
+  "with gesture" switch on the system's bring-up command is **not a process at all** — it flips the
+  navigate-by-gesture setting on, one shot, and exits.
+- **The phone-as-trackpad path is built and unit-tested but not wired end to end in this tree.** The
+  design is deliberately private: the phone runs its own hand detection and sends **tiny landmark
+  measurements, never the owner's pictures**, which is why that path can honestly declare it uploads
+  nothing; the decoder is strict, any malformation yields an honest empty result rather than a
+  fabricated hand, and stale, duplicated, reordered and foreign-session batches are dropped. But the
+  phone bridge's list of permitted actions does not include a landmark stream, and nothing outside the
+  test suite feeds landmarks into the loop. **What is wired end to end from the phone is the signed
+  request to *arm* a session** — signed with the phone's own key, re-verified in full by the desktop
+  for freshness, the emergency stop, the gesture setting, replay, a single live session, and a
+  deliberately shorter deadline than a local arm. The phone's own screen says as much: this only
+  records a signed request; it is not armed yet; the desktop decides.
+- **Injection on this machine would be limited to one display system**, because only one of the two
+  supported injection tools is present. A machine with neither is honestly inert and says so in the
+  record instead of claiming success.
+
+Finally, **navigating by gesture is a mode, not a capability.** Unlike the voice and gesture settings,
+which default to on, it defaults to **off** and is entered only by explicit owner action. While on, a
+live armed session's swipes and pinch change screens instead of scrolling and clicking — reached only
+after all five per-frame checks above, and mapped to **no input action at all**, so the operating
+system is untouched.
+
+#### What both surfaces have in common
+
+Voice and gesture make the same argument twice: **a new way of asking is not a new authority.** The
+microphone gets no permission table of its own; it borrows the one every other path uses and inherits
+the signed record with it. The camera does not decide what a wave of a hand is worth; the same
+fail-closed classifier that refuses to auto-approve an unknown command name also refuses to let a hand
+gesture become a keystroke.
+
+Both are governed by a switch with a deliberate asymmetry. **Turning either capability off always
+takes effect**, even unsigned — off is the safe direction, and the worst a forged "off" can do is
+inconvenience the owner. **Turning either back on requires the owner's signature** and a strictly
+increasing stamp inside the signed portion, so a genuine "on" captured last week cannot be replayed
+after the owner switched it off. If the setting cannot be read at all, it resolves to off.
+
+That, rather than the hands-free demonstration, is the part worth taking away.
+
+### 8. The cockpit and the status overlay
+
+
+#### 8.1 What this is, and why it matters
+
+The sovereign side has its own small web program — the system calls it the **cockpit** — serving two
+things: a read view of the permanent record, and one narrow channel through which the owner can
+change something.
+
+Its most important property comes before any mechanism. **Every item shown on screen can be clicked,
+and clicking it re-checks that item's integrity there and then rather than repeating what was
+cached.** The reply carries either a verified marker or the specific reason the check failed. Ask for
+a record that does not exist and the reply says so in words — *"no grounded record — not fabricated"*
+— rather than showing an empty screen a reader might mistake for an answer.
+
+#### 8.2 How the cockpit protects itself
+
+Four properties, all enforced in the program rather than in a configuration file a deployment could
+get wrong:
+
+| Property | What it means in plain words |
+|---|---|
+| **It refuses a public address** | The program will not start on an address reachable from the wider internet, or on the catch-all "listen everywhere" address. To serve a real domain name an operator puts a separate front door in front of a private address: the tunnel or proxy is the network boundary, never the listener. |
+| **A session pass-phrase printed to the terminal** | Generated at start-up, so only somebody at the machine can pick it up. The served page carries it; a page belonging to any other website cannot read it. |
+| **Reading and acting are separate planes** | Reading needs the pass-phrase. Acting needs the pass-phrase **and** an exactly-matching record of which page the request came from **and** an approved address in the request header — the combination that defeats a hostile website re-pointing a name at a private address. |
+| **The signing key never enters the browser** | The browser sends a request; the *server* signs. A stolen browser session cannot walk away with the ability to sign. |
+
+Two smaller details show the same instincts. The "ask a question" route is a *read* that starts a real
+reasoning process, so it carries the full action gate — classification follows what a request does,
+not where it sits in the menu. And the ordinary access log is deliberately switched off, because the
+pass-phrase can travel in a web address for the live feed and would otherwise be written to disk.
+
+#### 8.3 A contradiction in this briefing, resolved
+
+Chapter 9 of this briefing used to call this cockpit **legacy** — "an older design", "a single page
+with five panels". The sovereign side's own documentation calls it the **current** interface, its
+"glass cockpit". Both statements sat in the repository at once, and a document whose value is
+checkability cannot leave that standing. Here is the resolution, from the code; chapter 9 has since
+been corrected to carry it.
+
+**Two different things share the name:** the cockpit *program*, and the cockpit's own *page*. Three
+pieces of evidence settle which is which.
+
+1. **Starting the whole product starts this program first, and the product refuses to run without
+   it.** The launcher brings up three back-end programs; the cockpit is the first, and if it does not
+   come up and announce its session pass-phrase the launcher prints an error and stops.
+2. **The modern unified interface is a client of this program.** It makes sixteen calls to
+   sovereign-plane addresses, every one served here: the summary read that fills the dashboards, the
+   settings read, the **single** owner-signed channel through which every owner-plane change in the
+   whole interface passes, the governance event stream, and the status-overlay stream below. Remove
+   this program and the modern interface loses its entire sovereign half.
+3. **The five-panel page does still exist and is still served** at the program's own root address —
+   approval queue, agent activity and budgets, a capability panel, a live event feed, a detail
+   overlay.
+
+The precise statement is therefore: **the sovereign cockpit is the current and load-bearing back end
+of the modern interface; its own five-panel page is a superseded front end that is still shipped and
+still served.** The word "legacy" is right about the page and wrong about the program; the sovereign
+documentation is right about the program and overstates the page. A reviewer who meets the
+five-panel page should read it as a fallback that still works, not as the product's face.
+
+#### 8.4 The status overlay, and why it is a cross-plane channel
+
+The **overlay** is a small card in the corner of the unified interface showing what the sovereign
+assistant is doing right now — listening, thinking, speaking — with the line it heard or is saying.
+It can be minimised to a dot or dismissed, and a new interaction brings a dismissed card back.
+
+Described that way it sounds like decoration. It is not: it is **the one live channel that crosses
+from the sovereign side to the unified interface**, and it carries two kinds of traffic from two
+different places. **Navigation signals** come from the signed permanent record — when the owner says
+"go to findings" or makes a navigating gesture, the sovereign side appends a signal, the cockpit
+tails the record and passes it on, and the interface changes screen. Nothing is typed and no program
+is launched; the signal is a request to the owner's own browser, and that is its entire power.
+**State events** — the listening/thinking/speaking updates — come from a small scrap file.
+
+The navigation half is deliberately hemmed in. **The interface will navigate only to a screen that
+exists in its own navigation list**, and the membership test is built on a lookup object created with
+no inherited properties at all — so a signal naming one of the internal property names every ordinary
+object carries cannot come back "true" and steer the browser somewhere it should not go. A garbled or
+spoofed signal navigates nowhere.
+
+#### 8.5 Why fast-changing state goes to a scrap file and not the record
+
+This design point generalises far beyond an overlay.
+
+The speech state machine changes state many times in a single exchange, and the gesture layer moves
+the pointer about **thirty times a second**. Written to the signed, append-only history, either would
+render it useless — the code says so in as many words: thirty-per-second records "would swamp the
+append-only log". A reviewer months later would be scrolling past hundreds of thousands of cursor
+positions looking for the three decisions that mattered. So the system draws a hard line between
+**telemetry** and **audit**:
+
+| | Telemetry | Audit |
+|---|---|---|
+| **What it is** | What is happening right now | What was decided, and by whom |
+| **Where it goes** | A small file readable only by the owner's own account, replaced whole each time so a reader never sees a half-written state | The signed, hash-linked, append-only record |
+| **What survives** | Only the latest value — nothing is history | Everything, permanently, in order |
+| **If writing fails** | Swallowed on purpose, so telemetry can never break the thing it reports on | A failure to append is a real failure |
+
+The code is blunt about that file's status: *"The file is ephemeral state, not a record of truth."*
+The reader ignores it entirely if it is oversized or unreadable, and passes it on only when it
+changes.
+
+The consequence for an auditor is the thing to hold on to. **The permanent record contains what was
+decided, not what was displayed.** A ten-minute spoken conversation adds a handful of entries, not
+tens of thousands. The same split governs gestures: arming, disarming and discrete actions are
+recorded; per-frame pointer movement is not.
+
+#### 8.6 What is honest about this today
+
+The channel is built, wired at both ends and tested; the cockpit's tests and the status-file tests
+were run on this machine during the preparation of this section and passed. Its two **producers**
+belong to this chapter's earlier sections: the listening/thinking/speaking events exist only while a
+live speech loop is running, which needs a microphone; the navigation signals come from speech or a
+gesture session, on-box camera gesture being inert here for want of a model file. **Neither producer
+has been run against live hardware on this machine.**
+
+---
+
+### 9. The memory server — giving any assistant cited recall
+
+
+#### What this is, before how it works
+
+An owner who has worked for years through an AI assistant has a very large amount of history —
+decisions taken, reasons given, things promised, things built — and almost none of it is available
+when it is needed. It sits in transcripts nobody can search.
+
+The sovereign side turns that history into a searchable, tamper-evident record. **This section is
+about the small piece of software that hands that record back to any AI assistant the owner is
+already using, in a form the assistant is asked to cite.** The effect is simple: a new conversation
+can begin with the assistant already knowing what the owner decided eight months ago, *and being
+able to point at the exact record where the owner decided it* — rather than producing a confident
+paraphrase of something that may never have happened.
+
+The mechanism is a protocol met earlier in this briefing. MCP — the Model Context Protocol — is a
+published standard by which an AI assistant can discover and call tools living inside somebody
+else's software. Chapter 9 describes the *engine's* MCP server, which answers "what does VIGIL let
+an outside AI do?" This section describes a **second, entirely separate server on the sovereign
+side**, answering a different question: **what does the owner's own memory let an outside AI read?**
+Conflating the two would be a serious misreading, so they are distinguished in full below.
+
+#### The eight tools
+
+The server announces itself to an assistant as the sovereign side's memory, and offers exactly eight
+tools. All eight read. None of them acts.
+
+| The tool, in plain words | The question it answers | What comes back |
+|---|---|---|
+| **Search memory** | "What do I know about this?" | Records matched by meaning rather than keyword, each carrying its record number, content fingerprint, date, session and project. |
+| **Read a stretch of the record** | "What actually happened around this point?" | A contiguous run of records in numbered order — messages, tool calls, commits, documents — optionally filtered to one kind, capped at 200. The raw stream, not a search. |
+| **Memory health** | "How much is stored, how much is searchable, does the record still hold together?" | Counts of stored and indexed records, the model used to make them searchable, and — on request — whether the integrity chain and the signed anchor on its end still verify. |
+| **Look up an entity** | "Show me this project, session, commit or document, and what surrounds it." | The entity with its neighbours, each carrying the record number that produced it, so any part of the answer follows back into the raw record. |
+| **Query the structure** | A structured question over the memory graph. | Columns and rows. Read-only; see below. |
+| **Open threads** | "What is still unresolved for me?" | Current grounded decisions and commitments that nothing later has superseded, most stale first, each cited. |
+| **Commitments due** | "What have I promised, and by when?" | Grounded promises with a due date, earliest first, reduced to the latest version per subject so a rescheduled deadline never serves the old date. |
+| **Contradictions pending** | "Where have I contradicted myself?" | Subjects with more than one live decision, each naming the conflicting record numbers — **flagged for the owner, never resolved automatically**. |
+
+The last three carry a property worth stating on its own. What they serve as the *content* of an
+answer is the **verbatim quotation from the owner's own record**; the assistant's sentence about it
+travels alongside in a separate field, labelled a summary. The code comment is explicit that the
+model's sentence "is served only as an advisory summary (never the fact)". In plain terms: **the
+owner is shown their own words, and the machine's paraphrase is visibly marked as the machine's.**
+
+#### What "cited" means here, exactly
+
+Every result carries a record number and, in most cases, a content fingerprint. Together those
+identify one line of the append-only record uniquely, and the record is hash-chained, so an altered
+line does not survive verification. That is what makes a citation worth anything: the owner can go
+and look, and can tell whether what they are looking at has been changed.
+
+The tools also carry, in the text the assistant reads before calling them, an instruction to cite.
+The status of that instruction needs stating precisely: **it is a description the assistant reads,
+not a mechanism that constrains it.** Nothing here can force an assistant to quote its citations
+honestly. What *is* mechanical is that the citation is present in every result — so an uncited
+answer can be spotted, and a wrong one can be checked.
+
+#### The empty answer that admits it is empty
+
+This is the design point that most distinguishes the memory server from ordinary retrieval.
+
+Search by meaning always returns *something*: the nearest thing in the collection, however far away.
+That is exactly the condition under which an AI assistant fabricates — handed three weakly related
+fragments and a question, it will write a fluent answer.
+
+So the search tool does not simply return its best matches. It applies a **grounding threshold**,
+and the code records the measured behaviour that sets it: with the model in use, a genuinely present
+topic scores roughly 0.72 to 0.78, an absent topic roughly 0.55 to 0.62. The threshold sits at 0.66,
+between the two; individual results below 0.55 are discarded as noise outright. If the best match
+falls below the threshold, the tool returns **an empty list and a note** saying memory genuinely has
+nothing solid on this, and telling the assistant to say so rather than invent an answer.
+
+This is the sovereign side's version of the rule that governs the whole system: **an honest "I do
+not know" is a correct answer, and a fluent guess is a defect.**
+
+#### There is no way to write
+
+The strongest safety property of this server is the absence of something. **Not one of the eight
+tools appends to, alters, or removes a line from the owner's record.** There is no write path to be
+guarded, gated or bypassed, because there is no write path at all.
+
+Two precisions, because an overstatement here would be worse than useless:
+
+- The eight tools are the eight functions written into that one file. There is no configuration file
+  that adds a ninth and no request a caller can make that widens the set. This is a stronger
+  arrangement than an allowlist that can be edited, though it is also less flexible.
+- One side effect does exist, and it is not on the record. When the server first opens its
+  similarity index it will create that index's empty container if none is there — an empty container
+  in a *separate* database. It cannot put anything into the signed record.
+
+The structured-query tool deserves its own note, being the only one that takes a whole query written
+by the caller. It is guarded twice. First, a keyword check refuses anything containing a create,
+set, delete, merge, drop, alter, copy, install or attach instruction — a blocklist, which is the
+weaker kind of guard, the kind that fails when somebody thinks of a word nobody listed. Second, and
+load-bearing, **the database itself is opened in read-only mode**, so a write instruction slipping
+past the wordlist is still refused by the database. The code says exactly this: writes are refused
+"both by a keyword guard and by the read-only connection."
+
+#### It refuses to share a program with the offensive half
+
+The moment this server loads, before anything else, it checks whether any part of the offensive
+engine — the assessment engine or the third-party agent body — has been loaded into the same running
+program. If any has, it **refuses to start**, naming the offending parts in the error.
+
+That is the wall down the middle of this system, enforced inside a single running program rather
+than by a rule someone is trusted to follow. The owner's private memory server cannot be running in
+the same process as the tooling that attacks things.
+
+#### The two MCP servers, distinguished
+
+A reader who has met chapter 9's server may assume this is the same thing seen from another angle.
+It is not. They share a transport and a protocol and nothing else.
+
+| | The engine's server (chapter 9, section 5.8) | The sovereign memory server (this section) |
+|---|---|---|
+| Which half of the system | The offensive engine | The sovereign side |
+| The question it answers | What may an outside AI **do** with this engine? | What may an outside AI **read** of the owner's own memory? |
+| How many tools | **Two** by default | **Eight**, fixed |
+| Can the set be widened? | Yes — by a deliberate operator act | No — the set is the code |
+| What the tools do | Re-check a finding's evidence; describe a declared service | Search, read and summarise the owner's own record |
+| How safety is achieved | Every call re-passes the full permission chain, plus a four-property re-check, on top of the allowlist | Nothing to gate: no tool acts, and the graph database is opened read-only |
+| What a result is labelled | An observation — a lead, never a proven fact | A citation — a record number and fingerprint |
+| Transport | On-host standard input and output; no network listener | Identical |
+| How it is started | A command-line act; no start/stop control in the interface | Registered in the assistant's own configuration; the assistant starts it |
+
+The sentence to carry away: **one server lets an outside assistant ask the engine to check
+something; the other lets an outside assistant read the owner's memory and cite it. Neither can
+write.**
+
+#### Honest status
+
+**This is live, and it was exercised while this section was written.** The server is registered on
+this machine and its eight tools were attached to the session that produced this text. Two were
+called. The health tool returned real counts; the search tool, asked about a technical topic from
+the owner's own history, returned three ranked records with dates, projects, session identifiers,
+content fingerprints and scores above the grounding threshold. This is not a scaffold.
+
+**But the memory it is serving, on this machine, at this moment, is in two pieces that do not agree,
+and the briefing must say so.** The signed, hash-chained record on this host currently holds
+**sixteen entries** — governor and settings events, and one commit. Its chain verifies cleanly. The
+similarity index beside it holds **13,667 entries, numbered up to 43,350**, retained from an earlier
+and much larger record. The consequence is concrete and checkable: a search returns citations
+numbered in the tens of thousands, and **those record numbers do not exist in the current signed
+record**, so a sceptic following one would find nothing there. The tools that read the signed record
+directly — the range reader and the three consolidation tools — will accordingly find little or
+nothing until the ingestion and consolidation passes are run again on this machine.
+
+This is a state-of-this-host observation, not a design flaw: the search index is a rebuildable
+projection, and rebuilding it from the record it was built from is routine. What is not routine is
+rebuilding it *here*, because that record is no longer the one at the standard location — so on this
+machine the index, like the entity map in section 3.2, is the last copy of what it holds and should
+not be deleted on the assumption that a rebuild would bring it back. It also means **the figure of roughly
+43,000 records in the project's own documentation describes a record that is not the one on this
+machine today**, and no reader should be given that number as a present fact.
+
+Four further limits, stated plainly:
+
+- **The record is not currently anchored.** The health tool reports no signed head, with the
+  instruction to run the signing command to anchor it. The chain of sixteen entries links cleanly;
+  the signature that would distinguish honest growth from truncation has not been applied.
+- **There is no test file for the server itself.** Of eighty-three test files on the sovereign side,
+  none exercises it. What the eight tools are built on — the record store, the consolidation
+  queries, the graph, the index — is tested; the eight-function wrapper around them is covered by
+  use, not by a test.
+- **The server has no authentication of its own, and needs none.** It speaks over the standard input
+  and output of a program the assistant starts, on the same machine, as the owner's own account. No
+  network listener means no remote surface, and the security boundary is the owner's user account:
+  anyone who could reach this server could already read the same files directly.
+- **It is all-or-nothing, and it unseals.** There is no per-topic filter and no redaction stage. Any
+  assistant configured with this server can read everything in the owner's memory. Content sealed on
+  disk is unsealed for display when the key is available — and shown still-sealed, rather than
+  crashing or guessing, when it is not. **Configuring this server is a decision to give an AI
+  assistant the owner's whole history**, and should be put to an approving authority in those terms.
+
+### 10. The mesh, and the phone
+
+
+#### 10.1 The plain-English version
+
+**An authorised official can approve a live action from their phone, and the owner's master key never
+leaves the desktop.**
+
+Every mechanism below exists to make that sentence literally true rather than approximately true. A
+phone gets lost, stolen, sold and handed to a repair shop; a design that puts the master key on it —
+even encrypted, even behind a fingerprint — has made the phone into the crown jewels. This one does
+not. And one correction before the mechanism, because the natural phrase is the wrong one: **the
+phone does not "control" the desktop.** It *signs requests, and the desktop verifies them*. That is
+not pedantry — everything the phone is not allowed to do follows from it.
+
+#### 10.2 What the phone holds
+
+The phone holds exactly one secret: **its own key**, and nothing else. That key is created in the
+phone's own browser the first time the companion app is opened, in a mode that tells the browser to
+use it for signing but never to hand it back — not to a website, not to the companion app itself, not
+to anything. The phone then displays its public half plus a short human-readable fingerprint; the
+owner, at the desktop, compares that fingerprint against what the desktop computes and authorises the
+device once, as an entry in a signed ledger on the permanent record. The desktop's own master key
+stays on the desktop. In the code's words: *"the phone signs, the server only verifies."*
+
+The companion app is a normal installable web app served by the desktop. It requires a browser whose
+built-in cryptography supports the signature scheme in use — recent versions of the major browsers —
+and if it does not find it, **the app says so plainly and refuses to operate** rather than dropping
+to something weaker. That is a real deployment constraint, and it is written down as one.
+
+#### 10.3 There is no password on the wire
+
+A security reviewer should look here first. **There is no shared secret travelling between the phone
+and the desktop at all** — no password, no bearer token, no key that could be captured in transit and
+reused.
+
+**Authentication *is* the signature.** Every request the phone makes carries a small signed envelope,
+and the desktop rebuilds, byte for byte, exactly what the phone claims to have signed. Because the
+two sides are written in different programming languages, the rule for producing those bytes is a
+formal agreement between them with a fixed worked example pinned in the tests — get it wrong by one
+character and every signature is rejected, which is the right failure direction.
+
+Seven properties then bound what a captured request can do:
+
+| Property | What it protects against |
+|---|---|
+| **The authorised-device list is recomputed on every single request** | A revoked phone stops working on its *next* request — revocation is immediate by construction, not by a timer. One bound, stated plainly: the live notification feed is checked when it opens and not again, so a revoked phone that simply holds an open feed keeps receiving three-field notices until it disconnects. The companion app re-signs that feed every ninety seconds, which closes the gap for an honest client; a hostile one need not. |
+| **The signed request names the one thing it authorises, checked against the door it arrived at** | A captured request for the low-sensitivity queue listing cannot be re-aimed at the route returning the owner's own recorded on-screen text. A lesser permission cannot be pointed at a greater one. |
+| **Each request carries a timestamp, checked against a two-minute window** | A captured request goes stale. |
+| **Requests that *change* something also carry a counter that must beat the highest ever recorded for that phone — checked and recorded together, under a lock** | The same captured request can never be replayed, not even by two copies racing at the same instant. |
+| **The listener refuses any publicly reachable address** | A misconfiguration cannot expose the service, because it will not start. The private tunnel is the boundary. |
+| **The check for modern internet addresses is a positive list, not a "not public" test** | Two globally routable transition ranges are misclassified as private by the standard library the code would otherwise have trusted. |
+| **The transport certificate is self-signed, its fingerprint printed once and stable across restarts** | The owner compares it once, on the phone. A change later means interception, not a restart. |
+
+One honest limit sits inside that list. Requests that only *read* are bound by the freshness window
+and by their permission scope, but they consume no counter — a read changes nothing, and recording
+every one would write to the permanent history on every screen refresh. So a captured read request
+could in principle be replayed **within two minutes, by someone already inside the private tunnel, to
+re-read the same thing.** That is the stated bound, not an accident.
+
+#### 10.4 What crosses the tunnel, and what does not
+
+The notification feed and the pending-items list carry **three fields and no more**: a sequence
+number, a consequence level, and a kind. The code's own summary is *"never a subject, never a
+payload, never a secret."*
+
+So from the feed and the queue the phone learns that item 412 is awaiting approval, at the higher of
+the two supervised levels, and that it is a draft message. **Those two routes tell it nothing more —
+not who the message is to, not what it says.** Approving from that queue is approving a *numbered
+item*. That is a deliberate confidentiality choice and equally a usability limit — an approver
+working from a phone is confirming a decision they already understand, not reading a case for the
+first time.
+
+Two other routes do return content, and the code marks both out as different from the queue:
+
+| The route | What it returns |
+|---|---|
+| "Where did I last see this?" | The owner's own verbatim recorded on-screen text — never a paraphrase |
+| "Show me record number N" | That one record's stored contents in full; for a queued draft, that means the recipient, the subject and the body |
+
+Each of the two carries its own separate permission, which a lesser request cannot be re-aimed at —
+and the companion app does use the second one: tapping an item in the queue fetches the record behind
+it and displays its contents. So the honest sentence is narrower than "the phone never sees the
+case". **The phone is never *sent* the case unasked; reading it is a second request, separately
+permitted, that any still-authorised phone can make.** Approving and reading are different acts with
+different scopes, which is the property that matters when a phone goes missing: revoke the device and
+both stop.
+
+#### 10.5 What the phone can do, and what it cannot
+
+| The phone **can** | Notes |
+|---|---|
+| Approve or deny a queued item at the two supervised levels | The phone signs; the desktop verifies and only then records. Approvals can be signed **with no connection at all** and queued, flushing when the tunnel returns. |
+| **Panic-halt** the whole agent mesh | Signed like every other request from the phone — the desktop still checks the phone's key, the freshness window and the replay counter before it acts, and a failure at any of those halts nothing. What needs no signature is the halt *entry once it is on the record*: see below. |
+| Relay a typed command to the reasoning kernel | Through the same classification gate and signed action log as a command typed at the desktop or spoken aloud. |
+| Browse a read-only view | Queue, summary, budgets, recent agent activity, one record at a time, memory-graph health. |
+| Recall grounded on-screen history | Verbatim captured text, never a paraphrase or a model's guess. |
+| Arm a gesture session | Opt-in, off by default. The signed request to *arm* is wired end to end; the trackpad it would arm is not — nothing yet carries hand movement from the phone to the desktop. See below. |
+
+| The phone **cannot** | Why |
+|---|---|
+| **Release a halt** | Halting is the safe direction, so the check that folds up the record honours *any* halt entry it finds there, whoever wrote it — a nuisance halt is at worst an inconvenience. Un-halting is the dangerous direction: a release counts only if it verifies against the owner's own key and its issue time exceeds every release already honoured, and it stays with the owner at the desktop. The switch is deliberately asymmetric. The asymmetry is in how the *record* is read, not in how the phone's door is guarded — the door checks a signature either way. |
+| **Sign as the owner** | The master key is never used on this path at all. |
+| **Widen a gesture's authority** | Pointer movement, clicking, scrolling and dragging stay at the reversible level; typing, key combinations and launching an application always queue for a separate approval. A gesture, from a phone or a camera, can never type a password or start a program. |
+| **Be shown anything sensitive on the feed** | Three fields only. Reading the case behind an item is a separate request under its own permission, never something the feed pushes out. |
+| **Upload the owner's pixels** | See below. |
+| **Keep an armed gesture session through a revocation** | A revoked phone's *in-flight* session dies within about one or two frames of video, not when its time limit expires. (The one thing a revoked phone can hold on to is an already-open notification feed — three fields, until it disconnects.) |
+
+#### 10.6 The trackpad, and the pixels that never leave the phone
+
+Using a phone as a trackpad is the one place where the design could easily have leaked something
+serious — a camera feed of the owner's room, streamed to a desktop. The design refuses that, and the
+desktop half of the refusal is built and tested.
+
+**The design puts the hand detection on the phone and sends only the result.** What the desktop is
+built to accept is a small batch of landmark coordinates — at most two hands, exactly twenty-one
+points each — described in the code as *"landmark data, never owner pixels"*. Because the recognition
+would already have happened on the phone, the desktop's declaration that this source sends nothing
+off the machine is honest rather than aspirational, and the strict gate refusing any vision component
+that would upload imagery lets this one through for a real reason. A malformed batch decodes to an
+honest *nothing* rather than a fabricated hand; batches from another session, duplicated, out of
+order or stale are dropped; and the tracker keeps a single number rather than a growing list, so a
+flood cannot exhaust memory.
+
+**What does not exist yet is the sender.** The companion app contains no hand detection of any kind,
+the phone bridge has no door through which a batch of landmarks could arrive, and the desktop loop
+that would consume them is driven only by the test suite — no shipped command starts it. So no
+landmarks cross the tunnel on this machine, and none can until three pieces are built: a detector in
+the app, a route to receive a batch, and a command that starts the desktop loop. What is built and
+tested is the *receiving* contract, described above, and it is described here because a reader who
+met the privacy design without meeting this limit would take an intention for a running fact.
+
+Arming such a session shows the pattern the whole design uses. **The phone signs an arm request. The
+desktop only *records* it.** The gesture daemon then re-verifies everything independently — device
+still authorised, request fresh within thirty seconds, never used before, no other session live, halt
+switch not engaged — and it is that re-verification, not the request's arrival over the network, that
+arms anything. A phone-armed session also gets a deliberately **shorter life than one armed at the
+desktop**: five minutes against thirty. This remote-arm path widens trust, and is off by default.
+
+#### 10.7 What is proven here, and what has not been done here
+
+**Proven on this machine.** Ninety-five automated tests covering the phone bridge, the signed
+envelope, the companion app, the transport certificate, remote recall, device pairing, the remote
+landmark stream, the status file and the cockpit were run during the preparation of this section and
+all passed.
+
+**Demonstrated end to end on this machine.** There is a runnable demonstration that needs **no phone
+and no tunnel**: it stands up the real bridge program on the machine's own internal address and
+drives it exactly as a phone would, with a stand-in phone key signing every request. It was run to
+completion here and walked the whole flow — pair, approve a queued action, relay a command, recall
+on-screen history, arm a gesture session, panic-halt — with the real transport, the real signature
+checks and every real gate. Only the tunnel and the phone app are stood in for; everything else is
+the shipped code.
+
+**Not done here.** No phone has ever been paired with this machine: the device ledger on its
+permanent record contains no entry, and no transport certificate has ever been minted — which means
+**the phone bridge has never been served for real on this host**. The companion app is shipped and
+the walkthrough for a real tunnel is written down; neither has been exercised against a physical
+handset here. Read the phone story as *proven in code and proven in a faithful loopback rehearsal,
+and not yet demonstrated on a real device in this environment*.
+
+---
+
+### 11. What is proven on one platform, and what is a seam
+
+
+#### 11.1 The sentence, without euphemism
+
+The sovereign side's own documentation ends with this: the other operating-system backends and the
+browser-based web engine "are honest, documented seams (Linux is the proven path)." That is
+procurement-relevant, so it is repeated without softening. **Linux is the proven path; everything
+else in this part of the system is an interface with a deliberately incomplete implementation behind
+it.** A seam is neither a bug nor vapour — it is a place where the shape of the work is defined, the
+surrounding machinery already talks to it, and the platform-specific piece has not been written.
+Naming them lets a deployment plan route around them rather than discover them.
+
+#### 11.2 Where each platform actually stands
+
+| Capability | Linux | macOS | Windows | A phone running the core itself |
+|---|---|---|---|---|
+| **Screen capture** | Via one of four common screenshot tools — **one of which is installed on this machine**, with a graphical display running, so the grab step is available here. What is missing is downstream: the text reader that would make a grab groundable | Via the operating system's own built-in capture command | Via an optional add-on package that may or may not be installed | Via the system capture command, which is usually unavailable without deep device access |
+| **Camera capture** | Via the standard video device | **Not built** — declared an honest gap, with the optional tool named for anyone who wants it | **Not built** — honest gap | Via an optional add-on package |
+| **Cursor and keyboard injection** | Two possible tools; one is present on this machine, which limits injection to one of the two display systems | **Interface only.** It permanently reports itself unavailable and does nothing | **Interface only.** Same | **Not offered at all**, and honestly declared as such |
+
+Two things in that table deserve pulling out.
+
+**Nothing fabricates a result.** Every capture path returns *nothing* when its tool is missing, rather
+than an empty picture or a guess. The two unfinished injection backends neither crash nor pretend:
+they report themselves unavailable and do nothing. That matters because of what then appears in the
+permanent record — when the injection backend is inert, the record says the action was **not**
+injected and names the reason. It does not say "injected".
+
+**A phone running the core is described as a phone.** Such a phone reports itself to the operating
+system as Linux; without a dedicated check it would be handed the Linux backend and would claim
+capabilities it does not have. That check exists, and the resulting description honestly declares
+that a phone does not inject keyboard and mouse events into a desktop.
+
+#### 11.3 The browser that was deliberately not built
+
+The documentation lists "the browser-based web engine" alongside the platform backends as a seam. The
+code is more specific, and where the two differ the code is what a reviewer can check. A browser
+could have appeared in two places, and they are in different states.
+
+**On the research path** there is a defined interface for rendering a page that runs its own code,
+with exactly one shipped implementation: one that returns nothing. A page that only assembles itself
+in a browser is therefore an *honest gap* — the system reports that it could not read it, rather than
+silently reading half of it. The accompanying note explains why the obvious implementation was not
+written: a real browser follows redirections, loads material from third parties and executes the
+page's own code, all of which would go around the pinned-address protections the fetching layer
+depends on. It lists the conditions any future implementation would have to meet, and ends by calling
+itself a design note rather than a shipped capability.
+
+**On the account-acting path it is stronger than a seam — it is a structural absence.** The agent that
+logs into the owner's own accounts speaks only the plain request-and-response protocol; there is no
+browser code path in it at all. When it meets a "prove you are human" challenge and stops, its failure
+to escalate to a real browser is not a rule that could be relaxed. There is nothing there to call.
+
+#### 11.4 What this means for a buyer
+
+**Deploy on Linux** — that is where the whole path has been exercised, and it is the vendor's own
+assessment as well as this document's. **The hardware-facing capabilities are the ones that vary, and
+they degrade loudly:** screen capture, camera capture and cursor injection differ by platform, and
+every one reports its own absence rather than working around it. And **no claim is made from
+measurement about macOS or Windows** — the parts of the sovereign side that are pure calculation over
+the permanent record carry no platform-specific code and one would expect them to run, but they have
+not been exercised on either platform here, and this briefing does not assert what it has not seen.
+
+### 12. Learning from a page the owner points at
+
+Everything described so far in this chapter learns from material the owner already has: their
+assistant transcripts, their code commits, their documents, their screen. There is one route that
+deliberately goes outward. The owner can hand the system a web address, and it will read that page —
+and a very small number of pages linked from it — and file what it found into the permanent record.
+
+This is the capability in the sovereign side that sounds most alarming when it is described, and it is
+the one where the design's central rule does the most work. The rule is stated once and then held to
+without a single exception: **nothing a web page asserts ever becomes a fact.** A page is a source of
+quotations. It is never a source of truth.
+
+It is worth being blunt about why that distinction is load-bearing here in particular. The open web is
+precisely the place where a naive system would learn something false, and learn it *with confidence*.
+A page can say anything at all. A language model asked to summarise a page produces fluent, assured,
+well-organised prose whether the page was a national standards body or a forum post written by
+somebody guessing — and produces equally assured prose about things the page never said, because
+producing plausible sentences is what such a model does. A system that let a summariser's output flow
+into its own memory as knowledge would, sooner or later, hold a confident belief that came from
+nowhere and cite nothing. This route is built on the assumption that this *will* happen, and arranges
+matters so that when it does, the false claim arrives already labelled as unbacked.
+
+#### 12.1 What the owner does, and what comes back
+
+On the knowledge screen, when automatic learning is switched on, a card appears with two boxes. The
+first takes a vulnerability identifier and adds it to the queue of things the owner may later approve
+for study. The second takes a web address, next to a button marked **Learn from URL**.
+
+There is a second way in, in the layer behind the screen: instead of an address the owner can name a
+**topic**, and the system reads a short curated list of public reference sites rather than a site of
+the owner's choosing. That route is built and tested. Stated plainly: **the shipped interface has no
+box for it.** The address box is what a user of the screen can actually reach today; the topic route is
+reachable from the layer the screen talks to.
+
+What comes back is deliberately a set of counts before it is a set of sentences:
+
+| What the card shows | What it means |
+|---|---|
+| **N grounded** | claims that are backed by a passage found word for word on a page that was actually fetched |
+| **N advisory** | claims the writing model produced that **no** fetched passage backs — kept, displayed, and explicitly not relied upon |
+| The host, and the page count | which site was read, and how many of its pages were successfully fetched |
+| Up to four thousand characters of the extract | the composed write-up itself: the grounded quotations first, the advisory claims under a heading that says nothing backs them, and a list of the addresses that were *not* fetched, each with its reason |
+
+Two things about that presentation deserve underlining. **The grounded and advisory counts are shown
+side by side, as peers, before any prose is shown at all.** The owner's first impression of a learning
+run is therefore a ratio — how much of what the model wrote survived checking — rather than a
+readable paragraph that invites belief. And **the addresses that were skipped are part of the output**,
+not omitted as noise. A crawl that quietly stopped at its budget and reported only what it read would
+misrepresent its own coverage; here, the number of addresses that were discovered and then dropped is
+always reported, and the first twelve are listed with the reason each was dropped — outside the
+permitted site, forbidden by the site's own rules, over the per-site cap, a fetch that failed, or
+simply beyond the page budget. Beyond twelve the list stops and the count carries the rest, so a
+reader always knows how much they are not being shown.
+
+#### 12.2 What it will and will not do to a website
+
+The fetching layer is not a security tool and is not built like one. Three properties define it.
+
+**It reads and never writes.** Every request is an ordinary retrieval — the kind a browser makes when
+you open a page. There is no code path in this layer that submits a form, sends data, or attempts
+anything a site owner would recognise as probing. The whole sovereign side additionally refuses to
+start at all if any part of the offensive engine has been loaded into the same running program; that
+check runs the moment the web-reading component is loaded, and it fails loudly rather than continuing.
+The consequence worth stating for a reviewer: **this is not the attack tool wearing a different hat.
+It is a different piece of software, in a process the attack tool is structurally forbidden to be in.**
+
+**It identifies itself, and never varies.** Every request carries one fixed identifying string that
+names the system and says it is authorised owner research. That string is never rotated, never
+randomised, and never disguised. This is a deliberate inversion of what a stealthy crawler does, and
+it follows the same doctrine as the rest of the system: the point is that the *other* side's logs
+should be able to pick this traffic out and attribute it, not that they should fail to.
+
+**It is polite by construction, not by intention.** A minimum interval is enforced between two
+requests to the same site — and if the site publishes its own preferred delay, the longer of the two
+wins. Requests to one site are taken one at a time. A fetch gives up after twenty seconds and stops
+reading a page after about two megabytes, so a slow or enormous page cannot hold the run open or fill
+memory.
+
+#### 12.3 The four gates every single fetch passes
+
+Before any connection is opened, a candidate address is checked four times. Each check can only
+refuse; none of them can widen what an earlier one allowed.
+
+| Gate | What it does | What it is for |
+|---|---|---|
+| **The permitted-site list** | An empty list permits nothing. For a pointed-at address the list contains exactly one entry: the site of the address the owner typed. The address must also use ordinary web addressing, and the site name is put into one canonical form before it is compared | So a crawl that starts at one site can never wander onto another, and so two spellings of the same site cannot be used to smuggle past the check or to split its rate-limit budget |
+| **The private-network check** | The site name is looked up once; **every** address it resolves to must be a public one; and the connection is then pinned to that exact address. Redirections are refused outright, and any proxy configured in the surrounding environment is ignored | This is the one that stops a web address being used to reach the machine's own insides. Without it, a hostile or merely careless address could point at the machine's own loopback, at a neighbouring server on the internal network, or at the fixed internal address cloud providers use to hand out credentials. Pinning matters as much as looking up: a name that answers "public" to the check and "internal" a moment later, when the connection is made, is a known trick, and it does not work here |
+| **The site's own rules** | The file a site publishes to tell automated readers which parts of it are off limits is fetched — through the same private-network-checked fetcher, never by the shortcut the standard library offers, which would make its own unchecked request — and then respected. A forbidden address is dropped and recorded, never fetched | Respect, never evasion. And note which way the ambiguity falls: if that file cannot be read because the site returned an error, a refusal or a rate-limit response, **the entire site is treated as forbidden for the rest of the run.** A missing or empty file means the site has no restrictions, which is the standard reading |
+| **The per-site pace** | The wait computed above is taken before the request goes out | So a run cannot become a burst of traffic against somebody else's server |
+
+Only after all four is a socket opened.
+
+#### 12.4 It is small on purpose
+
+A pointed-at learning run fetches **at most four pages, and follows links at most one step from the
+address the owner gave.** That is far tighter than the general research path, which allows
+twenty-five pages and three steps.
+
+The reason is not caution for its own sake. **This runs while the owner is waiting.** The button is a
+synchronous action: the owner presses it, the request goes out, and the answer comes back into the
+same card. A deep crawl behind a button is a hung interface. So the budget is set to something that
+finishes, and the honest consequence — that a large site is read shallowly — is reported rather than
+hidden.
+
+Within that small budget the order is chosen rather than arbitrary. Candidate links are ranked by how
+much their link text and address path overlap with the distinctive words of the question being asked,
+with a penalty for each step away from the starting page. The effect is that four pages are spent on
+the four pages most likely to contain a passage worth quoting, instead of on the first four links in
+the page's markup. A repeat of the same address in a different spelling is recognised and not fetched
+twice.
+
+#### 12.5 The emergency stop actually stops it
+
+The emergency stop is checked twice on this path, and the second check is the one that matters.
+
+**Before the run starts,** the action is refused outright if the stop is engaged, or if automatic
+learning has been switched off. Nothing is fetched.
+
+**During the run,** the stop is handed to the crawl as a cancel signal, and it is consulted *between
+page fetches* — before each next page is taken off the queue. When it trips, the crawl abandons what
+is left, records the stop as an entry in that same list of dropped addresses so the run ends on the
+record rather than merely ending short, and returns what it had. **The practical difference is the difference between a stop that takes effect
+now and a stop that takes effect when the work would have finished anyway.** A crawl of four pages
+against a slow site, each with a politeness wait in front of it, can run for a noticeable stretch; a
+stop that only bit at the end would let every remaining page be fetched after the owner had already
+demanded a halt.
+
+There is a second, weaker safety net behind that one, worth understanding because it is what protects
+the *other* research path described below. Whatever a run produces, the write-up it wants to file goes
+through the same permission gate every automated worker's output goes through, and that gate refuses
+under the emergency stop — writing a refusal into the record instead. So a halted run cannot file its
+findings. But refusing the write does not un-send the requests. Stopping the fetching is a separate
+thing, and it is the thing the cancel signal does.
+
+#### 12.6 The keystone: a page is quoted, never believed
+
+Everything above is perimeter. This is the part that makes the capability safe to have at all.
+
+Each page that is successfully fetched is written into the permanent record as its own entry, before
+any claim about it is considered. That entry carries the address, the response code the site gave, a
+fingerprint of the body received, how many steps from the start it was, and the readable text of the
+page. The set of entry numbers created by that step defines a **window** — the exact set of pages this
+run actually read.
+
+Then, and only then, a writing model is shown those same page texts and asked to produce claims. Each
+claim it produces must carry two things: the entry number of the page it came from, and a quotation
+from that page.
+
+Every one of those claims is then put through **the identical admission check that governs the owner's
+own memory** — the same check described earlier in this chapter, the one the nightly consolidation
+pass uses on the owner's transcripts and documents. Not a similar check written for the web. The same
+one. It admits a claim only if all of the following hold:
+
+- the entry it cites is **inside the window** — a claim citing a page this run did not fetch is
+  rejected outright, which closes the obvious trick of a model inventing a plausible-looking source;
+- the quotation appears **word for word** in that entry, **re-read from the record** rather than taken
+  from the model's own copy of it — so a model that quietly edits a sentence while quoting it grounds
+  nothing;
+- the quotation is **specific enough to mean something** — it must carry at least two distinctive,
+  non-trivial words, so a common fragment cannot be used to attach a claim to a page that happens to
+  contain it.
+
+And what is then served as the grounded result is **the page's own passage, not the model's sentence
+about it.** The model's wording is treated as a pointer to evidence, never as the evidence.
+
+The check has one further property that is the whole reason it can be trusted in this position: **it
+can only demote.** There is no input to it that promotes anything, and the model's own stated
+confidence is not one of its inputs at all. A claim the model was certain about and a claim it was
+hesitant about are checked identically. Anything that fails is not deleted — it is recorded as
+advisory commentary, visible, attributable, and marked as backed by nothing.
+
+Put the pieces together and the guarantee is simple to state and simple to audit. **The strongest
+thing a web page can achieve in this system is to have one of its own sentences quoted back, with a
+citation to a stored copy of the page that fetched it.** It cannot cause the system to assert
+anything. It cannot cause the system to act. It cannot enter the owner's memory as knowledge. The
+worst case for a hostile page is that it gets quoted — and a quotation, attributed to its source, is
+exactly what a careful human researcher would take from an unfamiliar website too.
+
+#### 12.7 Learning by topic: references, never targets
+
+When the owner names a topic instead of an address, the system does not go looking for sources. It
+reads from a short, fixed, curated list written into the software: the Open Web Application Security
+Project's main site and its cheat-sheet series; three MITRE catalogues — of weakness types, of attack
+patterns, and of attacker techniques; the United States national vulnerability database; and the
+open-source vulnerability database. Seven sites, all of them public reference works.
+
+Two points about that list matter more than its contents.
+
+**These are references, never targets.** The system reads their documentation the way a person reads a
+manual. Nothing about their presence on this list makes them subject to any kind of testing, and the
+web-reading layer has no ability to test anything in any case. The distinction is the same one drawn
+elsewhere in this briefing between a source of information and a system under assessment, and it is
+worth keeping crisp: a list of sites the system may *read* is not a list of sites it may *touch*.
+
+**The list is fixed, and the other gates still apply.** A topic run cannot be steered onto a site the
+owner did not choose, because there is no step in which anything chooses a site — the seven are
+written into the software. And each of the seven still passes the public-address check, the site's own
+rules and the pacing gate on every fetch, exactly as a pointed-at address does.
+
+#### 12.8 Honest status of this route
+
+Four things are true about this capability on this machine, and all four should be said plainly.
+
+**The general research path does not have this cancel wiring.** A prior reviewer reported this, and
+checking the code confirms it: the typed command that performs general scoped web research constructs
+its crawl without a stop signal, and with the wider budget — twenty-five pages, three steps, fifteen
+per site. **The emergency stop therefore does not abort a general research crawl that is already under
+way.** It still refuses the write-up at the permission gate, so a halted run files nothing and a
+refusal is recorded instead; but the pages it had queued are still fetched. The pointed-at learning
+route and the general research route are not equivalent in this respect, and only the former stops
+promptly. Wiring the same signal into the general path is a small change and an obvious one; it has
+not been made.
+
+**This has not been exercised against a live outside site here.** The permanent record on this machine
+contains no fetched-page entries at all — not one — which is the direct check, and it comes back
+empty. The automated tests around this route are thorough about the *logic*: they drive it with a
+stand-in fetcher returning a fixed page and confirm that a genuine quotation grounds, that a fabricated
+quotation is demoted, that a citation to a page outside the window is rejected, that an internal
+address is refused, that the stop aborts the crawl, and that the action is refused when the stop is
+engaged or automatic learning is off. What they do not do is open a socket. **The grounding behaviour
+is verified; the network behaviour of this specific route is verified only against a stand-in.**
+
+**The interface exposes one of the two routes.** The address box is on the screen; the topic route is
+not, and reaching it means going to the layer behind the screen.
+
+**A page that assembles itself in the browser cannot be read.** As set out earlier in this chapter,
+the component that would run a page's own code has exactly one shipped implementation, and it returns
+nothing — deliberately, because a real browser would go around the pinned-address protection this
+whole route depends on. A modern site that renders itself entirely in the browser will therefore yield
+little or no text, and the run will report a thin result rather than inventing a thick one.
+
+### 13. Honest status: what is working, what is built but not live, and what is absent
+
+This chapter has described a lot of capability. A reader deciding whether to trust a system needs to
+know which parts of it are actually running, and the answer is not uniform. The table below is the
+whole chapter reduced to that one question, checked against this machine rather than against the
+project's own documentation — which, in two places, turned out to be describing an earlier state.
+
+**Read the middle column as the important one.** "Built and tested but not live here" is not a
+euphemism for "does not work". It means the logic exists, has automated tests, and is waiting on a
+piece of software or hardware that is not installed. It is a different thing from "absent", and a
+very different thing from "working", and this document will not blur the three.
+
+| Capability | Status on this machine | What it is waiting on |
+|---|---|---|
+| The signed record, and the chain over it | **Working** | — |
+| Ingesting assistant transcripts, sub-agent transcripts and code commits | **Working**, and safe to re-run | — |
+| Ingesting curated documents | **Working, but not safe to re-run** — it has no cursor and no duplicate detection, so running it twice files everything twice | A fix; it is opt-in, so nothing does this automatically |
+| The entity map (the sovereign knowledge graph) | **Built and populated** — a real database of about twelve megabytes | — |
+| The nightly pass that grounds a claim in a quotation | **Working when it is run** — nothing schedules it here; the scheduled-run definition ships with the software but has not been installed on this machine, so "nightly" is the intended cadence, not the current one | Installing that scheduled run, if the pass is to happen without being asked |
+| Recall by meaning | **Working** — about 13,700 entries indexed, computed on this machine's own processor with no outside service and no per-question cost | — |
+| The nine agents | **Built and tested; halted on this machine** — each one runs, holds its ceiling and writes its own name onto the record, but the emergency stop is engaged here, and while it is, the governing check denies every agent action above plain observation | The owner releasing the stop. The record's own release entry predates the anti-replay hardening and no longer verifies, so it is not honoured; a fresh owner-signed release clears it |
+| The perception agent | **Built and tested; not live here** — it runs and is a named identity on the record like the other nine, but the reader that supplies the authoritative half of its answer is not installed, so every reading it produces stays a lead. The halt above binds it too | The text-recognition program, and the owner releasing the stop |
+| Learning from a page the owner points at | **Built and tested, never run against a live site here** — the record holds no fetched-page entries at all; the tests drive it with a stand-in fetcher | A run against a real address. The grounding behaviour it depends on is exercised and holds |
+| The memory server that gives an assistant cited recall | **Live** — its eight tools are attached to the assistant session that wrote this chapter | — |
+| Capturing a screen or a camera frame | **Available** — a screen-capture utility and a camera are both present | — |
+| Reading the text in a captured image | **Absent** — the text-recognition program is not installed | That program |
+| The local advisory image reader | **Absent** — not installed | That program |
+| Watching the screen continuously | **Built, with no way to start it** — there is no command-line option that turns it on | A command to launch it |
+| The voice loop | **Built and tested, cannot start here** — the audio-device library both the microphone and the speaker need is not installed | That library, plus a microphone and speaker |
+| Hands-free waking by saying its name | **Not built** — the current trigger reacts to sound level, which is not the same thing | A trained model for the word |
+| Interrupting it mid-sentence, on real speakers | **Built and tested from recordings** | Echo cancellation, or run it one direction at a time |
+| On-camera hand gestures | **Built, and cannot fire** — the hand-tracking model is not present, so the detector is a deliberate no-op | That model |
+| The phone as a remote trackpad | **Built and tested on the desktop side only; not wired end to end** — the decoding of a landmark batch, the dropping of replayed, reordered and foreign batches, and the full re-verification of a signed arm request all have tests, but nothing carries hand movement from a phone to a desktop, here or anywhere in this software | A hand detector in the companion app, a door on the phone bridge to receive landmark batches, and a command that starts the desktop gesture loop |
+| The cockpit | **Working** | — |
+| The status overlay | **Built, wired at both ends and tested** — but neither of its two producers has run against live hardware here: the listening/thinking/speaking events exist only while a live speech loop is running, and the navigation signals come from speech or from a gesture session that is actually producing movement | A microphone; or, for the gesture half, everything the trackpad row above is waiting on |
+| The phone companion and its app | **Built**, with a demonstration that runs with no phone and no network tunnel | A phone, for real use |
+| Everything above, on macOS, Windows or Android | **Not proven** — Linux is the tested path; the others are honest, documented gaps | Work, and testing |
+
+#### 13.1 The four things a careful reader should press on
+
+**The agent mesh is halted on this machine.** The emergency stop is engaged here, and while it is,
+the governing check denies every agent action above plain observation. The record does carry a
+release, written before the guard against replayed decisions existed, and it no longer verifies
+against the shape the check now requires — so it is ignored, exactly as a stale release should be,
+and the halt stands. Nothing on the sovereign agent side is doing work on this host until the owner
+signs a fresh release. That is the fail-safe direction behaving as designed, and it is also the
+reason a reader should not read the agent rows above as "running today".
+
+**The projections are ahead of the record on this machine.** The meaning-search index and the entity
+map were built from a record containing tens of thousands of entries. The signed chain in use today
+holds sixteen. The chain itself verifies — it is internally consistent — but a search can return a
+citation whose entry number does not resolve against it. That matters more than it first appears,
+because *citing the source* is the property this whole design rests on. The honest statement is that
+the grounding **mechanism** is sound and tested, and that on this machine the indexes and the chain
+have drifted apart and should be rebuilt before anyone relies on a citation resolving.
+
+**The record has no signed head here.** The chain links cleanly, but nothing has yet signed a
+statement of the form "this is the record, and it ends here". Without that, growth and truncation
+look alike to an outside checker. Chapter 7 explains why that signature matters; on this machine it
+has not been made.
+
+**Absence of a reader is not absence of risk, but it is absence of capability.** With no
+text-recognition program installed, nothing seen on a screen can become a grounded claim at all —
+every reading stays advisory by construction. That is the design behaving correctly under a missing
+component rather than degrading quietly, and it is worth understanding as the pattern this whole
+side of the system follows: **when a piece is missing, the honest failure is the default one.**
 
 ---
 
@@ -20895,7 +27454,7 @@ fixed, closed set in the code, so a phrase like "probably fine" cannot reach the
 | **CRUCIBLE** | The offensive engine inside VIGIL. It explores an authorised target, probes it, and calls something a weakness only when a checker fires over the target's real output. |
 | **AEGIS** | The defensive counterpart — the same proving machinery pointed inward at systems the customer runs. It detects and proves attacks using the customer's own records, and issues a re-checkable certificate rather than an alert. |
 | **RAMPART** | The name used inside the code for AEGIS's inline protective gateway — the part that sits in the live traffic path in front of a web application and can block. Its stated distinguishing feature is not that it blocks, but that every block comes with a certificate anyone can re-run. |
-| **SIGIL** | The sovereign, personal side: an assistant that runs on the owner's own hardware, remembers the owner's work in a tamper-evident record, can act on the owner's files and accounts under strict permission tiers, and contains no offensive capability at all. |
+| **SIGIL (the sovereign side)** | The sovereign, personal side: an assistant that runs on the owner's own hardware, remembers the owner's work in a tamper-evident record, can act on the owner's files and accounts under strict permission tiers, and contains no offensive capability at all. It is also the offensive half's **governor** — it holds the owner's signing key, and the offensive engine must ask it for permission before it may begin work — which is why the briefing calls it "the sovereign side" as often as it uses the name. |
 | **STRIX** | A *vendored* third-party autonomous testing tool (see "vendored") kept inside the product under its original Apache-2.0 licence. It is used as a source of suggestions only; nothing it says becomes a fact without passing the same checking as anything else. |
 | **WARDEN** | The permission classifier: the component that sorts every proposed action into one of four danger tiers. |
 | **OBSIDIAN** | The written operating doctrine given to the artificial intelligence when it drives the offensive engine — how to think, what to record, what never to do. |
@@ -20909,11 +27468,17 @@ fixed, closed set in the code, so a phrase like "probably fine" cannot reach the
 | **Trust Center** | The screen that displays the result of an independent, offline re-verification of a package, including whether the identity of the signer was anchored properly. |
 | **Knowledge Engine** | The screen and subsystem that reasons over incoming vulnerability intelligence and drafts proposals for the owner. A proposal authorises nothing. |
 | **Universal Target Intake** | A helper that takes a single piece of information about a target and drafts the paperwork for an engagement, so the operator does not start from a blank page. |
-| **Command / VIGIL COMMAND** | The primary product interface: a single web application of twenty-eight screens covering assessment, learning and management. |
+| **Command / VIGIL COMMAND** | The primary product interface: a single web application of twenty-nine screens covering assessment, learning and management. |
 | **Ops Console** | An older, separate interface belonging to the offensive engine, of twenty-two screens, still present alongside the main one. |
-| **Cockpit** | The sovereign side's own small web page, served on the operator's own machine at the address `127.0.0.1:8733`. It is where the owner's signing key, the approvals queue, the emergency stop and the stored service credentials live. |
+| **Cockpit** | The sovereign side's own small web program, served on the operator's own machine at the address `127.0.0.1:8733`. It is where the owner's signing key, the approvals queue, the emergency stop and the stored service credentials live, and it is the load-bearing back end of the main interface — which calls it for every sovereign read and for the single signed channel through which every owner-plane change passes. Its own five-panel page is a superseded front end that is still shipped and still served; that is why one chapter calls the cockpit legacy and the sovereign documentation calls it current — they are describing the page and the program. |
+| **The status overlay** | The small card in the corner of the main interface showing what the sovereign assistant is doing at that moment — listening, thinking or speaking — and the line it heard or is saying. It is also the one live channel that crosses from the sovereign side into the main interface, carrying screen-change signals taken from the signed record and moment-to-moment state taken from a small scrap file. |
+| **The memory server** | The small piece of software on the sovereign side that hands the owner's own record back to any AI assistant the owner already uses, through a published tool-calling standard. It offers exactly eight tools, all of which read and none of which acts, and every result arrives with the record number and fingerprint needed to check it. |
+| **The companion (the phone)** | The installable web app the desktop serves to the owner's phone over a private network link. It holds only the phone's own key and **signs requests the desktop then verifies** — approving queued items, halting everything, relaying a typed command, reading a stripped-down view; it never holds the owner's top-level key and never controls the desktop. |
+| **Mesh** | Used for two different collections, and the briefing always says which. The *agent mesh* is the set of named automated assistants on the sovereign side; the *device mesh* is the signed list of phones and other devices the owner has authorised to sign requests. |
 | **Dashboard** | A word used in two ways. In the software it is the name of one read-only view over the signed record. In ordinary usage it means any summary screen. This briefing avoids the second sense; where it means the product's main interface it says "VIGIL COMMAND". |
 | **Unified proxy** | The single web address a person points a browser at — `127.0.0.1:8770` on the operator's own machine — which passes each request on to whichever part of the system owns it. It exists so that one human faces one front door rather than three separate ones. It is brought up only by the operator's own "bring it all up" command. |
+| **Engagement library** | The screen that lists every past job, most recently worked first, so an operator returning months later can find work by a human name rather than a machine identity. It adds navigation, not authority: the list is drawn only from the signed record and from what is on disk, and nothing on it can move a run into a job it does not belong to. |
+| **Engagement label** | The human name an operator attaches to a job, or to a single run — "Acme, Q3 external review". It is stored in one side-car file of its own, reaches no certificate and no proof bundle, and rewrites nothing that already exists, so anything already delivered re-verifies to byte-identical results. A run's name has one onward use: it titles the readable documents of a dossier downloaded after the rename. |
 
 ---
 
@@ -20957,6 +27522,12 @@ fixed, closed set in the code, so a phrase like "probably fine" cannot reach the
 | **Hash chain** | The mechanism behind that. Each entry in the record begins by writing down the fingerprint of the entry before it, so removing or altering an old page breaks every page after it. The same idea as a bound ledger with sequentially numbered pages. Described in full in section 6 under "Chain". |
 | **Ledger** | An ordinary word used in this briefing in its ordinary sense: a bound book of entries in order, which is what the system's records behave like. Two specific ledgers are named — the **usage ledger** (who ran the tool, when, and against what) and the **spend ledger** (which one-time authorisations have already been used up). |
 | **Chain of custody** | The evidence-handling idea borrowed from law: an unbroken, recorded account of who held a piece of evidence and when, so that its integrity can be argued about later. Here it is provided by the append-only record rather than by signatures on a paper form. |
+| **Case file** | The pack of nine numbered plain-language documents generated into every dossier, written for the non-specialist who receives it: what was done, what was found, what was **not** examined, what to do about it, how to check the result independently, and a glossary. Numbered so the reading order is obvious from the file names alone. |
+| **Live-fire harness** | A runnable script kept in the repository that points a finished capability at something real rather than at saved evidence, asserts every expectation, and stops with an error if any of them fails. Two exist: one fires at a real outside service, the other at real infrastructure the project stands up and destroys itself. They are deliberately not run by the automated build, because a live test that invents a result when it cannot actually run is worse than no live test at all. |
+| **Transport binding (connection provenance)** | The rule that every fact about a network connection — which address answered, whether encryption was genuinely verified, whether anything sat in the middle, whether the reply was cut short — is *derived from the connection itself rather than asserted*. Anything that cannot be established takes the value that makes the checker refuse. It is what made the first confirmation against a real outside provider possible. |
+| **Anti-laundering gate** | The specific condition attached to each exploitation confirmation whose only job is to stop a false confirmation being manufactured — typically by requiring the confirming call to have reached an address on a fixed approved list, and by binding that call to the exact secret that was captured. |
+| **Notary** | A separate party holding its own signing key, which countersigns a captured answer together with the encrypted session it arrived on, so a reader need not trust the producer's account of what the target sent. Built and tested; the shipped notary is software this system runs, so it demonstrates the mechanism rather than establishing independence. |
+| **Evidence grade** | The four-level scale the briefing uses to say how firmly a checker has been exercised: material a **real outside system** produced; material from **real infrastructure the system creates and destroys itself**; material a **real program on the project's own machine** produced; and **saved sample material** only. A grade is a statement about evidence, not about quality. |
 
 ---
 
@@ -20974,13 +27545,16 @@ fixed, closed set in the code, so a phrase like "probably fine" cannot reach the
 | **Gate** | Any control that must be passed before an action happens. Every gate in this system can only say no. |
 | **Conjunctive gate** | The combined permission check in which *every* condition must pass at once. One failure — or one error — refuses the whole action. |
 | **Egress gate** | The control that decides whether a single packet of data may leave the machine. "Egress" simply means outbound. |
+| **Data egress** | Sending data off the machine — for example uploading a picture of the owner's own screen to an outside company's model. The system treats that as an externally visible act with a consequence level of its own rather than as a quality setting, and each upload needs its own approval bound to that exact picture and that exact question. |
 | **Fail-closed** | If a safety check cannot be completed — an error, an unreadable file, a missing answer — the result is "no". Like a drawbridge held up by an electric motor: cut the power and it falls shut. A check that says "allowed" when it breaks is worse than no check at all. |
 | **Fail-open / best-effort** | The opposite: if the control cannot be applied, the work continues without it. The briefing names each place where this is the behaviour, and says whether it is a deliberate choice or a weakness. Two are deliberate choices: the defensive firewall forwards traffic rather than blocking it when its own inspection fails, on the stated rule that the firewall never takes your application down; and the confidence layer, which has no authority over any outcome, is skipped if it errors. The gates that decide whether an action may run fail *closed* — including the attachment of the gate on the vendored agent's shell, which stops the run rather than continuing without it. |
 | **Tiers A0 to A3** | Four levels of how much damage an action could do: A0 observe only, A1 a reversible internal act, A2 externally visible or only partly reversible, A3 destructive, financial or security-relevant. The lowest two may run automatically; the higher two are queued for a human. |
 | **Ceiling** | The highest tier a particular automated worker is allowed to reach. An agent cannot raise its own ceiling. |
 | **Approval queue** | Where an action that exceeds what may run automatically waits for a person. The default is that each such action is approved individually and the approval is signed. |
 | **Standing approval** | The weaker alternative: a blanket permission for a class of actions, offered but not the default. |
-| **Kill switch (emergency stop)** | A file on disk which, while it exists, causes every action to be refused. Because it is a file rather than a setting held in memory, tripping it survives a crash or a restart, and any uncertainty about whether it exists reads as "halted". |
+| **Capability latch** | An owner-signed on-or-off switch for a whole capability — voice control, gesture control, or the drafting of learning proposals — kept as an entry on the record rather than as a setting in a file anyone could edit. It is deliberately lopsided: an "off" always takes effect, even unsigned, while an "on" counts only if the owner signed it and carries a stamp later than every "on" already honoured, so a genuine "on" captured last week cannot be replayed after the owner switched it off. A latch that cannot be read at all resolves to off. |
+| **Arming (an armed session)** | Unlocking gesture control for a bounded period. Arming requires the owner's key and writes a signed entry to the record, and the session it creates lives only in the owner's own running program; with no live session nothing can be injected at all, and the session ends on disarm, on losing sight of the hand, on expiry, or on any of the per-frame safety checks failing. |
+| **Kill switch (emergency stop, panic halt)** | The single control that causes every action to be refused while it is engaged. On the offensive side it is a file on disk, so tripping it survives a crash or a restart and any uncertainty about whether it exists reads as "halted"; on the sovereign side it is an entry on the record, and it is deliberately lopsided — **any** halt counts, even unsigned and even sent from the phone, while releasing it requires the owner's signature at the desktop. It halts the assistants; observing and reading memory are left deliberately alive. |
 | **Dead-man's switch** | A cap on how long an authorisation for a dangerous action stays valid, so an approval left lying around expires by itself. |
 | **Entitlement** | A signed permission slip that decides which capabilities a particular installation may use at all. It is tied to one machine, it expires, and it can be withdrawn. It answers the question "if this software is copied or stolen, what can the thief do with it?" — the answer being: only the safe baseline. |
 | **Hard guardrail** | A categorical refusal of an entire class of targets by name — government, military, educational and intergovernmental addresses — which takes no settings and cannot be switched off. Built and tested; the briefing states plainly that no connection from it to the live testing path could be verified. |
@@ -21004,6 +27578,9 @@ fixed, closed set in the code, so a phrase like "probably fine" cannot reach the
 | **Throttling / pacing** | Deliberately slowing down. The system waits a fixed gap between requests so that testing does not behave like an attack on the target's availability. See "Posture (pacing)" above. |
 | **Rate limit** | A cap the *target* imposes on how many requests it will accept in a period. Meeting one is normal, and the system paces itself to stay under it. |
 | **Service credential (API key)** | A secret string that lets this system use somebody else's service — for example an artificial-intelligence provider, or a read-only view of a cloud account. They are supplied by the customer, stored on the owner's side, and each one is listed in the briefing with what it unlocks and what it cannot do. |
+| **Sovereignty tier** | The setting that decides where the system's own reasoning is allowed to physically happen, and therefore where the customer's data may go. Four rungs: local models only, models in a named jurisdiction, a contractually zero-retention service, or anything. It is consulted before a connection to a model is even built, and with nothing configured it resolves to the most permissive rung — so choosing one is a deployment act. |
+| **Capability grant (the code calls it an entitlement)** | The signed permission slip that decides which of the system's dangerous powers may run on a particular installation. Several named authorisers must sign it; it names the machines it is valid on; it expires; and it can be withdrawn. |
+| **Revocation list** | The signed list of capability grants that have been withdrawn. It carries a serial number that may only go up, so an older list cannot be replayed to quietly un-withdraw something. |
 
 ---
 
@@ -21017,12 +27594,16 @@ fixed, closed set in the code, so a phrase like "probably fine" cannot reach the
 | **Out-of-band pin** | The step that makes independent checking meaningful: the recipient obtains the trust root's fingerprint through a channel other than the package itself — a website, a letter, a signed email — and checks the package against that. It works the way a notary's specimen signature works: you do not verify a notarised document against the signature printed on the same document. |
 | **Delegation** | The ceremony by which the owner's key blesses a working key, so that day-to-day signing does not require the top key to be present. |
 | **Revocation** | Withdrawing a key's authority. The briefing states which forms of this exist and which do not. |
+| **Device key** | A signing key belonging to one device — a phone — and to nothing else. It is created on that device in a way that prevents anything reading it back out, and the owner authorises it once from the desktop; the device signs, the desktop verifies, and the owner's own top-level key never travels. |
+| **Device ledger** | The signed list, kept on the record, of which devices the owner has authorised. It is recomputed on every single request rather than cached, so withdrawing a device takes effect on that device's very next request, and a withdrawal keeps its force even if an old authorisation is captured and replayed. |
 | **Rotation** | Replacing a key with a new one on a planned schedule. |
 | **Escrow** | A safeguarded backup copy of a key, held so that losing the original does not lose everything it protects. |
 | **Purpose label (domain separation)** | A short fixed tag mixed into the bytes before signing, so a signature made for one purpose cannot be lifted and re-used as though it were made for another. |
 | **Canonical form** | One fixed, byte-for-byte way of writing a document down, so that two copies of the same content are identical and a signature over one is a signature over the other. |
 | **Chain (append-only record)** | A record in which each entry seals the one before it, so a page cannot be removed or altered without breaking every seal after it. |
-| **Spine** | The system's name for that append-only signed record of everything that happened. Entries can be added; they can never be edited or erased. |
+| **Spine (the record)** | The system's name for that append-only signed record of everything that happened. Entries can be added; they can never be edited or erased. On the sovereign side **the same object is also the assistant's memory** — there is no separate database of what the owner has been doing — which is why an answer from memory can cite an entry number a reader is able to go and check. |
+| **Supersede** | How a correction is made in a record from which nothing can be deleted: a new entry points at the older one it replaces, both stay where they are, and the newer one wins wherever the record is read. A fixed infrastructure problem, an approved request, a withdrawn device and an undone file change are all recorded this way. |
+| **Sealed (encrypted at rest)** | Stored in a form that cannot be read without a key. The sovereign record can seal an entry's human text field by field while leaving its bookkeeping fields readable, so the safety checks that scan the record keep working with no key at all and the integrity chain still verifies; it is off unless a key store has been set up. |
 | **Blackboard** | The shared working notice-board the automated assistants read from and write to. Also append-only. |
 | **High-water mark / anti-rollback floor** | A small separate marker file recording how far the record has advanced, so that quietly rewinding the record to an earlier state is detectable. Its limits are stated openly: an attacker with full control of the same machine who rewrites both is closed off only by an outside witness. |
 | **Monotonic** | Only ever moves forward, never back. Used of that high-water mark. |
@@ -21036,6 +27617,9 @@ fixed, closed set in the code, so a phrase like "probably fine" cannot reach the
 | **Append-only** | A record to which entries may be added but from which nothing may be removed or edited. The property the system's history and its shared notice-board both have. |
 | **Immutable** | Cannot be changed after it is written. Used of individual entries in an append-only record. |
 | **Nonce / single-use marker** | A value that may be used once and only once. It is how the system stops a genuine, correctly-signed permission slip from being presented a second time. |
+| **Anti-replay** | Stopping a genuine, correctly signed record from being presented a second time to resurrect a decision the owner had since withdrawn. Nothing is forged in such an attack — the signature really is the owner's — so a signature alone cannot defeat it. |
+| **Issue time (freshness stamp)** | The moment a signed decision was made, carried *inside* the signed material rather than beside it, so it cannot be re-stamped without breaking the signature. It is supplied by whoever holds the owner's key, never generated by the checking code, because a value the checker invents is a value a replay of the checker's own output can rely on. |
+| **High-water mark (of a signed decision)** | Alongside the record's own high-water mark above, each kind of owner decision remembers the newest issue time it has ever honoured. A record at or below that mark is ignored as a replay, and honouring one raises the mark past it, so an entry cannot even be replayed against itself. Only the *dangerous* direction is guarded: halting, revoking and switching off carry a fixed lowest value, because putting a freshness test on a fail-safe direction would turn it into a fail-open one. |
 
 ---
 
@@ -21043,7 +27627,8 @@ fixed, closed set in the code, so a phrase like "probably fine" cannot reach the
 
 | Term | What it means |
 |---|---|
-| **Knowledge graph** | The living map the system builds of a target: the things it found, and the connections between them. Sometimes just "the map" or "the picture". |
+| **Knowledge graph** | A map of things and the connections between them. There are **three** distinct ones in this product, and the briefing always names which is meant: the living map of a target described in the rest of this section, sometimes just "the map" or "the picture"; the **entity map** of the owner's own record on the sovereign side, below; and a derived picture of how one engagement unfolded, kept so that a later run can be given some prior context. Treating them as one object is the commonest way to misread the system. Chapter 10 counts *five pictures* rather than three graphs, and the difference is deliberate rather than a disagreement: it splits the derived engagement picture into the chain of attack and the per-job view of the signed record, which are two implementations of one family, and it counts alongside them the structured record of the reasoning behind the work — which is a record of a conversation rather than a map of things, and so is not a graph in this entry's sense. |
+| **Entity map** | The sovereign side's own small graph: the projects, working sessions, documents and code commits its record mentions, and which project each belongs to. It is rebuilt by replaying the record from the beginning, contains nothing a model judged or inferred, and every entry in it carries the record number and fingerprint that produced it — so an answer taken from the map can be traced back to a line of the record and read in its original context. |
 | **Node (a pin on the map)** | One thing: a host, a web address, an account, a credential, a data store, a defensive control. |
 | **Edge (a connection)** | One relationship between two things: "this account can reach that database", "this weakness affects that page". |
 | **Provenance tier** | How strong the history behind a map entry is — from "a checker proved it" at the top, down to "something inferred it" at the bottom. A weaker tier can never overwrite a stronger one. |
@@ -21057,7 +27642,7 @@ fixed, closed set in the code, so a phrase like "probably fine" cannot reach the
 | **Threat model** | The written analysis of what an attacker would want, who would attack, and where the trust boundaries sit. |
 | **Loudness** | How noticeable a route would be to a defender. Used to prefer a quiet route when the operator asks for one. |
 | **Drift** | The differences observed between one run and the next: what appeared, what disappeared, what changed. |
-| **Projection** | A copy of information rearranged into a more convenient shape. Derived from the record, disposable, rebuildable, and never allowed to feed a decision. |
+| **Projection** | A copy of information rearranged into a more convenient shape. Derived from the record, disposable, rebuildable, and never allowed to feed a decision. On the sovereign side the entity map and the meaning-search index are both projections, and each publishes how far behind the record it has fallen rather than hiding the gap. |
 
 ---
 
@@ -21068,7 +27653,11 @@ fixed, closed set in the code, so a phrase like "probably fine" cannot reach the
 | **Agent** | Here, a narrow specialised automated worker with one job, one output format, and a written set of things it is not allowed to do — enforced by the code, not by a policy document. Not a general-purpose robot. |
 | **Artificial intelligence (AI)** | In this briefing it always means a large language model — software that produces fluent, plausible text. It is used to decide what to try next. It is never used to decide what is true. |
 | **Large language model (LLM)** | The technical name for that kind of software. Its ordinary failure mode is to produce a confident, well-written description of something that is not there, which is precisely why the design keeps it away from verdicts. |
+| **Vision model** | Software of the same family that is handed a picture rather than text and describes it in ordinary prose. Its description is treated here as a guess about the image, never as a statement of what was on the screen. |
+| **Frontier model** | The largest and most capable models, run by outside companies on their own machines rather than on the owner's. Reaching one means sending the question — and, for a picture, the picture itself — off the machine, which is why the system treats using one as an act that needs permission rather than as a quality setting. |
+| **Embedding** | The list of numbers a small model produces to stand for the meaning of a passage of text. Passages that mean similar things produce lists pointing in similar directions, which is what makes searching by meaning possible; here they are computed on the owner's own processor, with no outside service, no account and no cost per question. |
 | **Propose** | What the AI and every external tool are allowed to do: suggest. Nothing more. |
+| **Advisory** | The label attached to anything a model produced that has not been confirmed against something independent — a summary, a description of a picture, a suggested reading. It is shown, clearly marked, beside the confirmed material. It is never the answer itself. |
 | **Critic** | An automatic reviewer that examines a finding. Its possible verdicts are deliberately *endorse*, *object* or *abstain* — there is no *confirm* option, so a critic can make the bar higher but never promote anything. |
 | **Reflection** | The system pausing to re-examine its own work in progress. It may re-order what to try next or defer something; it may never skip a surface or decide something is true. |
 | **Refusal** | The path by which the system declines to make a claim the evidence does not support. |
@@ -21079,9 +27668,14 @@ fixed, closed set in the code, so a phrase like "probably fine" cannot reach the
 | **Brain** | A pluggable planner that can propose what to do next. A proposal from a brain is still only a proposal. |
 | **Reasoning body** | The general "think, act, observe" loop the AI runs inside, with each action passing the same gates as everything else. |
 | **Executor** | The narrow component through which any action actually reaches the outside world, so that all the gates sit in one place rather than being scattered. |
-| **Seam** | A deliberately narrow joint between two parts of the system, built so that only inert data crosses it and never running code. |
+| **Seam** | Used in two senses, and the briefing distinguishes them. A *joining* seam is a deliberately narrow joint between two parts of the system, built so that only inert data crosses it and never running code. An *unfinished* seam is a place where the shape of a piece of work is defined and the surrounding machinery already talks to it, but the implementation behind it has deliberately not been written — the operating systems other than Linux, and the reading of pages that assemble themselves in a browser, are described this way. |
 | **Hallucination** | The characteristic failure of a large language model: producing a confident, fluent, entirely invented statement. It is the specific danger the whole design is built around, which is why a model's opinion can never become a fact here. |
 | **Veracity layer (anti-fabrication barrier)** | The component that takes a claim, re-runs the check the claim cites, and refuses to admit the claim if the check does not reproduce. It can only ever lower a claim; it has no power to raise one. The briefing is careful about its reach: it is wired into several real paths, including report generation, but it is not today a single universal checkpoint that every claim in the system must cross. |
+| **Consolidation (the nightly pass)** | The sovereign side's pass over everything added to the record since it last ran. A reader proposes candidate durable facts — decisions taken, promises made, positions reversed — a gate checks each one against the record, and the ones that pass and the ones that fail are both written down. It adds entries and removes none, and it can be run on a schedule or by hand. |
+| **Grounding a quote** | What a proposed fact must survive before it is recorded as one: it must name the record entries it rests on, all of them inside the batch the reader was actually shown; the quotation must appear word for word in the entry when that entry is fetched again from the record, rather than taken from the reader's copy of it; and the quotation must carry at least two substantial words. What is then served is **the owner's own words**, not the model's sentence about them — so a summary that quietly drops a "not" can never be presented as the owner's own history. |
+| **Recall by meaning** | Searching for what was meant rather than for the words that were used, so that a question about where to keep something can find a conversation that never used that word. Every hit comes back as a record entry with its number, fingerprint, date and score, so it can be cited and checked rather than merely quoted. |
+| **Grounding threshold** | The similarity score a search result must beat before the system will treat memory as having anything on the subject. Below it, the answer is an empty list plus an instruction not to fabricate, rather than the nearest weakly related fragments. The figures were set by measuring how this particular model scores topics that are present and topics that are absent, so changing the model would mean measuring them again. |
+| **Ambient watching** | The mode in which the sovereign side watches a stream of frames from the owner's own screen or camera instead of answering one question. It is off unless it is started, its start and its stop are both written to the record, and it acts only when the words read off the screen meaningfully change — so an unchanged frame produces no reading, no entry and no request at all. |
 
 ---
 
@@ -21135,6 +27729,10 @@ the terms that recur throughout the rest of the briefing.
 | **Port scan** | Knocking on each numbered door of a machine in turn to see which are open and what answers. |
 | **Breach / incident** | A breach is an actual unauthorised access to data or systems; an incident is any event a security team has to respond to. This system is a testing system, not an incident-response system. |
 | **Compliance** | Meeting the requirements of a standard, a regulator or a contract. The system can map its results onto published control frameworks, and it applies a hard rule when it does: an unproven suspicion is never counted towards a control. The output is explicitly not a certification, an accreditation, or a statement of compliance with anything. |
+| **Hash-locked dependency** | A third-party software component recorded not just by its version number but by a cryptographic fingerprint of the exact file. Installation runs in a mode that refuses the *whole* list if any single entry is unpinned or any fingerprint fails to match — the difference between ordering "the second edition" and ordering the copy whose every page matches a reference. |
+| **Lock file** | The written list of those hash-locked dependencies. There are two, one for each half of the system, because the two halves never share an installation. |
+| **Digest pinning** | The same idea applied to a whole prepared machine image: naming it by the fingerprint of its exact contents rather than by a movable label such as "latest", which whoever publishes it can silently re-point at something else. |
+| **Negative control on a gate** | Deliberately pointing a build gate at material known to be bad and requiring it to fail, immediately before the real check runs. Without it, a gate that reports nothing is indistinguishable from a gate that cannot report. |
 
 ---
 
@@ -21147,7 +27745,7 @@ Reading them precisely is the difference between an accurate picture and a misle
 |---|---|
 | **Fully working, exercised end to end** | Built, and actually run from beginning to end on this machine, producing real output. |
 | **Built and proven offline** | Built, and proven correct against recorded sample data standing in for a live system. Never yet pointed at a real outside system. |
-| **Live fire** | The act of running a built capability against a real system rather than against recorded sample data. Where that real system must belong to somebody else — a cloud account — several capabilities in this system are complete and await it by design, because they need a credential only the customer can supply. Where the system can create the real thing itself, it does: the Kubernetes confirmations are proven against a genuine cluster the system stands up, owns and destroys, which is also what makes that proof re-runnable by anyone. |
+| **Live fire** | The act of running a built capability against a real system rather than against recorded sample data. Where that real system must belong to somebody else — a cloud account — several capabilities in this system are complete and await it by design, because they need a credential only the customer can supply. Where the system can create the real thing itself, it does: the Kubernetes confirmations are proven against a genuine cluster the system stands up, owns and destroys. And where it can borrow only the evaluator's own account, it does that: the GitHub half of the exposed-secret confirmation is proven against the real public GitHub service. Both of those are re-runnable by anyone, which is the point. |
 | **Scaffold** | An interface exists; the thing behind it is not implemented. The system reports a clear error rather than returning a plausible-looking answer. |
 | **Refused** | Deliberately not built, for a stated reason. Not an oversight. |
 
@@ -21160,6 +27758,8 @@ Reading them precisely is the difference between an accurate picture and a misle
 | **Branch / merged / main line** | Software-development vocabulary that occasionally survives into the text. A *branch* is a separate working copy of the software; *merging* it into the *main line* is the step that makes the work part of what customers get. |
 | **Pull request** | A proposed change to the software, raised so that a human reviews it before it becomes part of the product. |
 | **Claim discipline** | The project's written rule that a claim must be true today, and that where a claim is not yet true the gap must be named as engineering work rather than resolved by quietly softening the claim. |
+| **Live fire, in this edition** | Three confirmations are proven this way today: both Kubernetes ones, against a real cluster the system creates and destroys itself, and the GitHub half of exposed-secret validity, against the real public GitHub service. The remaining cloud confirmations — including that same capability's Amazon Web Services half, to which nothing from the GitHub run transfers — are complete and proven offline, and await live fire on a customer's own account by design. |
+| **Row-level split** | Where one capability recognises two kinds of thing and only one of them has been proven against a real system. The briefing names the row rather than the capability in those cases, because blurring them would be an overclaim. The worked example is the exposed-secret check: its GitHub row is proven live, its Amazon Web Services row is not. |
 
 ---
 
@@ -21196,8 +27796,17 @@ Reading them precisely is the difference between an accurate picture and a misle
 | **Self-hosted / sovereign** | Run entirely on hardware the organisation controls, with nothing sent to an outside company. |
 | **Idempotent** | Running it twice does nothing extra; it is safe to press again. |
 | **Vendored** | A copy of somebody else's software kept inside this one, with its original licence and credits intact. |
-| **Telemetry** | Measurement data a system produces about itself. |
+| **Telemetry** | Measurement data a system produces about itself — what is happening right now, as opposed to what was decided. The briefing keeps the two firmly apart: telemetry goes to a small scrap file that holds only the latest value and is allowed to fail silently, while audit goes to the signed record and a failure to write it is treated as an incident. It is why a ten-minute spoken conversation adds a handful of entries rather than tens of thousands. |
 | **Log** | The record a system keeps of what happened to it. The defensive side reads these to prove an attack was visible. |
+| **Optical character recognition (OCR)** | Software that reads the letters out of a picture and hands back text — the technology behind scanning a page and getting something editable. On the sovereign side the text it reads off a captured screen is the authoritative half of the answer, so a machine with no such software installed can ground nothing it sees at all. |
+| **Wake word** | The spoken name that is meant to make an assistant start listening. Recognising one particular word requires a trained model; reacting to a rise in loudness does not, and the briefing is careful to say which of the two is built. |
+| **Barge-in** | Talking over the assistant while it is speaking and having it stop and listen. Here it takes several consecutive frames of detected speech, so a cough or a click does not abort the answer. |
+| **Echo cancellation** | The processing that stops a microphone from hearing its own machine's speaker. Without it — or without muting the microphone while speaking — an assistant with an open microphone interrupts itself, which is why the briefing separates a finished state machine from an unsolved room. |
+| **Full-duplex / half-duplex** | Both directions at once, or one direction at a time. A full-duplex voice loop listens while it speaks, which is what makes interruption possible; a half-duplex one mutes the microphone while speaking, which is the honest fallback where echo cancellation is unavailable. |
+| **Input injection** | Making a computer behave as though the owner had moved the mouse, clicked, scrolled or typed. It has nothing to do with the weakness family called injection in section 9: this is how a gesture or a remote trackpad reaches the desktop at all, and it is why typing, key combinations and launching a program are held one permission level above pointer movement. |
+| **Landmark** | One of the twenty-one points on a hand — knuckles, fingertips, wrist — that a hand-tracking model reports. A batch of landmarks is a few dozen coordinates and not a picture, which is what would let a phone acting as a trackpad send its hand tracking to the desktop without sending any image of the room. The desktop side of that exchange is built and tested; nothing sends it landmarks yet. |
+| **Debounce** | Requiring a signal to hold steady before acting on it. A gesture becomes an instruction only after several consecutive identical readings that are also clearly ahead of the runner-up interpretation, so a momentary or ambiguous reading does nothing at all. |
+| **No-op** | A piece of software that runs and deliberately does nothing. The briefing uses the word where a component is present, honest about being unable to work, and returns an empty result rather than an invented one — the hand-tracking stage with no model file installed being the example. |
 | **Dual-licensed** | Offered under two alternative sets of terms, with the user taking whichever applies to them. Relevant here because the free terms exclude government and public-sector use. |
 | **Open source** | Software whose source code is published, so anyone may read it, check it and usually re-use it under stated terms. Publishing source code is not the same as giving unrestricted permission to use it; see "dual-licensed". |
 | **Command line (terminal)** | The typed way of driving a computer: you type an instruction, press return, and read the reply, instead of clicking. Several of this system's capabilities are available only this way and have no screen, and the briefing says which. |
@@ -21313,6 +27922,8 @@ system re-does their work itself and judges its own record.
 | **Docker** | The standard way of packaging a program with everything it needs and running it in isolation. Optional for the core of this system; required for the vendored third-party testing tool. |
 | **Neo4j** | A database designed for storing things and the connections between them. An optional external home for the map the system builds of a target. It is started only under the deployment profile that asks for it, it holds no secret, and it grants no permission. |
 | **SQLite** | A database that lives in a single ordinary file, needing no separate server. Used for local working storage — for example the shared notice-board the automatic workers coordinate through. |
+| **k3s** | A small, complete distribution of Kubernetes. The live-fire harness downloads a real copy of it to stand up a genuine single-node cluster, which the system creates, owns and destroys — so the proof borrows nobody's infrastructure and anyone can re-run it. |
+| **GitHub** | A widely used commercial service for hosting source code. It appears here as the real third-party provider the exposed-secret confirmation has been fired at, using the operator's own credential against the least-privileged call that service offers. |
 | **Qdrant** | A database that searches by similarity of meaning rather than by exact words. It is the search behind the sovereign side's memory and recall, and there is a built-in fallback that needs no separate container at all. |
 | **Terraform** | A widely used text format for describing cloud infrastructure. It appears here as one of the languages the source-code review can read. |
 | **Strix** | See section 3. A third-party autonomous testing tool kept inside the product under its original licence, used as a source of suggestions only. |

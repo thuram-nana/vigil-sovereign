@@ -1,0 +1,234 @@
+[
+  {
+    "severity": "HIGH",
+    "kind": "wrong-number",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "| How the consolidation gate grounds a quotation | Three real record entries, with entry numbers, fingerprints, dates, sessions and similarity scores of 0.78, 0.73 and 0.73 |",
+    "why": "I re-ran that exact question through the same tool on this host and it does not reproduce. `memory_search(query=\"How the consolidation gate grounds a quotation\", k=8)` returns EIGHT results, scores 0.7886, 0.7198, 0.7177, 0.7171, 0.7162, 0.7158, 0.7118, 0.7100 \u2014 not three, and no result scores 0.73. Two of the three quoted scores are wrong; the count is wrong. The result is deterministic and re-checkable: the collection reports `indexed_vectors_count: 0` with `indexing_threshold: 20000` over 13,667 points, so search is exact brute force, not approximate HNSW; and `VectorIndex.search` embeds the query with `embed_one` (no query prefix, vectors/index.py:160), so there is no nondeterminism to blame. The alternate path `sigil search` also defaults to `-k 8` (cli.py:1230). Nothing has been written to the index since 17 July (last_indexed_seq 43,350, count 13,667, both unchanged). This is the section's live proof of the honesty property, in a briefing whose whole value is that an assessor can re-run it.",
+    "fix": "| How the consolidation gate grounds a quotation | Eight real record entries, with entry numbers, fingerprints, dates, sessions and similarity scores running from 0.79 down to 0.71 |"
+  },
+  {
+    "severity": "HIGH",
+    "kind": "missing-qualifier",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "An assessor who does not trust the map can rebuild it\nfrom the same record and compare. A discrepancy would be a fault in the software, not a difference of\nopinion.",
+    "why": "On this machine an assessor who follows that instruction gets a huge discrepancy that is NOT a software fault. `~/.sigil/graph/current/manifest.json` reads `{\"rebuilt_seq\": 43332, \"projects\": 1, \"sessions\": 160, \"documents\": 16, \"commits\": 534, \"edges\": 710}`, but the record at the standard path (`~/.sigil/spine/spine.jsonl`, 16 lines) contains 15 `event` records and 1 `commit` record and zero `session`/`message`/`document` records \u2014 I counted the kinds directly. `graph/rebuild.py:_accumulate` only mints Session/Document/Commit nodes from those kinds, so a rebuild here yields roughly one commit node and nothing else. The chapter establishes this drift in section 2.3 and again in 4.6, but section 3.2 tells the assessor the opposite and is the sentence they will act on.",
+    "fix": "An assessor who does not trust the map can rebuild it from the record it was replayed from and compare; a discrepancy there would be a fault in the software, not a difference of opinion. That comparison is not available on this machine, because the record at the standard path is no longer the 43,332-entry record the map was built from \u2014 the drift described in section 2.3."
+  },
+  {
+    "severity": "HIGH",
+    "kind": "overclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "**It can be thrown away without loss.** Delete the map and nothing is gone; rebuild it and it comes\nback.",
+    "why": "False on this host, and destructive if acted on. The map holds 160 sessions, 534 commits, 16 documents and 710 edges derived from a record that ran to entry 43,332; the record file now at `~/.sigil/spine/spine.jsonl` holds 16 entries beginning 2026-07-29 and contains no session, message or document records at all. `graph/rebuild.py` rebuilds only from `SpineStore()` at that path, so deleting `~/.sigil/graph/current/` here would destroy the only surviving copy of those 710 nodes. Section 3.3 repeats the same unqualified assurance (\"nothing is lost, because it held nothing not derived from the record\"), while section 4.6 says the opposite about the same object.",
+    "fix": "**It can be thrown away without loss \u2014 while the record it was replayed from is still there.** Delete the map and nothing is gone; rebuild it from that record and it comes back. On this machine that condition does not hold: the map was replayed from a 43,332-entry record the standard path no longer holds, so deleting it here would not be recoverable by a rebuild."
+  },
+  {
+    "severity": "MEDIUM",
+    "kind": "missing-qualifier",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "The model file is not conjured from nothing: about 65 megabytes is\ndownloaded once from a public model repository the first time it is needed, and cached on disk\nthereafter \u2014 which happened on this machine during the writing of this section.",
+    "why": "The size is right (65 MB: `/tmp/fastembed_cache` is 67,181,557 bytes) but \"cached on disk\" and \"one fetch ... at install time\" (four lines later) are wrong here, and this machine proves it. fastembed's default cache is \"`fastembed_cache` in the system's temp directory\" (fastembed/text/onnx_embedding.py:217); `findmnt /tmp` reports **tmpfs** \u2014 RAM-backed, cleared on reboot. So the fetch repeats every boot unless the cache dir is redirected. The evidence is in the timestamps: the meaning index was built 17 July (index high-water 43,350, collection mtime 17 July), yet `/tmp/fastembed_cache/models--qdrant--bge-small-en-v1.5-onnx-q/` was created 13 August 10:12 \u2014 the July copy did not survive. For a sealed deployment, bringing the file in on media is not enough; it must land somewhere persistent.",
+    "fix": "The model file is not conjured from nothing: about 65 megabytes is downloaded once from a public model repository the first time it is needed, and cached wherever the embedding library is pointed. By default that is a directory under the system temporary path, which on this machine is RAM-backed and cleared at every reboot \u2014 so the fetch repeated on 13 August even though the index had been built on 17 July. The accurate claim is one fetch per boot unless the cache is redirected to a persistent directory, and nothing crossing the boundary in between. For a sealed deployment, bring that one file in on media *and* point the cache at a persistent path."
+  },
+  {
+    "severity": "MEDIUM",
+    "kind": "overclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "The agent that owns memory runs one pass over everything added since it last ran. It has five moves\nand does nothing else.",
+    "why": "The pass has a sixth move the chapter never mentions, and it is the most consequential one for this audience: it re-signs the record's head with the owner's key. `consolidate/pipeline.py:5-7` enumerates its own steps as \"EXTRACT ... GATE ... PROMOTE ... flag CONTRADICTIONS ... write the BRIEF ... CHECKPOINT (re-sign the head)\", and `run_consolidation` defaults to `sign=True`, calling `checkpoint(store)` (pipeline.py:97-99). `spine/checkpoint.py:checkpoint()` writes `head.json` with an Ed25519 owner signature and advances the durable anti-rollback floor at `~/.sigil/floor.json`. The shipped service runs it unqualified (`ExecStart=... sigil consolidate --provider heuristic`), so signing is on by default. Section 3.8 compounds this with \"its whole output is entries: facts, refusals, contradiction flags, a brief\" \u2014 two of its writes land outside the record entirely.",
+    "fix": "The agent that owns memory runs one pass over everything added since it last ran. It has five moves that produce its output, and then one more: it re-signs the record's head under the owner's key and advances the durable anti-rollback mark. Nothing else."
+  },
+  {
+    "severity": "MEDIUM",
+    "kind": "missing-qualifier",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "The whole of the personal system's state lives in one directory readable only by the owner's own\naccount: the record, the keys, the search index, the entity map, the working caches.",
+    "why": "True of the directory (`~/.sigil` is `drwx------ kali`), but not of the search index as actually deployed here \u2014 and the index carries the record's text. `SIGIL_QDRANT_URL=http://127.0.0.1:6333` in `~/.sigil/sigil.env`, and `docker ps` shows `sigil-qdrant  qdrant/qdrant:v1.12.4  127.0.0.1:6333-6334`. Its storage is `~/.sigil/qdrant-server/collections`, owned `root:root` mode 0755, written by a root-run container rather than by the owner's account. More to the point, the loopback port carries no authentication: I read the collection and scrolled its points with a plain unauthenticated `curl`, and `index_spine` stores `\"text\": r.text()[:1200]` in every payload (vectors/index.py:143). Any local account on this host can therefore read 13,667 records' worth of the owner's text, whatever the directory mode says. Section 1.2's rules table carries the same unqualified claim.",
+    "fix": "The whole of the personal system's state lives in one directory readable only by the owner's own account: the record, the keys, the entity map, the working caches. The search index is the exception on this machine, because the owner has moved it into a small local server: it is reached over a loopback port that carries no authentication, so any account on this host can read the indexed text regardless of the directory's permissions."
+  },
+  {
+    "severity": "MEDIUM",
+    "kind": "overclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "That is why two\nrebuilds over the same record produce the same map, and the project's own tests assert exactly that.",
+    "why": "The test asserts something narrower. `apps/sigil/tests/test_graph.py:27-29` is the only determinism test: `def test_accumulate_is_deterministic(): s = _spine(); assert _accumulate(s) == _accumulate(s)`. It calls the derivation helper `_accumulate` twice; it never calls `rebuild()`, never opens K\u00f9zu, and never compares two maps. Section 2.5 of this same chapter states the limit correctly \u2014 \"What that test pins is the derivation step; nothing in the project claims two database files are byte-for-byte identical\" \u2014 so the two sections disagree, and \"exactly that\" is the word that makes 3.2 checkably wrong.",
+    "fix": "That is why two rebuilds over the same record produce the same map. The project's test pins the derivation step that guarantees it \u2014 it replays one record twice and requires the derived entities to be identical \u2014 rather than comparing two finished database files."
+  },
+  {
+    "severity": "LOW",
+    "kind": "wrong-number",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "The code says it in five words: *no API, no GPU, no cost.*",
+    "why": "`vectors/embed.py:3` reads \"No API, no GPU, no cost \u2014 fully local-first (SIGIL doctrine \u00a71.3).\" The quoted phrase is six words, not five. Trivial on its own, but it is a direct count of a directly quoted string, which is exactly the kind of thing a sceptical reader checks first.",
+    "fix": "The code says it in six words: *no API, no GPU, no cost.*"
+  },
+  {
+    "severity": "LOW",
+    "kind": "wrong-number",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "Where a fact does carry a strength number, that number\ncounts **how many distinct record entries independently re-verified it**: corroboration from the\nrecord, not self-assessment by the model.",
+    "why": "Off by one. `consolidate/promote.py:57` writes `\"alpha\": 1 + len(distinct), \"beta\": 1` where `distinct = sorted(set(verdict.verified_seqs))` \u2014 a Beta-prior pseudocount, so a fact corroborated by a single record carries 3 as its... carries alpha 2, not 1. The paragraph's real point (corroboration, not model confidence) is correct and the code says so in the same line, but the number as described does not match the number stored.",
+    "fix": "Where a fact does carry a strength number, that number is a corroboration count \u2014 one plus the number of distinct record entries that independently re-verified it: evidence from the record, not self-assessment by the model."
+  },
+  {
+    "severity": "LOW",
+    "kind": "contradiction",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "The entity map is rebuilt by replaying the record from the beginning, in entry order, into a fresh\nempty database, and then swapping the finished copy into place in one step so no reader ever sees\na half-built view.",
+    "why": "\"In one step\" contradicts section 3.3 of the same chapter, which corrects it: \"the old copy is removed immediately before the rename, so there is a brief moment when no map is in place.\" The code agrees with 3.3, not with 2.5 \u2014 `graph/rebuild.py:180-183` does `shutil.rmtree(CURRENT)` and then `STAGING.rename(CURRENT)`, two operations with a window between them. The \"no half-built view\" half is true (a reader in the window gets `GraphUnavailable`); only \"in one step\" is not.",
+    "fix": "The entity map is rebuilt by replaying the record from the beginning, in entry order, into a fresh empty database, and then putting the finished copy in place of the old one \u2014 so no reader ever sees a half-built view. Section 3.3 describes what that swap does and does not guarantee."
+  },
+  {
+    "severity": "LOW",
+    "kind": "underclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "On top of that absence sits a guard \u2014 a check that runs when each of the personal system's main\nsubsystems is loaded (the agent mesh, the governor, the voice pipeline, the gesture pipeline, the\ndevice registry, and the memory bridge).",
+    "why": "The list reads as an enumeration and undersells the coverage by half. `grep -rn \"assert_no_offense()\" apps/sigil/sigil/` returns twelve call sites, not six: agents, bridge, consolidate, gesture, governor, mcp/server, mesh, perception, platform, scrape, ui, voice. The six omitted include the consolidation pass itself (the subject of section 3), the web-research path that section 3.9 says reuses the same gate, the perception layer, the cockpit, and \u2014 depending on which one \"memory bridge\" is meant to name \u2014 either the MCP memory server or the phone transport. An assessor counting call sites finds twice what the briefing claims.",
+    "fix": "On top of that absence sits a guard \u2014 a check that runs when each of the personal system's subsystems is loaded, at twelve import sites: among them the agent mesh, the governor, the voice and gesture pipelines, the device registry, the consolidation pass, the web-research path, the cockpit and the memory server."
+  },
+  {
+    "severity": "BLOCK",
+    "kind": "overclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "and that it is a draft message. **It does not learn who the message is to, or what it says.**",
+    "why": "The three-field limit is real for `/api/pending` and the SSE stream only. The bridge also serves `/api/record/<seq>` (`bridge/server.py` do_GET, gated by the `read:record` action, which is in `envelope.ACTIONS`), and `_record()` returns `rec.payload` verbatim \u2014 the whole stored payload, unredacted. A queued approval's payload IS the proposal's payload: `agents/base.py:87,105` builds `common = {**p.payload, ...}` and appends it as the `awaiting-approval` record, and `agents/envoy.py:80-82` puts `to`, `subject` and `body` into a draft's payload. The phone signs its own envelopes, so it can mint a `read:record` envelope at will \u2014 and the shipped companion app already does: `webapp/index.html` labels the live feed \"tap any atom to verify its provenance\", and `webapp/app.js:352-362` (`showRecord`) fetches `/api/record/<seq>` with `read:record` and renders `JSON.stringify(r.payload, null, 2)` into the detail pane. At-rest field sealing does not save the claim either: it is opt-in and no vault is provisioned on this host (no `~/.sigil/vault*`, and `spine/store.py:206` says payloads stay plaintext without one); and even with a vault, `spine/envelope.py:58-64` lists `to` as not a content field at all and calls a `subject` a \"DOCUMENTED plaintext BOUNDARY\".",
+    "fix": "and that it is a draft message. **The feed and the queue tell it nothing more than that \u2014 not who the message is to, not what it says.** But the phone can also ask for one record by number, and that route returns the record's stored payload in full: for a draft, the recipient, the subject and the body. Approving from the queue is approving a numbered item; reading the case behind it is a second, separately-scoped request the phone is able to make."
+  },
+  {
+    "severity": "HIGH",
+    "kind": "contradiction",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "One route is different, and the code flags it as different. The \"where did I last see this?\" recall",
+    "why": "Two routes return content, not one. Besides `/api/recall`, `bridge/server.py` handles `path.startswith(\"/api/record/\")` with `self._authed(\"read:record\")` and returns the record's full payload (see the finding above). Note it is the one authenticated read NOT in the `_READ_ACTION` map \u2014 it is handled separately \u2014 so the code flags it as different too, and the briefing has counted only one of the two.",
+    "fix": "Two routes are different, and the code flags both. The \"where did I last see this?\" recall route returns the owner's own verbatim recorded on-screen text; the single-record route returns one stored record's payload in full. Precisely because each reveals more than the queue does, each is bound to its own separate permission a lesser request cannot reach."
+  },
+  {
+    "severity": "HIGH",
+    "kind": "overclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "| **Release a halt** | Halting is the safe direction, so *any* halt request works \u2014 no signature needed, because a nuisance halt is at worst an inconvenience. Un-halting is the dangerous direction and stays with the owner at the desktop. The switch is deliberately asymmetric. |",
+    "why": "Over the phone bridge a halt is signed like every other change. `bridge/server.py` do_POST routes `/api/panic` through `_authed_effectful(\"panic\")`, which requires a device envelope, a signature verifying against the per-request authorised-device set, the \u00b1120 s freshness window, the endpoint/action binding, and then `consume(..., effectful=True)` \u2014 the strict monotonic-nonce replay gate (`bridge/envelope.py:135-142`). `panic` sits in `envelope.ACTIONS` precisely so it can be signed, and the shipped PWA signs it (`webapp/app.js` panic handler \u2192 `buildEnvelope` \u2192 `deliver`, and its offline banner warns a queued panic is \"freshness-bound\"). An unsigned halt request gets 401. What needs no owner signature is the desktop-side library call `BridgeDaemon.panic_engage()` (`bridge/daemon.py`) \u2014 not reachable from a phone except through that signed endpoint. The same false claim appears at line 1623 as \"| **Panic-halt** the whole agent mesh | Needs no signature at all \u2014 see below. |\" and needs correcting with it.",
+    "fix": "| **Release a halt** | Halting is the safe direction, so *any authorised device's* halt request works \u2014 the desktop checks its signature, its freshness and its counter and asks for nothing beyond that, because a nuisance halt is at worst an inconvenience. Un-halting is the dangerous direction and stays with the owner at the desktop. The asymmetry is in what each direction is allowed to do, not in the proof it must carry. |  (and at line 1623: \"| **Panic-halt** the whole agent mesh | Signed like any other change, but nothing further is asked of it \u2014 see below. |\")"
+  },
+  {
+    "severity": "HIGH",
+    "kind": "underclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "Via one of four common screenshot tools \u2014 **none of which is installed on this machine**",
+    "why": "One of the four is installed and screen capture works here right now. `platform/linux.py:12` sets `_SCREEN_TOOLS = (\"scrot\", \"gnome-screenshot\", \"spectacle\", \"import\")`; `import` is ImageMagick's grabber and it is present \u2014 `/usr/bin/import`, ImageMagick 7.1.2-25. I ran the real code paths on this host: `LinuxBackend().capabilities()` returns `has_screen=True, has_camera=True, has_hid_inject=True`, and `perception.capture.grab_screen()` returned a real Frame (sha256 de31ebca59848bcb\u2026) with DISPLAY=:0.0. The \u00a713 ledger in the same chapter already says the opposite \u2014 \"Capturing a screen or a camera frame | **Available** \u2014 a screen-capture utility and a camera are both present\" \u2014 so the briefing contradicts itself and the ledger is the half that is right. What is genuinely absent is `tesseract`, so a capture carries no text.",
+    "fix": "Via one of four common screenshot tools \u2014 **one of which, ImageMagick's grabber, is installed here, so screen capture works on this machine** (what is missing is the text-recognition step, so a capture carries no readable text)"
+  },
+  {
+    "severity": "HIGH",
+    "kind": "overclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "| The phone as a remote trackpad | **The working gesture path** | A paired phone |",
+    "why": "It is waiting on far more than a paired phone, and \"working\" is wrong on this machine. (a) There is no route by which landmarks could arrive: the bridge's entire table is POST /api/action, /api/panic, /api/relay, /api/gesture/arm and GET /api/pending, /api/snapshot, /api/graph, /api/stream, /api/recall, /api/record/<seq> \u2014 no landmark endpoint. (b) The companion app contains no hand detection at all (no `getUserMedia`, no `hand`, no `landmark` anywhere under `bridge/webapp/`). (c) `gesture/remote.py:7-8` says the module has \"NO dependency on sigil/bridge/ \u2014 an inbound batch iterable is INJECTED, so there is no socket/import coupling here\", and the only producer of a `hand_batch` wire object anywhere in /home/kali/vigil is `apps/sigil/tests/test_gesture_remote.py`. (d) `gesture/run.py::run_gesture`, the daemon that would consume a `RemoteLandmarkSource`, has no non-test caller in the repository (`grep -rn run_gesture` hits only `gesture/run.py`, a docstring in `gesture/remote.py`, and two test files) and no `sigil` subcommand starts it; its default source is the local camera and its default landmarker is the inert ONNX stub.",
+    "fix": "| The phone as a remote trackpad | **Built and tested on the desktop side, not wired end to end here** \u2014 the decode, replay-drop and arm re-verification have tests; nothing yet carries landmarks from a phone to the desktop | A detector in the companion app, a route on the bridge to receive landmark batches, and a command that starts the gesture daemon |"
+  },
+  {
+    "severity": "HIGH",
+    "kind": "invented",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "**The phone runs its own hand detection, on the phone, and sends only the result.** What crosses the",
+    "why": "No phone-side detector exists and nothing crosses the tunnel, because there is no route to cross. The companion app under `bridge/webapp/` has no camera access and no hand detection of any kind; `bridge/server.py` exposes no landmark endpoint; `gesture/remote.py` explicitly takes an INJECTED iterable and disclaims any coupling to `sigil/bridge/`; and the only `hand_batch` object in the repository is constructed in `tests/test_gesture_remote.py`. The two-hands / twenty-one-points shape, the honest-empty decode, the session/sequence drops and the single-int tracker are all real (`gesture/remote.py:32-33,46-141`) \u2014 but as a receiving contract with no sender, not as traffic that flows today.",
+    "fix": "**The design puts the hand detection on the phone and sends only the result.** The desktop half of that is built: what it accepts is a small batch of landmark coordinates \u2014 at most two hands, exactly twenty-one points each \u2014 described in the code as *\"landmark data, never owner pixels\"*, and a malformed batch decodes to an honest *nothing* rather than a fabricated hand. What does not exist yet is the sender: the companion app has no hand detector, and the bridge has no route to receive a batch, so no landmarks cross the tunnel today."
+  },
+  {
+    "severity": "HIGH",
+    "kind": "overclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "| The cockpit and the status overlay | **Working** | \u2014 |",
+    "why": "The cockpit works; the overlay has no producer that can run on this machine, and the \"waiting on\" column should not be empty. `voice/hud_status.py:19` puts the scrap file at SIGIL_HOME/sigil-hud.json, and its ONLY writer is `voice/run.py:84-90` (`run_mic` \u2192 `StatusSink`) \u2014 the voice loop, which two rows above this one the same table says \"cannot start here\". Verified: `sounddevice` is not importable in ~/.sigil/venv, and ~/.sigil/sigil-hud.json does not exist. The overlay's other half, the navigation signals, is emitted only by `voice/nav.py:158` and `gesture/session.py:436` \u2014 again the voice loop, and a live gesture session, which the same table says cannot fire.",
+    "fix": "| The cockpit | **Working** | \u2014 |\n| The status overlay | **Built, with nothing here to feed it** \u2014 its two producers are the voice loop and a live gesture session, and neither can start on this machine | The audio-device library, or a hand-tracking model |"
+  },
+  {
+    "severity": "MEDIUM",
+    "kind": "overclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "misrepresent its own coverage; here, every address that was discovered and then dropped is listed with",
+    "why": "The write-up lists at most twelve. `scrape/researcher.py::_compose` prints `for url, why in skips[:12]`. The *count* is honest \u2014 the heading is `## Skipped ({len(skips)})` \u2014 but the enumeration is truncated, and truncation is easy to hit: with a four-page budget, `scrape/frontier.py` flushes every discovered-but-unfetched link left on the heap into `skips` as \"max-pages-budget\", which one ordinary page of links overruns. The same truncation can hide the mid-crawl \"stopped\" entry that \u00a712.5 relies on, since it is appended in crawl order.",
+    "fix": "misrepresent its own coverage; here, the number of dropped addresses is always reported, and the first twelve are listed with the reason each was dropped \u2014 outside the permitted site, forbidden by the site's own rules, over the per-site cap, a fetch that failed, or simply beyond the page budget."
+  },
+  {
+    "severity": "MEDIUM",
+    "kind": "missing-qualifier",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "| **The authorised-device list is recomputed on every single request** | A revoked phone stops working on its *next* request. Revocation is immediate by construction, not by a timer. |",
+    "why": "True for every request-shaped call, but the live feed is authenticated once and then never re-checked. `bridge/server.py::_sse` calls `_authed(\"read:stream\")` and then enters `while True:` writing frames; nothing inside that loop re-reads `_authorized_now()` or re-applies the freshness window. A revoked phone that simply holds the stream open keeps receiving {seq, tier, kind} frames until it disconnects. The shipped companion app re-signs every ninety seconds (`webapp/app.js`: `setInterval(restartStream, 90000)`), so an honest client does stop within that window \u2014 a hostile one need not.",
+    "fix": "| **The authorised-device list is recomputed on every single request** | A revoked phone stops working on its *next* request. Revocation is immediate by construction, not by a timer \u2014 with one bound: the live feed is checked when it opens and not again, so a revoked phone that holds an open feed keeps receiving the three-field frames until it disconnects. The companion app re-signs the feed every ninety seconds; a hostile client need not. |"
+  },
+  {
+    "severity": "LOW",
+    "kind": "missing-qualifier",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "| The nightly pass that grounds a claim in a quotation | **Working** | \u2014 |",
+    "why": "The pass runs when it is invoked (`sigil consolidate`), but nothing runs it nightly on this machine, and the column heading is \"Status on this machine\". `apps/sigil/deploy/systemd/sigil-consolidate.timer` ships in the tree and is not installed: `systemctl --user list-timers --all` lists none, there is no sigil unit in /etc/systemd/system, and the crontab holds only an unrelated script in ~/Downloads.",
+    "fix": "| The pass that grounds a claim in a quotation | **Working when it is run** \u2014 nothing schedules it here; the timer ships with the software but is not installed on this machine | Installing the timer, if it is to be nightly |"
+  },
+  {
+    "severity": "BLOCK",
+    "kind": "overclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "| Turning speech into text | A local transcription model **is installed** on this machine. A cloud service is the command-line default. With neither available, the system returns a visible placeholder saying no model is installed \u2014 **it does not invent a transcript**. |",
+    "why": "False on this host. The only local ASR in the tree is `WhisperAsr` (/home/kali/vigil/apps/sigil/sigil/voice/backends.py:149-153), whose constructor does `from faster_whisper import WhisperModel`. `faster_whisper` is absent from all three interpreters: `.venv-sovereign/bin/python`, `.venv-offense/bin/python` and system `python3` each raise `ModuleNotFoundError: No module named 'faster_whisper'` (~/.sigil/venv is a symlink to .venv-sovereign, so the daemon uses the same one). I ran the real selector rather than inferring: `.venv-sovereign/bin/python -c \"from sigil.voice.run import _make_asr; a=_make_asr('auto')\"` prints `[asr] faster-whisper unavailable (No module named 'faster_whisper'); using stub`, returns `_StubAsr`, and `a.transcribe([...])` returns the placeholder string. What does exist is a PARTIAL weights cache \u2014 ~/.cache/huggingface/hub/models--Systran--faster-whisper-tiny/snapshots/*/ contains only config.json, tokenizer.json and vocabulary.txt, no model weights \u2014 which is probably what was mistaken for an installation.",
+    "fix": "| Turning speech into text | A cloud service is the command-line default. A local model (faster-whisper) is supported in the code, but **its library is not installed on this machine**, so with no cloud key the system returns a visible placeholder saying no model is installed \u2014 **it does not invent a transcript**. |"
+  },
+  {
+    "severity": "HIGH",
+    "kind": "overclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "**Neither is required** \u2014 a local transcription model is installed and working, a local synthesiser is supported, and the silent fallback is always available.",
+    "why": "This sentence carries the chapter's sovereignty argument \u2014 that the cloud defaults can be declined today \u2014 and it rests on the false premise above. Same evidence: `faster_whisper` is not importable in the sovereign venv, so `_make_asr` falls to `_StubAsr` and no transcript is produced at all. The local synthesiser is in the same state: `PiperTts` (voice/backends.py:190-194) does `from piper.voice import PiperVoice`, and `piper` is likewise absent from `.venv-sovereign`. Only the silent fallback is genuinely available. Meanwhile ELEVENLABS_API_KEY is set in ~/.sigil/sigil.env and `run_mic` defaults to `asr=\"elevenlabs\", tts=\"elevenlabs\"` (voice/run.py:64), so on this host the only working speech path is the cloud one.",
+    "fix": "**Neither is required by the design** \u2014 a local transcription model and a local synthesiser are both supported in the code, and the silent fallback is always available. But on this machine neither local library is installed, so today the only speech path that would actually work is the cloud one."
+  },
+  {
+    "severity": "HIGH",
+    "kind": "overclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "A limit stronger than the design claims, found by reading the injection routine itself: **the gesture subsystem contains no code that types text, presses a key combination, or launches an application at all.**",
+    "why": "The absolute half of this is false, and it is presented as a verified-by-reading limit. `gesture/components.py:26-31` declares `type(self, text)` and `combo(self, keys)` on the `InputBackend` protocol the gesture layer is built on, and /home/kali/vigil/apps/sigil/sigil/platform/input.py:46-56 implements them for real: `LinuxInputBackend.type()` runs `xdotool type -- <text>` (or `ydotool type`), `.combo()` runs `xdotool key <keys>`. `xdotool` is installed on this host (/usr/bin/xdotool) and `LinuxInputBackend.available()` therefore returns True, so the typing code is present AND operable here. What is true is only the sentence that follows it: `SessionGate._inject` (gesture/session.py:445-454) branches on move/drag/click/scroll only, and grepping the tree for `action_token` finds no consumer of a queued `hid.type` record (the only hits are the unrelated web-actor gate in agents/actor_gate.py). Application launch is genuinely absent \u2014 no backend has a launch method.",
+    "fix": "A limit stronger than the design claims, found by reading the injection routine itself: **no gesture intent can reach the keyboard.** The routine that reaches the operating system has branches only for move, drag, click and scroll, and nothing anywhere in the tree carries out an approved typing intent. The input backend does carry `type` and `combo` methods that shell out to `xdotool` \u2014 application launch has no implementation at all \u2014 but no gesture path calls them. A queued item is therefore a *record of an intent*, not a keystroke waiting on a timer."
+  },
+  {
+    "severity": "HIGH",
+    "kind": "missing-qualifier",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "Under the emergency stop the upload is not even queued: it is refused outright and the refusal recorded, while the local, on-machine perception keeps working, because observation is the one thing the halt is designed to leave alive.",
+    "why": "True only of an upload that still needs approving; a reader takes away 'the halt stops frame uploads', which is not the case. `Perceptor.frontier` (perception/perceive.py:114-140) evaluates `if approved_seq is not None and egress_approved(self.store, approved_seq, token, tp):` and calls `vision.describe(frame, question)` \u2014 the actual upload \u2014 inside that branch, before the governor is consulted at all. `egress_approved` (perception/egress.py:33-49) checks only the egress token and the approval signature; it never constructs a KillSwitch. The record written afterwards is dispatched at `Tier.A0`, and `Governor.decide` (governor/core.py) returns `Decision(Outcome.AUTO, \"observe (A0)\")` for `tier <= Tier.A0` on the line BEFORE `if self.kill.is_engaged()`. So `sigil agents perceive --frontier --approved <seq>` (cli.py:224-226) with an engaged emergency stop still uploads. None of the 19 tests in apps/sigil/tests/test_vision.py exercises the kill switch on this path \u2014 I listed all 19 test names; the four frontier tests cover queueing, approval binding and the fail-closed helper only.",
+    "fix": "Under the emergency stop a *new* upload is not even queued: it is refused outright and the refusal recorded, while the local, on-machine perception keeps working, because observation is the one thing the halt is designed to leave alive. One qualifier the reader should have: the halt is checked when an egress is queued, not when an already-approved egress is re-run, so engaging the stop does not by itself cancel an upload the owner has previously approved."
+  },
+  {
+    "severity": "MEDIUM",
+    "kind": "missing-qualifier",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "A single new warning line on a screen already full of text still fires; the same screen re-rendered slightly differently does not.",
+    "why": "The token-based comparison only applies when at least one frame carries OCR text. `changed()` (perception/delta.py:20-31) computes `a, b = salient(prev.text), salient(cur.text)` and then `if not a and not b: return prev.sha256 != cur.sha256` \u2014 its own docstring says 'With no text on either side, falls back to byte-identity.' Section 6.8 of this same chapter establishes there is no OCR here, and I confirmed it (`which tesseract` returns nothing; capture.py:_ocr returns '' when tesseract is absent). So on this machine every frame carries text='' and the ambient comparison is exactly the byte/pixel comparison the paragraph says it is not \u2014 a re-rendered frame differs by bytes and does fire.",
+    "fix": "A single new warning line on a screen already full of text still fires; the same screen re-rendered slightly differently does not \u2014 provided the OCR produced text at all. With no captured text on either frame the comparison falls back to byte identity, which is the cruder behaviour this replaced; on this machine, where no OCR is installed, that fallback is what would run."
+  },
+  {
+    "severity": "MEDIUM",
+    "kind": "overclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "The owner still gets an answer; they simply do not get the outside model's opinion until they have said yes to that specific frame.",
+    "why": "On the queue path no answer is produced. `Perceptor.frontier` (perception/perceive.py:135-145), when there is no verified approval, dispatches only the `vision.egress` request proposal \u2014 it never calls a local reader and never calls `compose_perception`, so `res.applied` is empty. The CLI confirms the user-visible effect: cli.py:224-226 calls `perceptor.frontier(...)` INSTEAD of `perceptor.perceive(...)`, and the only thing printed for a queued egress is the `[A2 event] \u2026 awaiting approval` line at cli.py:234-235. The accurate claim is the one in egress.py's own docstring \u2014 the local reading path is untouched and still stands \u2014 not that the same request returns an answer.",
+    "fix": "The owner is not left worse off: the local, on-machine reading path is untouched and still answers. What the queued request itself returns is the awaiting-approval record rather than a perception answer \u2014 the owner runs the ordinary local path to get the on-box answer, and simply does not get the outside model's opinion until they have said yes to that specific frame."
+  },
+  {
+    "severity": "LOW",
+    "kind": "wrong-number",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "Six properties, all enforced in the program rather than in a configuration file a deployment could",
+    "why": "The table introduced by that colon has four rows: 'It refuses a public address', 'A session pass-phrase printed to the terminal', 'Reading and acting are separate planes', 'The signing key never enters the browser'. The two 'smaller details' in the paragraph after the table make six only if the reader adds them, which the sentence does not tell them to do. For reference the cockpit's own security-model docstring (apps/sigil/sigil/ui/server.py:5-25) enumerates five bullets.",
+    "fix": "Four properties, all enforced in the program rather than in a configuration file a deployment could get wrong \u2014 followed by two smaller ones:"
+  },
+  {
+    "severity": "LOW",
+    "kind": "overclaim",
+    "file": "/home/kali/vigil/docs/plain-english/14-the-sovereign-side.md",
+    "quote": "The section headings are the only lines allowed to start at the left-hand margin.",
+    "why": "`compose_perception` (perception/perceive.py:36-64) writes three other kinds of line at column 0: the title `# Perception \u2014 {question or '(observe)'}`, the `(frame: {kind}, sha256 \u2026, N chars captured)` metadata line, and the `## No text captured from the frame` variant. The property that actually holds \u2014 and the one the two tests at tests/test_vision.py:180 and :192 pin \u2014 is the next sentence: every captured line and every reading line is prefixed with the `  \u2502 ` guard, so no attacker-controlled content can occupy column 0.",
+    "fix": "No attacker-controlled line is allowed to start at the left-hand margin \u2014 only the program's own lines (the title, the section headings and the frame's metadata line) are written there."
+  }
+]

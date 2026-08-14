@@ -337,6 +337,52 @@ something unrelated — redacted transcripts of the engineering sessions that bu
 software, kept under a separate `knowledge/sessions` folder. Those are development
 history, not assessments.
 
+### Run, session, engagement — three words that are not synonyms
+
+Three words in this chapter sound interchangeable and are not, and the interface now groups
+work by all three. A reader who runs them together will misread both the screens and the
+report, so they are separated here once.
+
+| Word | What it is | How it is named | Can it change a finding or open a gate? |
+|---|---|---|---|
+| **Run** | One execution of the engine against one subject: a start, a finish, a status, its own findings and its own evidence. It is the only one of the three that sends any traffic anywhere. | A machine identity stamped with the date, the time and a sequence number | It is where findings are *made*. Everything the system proves, it proves inside a run |
+| **Session** | The thread of work that links runs together, with the conversation and the rebuilt picture — the subject of this section. | A short name the operator chooses | **No.** Creating, renaming, connecting or deleting one changes nothing |
+| **Engagement** | The named piece of client work: one authorisation over one subject, which may hold many sessions and many runs across months. It is what a charter authorises and what the final report is about. | A short machine-safe name shared by the charter, the working folder and the permanent record | **No.** The charter beneath it authorises; the name itself decides nothing |
+
+**The engagement is the one an operator comes back to months later**, and it now has a
+screen of its own — an Engagement Library listing every past job, most recently worked
+first, with real dates and times, what kind of operation each was, what subject it was
+pointed at, and how many runs and findings it holds, with the proven count shown separately.
+Three properties of that screen matter, because each one is a restraint:
+
+- **Nothing on it is invented.** The list is the union of two real sources: the permanent
+  signed record's own roster of jobs, and the folder of charters and working material on
+  disk. Every date shown is derived from something actually on disk. A job with no activity
+  at all is shown honestly as having none, and is never back-dated to look recent.
+- **Renaming cannot invalidate a proof.** A human name — "Acme, Q3 external review" — is
+  stored in one small file beside the machine identity, and nothing on that path writes into
+  a run's folder, an evidence certificate, the sealed proof bundle or the signed record. It
+  rewrites nothing that already exists, so a package already delivered still verifies exactly
+  as it did. One effect is deliberate: a case file downloaded *after* a run is renamed is
+  titled by the human name, so the person opening it months later recognises the job. The
+  proof inside is identical either way. The screen states the property on the page: renaming
+  "touches no signed byte, so every certificate still verifies".
+- **Membership cannot be asserted.** Which runs belong to which job is decided by what each
+  run recorded about itself at the time it ran, not by anything the person browsing can
+  claim. Nobody can move a run into a job it does not belong to from the screen.
+
+From a job the operator clicks through to its runs, and from a run to its findings, its
+evidence and its dossier. What the library adds is **navigation, not authority** — the same
+property the session has, for the same reason.
+
+**A fourth meaning, on the other side of the wall.** The owner's personal side uses the word
+"session" for something different again: one ingested conversation with an AI assistant. The
+owner's own working history is read into their permanent personal record — each conversation,
+and each delegated helper's transcript as a titled session of its own — and mirrored as a
+node in the owner's personal memory. Those are a record of the owner's past work, not of an
+assessment. They hold no findings and touch no target, and they are different again from the
+folder of development transcripts mentioned just above.
+
 ---
 
 ## 4. Stage 2 — Setting up the run
@@ -839,6 +885,118 @@ in the default engage/scan flow — it is an opt-in operator/engine capability".
 screen of its own or a command of its own. They are built, tested, and gated by construction;
 they are not yet a button an operator presses.
 
+### The outside agent, and where it fits in a job
+
+Everything in this stage so far is the engine's own machinery: fixed tests, fired by fixed
+code, into positions the mapping stage found. One of the four named parts of the system is
+not like that at all. It is a complete third-party penetration-testing agent — somebody
+else's product, kept as a copy inside this one — that works the way a human tester works:
+think, choose a tool, run it, read what came back, go round again. Chapter 2 describes what
+it is, what is in its toolbox and where it runs. This section places it in the job: when an
+operator reaches for it, what a run using it looks like, and what its output is worth.
+
+**When an operator reaches for it.** There are two routes to it, and they are not the same.
+
+| Route | What it starts | What it is for |
+|---|---|---|
+| The **"scan a codebase"** choice in the assessment wizard | The agent, running without a terminal display, pointed at a folder of source code on the operator's machine or at a repository address, with the operator's written objective handed to it as its instruction | A body of source code. The engine's own tests need something that answers on the network — an address to walk, forms to fill, parameters to nudge. Source code answers nothing, so the fixed tests have nothing to fire at |
+| The **passthrough command** | The vendored tool directly, in the offensive environment, with the operator's own arguments passed through untouched | Anything the operator wants to point it at. The tool itself accepts a web address, a domain name, a numeric network address, a repository or a local folder. The wizard offers only the source-code case; the command line offers the rest |
+
+Its planning is genuinely its own. It decides which classes of weakness to hunt, and it
+spawns its own helper agents to hunt them in parallel. The system does not constrain that
+choice at all. What the system constrains is the moment anything is **executed** — which is
+the subject of the gate described two paragraphs below.
+
+**What a run with it looks like.** Not like an engine run. Four differences meet the
+operator immediately:
+
+- **It needs a container.** The agent will not run without one, and the console checks for
+  the container system before starting rather than hanging: if it is not running, the run is
+  refused with a message saying so. The container is built from a Kali Linux base pinned to
+  an exact content fingerprint rather than a moving label, so two builds a week apart cannot
+  quietly ship different tools into the box that executes offensive actions.
+- **It costs model time.** The agent is driven step by step by a large language model, and
+  every step of the loop is a call to it. The models it names as recommended are all
+  commercial hosted ones, so in the default configuration every step costs money; the
+  settings screen can route it to a different provider. The engine's own measured
+  11-second benchmark run, quoted below, used no artificial intelligence at all. These are
+  different cost shapes and an agency budgeting for both should not average them.
+- **There is no live picture.** An engine run streams every action onto the Live screen as
+  it happens. This one reports inside its own sandbox, and the run is recorded as having no
+  stream at all. Rather than show an empty timeline, the interface says so: *"a codebase run
+  reports inside its sandbox — no re-checkable web report is captured here."*
+- **Its findings do not land on the permanent signed record.** That has a visible downstream
+  consequence, and the system does not paper over it: the automated repair ladder in stage 10
+  **refuses** to act on such a run, and its refusal names exactly what is missing and what
+  would produce it — the same job run through the engine's own governed path, which does
+  write the signed record.
+
+**What it produces are leads, not facts.** This is the single most important sentence about
+it, and chapter 2 explains the mechanism. The operational consequence is what matters here: a
+person reading the agent's own report is reading **suspicion**, and the number of things it
+reports is not the number of things proved. Nothing it writes is carried into the assessment
+report as a finding on its own word. The system's own deployment guidance instructs the
+operator to treat its results as investigative leads to confirm.
+
+**One thing it does can cross into proof, and it is not anything it says.** The distinction
+is between the agent's narrative — its account of what it did and what it concluded, which
+nothing can re-check — and a *demonstration*, meaning something that actually performs the
+attack against the target. When a demonstration runs, the capture machinery records what the
+target itself sent back: real response bytes, attached by the capture path and never by the
+model. Those bytes are screened for dangerous content first, and then handed to a checker
+exactly as any other evidence would be. If the checker fires, the result is a fact and
+crosses into the signed record; if it does not, the honest answer is recorded — not
+reproduced — and it stays a lead. The operator sees the three outcomes counted on the Proof
+Studio screen, one card per attempt, and the offline-verifiable bundle can only be exported
+when at least one fact exists. Two limits belong with that: the automatic capture works by
+correlating the exchange out of the intercepting proxy's own records, so the proxy has to be
+in the loop for it to happen, and **no run of this agent has been performed on the machine
+this briefing was written on** — no run of that kind appears in the console's stored history.
+One obstacle that used to stand in the way is gone: the sealed working environment such a run
+requires had never been built anywhere, and could not have been built from the instruction the
+project published, and it has since been built here for the first time. So what is missing now
+is the run, not the means to start one. The route is built and tested. It has not been
+exercised here.
+
+**Its shell is the most dangerous surface in the system, and the gate in front of it fails
+closed.** Everything the agent does that runs a program — every command-line tool it invokes,
+the browser it drives — passes through one thing: a shell that can run any command at all.
+The project treats that as the most dangerous surface anywhere in the system, and gates
+exactly it. Every call to that shell is classified at the top danger level, which means it
+never runs automatically: the exact command is published as a pending request, and it runs
+only if the owner signs a single-use approval bound to that exact command. The agent's
+other built-in tools — its notes, its to-do list, its report writer and its skill loader
+among them — are left to run freely, so the agent stays useful rather than frozen. If no
+approval authority has been set up, the shell call is refused. And the waiting window is zero
+by default, which has a blunt practical meaning worth stating: **an unattended run of this
+agent gets nothing past the shell gate.** The operator either watches it and signs, or sets a
+waiting window deliberately.
+
+Stated precisely, that gate covers **arbitrary command execution**, which is not the same as
+covering everything. Chapter 8, section 4.5 names every tool it leaves running automatically;
+most of them are inert — private reasoning, notes, a to-do list, a report writer. Three are
+not inert: they act outside the agent's own head without an owner's signature, and an agency
+assessing this system is entitled to know what bounds each one instead.
+
+| The tool that bypasses the shell gate | What bounds it instead |
+|---|---|
+| A web search | The container's network arrangement described in chapter 2 |
+| A replay of an already-captured request back at the target, through the intercepting proxy | The same network arrangement, and the fact that the request was already captured |
+| A patch tool that edits files directly | The container: the agent is given this file-editing capability unconditionally and it is classified as safe to run automatically, so it writes without an owner's signature — but it writes inside the agent's own container, not on the operator's machine |
+
+The shell gate is a gate on running programs, not a gate on everything the agent can do.
+
+The fail-closed part is the one to hold on to. If the gate cannot be attached at all — a
+wiring fault, a broken installation, anything — the run **stops**. It does not carry on
+ungated. The code gives the reason in one line:
+
+> A broken gate is not an opt-out; the run stops instead.
+
+There are exactly two ways a run proceeds without the gate, and both are deliberate: an
+explicit setting that switches it off, and running the outside tool entirely on its own,
+outside this system, where there is no governed run to protect. Chapter 8, section 4.5 sets
+the mechanism out in full.
+
 ### How the system decides what to try first
 
 There is a learning component that ranks which test is most likely to land on a target that
@@ -1273,6 +1431,16 @@ The **dossier** is one step further: a single self-contained archive holding the
 reports, the machine-readable exports, the offline-verifiable proof bundle, the scrubbed
 engagement log, the signed record chain, any drift record, and a readable index page.
 
+It also carries the **case file**: nine numbered plain-language documents written for the
+non-specialist who receives the archive — a start-here page, an executive summary, the
+approach and scope (including what was *not* examined), the proven findings, the unproven
+leads, the catalogue of what the engine can confirm with this run's position against each,
+what to do about the findings, how to verify the package yourself, and a glossary. They are
+built from the same graded findings as the three reports, so the two cannot disagree about
+what was proven, and where a value was not recorded they print "not recorded" rather than
+filling the gap. If that rendering fails for any reason, the archive still ships with its
+machine records and its proof intact and notes plainly that the case file is missing.
+
 Four properties, taken from the code's own description:
 
 - **Tamper-evident.** A manifest lists every entry with its hash; a multi-signature over
@@ -1542,12 +1710,22 @@ its own ledger of it. The relevant entries for the workflow described in this ch
   itself more power than it started with, and both tiers of container-platform access control
   (an anonymous caller bound to a dangerous role, and a dangerous permission or the default
   identity granted rights it should not have) — are written, reviewed, folded into the
-  released software and wired from end to end. The **two container-platform (Kubernetes)**
-  ones are proven against a real single-node cluster the system stands up, owns and destroys
-  itself: the dangerous binding is confirmed with a certificate that re-verifies offline, and
-  the benign arrangements in the same cluster are correctly left as leads. The **four cloud**
-  ones are proven offline against recorded sample data standing in for a live cloud account.
-  What has *not* happened for those four is the final step of pointing them at a live
+  released software and wired from end to end. **Three of the six have now been fired at
+  something real, and the three are not of equal weight.** The **two container-platform
+  (Kubernetes)** ones are proven against a real single-node cluster the system stands up, owns
+  and destroys itself — real infrastructure, but the project's own rather than a third party's:
+  the dangerous binding is confirmed with a certificate that re-verifies offline, and the benign
+  arrangements in the same cluster are correctly left as leads. The third, and the only one of
+  the six to have judged material from a real outside system, is **exposed-secret validity**,
+  which has been run against the real GitHub service using the operator's own credential
+  against GitHub's own least-privileged identity endpoint — confirmed, its certificate
+  re-verified offline, while a bogus credential of the same shape sent live to the same real
+  address was rejected by GitHub itself and correctly stayed a lead. **That one splits, and the
+  split must not be blurred:** only the GitHub half of that capability is proven live; its
+  Amazon Web Services half is built and unit-tested but has never touched real Amazon
+  infrastructure, and nothing from the GitHub run transfers to it. The remaining cloud
+  confirmations are proven offline against recorded sample data standing in for a live cloud
+  account. What has *not* happened for those is the final step of pointing them at a live
   third-party cloud account; that is the entry in the next list, and it waits on the
   customer's own credentials by design.
 - **The safeguards around how this software is built and shipped.** These protect the supply
@@ -1577,12 +1755,12 @@ the real thing — and live use awaits credentials the operator must supply, by 
 
 | Capability | What is blocking live use |
 |---|---|
-| **Live fire** for the **four cloud** exploitation confirmations. The software itself is complete, merged and proven offline — see the entry in the list above; what is outstanding is only the act of pointing it at a live third-party cloud account. (The **two Kubernetes** confirmations are no longer on this list: both are proven against a real single-node cluster the system stands up, owns and destroys itself, with the dangerous binding confirmed and re-verified offline and the benign ones correctly not confirmed. What that run does not cover is enumeration of bindings across a cluster, and a managed provider's control plane such as EKS, GKE or AKS.) | Waiting on the customer supplying their own cloud credentials for an authorised laboratory account. One of the four, the identity-privilege-escalation confirmation, is a different case worth stating precisely: it never performs the escalation, so there is nothing about it that awaits a live attack — but it still has to be given a real export of an account's permission rules, and obtaining that from a real account still needs the customer's read-only credentials |
+| **Live fire** against a real third-party cloud account, for the cloud exploitation confirmations that still await it: the metadata-credential capture, the Google service-account impersonation, the identity-privilege-escalation re-derivation, and the **Amazon Web Services half** of exposed-secret validity. The software itself is complete, merged and proven offline — see the entry in the list above; what is outstanding is only the act of pointing it at a live third-party cloud account. (Three confirmations are no longer on this list: the **two Kubernetes** ones, proven against a real single-node cluster the system stands up, owns and destroys itself, with the dangerous binding confirmed and re-verified offline and the benign ones correctly not confirmed; and the **GitHub half** of exposed-secret validity, proven against the real GitHub service. What the Kubernetes run does not cover is enumeration of bindings across a cluster, and a managed provider's control plane such as EKS, GKE or AKS.) | Waiting on the customer supplying their own cloud credentials for an authorised laboratory account. One of them, the identity-privilege-escalation confirmation, is a different case worth stating precisely: it never performs the escalation, so there is nothing about it that awaits a live attack — but it still has to be given a real export of an account's permission rules, and obtaining that from a real account still needs the customer's read-only credentials |
 | Cloud posture collectors for the three major providers and Kubernetes | Waiting on operator-supplied read-only credentials; all validated by live probes when present |
 | The destructive automated-fix leg that raises a proposed code change | Operator must provision the several signing keys and a platform access token |
 | Artificial-intelligence red-teaming tools as a source of facts | Those tools are absent from this environment. The routing that would govern them is built: a deterministic check can confirm; another AI acting as a judge is **always** recorded as a lead |
 | The live external graph database and telemetry service | The client software is built and the local fallback works; the external service is not deployed |
-| A live connection to an outside tool server | The description file and its validation are built; the connecting client is pending. (This uses the **Model Context Protocol**, an open convention for letting an AI system call tools that live outside it.) |
+| A live connection to an outside tool server | The description file and its validation are built; the connecting client is pending. (This uses the **Model Context Protocol**, an open convention for letting an AI system call tools that live outside it.) This is the *outbound* direction — VIGIL calling somebody else's tools. The opposite direction is a different thing and is not pending: the sovereign side's own memory server offers eight read-only tools to an assistant the owner already uses, and chapter 14 records it as live. |
 
 Two capabilities in this chapter belong in this category as well, and are described where
 they appear: the **fuzzing engine** and the **replay tool** (section 8) are built, tested and

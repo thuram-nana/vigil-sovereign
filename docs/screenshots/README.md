@@ -27,6 +27,7 @@ Findings and proofs shown are from a real loopback engagement — every "CONFIRM
 
 | Screen | Preview |
 |---|---|
+| **Engagement Library** — every past job you can come back to months later: newest worked first, real dates in your own timezone, the kind of operation, the subject, and its run and finding counts. Renaming a job or a run is presentation only — it stores a human name beside the machine identity and touches no signed byte, so every certificate still verifies | ![Engagement Library](33-engagement-library.png) |
 | **Sessions** — permanent per-session workspaces + their graph partition | ![Sessions](15-sessions.png) |
 | **Activity** — both planes' status + the live event log | ![Activity](16-activity.png) |
 | **Approvals & Safety** — kill-switch + the waiting-for-you approval queue | ![Approvals & Safety](17-approvals-and-safety.png) |
@@ -42,10 +43,13 @@ Findings and proofs shown are from a real loopback engagement — every "CONFIRM
 | **Knowledge Engine** — vuln feeds, propose-to-learn, self-evolve | ![Knowledge Engine](27-knowledge-engine.png) |
 | **New Assessment › Cloud / K8s / infra posture** — CSPM / IAM / kube-bench import (posture analysis of a provided export — never a live cloud attack) | ![Cloud / K8s posture](28-cloud-account.png) |
 | **Governance & Gate Audit** — read-only posture: GOVERNED vs UNGOVERNED (entitlement enforced?), the sovereignty tier, the conjunctive safety-gate, and the m-of-n destruction quorum (the UI can never fire a destructive action) | ![Governance & Gate Audit](31-governance.png) |
+| **MCP Servers** — the gated capabilities this engine *exposes* to an outside AI client over an on-host stdio server: a fixed, fail-closed allowlist of exactly two, each re-gated per call and each returning an observation, never a fact. The client can never choose the scope | ![MCP Servers](34-mcp-servers.png) |
+| **System & Services** — the whole system's readiness at a glance: prerequisites, both environments, writable directories, and the background services, as the `vigil doctor` report surfaced in the interface | ![System & Services](35-system-and-services.png) |
 
 ## LEARN
 
 | Screen | Preview |
 |---|---|
+| **Proof of Posture** — the Certificate of Non-Exploitability: a signed, coverage-bounded, offline-verifiable proof that over the surface the scanner actually reached, an applicable weakness was looked for and not found. A sound negative, stated with its own limits | ![Proof of Posture](36-proof-of-posture.png) |
 | **Trust Center** — VIGIL's signed recall / coverage / plan-integrity / evidence certificates rendered *as certificates* (trust root, out-of-band fingerprint pin) with a live offline PASS/FAIL verification | ![Trust Center](32-trust-center.png) |
 | **Manual** — the in-app documentation | ![Manual](29-manual.png) |

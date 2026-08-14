@@ -59,6 +59,7 @@ department.
 | **The integration layer** | The operations floor | The connective tissue: the `vigil` command, the safety gates, the bridge where a suggestion becomes a proven fact, and the running loop that drives an assessment from start to finish. |
 | **The gateway** | The guarded exit door | A network barrier that decides which packets are allowed to leave the machine at all. |
 | **The interfaces** | The front desk | The web screens and the command line through which a human drives everything. |
+| **The live-fire harnesses** | The proving ground | Not part of the running system, but part of what is shipped: two runnable scripts that point a finished capability at something real instead of at saved evidence — one at a real outside service, one at real infrastructure the project stands up and destroys — assert exactly what should and should not happen, and can be re-run by a customer or an auditor on their own machine. |
 
 Everything in that table exists as real code in one single repository. Every claim in
 this chapter was read out of that code or out of the project's own documents.
@@ -218,7 +219,7 @@ rest of the engine exists to feed them.
 | The evidence layer | Sealed evidence: certificates over confirmed findings, the hash chain, the manifest of raw files, and the packaging for offline audit. |
 | Machine attestation | Produces a signed statement about the machine the engine is running on — what it is and that its own files are unaltered. Honest limit, stated in its own code: today's statement is produced in software (optionally helped by the machine's security chip). The versions that would use special processor hardware to prove the same thing more strongly are deliberately written to refuse rather than to pretend. |
 | The external-tool roster | The single catalogue of the outside command-line tools the engine can drive, together with a live check of which are actually installed on this machine. The same roster is used by the installer and by the "Tools" screen, so what the screen shows and what the installer installs cannot drift apart. |
-| Reporting | The generated technical report, the client dossier, per-finding "how to check this yourself" instructions, and standards mapping. |
+| Reporting | The generated technical report, the client dossier, per-finding "how to check this yourself" instructions, standards mapping, and the **case file** — a numbered pack of plain-English documents written for the non-specialist who receives a dossier. Described below the tables. |
 | Target intake | Turns a single web address into a fully prepared engagement folder — a draft authorisation document, a draft threat model, a draft attack tree, and a fingerprint of the target's technology. It does this with a deliberately polite, capped, unauthenticated look at the public files a site publishes about itself. It never removes a gate: nothing is prepared without the operator's attested authorisation, and no active testing happens until the operator signs the authorisation document. |
 | Importers | Ingest another vendor's report — from the common scanners and proxies, or a generic findings file — into the system's own map as leads. The doctrine is applied without exception: a third party's finding is marked as unverified, is never recorded as a proven finding, and becomes one only if one of this system's own checkers re-proves it. Re-importing the same report twice changes nothing. |
 | The capability registry | One machine-readable catalogue over the engine's several separate rosters (sensors, internal tools, checkers, operators, commands), so an outside integrator can discover what capabilities exist, what each produces, and what permission tier each needs — without changing how any of them run. Listing a capability is not permission to use it. |
@@ -248,10 +249,86 @@ different route, so the claim "everything crosses this one barrier" is not yet t
 Chapters 4 and 6 describe it in exactly these terms; this chapter is consistent with
 them deliberately.
 
-*Third, the component's own written comment inside the code is out of date* — it still
-describes itself as connected to nothing but its tests, which understates it. Both the
-overstatement and the understatement are recorded here so that a reader who goes to the
-code and finds the comment is not misled in either direction.
+*Third, the component's own written comment inside the code used to be out of date* — it
+described itself as connected to nothing but its tests, long after real parts of the running
+system had been wired to it. That has been corrected: the comment now lists its callers, and
+an automated test fails the build in **both** directions — if the retired "connected to
+nothing but its tests" phrasing reappears while those callers exist, and equally if a module
+that does call it is dropped from the list. The project treats a note that outlives its phase
+as the same class of defect as an overclaim, because it understates what is true. Both the
+overstatement and the former understatement are recorded here so that a reader who goes to
+the code is not misled in either direction.
+
+**The case file, because it is the part a reader of this briefing would actually be
+handed.** A dossier already proved things; until recently it did not *explain* them. It
+held a machine-readable export and a cryptographic proof bundle — exactly the right
+evidence and, in the words of the code, "exactly the wrong reading material for the people
+a dossier is usually handed to." The case-file builder writes the part they read. It is
+generated into every dossier, and it is **nine numbered documents**, numbered so that the
+reading order is obvious from the file names:
+
+| File | What it contains |
+|---|---|
+| `00-START-HERE.html` | The one page to open first. It explains every other file in the archive. |
+| `01-executive-summary.md` | What was done, what was found, what it means, what to do first. |
+| `02-approach-and-scope.md` | How the work was done — and what was **not** examined. |
+| `03-findings.md` | Every proven finding, in plain language. |
+| `04-leads.md` | What was observed or suspected but **not** proven. |
+| `05-what-was-looked-for.md` | Every weakness category the engine can confirm, and this run's position against each. |
+| `06-what-to-do.md` | The remediation order, prioritised. |
+| `07-verify-it-yourself.md` | The exact commands to re-check the result, and what a pass and a failure look like. |
+| `08-glossary.md` | Every technical term used anywhere in the dossier. |
+
+Every one of the nine is written on every build, including when it has nothing to report,
+because "a document that says 'none' is information; a missing document is a gap the reader
+has to wonder about."
+
+Three rules run through the whole pack, and they are the same doctrine as the rest of the
+system: *meaning before mechanism* — every section opens with what something means for the
+organisation and only then how it works; *say the limits out loud* — a proven finding states
+what it proves **and** what it does not, and a section on what was tested is followed
+immediately by what was not; and *never assert what was not measured* — where a value was
+not recorded, the documents print "not recorded" rather than a plausible-looking figure.
+The builder is a pure calculation over the run's own recorded facts: no clock, no
+randomness, no reaching out to anything.
+
+Four supporting modules do the work behind it, and one of them carries the most important
+honesty control in the pack:
+
+- **The catalogue** answers the question a list of findings cannot: three findings out of
+  three categories examined is a very different document from three out of ninety. It is
+  derived **from the engine's own registry of weakness categories**, not from a
+  hand-written list, so a category added to the engine appears on the next build and one
+  removed disappears. Its status column has exactly three values — *confirmed*, *reported*
+  (a lead), and *not recorded*. There is deliberately **no "examined and found clean"
+  state**, because the run record does not support one: a scan writes down what it found,
+  not the list of checks it attempted. Inferring "examined and clean" from an absence would
+  convert a gap in the record into an assurance, which the code names as "the single most
+  dangerous thing a security document can do." The missing capability is written down as a
+  specific, fixable gap rather than left vague.
+- **The plain-language vocabulary** holds one shared set of sentences translating the
+  engine's internal terms, so the finding write-ups and the catalogue cannot describe the
+  same category two different ways. Its descriptions are generic, long-established
+  knowledge about a *kind* of weakness, and the documents keep that strictly apart from
+  what was demonstrated on the system examined. Where no description is on file it says so
+  and reproduces the engine's own wording rather than inventing a friendlier one.
+- **The run facts** module reads only what the run actually wrote — start, finish,
+  duration, settings, and what those settings mean was *not* covered. Anything with no
+  recorded source is printed as "not recorded"; nothing is estimated or back-calculated.
+  Times are in UTC and labelled as such, because the recipient of a dossier is often in a
+  different country from the machine that produced it.
+- **The authorisation reader** locates and reports the engagement charter — who authorised
+  the work, which systems, what was out of scope. The rule it enforces is that a missing
+  charter must be *stated*, never omitted: "a dossier without this section documents
+  activity that a lawyer cannot distinguish from an attack."
+
+An operator may attach a human name to a run — "Acme, Q3 external review" — and that name
+appears as the title of these documents in a pack built afterwards. It is presentation only:
+it is stored in one side-car file of its own, and there is no code path from it to a
+certificate, an evidence digest, the sealed proof bundle or the signed record. The pack's own
+list of hashes covers its documents, titles included, so a pack rebuilt under a new name is a
+different file — but the proof inside it, and every certificate already delivered, re-verify
+to exactly the same result.
 
 CRUCIBLE is driven from the command line and currently exposes **31** sub-commands.
 When an AI model operates it, it does so under a written standing doctrine — a
@@ -348,6 +425,32 @@ Its main pieces:
   Two properties matter. First, classification is by whole words, not fragments, so
   "overwrite" is not mistaken for "write". Second, **anything the classifier does not
   recognise falls to the strictest tier**. Unknown means dangerous.
+
+- **The signed governance ledgers.** Five kinds of record, appended to the same
+  tamper-evident history, decide the live state of the system's own controls: whether the
+  emergency stop is engaged, which assistants have been promoted to act with less
+  supervision, which capabilities are switched on, which devices are permitted to approve
+  things, and what each machine in the owner's mesh declares it can do. Each is signed by
+  the owner, and the newest record wins.
+
+  That last property carried a defect worth describing, because it is a good illustration
+  of a class of problem signatures alone do not solve, and it was closed. An *old* record is
+  still a genuinely signed record. Re-appending one verbatim would therefore resurrect a
+  state the owner had since revoked — a promotion that had been withdrawn, a capability that
+  had been switched off, a device that had been de-authorised — and every check the system
+  had would pass, because the signature really is the owner's and the chain really does
+  extend cleanly. Each of the five now carries the moment it was issued **inside** the signed
+  material, so it cannot be re-stamped, and each keeps a high-water mark of the newest record
+  it has honoured. A record at or below that mark is ignored as a replay.
+
+  Two details show the care taken. Only the *dangerous* direction is guarded: engaging the
+  emergency stop, disabling a capability, withdrawing a promotion and revoking a device all
+  carry a fixed lowest value and are honoured exactly as before — because putting a freshness
+  guard on a fail-*safe* direction would turn it into a fail-*open* one, where an attacker
+  could suppress a revocation by replaying nothing at all. And the freshness value is parsed
+  defensively even though it is signed, because a signature makes a value authentic, not
+  sane: a "not a number" would poison the guard permanently, so it and infinity are both
+  mapped to the bottom rather than trusted.
 
 - **The agent mesh.** A set of specialised assistants, each with a permanent ceiling on
   how dangerous an action it may ever take. They include a memory archivist, a
@@ -525,7 +628,42 @@ a hundred informal connections nobody can audit.
 | The attack-chain memory | A picture of how findings link into chains, built only from the signed record and kept strictly separate from it. It marks confirmed and merely-suspected items differently; a refuted lead is retired rather than deleted, so the history of what was believed remains visible. Nothing read out of this picture can grant a permission or create a fact. |
 | Telemetry and tracing | An emit-only operational record of what the engine did and how long it took, tied to the identity of the signed record entries so an operator can follow a trace and an auditor can follow the record and the two line up. Two events are first-class: every refusal by the permission gate, and every confirmation or refutation by a checker. |
 | The brain slot | A socket into which a different reasoning engine can be plugged. The code states its own limits: a plugged-in reasoning engine is propose-only, computes no facts, self-authorises nothing, and touches no network. |
+| The live network transport | The real network connection through which the cloud and exposed-secret confirmations reach the outside world — and, until recently, the missing piece. Each of those confirmations was written against a *seam*: a named joint where a real connection would be plugged in. For a period the only thing ever plugged into that joint was a stand-in used by the tests, which is exactly why none of those confirmations had ever fired against a real provider. This is the real binding, and it is described in its own right below the table. |
 | The live layer | The unified running engine and its connectors to real tools, real gates, the real record, and the optional external services. |
+
+**A note on the live network transport, because it is the difference between "built" and
+"has actually fired."** Several of the system's cloud confirmations depend on facts about
+the *connection itself* — was the encryption genuinely verified, could anything have sat
+in the middle, which machine actually answered. A checker refuses to confirm unless those
+facts hold. The defining rule of this component is that every one of them is **derived
+from the connection, never asserted**:
+
+- **Encryption verified** counts as true only when the request was an encrypted one, the
+  connection really carries an encryption session, that session yields a certificate from
+  the far end — which a computer only produces when the certificate chain was actually
+  validated — and the local settings really are set to validate. Any step that cannot be
+  established makes it false.
+- **No intermediary** is recorded only when the software can be positively shown unable to
+  have one: it was built to ignore the machine's ambient proxy configuration entirely and
+  carries no proxy routes of its own. "We could not tell" is recorded as *there might have
+  been one* — the honest negative that makes the checker refuse.
+- **A redirection is reported, not followed.** Being sent somewhere else is evidence about
+  the target, not an instruction to chase.
+- **The far end's address is read from the live connection** while the answer is still
+  arriving, rather than looked up again afterwards. A second look-up can return a different
+  address than the one the bytes came from, which would be evidence about the wrong thing.
+- **The answer is read up to a fixed limit**, and an over-long one is marked as cut short
+  and is never interpreted. Half an answer cannot honestly establish an identity, and a
+  partial reading would be evidence about bytes the system does not have.
+
+Every field fails to the value that makes the checker **refuse** rather than the value that
+lets it fire. Where a credential must be used to make a confirming call, it is bound into
+the connection through a factory the runner calls with the exact secret it fingerprinted,
+so the fingerprint stamped on the confirming call cannot silently describe a different
+credential from the one that authenticated. The connection also identifies itself with a
+fixed, recognisable label naming this as an authorised owner-test, so the operator — and
+the provider — can find exactly this traffic in their own logs. There is no rotation and no
+disguise.
 
 **A note on channel binding, because it addresses a limit this briefing states
 repeatedly.** Re-running a checker over saved evidence proves that the verdict follows
@@ -581,14 +719,14 @@ chapter and the next:
 
 | Interface | What it is | Where it listens |
 |---|---|---|
-| **VIGIL COMMAND** | The primary product interface: a single application of 28 screens covering assessment, live monitoring, findings, proof, reports, fixes, defence, approvals, charter, keys, tools, system status, compliance, assurance, governance, trust centre, manual, and knowledge. | Served by the `vigil up` reverse proxy at `127.0.0.1:8770` |
+| **VIGIL COMMAND** | The primary product interface: a single application of 29 screens covering assessment, live monitoring, findings, proof, reports, fixes, defence, approvals, charter, keys, tools, system status, compliance, assurance, governance, the engagement library, trust centre, manual, and knowledge. | Served by the `vigil up` reverse proxy at `127.0.0.1:8770` |
 | **The CRUCIBLE operations console** (older) | A 22-screen console from an earlier generation, still present and still served when the console is hit directly. It began as a purely read-only view; it has since gained a set of operator action buttons (see the note below). | `127.0.0.1:8787` |
 | **The SIGIL cockpit** (older) | A single minimal page from an earlier generation. | `127.0.0.1:8733` |
 | **The STRIX terminal interface** | The vendored third-party tool's own text interface. | The terminal |
 
 **On the older console's actions.** Its own module description still calls it
 "read-only", which is now only half true, and an agency reader should have the accurate
-picture. It today carries **31** operator action routes. What they do is
+picture. It today carries **33** operator action routes. What they do is
 tightly bounded, and the code says so: launching an assessment hands the request to the
 *same* gated command-line machinery a hand-typed engagement uses, spawned as a separate
 program; it cannot widen scope (scope comes from the signed authorisation document and
@@ -597,13 +735,29 @@ is refused; re-verifying a report is pure recomputation over retained evidence a
 no traffic; and the console can *trip* the emergency stop but deliberately has no way to
 *clear* it, because clearing must be a deliberate act elsewhere. Every action route also
 refuses a request that did not come from the console's own page in the operator's
-browser.
+browser, and the console will not serve any of its programmatic addresses without a
+credential at all — there is no configuration, not an unset variable and not a blank one,
+under which that requirement switches itself off.
+
+Two of the thirty-three are the newest and are worth naming, because they are an
+instructive example of the system's own rule applied to something as mundane as a name.
+The console keeps an **engagement library**: the list of past jobs, so an operator coming
+back months later can find work by a human name — "Acme, Q3 external review" — rather than
+by a machine identity such as `20260812-143355-118`. Those two routes attach that name to
+an engagement or to a single run. The name is stored in one side-car file of its own, keyed
+by the unchanged machine identity, and nothing in that code path writes into a run folder,
+an evidence certificate, the sealed proof bundle or the signed record. Renaming therefore
+writes exactly one file and rewrites nothing that already exists, so every proof already
+delivered still re-verifies to byte-identical results. A run's name has one deliberate onward
+use: a dossier downloaded after that run is renamed is titled by the human name, which changes
+how the pack reads and nothing about what it proves. The human name is presentation; the
+identity and the proof are untouched.
 
 **An honest note on the version read for this briefing.** The project's own packaging
-contract says the unified 28-screen interface should also be copied into the two older
+contract says the unified 29-screen interface should also be copied into the two older
 interfaces' directories. In the version read here, that copy has not happened — a change
 that did it was added to the released software and then withdrawn again, because it
-broke the sovereign side's tests. The practical consequence: the 28-screen interface is
+broke the sovereign side's tests. The practical consequence: the 29-screen interface is
 reachable **only** through the `vigil up` command. Opening the console or the cockpit
 directly gives the older interface instead.
 
@@ -664,6 +818,87 @@ ungoverned. This is deliberate, so that a development copy works without ceremon
 means an agency deployment that wants the "a stolen copy is inert" property must
 provision the trust root, or set the enforcement flag, as a deployment step. The
 interface shows which state the machine is in, labelled "governed" or "ungoverned".
+
+### 3.11 The live-fire harnesses — the parts that prove the parts
+
+**In one line:** two runnable scripts that point a finished capability at something real —
+one at a real outside service, one at real infrastructure the project stands up and destroys
+— assert exactly what should and should not happen, and can be re-run by anyone.
+
+Most of what a security product claims about itself is proven against *recorded sample
+data* — realistic material written by hand, standing in for the real thing. That proves the
+logic. It does not prove that the capability has ever touched a real system. These two
+scripts close that distance, and they are deliberately built as **proofs rather than
+demonstrations**: every expectation in them is asserted, and the script exits with an error
+if any one of them fails.
+
+There are exactly two of them in the repository today, both under `tools/livefire/`, and
+each is a shell script paired with a program:
+
+| Harness | What it fires at | What it proves |
+|---|---|---|
+| Kubernetes access control | A real single-node Kubernetes cluster the script itself creates, in a container reachable only on this machine's own address, and destroys afterwards | Both Kubernetes confirmations, over bytes a real Kubernetes interface produced |
+| Exposed-secret validity | The real, public `api.github.com`, using the operator's own credential against the operator's own identity | The GitHub row of the exposed-secret confirmation, over bytes the real provider returned |
+
+**The Kubernetes harness.** It downloads and starts a real cluster, waits for it to become
+ready, plants four access rules in it — one genuinely dangerous and three benign — captures
+what the real interface returns for each, and puts those real bytes through the ordinary
+production path. Then it destroys the cluster. Two engineering details are worth naming
+because they are what separate a proof from a demonstration. First, it does not merely
+report; it *asserts*, and any deviation is an error. Second, it **refuses to draw a
+conclusion at all** until the cluster has finished assembling its built-in roles: those
+roles' permissions are not written into the object, they are filled in by the cluster
+shortly after start-up, and reading one too early returns an empty rule list. An empty rule
+list would make the most important control pass for entirely the wrong reason — because
+nothing was read, rather than because the control held. Section 8 sets out what the four
+planted rules were and which were confirmed.
+
+**The GitHub harness.** It drives the real capture machinery over the real network
+connection described in section 3.7, against the least-privileged call the provider offers:
+"who am I?", which reads an identity and changes nothing. Four things happen in a single
+run: a valid credential is confirmed and its certificate re-verifies with no network; a
+bogus credential of the *same shape*, sent live to the same real address, is answered by
+the provider itself with a rejection and correctly remains a lead — the difference between
+looking like a credential and being one, measured against the real provider rather than
+assumed; the same confirmed capture stops being a fact the instant its confirming address is
+swapped for an attacker's host or a look-alike, and the machinery's own outbound-safety
+floor refuses to send the live credential there in the first place; and a capture whose
+credential and confirming call carry different fingerprints — "some other secret
+authenticated" — is likewise not confirmed. The two refusal gates are exercised for real on
+the same live path: with the emergency stop tripped, and with the scope check denying, the
+run stops before any network call is made and produces nothing to adjudicate.
+
+**The credential never touches the disk.** It is piped straight into the harness, so it is
+never written to a file, never placed where the machine's process list would show it, and
+never put into the environment. The script contains no command tracing anywhere, because
+tracing would print the credential. The harness then asserts that the credential does not
+appear in the capture, in the checker's working record, or in the signed certificate.
+
+**Neither harness runs in the automated build, and that is deliberate.** There are no
+credentials in the build environment, and — in the project's own words — "a live-fire that
+fabricates a result when it cannot run is worse than no live-fire." The GitHub one detects
+a missing or unauthenticated credential and stops cleanly, saying so, rather than reporting
+anything.
+
+**Why they matter more than a vendor demonstration.** Both were built so that the customer,
+the auditor or a sceptical evaluator runs the identical script on their own machine and
+watches the identical result, rather than taking anyone's word for it. The Kubernetes one
+borrows nobody's infrastructure; the GitHub one borrows nobody's account.
+
+**What neither harness covers, said plainly.** Each stops slightly short of the complete
+production path, and the difference should be stated here rather than left to be discovered.
+The Kubernetes one captures using the ordinary Kubernetes command-line tool inside the shell
+script and hands the resulting evidence straight to the confirmation machinery; it does not
+travel through the system's own gated, scope-checked reader for a live cluster. That reader
+exists and refuses unless the cluster it actually reached is one the operator declared in
+writing, but the software it needs is not installed on the machine this briefing was written
+on, so it was not exercised. The GitHub one *does* drive the real production capture
+machinery over the real network connection — the stronger of the two — but on its
+*permitted* legs the permission check and the scope check were stand-ins supplied by the
+harness rather than a signed authorisation document read from disk. The *refusal* legs were
+genuine, which is what demonstrates that the gate bites; no signed authorisation was loaded
+in that run. Section 8 covers separately what the Kubernetes result does and does not
+establish about clusters in general.
 
 ---
 
@@ -899,7 +1134,8 @@ what, and where". Everything below is on the operator's own disk.
 | The session registry | Named lines of work: a name the operator chose plus pointers to the runs that belong to it. It stores operator free text and pointers, never a secret | One small structured file per session; the folder is owner-only and the files are owner-only |
 | The per-session map | A graph view of one session, for the screens and for handover | One file per session, rebuilt from the record |
 | Keys and secrets | The owner key, the offensive side's own record key, the governance key, and any configured credentials | Owner-only files; encrypted at rest when the machine's security chip vault is set up (see 7.5) |
-| Reports, certificates and audit packages | The output the operator hands to someone else | Ordinary files under the engagement folder |
+| The engagement-library labels | The human names an operator has attached to past jobs, so work can be found again by name months later | One small owner-only side-car file under the console's own folder, keyed by the unchanged machine identity. It reaches no certificate and no proof bundle, and renaming rewrites nothing that already exists; a run's name does title a dossier downloaded afterwards |
+| Reports, certificates and audit packages | The output the operator hands to someone else, including the nine-document case file | Ordinary files under the engagement folder |
 
 A word used above: a **projection** is a copy of information rearranged into a more
 convenient shape. The per-session map is a projection of the signed record. That has a
@@ -928,7 +1164,7 @@ bound to a private or tunnel address, and never to a publicly reachable one (see
 
 | Surface | What it offers | Notes |
 |---|---|---|
-| The operations console (`:8787`) | **36** read-only addresses returning structured data — status, engagements, runs, sessions, benchmark, memory, tools, capabilities, defensive status, telemetry, certificates, posture, governance, coverage, world model, reports, and more — plus a live event stream that tails the log | Also carries the **31** operator action routes described in section 3.9 |
+| The operations console (`:8787`) | **37** read-only addresses returning structured data — status, engagements, runs, sessions, the engagement library, benchmark, memory, tools, capabilities, defensive status, telemetry, certificates, posture, governance, coverage, world model, reports, and more — plus a live event stream that tails the log | Every one requires the console's session credential. Also carries the **33** operator action routes described in section 3.9 |
 | The gated action interface (`:8799`) | A small deliberate interface for an operator's own software: read the status, engagements, runs, one engagement's authority, report, world model, evidence and intelligence; and two actions — invoke a tool, or import another tool's report | Every action goes through the same fail-closed authority, entitlement, scope and egress chain as a local action. It runs only if the operator starts it, and exposes no ungated capability |
 | The unified proxy (`:8770`) | The single origin a human points a browser at. It forwards `/sovereign/*` to the cockpit, `/offense/api/v1/*` to the gated action interface, and everything else under `/offense/*` to the console | Pure standard-library code that imports neither trust domain, so one program never holds both |
 | The model-context server | Lets other AI tools call this engine's safe capabilities | Runs over a direct program-to-program channel, not a network port |
@@ -1032,7 +1268,7 @@ operator an explicit four-rung ladder, selected by a single setting:
 
 | Setting | What is permitted | Trade-off, as stated in the code |
 |---|---|---|
-| **Air-gapped** | Locally-run models only. Cloud models are refused at start-up. ("Air-gapped" is the security term for a machine with no connection to any outside network at all — as if separated by a gap of air.) | Highest sovereignty; lowest reasoning quality. |
+| **Air-gapped** | Locally-run models only. A cloud model is refused *before the client that would call it is constructed*. ("Air-gapped" is the security term for a machine with no connection to any outside network at all — as if separated by a gap of air.) | Highest sovereignty; lowest reasoning quality. |
 | **Sovereign cloud** | Local, plus models hosted in a named jurisdiction (a major cloud provider's model service with a regional restriction, or a European provider). Direct consumer model interfaces are refused. | Frontier quality with data-residency guarantees. |
 | **Trusted cloud** | Adds enterprise offerings with contractual zero-data-retention, and requires the operator to attest explicitly that the key in use is such a key. Direct consumer interfaces are still refused. | Contractual rather than jurisdictional assurance. |
 | **Permissive** | Anything. This is the development default. | No policy enforcement. |
@@ -1041,6 +1277,56 @@ An unrecognised model backend is conservatively treated as the least sovereign c
 so it is refused under every restrictive setting. Locally-hosted options include a
 self-hosted model server, a local model runner, and a deterministic replay mode that
 needs no model at all.
+
+**Where the setting is enforced, and what "refused" means precisely.** This is worth
+stating exactly, because it recently changed. The setting used to govern the engine's
+own catalogue of model backends but *not* the model call inside the running assessment
+loop — so an operator could configure a sovereign tier and still have the path that
+actually drives an engagement reach a cloud model. That gap is closed. The setting is now
+consulted at every place in the offensive half that can call a model:
+
+| Where a model can be called | What now happens under a restrictive setting |
+|---|---|
+| The engine's model-backend catalogue — every backend the reasoning functions use | The tier is checked inside the routine that builds a backend, before the vendor's software library is loaded |
+| The reasoning loop's "propose the next step" call during a live assessment | Checked before the client is built; on a refusal the step becomes an inert pause that asks the operator |
+| The code-fix proposer | Same check, same refusal |
+| The operations console's natural-language command box | Refused with the policy's own message; the ordinary typed command line is unaffected, because it does not use a model at all |
+
+"Refused" is literal rather than cosmetic. The check happens **before the model client is
+constructed and before the vendor's software library is even loaded**, so on a refusal
+nothing is imported, nothing is built, and no bytes leave the machine. The code's own
+words for this are that "the client is never constructed, the SDK is never imported, and
+nothing leaves the host."
+
+It is fail-closed at four separate points, and each one is a decision someone had to make
+the safe way round: an unrecognised setting name resolves to the *strictest* tier, not the
+most permissive; an unrecognised model backend is classified as the least sovereign
+category; if the policy code cannot be loaded at all, then any configured tier refuses
+rather than proceeding unchecked; and an error *inside* the gate is itself a refusal, never
+a permission. A refusal does not crash the assessment — it returns the safest available
+action, a pause that asks the operator what to do, carrying the policy's own explanation of
+which tier refused and which setting would change it.
+
+Three bounds on that statement, all of which matter:
+
+- **An optional seal.** By default the setting is re-read on each call, which is convenient
+  in development but means a change to the machine's configuration mid-assessment would
+  take effect immediately. A separate opt-in setting latches the tier once for the life of
+  the running program, so a later change cannot relax it part-way through a job. It can
+  only pin the tier, never loosen it.
+- **It governs the offensive half.** The sovereign side's own optional use of a model — the
+  feature that describes a screen or camera image — is not on this ladder, and should not
+  be described as if it were. It is governed separately and, in one respect, more strictly:
+  sending a private image off the machine is classified as an externally-visible action
+  under the A0–A3 tiers, and it will not upload until an owner approval exists that is
+  bound by fingerprint to that exact image and that exact question, so the approval of one
+  upload cannot be replayed to authorise another.
+- **The vendored third-party agent is not on this ladder either.** STRIX (section 3.6) has
+  its own separate model setting, and its code contains no reference to this policy at all.
+  Its containment is of a different kind — it runs inside the disposable container whose only
+  route out is the gateway — but an agency intending to enforce a model-sovereignty policy
+  should treat the vendored agent's model choice as a separate configuration item to be set,
+  not as something the ladder covers for them.
 
 ### 7.3 No credential is strictly required to run
 
@@ -1135,15 +1421,22 @@ any particular live account.
 - The two-environment separation and every mechanism that enforces it.
 - The shared integrity core: chain, signatures, canonical formatting, the gate, the
   danger classifier, key storage, the anti-rollback floor.
-- The offensive engine, its checkers, and its evidence and reporting layers. (The
-  anti-fabrication barrier is real and in use, but it is *bounded* rather than universal;
-  it therefore appears in its own group below rather than here.)
+- The offensive engine, its checkers, and its evidence and reporting layers — including the
+  nine-document plain-English case file that is generated into every dossier (section 3.3).
+  (The anti-fabrication barrier is real and in use, but it is *bounded* rather than
+  universal; it therefore appears in its own group below rather than here.)
+- The real network connection through which the cloud and exposed-secret confirmations reach
+  the outside world (section 3.7), and the two live-fire harnesses that drive them
+  (section 3.11). This is a recent and consequential change: until it existed, the only thing
+  ever plugged into that joint was a stand-in used by the tests, which is precisely why none
+  of those capabilities had ever fired at a real provider. Both harnesses have now been run —
+  one against a real Kubernetes cluster, one against the real GitHub service.
 - The gate chain, the emergency stop, the permission tiers, the approval queue with
   single-use owner-signed tokens, and the exit-door gateway.
 - The sovereign side's record, its permission kernel, and its agent mesh.
 - The sealed evidence package and the standalone offline verifiers, which contain no
   VIGIL code at all and re-implement the published format from its specification.
-- The unified 28-screen interface, reachable through the bring-up command.
+- The unified 29-screen interface, reachable through the bring-up command.
 - The machine-checked models of the four core rules, together with their deliberately
   broken twins and the document mapping each model to the code it abstracts. All four
   models and all four broken twins are checked automatically on every change, as a
@@ -1185,9 +1478,10 @@ the released software and they run on every proposed change to it.
   documents, with two confirmed findings re-verified offline; that record was read as a
   documented claim in this pass, not re-executed.
 
-**The six cloud and Kubernetes exploitation confirmations: complete. The two Kubernetes
-ones are proven against a real cluster; the four cloud ones await the customer's
-credentials.**
+**The six cloud and Kubernetes exploitation confirmations: complete. Three of the six have
+now been fired at real infrastructure — though one of those three only for one of the two
+kinds of credential it handles. The other three await the customer's credentials, and one of
+them never fires at anything, by design.**
 
 This item is set out at length rather than listed in a table, because it is the single
 part of the system most easily misrepresented — and it can be misrepresented in either
@@ -1201,7 +1495,7 @@ confirmations that a weakness was not merely present but actually *achieved*:
 | Confirmation | What it establishes, in plain terms |
 |---|---|
 | **Instance-metadata credential capture** | A machine running in a cloud has an internal service that hands out credentials to whatever is running on it. This confirms a credential was actually retrieved from that service and actually worked — not merely that the service could be reached. |
-| **Exposed-secret validity** | A password or key found lying somewhere it should not be is only a real problem if it still works. This confirms the secret is currently valid, by using it once to ask "who am I?", rather than assuming it is live. |
+| **Exposed-secret validity** | A password or key found lying somewhere it should not be is only a real problem if it still works. This confirms the secret is currently valid, by using it once to ask "who am I?", rather than assuming it is live. It covers two kinds of credential, and the two are at different stages — see below, because the difference must not be blurred. |
 | **Google service-account impersonation** | One machine identity was able to obtain a working token as a different, more privileged identity, and that token was confirmed with one call. |
 | **Identity privilege escalation** | The captured permission rules, read together with the limits that are supposed to constrain them, unconditionally permit a named identity to gain privilege it should not have. |
 | **Kubernetes access control, tier one** | On a container cluster, an anonymous, unauthenticated caller is bound to a dangerous built-in role. |
@@ -1235,12 +1529,38 @@ rules across a whole cluster; and the cluster is one the system stood up itself,
 **managed provider's control plane** (Amazon EKS, Google GKE, Azure AKS) — the same
 interface reached by a different access path — is not exercised.
 
-**Cloud: what is deferred, and why.** For the four cloud capabilities, what has not yet
-happened is **real-world live fire against a third-party cloud account**. That step waits
-on the customer supplying their own read-only cloud credentials. The detection logic, the
-evidence handling, the certificates and the safety gates are all built and proven; only
-the act of pointing them at a live third-party account is pending, by design. The capture
-modules say so in their own written notes, in almost these words.
+**Exposed-secret validity: proven against a real third-party provider — for one kind of
+credential, and not the other.** This is the sharpest honesty point in the chapter and it
+must not be smoothed over, in either direction.
+
+The confirmation covers two kinds of credential: a GitHub personal access token, and an
+Amazon Web Services access key. **The GitHub one has been fired at the real, public
+`api.github.com`.** The harness described in section 3.11 drives the real capture machinery
+over the real network connection, using the operator's own credential against the operator's
+own identity, and the result is confirmed with a certificate that re-verifies offline. Three
+controls were measured in the same run against the same real provider: a bogus credential of
+the identical *shape*, sent live, was rejected by GitHub itself and correctly remained a
+lead — structure is not validity, and here that is measured rather than assumed; the same
+confirmed capture stopped being a fact the instant its confirming address was swapped for an
+attacker's host or a look-alike, with the machinery's own outbound-safety floor refusing to
+send the live credential there at all; and a capture whose credential and confirming call
+carried different fingerprints was likewise not confirmed. Both refusal gates were exercised
+on the same live path and stopped the run before any network call was made.
+
+**The Amazon row of the same capability has never touched real Amazon Web Services.** Its
+dispatch and its request-signing are built and proven — the signing implementation is checked
+against Amazon's own independently-written one — but it still needs a real, customer-supplied
+access key. **Nothing from the GitHub run transfers to it.** Anyone quoting this briefing
+should name the row rather than the capability.
+
+**Cloud: what is deferred, and why.** For the remaining cloud capabilities — metadata
+credential capture, Google service-account impersonation, identity privilege escalation, and
+the Amazon row just described — what has not yet happened is **real-world live fire against a
+third-party cloud account**. That step waits on the customer supplying their own read-only
+cloud credentials. The detection logic, the evidence handling, the certificates and the
+safety gates are all built and proven; only the act of pointing them at a live third-party
+account is pending, by design. The capture modules say so in their own written notes, in
+almost these words.
 
 One of the four — identity privilege escalation — is different in an instructive way, and
 the difference should not be glossed. It reasons over a *captured copy* of the permission
@@ -1252,19 +1572,27 @@ credentials. What it will never need is to actually take the privileged step.
 Two framings should both be avoided because each is wrong in a different direction.
 Saying the capabilities are unfinished understates the system: they are built, gated, and
 proven. Saying the cloud ones have been field-proven in customer clouds overstates it:
-they have not been pointed at one. The accurate statement, used throughout this briefing,
-is: **the two Kubernetes confirmations are proven against a real cluster the system
-stands up itself; the four cloud ones are built, gated, and proven offline, with live fire
-awaiting customer-supplied credentials, by design.**
+most have not been pointed at one. The accurate statement, used throughout this briefing,
+is: **the two Kubernetes confirmations are proven against a real cluster the system stands
+up itself; the GitHub row of exposed-secret validity is proven against the real, public
+GitHub service; and the remaining cloud work — metadata credential capture, Google
+service-account impersonation, identity privilege escalation, and the Amazon row of
+exposed-secret validity — is built, gated, and proven offline, with live fire awaiting
+customer-supplied credentials, by design.**
 
-There is a design point worth drawing out for a procurement reader, and the two halves
-illustrate it from opposite sides. For cloud, it would have been easy to demonstrate
-against an account of our own and call the matter field-proven; that was not done, because
-a demonstration on an account the customer cannot re-create is a claim, not
-evidence. For Kubernetes the same principle pointed the other way: a cluster *can* be
+There is a design point worth drawing out for a procurement reader, and the three parts
+illustrate it from different sides. For the remaining cloud capabilities it would have been
+easy to demonstrate against an account of our own and call the matter field-proven; that was
+not done, because a demonstration on an account the customer cannot re-create is a claim,
+not evidence. For Kubernetes the same principle pointed the other way: a cluster *can* be
 created from nothing in a few seconds on any machine, so the proof was built to create
 one — and the value of that proof is precisely that the customer, or an auditor, can run
-the identical script and watch the identical result, rather than take our word for it.
+the identical script and watch the identical result, rather than take our word for it. The
+GitHub proof is the same test applied to a service nobody can stand up themselves: it was
+built to use *the evaluator's own* account and the least-privileged call the service offers,
+so it too can be re-run by anyone, on their own credential, without borrowing ours. The
+common rule in all three is that a proof only counts if the person being asked to believe it
+can reproduce it.
 
 **Other things built, but deliberately not yet fired against live third-party systems:**
 
@@ -1355,7 +1683,8 @@ The technical words used in this chapter:
 | **m-of-n** | Several named key-holders, of whom a set number must agree. A vault needing two managers' keys at once. |
 | **Pull request** | The software industry's term for a proposed code change raised so a human can review it before it becomes part of the software. |
 | **Kubernetes** | The standard software for running large numbers of containers across many machines. |
-| **Live fire** | Running a capability against a real system rather than against a stand-in. The Kubernetes confirmations are proven this way against a real cluster the system creates itself; the cloud confirmations are complete and proven against stand-in data, and await live fire on the customer's own account by design. |
+| **Live fire** | Running a capability against a real system rather than against a stand-in. Three confirmations are proven this way today: both Kubernetes ones, against a real cluster the system creates and destroys itself, and the GitHub row of exposed-secret validity, against the real public GitHub service. The remaining cloud confirmations are complete and proven against stand-in data, and await live fire on the customer's own account by design. |
+| **Case file** | The pack of nine numbered plain-English documents generated into every dossier, written for the non-specialist who receives it: what was done, what was found, what was **not** examined, what to do, and how to check the result independently. |
 | **Recorded sample data** (the software calls it a *fixture*) | Saved, realistic data used in place of a live system, so a test proves the logic without touching anyone's account. Like testing a smoke alarm with a test button rather than a fire. |
 | **Fingerprint** (of a file, a message or an image) | A short value computed from the content, such that any change to the content changes the value. Used throughout to detect substitution. Sometimes called a hash or a digest. |
 | **Bill of materials** | A published list of everything inside a piece of software, item by item, with versions. The ingredients list on the packet. |
