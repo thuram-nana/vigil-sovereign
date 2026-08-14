@@ -84,9 +84,22 @@ class ClaudeVision:
         b64 = _b64_image(frame)
         if b64 is None or not self.api_key:
             return ""
+        # Per-tool TOKEN BUDGET for "sigil" (warn + throttle, never block). A direct paid call on the
+        # sovereign plane; meter it explicitly. Guarded: metering never breaks perception.
+        try:
+            from vigil_core import token_budget as _tb
+        except Exception:  # noqa: BLE001
+            _tb = None
+        _mt = self.max_tokens
+        if _tb is not None:
+            try:
+                _tb.throttle("sigil")
+                _mt = _tb.clamp_output("sigil", self.max_tokens)
+            except Exception:  # noqa: BLE001
+                _tb = None
         media = "image/png" if (frame.image_path or "").lower().endswith(".png") else "image/jpeg"
         body = json.dumps({
-            "model": self.model, "max_tokens": self.max_tokens,
+            "model": self.model, "max_tokens": _mt,
             "messages": [{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}},
                 {"type": "text", "text": (question or "Describe what is visible.")},
@@ -101,5 +114,10 @@ class ClaudeVision:
                 payload = json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, ValueError):
             return ""
+        if _tb is not None:
+            try:
+                _tb.record_usage("sigil", payload.get("usage"))
+            except Exception:  # noqa: BLE001
+                pass
         return "".join(b.get("text", "") for b in payload.get("content", [])
                        if isinstance(b, dict)).strip()[:2000]

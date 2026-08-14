@@ -47,3 +47,37 @@ def test_operator_can_add_a_custom_tool(budget_store):
     r = actions.set_token_budget({"tool": "my_api", "limit": 500, "mode": "throttle"})
     assert r["ok"] is True
     assert any(t["tool"] == "my_api" and t["limit"] == 500 for t in r["tools"])
+
+
+def test_no_overclaim_every_registered_tool_is_metered():
+    """Anti-overclaim guard (the red-pen finding that mattered most): every tool the UI advertises must
+    have a REAL metering wire in the source tree, so a listed budget is never decorative. 'engine' is the
+    default bucket — the kernel/think paths charge current_tool() with no explicit arg. A future tool
+    added to DEFAULT_TOOLS without wiring it (or a removed wire) fails here."""
+    import re
+    from pathlib import Path
+    from vigil_core import token_budget as tb
+
+    # repo root: .../engine/crucible/framework/v2/console/tests/<this file>
+    root = Path(__file__).resolve().parents[6]
+    trees = ["engine/crucible/framework/v2", "integration/vigil_integration", "apps/sigil"]
+    blobs: list[str] = []
+    for t in trees:
+        d = root / t
+        if not d.is_dir():
+            continue
+        for p in d.rglob("*.py"):
+            if "test" in p.name:
+                continue
+            try:
+                blobs.append(p.read_text(encoding="utf-8", errors="ignore"))
+            except OSError:
+                pass
+    src = "\n".join(blobs)
+    assert src, "could not read any source to check tool metering"
+    verbs = "record|throttle|clamp_output|record_usage|using_tool|tool_scope|current_tool"
+    for tool in tb.DEFAULT_TOOLS:
+        if tool == "engine":                     # the default bucket, wired via current_tool() (no arg)
+            continue
+        pat = re.compile(rf"(?:{verbs})\(\s*[\"']{re.escape(tool)}[\"']")
+        assert pat.search(src), f"registered tool {tool!r} has NO metering wire — that is an overclaim"

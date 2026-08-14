@@ -58,7 +58,10 @@ DEFAULT_TOOLS: dict[str, ToolDef] = {
     "threat_model": ToolDef("Threat modeling", 400_000, "llm"),
     "fireteam":     ToolDef("Fireteam agents", 1_000_000, "llm"),
     "sigil":        ToolDef("SIGIL perception / consolidation", 300_000, "llm"),
-    "strix":        ToolDef("Strix scans", 2_000_000, "llm"),
+    # NB: Strix is deliberately NOT registered here. It is a vendored subprocess that drives its OWN LLM
+    # via litellm with its OWN cost tracking + `--max-budget-usd` governor; VIGIL cannot meter its internal
+    # calls from outside without parsing its output, so listing a "strix" budget the engine can't enforce
+    # would be an overclaim. Strix self-governs; the VIGIL ledger covers the calls VIGIL itself makes.
     # non-LLM external APIs (request-count budgets)
     "vulnfeed":     ToolDef("Vuln feed (NVD / OSV / CISA-KEV)", 5_000, "requests"),
     "recon":        ToolDef("Passive recon (crt.sh / DoH / RDAP)", 2_000, "requests"),
@@ -88,8 +91,13 @@ def _store_path() -> Path:
 
 
 def _today(now: Optional[float]) -> str:
-    ts = now if now is not None else time.time()
-    return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d")
+    """The UTC day key. TOTAL: an out-of-range / bad clock must never break metering — it falls back to a
+    fixed epoch day rather than letting ``datetime.fromtimestamp`` raise up through status()/record()."""
+    try:
+        ts = now if now is not None else time.time()
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d")
+    except (OverflowError, OSError, ValueError, TypeError):
+        return datetime.fromtimestamp(0, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
 def _blank() -> dict:
@@ -385,12 +393,16 @@ def list_status(*, now: Optional[float] = None) -> list[Status]:
 # know which tool is spending without every caller threading an argument through. A subsystem wraps
 # its work in ``with using_tool("chat"): ...``; the hook reads ``current_tool()``.
 # --------------------------------------------------------------------------------------------------
-_CURRENT_TOOL: ContextVar[str] = ContextVar("vigil_current_tool", default="engine")
+# The ContextVar default is EMPTY (not "engine"): current_tool(default) must fall back to the CALLER'S
+# default when nothing wrapped the call — so the transport's current_tool("recon") actually yields "recon"
+# and the kernel's current_tool("engine") yields "engine". A truthy "engine" default here would make every
+# current_tool("recon") return "engine" (the `.get() or default` short-circuits), mis-charging recon.
+_CURRENT_TOOL: ContextVar[str] = ContextVar("vigil_current_tool", default="")
 
 
 @contextmanager
 def using_tool(tool: str) -> Iterator[None]:
-    token = _CURRENT_TOOL.set(str(tool or "engine"))
+    token = _CURRENT_TOOL.set(str(tool or ""))
     try:
         yield
     finally:
@@ -398,7 +410,24 @@ def using_tool(tool: str) -> Iterator[None]:
 
 
 def current_tool(default: str = "engine") -> str:
+    """The tool a call should charge: whatever the nearest ``using_tool(...)`` set, else the caller's
+    ``default`` (the kernel passes "engine", the transport passes "recon")."""
     try:
         return _CURRENT_TOOL.get() or default
     except Exception:              # noqa: BLE001
         return default
+
+
+def tool_scope(tool: str):
+    """Decorator form of ``using_tool``: everything the wrapped function does charges ``tool``. Used where
+    a call site can't wrap a with-block (e.g. a multi-line kernel call). Exception-safe (the underlying
+    context manager resets in a finally)."""
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            with using_tool(tool):
+                return fn(*args, **kwargs)
+        return wrapper
+    return deco

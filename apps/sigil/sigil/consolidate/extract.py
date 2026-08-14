@@ -160,8 +160,21 @@ class ApiProvider:
             raise RuntimeError("ApiProvider needs an API key — set ANTHROPIC_API_KEY (or SIGIL_ANTHROPIC_API_KEY)")
         import json as _json
         import urllib.request
+        # Per-tool TOKEN BUDGET for "sigil" (warn + throttle, never block). Sovereign-plane paid call;
+        # meter it explicitly. Guarded: metering never breaks consolidation.
+        try:
+            from vigil_core import token_budget as _tb
+        except Exception:  # noqa: BLE001
+            _tb = None
+        _mt = self.max_tokens
+        if _tb is not None:
+            try:
+                _tb.throttle("sigil")
+                _mt = _tb.clamp_output("sigil", self.max_tokens)
+            except Exception:  # noqa: BLE001
+                _tb = None
         body = _json.dumps({
-            "model": self.model, "max_tokens": self.max_tokens,
+            "model": self.model, "max_tokens": _mt,
             "messages": [{"role": "user", "content": build_prompt(records)}],
         }).encode("utf-8")
         req = urllib.request.Request(
@@ -174,6 +187,11 @@ class ApiProvider:
         except (urllib.error.URLError, OSError, ValueError) as e:
             _log.warning("ApiProvider extraction request failed: %s", e)  # never carries the key
             return []
+        if _tb is not None:
+            try:
+                _tb.record_usage("sigil", payload.get("usage"))
+            except Exception:  # noqa: BLE001
+                pass
         text = "".join(b.get("text", "") for b in payload.get("content", []) if isinstance(b, dict))
         return parse_candidates(text, extractor="api")
 

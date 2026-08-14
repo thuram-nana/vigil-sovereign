@@ -16,7 +16,17 @@ from .consistency import ConsistencyResult, run_consistent, sample_workers
 from .llm import LLMBackend
 from .models import CallTrace, ThreatModel
 
+# Attribute this cognitive call's LLM spend to the "threat_model" token budget (else it charges the
+# default "engine"). Guarded so a missing vigil_core leaves the function unchanged.
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import token_budget as _token_budget
+    _tb_threat_model = _token_budget.tool_scope("threat_model")
+except Exception:                                          # noqa: BLE001
+    def _tb_threat_model(fn):                              # no-op decorator
+        return fn
 
+
+@_tb_threat_model
 def threat_model(
     target_name: str,
     *,

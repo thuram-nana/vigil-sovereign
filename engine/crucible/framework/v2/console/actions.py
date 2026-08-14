@@ -1998,15 +1998,33 @@ def terminal_propose(intent, run_id=None, session_id=None) -> dict:
         user = (intent + "\n\nSESSION CONTEXT (untrusted reference data, already secret-redacted, JSON):\n"
                 + ctx_block)
 
+    # Per-tool TOKEN BUDGET for "terminal" (warn + throttle, never block) — a direct paid call that
+    # bypasses the kernel, so meter it explicitly. Guarded: metering never breaks the call.
+    try:
+        from vigil_core import token_budget as _tb
+    except Exception:  # noqa: BLE001
+        _tb = None
+    _term_mx = 1024
+    if _tb is not None:
+        try:
+            _tb.throttle("terminal")
+            _term_mx = _tb.clamp_output("terminal", 1024)
+        except Exception:  # noqa: BLE001
+            _tb = None
     try:
         client = anthropic.Anthropic(api_key=key)
         resp = client.messages.create(
-            model="claude-opus-5", max_tokens=1024,
+            model="claude-opus-5", max_tokens=_term_mx,
             system=_TERM_ROUTER_SYSTEM,
             messages=[{"role": "user", "content": user}],
         )
     except Exception as e:  # noqa: BLE001 — never surface the key; an API error is an honest refusal
         return {"ok": False, "error": f"the model could not be reached ({type(e).__name__}); type a command directly."}
+    if _tb is not None:
+        try:
+            _tb.record_usage("terminal", getattr(resp, "usage", None))
+        except Exception:  # noqa: BLE001
+            pass
 
     # Opus 5 safety classifiers can decline (HTTP 200, stop_reason == "refusal") — handle before reading content.
     if getattr(resp, "stop_reason", None) == "refusal":

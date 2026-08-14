@@ -128,6 +128,29 @@ def test_using_tool_contextvar(store):
     assert tb.current_tool() == "engine"               # restored
 
 
+def test_current_tool_honors_the_caller_default(store):
+    # the regression the red-pen caught: current_tool("recon") used to return "engine" (the ContextVar
+    # default was truthy), mis-charging recon. It must return the CALLER's default when nothing is set.
+    assert tb.current_tool("recon") == "recon"
+    assert tb.current_tool("engine") == "engine"
+    with tb.using_tool("vulnfeed"):
+        assert tb.current_tool("recon") == "vulnfeed"  # a wrap still wins over the default
+
+
+def test_today_is_total_on_a_bad_clock(store):
+    # a wildly out-of-range timestamp must not raise up through record/status (the "never breaks" property)
+    huge = 10 ** 30
+    st = tb.record("chat", 100, now=huge)
+    assert st.used >= 0
+    assert isinstance(tb.status("chat", now=huge).day, str)
+
+
+def test_strix_is_not_registered(store):
+    # Strix self-governs (its own litellm cost tracking); listing an unenforceable budget would overclaim.
+    assert "strix" not in tb.DEFAULT_TOOLS
+    assert all(s.tool != "strix" for s in tb.list_status())
+
+
 def test_record_usage_from_provider_shapes(store):
     class _AnthropicUsage:
         input_tokens = 100
