@@ -80,6 +80,39 @@ def test_grounded_is_sticky_a_lead_cannot_demote_a_fact() -> None:
     assert lead_after.grounding == GROUNDING_INTEL
 
 
+def test_the_veracity_firewall_can_still_demote_a_fact_whose_proof_did_not_refire() -> None:
+    """THE EXCEPTION THAT MAKES STICKINESS SAFE, and a defect the first version of it introduced.
+
+    ``demoted:`` is what the veracity firewall writes when a recorded-confirmed finding's RETAINED
+    PROOF DID NOT RE-FIRE (``scanner/campaign.py``). That layer's whole authority is that it may only
+    ever demote — so its write MUST land. The first sticky rule blocked it, which inverted the
+    firewall: a stale or tampered finding whose proof no longer fires stayed GROUNDED and read back
+    out of the graph as a fact.
+
+    This is the regression test for that. It is the one direction where refusing to overwrite a
+    grounded node is the UNSAFE choice."""
+    w = WorldModel()
+    w.add_node(_node("finding:x", "oracle:boolean_sqli", 0.99))
+    demoted = w.add_node(_node("finding:x", "demoted:boolean_sqli", 0.99))
+    assert demoted.provenance == "demoted:boolean_sqli", "the firewall's demotion was blocked"
+    assert demoted.grounding != GROUNDING_GROUNDED, "a finding whose proof did not re-fire reads as a fact"
+    # and the demotion holds even when the demoting write is LOWER confidence than the fact was.
+    w2 = WorldModel()
+    w2.add_node(_node("finding:y", "oracle:xss", 0.99))
+    d2 = w2.add_node(_node("finding:y", "demoted:xss", 0.10))
+    assert d2.grounding != GROUNDING_GROUNDED, "a low-confidence demotion was ignored"
+
+
+def test_an_llm_assertion_still_cannot_overwrite_a_fact() -> None:
+    """MUTATION CONTROL for the demotion exception: it must be scoped to the firewall's marker, not a
+    blanket 'any ungrounded write wins'. A high-confidence LLM assertion on an oracle-confirmed node
+    must still be refused — that is the case stickiness exists for."""
+    w = WorldModel()
+    w.add_node(_node("host:z", "oracle:boolean_sqli", 0.99))
+    after = w.add_node(_node("host:z", "llm-said-so", 1.0))
+    assert after.grounding == GROUNDING_GROUNDED and after.provenance == "oracle:boolean_sqli"
+
+
 # ---- add_node tags grounding, DEFAULT belief unchanged ----------------------
 
 

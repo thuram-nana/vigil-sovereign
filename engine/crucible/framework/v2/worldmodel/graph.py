@@ -61,20 +61,49 @@ class WorldModelError(CrucibleError):
 # confidence c contributes _BELIEF_WEIGHT*c corroboration and *(1-c) refutation.
 _BELIEF_WEIGHT = 1.0
 
+# The veracity firewall's demotion marker (``scanner/campaign.py`` writes ``demoted:<oracle>`` when a
+# retained proof does not re-fire). Named here because ``_sticky_grounded`` must let it through.
+_DEMOTION_PREFIX = "demoted:"
+
+
+def _is_demotion(provenance: str) -> bool:
+    """True for the veracity firewall's demotion marker.
+
+    A demotion is a SAFETY-CRITICAL DOWNGRADE and must not be outvoted by the confidence tiebreak: the
+    firewall writes it with the finding's own confidence, and a demotion that lost the tiebreak would
+    leave a finding whose proof no longer re-fires still reading as a fact. It cannot be abused in the
+    other direction, because ``demoted:`` classifies as ungrounded by construction — letting it always
+    win can only ever LOWER grounding, which is exactly the firewall's one authority."""
+    return (provenance or "").strip().lower().startswith(_DEMOTION_PREFIX)
+
 
 def _sticky_grounded(existing_prov: str, winning_prov: str) -> str:
-    """GROUNDED is sticky on upsert: a node/edge an oracle already grounded is never demoted
-    to a lead by a later non-grounded (intel/ungrounded) re-observation.
+    """GROUNDED is sticky on upsert: a node/edge an oracle already grounded is not demoted to a lead
+    by a later non-grounded re-observation that merely happens to carry higher confidence.
 
     Without this, a high-confidence sensor lead re-asserted on an oracle-confirmed node wins the
-    max-confidence tiebreak, rewrites the provenance pointer to itself, and the fact silently
-    becomes a lead (belief-floored in strict mode). This can only KEEP or protect grounding — it
-    never turns a lead into a fact, so the lead→fact direction the whole model forbids is
-    untouched. When the incoming write is ITSELF grounded (a second oracle), the winner stands."""
-    if (classify_provenance(existing_prov) == GROUNDING_GROUNDED
-            and classify_provenance(winning_prov) != GROUNDING_GROUNDED):
-        return existing_prov
-    return winning_prov
+    max-confidence tiebreak, rewrites the provenance pointer to itself, and the fact silently becomes
+    a lead (belief-floored in strict mode). This can only KEEP grounding — it never turns a lead into
+    a fact, so the lead→fact direction the whole model forbids is untouched. When the incoming write
+    is ITSELF grounded (a second oracle), the winner stands.
+
+    THE DEMOTION EXCEPTION, AND WHY IT IS NOT OPTIONAL. ``demoted:`` is the marker the veracity
+    firewall writes when a recorded-confirmed finding's RETAINED PROOF DID NOT RE-FIRE. It is the
+    anti-hallucination layer exercising its one authority — it may only ever demote — and it MUST
+    win, or a stale or tampered finding reads back out of the graph as a grounded fact. An earlier
+    version of this function blocked exactly that write, which inverted the firewall: caught by
+    asking whether the rule could freeze a fact that ought to have been demoted, and reproduced
+    directly (an oracle: node re-asserted as demoted: stayed grounded).
+
+    So stickiness protects against an ORDINARY non-grounded re-observation, never against a
+    deliberate demotion by the layer that owns demotion."""
+    if classify_provenance(existing_prov) != GROUNDING_GROUNDED:
+        return winning_prov
+    if classify_provenance(winning_prov) == GROUNDING_GROUNDED:
+        return winning_prov
+    if (winning_prov or "").strip().lower().startswith(_DEMOTION_PREFIX):
+        return winning_prov          # the veracity firewall's demote-only authority is absolute
+    return existing_prov
 
 
 def _seed_belief(confidence: float, alpha: float, beta: float) -> tuple[float, float]:
@@ -148,7 +177,10 @@ class WorldModel:
             provenance, confidence = node.provenance, node.confidence
         else:
             provenance, confidence = existing.provenance, existing.confidence
-        provenance = _sticky_grounded(existing.provenance, provenance)
+        # A demotion bypasses the confidence tiebreak entirely (see _is_demotion): the firewall's
+        # downgrade must land even when the fact it demotes was asserted more confidently.
+        provenance = node.provenance if _is_demotion(node.provenance) else \
+            _sticky_grounded(existing.provenance, provenance)
         alpha, beta = _update_belief(existing.alpha, existing.beta, node.confidence)
         merged = existing.model_copy(
             update={
@@ -213,7 +245,8 @@ class WorldModel:
                 provenance, confidence = edge.provenance, edge.confidence
             else:
                 provenance, confidence = existing.provenance, existing.confidence
-            provenance = _sticky_grounded(existing.provenance, provenance)
+            provenance = edge.provenance if _is_demotion(edge.provenance) else \
+                _sticky_grounded(existing.provenance, provenance)
             alpha, beta = _update_belief(existing.alpha, existing.beta, edge.confidence)
             stored = existing.model_copy(
                 update={
