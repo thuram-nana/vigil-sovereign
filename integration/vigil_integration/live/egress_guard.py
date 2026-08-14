@@ -24,12 +24,20 @@ for the guard. Live-fire and CI turn it on.
   VIGIL_EGRESS_GUARD_BIN=<path>   explicit binary path (else the in-repo build is used)
   VIGIL_EGRESS_GUARD_LOG=<path>   append the guard's decisions here
 
-HONEST BOUND. Allowed connects use SECCOMP_USER_NOTIF_FLAG_CONTINUE, which has a documented TOCTOU: a
-thread could rewrite the sockaddr between our read and the kernel's. That matters when sandboxing code
-that is trying to escape. It does not describe this deployment — the tools are authorized, correlatable
-and owner-run — so the guard is a control against a tool's own defaults and a mis-built argv, NOT a
-containment boundary for hostile code. The kernel-isolation boundary remains ``sandbox_exec`` (bwrap
-``--unshare-all``).
+HONEST BOUND 1 — TOCTOU. Allowed connects use SECCOMP_USER_NOTIF_FLAG_CONTINUE, which has a documented
+race: a thread could rewrite the sockaddr between our read and the kernel's. That matters when sandboxing
+code that is trying to escape. It does not describe this deployment — the tools are authorized,
+correlatable and owner-run — so the guard is a control against a tool's own defaults and a mis-built
+argv, NOT a containment boundary for hostile code. The kernel-isolation boundary remains ``sandbox_exec``
+(bwrap ``--unshare-all``).
+
+HONEST BOUND 2 — THE GUARD STRIPS PRIVILEGE, AND THAT CAN SILENCE A TOOL. An unprivileged seccomp filter
+REQUIRES ``PR_SET_NO_NEW_PRIVS``, and that flag also blocks setuid/setgid and FILE CAPABILITY elevation.
+Measured on this machine: ``/usr/lib/nmap/nmap`` carries ``cap_net_raw``; run under the guard it cannot
+acquire it, and it reports **no open ports at all** while exiting 0. That is not a degraded result, it is
+a FALSE NEGATIVE wearing the clothes of a clean one — precisely the failure this repository exists to
+prevent. So the guard REFUSES to wrap a tool known to depend on elevated privilege rather than run it
+crippled: a loud refusal beats a silent no-op. See ``_PRIVILEGE_DEPENDENT`` below.
 """
 
 from __future__ import annotations
@@ -45,8 +53,61 @@ EGRESS_BLOCKED_EXIT = 97
 _REPO_BIN = Path(__file__).resolve().parents[3] / "tools" / "egress-guard" / "egress_guard"
 
 
+# Tools that need elevated privilege to do their job, which NO_NEW_PRIVS would silently remove.
+#
+# `nmap` is the measured case: Kali ships /usr/bin/nmap as a wrapper that re-execs
+# /usr/lib/nmap/nmap (file capabilities cap_net_raw,cap_net_admin,cap_net_bind_service). Under the
+# guard the capability cannot be acquired and nmap emits XML with NO <port> element at all, exit 0 —
+# indistinguishable from a target with nothing listening.
+#
+# A STATIC CHECK ON argv[0] IS NOT ENOUGH, which is why this list exists at all: /usr/bin/nmap itself
+# carries no capabilities; they live on the binary it re-execs. So the name is the reliable signal and
+# the filesystem check below is the belt-and-braces for anything else that is directly privileged.
+_PRIVILEGE_DEPENDENT = frozenset({"nmap"})
+
+
 class EgressGuardUnavailable(RuntimeError):
     """Raised only in ``require`` mode: the guard was demanded and could not be found."""
+
+
+class EgressGuardWouldBreakTool(RuntimeError):
+    """The guard would strip privilege this tool needs, turning its output into a false negative."""
+
+
+def _is_privileged_binary(path: str) -> bool:
+    """True if ``path`` is setuid/setgid or carries file capabilities — either of which NO_NEW_PRIVS
+    would neutralise. Total: an unreadable path or a kernel without xattr support answers False."""
+    try:
+        mode = os.stat(path).st_mode
+        if mode & (0o4000 | 0o2000):
+            return True
+    except OSError:
+        return False
+    try:
+        return b"" != os.getxattr(path, "security.capability")
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
+def refuses_to_wrap(tool_argv: list) -> str | None:
+    """Why this argv must not be wrapped, or None if wrapping is safe.
+
+    Refusing is the whole point: a guard that quietly turns a scanner into a no-op is worse than no
+    guard, because its silence reads as a clean result."""
+    if not tool_argv:
+        return None
+    argv0 = str(tool_argv[0])
+    name = os.path.basename(argv0).lower()
+    if name in _PRIVILEGE_DEPENDENT:
+        return (f"{name} depends on elevated privilege (file capabilities). The guard must set "
+                f"NO_NEW_PRIVS to install an unprivileged seccomp filter, which blocks that "
+                f"elevation — {name} would run crippled and report NOTHING while exiting 0, a false "
+                f"negative indistinguishable from a clean target. Run {name} unguarded (its argv is "
+                f"already scope-pinned to loopback), or guard the tools that actually phone home.")
+    if _is_privileged_binary(argv0):
+        return (f"{argv0} is setuid/setgid or carries file capabilities; NO_NEW_PRIVS would strip "
+                f"them and the tool's result could not be trusted.")
+    return None
 
 
 def _mode() -> str:
@@ -80,6 +141,12 @@ def wrap_argv(argv: list) -> list:
     guard is an ADDITIONAL control layered over the argv allowlist that is still in force.
     """
     if not enabled():
+        return list(argv)
+    breakage = refuses_to_wrap(list(argv))
+    if breakage is not None:
+        # NOT an exception: this tool is meant to run, just not under the guard. Returning the argv
+        # unchanged keeps the scan honest (the argv allowlist and the loopback IP pin are still in
+        # force); raising here would break every nmap row the moment the guard was switched on.
         return list(argv)
     binary = guard_binary()
     if binary is None:

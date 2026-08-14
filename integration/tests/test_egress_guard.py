@@ -196,14 +196,17 @@ def test_the_guard_is_off_by_default_and_argv_is_unchanged(monkeypatch):
 
 @_needs_guard
 def test_enabling_the_guard_prefixes_the_spawn(monkeypatch, tmp_path):
+    # nuclei, not nmap: nmap is deliberately never wrapped (it needs cap_net_raw — see the
+    # privilege tests below), so using it here would test the refusal rather than the wrapping.
     monkeypatch.setenv("VIGIL_EGRESS_GUARD", "1")
     monkeypatch.setenv("VIGIL_EGRESS_GUARD_LOG", str(tmp_path / "l.log"))
     monkeypatch.setenv("VIGIL_EGRESS_GUARD_FAIL", "1")
-    wrapped = eg.wrap_argv(["nmap", "-Pn", "127.0.0.1"])
+    tool = ["nuclei", "-u", "http://127.0.0.1:8080/"]
+    wrapped = eg.wrap_argv(tool)
     assert wrapped[0].endswith("egress_guard")
     assert "--fail-on-egress" in wrapped and "--" in wrapped
     # the tool's own argv survives intact, in order, after the separator
-    assert wrapped[wrapped.index("--") + 1:] == ["nmap", "-Pn", "127.0.0.1"]
+    assert wrapped[wrapped.index("--") + 1:] == tool
 
 
 def test_require_mode_refuses_to_spawn_unguarded(monkeypatch):
@@ -212,7 +215,7 @@ def test_require_mode_refuses_to_spawn_unguarded(monkeypatch):
     monkeypatch.setenv("VIGIL_EGRESS_GUARD", "require")
     monkeypatch.setenv("VIGIL_EGRESS_GUARD_BIN", "/nonexistent/egress_guard")
     with pytest.raises(eg.EgressGuardUnavailable):
-        eg.wrap_argv(["nmap", "127.0.0.1"])
+        eg.wrap_argv(["nuclei", "-u", "http://127.0.0.1:8080/"])
 
 
 def test_require_mode_failure_degrades_the_runner_instead_of_crashing(monkeypatch):
@@ -222,3 +225,56 @@ def test_require_mode_failure_degrades_the_runner_instead_of_crashing(monkeypatc
     monkeypatch.setenv("VIGIL_EGRESS_GUARD_BIN", "/nonexistent/egress_guard")
     out = ex.subprocess_runner(["echo", "hi"])
     assert out.exit_code is None and "egress guard unavailable" in out.stderr
+
+
+# ---------------------------------------------------------------------------------------------------
+# THE GUARD MUST NOT SILENTLY CRIPPLE A TOOL — the defect this suite caught in the guard itself
+# ---------------------------------------------------------------------------------------------------
+
+
+def test_a_privilege_dependent_tool_is_not_wrapped(monkeypatch):
+    """MEASURED, NOT THEORISED. An unprivileged seccomp filter requires NO_NEW_PRIVS, which also blocks
+    file-capability elevation. /usr/lib/nmap/nmap carries cap_net_raw; wrapped, nmap emits XML with NO
+    <port> element and exits 0 — a false negative indistinguishable from a target with nothing
+    listening. The first live-fire run under the guard failed on exactly this.
+
+    So nmap is not wrapped. Its argv is already pinned to loopback by the executor, so declining the
+    extra layer costs nothing; running it crippled would cost the truth of every nmap row."""
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD", "1")
+    argv = ["nmap", "-oX", "-", "-Pn", "-n", "127.0.0.1"]
+    assert eg.wrap_argv(argv) == argv, "nmap was wrapped — its results can no longer be trusted"
+    assert eg.refuses_to_wrap(argv) is not None
+    assert "false negative" in eg.refuses_to_wrap(argv)
+
+
+def test_the_refusal_survives_an_absolute_path_and_a_wrapper_name(monkeypatch):
+    """The capabilities live on /usr/lib/nmap/nmap, NOT on the /usr/bin/nmap the executor resolves — so
+    a filesystem check of argv[0] alone would MISS this. The name is the reliable signal."""
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD", "1")
+    for argv0 in ("/usr/bin/nmap", "/usr/local/bin/nmap", "nmap"):
+        assert eg.refuses_to_wrap([argv0, "127.0.0.1"]) is not None, argv0
+
+
+@_needs_guard
+def test_tools_that_do_not_need_privilege_are_still_wrapped(monkeypatch):
+    """MUTATION CONTROL. A blanket 'never wrap anything' would pass the test above while removing the
+    entire feature. The tools that actually phone home — the web scanners — must still be guarded."""
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD", "1")
+    for tool in ("nuclei", "httpx", "wapiti", "nikto", "ffuf"):
+        wrapped = eg.wrap_argv([tool, "-u", "http://127.0.0.1:8080/"])
+        assert wrapped[0].endswith("egress_guard"), f"{tool} lost its guard"
+
+
+def test_a_setuid_binary_is_detected_by_the_filesystem_check(tmp_path, monkeypatch):
+    """The belt-and-braces half: anything directly setuid/setgid is refused even if it is not on the
+    name list, so a privileged tool added later cannot silently degrade."""
+    fake = tmp_path / "privtool"
+    fake.write_text("#!/bin/sh\ntrue\n")
+    fake.chmod(0o4755)                      # setuid
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD", "1")
+    assert eg.refuses_to_wrap([str(fake)]) is not None
+    assert eg._is_privileged_binary(str(fake)) is True
+    plain = tmp_path / "plaintool"
+    plain.write_text("#!/bin/sh\ntrue\n")
+    plain.chmod(0o755)
+    assert eg._is_privileged_binary(str(plain)) is False   # control: an ordinary binary is not flagged
