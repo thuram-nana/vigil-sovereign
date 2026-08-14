@@ -23,6 +23,7 @@ Every item below merged only after adversarial red-pen + all required CI jobs gr
 | Force-push to `main` | blocked |
 | Branch deletion | blocked |
 | Administrator enforcement | **off** (`enforce_admins: false`) — the repository owner keeps an explicit admin override |
+| Accuracy gate | rides **inside** `CRUCIBLE core` (required). `test_recall_baseline` + `test_gate` re-derive the committed accuracy core byte-identically, verify its Ed25519 signature against a source-pinned trust root, and assert recall 1.0 / precision 1.0 / fp 0 / fn 0. They also run in `CRUCIBLE eval + benchmark corpus`, which is **not** required — so placing them in a required job is what makes an accuracy regression unmergeable **in code**, independently of any branch-protection setting |
 
 So the honest form of the claim is: **a pull request cannot merge without those 9 checks green — unless the
 repository owner uses their admin override.** For every ordinary contributor, and for every automated agent

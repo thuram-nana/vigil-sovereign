@@ -58,6 +58,15 @@ jobs:
       # alone would run it unguarded, so a path typo that collects ZERO tests would
       # merge green (`framework/v2/agents` is not covered wholesale; only named
       # files under it run).
+      #
+      # THE ACCURACY GATE IS HERE ON PURPOSE (test_recall_baseline / test_gate, ~50s of
+      # this job's ~8m). They also run in `crucible-eval`, which is NOT a required check
+      # — so the product's accuracy claim (recall 1.0, precision 1.0, fp 0, fn 0, the
+      # committed core byte-identically reproduced, its Ed25519 signature verified against
+      # a source-pinned trust root) could regress and still merge. Running them in a
+      # REQUIRED job makes that impossible in CODE, independently of any branch-protection
+      # setting, which is a setting somebody can change. The expensive corpus/soak stays in
+      # crucible-eval so this job's critical path barely moves.
       CRUCIBLE_UNCOVERED_SUITES: >-
         framework/v2/veracity
         framework/v2/kernel
@@ -68,6 +77,8 @@ jobs:
         framework/v2/analysis
         framework/v2/tools
         framework/v2/agents/tests/test_engagement_library.py
+        framework/v2/eval/tests/test_recall_baseline.py
+        framework/v2/eval/tests/test_gate.py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
