@@ -318,14 +318,26 @@ class CdpBrowser:
 
     def _page_ws_url(self) -> str:
         url = f"http://127.0.0.1:{self._port}/json"
-        try:
-            targets = json.loads(urllib.request.urlopen(url, timeout=5).read())  # noqa: S310 (loopback)
-        except (OSError, ValueError) as e:
-            raise CdpError(f"could not list CDP targets: {e}") from e
-        for t in targets:
-            if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
-                return t["webSocketDebuggerUrl"]
-        raise CdpError("no page target exposed by the browser")
+        # The DevToolsActivePort file that start() waits for means the DEBUGGER is up, but the initial
+        # "about:blank" PAGE target is registered a beat later — reading /json the instant the port appears
+        # can list zero page targets. That transient produced a hard "no page target exposed by the browser"
+        # failure in CI as a launch-to-launch flake (the capability smoke in cdp_available() wins the race,
+        # a later real launch loses it). Poll for the page target within the same bounded launch window
+        # instead of raising on the first empty read; only a genuinely target-less browser times out.
+        deadline = time.monotonic() + self._launch_timeout
+        last_err = "no page target exposed by the browser"
+        while True:
+            try:
+                targets = json.loads(urllib.request.urlopen(url, timeout=5).read())  # noqa: S310 (loopback)
+            except (OSError, ValueError) as e:
+                last_err = f"could not list CDP targets: {e}"
+                targets = []
+            for t in targets:
+                if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+                    return t["webSocketDebuggerUrl"]
+            if time.monotonic() >= deadline:
+                raise CdpError(last_err)
+            time.sleep(0.1)
 
     def session(self) -> CdpSession:
         """Open a CDP session on the browser's page target. When this browser is
