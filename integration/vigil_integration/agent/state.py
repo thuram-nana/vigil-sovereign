@@ -81,6 +81,10 @@ class LLMDecision(BaseModel):
 
     action: ActionType
     reasoning: str = ""
+    # W6b: a classified BACKEND-CALL failure the think seam fail-closed over (network / api /
+    # api_transient / blocked); "" for a normal decision. Advisory only — it authorizes nothing; the
+    # engine mirrors it to the spine as an observation so the operator sees WHY a think stalled.
+    error_class: str = ""
     # use_tool
     tool: Optional[ToolCall] = None
     # plan_tools

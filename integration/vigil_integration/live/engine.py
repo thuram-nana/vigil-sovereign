@@ -271,6 +271,16 @@ class VigilEngine:
             decision = self._think(state)
             report.decisions.append(str(decision.action.value))
 
+            # W6b — a classified BACKEND-CALL failure the think seam fail-closed over (network / api /
+            # api_transient) is mirrored to the spine as an OBSERVATION so the operator's process box shows
+            # WHY a think stalled (network vs API), not just a silent ASK_USER. Advisory only: it is
+            # source-tagged 'backend-error', mints no finding, and never enters oracle intake.
+            if getattr(decision, "error_class", ""):
+                self._spine_post("observation", {
+                    "source": "backend-error",
+                    "error_class": str(decision.error_class),
+                    "summary": decision.reasoning or f"backend {decision.error_class} error"})
+
             # T3b — mirror the OODA ORIENT/DECIDE step onto the blackboard spine (best-effort NO-OP without a
             # seam). The decision is the coordinator choice; a USE_TOOL proposal additionally posts the
             # falsifiable HYPOTHESIS it is testing. All payloads are deterministic (no wallclock/rng), so two
