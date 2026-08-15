@@ -1606,7 +1606,9 @@
     reward:        { label: "Reward", icon: "dot", cat: "review",
       sum: function (p) { return (p.source || "") + (p.signal ? " · " + p.signal : "") + " · r=" + (p.reward != null ? p.reward : "?"); } },
     refusal:       { label: "Refusal", icon: "x", cat: "review",
-      sum: function (p) { return (p.gate || "gate") + " refused: " + (p.action_refused || "") + (p.fatal ? " (fatal)" : ""); } },
+      // the WHY is the point of a refusal row — carry p.reason through, not just what was refused.
+      sum: function (p) { return (p.gate || "gate") + " refused: " + (p.action_refused || "")
+        + (p.fatal ? " (fatal)" : "") + (p.reason ? " — " + p.reason : ""); } },
     agent_message: { label: "Message", icon: "brain", cat: "review",
       sum: function (p) { return (p.sender || "?") + " → " + (p.recipient || "?") + (p.topic ? " [" + p.topic + "]" : "") + (p.body ? " · " + p.body : "") + " · advisory coordination (not evidence)"; } },
   };
@@ -2301,13 +2303,24 @@
           L.events.push(ev); onEvents();
         }, function () { /* auto-reconnect; the id: cursor prevents gaps/replays */ });
       } else if (run.stream === "progress") {
-        // a loopback scan writes a progress log (not the reasoning spine) — render it honestly.
-        liveES = V.sse(OFF("/api/events?run=" + encodeURIComponent(run.run_id)), function (ev) {
+        // a loopback scan / codebase run writes a progress log (not the reasoning spine) — render it
+        // honestly. The tailer defaults to EOF, so replay the file from the START: otherwise opening a
+        // run that already finished (or joining a live one late) shows an empty timeline and a
+        // "Refusals 0" tile for a run that may have been blocked many times.
+        liveES = V.sse(OFF("/api/events?run=" + encodeURIComponent(run.run_id) + "&from_start=1"), function (ev) {
+          // dedup on the stream's _seq cursor exactly as the blackboard branch dedups on ev.id. The server
+          // already resumes from Last-Event-ID, so this is defence in depth: without BOTH, a reconnect on a
+          // replaying stream would re-count every event and the tiles would read a fabricated total.
+          if (ev && ev._seq != null) { if (L.seen["p" + ev._seq]) return; L.seen["p" + ev._seq] = 1; }
           const norm = progressToEvent(ev); if (norm) { L.events.push(norm); onEvents(); }
         });
       }
-      // strix/aegis (stream 'none'): no live spine — poll run status instead.
-      if (run.stream === "none") liveTimers.push(setInterval(refreshRunMeta, 3000));
+      // No completion signal in the stream → poll run status instead. 'none' (aegis) has no feed at all;
+      // a codebase (Strix) run now streams ACTIVITY (W6c: strix.graph / warden.block) but still emits no
+      // terminal event, so without this its header would never leave "running".
+      if (run.stream === "none" || run.mode === "codebase") {
+        liveTimers.push(setInterval(refreshRunMeta, 3000));
+      }
     }
     function refreshRunMeta() {
       V.getJSON(runsURL()).then(function (d) {
@@ -2331,6 +2344,20 @@
       if (ev.event === "scan.finding") return { kind: "finding", payload: { bug_class: ev.bug_class, title: (ev.param || "") + " @ " + (ev.endpoint || ""),
         confidence: ev.confidence, verified_by_oracle: false, oracle_kind: ev.confirmed_by, severity: "" }, _progress: true };
       if (ev.event === "scan.done") return { kind: "decision", payload: { question: "scan complete", choice: (ev.findings || 0) + " findings · " + (ev.requests_sent || 0) + " requests" }, _progress: true };
+      // W6c — a codebase (Strix) run's own progress, normalised into the kinds this view already renders.
+      // `_progress: true` tags these the same way the scan rows above are tagged — provenance metadata
+      // that says "came over the progress file, not the signed spine". (Nothing renders it today; it is
+      // carried for parity with the existing rows, not as a claim that the UI distinguishes them.)
+      if (ev.event === "warden.block") return { kind: "refusal", payload: {
+        gate: ev.gate || "warden", action_refused: ev.action_refused || "",
+        reason: ev.reason || "", fatal: !!ev.fatal }, _progress: true };
+      if (ev.event === "strix.graph") {
+        var st = ev.statuses || {}, parts = [];
+        Object.keys(st).forEach(function (k) { parts.push(k + ":" + st[k]); });
+        return { kind: "observation", payload: { source: "strix",
+          summary: (ev.agents || 0) + " agent" + ((ev.agents === 1) ? "" : "s")
+                   + (parts.length ? " (" + parts.join(", ") + ")" : "") }, _progress: true };
+      }
       return null;
     }
 
@@ -2464,12 +2491,26 @@
     function drawTimeline() {
       const host = V.$("#live-timeline"); if (!host) return;
       if (L.filter === "inbox") { drawInbox(host); return; }
+      // An empty timeline means different things — say which, and never imply "still coming" for a run
+      // that has ended. A finished run whose feed replayed empty genuinely recorded no steps.
+      function liveEmptyText() {
+        const r = L.run || {};
+        if (r.stream === "none") return "This run reports in its own sandbox — see Findings for its results.";
+        // Only a KNOWN-terminal status may assert a finished lifecycle. api.list_runs defaults a run with
+        // no meta to status "unknown" — claiming that one "has finished" would state a lifecycle we never
+        // observed, for a run that may never have started.
+        if (r.status === "interrupted") return "This run was interrupted before it reported any steps.";
+        if (r.status === "done" || r.status === "error" || r.status === "cancelled") {
+          return "This run finished and recorded no steps here.";
+        }
+        if (r.status === "running" || !r.status) return "Waiting for the first event…";
+        return "No steps have been recorded for this run.";   // unknown/other — state the fact, claim nothing
+      }
       let rows = L.events;
       if (L.filter === "facts") rows = rows.filter(function (e) { return e.kind === "finding" && isFact(e.payload); });
       else if (L.filter === "leads") rows = rows.filter(function (e) { return e.kind === "finding" && !isFact(e.payload); });
       if (!rows.length) {
-        V.mount(host, h("div.empty", null, L.events.length ? "No events match this filter." :
-          (L.run && L.run.stream === "none" ? "This run reports in its own sandbox — see Findings for its results." : "Waiting for the first event…")));
+        V.mount(host, h("div.empty", null, L.events.length ? "No events match this filter." : liveEmptyText()));
         return;
       }
       const out = [];
@@ -2983,11 +3024,12 @@
     }
   }
 
-  function p3RunHasNoReport(run) {
-    // strix/aegis runs (stream 'none') and live engage runs (stream 'blackboard') don't save a
-    // rendered findings report — say so honestly and point to where their results DO live.
-    return run.stream === "none" || run.stream === "blackboard";
-  }
+  // A run that never CAPTURES a report: aegis (stream 'none') and a codebase/Strix run — the console
+  // spawns both with capture_report=False, so /api/report stays {pending:true} forever. Keyed on the real
+  // cause (mode) as well as the stream, because a codebase run now STREAMS its activity (W6c) and so is no
+  // longer identifiable by stream alone — without this it would sit on "Still running… no saved report
+  // YET", which is false twice over: it has finished, and no report is ever coming.
+  function p3RunCapturesNoReport(run) { return run.stream === "none" || run.mode === "codebase"; }
   function p3NoReportEmpty(run, what) {
     if (run.stream === "blackboard") {
       return h("div.empty", null, [h("div.big", null, "This run reports on the reasoning spine"),
@@ -2995,9 +3037,16 @@
         h("button.btn", { style: { marginTop: "14px" }, onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(run.run_id); } },
           [V.icon("live"), "Open in Live"])]);
     }
-    if (run.stream === "none") {
+    if (p3RunCapturesNoReport(run)) {
       return h("div.empty", null, [h("div.big", null, "Runs in its own sandbox"),
-        h("p", null, "A codebase (Strix) / AEGIS run reports inside its sandbox — no re-checkable web report is captured here.")]);
+        h("p", null, "A codebase (Strix) / AEGIS run reports inside its sandbox — no re-checkable web report is captured here."),
+        // Offer Live ONLY for a run that actually HAS a replayable feed (stream "progress"). A legacy
+        // codebase run predates the feed and has stream "none" — sending it to Live would bounce the
+        // operator to an empty screen that points straight back here.
+        (run.stream === "progress"
+          ? h("button.btn", { style: { marginTop: "14px" }, onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(run.run_id); } },
+              [V.icon("live"), "See what it did in Live"])
+          : null)]);
     }
     return null;
   }
@@ -6991,7 +7040,10 @@
   function pboxStepText() {
     for (var i = PBOX.events.length - 1; i >= 0; i--) {
       var e = PBOX.events[i], p = e.payload || {};
-      if (e.kind === "refusal") return "blocked by " + (p.gate || "gate") + ": " + (p.action_refused || "");
+      // W6c: carry the WHY, not just WHAT was refused. W6b's pboxErrClass supersedes the older
+      // `kind === "error_class"` branch (no producer ever emitted that kind) — keep the live one.
+      if (e.kind === "refusal") return "blocked by " + (p.gate || "gate") + ": " + (p.action_refused || "")
+        + (p.reason ? " — " + p.reason : "");
       var _ec = pboxErrClass(e);
       if (_ec) return _ec + " error: " + (p.summary || p.detail || "the model call failed");
       if (e.kind === "tool_call") return "running " + (p.tool || "") + (p.target ? " → " + p.target : "");
@@ -7120,8 +7172,9 @@
     PBOX.events.push(e);
     if (PBOX.events.length > PBOX_CAP * 2) {
       PBOX.events = PBOX.events.slice(-PBOX_CAP);
-      // keep `seen` bounded too — rebuild it from the retained events (the SSE id: cursor means a
-      // reconnect never replays events older than the buffer, so dropped ids can't cause a dup).
+      // keep `seen` bounded too — rebuild it from the retained events. Both streams the box consumes now
+      // carry an id: cursor (the blackboard's event id; the progress stream's _seq), and the server
+      // resumes from Last-Event-ID, so a reconnect never replays events older than the buffer.
       var s = {}; PBOX.events.forEach(function (x) { if (x.id != null) s[x.id] = 1; }); PBOX.seen = s;
     }
     pboxUpdateChrome();
@@ -7141,8 +7194,13 @@
     if (run && run.stream === "blackboard" && run.slug) {
       PBOX.es = V.sse(OFF("/api/blackboard?slug=" + encodeURIComponent(run.slug)), pboxOnEvent, function () {});
     } else if (run && run.stream === "progress") {
-      PBOX.es = V.sse(OFF("/api/events?run=" + encodeURIComponent(run.run_id)), function (ev) {
-        var norm = pboxProgressToEvent(ev); if (norm) pboxOnEvent(norm);
+      // from_start: the tailer defaults to EOF, so a box attaching mid-run (or to a run that just ended)
+      // would show nothing. The ring buffer caps what is kept, so replaying the file is bounded.
+      PBOX.es = V.sse(OFF("/api/events?run=" + encodeURIComponent(run.run_id) + "&from_start=1"), function (ev) {
+        // pboxOnEvent dedups on e.id, which a progress event does not have — carry the stream's _seq
+        // cursor onto the normalised event so a reconnect can't duplicate rows in the ring buffer.
+        var norm = pboxProgressToEvent(ev);
+        if (norm) { if (ev && ev._seq != null) norm.id = "p" + ev._seq; pboxOnEvent(norm); }
       }, function () {});
     }
     // stream 'none' (strix/aegis): no live spine — the chrome poll keeps its status fresh.
@@ -7153,6 +7211,22 @@
     if (ev.event === "scan.phase") return { kind: "observation", payload: { source: "scan", summary: "phase: " + (ev.phase || "") } };
     if (ev.event === "scan.finding") return { kind: "finding", payload: { bug_class: ev.bug_class, title: (ev.param || "") + " @ " + (ev.endpoint || "") } };
     if (ev.event === "scan.done") return { kind: "decision", payload: { question: "scan complete", choice: (ev.findings || 0) + " findings" } };
+    // W6c — a codebase (Strix) run's own progress. Normalise into the SAME spine-shaped events the box
+    // already renders, so pboxTag/pboxRow need no change:
+    //  • warden.block → a "refusal" event: the box tags it "blocked" and both the row summary
+    //    (KIND_META.refusal) and the step line read "blocked by warden: <tool> — <reason>", so the
+    //    operator sees WHAT was blocked and WHY. (The reason is carried by both; verified by test.)
+    if (ev.event === "warden.block") return { kind: "refusal", payload: {
+      gate: ev.gate || "warden", action_refused: ev.action_refused || "",
+      reason: ev.reason || "", fatal: !!ev.fatal } };
+    //  • strix.graph → an "observation": a compact "N agents (running:2, done:1)" heartbeat.
+    if (ev.event === "strix.graph") {
+      var st = ev.statuses || {}, parts = [];
+      Object.keys(st).forEach(function (k) { parts.push(k + ":" + st[k]); });
+      return { kind: "observation", payload: { source: "strix",
+        summary: (ev.agents || 0) + " agent" + ((ev.agents === 1) ? "" : "s")
+                 + (parts.length ? " (" + parts.join(", ") + ")" : "") } };
+    }
     return null;
   }
   function pboxPickRun(runs) {

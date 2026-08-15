@@ -51,6 +51,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Optional
 
+from .progress import append_progress  # stdlib-only sibling — keeps this module framework/SDK/strix-clean
+
 # Tier is represented as the kernel's own string labels ("A0".."A3") + an ordinal, rather than a
 # third copy of the Tier enum (the seam map warned the Rust and Python enums must stay in sync;
 # a third would be worse). The kernel emits these exact strings.
@@ -222,6 +224,35 @@ class WardenGateHooks:
         self.decisions.append(d)
         return d
 
+    def _note_block(self, name: str, decision: ToolDecision, reason: str) -> None:
+        """Best-effort: surface this WARDEN block to the console's live process box via the offense child's
+        progress feed, so the operator sees ``blocked by WARDEN, because X`` for a Strix codebase run (which
+        otherwise streams nothing). ``fatal`` distinguishes a hard class DENY (never runs) from an approvable
+        QUEUE block. ``append_progress`` is best-effort and never raises, so the block itself is unaffected —
+        and it no-ops entirely unless the console handed this child a run dir (``$VIGIL_PROOF_RUN_DIR``).
+
+        TOTAL by contract: it swallows everything. ``append_progress`` is already total, but this second
+        guard is load-bearing — without it a broken/patched feed would replace the caller's ``WardenDenied``
+        with an unrelated exception, losing the block reason and the type callers catch to render it. Making
+        a refusal visible must never change what the refusal DOES."""
+        try:
+            # Bound the displayed name: `name` falls back to str(tool), which for an SDK tool object can be
+            # a long repr (potentially its whole JSON schema). The UI displays this field.
+            shown = str(decision.tool or name or "")[:120]
+            append_progress({
+                "event": "warden.block",
+                "gate": "warden",
+                "action_refused": shown,
+                "tier": decision.tier,
+                "outcome": decision.outcome,
+                "fatal": decision.outcome == "deny",
+                # bounded like action_refused: a reason can embed the tool name (decide_tool's denylist
+                # message does), and the UI now renders it in the box row AND the Live timeline.
+                "reason": str(reason or decision.reason or "")[:400],
+            })
+        except Exception:  # noqa: BLE001 — telemetry must NEVER alter the gate's control flow
+            pass
+
     async def on_tool_start(self, context, agent, tool) -> None:
         # The SDK passes the ACTUAL call arguments on ``context`` (a ToolContext: ``.tool_name`` /
         # ``.tool_arguments`` — the raw args string); ``tool`` is only the static definition. Read the
@@ -230,6 +261,7 @@ class WardenGateHooks:
         decision = self.evaluate(name)
         # A hard class deny (denylist / empty name) never runs — raise immediately.
         if decision.outcome == "deny":
+            self._note_block(name, decision, f"{decision.reason} (hard class deny — never runs)")
             raise WardenDenied(
                 f"WARDEN gate DENIED tool {name!r}: {decision.reason} (hard class deny — never runs)."
             )
@@ -240,6 +272,7 @@ class WardenGateHooks:
         # single-use, owner-signed approval broker. No approver wired (no authority provisioned) ⇒ fail-safe
         # hard-block, exactly as before. A valid, action-bound, single-use owner token ⇒ this ONE call runs.
         if self._approver is None:
+            self._note_block(name, decision, "no approval authority provisioned")
             raise WardenDenied(
                 f"WARDEN gate blocked tool {name!r}: {decision.outcome} ({decision.reason}); no approval "
                 f"authority provisioned (run `vigil approve provision-authority`)."
@@ -255,10 +288,12 @@ class WardenGateHooks:
             approved = bool(await asyncio.get_running_loop().run_in_executor(
                 None, self._approver, name, target, args))
         except Exception as exc:  # noqa: BLE001 — an approver error is fail-closed (block)
+            self._note_block(name, decision, f"approval errored ({type(exc).__name__}) — fail-closed")
             raise WardenDenied(
                 f"WARDEN gate blocked tool {name!r}: approval errored ({type(exc).__name__}) — fail-closed."
             )
         if not approved:
+            self._note_block(name, decision, "no valid owner approval within the window")
             raise WardenDenied(
                 f"WARDEN gate blocked tool {name!r}: {decision.outcome} — no valid owner approval within the "
                 f"window (sign it with `vigil approve sign` / the Safety screen, then it runs)."

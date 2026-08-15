@@ -245,7 +245,10 @@ def test_codebase_routes_to_strix_and_validates_path(stub_launch, tmp_path):
     src.mkdir()
     r = actions.launch_assessment({"mode": "codebase", "target": str(src), "authorized": True,
                                    "objective": "auth review"})
-    assert r["stream"] == "none"
+    # W6c: a codebase run STREAMS now (was "none"). The Strix child appends its own progress lines
+    # (strix.graph / warden.block) to the run's progress.jsonl, which /api/events?run= tails — so the
+    # process box shows what the scan is doing and what WARDEN blocked, instead of nothing at all.
+    assert r["stream"] == "progress"
     cmd, _ = stub_launch(r["run_id"])
     assert cmd[0].endswith("strix") and "--target" in cmd and str(src) in cmd
     assert "--non-interactive" in cmd  # A4b: headless, or a background/console spawn hangs on the TUI

@@ -239,22 +239,66 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _sse(self, path) -> None:
+    def _sse(self, path, *, allow_replay: bool = False, from_start: bool = False) -> None:
+        """Stream a run's progress log. By default the tailer starts at EOF (live follow). With
+        ``from_start`` it replays the file from byte 0 first — needed for a run that has ALREADY finished,
+        whose whole record is in the file and would otherwise stream nothing at all (a viewer would see an
+        empty screen and a "0 refusals" tile for a run that was blocked ten times). Read-only either way.
+
+        A REPLAYING stream (``from_start``, or a reconnect carrying ``Last-Event-ID``) additionally stamps
+        each event with an ``id:`` line + a ``_seq`` payload field — its ordinal among the PARSEABLE events
+        in the log (blank and malformed lines are skipped by the tailer, so this is NOT a raw line number) — so the reconnect resumes instead of re-delivering. Without that cursor a replaying
+        stream re-counts every event on each reconnect, turning the tiles it exists to fill into a
+        FABRICATED total ("Refusals 9" for three blocks) — no better than the fabricated zero.
+
+        The plain live tail deliberately keeps NO cursor and opens at EOF, exactly as it always has:
+          * cost — a cursor implies reading and parsing the whole file on every connection (measured at
+            5.3s / 200MB for a 34MB log), which a tail that was never going to emit those events must not
+            pay, once per connection, per reconnect, per open stream;
+          * correctness — ``EventTailer`` restarts from byte 0 when the file is truncated or ROTATED
+            (``common.logging`` rotates the engagement log at 64MB). A monotonic counter cannot survive
+            that: ids would continue past the new file's length, and the next reconnect would suppress
+            every genuinely-new event, permanently. A cursorless tail simply resumes tailing.
+        So the cursor is scoped to replay, where the file is a per-run progress log that does not rotate."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self._sec_headers()
         self.end_headers()
-        tailer = EventTailer(path)
+        try:
+            delivered = max(0, int(self.headers.get("Last-Event-ID") or 0))
+        except (TypeError, ValueError):
+            delivered = 0
+        # BOTH doors into replay are gated by `allow_replay`, not just the query flag. `Last-Event-ID` is
+        # a REQUEST HEADER, so gating only `from_start` left the whole replay path — the whole-file read
+        # AND the counter that cannot survive a rotation — reachable on any stream with one header. A
+        # non-replayable stream ignores the cursor entirely and stays a pure tail.
+        replay = bool(allow_replay and (from_start or delivered))
+        # Replay reads from the top and numbers what it emits; a live tail opens at EOF and numbers
+        # nothing — byte-for-byte the pre-cursor behaviour, at the pre-cursor cost.
+        tailer = EventTailer(path, from_end=not replay)
+        seq = 0
         last_beat = time.monotonic()
         try:
             self.wfile.write(b"retry: 3000\n\n")
             self.wfile.flush()
             while True:
                 for ev in tailer.read_new():
+                    if not replay:
+                        payload = json.dumps(ev, ensure_ascii=False, default=str)
+                        self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                        continue
+                    seq += 1
+                    if seq <= delivered:
+                        continue          # this client already has it — never re-deliver, never re-count
+                    if isinstance(ev, dict):
+                        # Always overwrite: a producer-supplied _seq would DISAGREE with the id:
+                        # we emit, and both UI consumers dedup on _seq — a repeated value would
+                        # silently suppress genuine rows. Payload and cursor must be one number.
+                        ev = {**ev, "_seq": seq}
                     payload = json.dumps(ev, ensure_ascii=False, default=str)
-                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.write(f"id: {seq}\ndata: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
                 now = time.monotonic()
                 if now - last_beat > 15:
@@ -329,8 +373,19 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         try:
             if path.startswith("/api/events"):
                 q = parse_qs(parts.query)
-                self._sse(stream_path(run=(q.get("run") or [None])[0],
-                                      slug=(q.get("slug") or [None])[0]))
+                run_q = (q.get("run") or [None])[0]
+                slug_q = (q.get("slug") or [None])[0]
+                # Replay (from_start OR a Last-Event-ID resume) is honoured for a RUN only. `run` is
+                # validated (_safe_run_id) whereas `slug` indexes straight into targets_root(), so a replay
+                # there would emit the whole contents of a file addressed by an unvalidated name — and put
+                # a ROTATING log into cursor mode, whose counter cannot survive the rotation. Gating only
+                # the query flag left the header as a second, ungated door. No caller needs it: the UI only
+                # ever replays `run=`, and the legacy SPA's `slug=` stream is a live tail.
+                allow_replay = (not slug_q and run_q is not None)
+                self._sse(stream_path(run=run_q, slug=slug_q),
+                          allow_replay=allow_replay,
+                          from_start=(allow_replay
+                                      and (q.get("from_start") or [""])[0] in ("1", "true", "yes")))
                 return
             if path == "/api/blackboard":
                 q = parse_qs(parts.query)
