@@ -460,6 +460,15 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         except Exception:  # noqa: BLE001 — a spine outage is a recorded no-op, never fatal to the run
             return None
 
+    def rebuild() -> "tuple[AgentState, int]":
+        # W2b resume: ONE read → (last SIGNED offline-verified AgentState, its head_seq) for this slug, so
+        # the state and the seq are always from the SAME snapshot (no two-read race). (fresh, 0) on an
+        # empty/unreadable/forged spine (deny-by-default). Total; never raises.
+        try:
+            return spine.rebuild_head(engagement=config.slug)
+        except Exception:  # noqa: BLE001
+            return (AgentState(), 0)
+
     # -- oracle (F2): confirm_and_certify over the retained oracle_context, PLUS the T2 live re-drive --
     def _redrive_executor_factory(base_url: str) -> Any:
         # A gated CRUCIBLE HttpExecutor bound to the SAME engagement slug the engine provisioned — its
@@ -603,7 +612,7 @@ def build_engine(config: EngineConfig) -> VigilEngine:
 
     seams = EngineSeams(
         think=think_seam, gate=gate, run_tool=run_tool, oracle=oracle, attest=attest,
-        checkpoint=checkpoint, detect=detect, approval=approval,
+        checkpoint=checkpoint, rebuild=rebuild, detect=detect, approval=approval,
         operator_messages=operator_messages, deploy_fireteam=deploy_fireteam,
         project=graph_project, persist_spine=persist_spine, spine_post=spine_post,
     )

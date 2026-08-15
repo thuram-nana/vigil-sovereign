@@ -354,10 +354,28 @@ def rebuild(
     truncation); and it is total (a garbage/None list yields a fresh empty ``AgentState``, never a crash).
     ``engagement`` filters to one charter scope so a mixed spine can never contaminate one run's rebuild
     with another's snapshots."""
+    _seq, state = _best_snapshot(records, engagement=engagement, verify=verify,
+                                 trust_unverified=trust_unverified)
+    return state if state is not None else AgentState()
+
+
+def _best_snapshot(
+    records: Any,
+    *,
+    engagement: Optional[str] = None,
+    verify: Optional[VerifyFn] = None,
+    trust_unverified: bool = False,
+) -> tuple[int, Optional[AgentState]]:
+    """The single highest-``(seq, hash)`` VALID snapshot — the ONE selection :func:`rebuild` and
+    :func:`head_seq` share, so they can never disagree (a record one accepts and the other counts). A
+    record is valid iff it is intact (content hash recomputes; signature verifies when a verifier is
+    wired) AND its ``state_json`` deserialises into a sound ``AgentState`` (the ``_load_state`` gate —
+    the sovereign fact-soundness re-check). Returns ``(seq, state)`` of the winner, or ``(0, None)``.
+    DENY-BY-DEFAULT: no verifier and no explicit opt-out → ``(0, None)`` (no signal). Total."""
     if verify is None and not trust_unverified:
-        return AgentState()  # deny-by-default: no verifier wired and no explicit opt-out → no signal
+        return (0, None)  # deny-by-default: no verifier wired and no explicit opt-out → no signal
     best_key: Optional[tuple[int, str]] = None
-    best_state: Optional[AgentState] = None
+    best: tuple[int, Optional[AgentState]] = (0, None)
     for rec in _iter_snapshots(records):
         if engagement is not None and rec.engagement != engagement:
             continue
@@ -368,8 +386,8 @@ def rebuild(
             continue
         key = (rec.seq, rec.hash)
         if best_key is None or key > best_key:
-            best_key, best_state = key, state
-    return best_state if best_state is not None else AgentState()
+            best_key, best = key, (rec.seq, state)
+    return best
 
 
 def rebuild_from(
@@ -416,6 +434,37 @@ def head_hash(
         if best_key is None or key > best_key:
             best_key, best_hash = key, rec.hash
     return best_hash
+
+
+def head_seq(
+    records: Any,
+    *,
+    engagement: Optional[str] = None,
+    verify: Optional[VerifyFn] = None,
+    trust_unverified: bool = False,
+) -> int:
+    """The checkpoint ``seq`` of the SAME snapshot :func:`rebuild` returns (0 if none) — they share
+    :func:`_best_snapshot`, so head_seq can never count a record rebuild rejects. A RESUME seeds its
+    monotonic clock at ``head_seq + 1`` so a resumed turn never collides a seq with an already-persisted
+    (and actually-restored) one. Total (never raises)."""
+    seq, _state = _best_snapshot(records, engagement=engagement, verify=verify,
+                                 trust_unverified=trust_unverified)
+    return seq
+
+
+def rebuild_head(
+    records: Any,
+    *,
+    engagement: Optional[str] = None,
+    verify: Optional[VerifyFn] = None,
+    trust_unverified: bool = False,
+) -> tuple[AgentState, int]:
+    """The restored state AND its seq from ONE pass over the records, so a resume reads the spine once and
+    the (state, seq) pair is guaranteed consistent — no two-read race can seed a state from one snapshot
+    and a seq from another. Returns ``(AgentState(), 0)`` when there is nothing valid to restore."""
+    seq, state = _best_snapshot(records, engagement=engagement, verify=verify,
+                               trust_unverified=trust_unverified)
+    return (state if state is not None else AgentState(), seq)
 
 
 def verify_chain(records: Any, *, engagement: Optional[str] = None) -> bool:
