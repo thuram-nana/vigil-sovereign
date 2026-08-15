@@ -34,6 +34,20 @@ from urllib.parse import urlsplit
 from .agents.http_executor import HttpExecutor, PromptCallback, parse_posture, stdin_prompt_with_timeout
 from .agents.scope_gate import validate_action
 from .authority.killswitch import KillSwitch
+from .phase_ledger import (
+    P_ASSESS_FINDINGS,
+    P_CHAINING,
+    P_DEFENDER,
+    P_FUSION,
+    P_GROUNDING,
+    P_INTEL_FINALIZE,
+    P_INTEL_RECON,
+    P_PREFLIGHT,
+    P_REASONING,
+    P_SCAN,
+    P_TRANSFER,
+    PhaseLedger,
+)
 from .scanner.campaign import ScanReport, WebScanCampaign
 from .scanner.orchestrator import AttackPath, AutonomousCampaign, ChainedConclusion
 from .worldmodel.graph import WorldModel
@@ -651,6 +665,7 @@ def run_engagement(
     defender_log: str | None = None,
     defender_log_format: str | None = None,
     fuse_sensors: bool = False,
+    resume: bool = False,
 ) -> EngagementResult:
     """Run one authorized engagement end to end and return an
     :class:`EngagementResult` — the oracle-confirmed :class:`ScanReport` plus the
@@ -661,17 +676,36 @@ def run_engagement(
     With ``enable_chaining`` (default) the confirmed findings are written into a
     world-model and the technique operators are run to a fixpoint to extract
     attacker→crown-jewel attack paths. Chaining sends NO traffic and is best-effort:
-    if it fails, the engagement still returns its report with empty paths."""
+    if it fails, the engagement still returns its report with empty paths.
+
+    Every phase is checkpointed to an append-only :class:`~framework.v2.phase_ledger.PhaseLedger`
+    (fail-open: a checkpoint IO failure is a recorded no-op, never a raise). With ``resume=True``
+    the phases a prior run completed are SKIPPED — most importantly the traffic-sending scan,
+    whose authoritative report is snapshotted on completion and reloaded here instead of re-
+    crawling/re-auditing the target. ``resume=False`` (the default) only ever RECORDS state, so
+    the control flow — and ``make gate`` — is byte-identical."""
     # Opt-in event-spine sink (default None → byte-identical behaviour). When present, every
     # gate refusal is recorded as evidence on the spine before it propagates.
     sink = _make_spine_sink(spine, slug)
 
+    # Append-only PHASE LEDGER + resume (default resume=False → the ledger only ever RECORDS;
+    # it changes no control flow, so the non-resume path is byte-identical). Every ledger write
+    # is fail-open: a checkpoint IO failure is a recorded no-op, never a raise. Under --resume it
+    # skips the phases a prior run completed (and reloads the scan's snapshotted report).
+    ledger = PhaseLedger(slug, resume=resume, sink=sink)
+
+    # Preflight is the fail-closed AUTHORIZATION gate — it ALWAYS runs, even on resume:
+    # re-validating the kill-switch + seed scope on every launch is a safety feature, never a
+    # cost to skip. Recorded (started/completed) purely for the process box + audit trail.
+    ledger.start(P_PREFLIGHT)
     try:
         preflight(slug, seed_url)
     except EngagementRefused as e:
+        ledger.fail(P_PREFLIGHT)
         if sink is not None:
             sink.refusal("preflight", seed_url, reason=str(e), fatal=True)
         raise
+    ledger.complete(P_PREFLIGHT)
 
     # Any OOB callback base the target will contact — the advertise host or the
     # collaborator relay — must itself be on the charter allowlist.
@@ -697,13 +731,14 @@ def run_engagement(
     # chaining accretes attack facts onto the SAME graph (disjoint id namespaces). Built
     # even when recon is off, so chaining shares it and the result exposes it.
     world = WorldModel()
-    ingest = None
-    if enable_recon:
-        try:
-            ingest = _intel_recon(world, slug, seed_url,
-                                  fixtures_dir=recon_fixtures, max_depth=recon_depth)
-        except Exception:
-            ingest = None   # recon is value-add; a recon failure never sinks the engagement
+    # Best-effort intel recon under the ledger (skipped on resume if a prior run completed it;
+    # its ingest handle is in-memory, so a skip simply leaves intel_finalize with nothing to do —
+    # the same degrade as a recon failure, which the code already tolerates).
+    ingest = ledger.run_phase(
+        P_INTEL_RECON,
+        lambda: _intel_recon(world, slug, seed_url,
+                             fixtures_dir=recon_fixtures, max_depth=recon_depth),
+        enabled=enable_recon, default=None)
 
     # W1.3 cross-engagement TRANSFER (opt-in): when an archetype is named and no explicit
     # priors were supplied, warm-start this run's check-ordering bandit from SMOOTHED priors
@@ -711,100 +746,125 @@ def run_engagement(
     # (memory.priors.smoothed_priors_for). Best-effort; default (no archetype) leaves
     # priors=None so behaviour — and `make gate`, which never names an archetype — is
     # byte-identical. The bandit only ORDERS effort, so transfer never gates a surface.
-    if priors is None and transfer_archetype:
+    def _do_transfer() -> object:
+        from .common import paths as _paths
+        _db = _paths.memory_db()
+        # Read-only: only consult an EXISTING memory store — never create one just
+        # because transfer was requested on a system with no engagement history yet.
+        if _db.exists():
+            from .memory import priors as _priors_mod
+            from .memory.store import open_store
+            _store = open_store(_db)
+            try:
+                transferred = _priors_mod.smoothed_priors_for(_store, transfer_archetype)
+            finally:
+                _store.close()
+            return transferred or None
+        return None
+
+    _transfer_enabled = priors is None and bool(transfer_archetype)
+    _transferred = ledger.run_phase(P_TRANSFER, _do_transfer,
+                                    enabled=_transfer_enabled, default=None)
+    if _transfer_enabled:
+        priors = _transferred   # None on skip/fail — identical to the old value-add degrade
+
+    def _do_scan() -> ScanReport:
+        """Build the gated executor (+ optional fail-closed arsenal-authz + access-control pack)
+        and run the Wave-1 campaign to a ScanReport, always closing the executor. Extracted so a
+        --resume run can RELOAD a snapshotted report and skip this entire traffic-sending phase."""
+        # Opt-in advanced arsenal (default OFF → byte-identical). Its RAW-SOCKET modules
+        # (smuggling/CSWSH/race) speak bytes on the wire directly, so they cannot ride the
+        # gated executor's `send`. Gate them fail-closed with the SAME chain the executor
+        # uses — kill-switch + charter/scope/posture — evaluated per host with NO traffic.
+        # A tripped kill-switch or an out-of-scope host means no probe leaves the box.
+        arsenal_authz = None
+        if enable_arsenal:
+            _posture = parse_posture(slug)
+            _killswitch = KillSwitch(slug)
+
+            def arsenal_authz(url: str) -> bool:
+                if _killswitch.is_tripped():
+                    return False
+                return validate_action(
+                    slug=slug, method="GET", target_url=url, posture=_posture).allowed
+
+        ex = HttpExecutor(
+            engagement_slug=slug,
+            base_url=_origin(seed_url),
+            auto_load_authority=True,
+            request_budget=request_budget,
+            prompt_callback=prompt_callback or stdin_prompt_with_timeout,
+        )
+        # Opt-in access-control pack: an explicit config wins; otherwise build one from the CLI
+        # refs/victim-headers, wrapping the GATED executor as the victim identity so the second
+        # identity's requests still pass the full safety stack. No refs => None (documented no-op).
+        ac_config = access_control_config
+        if enable_access_control and ac_config is None and access_control_refs:
+            from .scanner.access_control import config_from_cli
+            ac_config = config_from_cli(
+                ex.gated_fetch, access_control_victim_headers, access_control_refs)
         try:
-            from .common import paths as _paths
-            _db = _paths.memory_db()
-            # Read-only: only consult an EXISTING memory store — never create one just
-            # because transfer was requested on a system with no engagement history yet.
-            if _db.exists():
-                from .memory import priors as _priors_mod
-                from .memory.store import open_store
-                _store = open_store(_db)
-                try:
-                    transferred = _priors_mod.smoothed_priors_for(_store, transfer_archetype)
-                finally:
-                    _store.close()
-                priors = transferred or None
-        except Exception:
-            priors = None   # transfer is value-add; never sink the engagement on it
+            return WebScanCampaign(
+                ex.gated_fetch,
+                max_pages=max_pages,
+                max_audit_requests=max_audit_requests,
+                enable_oob=enable_oob,
+                enable_domxss=enable_domxss,
+                enable_browser_xss=enable_browser_xss,
+                enable_spa_crawl=enable_spa_crawl,
+                browser_allowed_hosts=browser_allowed_hosts or None,
+                bandit_path=bandit_path,
+                bandit_context=slug,
+                oob_advertise_base_url=oob_advertise_base_url,
+                oob_relay_url=oob_relay_url,
+                oob_relay_secret=oob_relay_secret,
+                waf_adaptive=waf_adaptive,
+                grammar_fuzz=grammar_fuzz,
+                enable_arsenal=enable_arsenal,
+                arsenal_authz=arsenal_authz,
+                arsenal_race_targets=arsenal_race_targets,
+                enable_sso=enable_sso,
+                enable_graphql_dos=enable_graphql_dos,
+                use_library=use_library,
+                enable_access_control=enable_access_control,
+                access_control_config=ac_config,
+                priors=priors,
+                progress=sink,   # opt-in: mirror scan phases/findings onto the spine (None → off)
+            ).run(seed_url)
+        finally:
+            ex.close()
 
-    # Opt-in advanced arsenal (default OFF → byte-identical). Its RAW-SOCKET modules
-    # (smuggling/CSWSH/race) speak bytes on the wire directly, so they cannot ride the
-    # gated executor's `send`. Gate them fail-closed with the SAME chain the executor
-    # uses — kill-switch + charter/scope/posture — evaluated per host with NO traffic.
-    # A tripped kill-switch or an out-of-scope host means no probe leaves the box.
-    arsenal_authz = None
-    if enable_arsenal:
-        _posture = parse_posture(slug)
-        _killswitch = KillSwitch(slug)
-
-        def arsenal_authz(url: str) -> bool:
-            if _killswitch.is_tripped():
-                return False
-            return validate_action(
-                slug=slug, method="GET", target_url=url, posture=_posture).allowed
-
-    ex = HttpExecutor(
-        engagement_slug=slug,
-        base_url=_origin(seed_url),
-        auto_load_authority=True,
-        request_budget=request_budget,
-        prompt_callback=prompt_callback or stdin_prompt_with_timeout,
-    )
-    # Opt-in access-control pack: an explicit config wins; otherwise build one from the CLI
-    # refs/victim-headers, wrapping the GATED executor as the victim identity so the second
-    # identity's requests still pass the full safety stack. No refs => None (documented no-op).
-    ac_config = access_control_config
-    if enable_access_control and ac_config is None and access_control_refs:
-        from .scanner.access_control import config_from_cli
-        ac_config = config_from_cli(
-            ex.gated_fetch, access_control_victim_headers, access_control_refs)
-    try:
-        report = WebScanCampaign(
-            ex.gated_fetch,
-            max_pages=max_pages,
-            max_audit_requests=max_audit_requests,
-            enable_oob=enable_oob,
-            enable_domxss=enable_domxss,
-            enable_browser_xss=enable_browser_xss,
-            enable_spa_crawl=enable_spa_crawl,
-            browser_allowed_hosts=browser_allowed_hosts or None,
-            bandit_path=bandit_path,
-            bandit_context=slug,
-            oob_advertise_base_url=oob_advertise_base_url,
-            oob_relay_url=oob_relay_url,
-            oob_relay_secret=oob_relay_secret,
-            waf_adaptive=waf_adaptive,
-            grammar_fuzz=grammar_fuzz,
-            enable_arsenal=enable_arsenal,
-            arsenal_authz=arsenal_authz,
-            arsenal_race_targets=arsenal_race_targets,
-            enable_sso=enable_sso,
-            enable_graphql_dos=enable_graphql_dos,
-            use_library=use_library,
-            enable_access_control=enable_access_control,
-            access_control_config=ac_config,
-            priors=priors,
-            progress=sink,   # opt-in: mirror scan phases/findings onto the spine (None → off)
-        ).run(seed_url)
-    finally:
-        ex.close()
+    # SCAN phase — the one traffic-sending phase, so resume matters most here. On --resume, if a
+    # prior run COMPLETED the scan, reload its snapshotted authoritative report and SKIP re-
+    # crawling/re-auditing the target (idempotent: the target sees no repeat traffic, and findings
+    # are never re-counted). A missing/corrupt snapshot falls through and re-runs (fail-open). A
+    # scan exception propagates exactly as before (the phase is NOT completed → retried on resume).
+    report: ScanReport | None = None
+    if not ledger.should_run(P_SCAN):
+        report = ledger.load_report()
+        if report is not None:
+            ledger.skip(P_SCAN)
+    if report is None:
+        ledger.start(P_SCAN)
+        report = _do_scan()
+        ledger.complete(P_SCAN)
+        ledger.persist_report(report)
 
     # Post-scan intel: register the observed target + stack, resolve the asset
     # inventory, and produce the gated prediction queue. Best-effort.
     result = EngagementResult(report=report, world=world)
-    if enable_recon and ingest is not None:
-        try:
-            result.entities, result.predictions = _intel_finalize(ingest, report)
-        except Exception:
-            pass
+
+    def _do_intel_finalize() -> None:
+        result.entities, result.predictions = _intel_finalize(ingest, report)
+    ledger.run_phase(P_INTEL_FINALIZE, _do_intel_finalize,
+                     enabled=(enable_recon and ingest is not None))
+
     # Scientific confidence per finding — pure reasoning over the oracle's verdicts,
     # never traffic; best-effort so it can never sink the engagement.
-    try:
+    def _do_assess_findings() -> None:
         result.finding_confidence = _assess_findings(report)
-    except Exception:
-        pass
+    ledger.run_phase(P_ASSESS_FINDINGS, _do_assess_findings)
+
     # Findings project ABOVE the intel recon band on the shared clock, so the monotonic
     # world-model time never inverts across the recon→scan handoff. Derived from the
     # SHARED WORLD itself (not the ingest handle), so it is correct even if recon
@@ -814,34 +874,32 @@ def run_engagement(
 
     # Forward reasoning over the confirmed facts (no traffic). Best-effort: the
     # scan result is authoritative and must survive any chaining error.
-    if enable_chaining:
-        try:
-            from .worldmodel.impact import ImpactModel
-            auto = AutonomousCampaign(
-                _no_send, detection_budget=detection_budget,
-                impact_model=ImpactModel.from_slug(slug),   # mission-aware path/portfolio value
-            ).chain_findings(report, world=world, seq_base=seq_base)
-            result.attack_paths = auto.attack_paths
-            result.path_portfolio = auto.path_portfolio
-            result.chained_conclusions = auto.chained_conclusions
-        except Exception:
-            # chaining is value-add; a reasoning failure never sinks the engagement
-            pass
+    def _do_chaining() -> None:
+        from .worldmodel.impact import ImpactModel
+        auto = AutonomousCampaign(
+            _no_send, detection_budget=detection_budget,
+            impact_model=ImpactModel.from_slug(slug),   # mission-aware path/portfolio value
+        ).chain_findings(report, world=world, seq_base=seq_base)
+        result.attack_paths = auto.attack_paths
+        result.path_portfolio = auto.path_portfolio
+        result.chained_conclusions = auto.chained_conclusions
+    ledger.run_phase(P_CHAINING, _do_chaining, enabled=enable_chaining)
+
     # Veracity firewall over the live findings — re-execute each finding's own oracle
     # against the (now chained) world-model and label GROUNDED/UNGROUNDED/CONTRADICTED.
     # Runs AFTER chaining so the world holds the endpoint nodes the check consults.
     # Best-effort: the anti-hallucination pass can only demote, never sink the engagement.
-    try:
+    def _do_grounding() -> None:
         result.grounding = _assess_grounding(report, world)
-    except Exception:
-        pass
-    # OPT-IN sensor fusion (``fuse_sensors``, default OFF → this whole block is skipped and the
+    ledger.run_phase(P_GROUNDING, _do_grounding)
+
+    # OPT-IN sensor fusion (``fuse_sensors``, default OFF → this phase is skipped and the
     # engagement — and ``make gate`` — is byte-identical). Fold the operator's declared OFFLINE sensor
     # LEADS into the SHARED world-model and let the deterministic promotion oracles re-fire over each
     # sensor's OWN retained evidence. Runs AFTER chaining/grounding so it folds onto the final world;
     # the fusion clock continues after the run's high-water so time never inverts. Best-effort — a
     # fusion failure never sinks the engagement, and it NEVER changes a finding or an oracle verdict.
-    if fuse_sensors:
+    def _do_fusion() -> None:
         try:
             fusion_base = max((n.last_seen for n in world.all_nodes()), default=0) + 1
             result.fused_leads, result.fused_facts = _run_fusion(
@@ -861,32 +919,35 @@ def run_engagement(
                 world, impact_model=ImpactModel.from_slug(slug), seq_base=lateral_base)
         except Exception:
             pass
-    # DEFENSIVE / purple-team pass (opt-in ``enable_defender``, default OFF → this whole block is
+    ledger.run_phase(P_FUSION, _do_fusion, enabled=fuse_sensors)
+
+    # DEFENSIVE / purple-team pass (opt-in ``enable_defender``, default OFF → this phase is
     # skipped and the engagement is byte-identical). It reasons over the confirmed findings to tell
     # the blue team where their detection coverage has holes: candidate Sigma rules for the misses,
     # a detection-efficacy signal (would the operator's Sigma ruleset have caught what CRUCIBLE did?)
     # mapped to ATT&CK, and Sigma over any operator-supplied OFFLINE logs (kill-switch-gated read).
     # READ-ONLY over the authoritative scan — it changes no finding and no oracle verdict.
-    if enable_defender:
-        try:
-            result.defense = _run_defender_pass(
-                report, ruleset_path=defender_ruleset, sigma_dir=defender_sigma_dir,
-                log_path=defender_log, log_format=defender_log_format, slug=slug, sink=sink)
-            if sink is not None and result.defense is not None:
-                _mirror_defense(sink, result.defense)
-        except Exception:
-            # the defensive pass is value-add; a failure never sinks the engagement
-            pass
+    def _do_defender() -> None:
+        result.defense = _run_defender_pass(
+            report, ruleset_path=defender_ruleset, sigma_dir=defender_sigma_dir,
+            log_path=defender_log, log_format=defender_log_format, slug=slug, sink=sink)
+        if sink is not None and result.defense is not None:
+            _mirror_defense(sink, result.defense)
+    ledger.run_phase(P_DEFENDER, _do_defender, enabled=enable_defender)
+
     # Mirror the authoritative findings onto the event spine AND run the reasoning pass over
     # them (W1.1: multi-critic panel + cognitive refusal + reward-bus credit + reflection) —
     # ADVISORY ONLY. This never alters report.active_findings nor the oracle verdict, and it
     # runs only when a spine is attached (so `make gate`, which uses no spine, is byte-identical).
-    if sink is not None:
+    # Skipping this on resume (a prior run completed it) is exactly what stops the append-only spine
+    # from double-counting the SAME findings' events on a re-run.
+    def _do_reasoning() -> None:
         _run_reasoning_pass(sink, spine, slug, report, result, world)
         # W2.2c — persist a compact READ-ONLY projection input so `plan <slug>` can reconstruct the
         # planner's route/goal-tree over this engagement offline. Spine-only (opt-in), so the default
         # engage path and the gate stay byte-identical. Best-effort — never sinks the run.
         _persist_plan_input(slug, report, world)
+    ledger.run_phase(P_REASONING, _do_reasoning, enabled=(sink is not None))
     return result
 
 
@@ -1215,6 +1276,15 @@ def main(argv: list[str]) -> int:
                         help="Mirror the whole engagement onto the immutable blackboard event "
                              "spine (phases, findings with their live grounding verdict, "
                              "refusals). Opt-in, best-effort; off by default (zero impact).")
+    parser.add_argument("--resume", action="store_true",
+                        help="RESUME a prior run of this slug from its phase ledger "
+                             "(targets/<slug>/<slug>.phases.jsonl): SKIP every phase a prior run "
+                             "already completed — most importantly the traffic-sending SCAN, whose "
+                             "authoritative report was snapshotted and is reloaded instead of re-"
+                             "crawling/re-auditing the target. A phase that only started/failed "
+                             "(crashed before completing) is retried. Preflight authorization ALWAYS "
+                             "re-runs. Fail-open: a missing/corrupt ledger just re-runs from scratch. "
+                             "Applies to the web engage path (not --fuse-only).")
     parser.add_argument("--ephemeral", action="store_true",
                         help="EPHEMERAL / ZDR session (opt-in; persist-by-default). Re-root the "
                              "run's evidence archive + audit log onto an in-memory tmpfs dir that "
@@ -1456,6 +1526,7 @@ def _engage_body(args: argparse.Namespace, spine: object) -> int:
             defender_log=args.defender_log,
             defender_log_format=args.defender_log_format,
             fuse_sensors=args.fuse_sensors,
+            resume=getattr(args, "resume", False),
         )
     except EngagementRefused as e:
         print(f"engagement refused: {e}")
