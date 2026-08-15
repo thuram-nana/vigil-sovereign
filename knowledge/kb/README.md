@@ -13,6 +13,8 @@ knowledge, not authority — see [`../README.md`](../README.md) for the doctrine
 - [`verify-and-oracles.md`](verify-and-oracles.md) — the veracity layer: the oracles + firewall that make
   "the machine cannot lie about a finding" literal.
 - [`gate-of-record.md`](gate-of-record.md) — the conjunctive gate of record and the WARDEN danger tiers.
+- [`approvals.md`](approvals.md) — the two approval queues, the keyless offense broker (token/nonce model),
+  and signing an offense approval from the UI via the sovereign signer (see ADR 0004).
 - [`live-layer.md`](live-layer.md) — the live execution layer, the gated executor, and the `vigil` engine.
 - [`proof-studio.md`](proof-studio.md) — Strix PoC → oracle-confirmed signed FACT → offline-verifiable bundle.
 - [`verifiable-fact.md`](verifiable-fact.md) — **the Verifiable-Fact program**: `vigil remediate --prove`, the
