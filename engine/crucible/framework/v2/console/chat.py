@@ -75,6 +75,60 @@ _MAX_ATTACH_CTX_CHARS = 48000
 _MAX_IMAGES = 8                    # how many image blocks one turn may carry
 _MAX_IMAGE_B64_TOTAL = 3 * 1024 * 1024   # and their total base64 weight, so one turn cannot balloon
 
+# ---------------------------------------------------------------------------
+# Auto-heal (W2): a chat call that hits a TRANSIENT backend error (a 429, an overload/5xx, a dropped
+# connection or a timeout) is retried with bounded exponential backoff, so a brief blip self-recovers
+# instead of the operator seeing a hard "could not be reached" and having to retype. A PERMANENT error
+# (a bad request, an auth failure) is NOT retried — that would only waste time. Mirrors the kernel's X4
+# backoff policy locally (chat builds its own client rather than routing through the kernel).
+# ---------------------------------------------------------------------------
+_CHAT_MAX_ATTEMPTS = 4
+_CHAT_BASE_BACKOFF_S = 0.5
+_CHAT_MAX_BACKOFF_S = 8.0
+_CHAT_RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+_CHAT_RETRYABLE_NAMES = frozenset({
+    "APIConnectionError", "APITimeoutError", "InternalServerError", "RateLimitError",
+    "ServiceUnavailableError", "OverloadedError", "ConnectionError", "TimeoutError",
+})
+
+
+def _chat_retryable(exc: Exception) -> bool:
+    """True iff a TRANSIENT error worth retrying: a connection/timeout, or a retryable HTTP status. A
+    permanent 4xx (bad request / auth) is False — retrying it only burns time."""
+    if type(exc).__name__ in _CHAT_RETRYABLE_NAMES:
+        return True
+    code = getattr(exc, "status_code", None)
+    try:
+        return int(code) in _CHAT_RETRYABLE_STATUS
+    except (TypeError, ValueError):
+        return False
+
+
+def _chat_call_with_backoff(call, blocks):
+    """Invoke ``call(blocks)`` (one Anthropic request), retrying a TRANSIENT failure up to
+    ``_CHAT_MAX_ATTEMPTS`` times with bounded exponential backoff (honouring a Retry-After header when
+    present). A permanent error, or the final attempt, re-raises unchanged. Total sleep is bounded."""
+    last: Exception | None = None
+    for attempt in range(_CHAT_MAX_ATTEMPTS):
+        try:
+            return call(blocks)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if attempt == _CHAT_MAX_ATTEMPTS - 1 or not _chat_retryable(exc):
+                raise
+            delay = min(_CHAT_MAX_BACKOFF_S, _CHAT_BASE_BACKOFF_S * (2 ** attempt))
+            ra = getattr(getattr(exc, "response", None), "headers", None)
+            if ra is not None:
+                try:
+                    val = ra.get("retry-after")
+                    if val is not None:
+                        delay = max(delay, min(_CHAT_MAX_BACKOFF_S, float(val)))
+                except (TypeError, ValueError):
+                    pass
+            time.sleep(delay)
+    if last is not None:                 # pragma: no cover — the loop either returns or raises above
+        raise last
+
 
 def _live_dir() -> Path:
     """The operator-machine base for chat transcripts. `vigil up` sets VIGIL_LIVE_DIR to the same
@@ -933,7 +987,7 @@ def _reason(chat_id: str, question: str) -> dict:
         )
 
     try:
-        resp = _call(content)
+        resp = _chat_call_with_backoff(_call, content)   # auto-heal a transient blip before giving up
     except Exception as e:  # noqa: BLE001 — never surface the key; an API error is an honest refusal
         if not images:
             return {"ok": False,
@@ -941,7 +995,7 @@ def _reason(chat_id: str, question: str) -> dict:
                              f"still runs."}
         # The images may be what it could not accept — retry TEXT-ONLY and SAY SO, never drop them silently.
         try:
-            resp = _call([content[0]])
+            resp = _chat_call_with_backoff(_call, [content[0]])
         except Exception as e2:  # noqa: BLE001
             return {"ok": False,
                     "error": f"the model could not be reached ({type(e2).__name__}); the gated assessment "
