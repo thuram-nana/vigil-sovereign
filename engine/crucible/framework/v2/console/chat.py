@@ -900,6 +900,73 @@ def _answer_footer(notes: list, coverage: dict, offer: dict) -> str:
     return "\n\n" + "\n".join("— " + ln for ln in lines)
 
 
+# ---------------------------------------------------------------------------------------------------
+# CONVERSATION MEMORY — a chat you reopen must CONTINUE, not restart.
+#
+# The transcript was always stored and displayed faithfully, but the model call carried only the
+# CURRENT question — so every turn was stateless and reopening an old chat lost the thread. These
+# helpers replay a chat's own prior turns into the messages array (bounded), so a follow-up is answered
+# in context. The current user turn is excluded: chat_send appends it BEFORE _reason runs, and _reason
+# rebuilds it with the live attachment/context blocks.
+# ---------------------------------------------------------------------------------------------------
+
+_HISTORY_TURN_CHARS = 4000       # cap any single replayed turn (a huge paste can't dominate the window)
+_HISTORY_TOTAL_CHARS = 24000     # cap the whole replayed history; oldest turns are dropped to fit
+
+
+def _prior_records(chat_id: str) -> list[dict]:
+    """This chat's transcript with the TRAILING current-user turn removed. chat_send records the user's
+    message before it calls _reason, so the last user record is the question we are answering now; it is
+    carried separately (rebuilt with attachments), never replayed as history."""
+    recs = read_session(chat_id)
+    for i in range(len(recs) - 1, -1, -1):
+        if recs[i].get("role") == "user":
+            return recs[:i]
+    return recs
+
+
+def _history_messages(chat_id: str) -> list[dict]:
+    """Prior conversational turns as alternating ``{role, content}`` messages the SDK accepts. Faithful
+    and bounded: user + assistant text is replayed as-is (launch/refusal/answer notices ARE part of the
+    conversation), consecutive same-role turns are merged so the array strictly alternates, each turn is
+    capped, the oldest turns are dropped to fit a total budget, and the list is trimmed to start with a
+    user turn and end with an assistant turn so appending the current user turn is always valid. Empty
+    for a fresh chat, so a first message is byte-identical to the pre-memory behaviour."""
+    msgs: list[dict] = []
+    for r in _prior_records(chat_id):
+        role = r.get("role")
+        text = str(r.get("text") or "").strip()
+        if not text or role not in ("user", "assistant"):
+            continue
+        if len(text) > _HISTORY_TURN_CHARS:
+            text = text[:_HISTORY_TURN_CHARS] + " …[truncated]"
+        if msgs and msgs[-1]["role"] == role:          # merge consecutive same-role → strict alternation
+            msgs[-1]["content"] += "\n\n" + text
+        else:
+            msgs.append({"role": role, "content": text})
+    while msgs and msgs[0]["role"] != "user":          # must start with a user turn
+        msgs.pop(0)
+    total = sum(len(m["content"]) for m in msgs)
+    while len(msgs) > 1 and total > _HISTORY_TOTAL_CHARS:   # drop oldest whole turns to fit the budget
+        total -= len(msgs.pop(0)["content"])
+    while msgs and msgs[0]["role"] != "user":          # re-check the start after trimming
+        total -= len(msgs.pop(0)["content"])
+    if msgs and msgs[-1]["role"] == "user":            # an unanswered trailing user (a torn write) —
+        msgs.pop()                                     # drop it so alternation with the current turn holds
+    return msgs
+
+
+def _has_prior_conversation(chat_id: str) -> bool:
+    """True once this chat has at least one prior user turn AND one prior assistant reply (excluding the
+    current turn) — i.e. the operator has already been talking with it, so a follow-up should CONTINUE the
+    thread rather than fall back to the ask-for-a-target reply. A brand-new chat's first message has no
+    prior turn, so first-touch behaviour is unchanged."""
+    recs = _prior_records(chat_id)
+    has_user = any(r.get("role") == "user" and str(r.get("text") or "").strip() for r in recs)
+    has_asst = any(r.get("role") == "assistant" and str(r.get("text") or "").strip() for r in recs)
+    return has_user and has_asst
+
+
 def _reason(chat_id: str, question: str) -> dict:
     """ONE Claude call over the operator's question + the redacted session context + the fenced attachment
     block (+ image blocks). Returns ``{ok, reply, notes, coverage}``, ``{ok: False, need_key: True, note}``
@@ -978,12 +1045,19 @@ def _reason(chat_id: str, question: str) -> dict:
         except Exception:  # noqa: BLE001 — metering must never break the chat call
             _tb = None
 
+    # Replay this chat's own prior turns so a follow-up CONTINUES the conversation. Bounded; empty for a
+    # fresh chat (then this is byte-identical to the single-message call it replaces). The current turn —
+    # `blocks`, carrying the live attachments/context/images — is always the final user message.
+    history = _history_messages(chat_id)
+    if history:
+        notes.append(f"continuing this conversation with {len(history)} earlier turn(s) in context.")
+
     def _call(blocks):
         client = anthropic.Anthropic(api_key=key)
         return client.messages.create(
             model="claude-opus-5", max_tokens=_mx,
             system=_CHAT_SYSTEM,
-            messages=[{"role": "user", "content": blocks}],
+            messages=history + [{"role": "user", "content": blocks}],
         )
 
     try:
@@ -1029,6 +1103,13 @@ def _reason_wanted(chat_id: str, body: dict) -> bool:
     if body.get("reason") is True:
         return True
     if _manifests(chat_id):
+        return True
+    # A chat the operator has ALREADY been talking with keeps conversing: a follow-up continues the
+    # thread (with prior turns in context, see _history_messages) instead of falling back to the canned
+    # ask-for-a-target reply. A brand-new chat's FIRST message has no prior turn, so first-touch is
+    # unchanged — this deliberately changes only the second turn onward, which is what "re-engage a chat
+    # fully" requires.
+    if _has_prior_conversation(chat_id):
         return True
     try:
         from . import sessions
