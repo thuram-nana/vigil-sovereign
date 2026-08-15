@@ -313,7 +313,8 @@ def test_feed_daemon_wires_the_live_killswitch_into_the_loop_cancel(tmp_path, mo
     monkeypatch.setattr(paths, "killswitch_path", lambda slug: ksfile)
     captured: dict = {}
 
-    def _fake_daemon(*, interval_ticks, poll_seconds, refresh, cancel, on_tick, max_ticks):
+    def _fake_daemon(*, interval_ticks, poll_seconds, refresh, cancel, on_tick, max_ticks, **_ignored):
+        # **_ignored absorbs the resume-checkpoint kwargs (state_path/feed_id/now_wall) the CLI now passes.
         captured["cancel"] = cancel
         return {"ticks": 0, "refreshes": 0}
 

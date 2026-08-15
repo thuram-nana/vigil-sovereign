@@ -318,9 +318,19 @@ def _feed_daemon(args: argparse.Namespace) -> int:
                              default=str), flush=True)
 
     interval_ticks = max(1, round(args.interval / args.poll))
+    # RESUME CHECKPOINT: persist this feed's wall-clock cadence under the live dir so a daemon restart
+    # resumes the real schedule instead of firing an immediate pull. Fail-open: if the path cannot even be
+    # resolved we disable persistence rather than abort the (already-gated) feed. feed_id keys the checkpoint
+    # by engagement + source set so distinct feeds never clobber each other's cadence.
+    try:
+        state_path = ticker.default_schedule_path()
+    except Exception:                                     # noqa: BLE001 — never let path resolution break the feed
+        state_path = None
+    feed_id = f"{args.slug or 'ephemeral'}:" + ",".join(sorted(s.name for s in sources))
     summary = ticker.run_feed_daemon(
         interval_ticks=interval_ticks, poll_seconds=args.poll, refresh=refresh, cancel=cancel,
-        on_tick=on_tick, max_ticks=(args.max_ticks if args.max_ticks and args.max_ticks > 0 else None))
+        on_tick=on_tick, max_ticks=(args.max_ticks if args.max_ticks and args.max_ticks > 0 else None),
+        state_path=state_path, feed_id=feed_id)
     if store is not None:
         store.close()
     return _emit({"live": True, "slug": args.slug or "(ephemeral)", "interval_seconds": args.interval,
