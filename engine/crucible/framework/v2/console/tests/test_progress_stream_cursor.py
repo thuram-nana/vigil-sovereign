@@ -260,3 +260,18 @@ def test_the_aegis_verdicts_stream_is_a_pure_tail(monkeypatch, tmp_path):
                                 last_event_id=1, want=1, timeout=2.0)
     assert evs == [], "the AEGIS verdicts stream replayed its history"
     assert ids == [], "the AEGIS verdicts stream emitted a cursor"
+
+
+def test_a_cursor_alone_resumes_a_run_stream(monkeypatch, tmp_path):
+    """`replay` is `from_start OR Last-Event-ID` — the OR term needs its own control. A client that
+    reconnects carrying only the cursor (no from_start) must RESUME and get the remainder; ignoring the
+    cursor would silently downgrade it to a tail and drop the rest of the record. Self-fuzz found this
+    gap: `replay = allow_replay and from_start` survived the suite because every other test also passes
+    from_start=1."""
+    run_id = _seed(tmp_path, n=4)
+    with _serve(monkeypatch, tmp_path) as base:
+        rest, ids = _read_events(f"{base}/api/events?run={run_id}",   # NO from_start
+                                 last_event_id=2, want=2)
+    assert [e["action_refused"] for e in rest] == ["exec_command_2", "exec_command_3"], \
+        "a cursor-only reconnect did not resume — the remainder of the record was lost"
+    assert ids == [3, 4], "resume must continue the original numbering"
