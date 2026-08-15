@@ -249,6 +249,14 @@ def test_codebase_routes_to_strix_and_validates_path(stub_launch, tmp_path):
     # (strix.graph / warden.block) to the run's progress.jsonl, which /api/events?run= tails — so the
     # process box shows what the scan is doing and what WARDEN blocked, instead of nothing at all.
     assert r["stream"] == "progress"
+    # ...and, load-bearing, the PERSISTED one. The UI's run.stream comes from meta.json via
+    # api.list_runs (api.py: meta.get("stream", ...)), NOT from this reply — launch() reads only
+    # run_id/slug/engine/error and then navigates away. Asserting the reply alone let a mutant revert
+    # the meta write and silently make the whole feed inert while all 584 console tests stayed green:
+    # /api/runs would say "none", no SSE would ever attach, and the box would show "Refusals 0" for a
+    # run WARDEN blocked ten times.
+    row = next(x for x in api.list_runs()["runs"] if x["run_id"] == r["run_id"])
+    assert row["stream"] == "progress", "the PERSISTED stream is what the UI reads — the feed is inert"
     cmd, _ = stub_launch(r["run_id"])
     assert cmd[0].endswith("strix") and "--target" in cmd and str(src) in cmd
     assert "--non-interactive" in cmd  # A4b: headless, or a background/console spawn hangs on the TUI

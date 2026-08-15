@@ -9,7 +9,8 @@ Both halves are load-bearing and each was a red-pen BLOCK:
   * with ``from_start`` but no cursor, every reconnect re-delivers the whole file — the same tiles then
     read a FABRICATED total (3 blocks counted as 9), which is no better.
 
-So the stream emits ``id:`` (the event's true line number) + ``_seq`` in the payload, and honours
+So the stream emits ``id:`` (the event's ordinal among the PARSEABLE events — the tailer skips
+blank and malformed lines, so it is NOT a raw line number) + ``_seq`` in the payload, and honours
 ``Last-Event-ID``. These tests drive the REAL server over HTTP.
 """
 from __future__ import annotations
@@ -88,7 +89,7 @@ def test_from_start_replays_a_finished_runs_whole_record(monkeypatch, tmp_path):
     with _serve(monkeypatch, tmp_path) as base:
         evs, ids = _read_events(f"{base}/api/events?run={run_id}&from_start=1", want=3)
     assert [e["action_refused"] for e in evs] == ["exec_command_0", "exec_command_1", "exec_command_2"]
-    assert ids == [1, 2, 3], "every event must carry its true line number as the SSE id cursor"
+    assert ids == [1, 2, 3], "every event must carry its parse-ordinal as the SSE id cursor"
     assert [e["_seq"] for e in evs] == [1, 2, 3], "the cursor must also ride in the payload for client dedup"
 
 

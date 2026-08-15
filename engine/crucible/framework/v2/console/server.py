@@ -252,9 +252,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         FABRICATED total ("Refusals 9" for three blocks) — no better than the fabricated zero.
 
         The plain live tail deliberately keeps NO cursor and opens at EOF, exactly as it always has:
-          * cost — a cursor implies reading and parsing the whole file on every connection (measured at
-            5.3s / 200MB for a 34MB log), which a tail that was never going to emit those events must not
-            pay, once per connection, per reconnect, per open stream;
+          * cost — a cursor implies reading and parsing the WHOLE file on every connection (order
+            hundreds of MB of peak allocation for a multi-tens-of-MB log; the wall time is
+            machine-dependent), which a tail that was never going to emit those events must not pay,
+            once per connection, per reconnect, per open stream;
           * correctness — ``EventTailer`` restarts from byte 0 when the file is truncated or ROTATED
             (``common.logging`` rotates the engagement log at 64MB). A monotonic counter cannot survive
             that: ids would continue past the new file's length, and the next reconnect would suppress
