@@ -30,7 +30,10 @@ from framework.v2.console.sse import EventTailer
 
 def test_status_data_shape() -> None:
     d = api.status_data()
-    assert set(d) == {"paths", "backends"}
+    # pending_approvals (a base-wide count of offense actions awaiting an owner signature) was added so
+    # the UI can merge both planes into the one "Waiting for you" counter; keep the exact-set guarantee.
+    assert set(d) == {"paths", "backends", "pending_approvals"}
+    assert isinstance(d["pending_approvals"], int) and d["pending_approvals"] >= 0
     assert "crucible_root" in d["paths"] and "targets_root" in d["paths"]
     assert isinstance(d["backends"], list)
     for b in d["backends"]:
