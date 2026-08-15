@@ -56,7 +56,20 @@ def status_data() -> dict[str, Any]:
         ],
         default=[],
     )
-    return {"paths": _paths(), "backends": backends}
+
+    def _pending_offense() -> int:
+        # Count OFFENSE approvals awaiting a signature so the UI can MERGE them into the one "Waiting for
+        # you" counter (which read the sovereign snapshot only, so a live Strix run's unsigned actions
+        # showed as 0). Read-only + total; same import-clean broker path api.approvals() uses. Base-wide
+        # (approvals are keyed under VIGIL_BASE_DIR, not per-engagement), matching api.approvals().
+        try:
+            from vigil_integration.live.approval_broker import approvals_root, list_pending
+            base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+            return len(list_pending(approvals_root(base)))
+        except Exception:  # noqa: BLE001 — a count is best-effort; never break /api/status
+            return 0
+
+    return {"paths": _paths(), "backends": backends, "pending_approvals": _pending_offense()}
 
 
 # ---------------------------------------------------------------------------

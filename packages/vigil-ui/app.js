@@ -757,7 +757,10 @@
     let snap = null, ostat = null;
     try { snap = await V.getJSON(SOV("/api/snapshot")); } catch (e) { /* sovereign offline */ }
     try { ostat = await V.getJSON(OFF("/api/status")); } catch (e) { /* offense offline */ }
-    const waiting = (snap && (snap.pending_approvals || []).length) || 0;
+    // MERGE both planes: sovereign pending + offense pending (renderHome already fetched OFF /api/status,
+    // so no extra request — see mergeWaiting for the polling screens).
+    const waiting = ((snap && (snap.pending_approvals || []).length) || 0)
+                  + ((ostat && ostat.pending_approvals) || 0);
     const killed = !!(snap && snap.kill_switch && (snap.kill_switch.engaged || snap.kill_switch === "ENGAGED"));
     const findings = (ostat && (ostat.findings_confirmed != null ? ostat.findings_confirmed : (ostat.findings || 0))) || 0;
     const runs = (ostat && (ostat.active_runs != null ? ostat.active_runs : 0)) || 0;
@@ -803,6 +806,17 @@
     const fresh = topbar();
     bar.parentNode.replaceChild(fresh, bar);
     renderNav();
+  }
+
+  // The "Waiting for you" count MERGES both planes: SOVEREIGN pending (agent-mesh / gesture / learn) plus
+  // OFFENSE pending (Strix / engage owner-approvals, from OFF /api/status.pending_approvals). It read the
+  // sovereign snapshot only, so a live Strix run's unsigned actions showed as "0 waiting". `done` is called
+  // with the summed count; if the offense plane is down we fall back to the sovereign count (honest, never
+  // an inflated number). Loopback fetch, cheap.
+  function mergeWaiting(sovPending, done) {
+    V.getJSON(OFF("/api/status"))
+      .then(function (o) { done(sovPending + ((o && o.pending_approvals) || 0)); })
+      .catch(function () { done(sovPending); });
   }
 
   // ---- Manual (in-app documentation; real content, no runtime data) ---------
@@ -2454,9 +2468,11 @@
     function pollSnapshot() {
       V.getJSON(SOV("/api/snapshot")).then(function (s) {
         L.snapshot = s; drawApprovals();
-        const waiting = (s && (s.pending_approvals || []).length) || 0;
+        const sovPending = (s && (s.pending_approvals || []).length) || 0;
         const killed = !!(s && (s.kill_switch === "ENGAGED" || (s.kill_switch && s.kill_switch.engaged)));
-        if (app.get().waiting !== waiting || app.get().killed !== killed) { app.set({ waiting: waiting, killed: killed }); refreshTopbar(); }
+        mergeWaiting(sovPending, function (waiting) {   // + offense pending, so a live Strix run shows up
+          if (app.get().waiting !== waiting || app.get().killed !== killed) { app.set({ waiting: waiting, killed: killed }); refreshTopbar(); }
+        });
       }).catch(function () { /* sovereign plane offline — approvals just won't show */ });
     }
 
@@ -2980,9 +2996,11 @@
       V.getJSON(SOV("/api/snapshot")).then(function (s) {
         B.snap = s; B.sovOnline = true; drawMesh(); drawStatus(); drawTiles();
         // keep the shared top bar honest (read-only, exactly as Live/Safety do)
-        const waiting = (s && (s.pending_approvals || []).length) || 0;
+        const sovPending = (s && (s.pending_approvals || []).length) || 0;
         const killed = !!(s && (s.kill_switch === "ENGAGED" || (s.kill_switch && s.kill_switch.engaged)));
-        if (app.get().waiting !== waiting || app.get().killed !== killed) { app.set({ waiting: waiting, killed: killed }); refreshTopbar(); }
+        mergeWaiting(sovPending, function (waiting) {   // + offense pending, so a live Strix run shows up
+          if (app.get().waiting !== waiting || app.get().killed !== killed) { app.set({ waiting: waiting, killed: killed }); refreshTopbar(); }
+        });
         // attach the live spine feed ONCE, tailing from the current head so we stream what
         // happens from now on (not a full replay of the whole spine).
         if (!B.streamAttached) attachStream(typeof s.head_seq === "number" ? s.head_seq : undefined);
