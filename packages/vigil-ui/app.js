@@ -6463,6 +6463,13 @@
                 h("button.btn.sm", { onClick: function (e) {
                   downloadDossier(run.run_id, e.target, V.$("#library-dossier-status")); } }, "Dossier"),
                 h("button.btn.sm", { onClick: function () { renameRun(run, slug); } }, "Rename"),
+                // W4: stop a running run, or relaunch a finished one (Resume where the CLI supports it).
+                (run.status === "running"
+                  ? h("button.btn.sm", { onClick: function () { runCancel(run.run_id, function () { loadLibraryDetail(slug); }); } }, "Cancel")
+                  : (runIsRetryable(run)
+                    ? h("button.btn.sm", { onClick: function () { runRetry(run.run_id, function () { loadLibraryDetail(slug); }); } },
+                        run.resumable ? "Resume" : "Retry")
+                    : null)),
               ])),
             ]);
           })),
@@ -7011,6 +7018,40 @@
     if (atBottom) feed.scrollTop = feed.scrollHeight;
     else if (trimmed) feed.scrollTop = Math.max(0, feed.scrollTop - trimmed);   // keep a scrolled-up view steady
   }
+  // W4 — run control (shared by the process box and the Runs table). Non-destructive lifecycle: Cancel
+  // terminates the run's process; Retry relaunches its recorded argv (Resume where the CLI supports it).
+  function runIsRetryable(r) {
+    return !!(r && r.run_id && (r.status === "error" || r.status === "interrupted" || r.status === "cancelled"));
+  }
+  function runCancel(runId, after) {
+    if (!runId) return;
+    if (!window.confirm("Stop this run? The process is terminated; findings and proof so far stay on disk.")) return;
+    V.postJSON(OFF("/api/run/" + encodeURIComponent(runId) + "/cancel"), {})
+      .then(function (res) {
+        V.toast((res && res.ok) ? "Run cancelled." : ((res && res.error) || "Could not cancel."), !(res && res.ok));
+        if (after) after(res);
+      })
+      .catch(function (e) { V.toast("Could not cancel: " + ((e && e.message) || e), true); });
+  }
+  function runRetry(runId, after) {
+    if (!runId) return;
+    V.postJSON(OFF("/api/run/" + encodeURIComponent(runId) + "/retry"), {})
+      .then(function (res) {
+        if (res && res.ok) { V.toast(res.resumed ? "Resuming from the last checkpoint…" : "Restarting…", false); if (after) after(res); }
+        else { V.toast((res && res.error) || "Could not retry.", true); }
+      })
+      .catch(function (e) { V.toast("Could not retry: " + ((e && e.message) || e), true); });
+  }
+  function pboxRetryable() { return runIsRetryable(PBOX.run); }
+  function pboxRetryTitle() {
+    return (PBOX.run && PBOX.run.resumable)
+      ? "Resume this run from its last signed checkpoint"
+      : "Restart this run from the beginning";
+  }
+  function pboxCancel() { if (PBOX.run) runCancel(PBOX.run.run_id, function () { pboxPoll(); }); }
+  function pboxRetry() {
+    if (PBOX.run) runRetry(PBOX.run.run_id, function () { PBOX.following = ""; pboxPoll(); });  // follow the NEW run
+  }
   function pboxRenderShell() {
     var host = pboxHost();
     if (PBOX.ui.dismissed) { host.style.display = "none"; return; }
@@ -7028,6 +7069,14 @@
         PBOX.run ? h("span.pb-run", { title: "the run this is following" },
           (PBOX.run.engagement_label || PBOX.run.slug || PBOX.run.run_id || "")) : null]),
       h("div.pb-btns", null, [
+        // W4: control the followed run right where the operator watches it. Cancel while it runs; Resume
+        // (a resumable run — continues its checkpoint) / Retry (restart) once it has ended.
+        (pboxIsRunning() && PBOX.run && PBOX.run.run_id
+          ? h("button.pb-act.pb-cancel", { title: "Stop this run", onClick: pboxCancel }, "Cancel")
+          : (pboxRetryable()
+            ? h("button.pb-act.pb-retry", { title: pboxRetryTitle(), onClick: pboxRetry },
+                (PBOX.run && PBOX.run.resumable) ? "Resume" : "Retry")
+            : null)),
         h("button.pb-x", { title: "Minimize", "aria-label": "Minimize activity",
           onClick: function () { PBOX.ui.open = false; pboxSaveUI(); pboxRenderShell(); } }, "–"),
         h("button.pb-x", { title: "Hide", "aria-label": "Hide activity",
