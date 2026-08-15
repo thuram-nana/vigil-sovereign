@@ -13,11 +13,16 @@ module ``framework``/``strix``/SDK-free (``integration/tests/test_two_env_bounda
 imports it lazily+guarded so a bare vendored checkout with no ``vigil_integration`` on the path stays
 byte-identical at runtime. It needs ZERO server changes — the existing ``/api/events`` tailer surfaces it.
 
-Every write is BEST-EFFORT and, critically, NEVER BLOCKS: a missing env var, an unwritable path, a symlink or
-hardlink, a non-regular file (FIFO/device/socket), a serialisation error, or an oversized payload is a silent
-no-op that returns ``False`` and never raises — surfacing progress must never break a run or, especially,
-delay a WARDEN block (the gate emits BEFORE it raises, so a blocking write here would hang the refusal
-itself).
+Every write is BEST-EFFORT: a missing env var, an unwritable path, a symlink or hardlink, a non-regular file
+(FIFO/device/socket), a serialisation error, or an oversized payload is a silent no-op that returns ``False``
+and never raises — surfacing progress must never break a run or, especially, delay a WARDEN block (the gate
+emits BEFORE it raises, so a blocking write here would hang the refusal itself).
+
+Liveness, scoped honestly: no ADVERSARIAL path can wedge this writer — a planted FIFO (with or without a
+reader), device or socket is refused at open/fstat rather than waited on. It is NOT an unconditional
+never-blocks guarantee: ``O_NONBLOCK`` has no effect on a regular file, so a stalled filesystem under the run
+dir (NFS/fuse on a "host anywhere" deploy) can still block ``os.write`` and therefore delay the refusal. That
+is a property of the storage, not something this module can defend against.
 
 Appends go to a regular file opened ``O_APPEND|O_NONBLOCK|O_NOFOLLOW`` (+ an ``fstat`` ``S_ISREG``/``st_nlink``
 check, since a reader-attached FIFO opens fine and a hardlink is a real regular file). On Linux the kernel

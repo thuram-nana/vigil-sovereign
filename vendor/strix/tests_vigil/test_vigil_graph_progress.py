@@ -1,0 +1,92 @@
+"""VIGIL W6c — the vendored-Strix half of the progress bridge.
+
+``AgentCoordinator._maybe_snapshot`` mirrors a compact graph histogram to the console's live process box.
+Three properties matter and none was covered by the integration-side tests:
+
+  * a BARE vendored checkout (no ``vigil_integration`` importable) is a silent no-op — the vendor stays
+    byte-identical at runtime — and the failed import is attempted ONCE per process, not on every one of
+    the seven coordinator mutation sites;
+  * the emit fires only when the histogram CHANGES, so the box's bounded scrollback holds real
+    transitions rather than hundreds of identical lines;
+  * a snapshot failure (``None``) never reaches the bridge.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import sys
+import types
+
+import pytest
+
+
+def _load_agents():
+    """Import ``strix.core.agents`` without the heavy SDK. It needs exactly one symbol from
+    ``strix.core.sessions`` (``session_write_lock``), and that module imports the openai-agents SDK at
+    top level — so stub it. This keeps the test running EVERYWHERE rather than skipping wherever the SDK
+    is absent (a skipped test would leave the bridge's only coverage decorative)."""
+    if "strix.core.sessions" not in sys.modules:
+        stub = types.ModuleType("strix.core.sessions")
+        stub.session_write_lock = contextlib.nullcontext
+        sys.modules["strix.core.sessions"] = stub
+    import strix.core.agents as mod
+    return mod
+
+
+agents = _load_agents()
+
+
+@pytest.fixture(autouse=True)
+def _reset_bridge_state():
+    agents._vigil_last_graph = None
+    agents._vigil_bridge_absent = False
+    yield
+    agents._vigil_last_graph = None
+    agents._vigil_bridge_absent = False
+
+
+class _BlockVigilIntegration:
+    """Simulate a bare vendored checkout: `vigil_integration` is simply not importable."""
+
+    def find_module(self, name, path=None):   # legacy API, harmless
+        return None
+
+    def find_spec(self, name, path=None, target=None):
+        if name == "vigil_integration" or name.startswith("vigil_integration."):
+            raise ModuleNotFoundError(f"No module named {name!r}")
+        return None
+
+
+def test_bare_checkout_is_a_silent_noop_and_the_import_is_attempted_once(monkeypatch):
+    for mod in [m for m in list(sys.modules) if m.startswith("vigil_integration")]:
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+    blocker = _BlockVigilIntegration()
+    monkeypatch.setattr(sys, "meta_path", [blocker, *sys.meta_path])
+
+    snap = {"statuses": {"a1": "running"}}
+    for _ in range(50):
+        agents._vigil_emit_graph_progress(snap)     # must never raise
+    assert agents._vigil_bridge_absent is True, "a failed import must be remembered, not retried per mutation"
+    assert agents._vigil_last_graph is None
+
+
+def test_emits_only_on_change(monkeypatch, tmp_path):
+    pytest.importorskip("vigil_integration.progress")
+    monkeypatch.setenv("VIGIL_PROOF_RUN_DIR", str(tmp_path))
+
+    same = {"statuses": {"a1": "running", "a2": "running"}}
+    for _ in range(25):
+        agents._vigil_emit_graph_progress(same)
+    agents._vigil_emit_graph_progress({"statuses": {"a1": "completed", "a2": "running"}})
+
+    raw = (tmp_path / "progress.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(raw) == 2, f"expected one line per DISTINCT histogram, got {len(raw)}"
+    assert all('"event":"strix.graph"' in line for line in raw)
+
+
+def test_a_failed_snapshot_never_reaches_the_bridge(monkeypatch, tmp_path):
+    pytest.importorskip("vigil_integration.progress")
+    monkeypatch.setenv("VIGIL_PROOF_RUN_DIR", str(tmp_path))
+    agents._vigil_emit_graph_progress(None)      # _maybe_snapshot passes None when snapshot() failed
+    agents._vigil_emit_graph_progress({})
+    assert not (tmp_path / "progress.jsonl").exists()

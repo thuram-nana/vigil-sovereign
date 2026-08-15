@@ -2308,6 +2308,10 @@
         // run that already finished (or joining a live one late) shows an empty timeline and a
         // "Refusals 0" tile for a run that may have been blocked many times.
         liveES = V.sse(OFF("/api/events?run=" + encodeURIComponent(run.run_id) + "&from_start=1"), function (ev) {
+          // dedup on the stream's _seq cursor exactly as the blackboard branch dedups on ev.id. The server
+          // already resumes from Last-Event-ID, so this is defence in depth: without BOTH, a reconnect on a
+          // replaying stream would re-count every event and the tiles would read a fabricated total.
+          if (ev && ev._seq != null) { if (L.seen["p" + ev._seq]) return; L.seen["p" + ev._seq] = 1; }
           const norm = progressToEvent(ev); if (norm) { L.events.push(norm); onEvents(); }
         });
       }
@@ -2492,11 +2496,15 @@
       function liveEmptyText() {
         const r = L.run || {};
         if (r.stream === "none") return "This run reports in its own sandbox — see Findings for its results.";
-        if (r.status && r.status !== "running") {
-          return "This run has finished and recorded no steps here"
-               + (r.status === "interrupted" ? " — it was interrupted before it reported." : ".");
+        // Only a KNOWN-terminal status may assert a finished lifecycle. api.list_runs defaults a run with
+        // no meta to status "unknown" — claiming that one "has finished" would state a lifecycle we never
+        // observed, for a run that may never have started.
+        if (r.status === "interrupted") return "This run was interrupted before it reported any steps.";
+        if (r.status === "done" || r.status === "error" || r.status === "cancelled") {
+          return "This run finished and recorded no steps here.";
         }
-        return "Waiting for the first event…";
+        if (r.status === "running" || !r.status) return "Waiting for the first event…";
+        return "No steps have been recorded for this run.";   // unknown/other — state the fact, claim nothing
       }
       let rows = L.events;
       if (L.filter === "facts") rows = rows.filter(function (e) { return e.kind === "finding" && isFact(e.payload); });
@@ -7164,8 +7172,9 @@
     PBOX.events.push(e);
     if (PBOX.events.length > PBOX_CAP * 2) {
       PBOX.events = PBOX.events.slice(-PBOX_CAP);
-      // keep `seen` bounded too — rebuild it from the retained events (the SSE id: cursor means a
-      // reconnect never replays events older than the buffer, so dropped ids can't cause a dup).
+      // keep `seen` bounded too — rebuild it from the retained events. Both streams the box consumes now
+      // carry an id: cursor (the blackboard's event id; the progress stream's _seq), and the server
+      // resumes from Last-Event-ID, so a reconnect never replays events older than the buffer.
       var s = {}; PBOX.events.forEach(function (x) { if (x.id != null) s[x.id] = 1; }); PBOX.seen = s;
     }
     pboxUpdateChrome();
@@ -7188,7 +7197,10 @@
       // from_start: the tailer defaults to EOF, so a box attaching mid-run (or to a run that just ended)
       // would show nothing. The ring buffer caps what is kept, so replaying the file is bounded.
       PBOX.es = V.sse(OFF("/api/events?run=" + encodeURIComponent(run.run_id) + "&from_start=1"), function (ev) {
-        var norm = pboxProgressToEvent(ev); if (norm) pboxOnEvent(norm);
+        // pboxOnEvent dedups on e.id, which a progress event does not have — carry the stream's _seq
+        // cursor onto the normalised event so a reconnect can't duplicate rows in the ring buffer.
+        var norm = pboxProgressToEvent(ev);
+        if (norm) { if (ev && ev._seq != null) norm.id = "p" + ev._seq; pboxOnEvent(norm); }
       }, function () {});
     }
     // stream 'none' (strix/aegis): no live spine — the chrome poll keeps its status fresh.

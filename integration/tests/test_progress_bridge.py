@@ -159,6 +159,60 @@ def test_append_progress_escapes_every_line_terminator(tmp_path, monkeypatch):
     assert json.loads(raw)["reason"] == nasty, "escaping must round-trip the value intact"
 
 
+def test_a_short_write_is_looped_to_completion(tmp_path, monkeypatch):
+    """A kernel short write must not truncate the event. Without the loop, the partial line merges with the
+    next append and BOTH events are lost."""
+    monkeypatch.setenv(ENV, str(tmp_path))
+    real = os.write
+    state = {"first": True}
+
+    def _short(fd, buf):
+        if state["first"]:          # write only 8 bytes the first time, then behave
+            state["first"] = False
+            return real(fd, bytes(buf)[:8])
+        return real(fd, buf)
+
+    monkeypatch.setattr(os, "write", _short)
+    assert append_progress({"event": "warden.block", "action_refused": "exec_command"}) is True
+    got = _lines(tmp_path)
+    assert [g["event"] for g in got] == ["warden.block"], "the short write truncated the event"
+
+
+def test_a_mid_line_write_error_is_terminated_so_the_next_event_survives(tmp_path, monkeypatch):
+    """ENOSPC/EFBIG/EIO part-way through leaves partial bytes on disk. They must be terminated with a
+    newline, otherwise the NEXT append merges into them and two events are lost instead of one."""
+    monkeypatch.setenv(ENV, str(tmp_path))
+    real = os.write
+    state = {"n": 0}
+
+    def _die_midline(fd, buf):
+        state["n"] += 1
+        if state["n"] == 1:
+            return real(fd, bytes(buf)[:12])          # partial...
+        if state["n"] == 2:
+            raise OSError(28, "No space left on device")   # ...then fail mid-line
+        return real(fd, buf)                          # the terminator + later events succeed
+
+    monkeypatch.setattr(os, "write", _die_midline)
+    assert append_progress({"event": "warden.block", "action_refused": "exec_command"}) is False
+    # NB: no monkeypatch.undo() — it would revert the ENV var too. _die_midline passes through from the
+    # 3rd call onward, which is exactly the "disk recovered, next event written" case under test.
+    assert append_progress({"event": "strix.graph", "agents": 2}) is True
+
+    raw = (tmp_path / "progress.jsonl").read_text(encoding="utf-8")
+    good = [json.loads(x) for x in raw.splitlines() if x.strip() and _parses(x)]
+    assert [g["event"] for g in good] == ["strix.graph"], \
+        "the event after a torn write was swallowed — the damage was not bounded to one line"
+
+
+def _parses(s):
+    try:
+        json.loads(s)
+        return True
+    except ValueError:
+        return False
+
+
 def test_append_progress_rejects_non_mappings_and_oversized_payloads(tmp_path, monkeypatch):
     monkeypatch.setenv(ENV, str(tmp_path))
     assert append_progress("not-a-mapping") is False         # type: ignore[arg-type]
