@@ -6947,7 +6947,12 @@
       if (k === "blocked") return { cls: "pb-blocked", label: "blocked" };
       return { cls: "pb-failed", label: k || "error" };
     }
-    if (e.kind === "finding") return { cls: "pb-finding", label: "" };
+    if (e.kind === "finding") {
+      // lead ≠ fact: only an oracle-CONFIRMED finding earns the proven-fact colour. An unconfirmed
+      // finding (every loopback-scan finding, an un-adjudicated blackboard lead) is a LEAD — the same
+      // distinction the Live view draws — so this ticker never shows a confirmation the oracle never gave.
+      return isFact(p) ? { cls: "pb-finding", label: "fact" } : { cls: "pb-lead", label: "lead" };
+    }
     return { cls: "", label: "" };
   }
   function pboxRow(e) {
@@ -6984,7 +6989,14 @@
     // update just the pill/step/dot without rebuilding the feed (so scroll position is preserved).
     var step = V.$("#pb-step"); if (step) step.textContent = pboxStepText() || "waiting…";
     var pill = V.$("#pb-pill");
-    if (pill) pill.className = "pb-pill" + (pboxIsRunning() ? " live" : "");
+    if (pill) {
+      pill.className = "pb-pill" + (pboxIsRunning() ? " live" : "");
+      // keep the pill TEXT in sync too (not just the dot), so a run starting while minimized doesn't
+      // leave a live green dot next to the text "Activity · idle".
+      if (pill.lastChild && pill.lastChild.nodeType === 3) {
+        pill.lastChild.textContent = pboxIsRunning() ? "Activity" : "Activity · idle";
+      }
+    }
     var dot = V.$("#pb-run-dot"); if (dot) dot.className = "dot" + (pboxIsRunning() ? " pb-on" : "");
   }
   function pboxAppendRow(e) {
@@ -6992,8 +7004,12 @@
     var empty = feed.querySelector(".pb-empty"); if (empty) empty.remove();
     var atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 28;   // "stick" only if already there
     feed.appendChild(pboxRow(e));
-    while (feed.childNodes.length > PBOX_CAP) feed.removeChild(feed.firstChild);
+    var trimmed = 0;
+    while (feed.childNodes.length > PBOX_CAP) {
+      var fc = feed.firstChild; trimmed += (fc.offsetHeight || 0); feed.removeChild(fc);
+    }
     if (atBottom) feed.scrollTop = feed.scrollHeight;
+    else if (trimmed) feed.scrollTop = Math.max(0, feed.scrollTop - trimmed);   // keep a scrolled-up view steady
   }
   function pboxRenderShell() {
     var host = pboxHost();
@@ -7037,7 +7053,12 @@
     if (!e || !e.kind) return;
     if (e.id != null) { if (PBOX.seen[e.id]) return; PBOX.seen[e.id] = 1; }   // dedup a reconnect replay
     PBOX.events.push(e);
-    if (PBOX.events.length > PBOX_CAP * 2) PBOX.events = PBOX.events.slice(-PBOX_CAP);
+    if (PBOX.events.length > PBOX_CAP * 2) {
+      PBOX.events = PBOX.events.slice(-PBOX_CAP);
+      // keep `seen` bounded too — rebuild it from the retained events (the SSE id: cursor means a
+      // reconnect never replays events older than the buffer, so dropped ids can't cause a dup).
+      var s = {}; PBOX.events.forEach(function (x) { if (x.id != null) s[x.id] = 1; }); PBOX.seen = s;
+    }
     pboxUpdateChrome();
     if (PBOX.ui.open && !PBOX.ui.dismissed) pboxAppendRow(e);
   }
@@ -7048,6 +7069,9 @@
   function pboxFollow(run) {
     // (re)subscribe to a run's live feed. Held in PBOX.es (never liveES), so a route change can't kill it.
     pboxDetach();
+    // A new RUNNING run re-shows a box the operator had hidden — HUD parity (a "Hide" is per-lull, not a
+    // permanent kill). It comes back as whatever it was (pill if collapsed), never force-expanded.
+    if (run && PBOX.ui.dismissed) { PBOX.ui.dismissed = false; pboxSaveUI(); }
     PBOX.run = run; PBOX.following = run ? run.run_id : "";
     if (run && run.stream === "blackboard" && run.slug) {
       PBOX.es = V.sse(OFF("/api/blackboard?slug=" + encodeURIComponent(run.slug)), pboxOnEvent, function () {});

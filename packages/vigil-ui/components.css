@@ -480,9 +480,11 @@ textarea { min-height: 80px; resize: vertical; }
   text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .pill.reconnect .dot, .pill.owner .dot { animation: pulse 1.4s ease-in-out infinite; }
 
-/* W5 process box — a fixed, collapsible, RESIZABLE live-activity overlay (bottom-right, below the toast
-   stack). It floats above the page and is never in the document flow, so it cannot shift the workspace. */
-#process-box { position: fixed; right: var(--sp-5); bottom: var(--sp-5); z-index: 70;
+/* W5 process box — a fixed, collapsible, RESIZABLE live-activity overlay (bottom-right). It floats above
+   the page but is never in the document flow, so it cannot shift the workspace. z-index 55 keeps it BELOW
+   the detail drawer (60), the modal (70) and toasts (80) — an activity ticker must never occlude or steal
+   clicks from an interactive panel. */
+#process-box { position: fixed; right: var(--sp-5); bottom: var(--sp-5); z-index: 55;
   display: flex; flex-direction: column; align-items: flex-end; }
 .pb-pill { display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; border-radius: var(--r-pill);
   border: 1px solid var(--border-strong); background: var(--bg-2); color: var(--text-1); cursor: pointer;
@@ -519,8 +521,11 @@ textarea { min-height: 80px; resize: vertical; }
 .pb-tag.pb-blocked { color: var(--st-blocked); background: color-mix(in srgb, var(--st-blocked) 16%, transparent); }
 .pb-tag.pb-failed { color: var(--st-blocked); background: color-mix(in srgb, var(--st-blocked) 12%, transparent); }
 .pb-row.pb-blocked .pb-ico, .pb-row.pb-failed .pb-ico { color: var(--st-blocked); }
+/* an oracle-CONFIRMED finding earns the proven-fact colour; a LEAD stays neutral (never the fact colour). */
 .pb-row.pb-finding .pb-ico { color: var(--st-confirmed); }
 .pb-row.pb-finding .pb-tag { color: var(--st-confirmed); background: color-mix(in srgb, var(--st-confirmed) 14%, transparent); }
+.pb-row.pb-lead .pb-ico { color: var(--text-2); }
+.pb-tag.pb-lead { color: var(--text-1); background: var(--bg-3); }
 
 /* responsive shell */
 @media (max-width: 900px) {
