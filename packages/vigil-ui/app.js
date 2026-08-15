@@ -2306,8 +2306,12 @@
           const norm = progressToEvent(ev); if (norm) { L.events.push(norm); onEvents(); }
         });
       }
-      // strix/aegis (stream 'none'): no live spine — poll run status instead.
-      if (run.stream === "none") liveTimers.push(setInterval(refreshRunMeta, 3000));
+      // No completion signal in the stream → poll run status instead. 'none' (aegis) has no feed at all;
+      // a codebase (Strix) run now streams ACTIVITY (W6c: strix.graph / warden.block) but still emits no
+      // terminal event, so without this its header would never leave "running".
+      if (run.stream === "none" || run.mode === "codebase") {
+        liveTimers.push(setInterval(refreshRunMeta, 3000));
+      }
     }
     function refreshRunMeta() {
       V.getJSON(runsURL()).then(function (d) {
@@ -2331,6 +2335,19 @@
       if (ev.event === "scan.finding") return { kind: "finding", payload: { bug_class: ev.bug_class, title: (ev.param || "") + " @ " + (ev.endpoint || ""),
         confidence: ev.confidence, verified_by_oracle: false, oracle_kind: ev.confirmed_by, severity: "" }, _progress: true };
       if (ev.event === "scan.done") return { kind: "decision", payload: { question: "scan complete", choice: (ev.findings || 0) + " findings · " + (ev.requests_sent || 0) + " requests" }, _progress: true };
+      // W6c — a codebase (Strix) run's own progress, normalised into the kinds this view already renders.
+      // `_progress` marks it as feed-derived, NOT a signed spine event (the same honesty marker the scan
+      // rows carry): a WARDEN block is a real refusal, but it reached us over the progress file.
+      if (ev.event === "warden.block") return { kind: "refusal", payload: {
+        gate: ev.gate || "warden", action_refused: ev.action_refused || "",
+        reason: ev.reason || "", fatal: !!ev.fatal }, _progress: true };
+      if (ev.event === "strix.graph") {
+        var st = ev.statuses || {}, parts = [];
+        Object.keys(st).forEach(function (k) { parts.push(k + ":" + st[k]); });
+        return { kind: "observation", payload: { source: "strix",
+          summary: (ev.agents || 0) + " agent" + ((ev.agents === 1) ? "" : "s")
+                   + (parts.length ? " (" + parts.join(", ") + ")" : "") }, _progress: true };
+      }
       return null;
     }
 
@@ -7153,6 +7170,21 @@
     if (ev.event === "scan.phase") return { kind: "observation", payload: { source: "scan", summary: "phase: " + (ev.phase || "") } };
     if (ev.event === "scan.finding") return { kind: "finding", payload: { bug_class: ev.bug_class, title: (ev.param || "") + " @ " + (ev.endpoint || "") } };
     if (ev.event === "scan.done") return { kind: "decision", payload: { question: "scan complete", choice: (ev.findings || 0) + " findings" } };
+    // W6c — a codebase (Strix) run's own progress. Normalise into the SAME spine-shaped events the box
+    // already renders, so no pboxTag/pboxRow/pboxStepText change is needed:
+    //  • warden.block → a "refusal" event: the box tags it "blocked" and the step line reads
+    //    "blocked by warden: <tool>" (the operator sees WHAT was blocked and WHY).
+    if (ev.event === "warden.block") return { kind: "refusal", payload: {
+      gate: ev.gate || "warden", action_refused: ev.action_refused || "",
+      reason: ev.reason || "", fatal: !!ev.fatal } };
+    //  • strix.graph → an "observation": a compact "N agents (running:2, done:1)" heartbeat.
+    if (ev.event === "strix.graph") {
+      var st = ev.statuses || {}, parts = [];
+      Object.keys(st).forEach(function (k) { parts.push(k + ":" + st[k]); });
+      return { kind: "observation", payload: { source: "strix",
+        summary: (ev.agents || 0) + " agent" + ((ev.agents === 1) ? "" : "s")
+                 + (parts.length ? " (" + parts.join(", ") + ")" : "") } };
+    }
     return null;
   }
   function pboxPickRun(runs) {

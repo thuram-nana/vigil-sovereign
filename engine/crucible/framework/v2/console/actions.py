@@ -877,7 +877,9 @@ def launch_assessment(body: dict) -> dict:
         if objective:
             cmd += ["--instruction", objective]
         slug = _slugify(p.name, fallback="codebase")
-        meta = {**base, **unapplied, "slug": slug, "cmd": cmd, "stream": "none", "status": "running"}
+        # W6c: "progress" (was "none") so the live process box follows this run's progress.jsonl — the Strix
+        # coordinator (strix.graph) and the WARDEN gate (warden.block) append lines the SSE tails.
+        meta = {**base, **unapplied, "slug": slug, "cmd": cmd, "stream": "progress", "status": "running"}
         _write_meta(run_id, **meta)
         # Proof Studio (B5/C1) activation: hand the Strix child THIS run's dir so its proof_sink
         # (vigil_integration.proof.bootstrap.install_from_env) mints + persists oracle-confirmed proofs under
@@ -889,7 +891,7 @@ def launch_assessment(body: dict) -> dict:
         _spawn_background(run_id, rd, cmd, meta, capture_report=False,
                           env_extra={"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug,
                                      "VIGIL_BASE_DIR": os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"})
-        return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "none",
+        return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "progress",
                 **unapplied}
 
     # ---- aegis → the defensive dual (detect over a telemetry/log file) -----

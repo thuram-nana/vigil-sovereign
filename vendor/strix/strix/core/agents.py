@@ -302,6 +302,7 @@ class AgentCoordinator:
         path = self._snapshot_path
         if path is None:
             return
+        data: dict[str, Any] | None = None
         try:
             data = await self.snapshot()
             payload = json.dumps(data, ensure_ascii=False, default=str)
@@ -319,6 +320,42 @@ class AgentCoordinator:
             tmp_path.replace(path)
         except Exception:
             logger.exception("coordinator snapshot to %s failed", path)
+        # VIGIL (W6c): best-effort mirror a compact graph summary to the console's live process box, so a
+        # codebase (Strix) run — which otherwise streams nothing — shows its agents advancing. Guarded +
+        # lazy so a bare vendored Strix checkout (no vigil_integration) stays byte-identical at runtime.
+        _vigil_emit_graph_progress(data)
+
+
+_vigil_last_graph: str | None = None   # last emitted strix.graph payload — emit only on CHANGE
+
+
+def _vigil_emit_graph_progress(snap: "dict[str, Any] | None") -> None:
+    """VIGIL bridge (best-effort): mirror a compact coordinator-graph summary to the console's live process
+    box via the offense child's progress feed (``$VIGIL_PROOF_RUN_DIR/progress.jsonl``, tailed by the
+    console's ``/api/events?run=`` SSE). Lazy + guarded so a bare vendored Strix checkout with no
+    ``vigil_integration`` on the path stays byte-identical at runtime — an ImportError, an unset run dir, or
+    any error is a silent no-op that never affects the run. Emits only a status HISTOGRAM (counts by state)
+    and the agent count — never agent names/metadata — so nothing sensitive rides the feed."""
+    if not snap:
+        return
+    try:
+        from vigil_integration.progress import append_progress, strix_graph_event
+    except Exception:  # noqa: BLE001 — bare vendored checkout: no bridge, byte-identical runtime
+        return
+    try:
+        ev = strix_graph_event(snap)
+        if not ev:
+            return
+        # _maybe_snapshot fires on EVERY graph mutation, most of which don't change the histogram. Emit only
+        # on CHANGE so the box's bounded scrollback holds real transitions, not hundreds of identical lines.
+        global _vigil_last_graph
+        key = json.dumps(ev, sort_keys=True)
+        if key == _vigil_last_graph:
+            return
+        _vigil_last_graph = key
+        append_progress(ev)
+    except Exception:  # noqa: BLE001 — telemetry must never break the run
+        return
 
 
 def coordinator_from_context(ctx: dict[str, Any]) -> AgentCoordinator | None:
