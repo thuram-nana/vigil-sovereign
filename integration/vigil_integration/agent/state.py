@@ -81,9 +81,13 @@ class LLMDecision(BaseModel):
 
     action: ActionType
     reasoning: str = ""
-    # W6b: a classified BACKEND-CALL failure the think seam fail-closed over (network / api /
-    # api_transient / blocked); "" for a normal decision. Advisory only — it authorizes nothing; the
-    # engine mirrors it to the spine as an observation so the operator sees WHY a think stalled.
+    # W6b: a classified BACKEND-CALL failure the think seam fail-closed over (network / api_transient /
+    # api); "" for every normal decision. CODE-ONLY — the think seam stamps it by DIRECT ASSIGNMENT after
+    # a real backend-call failure (``live.think_claude``); it is STRIPPED from every validated/parsed
+    # input by ``_strip_model_set_error_class`` below, so a prompt-injected model response can NEVER forge
+    # a "backend error" event into the process box or the append-only spine. Advisory only — authorizes
+    # nothing; the engine mirrors a stamped value to the spine as an observation so the operator sees WHY
+    # a think stalled.
     error_class: str = ""
     # use_tool
     tool: Optional[ToolCall] = None
@@ -100,6 +104,21 @@ class LLMDecision(BaseModel):
     summary: Optional[str] = None
     # inline analysis of the PRIOR tool output (claims → leads)
     output_analysis: Optional[OutputAnalysis] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_model_set_error_class(cls, data: Any) -> Any:
+        """``error_class`` is a CODE-ONLY diagnostic: only the think seam may set it, and only by DIRECT
+        attribute assignment after a real backend-call failure (``live.think_claude._think_via_client``).
+        Strip it from every VALIDATED input — ``parse_decision`` / ``model_validate`` / ``__init__`` — so
+        the model can never populate it from its own JSON. Without this, a prompt-injected in-scope target
+        could elicit a *successful* decision carrying ``error_class`` + arbitrary ``reasoning`` and forge a
+        fabricated 'backend network error' (with attacker-controlled prose) into the trusted W5 process box
+        and the append-only spine. Direct assignment (the legitimate stamp) bypasses this — pydantic runs
+        no validator on assignment (``validate_assignment`` is off on this model)."""
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if k != "error_class"}
+        return data
 
 
 class Finding(BaseModel):
