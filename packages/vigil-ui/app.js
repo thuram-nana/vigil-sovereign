@@ -6941,14 +6941,23 @@
     return host;
   }
   // The per-event status tag — this is the "what blocked / what failed" clarity the operator asked for.
+  // W6b: a classified BACKEND-CALL failure — either the dormant 'error_class' kind or (what the engine
+  // actually emits) an 'observation' whose source is 'backend-error'. Returns the class string, else "".
+  function pboxErrClass(e) {
+    var p = e.payload || {};
+    if (e.kind === "error_class") return String(p.error_class || "unknown");
+    if (e.kind === "observation" && String(p.source || "") === "backend-error") return String(p.error_class || "unknown");
+    return "";
+  }
   function pboxTag(e) {
     var p = e.payload || {};
     if (e.kind === "refusal") return { cls: "pb-blocked", label: "blocked" };
     if (e.kind === "tool_result" && p.refused) return { cls: "pb-blocked", label: "blocked" };
     if (e.kind === "tool_result" && p.ok === false) return { cls: "pb-failed", label: "failed" };
     if (e.kind === "result" && p.success === false) return { cls: "pb-failed", label: "failed" };
-    if (e.kind === "error_class") {                    // W6: a backend LLM-call failure, classified
-      var k = String(p.error_class || "").toLowerCase();
+    var ec = pboxErrClass(e);                          // W6b: network vs API vs blocked, so WHY is clear
+    if (ec) {
+      var k = ec.toLowerCase();
       if (k === "network") return { cls: "pb-failed", label: "network" };
       if (k === "api" || k === "api_transient") return { cls: "pb-failed", label: "API error" };
       if (k === "blocked") return { cls: "pb-blocked", label: "blocked" };
@@ -6967,8 +6976,8 @@
     var m = KIND_META[e.kind] || { label: e.kind, sum: function () { return ""; } };
     var st = pboxTag(e);
     var t = e.posted_at ? String(e.posted_at).slice(11, 19) : (e.id != null ? "#" + e.id : "");
-    var isErr = e.kind === "error_class";
-    var sum = isErr ? (p.detail || p.error_class || "the model call failed") : (m.sum(p) || "—");
+    var isErr = !!pboxErrClass(e);
+    var sum = isErr ? (p.summary || p.detail || p.error_class || "the model call failed") : (m.sum(p) || "—");
     return h("div.pb-row" + (st.cls ? "." + st.cls : ""), null, [
       h("span.pb-ico", null, V.icon(isErr ? "x" : kindIcon(e.kind, p))),
       h("div.pb-body", null, [
@@ -6983,7 +6992,8 @@
     for (var i = PBOX.events.length - 1; i >= 0; i--) {
       var e = PBOX.events[i], p = e.payload || {};
       if (e.kind === "refusal") return "blocked by " + (p.gate || "gate") + ": " + (p.action_refused || "");
-      if (e.kind === "error_class") return "error (" + (p.error_class || "") + "): " + (p.detail || "");
+      var _ec = pboxErrClass(e);
+      if (_ec) return _ec + " error: " + (p.summary || p.detail || "the model call failed");
       if (e.kind === "tool_call") return "running " + (p.tool || "") + (p.target ? " → " + p.target : "");
       if (e.kind === "plan") return "planning: " + (KIND_META.plan.sum(p) || "");
       if (e.kind === "observation") return KIND_META.observation.sum(p) || "observing";

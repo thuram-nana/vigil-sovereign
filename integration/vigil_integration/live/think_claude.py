@@ -467,6 +467,23 @@ def _think_retryable(exc: Exception) -> bool:
         return False
 
 
+_THINK_NETWORK_NAMES = frozenset({
+    "APIConnectionError", "APITimeoutError", "ConnectionError", "TimeoutError",
+    "ConnectTimeout", "ReadTimeout",
+})
+
+
+def _think_error_class(exc: Exception) -> str:
+    """Classify a fail-closed think-call error for the operator (W6b): 'network' (a dropped connection /
+    timeout — nothing reached the model), 'api_transient' (a 429 / overload / 5xx that survived retry),
+    else 'api' (a permanent API error — bad request / auth / parse). Advisory-only telemetry; never a gate."""
+    if type(exc).__name__ in _THINK_NETWORK_NAMES:
+        return "network"
+    if _think_retryable(exc):        # a retryable status/name that still failed after backoff
+        return "api_transient"
+    return "api"
+
+
 def _invoke_with_backoff(client: Any, params: dict) -> Any:
     """``_invoke`` with a bounded transient-retry. A permanent error, or the final attempt, re-raises
     unchanged — the caller then fail-closes to the safest action. Total sleep is bounded."""
@@ -508,8 +525,13 @@ def _think_via_client(client: Any, system: str, user: str, *, model: str, max_to
     try:
         resp = _invoke_with_backoff(client, params)   # auto-heal a transient blip before giving up (W2b)
     except Exception as exc:  # noqa: BLE001 — any SDK/transport error is a fail-closed pause, never raised
-        logger.warning("live think call failed (%s) — fail-closed to safest action", type(exc).__name__)
-        return _safest("the live think call failed", "the model call failed — how should I proceed?")
+        ec = _think_error_class(exc)                  # W6b: classify network vs API so the box can show WHY
+        logger.warning("live think call failed (%s, class=%s) — fail-closed to safest action",
+                       type(exc).__name__, ec)
+        d = _safest(f"backend {ec} error: {type(exc).__name__}",
+                    "the model call failed — how should I proceed?")
+        d.error_class = ec
+        return d
     if _token_budget is not None:      # charge the ACTUAL tokens the call spent (from resp.usage)
         try:
             _token_budget.record_usage(tool, getattr(resp, "usage", None))
