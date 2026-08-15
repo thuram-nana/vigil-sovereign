@@ -832,7 +832,7 @@ def _cmd_approve_provision(args: argparse.Namespace) -> int:
     print()
     print("OWNER PRIVATE KEY — shown ONCE; NOT stored by this command. Save it now:")
     print(f"    {priv}")
-    print("    → export as VIGIL_APPROVAL_OWNER_KEY (or paste into the Safety screen) to sign approvals.")
+    print("    → export as VIGIL_APPROVAL_OWNER_KEY in the terminal you sign from; then `vigil approve sign`.")
     print()
     print("Offense tools now default to PER-ACTION approval: each queued tool call must be signed with")
     print(f"    vigil approve sign --base-dir {args.base_dir} --request-id <id>   (see `vigil approve list`).")
