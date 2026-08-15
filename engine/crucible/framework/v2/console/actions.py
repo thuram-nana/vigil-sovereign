@@ -337,23 +337,42 @@ def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
     # built-ins, so honouring the flag widens COVERAGE without touching soundness.
     if use_library:
         cmd.append("--library")
-    _write_meta(run_id, ephemeral=ephemeral, target=target, cmd=cmd,
-                status="running", started=time.time())
+    # `started` is stamped ONCE, into _base, so every later write preserves the true launch moment
+    # (_write_meta rewrites the whole file — a fresh time.time() in the pid write would silently advance it).
+    _base = dict(ephemeral=ephemeral, target=target, cmd=cmd, run_kind="scan", started=time.time())
+    _write_meta(run_id, **_base, status="running")
 
     def _run() -> None:
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # noqa: S603
-            if proc.returncode == 0 and proc.stdout.strip():
-                (rd / "report.json").write_text(proc.stdout, encoding="utf-8")
-                _write_meta(run_id, ephemeral=ephemeral, target=target, cmd=cmd, status="done",
-                            rc=proc.returncode, finished=time.time())
-            else:
-                _write_meta(run_id, ephemeral=ephemeral, target=target, cmd=cmd, status="error",
-                            rc=proc.returncode, stderr=(proc.stderr or "")[-2000:],
-                            finished=time.time())
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,  # noqa: S603
+                                    text=True)
         except Exception as e:  # never let a launch crash the console
-            _write_meta(run_id, ephemeral=ephemeral, target=target, cmd=cmd,
-                        status="error", error=str(e))
+            _write_meta(run_id, **_base, status="error", error=str(e), finished=time.time())
+            return
+        # record the live pid so a console restart can reconcile this scan if it is orphaned.
+        _write_meta(run_id, **_base, status="running", pid=proc.pid, boot_id=_boot_id())
+        try:
+            out, err = proc.communicate(timeout=1800)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.communicate()
+            except Exception:  # noqa: BLE001
+                pass
+            _write_meta(run_id, **_base, status="error", pid=proc.pid, rc=None,
+                        stderr="timed out after 1800s", finished=time.time())
+            return
+        except Exception as e:  # noqa: BLE001
+            _write_meta(run_id, **_base, status="error", pid=proc.pid, error=str(e),
+                        finished=time.time())
+            return
+        if proc.returncode == 0 and (out or "").strip():
+            (rd / "report.json").write_text(out, encoding="utf-8")
+            _write_meta(run_id, **_base, status="done", pid=proc.pid,
+                        rc=proc.returncode, finished=time.time())
+        else:
+            _write_meta(run_id, **_base, status="error", pid=proc.pid,
+                        rc=proc.returncode, stderr=(err or "")[-2000:], finished=time.time())
 
     threading.Thread(target=_run, daemon=True).start()
     return {"run_id": run_id, "status": "running", "progress": f"runs/{run_id}"}
@@ -415,6 +434,16 @@ def _has_charter(slug: str) -> bool:
         return False
 
 
+def _boot_id() -> str:
+    """The host boot id (Linux ``/proc/sys/kernel/random/boot_id``), or "" if unavailable. Recorded on a
+    run so orphan reconciliation can tell a still-alive pid from a pid RECYCLED across a reboot: after a
+    reboot every prior pid is definitively dead regardless of what now holds that number."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
                       capture_report: bool, env_extra: "dict | None" = None) -> None:
     """Run ``cmd`` as a daemon subprocess, recording status transitions into meta.json. When
@@ -422,26 +451,98 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
     the Findings screen; otherwise stdout/stderr are retained for the run detail. Mirrors
     ``launch_scan``'s runner exactly — a launched run is an ordinary, non-hot-path subprocess.
 
+    The child's ``pid`` (+ the host ``boot_id``) is recorded into meta.json the moment it is spawned, so
+    a run orphaned by a console/host restart can be RECONCILED from 'running' → 'interrupted' (see
+    ``reconcile_orphaned_runs``) instead of showing as live forever, and later resumed.
+
     ``env_extra`` is merged over ``os.environ`` for the child (used to hand a Strix run its Proof Studio
     run context — ``VIGIL_PROOF_RUN_DIR`` — so the proof_sink writes proofs under this run's dir)."""
     child_env = {**os.environ, **env_extra} if env_extra else None
 
     def _run() -> None:
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,  # noqa: S603
-                                  env=child_env)
-            ok = proc.returncode == 0
-            if capture_report and ok and proc.stdout.strip():
-                (rd / "report.json").write_text(proc.stdout, encoding="utf-8")
-            else:
-                (rd / "stdout.txt").write_text(proc.stdout or "", encoding="utf-8")
-            _write_meta(run_id, **{**meta, "status": "done" if ok else "error", "rc": proc.returncode,
-                                   "stderr": (proc.stderr or "")[-2000:] if not ok else "",
-                                   "finished": time.time()})
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,  # noqa: S603
+                                    text=True, env=child_env)
+        except Exception as e:  # a spawn failure (bad argv / OS pressure) — record and stop
+            _write_meta(run_id, **{**meta, "status": "error", "error": str(e), "finished": time.time()})
+            return
+        # record the live pid up front, so a console restart can reconcile this run if it is orphaned.
+        _write_meta(run_id, **{**meta, "status": "running", "pid": proc.pid, "boot_id": _boot_id()})
+        try:
+            out, err = proc.communicate(timeout=3600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                out, err = proc.communicate()
+            except Exception:  # noqa: BLE001
+                out, err = "", ""
+            (rd / "stdout.txt").write_text(out or "", encoding="utf-8")
+            _write_meta(run_id, **{**meta, "status": "error", "pid": proc.pid, "rc": None,
+                                   "stderr": "timed out after 3600s", "finished": time.time()})
+            return
         except Exception as e:  # never let a launch crash the console
-            _write_meta(run_id, **{**meta, "status": "error", "error": str(e)})
+            _write_meta(run_id, **{**meta, "status": "error", "pid": proc.pid, "error": str(e),
+                                   "finished": time.time()})
+            return
+        rc = proc.returncode
+        ok = rc == 0
+        if capture_report and ok and (out or "").strip():
+            (rd / "report.json").write_text(out, encoding="utf-8")
+        else:
+            (rd / "stdout.txt").write_text(out or "", encoding="utf-8")
+        _write_meta(run_id, **{**meta, "status": "done" if ok else "error", "pid": proc.pid,
+                               "rc": rc, "stderr": (err or "")[-2000:] if not ok else "",
+                               "finished": time.time()})
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def reconcile_orphaned_runs() -> int:
+    """Called once at console startup: any run still recorded 'running' whose process is GONE is rewritten
+    to 'interrupted' + ``resumable: True`` — the "a live engagement I did not start" symptom — and can be
+    resumed. A run whose pid is still alive is left running.
+
+    Liveness is decided by ``_pid_alive(pid)`` (+ a ``boot_id`` guard so a pid recycled across a REBOOT is
+    treated as dead). This is deliberately CONSERVATIVE — it never false-interrupts a live run — so two
+    edges are knowingly NOT cleared and can strand a run as 'running':
+      * same-boot pid REUSE: the child died and its pid was recycled by an unrelated live process before
+        this console started (no portable way to tell "my dead run's recycled pid" from "a live process");
+      * an orphan-alive child: only the console pid died (a bare uncaught crash, not a signal to the whole
+        process group) so the scan/engage child is reparented to init and keeps running. Under the shipped
+        systemd deployment (``KillMode=control-group``) the child dies WITH the console, so this is covered
+        on the normal path; a bare ``kill -9 <console>`` is the residual gap.
+    Total: a broken meta file is skipped, and it never raises."""
+    n = 0
+    try:
+        runs = console_dir() / "runs"
+        if not runs.is_dir():
+            return 0
+        cur_boot = _boot_id()
+        for d in runs.iterdir():
+            mp = d / "meta.json"
+            try:
+                meta = json.loads(mp.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(meta, dict) or meta.get("status") != "running":
+                continue
+            pid = meta.get("pid")
+            boot = meta.get("boot_id") or ""
+            rebooted = bool(cur_boot and boot and cur_boot != boot)   # a reboot kills every prior pid
+            alive = (pid is not None) and (not rebooted) and _pid_alive(pid)
+            if alive:
+                continue
+            meta.update({"status": "interrupted", "resumable": True,
+                         "interrupted_reason": "the process was gone when the console restarted",
+                         "finished": meta.get("finished") or time.time()})
+            try:
+                mp.write_text(json.dumps(meta, default=str, indent=2), encoding="utf-8")
+                n += 1
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001 — reconciliation must never block console startup
+        pass
+    return n
 
 
 # ---- console → live-engine bridge (per-session Neo4j graph) ------------------
