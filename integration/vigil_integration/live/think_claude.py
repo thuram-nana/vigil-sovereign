@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any, Iterable, Optional, Union
 
 from ..agent.react import parse_decision
@@ -441,6 +442,47 @@ def _invoke(client: Any, params: dict) -> Any:
     return client.messages.create(**params)
 
 
+# Auto-heal (W2b): a live-think call that hits a TRANSIENT backend error (429 / overload / 5xx / dropped
+# connection / timeout) is retried with bounded exponential backoff, so a brief blip self-recovers instead
+# of the OODA loop fail-closing to ASK_USER and ENDING the engagement. A PERMANENT error (bad request /
+# auth) is not retried. Mirrors the console chat's auto-heal (they are in separate envs — no shared import).
+_THINK_MAX_ATTEMPTS = 3
+_THINK_BASE_BACKOFF_S = 0.5
+_THINK_MAX_BACKOFF_S = 8.0
+_THINK_RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+_THINK_RETRYABLE_NAMES = frozenset({
+    "APIConnectionError", "APITimeoutError", "InternalServerError", "RateLimitError",
+    "ServiceUnavailableError", "OverloadedError", "ConnectionError", "TimeoutError",
+})
+
+
+def _think_retryable(exc: Exception) -> bool:
+    """True iff a TRANSIENT error worth retrying (a connection/timeout, or a retryable HTTP status)."""
+    if type(exc).__name__ in _THINK_RETRYABLE_NAMES:
+        return True
+    code = getattr(exc, "status_code", None)
+    try:
+        return int(code) in _THINK_RETRYABLE_STATUS
+    except (TypeError, ValueError):
+        return False
+
+
+def _invoke_with_backoff(client: Any, params: dict) -> Any:
+    """``_invoke`` with a bounded transient-retry. A permanent error, or the final attempt, re-raises
+    unchanged — the caller then fail-closes to the safest action. Total sleep is bounded."""
+    last: Optional[Exception] = None
+    for attempt in range(_THINK_MAX_ATTEMPTS):
+        try:
+            return _invoke(client, params)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if attempt == _THINK_MAX_ATTEMPTS - 1 or not _think_retryable(exc):
+                raise
+            time.sleep(min(_THINK_MAX_BACKOFF_S, _THINK_BASE_BACKOFF_S * (2 ** attempt)))
+    if last is not None:                 # pragma: no cover — the loop returns or raises above
+        raise last
+
+
 def _think_via_client(client: Any, system: str, user: str, *, model: str, max_tokens: int) -> LLMDecision:
     """One live think call through an injected/real client, fail-closed on ANY error. Current-generation
     models get adaptive extended thinking (``thinking: {type: "adaptive"}``) and the effort chosen in the UI;
@@ -464,7 +506,7 @@ def _think_via_client(client: Any, system: str, user: str, *, model: str, max_to
         **_thinking_kwargs(model),     # thinking: {type: "adaptive"} for current models
     )
     try:
-        resp = _invoke(client, params)
+        resp = _invoke_with_backoff(client, params)   # auto-heal a transient blip before giving up (W2b)
     except Exception as exc:  # noqa: BLE001 — any SDK/transport error is a fail-closed pause, never raised
         logger.warning("live think call failed (%s) — fail-closed to safest action", type(exc).__name__)
         return _safest("the live think call failed", "the model call failed — how should I proceed?")
