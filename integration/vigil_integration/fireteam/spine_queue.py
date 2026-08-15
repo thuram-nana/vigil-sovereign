@@ -70,6 +70,15 @@ class SingleWriterSpineQueue:
     def pending_count(self) -> int:
         return len(self._buffer)
 
+    def pending_for(self, member_id: str) -> int:
+        """How many records are currently buffered for ``member_id`` (read-only). The orchestrator reads
+        this just before :meth:`flush_member` so it can tell a fully-successful per-member flush (every
+        buffered record written) from a partial/failed one, and only checkpoint a member whose records
+        are truly durable — a dropped record leaves the member un-checkpointed and thus re-run on resume
+        rather than skipped-without-durable-records."""
+        mid = str(member_id)
+        return sum(1 for q in self._buffer if q.member_id == mid)
+
     def submit(self, *, member_id: str, seq: int, kind: str, record: Any) -> None:
         """Buffer a redacted record for the single writer. A member calls this, never the writer. Total
         on untrusted input (coerces ids/seq/kind)."""
@@ -109,6 +118,39 @@ class SingleWriterSpineQueue:
             if ref is not None:
                 self._refs.append(ref)
         return list(self._refs)
+
+    def flush_member(self, member_id: str) -> list[str]:
+        """Drain ONLY this member's buffered records through the ONE writer, in deterministic
+        ``(seq, member_id, kind)`` order, leaving every other member's records buffered.
+
+        This is the per-member checkpoint: the orchestrator calls it the instant a member COMPLETES,
+        so a crash mid-wave keeps the finished members' spine records instead of losing the whole
+        wave's un-flushed buffer. Returns just the refs written for THIS member (a delta — they are
+        also appended, in write order, to :attr:`refs`). The call is fully synchronous (no ``await``),
+        so even under truly-concurrent members the event loop cannot interleave two flushes — the
+        single-writer invariant is preserved. Fail-open: any error degrades to an empty delta (the
+        member's records stay buffered and are re-attempted by the final :meth:`flush`), never raises."""
+        mid = str(member_id)
+        try:
+            mine = sorted((q for q in self._buffer if q.member_id == mid), key=QueuedWrite.order_key)
+            if not mine:
+                return []
+            self._buffer = [q for q in self._buffer if q.member_id != mid]
+        except Exception:  # noqa: BLE001 — a per-member flush must never crash the wave
+            return []
+        written: list[str] = []
+        for q in mine:
+            try:
+                ref = self._write_one(q)
+            except RuntimeError:
+                # serialization tripwire on a synchronous drain: drop rather than corrupt the chain.
+                ref = None
+            except Exception:  # noqa: BLE001 — isolate one bad write; keep draining the rest
+                ref = None
+            if ref is not None:
+                self._refs.append(ref)
+                written.append(ref)
+        return written
 
     async def write(self, *, member_id: str, seq: int, kind: str, record: Any) -> Optional[str]:
         """Async single-writer path for truly-concurrent members: acquire the lock, then write exactly

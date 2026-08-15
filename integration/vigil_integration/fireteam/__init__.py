@@ -60,6 +60,7 @@ from .orchestrator import (
     run_fireteam,
 )
 from .spine_queue import QueuedWrite, SingleWriterSpineQueue
+from .wave_progress import MemberProgress, WaveProgressStore
 
 __all__ = [
     # models
@@ -75,6 +76,8 @@ __all__ = [
     "ApproverFn",
     # spine queue
     "SingleWriterSpineQueue", "QueuedWrite",
+    # wave-resume checkpoint
+    "WaveProgressStore", "MemberProgress",
     # collect + orchestrator
     "collect", "CollectOutcome", "run_fireteam", "FireteamOutcome", "MemberRunContext", "MemberRunner",
 ]
