@@ -145,7 +145,13 @@ def run_feed_daemon(
     now_val = _safe_now(now_wall)
     # A missing/broken checkpoint OR a misbehaving clock both degrade to fire-now (the pre-existing behaviour).
     checkpoint = load_checkpoint(state_path, feed_id) if now_val is not None else None
-    plan = scheduler.resume_plan(interval, poll_seconds, checkpoint, now_val if now_val is not None else 0.0)
+    # resume_plan is the ONE checkpoint call site not already wrapped fail-open. A parseable-but-degenerate
+    # checkpoint (e.g. a non-finite last_run/interval that slipped through) could make its tick math raise, so
+    # any failure degrades to the pre-existing fire-now plan rather than crashing the daemon on every restart.
+    try:
+        plan = scheduler.resume_plan(interval, poll_seconds, checkpoint, now_val if now_val is not None else 0.0)
+    except Exception:                                     # noqa: BLE001 — a bad plan must never kill the daemon
+        plan = scheduler.ResumePlan(schedule=scheduler.FeedSchedule(interval=interval, last_run=-1), start_tick=0)
     schedule = plan.schedule
     tick = plan.start_tick
     interval_seconds = float(interval) * max(0.0, float(poll_seconds))

@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from framework.v2.intel import ticker
 from framework.v2.intel.scheduler import (
     FeedSchedule,
@@ -71,6 +73,21 @@ def test_schedule_checkpoint_roundtrips_and_rejects_garbage():
     assert ScheduleCheckpoint.from_json(None) is None
     assert ScheduleCheckpoint.from_json({"interval_seconds": 50}) is None     # missing last_run
     assert ScheduleCheckpoint.from_json({"last_run": "nope", "interval_seconds": 50}) is None
+
+
+def test_schedule_checkpoint_rejects_non_finite_values():
+    # float() and (by default) json.loads both accept nan/inf; from_json must treat them as MALFORMED so a
+    # torn/tampered checkpoint degrades to fire-now instead of slipping past resume_plan's degeneracy guard.
+    assert ScheduleCheckpoint.from_json({"last_run": float("nan"), "interval_seconds": 50.0}) is None
+    assert ScheduleCheckpoint.from_json({"last_run": float("inf"), "interval_seconds": 50.0}) is None
+    assert ScheduleCheckpoint.from_json({"last_run": float("-inf"), "interval_seconds": 50.0}) is None
+    assert ScheduleCheckpoint.from_json({"last_run": 1000.0, "interval_seconds": float("inf")}) is None
+    assert ScheduleCheckpoint.from_json({"last_run": 1000.0, "interval_seconds": float("nan")}) is None
+    assert ScheduleCheckpoint.from_json({"last_run": "nan", "interval_seconds": 50.0}) is None       # string
+    assert ScheduleCheckpoint.from_json({"last_run": 1000.0, "interval_seconds": "inf"}) is None     # string
+    # a finite pair with only next_run poisoned still parses (next_run is informational → recomputed).
+    ok = ScheduleCheckpoint.from_json({"last_run": 1000.0, "interval_seconds": 50.0, "next_run": float("nan")})
+    assert ok == ScheduleCheckpoint(last_run=1000.0, interval_seconds=50.0, next_run=1050.0)
 
 
 # ---- (a) PERSIST: a refresh writes the checkpoint under the live dir, keyed per feed --------------
@@ -144,6 +161,53 @@ def test_fail_open_broken_checkpoint_file_degrades_to_fire_now(tmp_path):
     assert ticker.load_checkpoint(sp, "default") is None    # parse error → no checkpoint, no raise
     s, calls = _run(sp, now=1000.0, max_ticks=1)
     assert s == {"ticks": 1, "refreshes": 1} and len(calls) == 1   # degraded to due-immediately
+
+
+# A checkpoint file can be PARSEABLE json yet carry a degenerate/non-finite value: json.loads accepts the bare
+# tokens NaN/Infinity by default, and a torn or tampered file can hold them. The old "broken file" test above
+# only covered UNPARSEABLE bytes, so this class of poison reached the daemon: from_json's bare float() kept the
+# non-finite value, resume_plan's `<= 0` guard let it through (every NaN compare is False, +inf passes all), and
+# the tick math (math.ceil(remaining / poll)) raised ValueError/OverflowError — crashing run_feed_daemon on
+# EVERY restart, permanently killing the `vigil up --with-feed` sidecar. These drive the REAL entrypoint.
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"feeds": {"default": {"last_run": NaN, "interval_seconds": Infinity, "next_run": NaN}}}',
+        '{"feeds": {"default": {"last_run": Infinity, "interval_seconds": 50.0}}}',
+        '{"feeds": {"default": {"last_run": -Infinity, "interval_seconds": 50.0}}}',
+        '{"feeds": {"default": {"last_run": 1000.0, "interval_seconds": Infinity}}}',
+        '{"feeds": {"default": {"last_run": 1000.0, "interval_seconds": NaN}}}',
+        '{"feeds": {"default": {"last_run": "nan", "interval_seconds": 50.0}}}',
+        '{"feeds": {"default": {"last_run": 1000.0, "interval_seconds": "inf"}}}',
+    ],
+    ids=["nan+inf", "inf-last", "-inf-last", "inf-interval", "nan-interval", "str-nan", "str-inf"],
+)
+def test_fail_open_parseable_but_non_finite_checkpoint_degrades_to_fire_now(tmp_path, payload):
+    sp = tmp_path / "live-ui" / "feed-schedule.json"
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text(payload, encoding="utf-8")               # PARSEABLE json, degenerate value
+    assert ticker.load_checkpoint(sp, "default") is None   # non-finite value rejected as malformed, no raise
+    # drive the REAL run_feed_daemon entrypoint (the one checkpoint call site not already try/except-wrapped):
+    # it must NOT raise and must degrade to fire-now instead of crashing the daemon.
+    s, calls = _run(sp, now=2000.0, max_ticks=1)
+    assert s == {"ticks": 1, "refreshes": 1} and len(calls) == 1
+
+
+def test_fail_open_degenerate_checkpoint_bypassing_parse_cannot_crash_the_daemon(tmp_path, monkeypatch):
+    # BELT (independent of the from_json parse fix): even if a non-finite ScheduleCheckpoint somehow reaches
+    # resume_plan — where its tick math WOULD raise — run_feed_daemon's fail-open wrapper must catch it and
+    # degrade to fire-now. Force that path by making load_checkpoint hand back a poisoned checkpoint directly.
+    from framework.v2.intel.scheduler import ScheduleCheckpoint as _CP
+
+    poisoned = _CP(last_run=float("nan"), interval_seconds=float("inf"), next_run=float("nan"))
+    monkeypatch.setattr(ticker, "load_checkpoint", lambda _sp, _fid: poisoned)
+    # prove the poison really does blow up resume_plan (so the wrapper is load-bearing, not decorative)…
+    with pytest.raises((ValueError, OverflowError)):
+        ticker.scheduler.resume_plan(5, 10.0, poisoned, 2000.0)
+    # …yet the daemon survives it and still fires.
+    sp = tmp_path / "live-ui" / "feed-schedule.json"
+    s, calls = _run(sp, now=2000.0, max_ticks=1)
+    assert s == {"ticks": 1, "refreshes": 1} and len(calls) == 1
 
 
 def test_fail_open_unknown_feed_id_returns_none(tmp_path):

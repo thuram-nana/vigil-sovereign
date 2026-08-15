@@ -87,7 +87,14 @@ class ScheduleCheckpoint:
     @classmethod
     def from_json(cls, doc: object) -> "ScheduleCheckpoint | None":
         """Parse a persisted entry, or ``None`` if it is missing/malformed (caller then falls back to
-        fire-now). Total: never raises on a broken/foreign document — a bad checkpoint is a no-op."""
+        fire-now). Total: never raises on a broken/foreign document — a bad checkpoint is a no-op.
+
+        Non-finite floats are treated as MALFORMED and rejected. ``float()`` accepts ``nan``/``inf``, and
+        ``json.loads`` accepts the bare JSON tokens ``NaN``/``Infinity`` by default, so a torn or tampered
+        checkpoint can carry them. They are poison downstream: ``resume_plan``'s degeneracy guard is a chain
+        of ``<= 0`` / ``< 0`` comparisons, and every NaN comparison is False while ``+inf`` passes them all,
+        so a non-finite value would slip past the guard and crash the daemon in the tick math. Rejecting them
+        here degrades to the fail-open fire-now default instead."""
         if not isinstance(doc, dict):
             return None
         try:
@@ -95,9 +102,13 @@ class ScheduleCheckpoint:
             interval = float(doc["interval_seconds"])
         except (KeyError, TypeError, ValueError):
             return None
+        if not (math.isfinite(last) and math.isfinite(interval)):
+            return None
         try:
             nxt = float(doc.get("next_run", last + interval))
         except (TypeError, ValueError):
+            nxt = last + interval
+        if not math.isfinite(nxt):                           # informational field; recompute if poisoned
             nxt = last + interval
         return cls(last_run=last, interval_seconds=interval, next_run=nxt)
 
