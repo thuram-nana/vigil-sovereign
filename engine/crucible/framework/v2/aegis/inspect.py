@@ -47,6 +47,20 @@ _MAX_NOSQL_BODY_CHARS = 65536
 _MAX_VALUES = 256
 _MAX_VALUE_CHARS = 8192
 _MAX_BODY_BYTES = 2_000_000
+# PER-SOURCE caps that RESERVE each surface's share of the global bound (they sum to _MAX_VALUES). A
+# global-only cap let one source STARVE the others: 96 junk query params used to exhaust the whole 256
+# before a single cookie or header was inspected, so an injection in a header sailed past. With reserved
+# shares, a flood of query params can never crowd out the body/cookie/header surface.
+_MAX_QUERY_VALUES = 96
+_MAX_BODY_VALUES = 96
+_MAX_HC_VALUES = 64
+_MAX_MULTIPART_PARTS = 96
+# A multipart/form-data boundary token (RFC 2046: 1–70 chars). Bounded, negated class → ReDoS-safe.
+_MULTIPART_BOUNDARY_RE = re.compile(r'boundary="?([^";,\s]{1,200})"?', re.I)
+_MULTIPART_NAME_RE = re.compile(r'name="?([^";]{1,128})"?', re.I)
+# XML/SOAP text nodes: the content BETWEEN tags, where an injected value lives (tag names/attributes are
+# NOT captured, so a benign document's structure is never fed to the oracles). Bounded → ReDoS-safe.
+_XML_TEXT_RE = re.compile(r">([^<]{1,8192})<")
 
 # CURATED header injection surface (lowercased). A BOUNDED allowlist of free-text, user-controlled
 # request headers that are realistic SQL/command-injection vectors — deliberately NOT every header.
@@ -99,41 +113,118 @@ def _header_cookie_values(headers: list[tuple[str, str]], add: Callable[[str, st
             continue
 
 
+def _multipart_fields(ctype: str, body: str) -> list[tuple[str, str]]:
+    """Bounded, total ``(name, value)`` extraction of TEXT form fields from a ``multipart/form-data``
+    body. FILE parts (a Content-Disposition carrying ``filename=``) are skipped — their bytes are often
+    binary and are not a string-injection surface. Never raises; ``[]`` on any malformed structure. This
+    exists because a multipart body used to fall through candidate extraction entirely, so a payload
+    posted as a form field bypassed inline inspection completely."""
+    out: list[tuple[str, str]] = []
+    try:
+        m = _MULTIPART_BOUNDARY_RE.search(ctype)
+        if not m:
+            return out
+        marker = "--" + m.group(1)
+        for part in body.split(marker)[1:]:      # [0] is the preamble before the first boundary
+            if len(out) >= _MAX_MULTIPART_PARTS:
+                break
+            part = part.strip("\r\n")
+            if part in ("", "--"):               # the closing boundary
+                continue
+            head, sep, val = part.partition("\r\n\r\n")
+            if not sep:
+                head, sep, val = part.partition("\n\n")
+                if not sep:
+                    continue
+            if "filename=" in head.lower():      # a file upload — not a string-value surface
+                continue
+            nm = _MULTIPART_NAME_RE.search(head)
+            out.append((nm.group(1) if nm else "part", val.strip("\r\n")[:_MAX_VALUE_CHARS]))
+    except Exception:  # noqa: BLE001 — extraction is best-effort; a malformed body is skipped, never fatal
+        return out
+    return out
+
+
+def _xml_text_nodes(body: str) -> list[str]:
+    """Bounded, total extraction of XML/SOAP TEXT-node values — the content between tags, where an
+    injected value lives. Tag names and attributes are NOT captured, so a benign document's structure is
+    never handed to the oracles (the injected VALUE is; the near-zero-FP oracle still decides). Never
+    raises. Exists because an XML body used to yield no candidate values at all."""
+    out: list[str] = []
+    try:
+        for mm in _XML_TEXT_RE.finditer(body):
+            if len(out) >= _MAX_BODY_VALUES:
+                break
+            v = mm.group(1).strip()
+            if v:
+                out.append(v)
+    except Exception:  # noqa: BLE001
+        return out
+    return out
+
+
 def candidate_values(path: str, headers: list[tuple[str, str]], body: str | None) -> list[tuple[str, str]]:
-    """``(param_name, DECODED value)`` pairs from the request's injection surfaces — query params,
-    urlencoded / JSON body values, decoded Cookie values (``cookie:<name>``), and a bounded, curated
-    set of free-text request headers (``header:<name>``, see ``_INSPECT_HEADERS``). Query/body come
-    first (the most common vectors); header/cookie last. Bounded and total (a malformed body is
-    skipped, never raised)."""
+    """``(param_name, DECODED value)`` pairs from the request's injection surfaces — query params;
+    JSON / urlencoded / multipart / XML / text body values; decoded Cookie values (``cookie:<name>``);
+    and a bounded, curated set of free-text request headers (``header:<name>``, see ``_INSPECT_HEADERS``).
+    Bounded and total (a malformed body is skipped, never raised).
+
+    Each surface has a RESERVED share of the global bound (see the per-source caps) so a flood of one
+    surface — classically hundreds of junk query params — can never starve the others out of inspection.
+    Feeding more body types is FP-safe: the downstream oracles are near-zero-FP by construction (they
+    confirm a string-literal break-out / a shell command construct / a NoSQL operator-as-key), so a
+    genuine benign field value never trips one — only the extraction surface widens, not the verdict."""
     out: list[tuple[str, str]] = []
 
-    def add(name: str, val: Any) -> None:
-        if isinstance(val, str) and val and len(out) < _MAX_VALUES:
+    def _adder(cap: int) -> Callable[[str, Any], None]:
+        state = {"n": 0}
+
+        def add(name: str, val: Any) -> None:
+            if not (isinstance(val, str) and val):
+                return
+            if len(out) >= _MAX_VALUES or state["n"] >= cap:
+                return
+            state["n"] += 1
             out.append((str(name)[:128], val[:_MAX_VALUE_CHARS]))
+        return add
+
+    add_q = _adder(_MAX_QUERY_VALUES)      # query params — reserved share
+    add_b = _adder(_MAX_BODY_VALUES)       # any body surface — reserved share
+    add_hc = _adder(_MAX_HC_VALUES)        # headers + cookies — reserved share, so a query flood can't starve it
 
     try:
         for k, v in parse_qsl(urlsplit(path).query, keep_blank_values=False):
-            add(k, v)
+            add_q(k, v)
     except Exception:
         pass
 
     ctype = ""
+    ctype_raw = ""
     for hk, hv in (headers or []):
         if str(hk).lower() == "content-type":
-            ctype = str(hv).lower()
+            ctype_raw = str(hv)          # ORIGINAL case — a multipart boundary is case-SENSITIVE
+            ctype = ctype_raw.lower()    # lowercased only for the content-type family match
             break
     if body and len(body) <= _MAX_BODY_BYTES:
         try:
             if "application/json" in ctype:
-                _json_leaves(json.loads(body), "", add)
-            elif "x-www-form-urlencoded" in ctype or not ctype:
+                _json_leaves(json.loads(body), "", add_b)
+            elif "multipart/form-data" in ctype:
+                for k, v in _multipart_fields(ctype_raw, body):
+                    add_b(k, v)
+            elif "xml" in ctype:                                  # application/xml, text/xml, *+xml, SOAP
+                for v in _xml_text_nodes(body):
+                    add_b("body:xml", v)
+            elif "x-www-form-urlencoded" in ctype or not ctype:   # unchanged: empty ctype stays urlencoded
                 for k, v in parse_qsl(body, keep_blank_values=False):
-                    add(k, v)
+                    add_b(k, v)
+            else:                                                 # text/plain and any other declared type:
+                add_b("body", body)                               # the whole body is one candidate value
         except Exception:
             pass
 
-    # header/cookie injection surface (curated + bounded), inspected AFTER query/body.
-    _header_cookie_values(headers, add)
+    # header/cookie injection surface (curated + bounded), with its OWN reserved share.
+    _header_cookie_values(headers, add_hc)
     return out[:_MAX_VALUES]
 
 
