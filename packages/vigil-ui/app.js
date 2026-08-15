@@ -4166,7 +4166,7 @@
         ]),
       ]),
       h("div.grid", { style: { marginTop: "4px" } }, [
-        V.card("Pending approvals", "READ-ONLY", h("div#safety-pending", null, h("div.empty", null, "Loading…")), false),
+        V.card("Pending approvals", "OWNER", h("div#safety-pending", null, h("div.empty", null, "Loading…")), true),
       ]),
     ]);
     loadSafety();
@@ -4274,11 +4274,14 @@
     ]);
   }
 
-  // ---- Pending approvals (OFFENSE plane, READ-ONLY / KEYLESS) ----------------
-  // The offense worker publishes a public-safe pending request per queued action; the OWNER signs it
-  // out-of-band with `vigil approve sign` (owner PRIVATE key held off-box). This console is KEYLESS — it
-  // LISTS pending requests and shows the exact sign command, but it can NEVER sign (FATAL-2): there is no
-  // POST here, GET only. Distinct from the sovereign snapshot's approve/deny card above.
+  // ---- Pending approvals (OFFENSE plane; OWNER-actionable via the sovereign signer) ---------------
+  // The offense worker publishes a public-safe pending request per queued action. The OFFENSE console
+  // stays KEYLESS (it only GET-lists these from OFF /api/status/approvals). Signing happens on the
+  // SOVEREIGN plane: Approve/Deny POST to SOV /api/action (offense_approve/offense_deny), where the
+  // cockpit mints an owner-signed token in-process and drops it in the shared approvals/signed/ dir for
+  // the keyless offense broker to verify + consume (route-via-sovereign; see knowledge/decisions/0004
+  // and kb/approvals.md). The owner PRIVATE key never reaches this offense console. `vigil approve sign`
+  // from a terminal remains a valid fallback, shown under each item.
   function loadPendingApprovals() {
     function refresh() {
       V.getJSON(OFF("/api/approvals/loopback")).then(drawPendingApprovals).catch(function () {
