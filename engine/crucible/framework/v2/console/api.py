@@ -351,6 +351,16 @@ def list_runs(slug: str = "") -> dict[str, Any]:
                 # how the Live view should tail this run: 'blackboard' (engage --spine), 'progress'
                 # (loopback scan --progress-log), or 'none' (strix/aegis — status only).
                 "stream": meta.get("stream", "progress"),
+                # run-registry (W1): resume/retry + honest end-of-run failure surfacing. `run_kind`
+                # names the op type; `resumable` gates a Resume button; a failed/interrupted run
+                # carries a short reason so the UI can say WHAT failed, not just "error".
+                "run_kind": meta.get("run_kind", meta.get("mode", "")),
+                "resumable": bool(meta.get("resumable", False)),
+                "interrupted_reason": meta.get("interrupted_reason", ""),
+                "rc": meta.get("rc"),
+                "error": str(meta.get("error", "") or "")[:500],
+                "stderr_tail": str(meta.get("stderr", "") or "")[-500:],
+                "pid": meta.get("pid"),
                 "findings": len((report or {}).get("findings", [])) if report else None,
                 "has_report": report is not None,
             })
