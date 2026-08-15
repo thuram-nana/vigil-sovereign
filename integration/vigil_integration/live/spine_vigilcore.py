@@ -70,6 +70,7 @@ from ..agent.checkpoint import (
     SnapshotRecord,
     head_hash,
     head_seq,
+    rebuild_head as _rebuild_head,
     rebuild_from,
     serialize,
 )
@@ -297,6 +298,11 @@ class VigilCoreSpine:
         clock at ``head_seq + 1`` so a resumed turn never collides a seq with an already-persisted one.
         Verifier-gated and total."""
         return head_seq(self.reader(), engagement=engagement, verify=self.verify_record)
+
+    def rebuild_head(self, *, engagement: Optional[str] = None) -> "tuple[AgentState, int]":
+        """The restored state AND its seq from ONE read of the spine — the resume path, so the pair is
+        guaranteed consistent (no two-read race between rebuild and head_seq). Verifier-gated and total."""
+        return _rebuild_head(self.reader(), engagement=engagement, verify=self.verify_record)
 
     # --- internals -----------------------------------------------------------------------------------
 

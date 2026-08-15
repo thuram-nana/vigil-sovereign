@@ -1597,7 +1597,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "own chartered loopback (the human leg of the conjunctive gate; scope still enforced)")
     pe.add_argument("--resume", action="store_true",
                     help="continue this slug's engagement from its last SIGNED checkpoint (the same "
-                         "{slug}.spine) instead of starting fresh — the network-failure / crash recovery path")
+                         "{slug}.spine) instead of starting fresh — the network-failure / crash recovery "
+                         "path. A COMPLETED run is a no-op. At-least-once: an iteration that ran a tool but "
+                         "crashed before its checkpoint re-runs that tool on resume (re-gated + re-confirmed).")
     pe.set_defaults(func=_cmd_engage)
 
     pei = sub.add_parser("engage-instruct",

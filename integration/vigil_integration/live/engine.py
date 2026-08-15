@@ -124,8 +124,9 @@ class EngineSeams:
     govern: Optional[GovernFn] = None          # None ⇒ no advisory re-rank (never gates truth anyway)
     emit: Optional[EmitFn] = None              # None ⇒ no telemetry span emitted
     checkpoint: Optional[CheckpointFn] = None  # None ⇒ no per-turn spine snapshot
-    rebuild: Optional[Callable[[], Any]] = None      # None ⇒ --resume cannot reconstruct → starts fresh (W2b)
-    head_seq: Optional[Callable[[], int]] = None     # None ⇒ resume seeds seq from state.iteration only (W2b)
+    # W2b resume: ONE read → (restored_state, head_seq). One call so the state and its seq are always from
+    # the same snapshot (no two-read race). None ⇒ --resume degrades to a fresh start.
+    rebuild: Optional[Callable[[], Any]] = None
     detect: Optional[DetectFn] = None          # None ⇒ the Detection Mirror is not run
     approval: Optional[ApprovalFn] = None      # None ⇒ a phase escalation / fireteam stays QUEUED
     operator_messages: Optional[OperatorMsgFn] = None  # None ⇒ no mid-run operator instructions (A5)
@@ -214,23 +215,38 @@ class VigilEngine:
             return report
         report.attestation_ref = att_ref
 
-        # (0b) RESUME (W2b): reconstruct the last signed AgentState for this slug and continue the OODA loop
-        # from where it stopped. The checkpoint spine already threads prev_hash from the file tail (a fresh
-        # binder resumes the SAME chain), so all we seed here is (a) the state, (b) the monotonic seq at
-        # head_seq+1 so a resumed turn never collides a seq with an already-persisted one, and (c) the loop
-        # index (the next iteration). A resume with no prior state, no rebuild seam, or an unreadable spine
-        # degrades to a fresh start — never a crash. The gate/oracle/attestation are unchanged: a resumed
-        # edge is authorized and oracle-confirmed exactly like a fresh one.
+        # (0b) RESUME (W2b): reconstruct the last signed AgentState for this slug (via ONE spine read that
+        # returns the state AND its seq together) and continue the OODA loop from where it stopped. The
+        # checkpoint spine already threads prev_hash from the file tail (a fresh binder resumes the SAME
+        # chain), so all we seed here is (a) the state, (b) the monotonic seq at head_seq+1 so a resumed turn
+        # never collides a seq with an already-persisted (and actually-restored) one, and (c) the loop index.
+        #
+        # FAIL-CLOSED, not fail-open: a resume proceeds ONLY when we have real restored progress AND a real
+        # head_seq (>=1) to continue past. No prior state, no rebuild seam, an unreadable/forged spine, a
+        # raising seam, or a restored-state-without-a-seq all degrade to a FRESH start — never a partial
+        # resume that could reseed seq=1 and collide persisted turns, and never a crash. Gate/oracle/
+        # attestation are unchanged: a resumed edge is authorized + oracle-confirmed exactly like a fresh one.
+        #
+        # AT-LEAST-ONCE re-execution: the per-turn checkpoint is written at the END of an iteration, so a
+        # crash AFTER a tool ran but BEFORE its checkpoint resumes at that iteration and RE-RUNS its tool.
+        # Every re-run still re-gates + re-confirms through the oracle (no auth bypass), but an offense tool
+        # CAN re-fire on resume — resume is at-least-once, not exactly-once. A COMPLETED run is a no-op.
         state = AgentState(engagement_slug=self.slug, objective=objective, phase=Phase.INFORMATIONAL)
         seq = 1
         start_it = 0
         if resume and self.seams.rebuild is not None:
+            prior, hs = None, 0
             try:
-                prior = self.seams.rebuild()
+                out = self.seams.rebuild()                  # ONE read → (restored_state, head_seq)
+                if isinstance(out, tuple) and len(out) == 2:
+                    prior, hs = out[0], int(out[1] or 0)
+                elif isinstance(out, AgentState):           # tolerate a bare-state seam (tests)
+                    prior, hs = out, 0
             except Exception:  # noqa: BLE001 — an unreadable/forged spine → a fresh start, never a crash
-                prior = None
-            if isinstance(prior, AgentState) and (prior.iteration or prior.facts or prior.leads
-                                                  or prior.execution_trace):
+                prior, hs = None, 0
+            has_progress = isinstance(prior, AgentState) and bool(
+                prior.iteration or prior.facts or prior.leads or prior.execution_trace or prior.done)
+            if has_progress and hs >= 1:                    # real state AND a real seq to continue past
                 state = prior
                 state.engagement_slug = self.slug          # identity/objective stay authoritative
                 if objective:
@@ -238,15 +254,13 @@ class VigilEngine:
                 report.resumed = True
                 report.facts.extend(list(prior.facts))     # the report reflects TOTAL progress, honestly
                 report.leads.extend(list(prior.leads))
-                start_it = int(getattr(prior, "iteration", 0) or 0) + 1
+                seq = int(hs) + 1                           # strictly past every persisted + restored turn
                 if state.done:
                     start_it = self.max_iterations          # a COMPLETED run resumes to a no-op, never re-runs
-                try:
-                    hs = self.seams.head_seq() if self.seams.head_seq is not None else 0
-                    seq = max(seq, int(hs) + 1)             # never reuse a persisted seq
-                except Exception:  # noqa: BLE001
-                    pass
-        report.iterations = start_it                        # a no-op resume (done/exhausted) reports honestly
+                    report.iterations = int(getattr(prior, "iteration", 0) or 0)   # honest count, not max
+                else:
+                    start_it = int(getattr(prior, "iteration", 0) or 0) + 1
+                    report.iterations = start_it
 
         for it in range(start_it, self.max_iterations):
             state.iteration = it
@@ -424,6 +438,17 @@ class VigilEngine:
                  "facts": len(intake.facts), "leads": len(intake.leads)})
 
         report.done = state.done
+
+        # W2b — persist the TERMINAL state so a later --resume sees the true end. The COMPLETE branch and
+        # the pause branches (ask_user / awaiting_approval) BREAK without a per-turn checkpoint, so without
+        # this the last persisted snapshot reads done=False and a finished run would RE-ENTER the loop on
+        # resume and re-fire offense. Writing the final state (done / paused flags / final trace) makes the
+        # resume done-guard reachable and lets a paused run resume its true pause. Fail-closed: a spine
+        # outage is a recorded no-op (via _checkpoint), never fatal to the run. Skipped only for a pure
+        # no-op resume (start_it == max_iterations: a completed/exhausted run this session did no work and
+        # its terminal state is already persisted) — so a done-resume adds no redundant snapshot.
+        if start_it < self.max_iterations:
+            self._checkpoint(state, seq, report)
 
         # DETECTION MIRROR (WS-4) — prove each attack's signature over the target's own logs.
         self._run_detection(report)
