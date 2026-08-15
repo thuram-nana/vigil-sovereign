@@ -120,8 +120,17 @@ def test_deny_cannot_traverse_out_of_the_pending_dir():
     # MUST be there — a victim under approvals/ is never reached by the traversal and makes this vacuous.
     victim = authority_path(base)
     assert victim == Path(base) / "approval-authority.json"          # pin the target the exploit hits
-    victim.write_text('{"schema":"x","owner_key_id":"owner","owner_public_key_b64":"AAAA"}', encoding="utf-8")
-    # a hostile pending file: its FIELD is a traversal, its real filename is inside pending/
+    # CRUCIAL: the victim must ITSELF carry request_id == the traversal string. A path-join regression
+    # (pending/<rid>.json) still runs the content-match, so a victim WITHOUT a matching request_id would
+    # be spared by the match even under the bug — making this test vacuous (the flaw the re-attestation
+    # found). With the matching field, a path-join mutant reads the victim, matches, and DELETES it, so
+    # `victim.exists()` fails → the guard actually guards. The correct glob code never reads outside
+    # pending/, so the victim always survives.
+    victim.write_text(json.dumps({"request_id": "../../approval-authority",
+                                  "schema": "x", "owner_key_id": "owner", "owner_public_key_b64": "AAAA"}),
+                      encoding="utf-8")
+    # a hostile pending file: its FIELD is a traversal, its real filename is inside pending/ (so the
+    # correct code has a real in-dir file to remove and returns removed:True).
     evil = root / "pending" / "evil.json"
     evil.write_text(json.dumps({"schema": "vigil-approval-pending-v1",
                                 "request_id": "../../approval-authority", "tool_name": "x", "target": "y",
@@ -155,14 +164,27 @@ def test_deny_does_not_follow_a_symlinked_pending_file_out_of_the_dir():
 
 def test_deny_removes_the_RIGHT_pending_when_several_are_queued():
     """With ≥2 pending, deny must remove only the one whose request_id matches — a content-match-drop
-    mutant that removes the first globbed file would corrupt the queue (red-pen BLOCK-2, mutant C)."""
+    mutant that removes the first (or last) globbed file corrupts the queue (red-pen BLOCK-2).
+
+    DETERMINISTIC: plant fixed request_ids so glob order is fixed (aaa < bbb < ccc) and deny the MIDDLE
+    one. A 'remove first' mutant deletes aaa and a 'remove last' mutant deletes ccc — either way the
+    surviving set differs from {aaa, ccc}, so the mutant dies EVERY run. (Using _publish's random nonces
+    made the sort order random, so 'remove first' coincidentally hit the target ~50% of the time.)"""
+    import json
+
     from sigil.ui import offense_approvals as oa
-    br1, p1 = _publish(tool="exec_command")
-    br2, p2 = _publish(tool="write_stdin")
-    assert len(oa.list_offense_pending()["pending"]) == 2
-    assert oa.deny_pending(p2.request_id)["removed"] is True
-    remaining = [p["request_id"] for p in oa.list_offense_pending()["pending"]]
-    assert remaining == [p1.request_id], "deny removed the wrong pending item"
+    from vigil_integration.live.approval_broker import approvals_root
+    pd = approvals_root(os.environ["VIGIL_BASE_DIR"]) / "pending"
+    pd.mkdir(parents=True, exist_ok=True)
+    for rid in ("aaa", "bbb", "ccc"):
+        (pd / f"{rid}.json").write_text(
+            json.dumps({"schema": "vigil-approval-pending-v1", "request_id": rid, "tool_name": "t",
+                        "target": "x", "action_digest": "", "nonce": rid, "args_preview": "",
+                        "created_at_iso": ""}), encoding="utf-8")
+    assert len(oa.list_offense_pending()["pending"]) == 3
+    assert oa.deny_pending("bbb")["removed"] is True
+    remaining = sorted(p["request_id"] for p in oa.list_offense_pending()["pending"])
+    assert remaining == ["aaa", "ccc"], "deny removed the wrong pending item"
 
 
 # --- dispatch + boundary ---------------------------------------------------------------------------
