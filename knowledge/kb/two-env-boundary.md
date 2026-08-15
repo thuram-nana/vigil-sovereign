@@ -159,3 +159,21 @@ directory. Follow the finding/detection precedent:
 - **Both halves of a producer/consumer pair must be offense-free.** It's easy to remember the offense
   consumer (`learn_drain`) needs a lazy import and forget that the sovereign producer (`learn_grant`) must
   never import `framework` at all — the test asserts both (lines 53–55).
+- **A red `integration two-env boundary (P5)` check is USUALLY NOT a boundary violation — don't panic.**
+  The CI job named "two-env boundary (P5)" (`.github/workflows/ci.yml`) runs the *whole* `integration/tests`
+  suite (inert receiver, keyless worker, the boundary probes, **plus** `test_egress_guard.py` and
+  `test_sandbox_exec.py`, and the oracle-adapter test in its own process). The name is its headline, not
+  its exclusive scope. The most common red here is a **runner-environment flake in `test_egress_guard.py`**:
+  `egress-guard: FAILED to acquire the seccomp listener (Bad file descriptor)` / `could not acquire the
+  seccomp listener; refusing to continue`. That is the GitHub Actions runner failing to hand the guard
+  process a seccomp user-notification listener FD — a kernel/runner resource condition, **not** a FATAL-2
+  regression and **not** anything an application diff caused. **Triage before you debug:** (1) confirm the
+  failing assertion is in `test_egress_guard.py`/`test_sandbox_exec.py`, not a `test_two_env_boundary.py`
+  probe (`git ... --log-failed | grep`); (2) `git diff --name-only <last-green>..<HEAD> | grep -iE
+  'egress|seccomp'` — if empty, no diff touched it; (3) **re-run the job** (`gh run rerun <id> --failed`) —
+  a transient seccomp flake clears on a fresh runner. Only if it fails *deterministically* across re-runs
+  is it real. The existing skip guard (`_guard_usable()` at `test_egress_guard.py:37`) is an **import-time**
+  probe; it can arm seccomp at import and still lose the listener at *runtime* (a probe→run TOCTOU), so the
+  probe passing does not guarantee the run will — which is why an occasional red slips through despite the
+  skip. Real logic failures assert about behavior ("the sendto was not seen", "read as clean"); the flake
+  always names the seccomp-listener acquisition.
