@@ -61,6 +61,11 @@ __all__ = [
 # never oracle/learning math.
 _WAIT_ENV = "VIGIL_APPROVAL_WAIT_SECONDS"
 _MAX_WAIT_SECONDS = 900.0          # cap the human-approval poll window at the token dead-man's-switch bound
+# Default poll window when the env var is unset/blank: 5 minutes, so a queued action gives the operator
+# TIME to sign (from the UI once the sovereign-signer bridge lands, or the CLI) instead of denying
+# instantly and killing the run. It applies only when an approval authority IS provisioned — with none,
+# the gate hard-blocks before any wait. Settings-configurable (CONFIG_META VIGIL_APPROVAL_WAIT_SECONDS).
+_DEFAULT_WAIT_SECONDS = 300.0
 _POLL_INTERVAL = 0.25              # seconds between signed/ polls while blocking
 _PREVIEW_CAP = 2000                # bound the redacted args preview written to disk
 
@@ -371,12 +376,15 @@ def provision_authority_material(base_dir: Any, *, key_id: str = "owner") -> tup
 
 def _resolve_wait(wait_seconds: Optional[float]) -> float:
     """The human-approval poll window: an explicit ``wait_seconds`` wins, else ``VIGIL_APPROVAL_WAIT_SECONDS``,
-    else 0 (non-blocking — an unattended run denies immediately). Capped at the token dead-man's bound."""
+    else ``_DEFAULT_WAIT_SECONDS`` (5 min, so a queued action gives the operator time to sign rather than
+    denying instantly). NaN/negative still fail closed to 0; the value is capped at the token dead-man's
+    bound. An UNSET env is the default; an EXPLICIT ``0`` still means non-blocking (an operator can opt back
+    into instant-deny)."""
     raw: Any = wait_seconds
     if raw is None:
         raw = os.environ.get(_WAIT_ENV, "")
     try:
-        val = float(raw) if str(raw).strip() != "" else 0.0
+        val = float(raw) if str(raw).strip() != "" else _DEFAULT_WAIT_SECONDS
     except (TypeError, ValueError):
         return 0.0
     if val != val or val < 0:  # NaN / negative → non-blocking (fail-closed)

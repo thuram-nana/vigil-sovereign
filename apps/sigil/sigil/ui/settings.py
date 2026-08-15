@@ -409,6 +409,11 @@ CONFIG_META = {
     "VIGIL_UP_COCKPIT_TIMEOUT": {"group": "system", "type": "int", "min": 5, "max": 3600, "default": "120",
         "label": "Cockpit start timeout (s)", "plane": "system",
         "purpose": "How long `vigil up` waits for the cockpit to come up before giving up."},
+    "VIGIL_APPROVAL_WAIT_SECONDS": {"group": "offense", "type": "int", "min": 0, "max": 900, "default": "300",
+        "label": "Approval wait window (s)", "plane": "offense",
+        "purpose": "How long a queued offense action waits for your owner signature before it is denied. "
+                   "0 = deny instantly (unattended). The default 300s gives you time to approve; capped at "
+                   "900s (the token dead-man's bound)."},
 }
 CONFIG_VARS = tuple(CONFIG_META)
 _CONFIG_GROUP_ORDER = ("offense", "sovereign", "gateway", "system")

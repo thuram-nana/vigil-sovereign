@@ -29,9 +29,10 @@ checkout) the runner's ``ImportError`` guard leaves the vendor byte-identical. A
 hooks, so a governed run stops instead of silently running an UNGUARDED arbitrary shell. A non-AUTO (QUEUE) decision no
 longer hard-blocks: it is routed to the per-action, single-use, owner-signed approval BROKER
 (:mod:`live.approval_broker`) — the hook publishes a pending request, waits (bounded by
-``VIGIL_APPROVAL_WAIT_SECONDS``, default 0 ⇒ non-blocking) for a token the owner signs for THIS exact call
-(``vigil approve sign`` from a terminal holding the owner key — the keyless console cannot sign it), verifies
-it against the deployment-pinned owner key, and spends
+``VIGIL_APPROVAL_WAIT_SECONDS``, default 300s ⇒ a 5-minute window; an explicit 0 opts back into instant
+non-blocking deny) for a token the owner signs for THIS exact call (``vigil approve sign`` from a terminal
+holding the owner key — the keyless console cannot sign it), verifies it against the deployment-pinned
+owner key, and spends
 its nonce ONCE — then the call runs. No authority provisioned, or no valid token in the window ⇒ the call is
 BLOCKED (fail-safe). A hard class ``deny`` (denylist / empty name) always raises immediately. The DECISION
 CORE + the approval token/ledger are complete and fully tested.
