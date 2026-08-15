@@ -236,10 +236,13 @@ class WardenGateHooks:
         with an unrelated exception, losing the block reason and the type callers catch to render it. Making
         a refusal visible must never change what the refusal DOES."""
         try:
+            # Bound the displayed name: `name` falls back to str(tool), which for an SDK tool object can be
+            # a long repr (potentially its whole JSON schema). The UI displays this field.
+            shown = str(decision.tool or name or "")[:120]
             append_progress({
                 "event": "warden.block",
                 "gate": "warden",
-                "action_refused": decision.tool or name,
+                "action_refused": shown,
                 "tier": decision.tier,
                 "outcome": decision.outcome,
                 "fatal": decision.outcome == "deny",

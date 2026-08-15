@@ -13,19 +13,22 @@ module ``framework``/``strix``/SDK-free (``integration/tests/test_two_env_bounda
 imports it lazily+guarded so a bare vendored checkout with no ``vigil_integration`` on the path stays
 byte-identical at runtime. It needs ZERO server changes — the existing ``/api/events`` tailer surfaces it.
 
-Every write is BEST-EFFORT: a missing env var, an unwritable path, a serialisation error, or an oversized
-payload is a silent no-op that returns ``False`` and NEVER raises — surfacing progress must never break a run
-or, especially, a WARDEN block. Each line is a single ``os.write`` in ``O_APPEND`` mode; on Linux the kernel
-serialises appends to a regular file (the inode lock is held for the write), so a concurrent console-side
-``_append_progress`` and this child write land as whole, non-interleaved lines. Oversized payloads are dropped
-rather than risk a torn write, and the console tailer already skips any malformed line, so the failure mode is
-"a line is missing", never "the feed is corrupt".
+Every write is BEST-EFFORT and, critically, NEVER BLOCKS: a missing env var, an unwritable path, a symlink, a
+non-regular file (FIFO/device/socket), a serialisation error, or an oversized payload is a silent no-op that
+returns ``False`` and never raises — surfacing progress must never break a run or, especially, delay a WARDEN
+block (the gate emits BEFORE it raises, so a blocking write here would hang the refusal itself). Appends go to
+a regular file opened ``O_APPEND|O_NONBLOCK|O_NOFOLLOW``; on Linux the kernel serialises appends to a regular
+file (the inode lock is held across the write), so a concurrent console-side ``_append_progress`` and this
+child write land as whole, non-interleaved lines. Oversized payloads are dropped rather than risk a torn
+write, short writes are looped to completion, and the console tailer already skips any malformed line — so the
+failure mode is "a line is missing", never "the feed is corrupt".
 """
 
 from __future__ import annotations
 
 import json
 import os
+import stat
 from collections.abc import Mapping
 from typing import Any
 
@@ -43,14 +46,33 @@ def append_progress(event: Mapping[str, Any], *, run_dir_env: str = _RUN_DIR_ENV
         run_dir = os.environ.get(run_dir_env)
         if not run_dir or not isinstance(event, Mapping):
             return False
-        line = json.dumps(dict(event), default=str, ensure_ascii=False, separators=(",", ":"))
+        # ensure_ascii=True: escape U+2028/U+2029/U+0085 too. They are NOT newlines to str.split("\n")
+        # (what the console SSE tailer uses) but ARE line terminators to str.splitlines() (what some
+        # readers use), so leaving them raw would make "one event = one line" depend on the reader.
+        line = json.dumps(dict(event), default=str, ensure_ascii=True, separators=(",", ":"))
         data = (line + "\n").encode("utf-8", "replace")
         if len(data) > _MAX_BYTES:
             return False
         path = os.path.join(run_dir, _PROGRESS_FILE)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        # O_NONBLOCK: never BLOCK on open. Without it, a FIFO planted at this path wedges the caller
+        # forever — and because the WARDEN gate emits BEFORE it raises, that would hang the gate and the
+        # refusal would never fire. A non-blocking open of a readerless FIFO fails (ENXIO) instead.
+        # O_NOFOLLOW: never follow a symlink here, so this path can't redirect the child's appends
+        # elsewhere (the existing reader in report/runinfo.py already refuses a symlinked progress file).
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
         try:
-            os.write(fd, data)
+            # Belt-and-braces after the flags: only ever write to a REGULAR file. A device/socket/FIFO
+            # that slipped past the open flags is refused rather than written to.
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return False
+            # Write the WHOLE line: a short write would truncate this event AND merge it with the next
+            # append into one malformed line — losing two events instead of the promised "one is missing".
+            mv = memoryview(data)
+            while mv:
+                n = os.write(fd, mv)
+                if n <= 0:
+                    return False
+                mv = mv[n:]
         finally:
             os.close(fd)
         return True

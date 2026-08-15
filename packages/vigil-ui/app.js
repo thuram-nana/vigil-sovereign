@@ -1606,7 +1606,9 @@
     reward:        { label: "Reward", icon: "dot", cat: "review",
       sum: function (p) { return (p.source || "") + (p.signal ? " · " + p.signal : "") + " · r=" + (p.reward != null ? p.reward : "?"); } },
     refusal:       { label: "Refusal", icon: "x", cat: "review",
-      sum: function (p) { return (p.gate || "gate") + " refused: " + (p.action_refused || "") + (p.fatal ? " (fatal)" : ""); } },
+      // the WHY is the point of a refusal row — carry p.reason through, not just what was refused.
+      sum: function (p) { return (p.gate || "gate") + " refused: " + (p.action_refused || "")
+        + (p.fatal ? " (fatal)" : "") + (p.reason ? " — " + p.reason : ""); } },
     agent_message: { label: "Message", icon: "brain", cat: "review",
       sum: function (p) { return (p.sender || "?") + " → " + (p.recipient || "?") + (p.topic ? " [" + p.topic + "]" : "") + (p.body ? " · " + p.body : "") + " · advisory coordination (not evidence)"; } },
   };
@@ -2336,8 +2338,9 @@
         confidence: ev.confidence, verified_by_oracle: false, oracle_kind: ev.confirmed_by, severity: "" }, _progress: true };
       if (ev.event === "scan.done") return { kind: "decision", payload: { question: "scan complete", choice: (ev.findings || 0) + " findings · " + (ev.requests_sent || 0) + " requests" }, _progress: true };
       // W6c — a codebase (Strix) run's own progress, normalised into the kinds this view already renders.
-      // `_progress` marks it as feed-derived, NOT a signed spine event (the same honesty marker the scan
-      // rows carry): a WARDEN block is a real refusal, but it reached us over the progress file.
+      // `_progress: true` tags these the same way the scan rows above are tagged — provenance metadata
+      // that says "came over the progress file, not the signed spine". (Nothing renders it today; it is
+      // carried for parity with the existing rows, not as a claim that the UI distinguishes them.)
       if (ev.event === "warden.block") return { kind: "refusal", payload: {
         gate: ev.gate || "warden", action_refused: ev.action_refused || "",
         reason: ev.reason || "", fatal: !!ev.fatal }, _progress: true };
@@ -3000,10 +3003,15 @@
     }
   }
 
+  // A run that never CAPTURES a report: aegis (stream 'none') and a codebase/Strix run — the console
+  // spawns both with capture_report=False, so /api/report stays {pending:true} forever. Keyed on the real
+  // cause (mode) as well as the stream, because a codebase run now STREAMS its activity (W6c) and so is no
+  // longer identifiable by stream alone — without this it would sit on "Still running… no saved report
+  // YET", which is false twice over: it has finished, and no report is ever coming.
+  function p3RunCapturesNoReport(run) { return run.stream === "none" || run.mode === "codebase"; }
   function p3RunHasNoReport(run) {
-    // strix/aegis runs (stream 'none') and live engage runs (stream 'blackboard') don't save a
-    // rendered findings report — say so honestly and point to where their results DO live.
-    return run.stream === "none" || run.stream === "blackboard";
+    // ...plus live engage runs (stream 'blackboard'), whose results live on the spine, not in a report.
+    return p3RunCapturesNoReport(run) || run.stream === "blackboard";
   }
   function p3NoReportEmpty(run, what) {
     if (run.stream === "blackboard") {
@@ -3012,9 +3020,13 @@
         h("button.btn", { style: { marginTop: "14px" }, onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(run.run_id); } },
           [V.icon("live"), "Open in Live"])]);
     }
-    if (run.stream === "none") {
+    if (p3RunCapturesNoReport(run)) {
       return h("div.empty", null, [h("div.big", null, "Runs in its own sandbox"),
-        h("p", null, "A codebase (Strix) / AEGIS run reports inside its sandbox — no re-checkable web report is captured here.")]);
+        h("p", null, "A codebase (Strix) / AEGIS run reports inside its sandbox — no re-checkable web report is captured here."),
+        (run.mode === "codebase"
+          ? h("button.btn", { style: { marginTop: "14px" }, onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(run.run_id); } },
+              [V.icon("live"), "See what it did in Live"])
+          : null)]);
     }
     return null;
   }
@@ -7008,7 +7020,10 @@
   function pboxStepText() {
     for (var i = PBOX.events.length - 1; i >= 0; i--) {
       var e = PBOX.events[i], p = e.payload || {};
-      if (e.kind === "refusal") return "blocked by " + (p.gate || "gate") + ": " + (p.action_refused || "");
+      // W6c: carry the WHY, not just WHAT was refused. W6b's pboxErrClass supersedes the older
+      // `kind === "error_class"` branch (no producer ever emitted that kind) — keep the live one.
+      if (e.kind === "refusal") return "blocked by " + (p.gate || "gate") + ": " + (p.action_refused || "")
+        + (p.reason ? " — " + p.reason : "");
       var _ec = pboxErrClass(e);
       if (_ec) return _ec + " error: " + (p.summary || p.detail || "the model call failed");
       if (e.kind === "tool_call") return "running " + (p.tool || "") + (p.target ? " → " + p.target : "");
@@ -7171,9 +7186,10 @@
     if (ev.event === "scan.finding") return { kind: "finding", payload: { bug_class: ev.bug_class, title: (ev.param || "") + " @ " + (ev.endpoint || "") } };
     if (ev.event === "scan.done") return { kind: "decision", payload: { question: "scan complete", choice: (ev.findings || 0) + " findings" } };
     // W6c — a codebase (Strix) run's own progress. Normalise into the SAME spine-shaped events the box
-    // already renders, so no pboxTag/pboxRow/pboxStepText change is needed:
-    //  • warden.block → a "refusal" event: the box tags it "blocked" and the step line reads
-    //    "blocked by warden: <tool>" (the operator sees WHAT was blocked and WHY).
+    // already renders, so pboxTag/pboxRow need no change:
+    //  • warden.block → a "refusal" event: the box tags it "blocked" and both the row summary
+    //    (KIND_META.refusal) and the step line read "blocked by warden: <tool> — <reason>", so the
+    //    operator sees WHAT was blocked and WHY. (The reason is carried by both; verified by test.)
     if (ev.event === "warden.block") return { kind: "refusal", payload: {
       gate: ev.gate || "warden", action_refused: ev.action_refused || "",
       reason: ev.reason || "", fatal: !!ev.fatal } };

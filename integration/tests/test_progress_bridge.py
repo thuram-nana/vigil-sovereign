@@ -55,6 +55,36 @@ def test_append_progress_is_a_silent_noop_without_a_run_dir(tmp_path, monkeypatc
     assert append_progress({"event": "a"}) is False          # unwritable path → silent, no raise
 
 
+def test_append_progress_never_blocks_on_a_fifo(tmp_path, monkeypatch):
+    """A FIFO planted at progress.jsonl must NOT wedge the writer. The WARDEN gate emits BEFORE it raises,
+    so a blocking open here would hang the refusal itself — telemetry altering the gate (red-pen BLOCK-3).
+    The call must return promptly and falsely-claim nothing."""
+    monkeypatch.setenv(ENV, str(tmp_path))
+    os.mkfifo(os.path.join(str(tmp_path), "progress.jsonl"))   # no reader attached
+    assert append_progress({"event": "warden.block"}) is False  # returns — does not hang
+
+
+def test_append_progress_refuses_to_follow_a_symlink(tmp_path, monkeypatch):
+    """A symlink at progress.jsonl must not redirect the child's appends to another path."""
+    monkeypatch.setenv(ENV, str(tmp_path))
+    victim = tmp_path / "victim.txt"
+    victim.write_text("original", encoding="utf-8")
+    os.symlink(str(victim), os.path.join(str(tmp_path), "progress.jsonl"))
+    assert append_progress({"event": "warden.block"}) is False
+    assert victim.read_text(encoding="utf-8") == "original", "the append followed a symlink"
+
+
+def test_append_progress_escapes_every_line_terminator(tmp_path, monkeypatch):
+    """One event = one line for EVERY reader. U+2028/U+2029/U+0085 are not newlines to split("\\n") (the
+    SSE tailer) but ARE to splitlines() (other readers) — so they must be escaped, not written raw."""
+    monkeypatch.setenv(ENV, str(tmp_path))
+    nasty = "a\u2028b\u2029c\u0085d\ne"   # LS, PS, NEL, and a real newline
+    assert append_progress({"event": "warden.block", "reason": nasty}) is True
+    raw = (tmp_path / "progress.jsonl").read_text(encoding="utf-8")
+    assert len(raw.splitlines()) == 1, "a payload split one event across multiple lines"
+    assert json.loads(raw)["reason"] == nasty, "escaping must round-trip the value intact"
+
+
 def test_append_progress_rejects_non_mappings_and_oversized_payloads(tmp_path, monkeypatch):
     monkeypatch.setenv(ENV, str(tmp_path))
     assert append_progress("not-a-mapping") is False         # type: ignore[arg-type]
@@ -85,6 +115,23 @@ def test_warden_queue_block_is_surfaced_as_non_fatal(tmp_path, monkeypatch):
     assert ev["action_refused"] == "exec_command" and ev["outcome"] == "queue"
     assert ev["fatal"] is False
     assert "authority" in ev["reason"]
+
+
+def test_warden_block_from_a_RAISING_approver_is_surfaced(tmp_path, monkeypatch):
+    """The 4th block site: the approval broker itself errored → fail-closed block. This is the case an
+    operator is least able to diagnose unaided, so it must not be a SILENT block. (Red-pen MEDIUM-1: a
+    mutant deleting this emit previously escaped the whole suite.)"""
+    monkeypatch.setenv(ENV, str(tmp_path))
+
+    def _boom_approver(*_a):
+        raise RuntimeError("broker down")
+
+    hooks = WardenGateHooks(classify=_stub({"exec_command": "A3"}), approver=_boom_approver)
+    with pytest.raises(WardenDenied):
+        asyncio.run(hooks.on_tool_start(None, None, _FakeTool("exec_command")))
+    (ev,) = _lines(tmp_path)
+    assert ev["event"] == "warden.block" and ev["action_refused"] == "exec_command"
+    assert "RuntimeError" in ev["reason"] and "fail-closed" in ev["reason"]
 
 
 def test_warden_denied_by_approver_is_surfaced(tmp_path, monkeypatch):
