@@ -7023,24 +7023,30 @@
   function runIsRetryable(r) {
     return !!(r && r.run_id && (r.status === "error" || r.status === "interrupted" || r.status === "cancelled"));
   }
+  // in-flight guard: a second click on the same run's control is ignored until the first resolves, so a
+  // double-click can never fire two concurrent cancels/retries (the backend also refuses a second running
+  // run of a slug, but this stops the request storm at the source).
+  var _runBusy = {};
+  function _runAct(runId, verb, body, okMsg, after) {
+    if (!runId || _runBusy[runId]) return;
+    _runBusy[runId] = true;
+    V.postJSON(OFF("/api/run/" + encodeURIComponent(runId) + "/" + verb), body || {})
+      .then(function (res) {
+        if (res && res.ok) { V.toast(okMsg(res), false); if (after) after(res); }
+        else { V.toast((res && res.error) || ("Could not " + verb + "."), true); }
+      })
+      .catch(function (e) { V.toast("Could not " + verb + ": " + ((e && e.message) || e), true); })
+      .then(function () { delete _runBusy[runId]; });
+  }
   function runCancel(runId, after) {
     if (!runId) return;
     if (!window.confirm("Stop this run? The process is terminated; findings and proof so far stay on disk.")) return;
-    V.postJSON(OFF("/api/run/" + encodeURIComponent(runId) + "/cancel"), {})
-      .then(function (res) {
-        V.toast((res && res.ok) ? "Run cancelled." : ((res && res.error) || "Could not cancel."), !(res && res.ok));
-        if (after) after(res);
-      })
-      .catch(function (e) { V.toast("Could not cancel: " + ((e && e.message) || e), true); });
+    _runAct(runId, "cancel", {}, function () { return "Run cancelled."; }, after);
   }
   function runRetry(runId, after) {
     if (!runId) return;
-    V.postJSON(OFF("/api/run/" + encodeURIComponent(runId) + "/retry"), {})
-      .then(function (res) {
-        if (res && res.ok) { V.toast(res.resumed ? "Resuming from the last checkpoint…" : "Restarting…", false); if (after) after(res); }
-        else { V.toast((res && res.error) || "Could not retry.", true); }
-      })
-      .catch(function (e) { V.toast("Could not retry: " + ((e && e.message) || e), true); });
+    if (!window.confirm("Relaunch this run? A resumable run continues from its last checkpoint; otherwise it restarts.")) return;
+    _runAct(runId, "retry", {}, function (res) { return res.resumed ? "Resuming from the last checkpoint…" : "Restarting…"; }, after);
   }
   function pboxRetryable() { return runIsRetryable(PBOX.run); }
   function pboxRetryTitle() {
