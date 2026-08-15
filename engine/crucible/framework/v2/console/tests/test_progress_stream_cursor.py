@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.request
 from contextlib import contextmanager
 
@@ -99,6 +100,52 @@ def test_without_from_start_a_finished_run_streams_nothing(monkeypatch, tmp_path
     assert evs == []
 
 
+def test_a_live_tail_delivers_newly_appended_events(monkeypatch, tmp_path):
+    """The POSITIVE half of the live tail, and the one that was missing: "streams nothing" is satisfied by
+    a correct tail AND by a DEAD one, so on its own it lets a broken stream pass (a realistic partial
+    revert killed the stream and survived the whole suite). This asserts a tail actually delivers what is
+    appended after the client connects — the pre-existing behaviour of every loopback scan and of the
+    legacy ?slug= view."""
+    run_id = _seed(tmp_path, n=2)             # pre-existing lines must NOT be replayed...
+    log = tmp_path / "runs" / run_id / "progress.jsonl"
+    with _serve(monkeypatch, tmp_path) as base:
+        req = urllib.request.Request(f"{base}/api/events?run={run_id}", headers=dict(AUTH_HEADERS))
+        resp = urllib.request.urlopen(req, timeout=8.0)
+        try:
+            _drain_preamble(resp)             # the handler has entered its loop
+            with log.open("a", encoding="utf-8") as f:   # ...but this one MUST arrive
+                f.write(json.dumps({"event": "warden.block", "action_refused": "appended_live"}) + "\n")
+            got = _next_data(resp, timeout=8.0)
+        finally:
+            resp.close()
+    assert got is not None and got.get("action_refused") == "appended_live", \
+        "a live tail delivered nothing — the stream is dead, not merely quiet"
+    assert "_seq" not in got, "a live tail carries no cursor (it must not pay to number a whole file)"
+
+
+def _drain_preamble(resp):
+    """Read the `retry:` preamble so we know the handler has entered its loop."""
+    while True:
+        line = resp.fp.readline()
+        if not line or line.decode("utf-8", "replace").startswith("retry:"):
+            return
+
+
+def _next_data(resp, *, timeout=8.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            line = resp.fp.readline()
+        except (TimeoutError, OSError):
+            return None
+        if not line:
+            return None
+        s = line.decode("utf-8", "replace").strip()
+        if s.startswith("data: "):
+            return json.loads(s[6:])
+    return None
+
+
 def test_reconnect_with_last_event_id_never_re_delivers(monkeypatch, tmp_path):
     """BLOCK-B: the defect that made "3 blocks" render as "Refusals 9". A reconnect carrying the cursor
     must resume, not replay."""
@@ -126,8 +173,11 @@ def test_from_start_is_refused_for_a_slug_stream(monkeypatch, tmp_path):
     would widen a bounded tail into a whole-file read down an unvalidated path. No caller needs it."""
     (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
     log = tmp_path / "secret.log"
-    log.write_text(json.dumps({"event": "historic", "secret": "OWNER-KEY"}) + "\n", encoding="utf-8")
+    log.write_text(json.dumps({"event": "historic", "note": "prior contents"}) + "\n", encoding="utf-8")
     monkeypatch.setattr(server, "stream_path", lambda run=None, slug=None: log)
     with _serve(monkeypatch, tmp_path) as base:
         evs, _ = _read_events(f"{base}/api/events?slug=anything&from_start=1", want=1, timeout=2.0)
     assert evs == [], "from_start must not replay a slug-addressed log"
+    # NB: this bounds the REPLAY only. A slug live tail still streams what is appended next —
+    # the guard is about not emitting a whole file addressed by an unvalidated name, not
+    # confidentiality of that file.

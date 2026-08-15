@@ -86,16 +86,3 @@ class EventTailer:
             if isinstance(obj, dict):
                 out.append(obj)
         return out
-
-
-def count_events(path: Path) -> int:
-    """How many events a from-the-top tail of ``path`` would yield right now.
-
-    Deliberately implemented BY tailing rather than by counting newlines: ``read_new`` skips blank lines,
-    malformed lines and a partial trailing line, so a hand-rolled line count would drift from the sequence
-    numbers the stream actually emits — and a cursor that drifts resumes at the wrong event. Best-effort:
-    0 on any error (a missing file included)."""
-    try:
-        return len(EventTailer(path, from_end=False).read_new())
-    except Exception:  # noqa: BLE001 — a cursor helper must never break the stream
-        return 0

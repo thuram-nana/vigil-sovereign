@@ -71,7 +71,7 @@ def _is_loopback_host(host: str) -> bool:
 
 from . import actions, api, chat, labels, sessions
 from .blackboard_sse import BlackboardTailer
-from .sse import EventTailer, count_events, stream_path
+from .sse import EventTailer, stream_path
 
 
 def _resolve_token(explicit: str | None = None) -> str:
@@ -245,11 +245,21 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         whose whole record is in the file and would otherwise stream nothing at all (a viewer would see an
         empty screen and a "0 refusals" tile for a run that was blocked ten times). Read-only either way.
 
-        Every event carries an ``id:`` line — its 1-based line number in the log — so a reconnect resumes
-        from ``Last-Event-ID`` instead of re-delivering the file. Without that cursor a replaying stream
-        would re-count every event on each reconnect, turning the same tiles it exists to fill into a
-        FABRICATED total ("Refusals 9" for three blocks) — no better than the fabricated zero. The same
-        number is mirrored into the payload as ``_seq`` so the client can dedup as well."""
+        A REPLAYING stream (``from_start``, or a reconnect carrying ``Last-Event-ID``) additionally stamps
+        each event with an ``id:`` line + a ``_seq`` payload field — its ordinal among the PARSEABLE events
+        in the log (blank and malformed lines are skipped by the tailer, so this is NOT a raw line number) — so the reconnect resumes instead of re-delivering. Without that cursor a replaying
+        stream re-counts every event on each reconnect, turning the tiles it exists to fill into a
+        FABRICATED total ("Refusals 9" for three blocks) — no better than the fabricated zero.
+
+        The plain live tail deliberately keeps NO cursor and opens at EOF, exactly as it always has:
+          * cost — a cursor implies reading and parsing the whole file on every connection (measured at
+            5.3s / 200MB for a 34MB log), which a tail that was never going to emit those events must not
+            pay, once per connection, per reconnect, per open stream;
+          * correctness — ``EventTailer`` restarts from byte 0 when the file is truncated or ROTATED
+            (``common.logging`` rotates the engagement log at 64MB). A monotonic counter cannot survive
+            that: ids would continue past the new file's length, and the next reconnect would suppress
+            every genuinely-new event, permanently. A cursorless tail simply resumes tailing.
+        So the cursor is scoped to replay, where the file is a per-run progress log that does not rotate."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -260,14 +270,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             delivered = max(0, int(self.headers.get("Last-Event-ID") or 0))
         except (TypeError, ValueError):
             delivered = 0
-        # ONE code path: always read from the top so `seq` is the event's TRUE line number in the log (a
-        # cursor that restarted at 1 mid-file would make a later resume skip the wrong events). What
-        # differs is only how many leading lines are suppressed:
-        #   * resuming (Last-Event-ID)      → skip exactly what this client already has;
-        #   * from_start (replay a record)  → skip nothing;
-        #   * plain live tail (the default) → skip everything already in the file.
-        tailer = EventTailer(path, from_end=False)
-        skip = delivered if (delivered or from_start) else count_events(path)
+        replay = bool(from_start or delivered)
+        # Replay reads from the top and numbers what it emits; a live tail opens at EOF and numbers
+        # nothing — byte-for-byte the pre-cursor behaviour, at the pre-cursor cost.
+        tailer = EventTailer(path, from_end=not replay)
         seq = 0
         last_beat = time.monotonic()
         try:
@@ -275,10 +281,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
             while True:
                 for ev in tailer.read_new():
+                    if not replay:
+                        payload = json.dumps(ev, ensure_ascii=False, default=str)
+                        self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                        continue
                     seq += 1
-                    if seq <= skip:
-                        continue          # already delivered (or pre-dates a live tail) — never re-count
-                    if isinstance(ev, dict):
+                    if seq <= delivered:
+                        continue          # this client already has it — never re-deliver, never re-count
+                    if isinstance(ev, dict) and "_seq" not in ev:
                         ev = {**ev, "_seq": seq}
                     payload = json.dumps(ev, ensure_ascii=False, default=str)
                     self.wfile.write(f"id: {seq}\ndata: {payload}\n\n".encode("utf-8"))
@@ -359,9 +369,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 run_q = (q.get("run") or [None])[0]
                 slug_q = (q.get("slug") or [None])[0]
                 # from_start is honoured for a RUN only. `run` is validated (_safe_run_id) whereas `slug`
-                # indexes straight into targets_root(), so allowing a full-file replay there would widen a
-                # bounded tail into a whole-file read down an unvalidated path. No caller needs it: the UI
-                # only ever replays `run=`.
+                # indexes straight into targets_root(), so a replay there would emit the whole contents of
+                # a file addressed by an unvalidated name. No caller needs it: the UI only ever replays
+                # `run=`, and the legacy SPA's `slug=` stream is a live tail.
                 self._sse(stream_path(run=run_q, slug=slug_q),
                           from_start=(not slug_q and run_q is not None
                                       and (q.get("from_start") or [""])[0] in ("1", "true", "yes")))
