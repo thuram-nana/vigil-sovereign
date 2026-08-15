@@ -252,9 +252,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         FABRICATED total ("Refusals 9" for three blocks) — no better than the fabricated zero.
 
         The plain live tail deliberately keeps NO cursor and opens at EOF, exactly as it always has:
-          * cost — a cursor implies reading and parsing the whole file on every connection (measured at
-            5.3s / 200MB for a 34MB log), which a tail that was never going to emit those events must not
-            pay, once per connection, per reconnect, per open stream;
+          * cost — a cursor implies reading and parsing the WHOLE file on every connection (order
+            hundreds of MB of peak allocation for a multi-tens-of-MB log; the wall time is
+            machine-dependent), which a tail that was never going to emit those events must not pay,
+            once per connection, per reconnect, per open stream;
           * correctness — ``EventTailer`` restarts from byte 0 when the file is truncated or ROTATED
             (``common.logging`` rotates the engagement log at 64MB). A monotonic counter cannot survive
             that: ids would continue past the new file's length, and the next reconnect would suppress
@@ -381,7 +382,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # a ROTATING log into cursor mode, whose counter cannot survive the rotation. Gating only
                 # the query flag left the header as a second, ungated door. No caller needs it: the UI only
                 # ever replays `run=`, and the legacy SPA's `slug=` stream is a live tail.
-                allow_replay = (not slug_q and run_q is not None)
+                # bool(run_q), not `is not None`: stream_path's own predicate is `if run:`, so matching it
+                # exactly keeps the gate and the path selection from ever disagreeing (today they
+                # agree only because parse_qs drops blank values).
+                allow_replay = bool(run_q) and not slug_q
                 self._sse(stream_path(run=run_q, slug=slug_q),
                           allow_replay=allow_replay,
                           from_start=(allow_replay

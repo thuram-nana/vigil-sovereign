@@ -128,3 +128,65 @@ def test_a_failed_snapshot_never_reaches_the_bridge(emitted):
     agents._vigil_emit_graph_progress(None)      # _maybe_snapshot passes None when snapshot() failed
     agents._vigil_emit_graph_progress({})
     assert emitted == []
+
+
+def test_a_failed_snapshot_does_not_break_the_run(emitted, monkeypatch):
+    """MEDIUM-1: `data` is pre-initialised to None BEFORE the try in _maybe_snapshot, because the bridge
+    call sits OUTSIDE that try. Without the pre-init a snapshot() failure leaves `data` unbound and the
+    UnboundLocalError propagates out of all seven `await self._maybe_snapshot()` coordinator call sites —
+    telemetry breaking the very run it must never touch. Drive the REAL _maybe_snapshot, not the bridge."""
+    import asyncio
+
+    coord = agents.AgentCoordinator()
+    coord.set_snapshot_path(_tmp_snapshot_path())
+
+    async def _boom():
+        raise RuntimeError("snapshot failed")
+
+    monkeypatch.setattr(coord, "snapshot", _boom)
+    asyncio.run(coord._maybe_snapshot())      # must NOT raise
+    assert emitted == [], "a failed snapshot still reached the bridge"
+
+
+def _tmp_snapshot_path():
+    import pathlib
+    import tempfile
+    return pathlib.Path(tempfile.mkdtemp()) / ".state" / "agents.json"
+
+
+def test_a_failed_bridge_import_is_attempted_ONCE_not_per_mutation(monkeypatch):
+    """MEDIUM-2: the other bare-checkout test asserts the memo flag is WRITTEN; nothing asserted it is
+    READ. Dropping the read still sets the flag, so the import would be retried on every graph mutation
+    (a full sys.path walk each time) with the test still green. Count the attempts."""
+    for mod in [m for m in list(sys.modules) if m.startswith("vigil_integration")]:
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+    attempts = {"n": 0}
+
+    class _CountingBlocker:
+        def find_spec(self, name, path=None, target=None):
+            if name == "vigil_integration" or name.startswith("vigil_integration."):
+                attempts["n"] += 1
+                raise ModuleNotFoundError(f"No module named {name!r}")
+            return None
+
+    monkeypatch.setattr(sys, "meta_path", [_CountingBlocker(), *sys.meta_path])
+    for i in range(30):
+        agents._vigil_emit_graph_progress({"statuses": {f"a{i}": "running"}})   # a CHANGING histogram
+    assert attempts["n"] == 1, f"the failed import was retried {attempts['n']}x — the memo is not read"
+
+
+def test_a_broken_bridge_package_never_breaks_the_run(monkeypatch):
+    """The import guard must be broad, not just ImportError: an INSTALLED-but-broken vigil_integration
+    (any exception at import) must still degrade to a silent no-op rather than propagate into the run."""
+    for mod in [m for m in list(sys.modules) if m.startswith("vigil_integration")]:
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+
+    class _ExplodingFinder:
+        def find_spec(self, name, path=None, target=None):
+            if name == "vigil_integration" or name.startswith("vigil_integration."):
+                raise RuntimeError("the installed package is broken")
+            return None
+
+    monkeypatch.setattr(sys, "meta_path", [_ExplodingFinder(), *sys.meta_path])
+    agents._vigil_emit_graph_progress({"statuses": {"a1": "running"}})   # must NOT raise
+    assert agents._vigil_bridge_absent is True

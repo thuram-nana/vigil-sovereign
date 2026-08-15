@@ -9,7 +9,8 @@ Both halves are load-bearing and each was a red-pen BLOCK:
   * with ``from_start`` but no cursor, every reconnect re-delivers the whole file — the same tiles then
     read a FABRICATED total (3 blocks counted as 9), which is no better.
 
-So the stream emits ``id:`` (the event's true line number) + ``_seq`` in the payload, and honours
+So the stream emits ``id:`` (the event's ordinal among the PARSEABLE events — the tailer skips
+blank and malformed lines, so it is NOT a raw line number) + ``_seq`` in the payload, and honours
 ``Last-Event-ID``. These tests drive the REAL server over HTTP.
 """
 from __future__ import annotations
@@ -88,7 +89,7 @@ def test_from_start_replays_a_finished_runs_whole_record(monkeypatch, tmp_path):
     with _serve(monkeypatch, tmp_path) as base:
         evs, ids = _read_events(f"{base}/api/events?run={run_id}&from_start=1", want=3)
     assert [e["action_refused"] for e in evs] == ["exec_command_0", "exec_command_1", "exec_command_2"]
-    assert ids == [1, 2, 3], "every event must carry its true line number as the SSE id cursor"
+    assert ids == [1, 2, 3], "every event must carry its parse-ordinal as the SSE id cursor"
     assert [e["_seq"] for e in evs] == [1, 2, 3], "the cursor must also ride in the payload for client dedup"
 
 
@@ -215,3 +216,63 @@ def test_a_producer_supplied_seq_is_overwritten_by_the_stream_cursor(monkeypatch
         evs, ids = _read_events(f"{base}/api/events?run=run-seq&from_start=1", want=2)
     assert [e["_seq"] for e in evs] == [1, 2], "a producer-supplied _seq survived and shadowed the cursor"
     assert ids == [1, 2] and [e["_seq"] for e in evs] == ids, "payload and id: cursor must agree"
+
+
+def test_the_ambient_engagement_log_is_never_cursored(monkeypatch, tmp_path):
+    """The LOAD-BEARING half of the gate. `stream_path` gives `run` precedence, so `not slug_q` is
+    redundant — `run_q` is the only conjunct keeping the AMBIENT log (`log_path_for(None)`, which
+    common.logging ROTATES at 64MB) out of replay. Rotation is exactly what a monotonic cursor cannot
+    survive: ids run past the new file's length and every later event is suppressed permanently.
+
+    The other two negative controls both pass `?slug=` with no `run`, so they are satisfied by the
+    REDUNDANT conjunct and never execute this one — a mutant dropping it passed all 562 console tests."""
+    (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    log = tmp_path / "ambient.log"
+    with log.open("w", encoding="utf-8") as f:
+        for i in range(4):
+            f.write(json.dumps({"event": "historic", "n": i}) + "\n")
+    monkeypatch.setattr(server, "stream_path", lambda run=None, slug=None: log)
+    with _serve(monkeypatch, tmp_path) as base:
+        # no query at all — the ambient stream — with a cursor header
+        evs, ids = _read_events(f"{base}/api/events", last_event_id=1, want=1, timeout=2.0)
+        assert evs == [] and ids == [], "the no-arg ambient stream was replayed/cursored"
+        # ...and with the query flag
+        evs2, ids2 = _read_events(f"{base}/api/events?from_start=1", want=1, timeout=2.0)
+        assert evs2 == [] and ids2 == [], "from_start replayed the ambient stream"
+        # ...and a BLANK run, which must not read as "a run"
+        evs3, ids3 = _read_events(f"{base}/api/events?run=&from_start=1", last_event_id=1,
+                                  want=1, timeout=2.0)
+    assert evs3 == [] and ids3 == [], "a blank ?run= was treated as a replayable run"
+
+
+def test_the_aegis_verdicts_stream_is_a_pure_tail(monkeypatch, tmp_path):
+    """The second _sse call site passes no allow_replay and relies entirely on the signature default —
+    nothing pinned it, so flipping that default to True survived the whole console suite. The AEGIS
+    gateway's verdicts JSONL is unbounded and written in front of a live app; it must never become a
+    whole-file read + cursored stream."""
+    (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    verdicts = tmp_path / "verdicts.jsonl"
+    with verdicts.open("w", encoding="utf-8") as f:
+        for i in range(3):
+            f.write(json.dumps({"verdict": "allow", "n": i}) + "\n")
+    monkeypatch.setattr(actions, "aegis_verdicts_path", lambda: str(verdicts))
+    with _serve(monkeypatch, tmp_path) as base:
+        evs, ids = _read_events(f"{base}/api/aegis/verdicts?from_start=1",
+                                last_event_id=1, want=1, timeout=2.0)
+    assert evs == [], "the AEGIS verdicts stream replayed its history"
+    assert ids == [], "the AEGIS verdicts stream emitted a cursor"
+
+
+def test_a_cursor_alone_resumes_a_run_stream(monkeypatch, tmp_path):
+    """`replay` is `from_start OR Last-Event-ID` — the OR term needs its own control. A client that
+    reconnects carrying only the cursor (no from_start) must RESUME and get the remainder; ignoring the
+    cursor would silently downgrade it to a tail and drop the rest of the record. Self-fuzz found this
+    gap: `replay = allow_replay and from_start` survived the suite because every other test also passes
+    from_start=1."""
+    run_id = _seed(tmp_path, n=4)
+    with _serve(monkeypatch, tmp_path) as base:
+        rest, ids = _read_events(f"{base}/api/events?run={run_id}",   # NO from_start
+                                 last_event_id=2, want=2)
+    assert [e["action_refused"] for e in rest] == ["exec_command_2", "exec_command_3"], \
+        "a cursor-only reconnect did not resume — the remainder of the record was lost"
+    assert ids == [3, 4], "resume must continue the original numbering"

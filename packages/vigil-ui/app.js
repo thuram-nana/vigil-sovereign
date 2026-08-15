@@ -7215,7 +7215,8 @@
     // already renders, so pboxTag/pboxRow need no change:
     //  • warden.block → a "refusal" event: the box tags it "blocked" and both the row summary
     //    (KIND_META.refusal) and the step line read "blocked by warden: <tool> — <reason>", so the
-    //    operator sees WHAT was blocked and WHY. (The reason is carried by both; verified by test.)
+    //    operator sees WHAT was blocked and WHY. (The reason is carried by both. NB: this repo runs
+    //    no JS test suite, so the UI half of this slice is checked by `node --check` only.)
     if (ev.event === "warden.block") return { kind: "refusal", payload: {
       gate: ev.gate || "warden", action_refused: ev.action_refused || "",
       reason: ev.reason || "", fatal: !!ev.fatal } };
