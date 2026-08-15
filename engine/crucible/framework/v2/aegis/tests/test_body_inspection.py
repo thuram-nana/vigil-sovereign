@@ -98,6 +98,29 @@ def test_multipart_matches_urlencoded_parity_on_the_same_value():
     assert ue == mp == "sqli_attempt"
 
 
+def test_a_field_literally_named_filename_is_still_inspected_not_skipped_as_a_file():
+    # evasion-resistance: the file-part skip is anchored to a `;`-delimited filename PARAM, so a field
+    # whose NAME happens to be "filename" is a normal text field and must still be inspected — otherwise
+    # an attacker names their injection field "filename" to slip past the gate.
+    body = _multipart(("filename", SQLI))
+    v = inspect_request("POST", "/", [("Content-Type", MP)], body, enforce=True)
+    assert v is not None and v.decision == "confirmed" and v.attack_class == "sqli_attempt"
+    assert v.contributing == ["filename"]
+
+
+def test_multipart_strip_is_fail_safe_not_byte_identical():
+    # HONESTY: multipart parity is FP-safe, not byte-identical. A value whose only maliciousness is a
+    # leading/trailing newline blocks on urlencoded but clears on multipart (the part value is
+    # \r\n-stripped). The divergence is fail-SAFE (multipart is more conservative — it never turns a
+    # urlencoded clear into a multipart block), so it cannot introduce a false positive.
+    import urllib.parse
+    edge = "\ncat /etc/passwd\n"
+    ue = _block("application/x-www-form-urlencoded", "q=" + urllib.parse.quote(edge))
+    mp = _block(MP, _multipart(("q", edge)))
+    assert ue == "command_injection_attempt"     # urlencoded keeps the newline separators
+    assert mp is None                            # multipart strips the framing newlines → clear (fail-safe)
+
+
 # --------------------------------------------------------------------------- NEGATIVE CONTROLS (near-zero-FP)
 
 def test_benign_single_field_form_does_not_block():

@@ -116,9 +116,12 @@ def _header_cookie_values(headers: list[tuple[str, str]], add: Callable[[str, st
 
 def _multipart_fields(ctype: str, body: str) -> list[tuple[str, str]]:
     """Bounded, total ``(name, value)`` extraction of TEXT form fields from a ``multipart/form-data``
-    body. FILE parts (a Content-Disposition carrying ``filename=``) are skipped — their bytes are often
-    binary and are not a string-injection surface. Never raises; ``[]`` on any malformed structure. This
-    exists because a multipart body used to fall through candidate extraction entirely, so a payload
+    body. FILE parts (a Content-Disposition carrying a ``filename``/``filename*`` param, matched by
+    ``_MULTIPART_FILENAME_RE`` so ``filename =`` and RFC-5987 ``filename*=`` are caught too) are skipped —
+    their bytes are often binary and are not a string-injection surface. A field merely NAMED ``filename``
+    is NOT a file part (the regex is ``;``-anchored to the param, not the name) and is still inspected.
+    Never raises; ``[]`` on any malformed structure. This exists because a multipart body used to fall
+    through candidate extraction entirely, so a payload
     posted as a form field bypassed inline inspection completely."""
     out: list[tuple[str, str]] = []
     try:
