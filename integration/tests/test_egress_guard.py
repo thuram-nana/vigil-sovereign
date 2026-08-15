@@ -31,11 +31,30 @@ ex = pytest.importorskip("vigil_integration.live.executor")
 eg = pytest.importorskip("vigil_integration.live.egress_guard")
 
 GUARD = Path(__file__).resolve().parents[2] / "tools" / "egress-guard" / "egress_guard"
-_needs_guard = pytest.mark.skipif(
-    not (GUARD.is_file() and os.access(GUARD, os.X_OK)),
-    reason="egress_guard not built — run `make -C tools/egress-guard`")
-
 _PY = "python3"
+
+
+def _guard_usable() -> tuple[bool, str]:
+    """The guard must be BUILT *and* able to actually ARM its unprivileged seccomp user-notify listener on
+    THIS host. A restricted kernel/namespace (some CI runners — e.g. GitHub's Noble image, where the guard
+    exits non-zero with "could not acquire the seccomp listener") builds the binary but cannot arm it. That
+    is a platform capability gap, not a guard defect — so we SKIP there, exactly as the bwrap sandbox tests
+    skip when namespaces cannot be constructed. Probe once, at collection, with a trivial command."""
+    if not (GUARD.is_file() and os.access(GUARD, os.X_OK)):
+        return (False, "egress_guard not built — run `make -C tools/egress-guard`")
+    try:
+        r = subprocess.run([str(GUARD), "--", _PY, "-c", "print('probe')"],
+                           capture_output=True, text=True, timeout=30)
+    except Exception as exc:  # noqa: BLE001 — a probe failure = not usable here, never a collection error
+        return (False, f"egress_guard could not be probed on this host ({type(exc).__name__})")
+    if r.returncode == 0 and "probe" in r.stdout:
+        return (True, "")
+    return (False, "egress_guard cannot arm its seccomp listener on this host "
+                   f"(rc={r.returncode}: {(r.stderr or '').strip()[:120]}) — a restricted-namespace runner")
+
+
+_GUARD_OK, _GUARD_SKIP_REASON = _guard_usable()
+_needs_guard = pytest.mark.skipif(not _GUARD_OK, reason=_GUARD_SKIP_REASON)
 
 
 def _run_guarded(code: str, *, log: Path, fail_on_egress: bool = False, timeout: int = 60):
