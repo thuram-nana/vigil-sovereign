@@ -83,6 +83,17 @@ def test_resume_fails_closed_when_a_restored_state_has_no_real_seq():
     assert rep.iterations == 1                                 # fresh start
 
 
+def test_resume_of_a_paused_at_zero_run_resumes_honestly():
+    # a run that paused at iteration 0 (awaiting approval, no facts/leads/trace) is real progress: resume
+    # must continue it (resumed=True, seeded at head_seq+1), not silently start fresh.
+    prior = AgentState(engagement_slug="loopback", iteration=0)
+    prior.awaiting_approval = True
+    seams = EngineSeams(attest=_attest_allow, think=ReplayThinker([_complete()]),
+                        rebuild=lambda: (prior, 1))
+    rep = _engine(seams).engage(TARGET, resume=True)
+    assert rep.resumed is True
+
+
 def test_resume_with_no_prior_state_degrades_to_a_fresh_start():
     seams = EngineSeams(attest=_attest_allow, think=ReplayThinker([_complete()]),
                         rebuild=lambda: (AgentState(), 0))

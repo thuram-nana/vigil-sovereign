@@ -245,7 +245,8 @@ class VigilEngine:
             except Exception:  # noqa: BLE001 — an unreadable/forged spine → a fresh start, never a crash
                 prior, hs = None, 0
             has_progress = isinstance(prior, AgentState) and bool(
-                prior.iteration or prior.facts or prior.leads or prior.execution_trace or prior.done)
+                prior.iteration or prior.facts or prior.leads or prior.execution_trace or prior.done
+                or prior.awaiting_approval or prior.awaiting_question)   # a paused-at-0 run resumes honestly
             if has_progress and hs >= 1:                    # real state AND a real seq to continue past
                 state = prior
                 state.engagement_slug = self.slug          # identity/objective stay authoritative
