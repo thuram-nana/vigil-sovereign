@@ -239,14 +239,18 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _sse(self, path) -> None:
+    def _sse(self, path, *, from_start: bool = False) -> None:
+        """Stream a run's progress log. By default the tailer starts at EOF (live follow). With
+        ``from_start`` it replays the file from byte 0 first — needed for a run that has ALREADY finished,
+        whose whole record is in the file and would otherwise stream nothing at all (a viewer would see an
+        empty screen and a "0 refusals" tile for a run that was blocked ten times). Read-only either way."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self._sec_headers()
         self.end_headers()
-        tailer = EventTailer(path)
+        tailer = EventTailer(path, from_end=not from_start)
         last_beat = time.monotonic()
         try:
             self.wfile.write(b"retry: 3000\n\n")
@@ -330,7 +334,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/events"):
                 q = parse_qs(parts.query)
                 self._sse(stream_path(run=(q.get("run") or [None])[0],
-                                      slug=(q.get("slug") or [None])[0]))
+                                      slug=(q.get("slug") or [None])[0]),
+                          from_start=((q.get("from_start") or [""])[0] in ("1", "true", "yes")))
                 return
             if path == "/api/blackboard":
                 q = parse_qs(parts.query)

@@ -2303,8 +2303,11 @@
           L.events.push(ev); onEvents();
         }, function () { /* auto-reconnect; the id: cursor prevents gaps/replays */ });
       } else if (run.stream === "progress") {
-        // a loopback scan writes a progress log (not the reasoning spine) — render it honestly.
-        liveES = V.sse(OFF("/api/events?run=" + encodeURIComponent(run.run_id)), function (ev) {
+        // a loopback scan / codebase run writes a progress log (not the reasoning spine) — render it
+        // honestly. The tailer defaults to EOF, so replay the file from the START: otherwise opening a
+        // run that already finished (or joining a live one late) shows an empty timeline and a
+        // "Refusals 0" tile for a run that may have been blocked many times.
+        liveES = V.sse(OFF("/api/events?run=" + encodeURIComponent(run.run_id) + "&from_start=1"), function (ev) {
           const norm = progressToEvent(ev); if (norm) { L.events.push(norm); onEvents(); }
         });
       }
@@ -2484,12 +2487,22 @@
     function drawTimeline() {
       const host = V.$("#live-timeline"); if (!host) return;
       if (L.filter === "inbox") { drawInbox(host); return; }
+      // An empty timeline means different things — say which, and never imply "still coming" for a run
+      // that has ended. A finished run whose feed replayed empty genuinely recorded no steps.
+      function liveEmptyText() {
+        const r = L.run || {};
+        if (r.stream === "none") return "This run reports in its own sandbox — see Findings for its results.";
+        if (r.status && r.status !== "running") {
+          return "This run has finished and recorded no steps here"
+               + (r.status === "interrupted" ? " — it was interrupted before it reported." : ".");
+        }
+        return "Waiting for the first event…";
+      }
       let rows = L.events;
       if (L.filter === "facts") rows = rows.filter(function (e) { return e.kind === "finding" && isFact(e.payload); });
       else if (L.filter === "leads") rows = rows.filter(function (e) { return e.kind === "finding" && !isFact(e.payload); });
       if (!rows.length) {
-        V.mount(host, h("div.empty", null, L.events.length ? "No events match this filter." :
-          (L.run && L.run.stream === "none" ? "This run reports in its own sandbox — see Findings for its results." : "Waiting for the first event…")));
+        V.mount(host, h("div.empty", null, L.events.length ? "No events match this filter." : liveEmptyText()));
         return;
       }
       const out = [];
@@ -3009,10 +3022,6 @@
   // longer identifiable by stream alone — without this it would sit on "Still running… no saved report
   // YET", which is false twice over: it has finished, and no report is ever coming.
   function p3RunCapturesNoReport(run) { return run.stream === "none" || run.mode === "codebase"; }
-  function p3RunHasNoReport(run) {
-    // ...plus live engage runs (stream 'blackboard'), whose results live on the spine, not in a report.
-    return p3RunCapturesNoReport(run) || run.stream === "blackboard";
-  }
   function p3NoReportEmpty(run, what) {
     if (run.stream === "blackboard") {
       return h("div.empty", null, [h("div.big", null, "This run reports on the reasoning spine"),
@@ -3023,7 +3032,10 @@
     if (p3RunCapturesNoReport(run)) {
       return h("div.empty", null, [h("div.big", null, "Runs in its own sandbox"),
         h("p", null, "A codebase (Strix) / AEGIS run reports inside its sandbox — no re-checkable web report is captured here."),
-        (run.mode === "codebase"
+        // Offer Live ONLY for a run that actually HAS a replayable feed (stream "progress"). A legacy
+        // codebase run predates the feed and has stream "none" — sending it to Live would bounce the
+        // operator to an empty screen that points straight back here.
+        (run.stream === "progress"
           ? h("button.btn", { style: { marginTop: "14px" }, onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(run.run_id); } },
               [V.icon("live"), "See what it did in Live"])
           : null)]);
@@ -7173,7 +7185,9 @@
     if (run && run.stream === "blackboard" && run.slug) {
       PBOX.es = V.sse(OFF("/api/blackboard?slug=" + encodeURIComponent(run.slug)), pboxOnEvent, function () {});
     } else if (run && run.stream === "progress") {
-      PBOX.es = V.sse(OFF("/api/events?run=" + encodeURIComponent(run.run_id)), function (ev) {
+      // from_start: the tailer defaults to EOF, so a box attaching mid-run (or to a run that just ended)
+      // would show nothing. The ring buffer caps what is kept, so replaying the file is bounded.
+      PBOX.es = V.sse(OFF("/api/events?run=" + encodeURIComponent(run.run_id) + "&from_start=1"), function (ev) {
         var norm = pboxProgressToEvent(ev); if (norm) pboxOnEvent(norm);
       }, function () {});
     }

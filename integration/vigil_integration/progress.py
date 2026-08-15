@@ -13,15 +13,26 @@ module ``framework``/``strix``/SDK-free (``integration/tests/test_two_env_bounda
 imports it lazily+guarded so a bare vendored checkout with no ``vigil_integration`` on the path stays
 byte-identical at runtime. It needs ZERO server changes — the existing ``/api/events`` tailer surfaces it.
 
-Every write is BEST-EFFORT and, critically, NEVER BLOCKS: a missing env var, an unwritable path, a symlink, a
-non-regular file (FIFO/device/socket), a serialisation error, or an oversized payload is a silent no-op that
-returns ``False`` and never raises — surfacing progress must never break a run or, especially, delay a WARDEN
-block (the gate emits BEFORE it raises, so a blocking write here would hang the refusal itself). Appends go to
-a regular file opened ``O_APPEND|O_NONBLOCK|O_NOFOLLOW``; on Linux the kernel serialises appends to a regular
-file (the inode lock is held across the write), so a concurrent console-side ``_append_progress`` and this
-child write land as whole, non-interleaved lines. Oversized payloads are dropped rather than risk a torn
-write, short writes are looped to completion, and the console tailer already skips any malformed line — so the
-failure mode is "a line is missing", never "the feed is corrupt".
+Every write is BEST-EFFORT and, critically, NEVER BLOCKS: a missing env var, an unwritable path, a symlink or
+hardlink, a non-regular file (FIFO/device/socket), a serialisation error, or an oversized payload is a silent
+no-op that returns ``False`` and never raises — surfacing progress must never break a run or, especially,
+delay a WARDEN block (the gate emits BEFORE it raises, so a blocking write here would hang the refusal
+itself).
+
+Appends go to a regular file opened ``O_APPEND|O_NONBLOCK|O_NOFOLLOW`` (+ an ``fstat`` ``S_ISREG``/``st_nlink``
+check, since a reader-attached FIFO opens fine and a hardlink is a real regular file). On Linux the kernel
+serialises appends to a regular file — the inode lock is held across the write — so a concurrent console-side
+``_append_progress`` and this child write land as whole, non-interleaved lines.
+
+Scope of the durability claim, stated honestly: oversized payloads are dropped rather than risk a torn write,
+and short writes are looped to completion, so in normal operation an event is either fully written or not
+written at all. If the filesystem errors PART-WAY through a line (ENOSPC/EFBIG/EIO), the partial bytes are
+already on disk; we then best-effort append a newline so the damage is bounded to that one malformed line,
+which the console tailer skips. Under a hard cap even that terminator can fail — in which case the next append
+merges into the partial line and both events are lost. So: normally "an event is missing"; under a mid-line
+write error, "one or two lines are lost" — never a wedged run, and never a blocked WARDEN refusal.
+``O_NOFOLLOW`` guards the FINAL path component only; a symlinked parent *directory* is not defended here (the
+run dir is created by the console, not by this writer).
 """
 
 from __future__ import annotations
@@ -61,18 +72,38 @@ def append_progress(event: Mapping[str, Any], *, run_dir_env: str = _RUN_DIR_ENV
         # elsewhere (the existing reader in report/runinfo.py already refuses a symlinked progress file).
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
         try:
-            # Belt-and-braces after the flags: only ever write to a REGULAR file. A device/socket/FIFO
-            # that slipped past the open flags is refused rather than written to.
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
+            st = os.fstat(fd)
+            # Belt-and-braces AFTER the flags, because the flags do not cover every case:
+            #  * a FIFO with a reader ALREADY attached opens fine under O_NONBLOCK — S_ISREG is the only
+            #    thing that stops it (and stops a device/socket too);
+            #  * O_NOFOLLOW rejects a symlink at the final component, but a HARDLINK planted here is a
+            #    real regular file — st_nlink != 1 refuses it, so these appends can't be redirected into
+            #    a second name for the same inode.
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
                 return False
             # Write the WHOLE line: a short write would truncate this event AND merge it with the next
-            # append into one malformed line — losing two events instead of the promised "one is missing".
+            # append into one malformed line — losing two events instead of just this one.
             mv = memoryview(data)
-            while mv:
-                n = os.write(fd, mv)
-                if n <= 0:
-                    return False
-                mv = mv[n:]
+            wrote = 0
+            try:
+                while mv:
+                    n = os.write(fd, mv)
+                    if n <= 0:
+                        return False
+                    wrote += n
+                    mv = mv[n:]
+            except OSError:
+                # ENOSPC / EFBIG / EIO part-way through: those bytes are already in the file. Terminate
+                # them with a newline so the NEXT append starts a fresh line and the tailer skips exactly
+                # one malformed line instead of silently swallowing the event that follows. Best-effort:
+                # under a hard cap even this 1-byte write fails, which is why the docstring scopes the
+                # guarantee rather than asserting it absolutely.
+                if wrote:
+                    try:
+                        os.write(fd, b"\n")
+                    except OSError:
+                        pass
+                return False
         finally:
             os.close(fd)
         return True

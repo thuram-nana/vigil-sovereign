@@ -246,7 +246,9 @@ class WardenGateHooks:
                 "tier": decision.tier,
                 "outcome": decision.outcome,
                 "fatal": decision.outcome == "deny",
-                "reason": reason or decision.reason,
+                # bounded like action_refused: a reason can embed the tool name (decide_tool's denylist
+                # message does), and the UI now renders it in the box row AND the Live timeline.
+                "reason": str(reason or decision.reason or "")[:400],
             })
         except Exception:  # noqa: BLE001 — telemetry must NEVER alter the gate's control flow
             pass

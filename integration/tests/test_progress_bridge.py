@@ -10,8 +10,11 @@ The invariants under test:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import signal
+import time
 
 import pytest
 
@@ -55,13 +58,84 @@ def test_append_progress_is_a_silent_noop_without_a_run_dir(tmp_path, monkeypatc
     assert append_progress({"event": "a"}) is False          # unwritable path → silent, no raise
 
 
+class _Blocked(BaseException):
+    """Deliberately a BaseException, NOT an Exception: ``append_progress`` catches ``Exception`` and
+    returns False, so an Exception-derived timeout would be SWALLOWED by the code under test and the
+    assertion `is False` would pass — the test would green-wash the very hang it exists to catch.
+    (Verified: with an AssertionError timeout, a mutant dropping O_NONBLOCK passed 19/19.)"""
+
+
+@contextlib.contextmanager
+def _deadline(seconds=3):
+    """Turn a HANG into a test FAILURE. Without this, a regression on "telemetry never blocks the gate"
+    surfaces only as a CI job that runs to the runner limit with no pytest output — a far weaker signal
+    than a red test (red-pen MEDIUM-2)."""
+    def _fire(_sig, _frm):
+        raise _Blocked("append_progress BLOCKED — telemetry must never delay a WARDEN refusal")
+    old = signal.signal(signal.SIGALRM, _fire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+    # belt-and-braces: even if a future refactor swallows the signal, a slow call still fails here.
+    assert time.monotonic() - started < seconds, "append_progress took too long — it blocked"
+
+
 def test_append_progress_never_blocks_on_a_fifo(tmp_path, monkeypatch):
     """A FIFO planted at progress.jsonl must NOT wedge the writer. The WARDEN gate emits BEFORE it raises,
     so a blocking open here would hang the refusal itself — telemetry altering the gate (red-pen BLOCK-3).
     The call must return promptly and falsely-claim nothing."""
     monkeypatch.setenv(ENV, str(tmp_path))
     os.mkfifo(os.path.join(str(tmp_path), "progress.jsonl"))   # no reader attached
-    assert append_progress({"event": "warden.block"}) is False  # returns — does not hang
+    with _deadline():
+        assert append_progress({"event": "warden.block"}) is False  # returns — does not hang
+
+
+def test_append_progress_refuses_a_fifo_that_HAS_a_reader(tmp_path, monkeypatch):
+    """The case the open flags do NOT cover: with a reader attached, O_NONBLOCK opens the FIFO happily —
+    only the fstat S_ISREG check stops the write. Without that check this test's bytes would land in the
+    pipe instead of a file (red-pen BLOCK-2: a mutant deleting S_ISREG passed the whole suite)."""
+    monkeypatch.setenv(ENV, str(tmp_path))
+    fifo = os.path.join(str(tmp_path), "progress.jsonl")
+    os.mkfifo(fifo)
+    rfd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)      # attach a reader
+    try:
+        with _deadline():
+            assert append_progress({"event": "warden.block"}) is False
+        try:
+            spilled = os.read(rfd, 4096)
+        except BlockingIOError:
+            spilled = b""
+        assert spilled == b"", "the event was written into a FIFO instead of being refused"
+    finally:
+        os.close(rfd)
+
+
+def test_append_progress_refuses_a_hardlink(tmp_path, monkeypatch):
+    """A hardlink is a real regular file, so O_NOFOLLOW and S_ISREG both pass it — st_nlink is what
+    refuses it, so these appends can't be redirected into a second name for the same inode."""
+    monkeypatch.setenv(ENV, str(tmp_path))
+    victim = tmp_path / "victim.txt"
+    victim.write_text("original\n", encoding="utf-8")
+    os.link(str(victim), os.path.join(str(tmp_path), "progress.jsonl"))
+    assert append_progress({"event": "warden.block"}) is False
+    assert victim.read_text(encoding="utf-8") == "original\n", "the append wrote through a hardlink"
+
+
+def test_warden_block_fields_are_bounded(tmp_path, monkeypatch):
+    """action_refused/reason are rendered by the UI — an SDK tool repr or a long reason must not ride in
+    unbounded (red-pen L-2/L-3: dropping either cap left the suite green)."""
+    monkeypatch.setenv(ENV, str(tmp_path))
+    huge = "T" * 5000
+    hooks = WardenGateHooks(classify=_stub({huge: "A3"}), denylist=[huge])
+    with pytest.raises(WardenDenied):
+        asyncio.run(hooks.on_tool_start(None, None, _FakeTool(huge)))
+    (ev,) = _lines(tmp_path)
+    assert len(ev["action_refused"]) <= 120
+    assert len(ev["reason"]) <= 400
 
 
 def test_append_progress_refuses_to_follow_a_symlink(tmp_path, monkeypatch):

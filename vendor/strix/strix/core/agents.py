@@ -326,7 +326,8 @@ class AgentCoordinator:
         _vigil_emit_graph_progress(data)
 
 
-_vigil_last_graph: str | None = None   # last emitted strix.graph payload — emit only on CHANGE
+_vigil_last_graph: str | None = None    # last emitted strix.graph payload — emit only on CHANGE
+_vigil_bridge_absent: bool = False      # bare vendored checkout: don't retry the import per mutation
 
 
 def _vigil_emit_graph_progress(snap: "dict[str, Any] | None") -> None:
@@ -336,11 +337,15 @@ def _vigil_emit_graph_progress(snap: "dict[str, Any] | None") -> None:
     ``vigil_integration`` on the path stays byte-identical at runtime — an ImportError, an unset run dir, or
     any error is a silent no-op that never affects the run. Emits only a status HISTOGRAM (counts by state)
     and the agent count — never agent names/metadata — so nothing sensitive rides the feed."""
-    if not snap:
+    global _vigil_bridge_absent
+    if not snap or _vigil_bridge_absent:
         return
     try:
         from vigil_integration.progress import append_progress, strix_graph_event
     except Exception:  # noqa: BLE001 — bare vendored checkout: no bridge, byte-identical runtime
+        # remember it: a failed import is NOT cached by Python, so retrying per graph mutation would walk
+        # the whole sys.path every time. One attempt per process is enough.
+        _vigil_bridge_absent = True
         return
     try:
         ev = strix_graph_event(snap)
