@@ -85,6 +85,12 @@ def test_schedule_checkpoint_rejects_non_finite_values():
     assert ScheduleCheckpoint.from_json({"last_run": 1000.0, "interval_seconds": float("nan")}) is None
     assert ScheduleCheckpoint.from_json({"last_run": "nan", "interval_seconds": 50.0}) is None       # string
     assert ScheduleCheckpoint.from_json({"last_run": 1000.0, "interval_seconds": "inf"}) is None     # string
+    # a JSON int is arbitrary-precision: a tampered huge integer overflows float() (OverflowError, not
+    # ValueError) — from_json must REJECT it (return None), never raise (its documented totality).
+    assert ScheduleCheckpoint.from_json({"last_run": 10 ** 400, "interval_seconds": 50.0}) is None
+    assert ScheduleCheckpoint.from_json({"last_run": 1000.0, "interval_seconds": 10 ** 400}) is None
+    assert ScheduleCheckpoint.from_json({"last_run": 1000.0, "interval_seconds": 50.0, "next_run": 10 ** 400}) \
+        == ScheduleCheckpoint(last_run=1000.0, interval_seconds=50.0, next_run=1050.0)   # poisoned next_run recomputed
     # a finite pair with only next_run poisoned still parses (next_run is informational → recomputed).
     ok = ScheduleCheckpoint.from_json({"last_run": 1000.0, "interval_seconds": 50.0, "next_run": float("nan")})
     assert ok == ScheduleCheckpoint(last_run=1000.0, interval_seconds=50.0, next_run=1050.0)

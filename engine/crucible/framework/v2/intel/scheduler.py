@@ -100,13 +100,15 @@ class ScheduleCheckpoint:
         try:
             last = float(doc["last_run"])
             interval = float(doc["interval_seconds"])
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            # ArithmeticError covers OverflowError: a JSON int is arbitrary-precision, so a tampered
+            # last_run/interval like 10**400 raises OverflowError in float() — reject it, don't crash.
             return None
         if not (math.isfinite(last) and math.isfinite(interval)):
             return None
         try:
             nxt = float(doc.get("next_run", last + interval))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, ArithmeticError):
             nxt = last + interval
         if not math.isfinite(nxt):                           # informational field; recompute if poisoned
             nxt = last + interval
