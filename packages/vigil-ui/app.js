@@ -6906,6 +6906,226 @@
     ]));
   }
 
+  // ============================================================================
+  // W5 — the PROCESS BOX. A global, collapsible, resizable, scrollable overlay that
+  // shows, live, exactly what the backend is doing on the active run: every step, and
+  // clearly WHAT blocked (which gate + why) or WHAT failed (a bad tool result / a
+  // backend network/API error). It discovers the newest running run on its own, tails
+  // the SAME SSE feeds the Live view uses, and SURVIVES route changes — its EventSource
+  // is held in PBOX.es, NOT in liveES, so teardownLive() never closes it. It is a fixed
+  // overlay (bottom-right, below the toast stack) that never covers the workspace.
+  var PBOX_KEY = "vigil-process-box";
+  var PBOX_CAP = 200;                                   // rows kept in the scrollback ring buffer
+  var PBOX = { es: null, run: null, following: "", events: [], seen: {}, poll: null,
+               ui: { open: false, dismissed: false } };
+
+  function pboxLoadUI() {
+    try {
+      var s = JSON.parse(localStorage.getItem(PBOX_KEY) || "{}");
+      if (s && typeof s === "object") { PBOX.ui.open = !!s.open; PBOX.ui.dismissed = !!s.dismissed; }
+    } catch (e) { /* storage off — defaults (collapsed, visible) */ }
+  }
+  function pboxSaveUI() {
+    try { localStorage.setItem(PBOX_KEY, JSON.stringify(PBOX.ui)); } catch (e) {}
+  }
+  function pboxHost() {
+    var host = V.$("#process-box");
+    if (!host) { host = h("div#process-box"); document.body.appendChild(host); }
+    return host;
+  }
+  // The per-event status tag — this is the "what blocked / what failed" clarity the operator asked for.
+  function pboxTag(e) {
+    var p = e.payload || {};
+    if (e.kind === "refusal") return { cls: "pb-blocked", label: "blocked" };
+    if (e.kind === "tool_result" && p.refused) return { cls: "pb-blocked", label: "blocked" };
+    if (e.kind === "tool_result" && p.ok === false) return { cls: "pb-failed", label: "failed" };
+    if (e.kind === "result" && p.success === false) return { cls: "pb-failed", label: "failed" };
+    if (e.kind === "error_class") {                    // W6: a backend LLM-call failure, classified
+      var k = String(p.error_class || "").toLowerCase();
+      if (k === "network") return { cls: "pb-failed", label: "network" };
+      if (k === "api" || k === "api_transient") return { cls: "pb-failed", label: "API error" };
+      if (k === "blocked") return { cls: "pb-blocked", label: "blocked" };
+      return { cls: "pb-failed", label: k || "error" };
+    }
+    if (e.kind === "finding") {
+      // lead ≠ fact: only an oracle-CONFIRMED finding earns the proven-fact colour. An unconfirmed
+      // finding (every loopback-scan finding, an un-adjudicated blackboard lead) is a LEAD — the same
+      // distinction the Live view draws — so this ticker never shows a confirmation the oracle never gave.
+      return isFact(p) ? { cls: "pb-finding", label: "fact" } : { cls: "pb-lead", label: "lead" };
+    }
+    return { cls: "", label: "" };
+  }
+  function pboxRow(e) {
+    var p = e.payload || {};
+    var m = KIND_META[e.kind] || { label: e.kind, sum: function () { return ""; } };
+    var st = pboxTag(e);
+    var t = e.posted_at ? String(e.posted_at).slice(11, 19) : (e.id != null ? "#" + e.id : "");
+    var isErr = e.kind === "error_class";
+    var sum = isErr ? (p.detail || p.error_class || "the model call failed") : (m.sum(p) || "—");
+    return h("div.pb-row" + (st.cls ? "." + st.cls : ""), null, [
+      h("span.pb-ico", null, V.icon(isErr ? "x" : kindIcon(e.kind, p))),
+      h("div.pb-body", null, [
+        h("div.pb-k", null, [isErr ? "Backend error" : m.label,
+          st.label ? h("span.pb-tag" + (st.cls ? "." + st.cls : ""), null, st.label) : null]),
+        h("div.pb-m", { title: sum }, sum),
+      ]),
+      h("span.pb-t", null, t),
+    ]);
+  }
+  function pboxStepText() {
+    for (var i = PBOX.events.length - 1; i >= 0; i--) {
+      var e = PBOX.events[i], p = e.payload || {};
+      if (e.kind === "refusal") return "blocked by " + (p.gate || "gate") + ": " + (p.action_refused || "");
+      if (e.kind === "error_class") return "error (" + (p.error_class || "") + "): " + (p.detail || "");
+      if (e.kind === "tool_call") return "running " + (p.tool || "") + (p.target ? " → " + p.target : "");
+      if (e.kind === "plan") return "planning: " + (KIND_META.plan.sum(p) || "");
+      if (e.kind === "observation") return KIND_META.observation.sum(p) || "observing";
+      if (e.kind === "finding") return "found: " + (KIND_META.finding.sum(p) || "");
+    }
+    return PBOX.run ? (PBOX.run.status || "starting…") : "";
+  }
+  function pboxIsRunning() { return !!(PBOX.run && PBOX.run.status === "running"); }
+  function pboxUpdateChrome() {
+    // update just the pill/step/dot without rebuilding the feed (so scroll position is preserved).
+    var step = V.$("#pb-step"); if (step) step.textContent = pboxStepText() || "waiting…";
+    var pill = V.$("#pb-pill");
+    if (pill) {
+      pill.className = "pb-pill" + (pboxIsRunning() ? " live" : "");
+      // keep the pill TEXT in sync too (not just the dot), so a run starting while minimized doesn't
+      // leave a live green dot next to the text "Activity · idle".
+      if (pill.lastChild && pill.lastChild.nodeType === 3) {
+        pill.lastChild.textContent = pboxIsRunning() ? "Activity" : "Activity · idle";
+      }
+    }
+    var dot = V.$("#pb-run-dot"); if (dot) dot.className = "dot" + (pboxIsRunning() ? " pb-on" : "");
+  }
+  function pboxAppendRow(e) {
+    var feed = V.$("#pb-feed"); if (!feed) return;
+    var empty = feed.querySelector(".pb-empty"); if (empty) empty.remove();
+    var atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 28;   // "stick" only if already there
+    feed.appendChild(pboxRow(e));
+    var trimmed = 0;
+    while (feed.childNodes.length > PBOX_CAP) {
+      var fc = feed.firstChild; trimmed += (fc.offsetHeight || 0); feed.removeChild(fc);
+    }
+    if (atBottom) feed.scrollTop = feed.scrollHeight;
+    else if (trimmed) feed.scrollTop = Math.max(0, feed.scrollTop - trimmed);   // keep a scrolled-up view steady
+  }
+  function pboxRenderShell() {
+    var host = pboxHost();
+    if (PBOX.ui.dismissed) { host.style.display = "none"; return; }
+    host.style.display = "";
+    if (!PBOX.ui.open) {
+      V.mount(host, h("button.pb-pill#pb-pill" + (pboxIsRunning() ? ".live" : ""), {
+        title: "Show live backend activity",
+        onClick: function () { PBOX.ui.open = true; pboxSaveUI(); pboxRenderShell(); } },
+        [h("span.dot"), pboxIsRunning() ? "Activity" : "Activity · idle"]));
+      return;
+    }
+    var head = h("div.pb-head", null, [
+      h("div.pb-title", null, [h("span.dot#pb-run-dot" + (pboxIsRunning() ? ".pb-on" : "")),
+        h("b", null, "Activity"),
+        PBOX.run ? h("span.pb-run", { title: "the run this is following" },
+          (PBOX.run.engagement_label || PBOX.run.slug || PBOX.run.run_id || "")) : null]),
+      h("div.pb-btns", null, [
+        h("button.pb-x", { title: "Minimize", "aria-label": "Minimize activity",
+          onClick: function () { PBOX.ui.open = false; pboxSaveUI(); pboxRenderShell(); } }, "–"),
+        h("button.pb-x", { title: "Hide", "aria-label": "Hide activity",
+          onClick: function () { PBOX.ui.dismissed = true; pboxSaveUI(); pboxHost().style.display = "none"; } }, "×"),
+      ]),
+    ]);
+    var step = h("div.pb-step#pb-step", null, pboxStepText() || "waiting…");
+    var body;
+    if (PBOX.run && PBOX.run.stream === "none") {
+      body = h("div.pb-feed#pb-feed", null,
+        h("div.pb-empty", null, "This run reports inside its own sandbox — its results land in Findings."));
+    } else if (!PBOX.events.length) {
+      body = h("div.pb-feed#pb-feed", null, h("div.pb-empty", null,
+        pboxIsRunning() ? "Waiting for the first step…"
+                        : "No active run. Start an assessment and its steps stream here, live."));
+    } else {
+      body = h("div.pb-feed#pb-feed", null, PBOX.events.slice(-PBOX_CAP).map(pboxRow));
+    }
+    V.mount(host, h("div.pb-card", null, [head, step, body]));
+    var f = V.$("#pb-feed"); if (f) f.scrollTop = f.scrollHeight;   // land at the newest on (re)open
+  }
+  function pboxOnEvent(e) {
+    if (!e || !e.kind) return;
+    if (e.id != null) { if (PBOX.seen[e.id]) return; PBOX.seen[e.id] = 1; }   // dedup a reconnect replay
+    PBOX.events.push(e);
+    if (PBOX.events.length > PBOX_CAP * 2) {
+      PBOX.events = PBOX.events.slice(-PBOX_CAP);
+      // keep `seen` bounded too — rebuild it from the retained events (the SSE id: cursor means a
+      // reconnect never replays events older than the buffer, so dropped ids can't cause a dup).
+      var s = {}; PBOX.events.forEach(function (x) { if (x.id != null) s[x.id] = 1; }); PBOX.seen = s;
+    }
+    pboxUpdateChrome();
+    if (PBOX.ui.open && !PBOX.ui.dismissed) pboxAppendRow(e);
+  }
+  function pboxDetach() {
+    if (PBOX.es) { try { PBOX.es.close(); } catch (e) {} PBOX.es = null; }
+    PBOX.events = []; PBOX.seen = {};
+  }
+  function pboxFollow(run) {
+    // (re)subscribe to a run's live feed. Held in PBOX.es (never liveES), so a route change can't kill it.
+    pboxDetach();
+    // A new RUNNING run re-shows a box the operator had hidden — HUD parity (a "Hide" is per-lull, not a
+    // permanent kill). It comes back as whatever it was (pill if collapsed), never force-expanded.
+    if (run && PBOX.ui.dismissed) { PBOX.ui.dismissed = false; pboxSaveUI(); }
+    PBOX.run = run; PBOX.following = run ? run.run_id : "";
+    if (run && run.stream === "blackboard" && run.slug) {
+      PBOX.es = V.sse(OFF("/api/blackboard?slug=" + encodeURIComponent(run.slug)), pboxOnEvent, function () {});
+    } else if (run && run.stream === "progress") {
+      PBOX.es = V.sse(OFF("/api/events?run=" + encodeURIComponent(run.run_id)), function (ev) {
+        var norm = pboxProgressToEvent(ev); if (norm) pboxOnEvent(norm);
+      }, function () {});
+    }
+    // stream 'none' (strix/aegis): no live spine — the chrome poll keeps its status fresh.
+    pboxRenderShell();
+  }
+  function pboxProgressToEvent(ev) {
+    if (!ev || !ev.event) return null;
+    if (ev.event === "scan.phase") return { kind: "observation", payload: { source: "scan", summary: "phase: " + (ev.phase || "") } };
+    if (ev.event === "scan.finding") return { kind: "finding", payload: { bug_class: ev.bug_class, title: (ev.param || "") + " @ " + (ev.endpoint || "") } };
+    if (ev.event === "scan.done") return { kind: "decision", payload: { question: "scan complete", choice: (ev.findings || 0) + " findings" } };
+    return null;
+  }
+  function pboxPickRun(runs) {
+    // the newest RUNNING run wins (list_runs is newest-first); else nothing to follow.
+    for (var i = 0; i < runs.length; i++) if (runs[i] && runs[i].status === "running") return runs[i];
+    return null;
+  }
+  function pboxPoll() {
+    // GLOBAL box → all runs, unscoped (never the active-engagement filter).
+    fetch(OFF("/api/runs"), { headers: (function () { var hh = { "X-Requested-With": "vigil-ui" }; var t = V.token(); if (t) hh["X-SIGIL-Token"] = t; return hh; })(),
+      credentials: "same-origin", cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        var runs = (d && d.runs) || [];
+        var run = pboxPickRun(runs);
+        if (run) {
+          if (run.run_id !== PBOX.following) pboxFollow(run);   // a new/changed RUNNING run → resubscribe
+          else { PBOX.run = run; pboxUpdateChrome(); }          // same run → refresh its status only
+        } else {
+          // no running run: close the (now-silent) stream but KEEP the last run's steps on screen, and
+          // reflect its final status (done / error / interrupted) so the operator sees how it ended.
+          if (PBOX.es) { try { PBOX.es.close(); } catch (e) {} PBOX.es = null; }
+          if (PBOX.following) {
+            var last = runs.find(function (x) { return x.run_id === PBOX.following; });
+            if (last) PBOX.run = last;
+          }
+          pboxUpdateChrome();
+        }
+      })
+      .catch(function () { /* offense plane down — the box just shows idle */ });
+  }
+  function startProcessBox() {
+    pboxLoadUI();
+    pboxRenderShell();
+    pboxPoll();
+    PBOX.poll = setInterval(function () { if (!document.hidden) pboxPoll(); }, 4000);
+  }
+
   // ---- boot ------------------------------------------------------------------
   // ---- Compliance & ATT&CK (C3): map proven findings → standards controls ----
   var CMP = { run: "", runs: [], data: null, loaded: false };
@@ -7487,6 +7707,7 @@
                                   // this the chip stays `display:none` forever (OFFENSE.known never flips),
                                   // which is exactly why the Start/Stop control never appeared.
     watchBuildVersion();          // W0-deploy: notice a republished bundle and offer to reload.
+    startProcessBox();            // W5: the global live-activity box (survives route changes).
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot); else boot();
 })();
