@@ -124,6 +124,8 @@ class EngineSeams:
     govern: Optional[GovernFn] = None          # None ⇒ no advisory re-rank (never gates truth anyway)
     emit: Optional[EmitFn] = None              # None ⇒ no telemetry span emitted
     checkpoint: Optional[CheckpointFn] = None  # None ⇒ no per-turn spine snapshot
+    rebuild: Optional[Callable[[], Any]] = None      # None ⇒ --resume cannot reconstruct → starts fresh (W2b)
+    head_seq: Optional[Callable[[], int]] = None     # None ⇒ resume seeds seq from state.iteration only (W2b)
     detect: Optional[DetectFn] = None          # None ⇒ the Detection Mirror is not run
     approval: Optional[ApprovalFn] = None      # None ⇒ a phase escalation / fireteam stays QUEUED
     operator_messages: Optional[OperatorMsgFn] = None  # None ⇒ no mid-run operator instructions (A5)
@@ -168,6 +170,7 @@ class RunReport(BaseModel):
     checkpoints: list[str] = Field(default_factory=list)
     paused: str = ""                       # "" | "ask_user" | "awaiting_approval"
     done: bool = False
+    resumed: bool = False                  # True iff this run CONTINUED a prior checkpointed state (W2b)
 
     @property
     def fact_count(self) -> int:
@@ -192,11 +195,15 @@ class VigilEngine:
 
     # -- the loop -----------------------------------------------------------------------------------
 
-    def engage(self, seed_url: str, *, objective: str = "", spine_head: str = _GENESIS) -> RunReport:
+    def engage(self, seed_url: str, *, objective: str = "", spine_head: str = _GENESIS,
+               resume: bool = False) -> RunReport:
         """Run one authorized engagement against ``seed_url`` (loopback-pinned downstream). Mints a usage
         attestation FIRST and refuses the whole run if one cannot be minted+recorded; then drives the
         OODA loop, routing every action-bearing edge through the real gate and every claimed exploit
-        through the real oracle. Never raises — every failure path is a recorded refusal, never a crash."""
+        through the real oracle. Never raises — every failure path is a recorded refusal, never a crash.
+
+        ``resume=True`` continues a prior run of this slug from its last SIGNED checkpoint instead of
+        starting fresh — the network-failure / crash recovery path (W2b)."""
         report = RunReport(slug=self.slug, seed=seed_url, objective=objective)
 
         # (0) ATTEST FIRST — the deep-core, always-on rule. No attestation → no engagement.
@@ -207,10 +214,41 @@ class VigilEngine:
             return report
         report.attestation_ref = att_ref
 
+        # (0b) RESUME (W2b): reconstruct the last signed AgentState for this slug and continue the OODA loop
+        # from where it stopped. The checkpoint spine already threads prev_hash from the file tail (a fresh
+        # binder resumes the SAME chain), so all we seed here is (a) the state, (b) the monotonic seq at
+        # head_seq+1 so a resumed turn never collides a seq with an already-persisted one, and (c) the loop
+        # index (the next iteration). A resume with no prior state, no rebuild seam, or an unreadable spine
+        # degrades to a fresh start — never a crash. The gate/oracle/attestation are unchanged: a resumed
+        # edge is authorized and oracle-confirmed exactly like a fresh one.
         state = AgentState(engagement_slug=self.slug, objective=objective, phase=Phase.INFORMATIONAL)
         seq = 1
+        start_it = 0
+        if resume and self.seams.rebuild is not None:
+            try:
+                prior = self.seams.rebuild()
+            except Exception:  # noqa: BLE001 — an unreadable/forged spine → a fresh start, never a crash
+                prior = None
+            if isinstance(prior, AgentState) and (prior.iteration or prior.facts or prior.leads
+                                                  or prior.execution_trace):
+                state = prior
+                state.engagement_slug = self.slug          # identity/objective stay authoritative
+                if objective:
+                    state.objective = objective
+                report.resumed = True
+                report.facts.extend(list(prior.facts))     # the report reflects TOTAL progress, honestly
+                report.leads.extend(list(prior.leads))
+                start_it = int(getattr(prior, "iteration", 0) or 0) + 1
+                if state.done:
+                    start_it = self.max_iterations          # a COMPLETED run resumes to a no-op, never re-runs
+                try:
+                    hs = self.seams.head_seq() if self.seams.head_seq is not None else 0
+                    seq = max(seq, int(hs) + 1)             # never reuse a persisted seq
+                except Exception:  # noqa: BLE001
+                    pass
+        report.iterations = start_it                        # a no-op resume (done/exhausted) reports honestly
 
-        for it in range(self.max_iterations):
+        for it in range(start_it, self.max_iterations):
             state.iteration = it
             report.iterations = it + 1
 

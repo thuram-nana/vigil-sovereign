@@ -418,6 +418,28 @@ def head_hash(
     return best_hash
 
 
+def head_seq(
+    records: Any,
+    *,
+    engagement: Optional[str] = None,
+    verify: Optional[VerifyFn] = None,
+) -> int:
+    """The checkpoint ``seq`` of the latest VALID snapshot (the SAME record :func:`rebuild` returns), or
+    ``0`` if none — so a RESUME can seed its monotonic clock at ``head_seq + 1`` and never collide a seq
+    with an already-persisted turn. Same validity/order rules as :func:`rebuild`; total (never raises)."""
+    best_key: Optional[tuple[int, str]] = None
+    best_seq = 0
+    for rec in _iter_snapshots(records):
+        if engagement is not None and rec.engagement != engagement:
+            continue
+        if not _is_intact(rec, verify):
+            continue
+        key = (rec.seq, rec.hash)
+        if best_key is None or key > best_key:
+            best_key, best_seq = key, rec.seq
+    return best_seq
+
+
 def verify_chain(records: Any, *, engagement: Optional[str] = None) -> bool:
     """Audit helper: are the coercible snapshots a consistent, append-only ``prev_hash`` chain?
 

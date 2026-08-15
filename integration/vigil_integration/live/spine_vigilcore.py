@@ -69,6 +69,7 @@ from ..agent.checkpoint import (
     GENESIS_PREV,
     SnapshotRecord,
     head_hash,
+    head_seq,
     rebuild_from,
     serialize,
 )
@@ -290,6 +291,12 @@ class VigilCoreSpine:
         """The checkpoint ``hash`` of the latest VALID snapshot on the spine (or ``GENESIS_PREV`` if none) —
         the value the next turn threads into ``serialize(prev_hash=...)``. Verifier-gated and total."""
         return head_hash(self.reader(), engagement=engagement, verify=self.verify_record)
+
+    def head_seq(self, *, engagement: Optional[str] = None) -> int:
+        """The checkpoint ``seq`` of the latest VALID snapshot (0 if none) — a RESUME seeds its monotonic
+        clock at ``head_seq + 1`` so a resumed turn never collides a seq with an already-persisted one.
+        Verifier-gated and total."""
+        return head_seq(self.reader(), engagement=engagement, verify=self.verify_record)
 
     # --- internals -----------------------------------------------------------------------------------
 

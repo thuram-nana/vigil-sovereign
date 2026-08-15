@@ -112,9 +112,9 @@ def _cmd_engage(args: argparse.Namespace) -> int:
         max_iterations=args.max_iterations, owner_approves_offense=args.approve_offense,
     )
     engine = build_engine(cfg)
-    report = engine.engage(args.url, objective=args.objective)
+    report = engine.engage(args.url, objective=args.objective, resume=bool(getattr(args, "resume", False)))
 
-    print(f"=== vigil engage {args.url} (slug={report.slug}) ===")
+    print(f"=== vigil engage {args.url} (slug={report.slug}){' [RESUMED]' if report.resumed else ''} ===")
     if report.refused:
         print(f"REFUSED (fail-closed): {report.refusal_reason}")
         return 2
@@ -1595,6 +1595,9 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--approve-offense", action="store_true",
                     help="the operator's standing approval to run queued offense tools against their "
                          "own chartered loopback (the human leg of the conjunctive gate; scope still enforced)")
+    pe.add_argument("--resume", action="store_true",
+                    help="continue this slug's engagement from its last SIGNED checkpoint (the same "
+                         "{slug}.spine) instead of starting fresh — the network-failure / crash recovery path")
     pe.set_defaults(func=_cmd_engage)
 
     pei = sub.add_parser("engage-instruct",
