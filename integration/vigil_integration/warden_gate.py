@@ -30,7 +30,8 @@ hooks, so a governed run stops instead of silently running an UNGUARDED arbitrar
 longer hard-blocks: it is routed to the per-action, single-use, owner-signed approval BROKER
 (:mod:`live.approval_broker`) — the hook publishes a pending request, waits (bounded by
 ``VIGIL_APPROVAL_WAIT_SECONDS``, default 0 ⇒ non-blocking) for a token the owner signs for THIS exact call
-(``vigil approve sign`` / the Safety screen), verifies it against the deployment-pinned owner key, and spends
+(``vigil approve sign`` from a terminal holding the owner key — the keyless console cannot sign it), verifies
+it against the deployment-pinned owner key, and spends
 its nonce ONCE — then the call runs. No authority provisioned, or no valid token in the window ⇒ the call is
 BLOCKED (fail-safe). A hard class ``deny`` (denylist / empty name) always raises immediately. The DECISION
 CORE + the approval token/ledger are complete and fully tested.
@@ -296,7 +297,8 @@ class WardenGateHooks:
             self._note_block(name, decision, "no valid owner approval within the window")
             raise WardenDenied(
                 f"WARDEN gate blocked tool {name!r}: {decision.outcome} — no valid owner approval within the "
-                f"window (sign it with `vigil approve sign` / the Safety screen, then it runs)."
+                f"window. Sign it from a terminal holding your owner key: `vigil approve sign --request-id "
+                f"<id>` (see `vigil approve list`). The console is keyless and cannot sign this."
             )
         # owner-approved (per-action, single-use token consumed) → allow this ONE call.
 

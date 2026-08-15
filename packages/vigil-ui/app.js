@@ -4156,7 +4156,7 @@
     if (!pend.length) { V.mount(box, h("div.empty", null, "No actions awaiting approval.")); return; }
     V.mount(box, [
       h("div.hint", { style: { marginBottom: "10px" } },
-        "These offense actions are queued and awaiting your signature. This console is keyless and cannot sign — sign with your owner key via the CLI (or the sovereign cockpit)."),
+        "These offense actions are queued and awaiting your signature. This console is keyless and cannot sign them — copy the command below and run it in a terminal that holds your owner key (VIGIL_APPROVAL_OWNER_KEY). No screen can sign an offense approval — not this one and not the sovereign cockpit."),
       h("div.stack", null, pend.map(function (p) { return pendingApprovalCard(p, base); })),
     ]);
   }
@@ -4175,7 +4175,7 @@
         h("button.btn.sm", { title: "Copy the sign command", onClick: function () { copyText(cmd); } }, "Copy"),
       ]),
       h("div.hint", { style: { marginTop: "8px" } },
-        "Signing uses your owner key via `vigil approve sign` (or the sovereign cockpit) — never from this screen."),
+        "Run this in a terminal holding your owner key (VIGIL_APPROVAL_OWNER_KEY). Signing never happens from a screen — this is by design, so the key never reaches the console."),
     ]);
   }
 
