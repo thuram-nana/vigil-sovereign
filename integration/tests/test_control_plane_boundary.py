@@ -106,9 +106,12 @@ _UP_ALLOWED_STDLIB = {
     # token compared with `==` leaks itself a byte at a time to a timing attacker, and the proxy is the
     # process that can start the offense backends — so this is a stdlib primitive, not a dependency, and
     # the boundary it guards is the reason it is allowed.
-    "__future__", "base64", "binascii", "hmac", "http", "ipaddress", "json", "os", "re", "signal",
-    "socket", "socketserver", "subprocess", "sys", "threading", "time", "pathlib", "queue", "typing",
-    "urllib", "webbrowser",
+    # `hashlib` is on this list for the deploy-hygiene build id: a SHA-256 over the served bundle bytes,
+    # stamped as the `?v=<build>` cache-buster + the /__vigil/plane/version ETag. A stdlib primitive, not
+    # a dependency — it crosses no env boundary.
+    "__future__", "base64", "binascii", "hashlib", "hmac", "http", "ipaddress", "json", "os", "re",
+    "signal", "socket", "socketserver", "subprocess", "sys", "threading", "time", "pathlib", "queue",
+    "typing", "urllib", "webbrowser",
 }
 _BANNED = ("framework", "strix", "sigil")
 

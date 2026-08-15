@@ -212,6 +212,78 @@ def test_static_has_strict_csp(proxy):
         assert r.headers.get("X-Content-Type-Options") == "nosniff"
 
 
+# ==================================================================================================
+# deploy hygiene: a per-build cache-buster + revalidating static, so a redeploy is never masked by a
+# warm browser cache (the "I updated the UI but still see the old one" gap).
+# ==================================================================================================
+def _assemble_build(tmp_path, tag, *, app_js="/*app.js*/", index=None):
+    src = tmp_path / ("src-" + tag)
+    src.mkdir()
+    (src / "tokens.css").write_text(":root{--a:1}", encoding="utf-8")
+    (src / "components.css").write_text(".btn{color:red}", encoding="utf-8")
+    for j in uiproxy.BUNDLE_JS:
+        (src / j).write_text(app_js if j == "app.js" else f"/*{j}*/", encoding="utf-8")
+    (src / "index.html").write_text(
+        index if index is not None else "<body></body>", encoding="utf-8")
+    serve = tmp_path / ("serve-" + tag)
+    uiproxy.assemble_serve_dir(src, serve, token="T")
+    return serve
+
+
+def test_assemble_stamps_a_build_id_and_versions_the_bundle(tmp_path):
+    """A per-deploy build id is written to `.build-id` and substituted into index.html — both the body
+    `data-build` (so the running page knows its own build) and the `?v=<build>` cache-buster on the
+    asset URLs (so a redeploy changes the URL and a warm cache cannot serve a stale bundle)."""
+    serve = _assemble_build(
+        tmp_path, "stamp",
+        index='<body data-build="__VIGIL_BUILD__"><script src="app.js?v=__VIGIL_BUILD__"></script></body>')
+    build = (serve / ".build-id").read_text(encoding="utf-8").strip()
+    assert len(build) == 12 and all(c in "0123456789abcdef" for c in build)
+    html = (serve / "index.html").read_text(encoding="utf-8")
+    assert "__VIGIL_BUILD__" not in html
+    assert f'data-build="{build}"' in html
+    assert f"app.js?v={build}" in html
+
+
+def test_build_id_is_deterministic_and_sensitive_to_bundle_changes(tmp_path):
+    """Same bytes → same id (a no-op redeploy does not needlessly bust the cache); a changed bundle →
+    a new id (the changed code IS picked up)."""
+    a1 = (_assemble_build(tmp_path, "a", app_js="/*v1*/") / ".build-id").read_text(encoding="utf-8")
+    a2 = (_assemble_build(tmp_path, "b", app_js="/*v1*/") / ".build-id").read_text(encoding="utf-8")
+    b1 = (_assemble_build(tmp_path, "c", app_js="/*v2 CHANGED*/") / ".build-id").read_text(encoding="utf-8")
+    assert a1 == a2          # deterministic
+    assert a1 != b1          # sensitive — a code change mints a new build id
+
+
+def test_static_assets_revalidate_with_etag_and_304(proxy):
+    """Every static asset carries an ETag + `Cache-Control: no-cache`, so the browser MUST revalidate
+    it — and a matching `If-None-Match` returns a bodyless 304. That is what makes a redeploy visible
+    without a hard reload, cheaply."""
+    import http.client
+    hostname, port = base_hostport(proxy[0])
+    conn = http.client.HTTPConnection(hostname, port, timeout=5)
+    conn.request("GET", "/style.css")
+    r = conn.getresponse(); r.read()
+    etag = r.getheader("ETag")
+    assert etag and etag.startswith('"')
+    assert "no-cache" in (r.getheader("Cache-Control") or "")
+    conn.close()
+    # a fresh connection (static responses close the socket) with the SAME ETag → 304, no body
+    conn2 = http.client.HTTPConnection(hostname, port, timeout=5)
+    conn2.request("GET", "/style.css", headers={"If-None-Match": etag})
+    r2 = conn2.getresponse(); body2 = r2.read()
+    assert r2.status == 304
+    assert body2 == b""
+    assert r2.getheader("ETag") == etag
+    conn2.close()
+
+
+def base_hostport(base: str):
+    host = base.replace("http://", "").replace("https://", "")
+    hostname, port = host.split(":")
+    return hostname, int(port)
+
+
 def test_unknown_static_path_is_404_not_proxied(proxy):
     base, _serve = proxy
     try:
@@ -515,3 +587,142 @@ def test_spawn_tracked_cleans_up_on_spawn_failure(monkeypatch):
     monkeypatch.setattr(uiproxy, "_spawn", lambda *a, **k: "PROC")
     ok = uiproxy._spawn_tracked(procs, "offense-api", ["y"], object(), lambda: None)
     assert ok is False and procs[-1] == ("offense-api", "PROC")
+
+
+def test_plane_control_stop_offense_already_stopped_when_nothing_listens():
+    """Nothing listening on either backend port → an immediate, idempotent `already_stopped`, and the
+    on_stopped callback is never invoked (there is nothing to terminate)."""
+    port = _free_port()
+    called = []
+    specs = [("offense-console", ["a"], "log", {}, "127.0.0.1", port),
+             ("offense-api", ["b"], "log", {}, "127.0.0.1", port)]
+    pc = uiproxy.PlaneControl(specs, on_stopped=lambda names: called.append(names))
+    res = pc.stop_offense()
+    assert res["result"] == "already_stopped"
+    assert res["ok"] is True
+    assert called == []
+
+
+def test_plane_control_stop_offense_uses_on_stopped_for_boot_children():
+    """The common case: the console + api were spawned at boot (not through this object), so stop asks
+    its on_stopped callback to terminate + un-track them — passing ONLY the two offense names — and then
+    reports a measured `stopped` once their ports read free. A second stop is idempotent."""
+    s1 = socket.socket(); s1.bind(("127.0.0.1", 0)); s1.listen()
+    s2 = socket.socket(); s2.bind(("127.0.0.1", 0)); s2.listen()
+    p1 = s1.getsockname()[1]
+    p2 = s2.getsockname()[1]
+    asked = []
+
+    def _on_stopped(names):
+        asked.extend(names)
+        s1.close(); s2.close()            # the boot path kills the children → ports freed
+    specs = [("offense-console", ["a"], "log", {}, "127.0.0.1", p1),
+             ("offense-api", ["b"], "log", {}, "127.0.0.1", p2)]
+    pc = uiproxy.PlaneControl(specs, on_stopped=_on_stopped)
+    try:
+        res = pc.stop_offense()
+    finally:
+        for s in (s1, s2):
+            try:
+                s.close()
+            except OSError:
+                pass
+    assert set(asked) == {"offense-console", "offense-api"}
+    assert res["result"] == "stopped"
+    assert res["status"]["running"] is False
+    # idempotent: nothing listening now → already_stopped, callback not invoked again
+    asked.clear()
+    res2 = pc.stop_offense()
+    assert res2["result"] == "already_stopped"
+    assert asked == []
+
+
+def test_plane_control_stop_offense_terminates_a_child_it_started(monkeypatch):
+    """A backend the proxy itself started (a Popen in `_children`) is terminated on stop; the port then
+    reads free and the result is a clean `stopped`."""
+    sock = socket.socket(); sock.bind(("127.0.0.1", 0)); sock.listen()
+    port = sock.getsockname()[1]
+    killed = []
+
+    def _fake_terminate(pid, **_kw):
+        killed.append(pid)
+        sock.close()                      # the child dying frees its listening port
+        return True
+    monkeypatch.setattr(uiproxy, "_terminate", _fake_terminate)
+
+    class _FakeProc:
+        pid = 4242
+
+        def poll(self):
+            return None                   # alive
+    specs = [("offense-console", ["x"], "log", {}, "127.0.0.1", port)]
+    pc = uiproxy.PlaneControl(specs)
+    pc._children["offense-console"] = _FakeProc()
+    try:
+        res = pc.stop_offense()
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    assert 4242 in killed
+    assert res["result"] == "stopped"
+    assert res["status"]["running"] is False
+
+
+def test_plane_control_stop_offense_reports_failure_if_a_backend_will_not_die(monkeypatch):
+    """A kill that did not take (the backend keeps listening) must surface as an honest `failed` that
+    NAMES the surviving backend — never a false clean stop."""
+    monkeypatch.setattr(uiproxy.time, "sleep", lambda *_a: None)   # skip the settle wait; fail fast
+    sock = socket.socket(); sock.bind(("127.0.0.1", 0)); sock.listen()
+    port = sock.getsockname()[1]
+    specs = [("offense-console", ["x"], "log", {}, "127.0.0.1", port)]
+    pc = uiproxy.PlaneControl(specs, on_stopped=lambda names: None)   # does NOT free the port
+    try:
+        res = pc.stop_offense()
+    finally:
+        sock.close()
+    assert res["ok"] is False
+    assert res["result"] == "failed"
+    assert "offense-console" in res["error"]
+
+
+def test_plane_control_stop_offense_keeps_a_child_it_could_not_kill(monkeypatch):
+    """A UI-started child that survives the kill (poll stays None — a D-state child) must KEEP its Popen
+    handle so a retry can still re-target it, symmetric with _unadopt. Dropping it would strand the plane
+    (the operator would have to fall back to `vigil down`)."""
+    monkeypatch.setattr(uiproxy.time, "sleep", lambda *_a: None)   # skip the settle wait; fail fast
+    monkeypatch.setattr(uiproxy, "_terminate", lambda pid, **_k: False)   # the kill does not take
+    sock = socket.socket(); sock.bind(("127.0.0.1", 0)); sock.listen()
+    port = sock.getsockname()[1]
+
+    class _Stubborn:
+        pid = 5252
+
+        def poll(self):
+            return None                   # never dies
+    specs = [("offense-console", ["x"], "log", {}, "127.0.0.1", port)]
+    pc = uiproxy.PlaneControl(specs)
+    pc._children["offense-console"] = _Stubborn()
+    try:
+        res = pc.stop_offense()
+    finally:
+        sock.close()
+    assert res["result"] == "failed"
+    assert "offense-console" in pc._children   # handle KEPT so a retry can re-target the survivor
+
+
+def test_new_plane_routes_are_guarded_like_start(proxy):
+    """/offense/stop (POST) and /offense/version (GET) run the SAME guard chain as /offense/start: this
+    fixture's proxy has no session token, so every plane route fails closed with a 4xx BEFORE the route
+    body runs — proving the guard is not bypassed for the routes this slice added."""
+    base, _serve = proxy
+    for method, path in [("POST", "/__vigil/plane/offense/stop"),
+                         ("GET", "/__vigil/plane/version")]:
+        req = urllib.request.Request(base + path, method=method,
+                                     data=(b"{}" if method == "POST" else None))
+        try:
+            urllib.request.urlopen(req, timeout=5)  # noqa: S310 (loopback test)
+            raise AssertionError(f"{method} {path} should have been refused (no token)")
+        except urllib.error.HTTPError as e:  # type: ignore[attr-defined]
+            assert e.code in (401, 403), f"{method} {path} → {e.code} (expected a fail-closed refusal)"

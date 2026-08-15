@@ -67,6 +67,15 @@ button { font: inherit; }
 .scope-chip .txt { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .scope-chip.on { color: var(--owner); border-color: var(--owner-line); background: var(--owner-dim); }
 .scope-chip.on .glyph { opacity: 1; }
+/* the × that clears the view filter straight from the top bar (no trip to the library needed). It is a
+   SIBLING of the chip inside .scope-wrap — never nested in the chip button (a button-in-a-button is
+   invalid HTML). */
+.scope-wrap { display: inline-flex; align-items: center; gap: 2px; min-width: 0; }
+.scope-clear { flex: 0 0 auto; padding: 3px 7px; border: 1px solid var(--owner-line); background: var(--owner-dim);
+  color: var(--owner); font: inherit; font-weight: 700; line-height: 1; cursor: pointer;
+  border-radius: var(--r-1); opacity: .85; }
+.scope-clear:hover { opacity: 1; background: color-mix(in srgb, var(--owner) 28%, transparent); border-color: var(--owner); }
+.scope-clear:focus-visible { outline: 2px solid var(--owner); outline-offset: 1px; }
 
 /* segmented control (All / Offense / Defense) */
 .segmented { display: inline-flex; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-pill); padding: 3px; }
@@ -123,6 +132,14 @@ button { font: inherit; }
 .offense-chip.down.action { cursor: pointer; color: var(--owner); border-color: var(--owner-line); background: var(--owner-dim); }
 .offense-chip.down.action:hover { color: var(--text-0); background: color-mix(in srgb, var(--owner) 32%, transparent); border-color: var(--owner); }
 .offense-chip.down.action:focus-visible { outline: 2px solid var(--owner); outline-offset: 2px; }
+/* the STOP that pairs with "Start offense side": a subtle danger-tinted pill sitting inside the green
+   "Offense up" indicator, so bringing the offense side down is one click from where it reads as up. */
+.offense-chip.up .oc-stop { margin-left: 2px; padding: 2px 10px; border-radius: var(--r-pill);
+  font-weight: 700; font-size: var(--fs-xs); font-family: inherit; cursor: pointer; line-height: 1.5;
+  color: var(--text-1); background: transparent; border: 1px solid var(--border); }
+.offense-chip.up .oc-stop:hover { color: var(--st-blocked); border-color: var(--st-blocked);
+  background: color-mix(in srgb, var(--st-blocked) 15%, transparent); }
+.offense-chip.up .oc-stop:focus-visible { outline: 2px solid var(--st-blocked); outline-offset: 2px; }
 
 /* buttons ------------------------------------------------------------------ */
 .btn { display: inline-flex; align-items: center; gap: 8px; background: var(--bg-2); border: 1px solid var(--border-strong);
