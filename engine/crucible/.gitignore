@@ -364,6 +364,9 @@ targets/*/.crucible-v2.log
 targets/*/.planner-state.json
 targets/*/recon/fingerprint.json
 targets/*/charter.draft.md
+# engage phase-ledger checkpoint + resume snapshot (per-run runtime state, like .crucible-v2.log)
+targets/*/*.phases.jsonl
+targets/*/*.report.json
 targets/*/postmortem.md
 # UTI versioned scaffold outputs (threat-model.md.uti-<date>, attack-tree.md.uti-<date>)
 # — engagement-specific URK drafts; operator decides what to publish.

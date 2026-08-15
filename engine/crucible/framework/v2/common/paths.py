@@ -371,6 +371,24 @@ def planner_state(slug: str) -> Path:
     return target_dir(slug) / ".planner-state.json"
 
 
+def phase_ledger_path(slug: str) -> Path:
+    """The append-only engagement PHASE LEDGER (``engage`` scanner-phase checkpoint +
+    ``--resume``). One JSON record per line: each phase's started / completed / skipped /
+    failed. Re-rooted under the ephemeral write base in a ZDR session exactly like the
+    evidence archive, so an ephemeral run's checkpoint is purged on exit (resume is a
+    persist-by-default feature). Default path is byte-identical (honours a test override
+    of ``target_dir``)."""
+    return _write_target_dir(slug) / f"{slug}.phases.jsonl"
+
+
+def phase_report_path(slug: str) -> Path:
+    """The durable ScanReport SNAPSHOT the phase ledger writes when the scan phase
+    completes, so a ``--resume`` re-run can SKIP the (traffic-sending) scan and reload the
+    authoritative report instead of re-crawling/re-auditing the target. Re-rooted under the
+    ephemeral write base like the ledger. Owner-only on disk (it holds finding evidence)."""
+    return _write_target_dir(slug) / f"{slug}.report.json"
+
+
 def endpoints_path(slug: str) -> Path:
     return target_dir(slug) / "notes" / "endpoints.md"
 
