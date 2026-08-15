@@ -175,7 +175,12 @@
           onClick: function (e) { e.preventDefault(); e.stopPropagation(); setEngagement(""); route(); },
         }, "×")])
       : scopeChip;
-    const live = s.killed ? V.pill("Kill-switch", "danger", null)
+    // The kill-switch state is REAL (the mesh is halted while it is engaged) — but as a bare pill it was
+    // an inert readout the operator could click forever with nothing happening. Make it carry its own
+    // action: it now takes you to Safety, which is where the signed Release control lives.
+    const live = s.killed
+      ? h("button.pill.danger.pill-act", { title: "The kill-switch is ENGAGED — the agent mesh is halted. Open Safety to release it.",
+          onClick: function () { location.hash = "#/safety"; } }, "Kill-switch")
       : (s.live === "live" ? V.pill("Live", "live", null) : V.pill("Idle", "idle", null));
     const counts = h("div.counts", null, [
       h("span.count", null, [V.icon("brain"), h("b", null, String(s.counts.agents)), " agents"]),
@@ -621,7 +626,121 @@
     document.documentElement.setAttribute("data-theme", next);
     try { localStorage.setItem("vigil-theme", next); } catch (e) {}
   }
-  function openPalette() { V.toast("Command palette is on the roadmap — for now use the sidebar. Start a run from New Assessment."); }
+  // ---- Command palette -------------------------------------------------------
+  // The top bar advertises "Search or run a command ⌘K". It used to answer with a toast saying the
+  // feature was on the roadmap, and ⌘K was not bound at all — a control that promised search and
+  // delivered nothing. This is the real thing: it searches every screen the nav can reach plus every
+  // Manual section, and runs a small set of named actions. Pure overlay — it mounts into its own
+  // fixed host, steals no layout, and Escape / a backdrop click always closes it.
+  var PAL = { host: null, items: [], sel: 0, onKey: null };
+
+  function paletteSources() {
+    var out = [];
+    (NAV || []).forEach(function (grp) {
+      (grp.items || []).forEach(function (it) {
+        if (it.ready === false) return;                       // never offer a screen that isn't wired
+        out.push({ kind: grp.group || "GO", label: it.label, icon: it.icon || "dot",
+                   hint: "screen", run: function () { location.hash = "#/" + it.id; } });
+      });
+    });
+    (window.VIGIL_MANUAL || []).forEach(function (s) {
+      out.push({ kind: "MANUAL", label: s.title, icon: "book", hint: "manual section",
+                 run: function () {
+                   location.hash = "#/manual";
+                   setTimeout(function () {
+                     var t = document.getElementById("man-" + s.id);
+                     if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
+                   }, 60);
+                 } });
+    });
+    out.push({ kind: "DO", label: "New Assessment", icon: "bolt", hint: "start a run",
+               run: function () { location.hash = "#/assess"; } });
+    out.push({ kind: "DO", label: "Toggle theme (light / dark)", icon: "dot", hint: "appearance",
+               run: toggleTheme });
+    return out;
+  }
+
+  function paletteMatch(all, q) {
+    var s = (q || "").trim().toLowerCase();
+    if (!s) return all.slice(0, 12);
+    var scored = [];
+    all.forEach(function (it) {
+      var hay = (it.label + " " + it.kind + " " + (it.hint || "")).toLowerCase();
+      var i = hay.indexOf(s);
+      if (i === -1) {                       // fall back to subsequence, so "prfstd" finds "Proof Studio"
+        var pos = 0, ok = true;
+        for (var c = 0; c < s.length; c++) {
+          pos = hay.indexOf(s[c], pos);
+          if (pos === -1) { ok = false; break; }
+          pos++;
+        }
+        if (!ok) return;
+        i = 500;                            // rank subsequence hits below substring hits
+      }
+      scored.push({ it: it, score: i - (it.label.toLowerCase().indexOf(s) === 0 ? 100 : 0) });
+    });
+    scored.sort(function (a, b) { return a.score - b.score; });
+    return scored.slice(0, 12).map(function (x) { return x.it; });
+  }
+
+  function paletteDraw(q) {
+    var list = V.$("#pal-list"); if (!list) return;
+    PAL.items = paletteMatch(PAL.all, q);
+    if (PAL.sel >= PAL.items.length) PAL.sel = 0;
+    if (!PAL.items.length) {
+      V.mount(list, h("div.empty", null, "Nothing matches “" + q + "”."));
+      return;
+    }
+    V.mount(list, PAL.items.map(function (it, i) {
+      return h("div.pal-row" + (i === PAL.sel ? ".on" : ""), {
+        onClick: function () { paletteRun(i); },
+      }, [h("span.pal-ico", null, V.icon(it.icon)),
+          h("span.pal-label", null, it.label),
+          h("span.pal-kind", null, it.hint || it.kind)]);
+    }));
+  }
+
+  function paletteRun(i) {
+    var it = PAL.items[i];
+    closePalette();
+    if (it && typeof it.run === "function") it.run();
+  }
+
+  function closePalette() {
+    if (PAL.onKey) { document.removeEventListener("keydown", PAL.onKey, true); PAL.onKey = null; }
+    if (PAL.host && PAL.host.parentNode) PAL.host.parentNode.removeChild(PAL.host);
+    PAL.host = null; PAL.items = []; PAL.sel = 0;
+  }
+
+  function openPalette() {
+    if (PAL.host) { closePalette(); return; }              // toggle
+    PAL.all = paletteSources();
+    PAL.sel = 0;
+    var input = h("input.pal-input", { type: "text", placeholder: "Search screens, manual sections, actions…",
+                                       "aria-label": "Search or run a command", autocomplete: "off" });
+    PAL.host = h("div.pal-host", { onClick: function (e) { if (e.target === PAL.host) closePalette(); } },
+      h("div.pal-box", null, [
+        h("div.pal-head", null, [V.icon("search"), input]),
+        h("div.pal-list#pal-list"),
+        h("div.pal-foot", null, "↑↓ move · ↵ open · esc close"),
+      ]));
+    document.body.appendChild(PAL.host);
+    paletteDraw("");
+    input.addEventListener("input", function () { PAL.sel = 0; paletteDraw(input.value); });
+    PAL.onKey = function (e) {
+      if (e.key === "Escape") { e.preventDefault(); closePalette(); return; }
+      if (e.key === "ArrowDown") { e.preventDefault(); PAL.sel = Math.min(PAL.sel + 1, PAL.items.length - 1); paletteDraw(input.value); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); PAL.sel = Math.max(PAL.sel - 1, 0); paletteDraw(input.value); return; }
+      if (e.key === "Enter") { e.preventDefault(); paletteRun(PAL.sel); return; }
+    };
+    document.addEventListener("keydown", PAL.onKey, true);
+    input.focus();
+  }
+
+  // ⌘K / Ctrl-K — the shortcut the top bar advertises. It was never bound, so the hint was a lie.
+  document.addEventListener("keydown", function (e) {
+    if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) { e.preventDefault(); openPalette(); }
+  });
 
   // ---- Home screen -----------------------------------------------------------
   async function renderHome(screen) {
@@ -691,7 +810,11 @@
     const sections = window.VIGIL_MANUAL || [];
     const index = h("div.card", { style: { position: "sticky", top: "0", alignSelf: "start" } },
       [h("span.label", null, "CONTENTS"),
-       h("div.stack", { style: { gap: "2px", marginTop: "8px" } }, sections.map(function (s) {
+       // .man-toc: this is a table of CONTENTS, not the icon rail — a long section title must WRAP
+       // inside the 260px card rather than run out of it (the global .nav-item .txt is nowrap, which
+       // is right for the sidebar rail but overflows here). Ellipsis would be worse: the operator
+       // needs to read the whole title to navigate by it.
+       h("div.stack.man-toc", { style: { gap: "2px", marginTop: "8px" } }, sections.map(function (s) {
          return h("a.nav-item", { href: "#/manual", onClick: function (e) {
            e.preventDefault(); const t = document.getElementById("man-" + s.id);
            if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
