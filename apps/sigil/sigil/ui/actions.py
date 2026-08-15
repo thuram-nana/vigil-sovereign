@@ -17,8 +17,12 @@ _SETTINGS_ACTIONS = frozenset({"set_secret", "set_model", "set_provider", "set_e
                                "check_secret", "check_secrets",
                                "set_cloud_config", "set_cloud_file_secret",   # + cloud-config/file-cred plane
                                "set_config"})                                  # + the general config-var plane
+# Offense per-action approvals signed FROM the cockpit (route-via-sovereign bridge): bind the offense
+# authority to the owner key once, then sign/deny a queued Strix/engage action in-process. The private
+# key stays sovereign-side; only a public-safe token crosses to the keyless offense broker.
+_OFFENSE_APPROVAL_ACTIONS = frozenset({"offense_bind_authority", "offense_approve", "offense_deny"})
 ACTIONS = frozenset({"approve", "deny", "kill", "release", "promote", "revoke",
-                     "queue_learn", "start_learn"}) | _CAP_ACTIONS | _SETTINGS_ACTIONS
+                     "queue_learn", "start_learn"}) | _CAP_ACTIONS | _SETTINGS_ACTIONS | _OFFENSE_APPROVAL_ACTIONS
 
 
 def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) -> dict:
@@ -39,6 +43,16 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
     from ..governor.identity import ensure_owner_keypair
     owner = ensure_owner_keypair()
     reason = str(params.get("reason", ""))[:200]
+
+    if action in _OFFENSE_APPROVAL_ACTIONS:
+        # Route-via-sovereign: sign/deny a queued OFFENSE approval in-process with the owner key. The owner
+        # key is the persisted sovereign identity (never from params), exactly as every other action here.
+        from . import offense_approvals as _oa
+        if action == "offense_bind_authority":
+            return _oa.bind_authority()
+        if action == "offense_approve":
+            return _oa.sign_pending(str(params.get("request_id", "")), now=_time.time)
+        return _oa.deny_pending(str(params.get("request_id", "")))
 
     if action in ("approve", "deny"):
         seq = int(params["seq"])
