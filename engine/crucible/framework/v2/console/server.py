@@ -381,7 +381,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # a ROTATING log into cursor mode, whose counter cannot survive the rotation. Gating only
                 # the query flag left the header as a second, ungated door. No caller needs it: the UI only
                 # ever replays `run=`, and the legacy SPA's `slug=` stream is a live tail.
-                allow_replay = (not slug_q and run_q is not None)
+                # bool(run_q), not `is not None`: stream_path's own predicate is `if run:`, so matching it
+                # exactly keeps the gate and the path selection from ever disagreeing (today they
+                # agree only because parse_qs drops blank values).
+                allow_replay = bool(run_q) and not slug_q
                 self._sse(stream_path(run=run_q, slug=slug_q),
                           allow_replay=allow_replay,
                           from_start=(allow_replay
