@@ -493,8 +493,9 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
         else:
             (rd / "stdout.txt").write_text(out or "", encoding="utf-8")
         # A negative rc means the child was killed by a signal — the operator's Cancel (W4), not a genuine
-        # error — so record it as 'cancelled', not 'error'. cancel_run and this writer thus converge on the
-        # same terminal status (the thread is the sole terminal-status writer for a live run).
+        # error — so record it as 'cancelled', not 'error'. This supervisor thread is the SOLE terminal-status
+        # writer for a live run: cancel_run signals and then waits for THIS write (it only writes the status
+        # itself for an ORPHANED run with no live supervisor), so there is no double-write race.
         status = "done" if ok else ("cancelled" if (rc is not None and rc < 0) else "error")
         _write_meta(run_id, **{**meta, "status": status, "pid": proc.pid,
                                "rc": rc, "stderr": (err or "")[-2000:] if not ok else "",
@@ -659,9 +660,12 @@ def _cmd_supports_resume(cmd: "list[str]") -> bool:
 
 
 def _slug_has_running_run(slug: str, *, exclude: str = "") -> bool:
-    """True iff some run of ``slug`` is currently 'running' — so a resume/retry does not start a SECOND
-    concurrent run of the same engagement (two `engage --resume` would each read head_seq independently and
-    could collide the spine seq / fork the hash chain). Total; a broken meta is skipped."""
+    """True iff some run of ``slug`` is currently 'running'. Used by retry as a BEST-EFFORT guard against
+    starting a SECOND concurrent run of the same engagement (two `engage --resume` would each read head_seq
+    independently and could collide the spine seq / fork the hash chain). It is check-then-act, NOT atomic:
+    two retries firing within the same instant can both pass (the UI in-flight guard closes the realistic
+    double-click; an atomic O_EXCL per-slug claim — the LAP-3b nonce-ledger pattern — is named follow-on
+    hardening for the independent-concurrent-POST case). Total; a broken meta is skipped."""
     if not slug:
         return False
     try:
@@ -681,7 +685,8 @@ def retry_run(run_id: str) -> dict:
     """Relaunch a FINISHED/interrupted run as a NEW run linked to the original (parent_run_id). A resumable
     run whose CLI supports --resume is RESUMED (argv + --resume → continues its slug's spine from the last
     checkpoint); everything else is RESTARTED (argv as-is). Refuses a run that is still running (cancel it
-    first), and refuses to start a second concurrent run of the same slug. CSRF/rebind-gated. Never raises."""
+    first), and BEST-EFFORT refuses a second concurrent run of the same slug (check-then-act, not atomic —
+    see _slug_has_running_run). CSRF/rebind-gated. Never raises."""
     meta = _read_run_meta(run_id)
     if meta is None:
         return {"ok": False, "error": "no such run"}
