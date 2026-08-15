@@ -4297,13 +4297,51 @@
     if (!pend.length) { V.mount(box, h("div.empty", null, "No actions awaiting approval.")); return; }
     V.mount(box, [
       h("div.hint", { style: { marginBottom: "10px" } },
-        "These offense actions are queued and awaiting your signature. This console is keyless and cannot sign them — copy the command below and run it in a terminal that holds your owner key (VIGIL_APPROVAL_OWNER_KEY). No screen can sign an offense approval — not this one and not the sovereign cockpit."),
+        "These offense actions are queued and awaiting your owner signature. Approve signs in the sovereign "
+        + "cockpit with your owner key (the offense console stays keyless — your key never reaches it). You can "
+        + "still sign from a terminal instead; the command is under each item."),
       h("div.stack", null, pend.map(function (p) { return pendingApprovalCard(p, base); })),
     ]);
   }
 
+  // Approve ONE queued offense action from the UI. The sovereign cockpit signs in-process with your owner
+  // key (route-via-sovereign). First time, it needs the offense authority bound to that key — if the backend
+  // says so, confirm the one-time bind and retry. `then` refreshes the queue.
+  function offenseApprove(p, then) {
+    V.postJSON(SOV("/api/action"), { action: "offense_approve", request_id: p.request_id })
+      .then(function (r) {
+        if (r && r.needs_bind) {
+          if (!confirm("Enable UI approvals? This binds offense approvals to your owner key (one time), so "
+                     + "the cockpit can sign them. Your key stays sovereign-side.")) return;
+          V.postJSON(SOV("/api/action"), { action: "offense_bind_authority" }).then(function (b) {
+            if (b && b.error) { V.toast(b.error, true); return; }
+            V.postJSON(SOV("/api/action"), { action: "offense_approve", request_id: p.request_id })
+              .then(function (r2) {
+                if (r2 && r2.ok) { V.toast("Approved — the action can run."); if (then) then(); }
+                else { V.toast((r2 && r2.error) || "Approve failed", true); }
+              }).catch(function (e) { V.toast((e && e.message) || "Approve failed", true); });
+          }).catch(function (e) { V.toast((e && e.message) || "Bind failed", true); });
+          return;
+        }
+        if (r && r.ok) { V.toast("Approved — the action can run."); if (then) then(); }
+        else { V.toast((r && r.error) || "Approve failed — are you on the owner plane?", true); }
+      })
+      .catch(function (e) { V.toast((e && e.message) || "Approve failed", true); });
+  }
+
+  function offenseDeny(p, then) {
+    if (!confirm("Deny this action? It is removed from the queue and the run's request is refused.")) return;
+    V.postJSON(SOV("/api/action"), { action: "offense_deny", request_id: p.request_id })
+      .then(function (r) {
+        if (r && r.ok) { V.toast("Denied."); if (then) then(); }
+        else { V.toast((r && r.error) || "Deny failed", true); }
+      })
+      .catch(function (e) { V.toast((e && e.message) || "Deny failed", true); });
+  }
+
   function pendingApprovalCard(p, base) {
     var cmd = "vigil approve sign --base-dir " + base + " --request-id " + p.request_id;
+    var refresh = function () { var b = V.$("#safety-pending"); if (b) loadPendingApprovals(); };
     return h("div.approval", null, [
       h("div.ah", null, [V.icon("key"), h("span.t", null, (p.tool_name || "action") + " → " + (p.target || "—"))]),
       h("div.why", null, [
@@ -4311,12 +4349,16 @@
           "request " + (p.request_id || "—") + (p.created_at_iso ? (" · " + p.created_at_iso) : "")),
         p.args_preview ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all", marginTop: "4px" } }, p.args_preview) : null,
       ]),
-      h("div", { style: { marginTop: "10px", display: "flex", gap: "8px", alignItems: "stretch" } }, [
-        h("pre.code", { style: { flex: "1", margin: "0" } }, cmd),
-        h("button.btn.sm", { title: "Copy the sign command", onClick: function () { copyText(cmd); } }, "Copy"),
+      // owner-plane actions: sign / deny from the UI (the cockpit holds the key, not this console)
+      h("div", { style: { marginTop: "10px", display: "flex", gap: "8px" } }, [
+        h("button.btn.sm.owner", { onClick: function () { offenseApprove(p, refresh); } }, [V.icon("check"), "Approve"]),
+        h("button.btn.sm", { onClick: function () { offenseDeny(p, refresh); } }, [V.icon("x"), "Deny"]),
       ]),
-      h("div.hint", { style: { marginTop: "8px" } },
-        "Run this in a terminal holding your owner key (VIGIL_APPROVAL_OWNER_KEY). Signing never happens from a screen — this is by design, so the key never reaches the console."),
+      // fallback: sign from a terminal instead (the offense console remains keyless either way)
+      h("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "stretch" } }, [
+        h("pre.code", { style: { flex: "1", margin: "0" } }, cmd),
+        h("button.btn.sm", { title: "Copy the CLI sign command", onClick: function () { copyText(cmd); } }, "Copy"),
+      ]),
     ]);
   }
 
