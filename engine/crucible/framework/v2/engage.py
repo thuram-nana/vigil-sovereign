@@ -681,16 +681,25 @@ def run_engagement(
     Every phase is checkpointed to an append-only :class:`~framework.v2.phase_ledger.PhaseLedger`
     (fail-open: a checkpoint IO failure is a recorded no-op, never a raise). With ``resume=True``
     a resumed run RELOADS the prior run's snapshotted scan report and skips the traffic-sending
-    crawl/audit — but it is NOT a "skip every completed phase" shortcut: only the scan and the
-    spine-emitting reasoning pass are skipped (see ``phase_ledger.RESUMABLE_PHASES``). Every
-    PURE, no-traffic reasoning phase — intel finalize, finding-confidence, chaining, the
-    GROUNDING veracity firewall, fusion, the defender pass — ALWAYS re-runs on resume, deriving
-    its in-memory result fresh from the reloaded report. Re-firing the grounding firewall is
-    REQUIRED, not optional: a finding is presented as a fact only if its retained oracle_context
-    RE-FIRES (CRUCIBLE invariant #3), and the firewall can only demote — so a resumed report is
-    as authoritative as a fresh one, never a stale snapshot presented without re-verification.
-    ``resume=False`` (the default) only ever RECORDS state, so the control flow — and
-    ``make gate`` — is byte-identical."""
+    crawl/audit — but it is NOT a "skip every completed phase" shortcut. The scan is the only phase
+    whose WORK is skipped (its report is reloaded, not re-crawled; see
+    ``phase_ledger.RESUMABLE_PHASES``, which also lists the reasoning pass). Every PURE, no-traffic
+    reasoning phase — intel finalize, finding-confidence, chaining, the GROUNDING veracity firewall,
+    fusion, the defender pass — ALWAYS re-runs on resume, deriving its in-memory result fresh from
+    the reloaded report. Re-firing the grounding firewall is REQUIRED, not optional: a finding is
+    presented as a fact only if its retained oracle_context RE-FIRES (CRUCIBLE invariant #3), and the
+    firewall can only demote — so a resumed report is as authoritative as a fresh one, never a stale
+    snapshot presented without re-verification.
+
+    The phases that re-run but ALSO write to the append-only event spine — the reasoning pass
+    (skipped outright), sensor fusion, and the defender pass — must not double-count their events on
+    a resume. The reasoning pass is skipped when completed (its re-emit is its only effect). Fusion
+    and defender re-run to recompute their derived fields but hand their spine-EMITTING steps a NULL
+    sink whenever the prior run already recorded that phase on the spine (see ``_emit_sink``), so the
+    fused-lead findings and the defender gap-report/efficacy events appear ONCE across fresh+resume
+    while ``result.fused_leads``/``fused_facts``/``defense`` are still recomputed. ``resume=False``
+    (the default) only ever RECORDS state, so the control flow — and ``make gate`` — is
+    byte-identical."""
     # Opt-in event-spine sink (default None → byte-identical behaviour). When present, every
     # gate refusal is recorded as evidence on the spine before it propagates.
     sink = _make_spine_sink(spine, slug)
@@ -702,6 +711,28 @@ def run_engagement(
     # pass (RESUMABLE_PHASES); every pure-reasoning phase — including the grounding veracity
     # firewall — re-runs, so a resumed report is re-verified, never a stale snapshot.
     ledger = PhaseLedger(slug, resume=resume, sink=sink)
+
+    # Suppress the SPINE RE-EMIT of a pure-reasoning phase that ALSO writes to the append-only
+    # event spine and that a PRIOR run already recorded there. Two re-run phases emit: FUSION
+    # (each fused-sensor LEAD becomes a `finding` event via _emit_fused_leads, and the gated
+    # sensor invocations emit tool_call/tool_result) and DEFENDER (_mirror_defense posts the
+    # gap-report observation + efficacy decision). They are correctly NOT in RESUMABLE_PHASES —
+    # they MUST re-run so a resumed result recomputes its in-memory derived fields (fused_leads/
+    # fused_facts, defense) and is as complete as a fresh one. But re-running them verbatim would
+    # DOUBLE-COUNT their events on the immutable stream every resume. Fix: a re-run phase whose
+    # prior run already recorded it on the spine hands its EMITTING steps a NULL sink — it still
+    # recomputes in-memory, it just does not re-append the same events. A phase the prior run did
+    # NOT complete (never emitted, or crashed mid-emit) keeps the real sink, so its events are
+    # emitted exactly once. Grounding/finding-confidence/chaining/intel emit NOTHING to the spine,
+    # so they are already re-emit-idempotent and untouched. Empty unless resuming → fresh runs
+    # (and `make gate`, which uses no spine) are byte-identical.
+    _completed_prior = ledger.completed_prior()
+
+    def _emit_sink(phase: str):
+        """The sink a re-runnable phase hands to its spine-EMITTING steps: the real ``sink``
+        normally, but ``None`` when resuming a phase the prior run already recorded on the spine
+        (so it recomputes its in-memory result WITHOUT re-appending the same events)."""
+        return None if (resume and phase in _completed_prior) else sink
 
     # Preflight is the fail-closed AUTHORIZATION gate — it ALWAYS runs, even on resume:
     # re-validating the kill-switch + seed scope on every launch is a safety feature, never a
@@ -914,10 +945,15 @@ def run_engagement(
     # the fusion clock continues after the run's high-water so time never inverts. Best-effort — a
     # fusion failure never sinks the engagement, and it NEVER changes a finding or an oracle verdict.
     def _do_fusion() -> None:
+        # On a resume where fusion already completed, hand _run_fusion a NULL sink: the world-fold
+        # + oracle re-verification (and thus result.fused_leads/fused_facts) recompute identically,
+        # but the fused-lead `finding` events + gated-sensor tool events are NOT re-appended to the
+        # spine (the prior run already recorded them). Otherwise the real sink emits them once.
+        fusion_sink = _emit_sink(P_FUSION)
         try:
             fusion_base = max((n.last_seen for n in world.all_nodes()), default=0) + 1
             result.fused_leads, result.fused_facts = _run_fusion(
-                world, slug, seq_base=fusion_base, sink=sink)
+                world, slug, seq_base=fusion_base, sink=fusion_sink)
         except Exception:
             pass
         # C4 — internal attack paths over the NOW-FUSED world. Bridge the GROUNDED cloud oracle
@@ -942,11 +978,16 @@ def run_engagement(
     # mapped to ATT&CK, and Sigma over any operator-supplied OFFLINE logs (kill-switch-gated read).
     # READ-ONLY over the authoritative scan — it changes no finding and no oracle verdict.
     def _do_defender() -> None:
+        # On a resume where the defender pass already completed, hand it a NULL sink: the
+        # DefenseReport (result.defense) is rebuilt identically from the reloaded report, but the
+        # gap-report observation + efficacy decision (and any gated log-ingest tool events) are NOT
+        # re-appended to the spine (the prior run already recorded them). Otherwise emit them once.
+        defender_sink = _emit_sink(P_DEFENDER)
         result.defense = _run_defender_pass(
             report, ruleset_path=defender_ruleset, sigma_dir=defender_sigma_dir,
-            log_path=defender_log, log_format=defender_log_format, slug=slug, sink=sink)
-        if sink is not None and result.defense is not None:
-            _mirror_defense(sink, result.defense)
+            log_path=defender_log, log_format=defender_log_format, slug=slug, sink=defender_sink)
+        if defender_sink is not None and result.defense is not None:
+            _mirror_defense(defender_sink, result.defense)
     ledger.run_phase(P_DEFENDER, _do_defender, enabled=enable_defender)
 
     # Mirror the authoritative findings onto the event spine AND run the reasoning pass over
@@ -1294,15 +1335,20 @@ def main(argv: list[str]) -> int:
                         help="RESUME a prior run of this slug from its phase ledger "
                              "(targets/<slug>/<slug>.phases.jsonl): reload the prior run's "
                              "snapshotted SCAN report and skip re-crawling/re-auditing the target. "
-                             "This skips ONLY the traffic-sending scan and the spine-emitting "
-                             "reasoning pass; it is NOT a skip-everything shortcut. The veracity "
-                             "firewall and every other pure-reasoning phase (finding-confidence, "
-                             "chaining, grounding, fusion, defender) ALWAYS re-run over the reloaded "
-                             "report — so a resumed report is re-verified (oracle contexts re-fire), "
-                             "never a stale snapshot presented as authoritative. A scan that only "
-                             "started/failed (crashed before completing) is retried; preflight "
-                             "authorization ALWAYS re-runs. Fail-open: a missing/corrupt ledger just "
-                             "re-runs from scratch. Applies to the web engage path (not --fuse-only).")
+                             "It is NOT a skip-everything shortcut: only the traffic-sending scan's "
+                             "WORK is skipped (its report is reloaded). The veracity firewall and "
+                             "every other pure-reasoning phase (finding-confidence, chaining, "
+                             "grounding, fusion, defender) ALWAYS re-run over the reloaded report — "
+                             "so a resumed report is re-verified (oracle contexts re-fire) and its "
+                             "derived fields (fused leads/facts, defense) are recomputed, never a "
+                             "stale snapshot. The re-run phases that also WRITE to the event spine "
+                             "(fusion, defender; the reasoning pass is skipped outright) suppress "
+                             "their spine RE-EMIT for any phase the original run already recorded "
+                             "there, so their events are NOT double-counted on the append-only "
+                             "stream. A scan that only started/failed (crashed before completing) is "
+                             "retried; preflight authorization ALWAYS re-runs. Fail-open: a "
+                             "missing/corrupt ledger just re-runs from scratch. Applies to the web "
+                             "engage path (not --fuse-only).")
     parser.add_argument("--ephemeral", action="store_true",
                         help="EPHEMERAL / ZDR session (opt-in; persist-by-default). Re-root the "
                              "run's evidence archive + audit log onto an in-memory tmpfs dir that "

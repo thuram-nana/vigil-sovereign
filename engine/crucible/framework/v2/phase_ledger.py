@@ -19,17 +19,24 @@ importance:
     allowlist) may be skipped, and only when a prior run completed them. Exactly two phases
     qualify: the one TRAFFIC-SENDING phase, the scan — which snapshots its authoritative
     :class:`ScanReport` on completion so a resumed run RELOADS that report instead of
-    re-crawling/re-auditing the target — and the advisory reasoning pass, which EMITS the
-    findings' events onto the append-only event spine (re-running it would double-count the
-    same findings on the immutable stream). EVERY OTHER phase — intel finalize,
-    finding-confidence, chaining, the GROUNDING veracity firewall, fusion, the defender pass
-    — is PURE, no-traffic, deterministic reasoning over the reloaded report/world, and MUST
-    re-run on resume: its output is an in-memory field of the prior process that nothing
-    reloads, and re-firing the grounding firewall (CRUCIBLE invariant #3: a finding is a fact
-    only if its retained ``oracle_context`` RE-FIRES; the firewall can only demote) is
-    REQUIRED for a resumed report to be as authoritative as a fresh one — not an optional
-    optimization. Re-running them sends no traffic and is free. A phase that only ``started``
-    / ``failed`` (crashed before completing) is likewise never skipped — it is retried.
+    re-crawling/re-auditing the target — and the advisory reasoning pass, whose ONLY effect is
+    to EMIT the findings' events onto the append-only event spine (re-running it would
+    double-count the same findings on the immutable stream, and it changes no report field, so
+    skipping it loses nothing). EVERY OTHER phase — intel finalize, finding-confidence,
+    chaining, the GROUNDING veracity firewall, fusion, the defender pass — is no-traffic,
+    deterministic reasoning over the reloaded report/world, and MUST re-run on resume: its
+    output is an in-memory field of the prior process that nothing reloads, and re-firing the
+    grounding firewall (CRUCIBLE invariant #3: a finding is a fact only if its retained
+    ``oracle_context`` RE-FIRES; the firewall can only demote) is REQUIRED for a resumed report
+    to be as authoritative as a fresh one — not an optional optimization. Re-running them sends
+    no traffic and is free. Two of those re-run phases — sensor fusion and the defender pass —
+    ALSO write to the spine (fused-lead ``finding`` events / the defender gap-report), so on a
+    resume they must recompute their derived fields WITHOUT re-appending those events. That
+    spine-idempotency is the CALLER's job, not the allowlist's: :func:`engage.run_engagement`
+    hands those phases a NULL sink (its ``_emit_sink`` helper, keyed on :meth:`completed_prior`)
+    when the prior run already recorded them, so they re-run in-memory but re-emit nothing. A
+    phase that only ``started`` / ``failed`` (crashed before completing) is likewise never
+    skipped — it is retried (and it keeps the real sink, so its events are emitted once).
   * **State, never a finding.** The ledger records phase STATE only (``started`` /
     ``completed`` / ``skipped`` / ``failed`` + a run-status timestamp). It never mints a
     finding, never promotes a lead to a fact, and feeds no deterministic / oracle math.
@@ -80,13 +87,13 @@ ORDERED_PHASES: tuple[str, ...] = (
 #                   ScanReport (persist_report), and a resumed run RELOADS that snapshot instead
 #                   of re-crawling/re-auditing, so the target sees no repeat traffic and findings
 #                   are never re-counted. Its output is durably reloadable — nothing is lost.
-#   * P_REASONING — the ADVISORY pass that EMITS the findings' events onto the append-only event
-#                   spine. Re-running it would double-count the SAME findings on the immutable
-#                   stream; it changes no report field and no oracle verdict, so skipping the
-#                   re-emit loses nothing authoritative.
+#   * P_REASONING — the ADVISORY pass WHOSE ONLY EFFECT is to EMIT the findings' events onto the
+#                   append-only event spine. Re-running it would double-count the SAME findings on
+#                   the immutable stream; it changes no report field and no oracle verdict, so
+#                   skipping the re-emit loses nothing authoritative.
 #
-# Every OTHER phase is PURE, no-traffic, DETERMINISTIC reasoning over the reloaded report/world
-# whose result lives ONLY as an in-memory field of the prior process (grounding, finding_confidence,
+# Every OTHER phase is no-traffic, DETERMINISTIC reasoning over the reloaded report/world whose
+# result lives ONLY as an in-memory field of the prior process (grounding, finding_confidence,
 # attack_paths, chained_conclusions, entities, predictions, fused_leads/facts, defense) that NOTHING
 # reloads. Those MUST re-run on resume — most critically P_GROUNDING, the veracity firewall, whose
 # re-execution of each finding's retained oracle_context is REQUIRED (CRUCIBLE invariant #3) for a
@@ -94,6 +101,15 @@ ORDERED_PHASES: tuple[str, ...] = (
 # them sends no traffic and is free, so the allowlist below is deliberately minimal: any phase NOT
 # named here always re-runs on resume (a fail-safe default — a newly added reasoning phase can never
 # be silently dropped from a resumed deliverable).
+#
+# Note two of those always-re-run phases — P_FUSION and P_DEFENDER — ALSO write to the spine (a
+# fused-lead `finding` event per sensor LEAD; the defender gap-report observation + efficacy
+# decision). They deliberately stay OUT of this allowlist because they must re-run to recompute
+# their in-memory derived fields, but re-running them verbatim would double-count their events. Their
+# spine-idempotency is handled by the CALLER, not by skipping them: engage.run_engagement re-runs
+# them with a NULL sink (its `_emit_sink`, keyed on `completed_prior`) whenever the prior run already
+# recorded the phase, so the computation repeats but the emit does not. This module's contract is
+# purely which phase WORK may be skipped; suppressing a re-emit is not skipping the phase.
 RESUMABLE_PHASES: frozenset[str] = frozenset({P_SCAN, P_REASONING})
 
 

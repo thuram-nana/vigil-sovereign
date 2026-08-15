@@ -29,10 +29,13 @@ from pathlib import Path
 import pytest
 
 from framework.v2 import engage as engage_mod
+from framework.v2.agents.blackboard import Blackboard
 from framework.v2.common import paths as _paths
 from framework.v2.engage import EngagementRefused, run_engagement
 from framework.v2.phase_ledger import (
     P_CHAINING,
+    P_DEFENDER,
+    P_FUSION,
     P_GROUNDING,
     P_PREFLIGHT,
     P_REASONING,
@@ -387,6 +390,77 @@ def test_resume_skips_the_scan_and_does_not_double_execute(isolate, monkeypatch)
     assert _statuses(recs, P_CHAINING).count("completed") == 2
     # preflight STILL re-ran on resume (authorization is never skipped)
     assert _statuses(recs, P_PREFLIGHT).count("completed") == 2
+
+
+def test_resume_recomputes_fusion_and_defender_without_double_counting_spine_events(
+        isolate, monkeypatch):
+    """The re-verify BLOCK: resume correctly RE-RUNS the pure-reasoning phases, but two of them —
+    sensor fusion and the defender pass — ALSO write to the append-only spine. Re-running them
+    verbatim double-counted their events on every resume (a fused-lead ``finding`` event per sensor
+    LEAD + the defender gap-report observation), inflating the engagement's finding count. The fix
+    RE-RUNS them (so ``fused_leads``/``defense`` recompute and a resumed result is as complete as a
+    fresh one) but hands their EMITTING steps a NULL sink when the prior run already recorded the
+    phase — so their events appear EXACTLY ONCE across fresh+resume. Uses a REAL Blackboard spine
+    and a real operator fusion plan (a declared_service on the in-scope host)."""
+    td = isolate("alpha")
+    seed = "http://127.0.0.1:9/"
+    # A real operator fusion plan: a declared_service on the IN-SCOPE host mints LEAD observations
+    # that fusion mirrors onto the spine as `finding` events (finding_slug 'lead:...').
+    (td / "fusion.json").write_text(json.dumps([
+        {"sensor": "declared_service", "args": {"host": "127.0.0.1", "services": [
+            {"port": 443, "protocol": "tcp", "service": "https", "product": "nginx", "version": "1.18.0"},
+            {"port": 8080, "protocol": "tcp", "service": "http", "product": "apache", "version": "2.4.41"},
+        ]}}]), encoding="utf-8")
+
+    bb = Blackboard(db_path=td.parent.parent / "spine.db")   # tmp_path/spine.db (real, on-disk)
+
+    def _lead_finding_slugs() -> list[str]:
+        """The fused-sensor LEAD finding events on the spine (finding_slug 'lead:...'), which the
+        fusion phase emits — the exact events the BLOCK re-appended on every resume."""
+        return sorted(
+            s for s in (str((r.payload or {}).get("finding_slug", ""))
+                        for r in bb.read(engagement="alpha", kinds=["finding"]))
+            if s.startswith("lead:"))
+
+    def _defender_gap_obs() -> list:
+        return [r for r in bb.read(engagement="alpha", kinds=["observation"])
+                if str((r.payload or {}).get("source", "")) == "defender:gap-report"]
+
+    # FRESH run — spine + fusion + defender all active; every phase executes.
+    Fake, state = _fake_campaign(_sample_report(seed))
+    fresh = _run("alpha", seed, Fake, monkeypatch,
+                 spine=bb, fuse_sensors=True, enable_defender=True)
+    assert state["runs"] == 1
+    # the DERIVED fields were computed, and their spine events were emitted ONCE.
+    assert fresh.fused_leads > 0                        # fusion minted + folded LEADs (in-memory derived field)
+    assert fresh.defense is not None                    # defender built its DefenseReport (in-memory derived field)
+    fresh_leads = _lead_finding_slugs()
+    assert len(fresh_leads) > 0                         # fused-lead finding events reached the spine on the fresh run
+    assert len(_defender_gap_obs()) == 1               # the defender gap-report observation emitted exactly once
+    total_findings_fresh = bb.count(engagement="alpha", kind="finding")
+
+    # RESUME — fusion + defender RE-RUN (they are not RESUMABLE_PHASES), but must NOT re-emit.
+    Fake2, state2 = _fake_campaign(_sample_report(seed))
+    resumed = _run("alpha", seed, Fake2, monkeypatch,
+                   spine=bb, fuse_sensors=True, enable_defender=True, resume=True)
+    assert state2["runs"] == 0                          # the scan was reloaded from snapshot, not re-crawled
+
+    # THE FIX — the derived fields are RECOMPUTED on resume (a resumed result is as complete)...
+    assert resumed.fused_leads == fresh.fused_leads and resumed.fused_leads > 0
+    assert resumed.defense is not None
+    # ...but the spine events are NOT re-appended: the fused-lead findings and the defender
+    # gap-report observation appear EXACTLY ONCE across fresh+resume (zero duplicates).
+    assert _lead_finding_slugs() == fresh_leads         # no duplicate fused-lead finding events
+    assert len(_defender_gap_obs()) == 1               # no duplicate defender gap-report observation
+    assert bb.count(engagement="alpha", kind="finding") == total_findings_fresh  # finding count did not inflate
+
+    # the ledger proves fusion + defender actually RE-RAN on resume (completed twice), while the
+    # spine-emitting reasoning pass was SKIPPED (its re-emit is its only effect).
+    recs = _read_ledger("alpha")
+    assert _statuses(recs, P_FUSION).count("completed") == 2
+    assert _statuses(recs, P_DEFENDER).count("completed") == 2
+    assert "skipped" in _statuses(recs, P_REASONING)
+    bb.close()
 
 
 def test_resume_retries_a_scan_that_crashed_mid_op(isolate, monkeypatch):
