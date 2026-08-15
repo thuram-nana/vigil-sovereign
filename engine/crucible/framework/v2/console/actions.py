@@ -371,7 +371,9 @@ def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
             _write_meta(run_id, **_base, status="done", pid=proc.pid,
                         rc=proc.returncode, finished=time.time())
         else:
-            _write_meta(run_id, **_base, status="error", pid=proc.pid,
+            # a negative rc = killed by a signal (the operator's Cancel), not a genuine error.
+            _status = "cancelled" if (proc.returncode is not None and proc.returncode < 0) else "error"
+            _write_meta(run_id, **_base, status=_status, pid=proc.pid,
                         rc=proc.returncode, stderr=(err or "")[-2000:], finished=time.time())
 
     threading.Thread(target=_run, daemon=True).start()
@@ -490,7 +492,12 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
             (rd / "report.json").write_text(out, encoding="utf-8")
         else:
             (rd / "stdout.txt").write_text(out or "", encoding="utf-8")
-        _write_meta(run_id, **{**meta, "status": "done" if ok else "error", "pid": proc.pid,
+        # A negative rc means the child was killed by a signal — the operator's Cancel (W4), not a genuine
+        # error — so record it as 'cancelled', not 'error'. This supervisor thread is the SOLE terminal-status
+        # writer for a live run: cancel_run signals and then waits for THIS write (it only writes the status
+        # itself for an ORPHANED run with no live supervisor), so there is no double-write race.
+        status = "done" if ok else ("cancelled" if (rc is not None and rc < 0) else "error")
+        _write_meta(run_id, **{**meta, "status": status, "pid": proc.pid,
                                "rc": rc, "stderr": (err or "")[-2000:] if not ok else "",
                                "finished": time.time()})
 
@@ -543,6 +550,179 @@ def reconcile_orphaned_runs() -> int:
     except Exception:  # noqa: BLE001 — reconciliation must never block console startup
         pass
     return n
+
+
+# ---------------------------------------------------------------------------
+# W4 — run control: Cancel a running run; Retry (restart) / Resume (continue) a finished one.
+# ---------------------------------------------------------------------------
+def _read_run_meta(run_id: str) -> "dict | None":
+    """The run's meta.json (its registry record), or None if absent/unreadable. Total."""
+    try:
+        return json.loads((run_dir(run_id) / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _signal_pid(pid) -> bool:
+    """SIGTERM a pid, then SIGKILL after a short grace, and report whether it is gone. Liveness is probed
+    with ``os.kill(pid, 0)`` — deliberately NOT ``waitpid`` — so this never REAPS the process: a run's own
+    supervisor thread (``_spawn_background``) may be reaping the same child via ``proc.communicate()``, and
+    stealing the reap would race it into recording the wrong terminal status. Total; never raises.
+
+    NOTE ON OWNERSHIP: this distinguishes processes by KILL PERMISSION, not by run-ownership. A same-UID
+    pid that was RECYCLED to an unrelated process after our child died is indistinguishable here and would
+    be signalled — ``cancel_run`` guards the cross-REBOOT case with ``boot_id``; the same-boot reuse window
+    is the residual gap (no portable pidfd/start-time check), documented, not silently claimed away."""
+    try:
+        p = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if p <= 0:
+        return False
+
+    def _gone() -> bool:
+        try:
+            os.kill(p, 0)
+            return False
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False        # exists but not signalable by us (cross-UID) — treat as not-gone
+
+    try:
+        os.kill(p, signal.SIGTERM)
+    except ProcessLookupError:
+        return True             # already gone
+    except OSError:
+        return False            # not permitted / not ours
+    for _ in range(20):         # ~2s grace for a clean exit (supervisor reaps in parallel)
+        if _gone():
+            return True
+        time.sleep(0.1)
+    try:
+        os.kill(p, signal.SIGKILL)
+    except OSError:
+        pass
+    for _ in range(10):
+        if _gone():
+            return True
+        time.sleep(0.1)
+    return _gone()
+
+
+def cancel_run(run_id: str) -> dict:
+    """Stop a running run by signalling its recorded pid (SIGTERM→SIGKILL). Idempotent — a non-running run
+    is a clean no-op. CSRF/rebind-gated by the caller. Never raises.
+
+    RACE-FREE terminal status: after signalling we let the run's OWN supervisor thread reap the child and
+    record the terminal status itself (its negative-rc path writes 'cancelled'); we poll the meta and only
+    write 'cancelled' OURSELVES if nothing updated it within the grace — i.e. an ORPHANED run with no live
+    supervisor (console restarted). So there is exactly one terminal-status writer per run and a run that
+    happened to finish on its own an instant before the click keeps its true 'done'/'error' status.
+
+    REBOOT-SAFE: if the run's ``boot_id`` differs from this host's, its pid is from a previous boot (already
+    dead, its number possibly recycled) — we do NOT signal it, just mark it cancelled. The same-boot
+    pid-reuse window is the residual gap (see ``_signal_pid``)."""
+    meta = _read_run_meta(run_id)
+    if meta is None:
+        return {"ok": False, "error": "no such run"}
+    if meta.get("status") != "running":
+        return {"ok": True, "status": meta.get("status", "unknown"), "note": "not running"}
+    pid = meta.get("pid")
+    boot = str(meta.get("boot_id") or "")
+    cur_boot = _boot_id()
+    rebooted = bool(cur_boot and boot and cur_boot != boot)
+    terminated = False
+    if pid is not None and not rebooted:
+        terminated = _signal_pid(pid)
+    # Give a live supervisor a moment to record the terminal status itself; only close an ORPHANED run
+    # (still 'running' after the grace) ourselves — never overwrite a status the supervisor already set.
+    final = "running"
+    for _ in range(20):
+        cur = _read_run_meta(run_id) or {}
+        final = cur.get("status", "running")
+        if final != "running":
+            break
+        time.sleep(0.1)
+    if final == "running":
+        _write_meta(run_id, **{**meta, "status": "cancelled", "cancelled": True,
+                               "finished": meta.get("finished") or time.time()})
+        final = "cancelled"
+    return {"ok": True, "status": final, "terminated": terminated}
+
+
+def _cmd_supports_resume(cmd: "list[str]") -> bool:
+    """True iff relaunching this argv with --resume CONTINUES it. Only the integration `vigil engage` path
+    carries --resume (W2b); the offense `framework.v2 engage` scanner and every other CLI restart instead,
+    so appending --resume there would be an unrecognised-argument error, not a resume."""
+    toks = [str(a) for a in cmd]
+    return "engage" in toks and not any("framework.v2" in t for t in toks)
+
+
+def _slug_has_running_run(slug: str, *, exclude: str = "") -> bool:
+    """True iff some run of ``slug`` is currently 'running'. Used by retry as a BEST-EFFORT guard against
+    starting a SECOND concurrent run of the same engagement (two `engage --resume` would each read head_seq
+    independently and could collide the spine seq / fork the hash chain). It is check-then-act, NOT atomic:
+    two retries firing within the same instant can both pass (the UI in-flight guard closes the realistic
+    double-click; an atomic O_EXCL per-slug claim — the LAP-3b nonce-ledger pattern — is named follow-on
+    hardening for the independent-concurrent-POST case). Total; a broken meta is skipped."""
+    if not slug:
+        return False
+    try:
+        root = console_dir() / "runs"
+        for d in (root.iterdir() if root.is_dir() else []):
+            if d.name == exclude:
+                continue
+            m = _read_run_meta(d.name)
+            if isinstance(m, dict) and m.get("status") == "running" and str(m.get("slug") or "") == slug:
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def retry_run(run_id: str) -> dict:
+    """Relaunch a FINISHED/interrupted run as a NEW run linked to the original (parent_run_id). A resumable
+    run whose CLI supports --resume is RESUMED (argv + --resume → continues its slug's spine from the last
+    checkpoint); everything else is RESTARTED (argv as-is). Refuses a run that is still running (cancel it
+    first), and BEST-EFFORT refuses a second concurrent run of the same slug (check-then-act, not atomic —
+    see _slug_has_running_run). CSRF/rebind-gated. Never raises."""
+    meta = _read_run_meta(run_id)
+    if meta is None:
+        return {"ok": False, "error": "no such run"}
+    if meta.get("status") == "running":
+        return {"ok": False, "error": "this run is still running — cancel it before retrying"}
+    cmd = meta.get("cmd")
+    if not isinstance(cmd, list) or not cmd:
+        return {"ok": False, "error": "this run has no recorded command to relaunch"}
+    slug = str(meta.get("slug") or "")
+    if slug and _slug_has_running_run(slug):
+        return {"ok": False, "error": f"a run for '{slug}' is already in progress — wait for it or cancel it"}
+    new_id = _new_run_id()
+    rd = run_dir(new_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    # Re-point any output path baked into the argv at the PARENT run's dir (a loopback scan bakes absolute
+    # --progress-log / --reverifiable-out paths) to the NEW run's dir — else the retry would write into (and
+    # overwrite) the parent's artifacts and leave the new run with none.
+    parent_rd = str(run_dir(run_id))
+    new_rd = str(rd)
+    new_cmd = [(str(a).replace(parent_rd, new_rd) if parent_rd in str(a) else str(a)) for a in cmd]
+    resume = bool(meta.get("resumable")) and _cmd_supports_resume(new_cmd)
+    if resume and "--resume" not in new_cmd:
+        new_cmd.append("--resume")
+    carry = {k: meta[k] for k in ("target", "slug", "mode", "run_kind", "objective", "scope",
+                                  "session_id", "stream") if k in meta}
+    new_meta = {**carry, "cmd": new_cmd, "parent_run_id": run_id, "started": time.time()}
+    _write_meta(new_id, **new_meta, status="running")
+    # capture_report only for the loopback scan (JSON on stdout); engage/strix report elsewhere.
+    capture_report = ("scan" in new_cmd and "--format" in new_cmd)
+    # a Strix run needs its Proof Studio env re-pointed at the NEW run dir (else its proofs mis-locate).
+    env_extra = None
+    if str(carry.get("run_kind") or carry.get("mode") or "") in ("strix", "codebase") or "strix" in new_cmd:
+        env_extra = {"VIGIL_PROOF_RUN_DIR": new_rd, "VIGIL_ENGAGEMENT": slug,
+                     "VIGIL_BASE_DIR": os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"}
+    _spawn_background(new_id, rd, new_cmd, new_meta, capture_report=capture_report, env_extra=env_extra)
+    return {"ok": True, "run_id": new_id, "resumed": resume, "parent": run_id}
 
 
 # ---- console → live-engine bridge (per-session Neo4j graph) ------------------
