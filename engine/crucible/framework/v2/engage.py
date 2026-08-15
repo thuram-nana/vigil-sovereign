@@ -680,10 +680,17 @@ def run_engagement(
 
     Every phase is checkpointed to an append-only :class:`~framework.v2.phase_ledger.PhaseLedger`
     (fail-open: a checkpoint IO failure is a recorded no-op, never a raise). With ``resume=True``
-    the phases a prior run completed are SKIPPED — most importantly the traffic-sending scan,
-    whose authoritative report is snapshotted on completion and reloaded here instead of re-
-    crawling/re-auditing the target. ``resume=False`` (the default) only ever RECORDS state, so
-    the control flow — and ``make gate`` — is byte-identical."""
+    a resumed run RELOADS the prior run's snapshotted scan report and skips the traffic-sending
+    crawl/audit — but it is NOT a "skip every completed phase" shortcut: only the scan and the
+    spine-emitting reasoning pass are skipped (see ``phase_ledger.RESUMABLE_PHASES``). Every
+    PURE, no-traffic reasoning phase — intel finalize, finding-confidence, chaining, the
+    GROUNDING veracity firewall, fusion, the defender pass — ALWAYS re-runs on resume, deriving
+    its in-memory result fresh from the reloaded report. Re-firing the grounding firewall is
+    REQUIRED, not optional: a finding is presented as a fact only if its retained oracle_context
+    RE-FIRES (CRUCIBLE invariant #3), and the firewall can only demote — so a resumed report is
+    as authoritative as a fresh one, never a stale snapshot presented without re-verification.
+    ``resume=False`` (the default) only ever RECORDS state, so the control flow — and
+    ``make gate`` — is byte-identical."""
     # Opt-in event-spine sink (default None → byte-identical behaviour). When present, every
     # gate refusal is recorded as evidence on the spine before it propagates.
     sink = _make_spine_sink(spine, slug)
@@ -691,7 +698,9 @@ def run_engagement(
     # Append-only PHASE LEDGER + resume (default resume=False → the ledger only ever RECORDS;
     # it changes no control flow, so the non-resume path is byte-identical). Every ledger write
     # is fail-open: a checkpoint IO failure is a recorded no-op, never a raise. Under --resume it
-    # skips the phases a prior run completed (and reloads the scan's snapshotted report).
+    # reloads the scan's snapshotted report and skips ONLY the scan + the spine-emitting reasoning
+    # pass (RESUMABLE_PHASES); every pure-reasoning phase — including the grounding veracity
+    # firewall — re-runs, so a resumed report is re-verified, never a stale snapshot.
     ledger = PhaseLedger(slug, resume=resume, sink=sink)
 
     # Preflight is the fail-closed AUTHORIZATION gate — it ALWAYS runs, even on resume:
@@ -731,9 +740,11 @@ def run_engagement(
     # chaining accretes attack facts onto the SAME graph (disjoint id namespaces). Built
     # even when recon is off, so chaining shares it and the result exposes it.
     world = WorldModel()
-    # Best-effort intel recon under the ledger (skipped on resume if a prior run completed it;
-    # its ingest handle is in-memory, so a skip simply leaves intel_finalize with nothing to do —
-    # the same degrade as a recon failure, which the code already tolerates).
+    # Best-effort intel recon under the ledger. It is NOT a RESUMABLE_PHASE, so it re-runs on
+    # resume — rebuilding the in-memory ingest handle that intel_finalize consumes (its collectors
+    # only read OFFLINE fixtures via FixtureTransport, so a re-run sends no live traffic). Were it
+    # skipped, its ingest handle — which lives only in the prior process — would be lost and
+    # intel_finalize would silently produce nothing, exactly the derived-field drop this slice fixes.
     ingest = ledger.run_phase(
         P_INTEL_RECON,
         lambda: _intel_recon(world, slug, seed_url,
@@ -889,6 +900,9 @@ def run_engagement(
     # against the (now chained) world-model and label GROUNDED/UNGROUNDED/CONTRADICTED.
     # Runs AFTER chaining so the world holds the endpoint nodes the check consults.
     # Best-effort: the anti-hallucination pass can only demote, never sink the engagement.
+    # NOT a RESUMABLE_PHASE — it ALWAYS re-runs on resume (its verdict list lives only in the
+    # prior process, and CRUCIBLE invariant #3 requires the oracle to re-fire before findings
+    # are presented as facts; re-running over the reloaded report sends no traffic and is free).
     def _do_grounding() -> None:
         result.grounding = _assess_grounding(report, world)
     ledger.run_phase(P_GROUNDING, _do_grounding)
@@ -1278,13 +1292,17 @@ def main(argv: list[str]) -> int:
                              "refusals). Opt-in, best-effort; off by default (zero impact).")
     parser.add_argument("--resume", action="store_true",
                         help="RESUME a prior run of this slug from its phase ledger "
-                             "(targets/<slug>/<slug>.phases.jsonl): SKIP every phase a prior run "
-                             "already completed — most importantly the traffic-sending SCAN, whose "
-                             "authoritative report was snapshotted and is reloaded instead of re-"
-                             "crawling/re-auditing the target. A phase that only started/failed "
-                             "(crashed before completing) is retried. Preflight authorization ALWAYS "
-                             "re-runs. Fail-open: a missing/corrupt ledger just re-runs from scratch. "
-                             "Applies to the web engage path (not --fuse-only).")
+                             "(targets/<slug>/<slug>.phases.jsonl): reload the prior run's "
+                             "snapshotted SCAN report and skip re-crawling/re-auditing the target. "
+                             "This skips ONLY the traffic-sending scan and the spine-emitting "
+                             "reasoning pass; it is NOT a skip-everything shortcut. The veracity "
+                             "firewall and every other pure-reasoning phase (finding-confidence, "
+                             "chaining, grounding, fusion, defender) ALWAYS re-run over the reloaded "
+                             "report — so a resumed report is re-verified (oracle contexts re-fire), "
+                             "never a stale snapshot presented as authoritative. A scan that only "
+                             "started/failed (crashed before completing) is retried; preflight "
+                             "authorization ALWAYS re-runs. Fail-open: a missing/corrupt ledger just "
+                             "re-runs from scratch. Applies to the web engage path (not --fuse-only).")
     parser.add_argument("--ephemeral", action="store_true",
                         help="EPHEMERAL / ZDR session (opt-in; persist-by-default). Re-root the "
                              "run's evidence archive + audit log onto an in-memory tmpfs dir that "

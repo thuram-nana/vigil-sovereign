@@ -8,17 +8,28 @@ NO phase identity: a run that crashed in a late phase restarted from scratch —
 and re-auditing the target from the first request.
 
 This module adds a durable, append-only ledger of each phase's lifecycle and a resume
-path that SKIPS the phases a prior run already completed. Its contract, in order of
+path that skips ONLY the phases which are sound to skip. Its contract, in order of
 importance:
 
   * **Fail-open.** Every ledger write is total: a checkpoint/persist failure is a recorded
     no-op that NEVER raises into — or changes the behaviour of — the engagement. If the
     ledger cannot be written, the run proceeds exactly as if there were no ledger.
-  * **Resume-idempotent.** A phase marked ``completed`` in a prior run is skipped on
-    ``--resume`` (never re-executed, never double-counted). The one traffic-sending phase —
-    the scan — additionally snapshots its authoritative :class:`ScanReport` on completion,
-    so a resumed run reloads that report instead of re-crawling/re-auditing. A phase that
-    only ``started`` / ``failed`` (crashed before completing) is NOT skipped — it is retried.
+  * **Resume skips only what is SOUND to skip — the veracity firewall always re-fires.**
+    ``--resume`` is NOT "skip every completed phase": only :data:`RESUMABLE_PHASES` (a strict
+    allowlist) may be skipped, and only when a prior run completed them. Exactly two phases
+    qualify: the one TRAFFIC-SENDING phase, the scan — which snapshots its authoritative
+    :class:`ScanReport` on completion so a resumed run RELOADS that report instead of
+    re-crawling/re-auditing the target — and the advisory reasoning pass, which EMITS the
+    findings' events onto the append-only event spine (re-running it would double-count the
+    same findings on the immutable stream). EVERY OTHER phase — intel finalize,
+    finding-confidence, chaining, the GROUNDING veracity firewall, fusion, the defender pass
+    — is PURE, no-traffic, deterministic reasoning over the reloaded report/world, and MUST
+    re-run on resume: its output is an in-memory field of the prior process that nothing
+    reloads, and re-firing the grounding firewall (CRUCIBLE invariant #3: a finding is a fact
+    only if its retained ``oracle_context`` RE-FIRES; the firewall can only demote) is
+    REQUIRED for a resumed report to be as authoritative as a fresh one — not an optional
+    optimization. Re-running them sends no traffic and is free. A phase that only ``started``
+    / ``failed`` (crashed before completing) is likewise never skipped — it is retried.
   * **State, never a finding.** The ledger records phase STATE only (``started`` /
     ``completed`` / ``skipped`` / ``failed`` + a run-status timestamp). It never mints a
     finding, never promotes a lead to a fact, and feeds no deterministic / oracle math.
@@ -60,6 +71,30 @@ ORDERED_PHASES: tuple[str, ...] = (
     P_PREFLIGHT, P_INTEL_RECON, P_TRANSFER, P_SCAN, P_INTEL_FINALIZE,
     P_ASSESS_FINDINGS, P_CHAINING, P_GROUNDING, P_FUSION, P_DEFENDER, P_REASONING,
 )
+
+# The ONLY phases a completed prior run may cause ``--resume`` to skip — a strict ALLOWLIST,
+# never "every completed phase". A phase belongs here iff skipping it on resume is SOUND, which
+# is true for exactly two:
+#
+#   * P_SCAN      — the one TRAFFIC-SENDING phase. On completion it snapshots its authoritative
+#                   ScanReport (persist_report), and a resumed run RELOADS that snapshot instead
+#                   of re-crawling/re-auditing, so the target sees no repeat traffic and findings
+#                   are never re-counted. Its output is durably reloadable — nothing is lost.
+#   * P_REASONING — the ADVISORY pass that EMITS the findings' events onto the append-only event
+#                   spine. Re-running it would double-count the SAME findings on the immutable
+#                   stream; it changes no report field and no oracle verdict, so skipping the
+#                   re-emit loses nothing authoritative.
+#
+# Every OTHER phase is PURE, no-traffic, DETERMINISTIC reasoning over the reloaded report/world
+# whose result lives ONLY as an in-memory field of the prior process (grounding, finding_confidence,
+# attack_paths, chained_conclusions, entities, predictions, fused_leads/facts, defense) that NOTHING
+# reloads. Those MUST re-run on resume — most critically P_GROUNDING, the veracity firewall, whose
+# re-execution of each finding's retained oracle_context is REQUIRED (CRUCIBLE invariant #3) for a
+# resumed report to be as authoritative as a fresh one and which can only ever DEMOTE. Re-running
+# them sends no traffic and is free, so the allowlist below is deliberately minimal: any phase NOT
+# named here always re-runs on resume (a fail-safe default — a newly added reasoning phase can never
+# be silently dropped from a resumed deliverable).
+RESUMABLE_PHASES: frozenset[str] = frozenset({P_SCAN, P_REASONING})
 
 
 class PhaseLedger:
@@ -122,8 +157,22 @@ class PhaseLedger:
         return set(self._completed_prior)
 
     def should_run(self, phase: str) -> bool:
-        """False iff we are resuming AND this phase already completed in a prior run."""
-        return not (self._resume and phase in self._completed_prior)
+        """True unless this phase may be SOUNDLY skipped on ``--resume``.
+
+        A phase is skipped iff ALL of: we are resuming, it completed in a prior run, AND it is
+        one of the strict :data:`RESUMABLE_PHASES` (the traffic-sending scan, whose snapshot the
+        caller reloads, or the spine-emitting reasoning pass, whose re-emit would double-count).
+        EVERY OTHER phase always re-runs on resume — it is pure, no-traffic, deterministic
+        reasoning over the reloaded report, and skipping it would drop an in-memory-only field of
+        the prior process. Most importantly the GROUNDING veracity firewall re-fires on every
+        resume: presenting findings without re-running the oracle would violate CRUCIBLE invariant
+        #3 (a finding is a fact only if its retained oracle_context RE-FIRES). Re-running these is
+        free (no traffic) and required for a resumed report to match a fresh one."""
+        if not self._resume:
+            return True
+        if phase not in RESUMABLE_PHASES:
+            return True   # pure-reasoning phase — always re-run on resume (free + required)
+        return phase not in self._completed_prior
 
     # ------------------------------------------------------------------ append (fail-open)
 
@@ -179,7 +228,10 @@ class PhaseLedger:
         """Run one best-effort phase under the ledger and return its value.
 
         * ``enabled=False``     → skip silently (the phase's opt-in flag is off); return default.
-        * resuming + completed  → record ``skipped``; return default WITHOUT running ``fn``.
+        * skippable on resume   → record ``skipped``; return default WITHOUT running ``fn`` — but
+                                  ONLY for a completed :data:`RESUMABLE_PHASES` phase (see
+                                  :meth:`should_run`). A pure-reasoning phase always re-runs on
+                                  resume, so the veracity firewall is never skipped here.
         * otherwise             → record ``started``, run ``fn``; on success record ``completed``
                                   and return its value; on ANY exception record ``failed`` and
                                   return default (fail-open — matching the existing best-effort
