@@ -58,9 +58,10 @@ _MAX_MULTIPART_PARTS = 96
 # A multipart/form-data boundary token (RFC 2046: 1–70 chars). Bounded, negated class → ReDoS-safe.
 _MULTIPART_BOUNDARY_RE = re.compile(r'boundary="?([^";,\s]{1,200})"?', re.I)
 _MULTIPART_NAME_RE = re.compile(r'name="?([^";]{1,128})"?', re.I)
-# XML/SOAP text nodes: the content BETWEEN tags, where an injected value lives (tag names/attributes are
-# NOT captured, so a benign document's structure is never fed to the oracles). Bounded → ReDoS-safe.
-_XML_TEXT_RE = re.compile(r">([^<]{1,8192})<")
+# A FILE part carries a `filename` OR RFC-5987 `filename*` param on its Content-Disposition, with any
+# spacing around the `=`. A naive `"filename=" in head` missed `filename =` and `filename*=`, so a
+# benign file's bytes got inspected and could spuriously block — this parses the real param shape.
+_MULTIPART_FILENAME_RE = re.compile(r';\s*filename\*?\s*=', re.I)
 
 # CURATED header injection surface (lowercased). A BOUNDED allowlist of free-text, user-controlled
 # request headers that are realistic SQL/command-injection vectors — deliberately NOT every header.
@@ -115,9 +116,12 @@ def _header_cookie_values(headers: list[tuple[str, str]], add: Callable[[str, st
 
 def _multipart_fields(ctype: str, body: str) -> list[tuple[str, str]]:
     """Bounded, total ``(name, value)`` extraction of TEXT form fields from a ``multipart/form-data``
-    body. FILE parts (a Content-Disposition carrying ``filename=``) are skipped — their bytes are often
-    binary and are not a string-injection surface. Never raises; ``[]`` on any malformed structure. This
-    exists because a multipart body used to fall through candidate extraction entirely, so a payload
+    body. FILE parts (a Content-Disposition carrying a ``filename``/``filename*`` param, matched by
+    ``_MULTIPART_FILENAME_RE`` so ``filename =`` and RFC-5987 ``filename*=`` are caught too) are skipped —
+    their bytes are often binary and are not a string-injection surface. A field merely NAMED ``filename``
+    is NOT a file part (the regex is ``;``-anchored to the param, not the name) and is still inspected.
+    Never raises; ``[]`` on any malformed structure. This exists because a multipart body used to fall
+    through candidate extraction entirely, so a payload
     posted as a form field bypassed inline inspection completely."""
     out: list[tuple[str, str]] = []
     try:
@@ -136,7 +140,7 @@ def _multipart_fields(ctype: str, body: str) -> list[tuple[str, str]]:
                 head, sep, val = part.partition("\n\n")
                 if not sep:
                     continue
-            if "filename=" in head.lower():      # a file upload — not a string-value surface
+            if _MULTIPART_FILENAME_RE.search(head):   # a file upload — not a string-value surface
                 continue
             nm = _MULTIPART_NAME_RE.search(head)
             out.append((nm.group(1) if nm else "part", val.strip("\r\n")[:_MAX_VALUE_CHARS]))
@@ -145,35 +149,28 @@ def _multipart_fields(ctype: str, body: str) -> list[tuple[str, str]]:
     return out
 
 
-def _xml_text_nodes(body: str) -> list[str]:
-    """Bounded, total extraction of XML/SOAP TEXT-node values — the content between tags, where an
-    injected value lives. Tag names and attributes are NOT captured, so a benign document's structure is
-    never handed to the oracles (the injected VALUE is; the near-zero-FP oracle still decides). Never
-    raises. Exists because an XML body used to yield no candidate values at all."""
-    out: list[str] = []
-    try:
-        for mm in _XML_TEXT_RE.finditer(body):
-            if len(out) >= _MAX_BODY_VALUES:
-                break
-            v = mm.group(1).strip()
-            if v:
-                out.append(v)
-    except Exception:  # noqa: BLE001
-        return out
-    return out
-
-
 def candidate_values(path: str, headers: list[tuple[str, str]], body: str | None) -> list[tuple[str, str]]:
-    """``(param_name, DECODED value)`` pairs from the request's injection surfaces — query params;
-    JSON / urlencoded / multipart / XML / text body values; decoded Cookie values (``cookie:<name>``);
-    and a bounded, curated set of free-text request headers (``header:<name>``, see ``_INSPECT_HEADERS``).
+    """``(param_name, DECODED value)`` pairs from the request's injection surfaces — query params; JSON /
+    urlencoded / **multipart** form-field values; decoded Cookie values (``cookie:<name>``); and a
+    bounded, curated set of free-text request headers (``header:<name>``, see ``_INSPECT_HEADERS``).
     Bounded and total (a malformed body is skipped, never raised).
 
+    Multipart is added at PARITY with the existing urlencoded/JSON form surface: a multipart text field is
+    the same kind of NAMED injection point, encoded differently, and it is fed to the SAME oracles under
+    the SAME contract. It therefore inherits — and does not worsen — the oracles' existing behaviour on a
+    single field value (including how the cmdi oracle already treats a multi-line value on urlencoded/JSON
+    today); it introduces no NEW false-positive class.
+
+    Deliberately NOT extracted: a raw ``text/plain`` / XML *document* body. Those are FREE TEXT, not a
+    structured injection point — a note, comment or markdown body legitimately contains prose that reads
+    like a command or a SQL fragment, and the request-side oracles' near-zero-FP guarantee only holds for
+    a single structured field value. Handing them a whole document trades that guarantee for false
+    blocks (text/plain is the ``fetch`` default), so the sound path for those is response-side
+    confirmation, not request-side prose-matching — left as named future work rather than forced here.
+
     Each surface has a RESERVED share of the global bound (see the per-source caps) so a flood of one
-    surface — classically hundreds of junk query params — can never starve the others out of inspection.
-    Feeding more body types is FP-safe: the downstream oracles are near-zero-FP by construction (they
-    confirm a string-literal break-out / a shell command construct / a NoSQL operator-as-key), so a
-    genuine benign field value never trips one — only the extraction surface widens, not the verdict."""
+    surface — classically hundreds of junk query params, or a huge form body — can never starve the
+    others out of inspection."""
     out: list[tuple[str, str]] = []
 
     def _adder(cap: int) -> Callable[[str, Any], None]:
@@ -212,14 +209,12 @@ def candidate_values(path: str, headers: list[tuple[str, str]], body: str | None
             elif "multipart/form-data" in ctype:
                 for k, v in _multipart_fields(ctype_raw, body):
                     add_b(k, v)
-            elif "xml" in ctype:                                  # application/xml, text/xml, *+xml, SOAP
-                for v in _xml_text_nodes(body):
-                    add_b("body:xml", v)
             elif "x-www-form-urlencoded" in ctype or not ctype:   # unchanged: empty ctype stays urlencoded
                 for k, v in parse_qsl(body, keep_blank_values=False):
                     add_b(k, v)
-            else:                                                 # text/plain and any other declared type:
-                add_b("body", body)                               # the whole body is one candidate value
+            # NB: a raw text/plain or XML document body is deliberately NOT extracted — it is free text,
+            # not a structured injection point, so the near-zero-FP oracle contract does not hold for it
+            # (see the docstring). Any other declared content-type falls through, uninspected, as before.
         except Exception:
             pass
 
