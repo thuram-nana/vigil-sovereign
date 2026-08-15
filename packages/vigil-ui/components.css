@@ -463,6 +463,32 @@ textarea { min-height: 80px; resize: vertical; }
 .chat-toolrow select { width: auto; }
 .chat-toolrow .hint { flex: 1 1 260px; color: var(--text-2); font-size: var(--fs-xs); }
 
+/* command palette (⌘K) -------------------------------------------------------
+   z-index 70 = the modal layer: above the drawer (60) and the process box (55), below toasts (80),
+   so a toast fired by an action stays readable. Pure overlay — it never enters the page flow. */
+.pal-host { position: fixed; inset: 0; z-index: 70; background: rgba(0, 0, 0, .55);
+  display: grid; place-items: start center; padding-top: 12vh; }
+.pal-box { width: min(680px, 92vw); background: var(--bg-1); border: 1px solid var(--border-strong);
+  border-radius: var(--r-2); box-shadow: var(--shadow-2); overflow: hidden; }
+.pal-head { display: flex; align-items: center; gap: 10px; padding: 12px var(--sp-5);
+  border-bottom: 1px solid var(--border); }
+.pal-head .glyph { width: 18px; height: 18px; flex: 0 0 auto; opacity: .7; }
+.pal-input { flex: 1 1 auto; min-width: 0; background: transparent; border: 0; outline: none;
+  color: var(--text-0); font-size: var(--fs-lg); font-family: inherit; }
+.pal-list { max-height: 46vh; overflow-y: auto; }
+.pal-row { display: flex; align-items: center; gap: 12px; padding: 9px var(--sp-5); cursor: pointer; }
+.pal-row .glyph { width: 18px; height: 18px; flex: 0 0 auto; opacity: .8; }
+.pal-row:hover, .pal-row.on { background: var(--bg-2); }
+.pal-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pal-kind { flex: 0 0 auto; color: var(--text-2); font-size: var(--fs-xs); text-transform: uppercase;
+  letter-spacing: .04em; }
+.pal-foot { padding: 8px var(--sp-5); border-top: 1px solid var(--border); color: var(--text-2);
+  font-size: var(--fs-xs); }
+.pal-list .empty { padding: 18px var(--sp-5); color: var(--text-2); font-size: var(--fs-sm); }
+/* a pill that is also a control (the engaged kill-switch, which opens Safety to release it) */
+.pill-act { cursor: pointer; border-width: 1px; font: inherit; font-size: var(--fs-sm); }
+.pill-act:hover { filter: brightness(1.12); }
+
 /* toasts */
 #toasts { position: fixed; bottom: var(--sp-5); right: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-2); z-index: 80; }
 .toast { background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--r-2); padding: 12px 16px; box-shadow: var(--shadow-2);
