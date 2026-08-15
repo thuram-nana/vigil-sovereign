@@ -371,7 +371,9 @@ def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
             _write_meta(run_id, **_base, status="done", pid=proc.pid,
                         rc=proc.returncode, finished=time.time())
         else:
-            _write_meta(run_id, **_base, status="error", pid=proc.pid,
+            # a negative rc = killed by a signal (the operator's Cancel), not a genuine error.
+            _status = "cancelled" if (proc.returncode is not None and proc.returncode < 0) else "error"
+            _write_meta(run_id, **_base, status=_status, pid=proc.pid,
                         rc=proc.returncode, stderr=(err or "")[-2000:], finished=time.time())
 
     threading.Thread(target=_run, daemon=True).start()
@@ -490,7 +492,11 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
             (rd / "report.json").write_text(out, encoding="utf-8")
         else:
             (rd / "stdout.txt").write_text(out or "", encoding="utf-8")
-        _write_meta(run_id, **{**meta, "status": "done" if ok else "error", "pid": proc.pid,
+        # A negative rc means the child was killed by a signal — the operator's Cancel (W4), not a genuine
+        # error — so record it as 'cancelled', not 'error'. cancel_run and this writer thus converge on the
+        # same terminal status (the thread is the sole terminal-status writer for a live run).
+        status = "done" if ok else ("cancelled" if (rc is not None and rc < 0) else "error")
+        _write_meta(run_id, **{**meta, "status": status, "pid": proc.pid,
                                "rc": rc, "stderr": (err or "")[-2000:] if not ok else "",
                                "finished": time.time()})
 
@@ -543,6 +549,98 @@ def reconcile_orphaned_runs() -> int:
     except Exception:  # noqa: BLE001 — reconciliation must never block console startup
         pass
     return n
+
+
+# ---------------------------------------------------------------------------
+# W4 — run control: Cancel a running run; Retry (restart) / Resume (continue) a finished one.
+# ---------------------------------------------------------------------------
+def _read_run_meta(run_id: str) -> "dict | None":
+    """The run's meta.json (its registry record), or None if absent/unreadable. Total."""
+    try:
+        return json.loads((run_dir(run_id) / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _terminate_pid(pid) -> bool:
+    """SIGTERM a pid, then SIGKILL after a short grace. True iff the process is gone afterwards. Total: a
+    bad/dead pid is a no-op (True = already gone), a non-ours pid returns False, never raises."""
+    try:
+        p = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if p <= 0:
+        return False
+    try:
+        os.kill(p, signal.SIGTERM)
+    except ProcessLookupError:
+        return True                       # already gone
+    except OSError:
+        return False                      # not permitted / not ours
+    for _ in range(20):                   # ~2s grace for a clean exit
+        if not _pid_alive(p):
+            return True
+        time.sleep(0.1)
+    try:
+        os.kill(p, signal.SIGKILL)
+    except OSError:
+        pass
+    return not _pid_alive(p)
+
+
+def cancel_run(run_id: str) -> dict:
+    """Stop a running run by terminating its recorded pid (SIGTERM→SIGKILL). Idempotent — a run that is not
+    running is a clean no-op. We mark it 'cancelled' so an ORPHANED run (no live supervisor thread) is
+    closed too; a live run's supervisor thread also converges on 'cancelled' (a signal gives a negative rc).
+    CSRF/rebind-gated by the caller. Never raises."""
+    meta = _read_run_meta(run_id)
+    if meta is None:
+        return {"ok": False, "error": "no such run"}
+    if meta.get("status") != "running":
+        return {"ok": True, "status": meta.get("status", "unknown"), "note": "not running"}
+    pid = meta.get("pid")
+    terminated = _terminate_pid(pid) if pid is not None else False
+    _write_meta(run_id, **{**meta, "status": "cancelled", "cancelled": True,
+                           "finished": meta.get("finished") or time.time()})
+    return {"ok": True, "status": "cancelled", "terminated": terminated}
+
+
+def _cmd_supports_resume(cmd: "list[str]") -> bool:
+    """True iff relaunching this argv with --resume CONTINUES it. Only the integration `vigil engage` path
+    carries --resume (W2b); the offense `framework.v2 engage` scanner and every other CLI restart instead,
+    so appending --resume there would be an unrecognised-argument error, not a resume."""
+    toks = [str(a) for a in cmd]
+    return "engage" in toks and not any("framework.v2" in t for t in toks)
+
+
+def retry_run(run_id: str) -> dict:
+    """Relaunch a FINISHED/interrupted run as a NEW run linked to the original (parent_run_id). A resumable
+    run whose CLI supports --resume is RESUMED (argv + --resume → continues its slug's spine from the last
+    checkpoint); everything else is RESTARTED (argv as-is, a clean fresh run). Refuses to relaunch a run
+    that is still running (cancel it first). CSRF/rebind-gated by the caller. Never raises."""
+    meta = _read_run_meta(run_id)
+    if meta is None:
+        return {"ok": False, "error": "no such run"}
+    if meta.get("status") == "running":
+        return {"ok": False, "error": "this run is still running — cancel it before retrying"}
+    cmd = meta.get("cmd")
+    if not isinstance(cmd, list) or not cmd:
+        return {"ok": False, "error": "this run has no recorded command to relaunch"}
+    new_cmd = [str(a) for a in cmd]
+    resume = bool(meta.get("resumable")) and _cmd_supports_resume(new_cmd)
+    if resume and "--resume" not in new_cmd:
+        new_cmd.append("--resume")
+    new_id = _new_run_id()
+    rd = run_dir(new_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    carry = {k: meta[k] for k in ("target", "slug", "mode", "run_kind", "objective", "scope",
+                                  "session_id", "stream") if k in meta}
+    new_meta = {**carry, "cmd": new_cmd, "parent_run_id": run_id, "started": time.time()}
+    _write_meta(new_id, **new_meta, status="running")
+    # capture_report only for the loopback scan (JSON on stdout); engage/strix report elsewhere.
+    capture_report = ("scan" in new_cmd and "--format" in new_cmd)
+    _spawn_background(new_id, rd, new_cmd, new_meta, capture_report=capture_report)
+    return {"ok": True, "run_id": new_id, "resumed": resume, "parent": run_id}
 
 
 # ---- console → live-engine bridge (per-session Neo4j graph) ------------------

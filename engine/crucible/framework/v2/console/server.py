@@ -563,6 +563,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # loudly a tool is warned/throttled, never whether a call is allowed (never-block).
                 self._json(actions.set_token_budget(body))
                 return
+            if path.startswith("/api/run/") and path.endswith("/cancel"):
+                # W4: stop a running run (terminate its recorded pid). Non-destructive lifecycle control —
+                # it stops a process the operator started; it touches no scope, gate, finding or fact.
+                self._json(actions.cancel_run(path[len("/api/run/"):-len("/cancel")].strip("/")))
+                return
+            if path.startswith("/api/run/") and path.endswith("/retry"):
+                # W4: relaunch a finished/interrupted run — RESUMED (argv + --resume) where the CLI supports
+                # it, else RESTARTED. Spawns only the SAME already-gated argv the run recorded; it cannot
+                # widen scope or bypass a gate (a resumed engage re-attests + re-gates every edge).
+                self._json(actions.retry_run(path[len("/api/run/"):-len("/retry")].strip("/")))
+                return
             if path == "/api/launch/assessment":
                 # The New-Assessment wizard's one action. It spawns only the SAME gated CLIs; it
                 # cannot relax scope (charter-signed, never an arg) or bypass a gate. A clean JSON
