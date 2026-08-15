@@ -14,11 +14,12 @@ from types import SimpleNamespace
 
 def _stub_engine():
     class _E:
-        def engage(self, url, objective=""):
+        def engage(self, url, objective="", resume=False):     # resume: the W2b flag the CLI threads through
             return SimpleNamespace(
                 slug="loopback", refused=False, refusal_reason="", attestation_ref="",
                 iterations=0, decisions=[], tool_calls=[], denied_edges=[], fact_count=0,
-                facts=[], leads=[], detection_facts=0, detection_leads=0, checkpoints=[], paused=None)
+                facts=[], leads=[], detection_facts=0, detection_leads=0, checkpoints=[], paused=None,
+                resumed=False)
     return _E()
 
 
