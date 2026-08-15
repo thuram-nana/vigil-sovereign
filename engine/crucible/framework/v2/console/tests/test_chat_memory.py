@@ -62,6 +62,28 @@ def test_history_merges_consecutive_same_role_and_starts_with_user():
     assert "a1" in hist[-1]["content"] and "a1b" in hist[-1]["content"], "consecutive assistant turns merge"
 
 
+def test_history_excludes_the_current_turn_even_with_a_later_record():
+    """The current-turn exclusion is the ONLY guard against leaking+duplicating the current question when
+    a record lands AFTER it (a late/concurrent assistant write). Without it, the current question appears
+    both in history and as the appended final turn. (Red-pen BLOCK-1: this guard was unpinned.)"""
+    _seed("c-excl", [("user", "first question", None), ("assistant", "first answer", "answer"),
+                     ("user", "CURRENT question", None), ("assistant", "a late/racing write", "answer")])
+    hist = chat._history_messages("c-excl")
+    assert [m["role"] for m in hist] == ["user", "assistant"]
+    assert hist[0]["content"] == "first question"
+    assert all("CURRENT question" not in m["content"] for m in hist), "the current question leaked into history"
+
+
+def test_orphan_user_history_does_not_break_alternation_with_the_current_turn():
+    """A torn write can leave a prior user turn with no assistant reply: [user OLD, user CURRENT]. The
+    trailing-user pop must ensure history does not END with a user, or appending the current user turn
+    yields two consecutive users — which the SDK rejects. (Red-pen BLOCK-1: this guard was unpinned.)"""
+    _seed("c-orphan", [("user", "OLD unanswered", None), ("user", "CURRENT question", None)])
+    hist = chat._history_messages("c-orphan")
+    assert not (hist and hist[-1]["role"] == "user"), \
+        "history ended with a user turn — appending the current turn would break alternation"
+
+
 def test_history_is_budget_bounded():
     big = "X" * 5000
     turns = []
@@ -136,6 +158,18 @@ def test_followup_carries_prior_turns_into_the_model_call(monkeypatch):
                      else str(m["content"]) for m in msgs)
     assert "MARKER_ONE" in flat and "MARKER_TWO" in flat, "prior turns were not sent to the model"
     assert "MARKER_THREE" in flat, "the current question was not sent"
+
+
+def test_a_keyless_followup_keeps_the_helpful_reply_not_a_false_key_nag(monkeypatch):
+    """With NO key, a conversational follow-up must NOT route into _reason — otherwise the operator gets
+    the attachment-specific "add a key and I can read what you attached" notice for a turn that attached
+    nothing. It should keep the helpful ask-for-a-target reply. (Red-pen BLOCK-2.)"""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    first = chat.chat_send({"message": "hey there"})
+    assert first["status"] == "need_target"
+    second = chat.chat_send({"message": "hi again, what can you do?", "chat_id": first["chat_id"]})
+    assert second["status"] == "need_target", "a keyless follow-up regressed into a key nag"
+    assert "attached" not in second["reply"].lower(), "claimed an attachment that does not exist"
 
 
 def test_a_followup_on_a_talked_to_chat_reasons_instead_of_the_canned_reply(monkeypatch):

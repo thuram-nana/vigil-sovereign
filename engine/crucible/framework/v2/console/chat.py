@@ -967,6 +967,12 @@ def _has_prior_conversation(chat_id: str) -> bool:
     return has_user and has_asst
 
 
+def _has_api_key() -> bool:
+    """Whether a model key is present — the same check _reason gates on before any egress."""
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    return isinstance(key, str) and bool(key.strip())
+
+
 def _reason(chat_id: str, question: str) -> dict:
     """ONE Claude call over the operator's question + the redacted session context + the fenced attachment
     block (+ image blocks). Returns ``{ok, reply, notes, coverage}``, ``{ok: False, need_key: True, note}``
@@ -1108,8 +1114,12 @@ def _reason_wanted(chat_id: str, body: dict) -> bool:
     # thread (with prior turns in context, see _history_messages) instead of falling back to the canned
     # ask-for-a-target reply. A brand-new chat's FIRST message has no prior turn, so first-touch is
     # unchanged — this deliberately changes only the second turn onward, which is what "re-engage a chat
-    # fully" requires.
-    if _has_prior_conversation(chat_id):
+    # fully" requires. Gated on a key being present: without one there is nothing to continue WITH, and
+    # routing a keyless conversational follow-up into _reason would answer it with the attachment-specific
+    # "add a key and I can read what you attached" notice for a turn that attached nothing — so a keyless
+    # chat keeps the helpful ask-for-a-target reply instead of a false key nag. (An attachment or a
+    # connection still reasons regardless of key: there the need-key notice is TRUE.)
+    if _has_prior_conversation(chat_id) and _has_api_key():
         return True
     try:
         from . import sessions
