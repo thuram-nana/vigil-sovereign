@@ -5,10 +5,14 @@ The properties under test are the load-bearing contract of the slice:
 
   * **Persist.** Each phase's start/complete is appended (append-only) to a durable JSONL, and
     the scan snapshots its authoritative ScanReport.
-  * **Resume, idempotent.** A phase a prior run COMPLETED is skipped on ``resume`` — never re-
-    executed, never double-counted; the traffic-sending scan is reloaded from its snapshot
-    instead of re-crawling. A phase that only started/failed (crashed before completing) is
-    RETRIED.
+  * **Resume skips ONLY what is sound to skip.** ``resume`` is not "skip every completed phase":
+    only the two ``RESUMABLE_PHASES`` — the traffic-sending scan (reloaded from its snapshot
+    instead of re-crawling) and the spine-emitting reasoning pass (whose re-emit would double-
+    count) — are skipped. Every PURE, no-traffic reasoning phase — finding-confidence, chaining,
+    and above all the GROUNDING veracity firewall — ALWAYS re-runs on resume, so a resumed
+    result carries the SAME authoritative derived fields (grounding, finding_confidence, attack
+    paths) as a fresh run, re-verified by the oracle re-firing, never a stale snapshot. A scan
+    that only started/failed (crashed before completing) is RETRIED.
   * **Fail-open.** Every ledger write is total: an unwritable ledger, a corrupt line, or a
     missing snapshot degrades to a recorded no-op / a clean re-run — it NEVER raises into or
     changes the engagement, and it never mints a finding.
@@ -29,8 +33,11 @@ from framework.v2.common import paths as _paths
 from framework.v2.engage import EngagementRefused, run_engagement
 from framework.v2.phase_ledger import (
     P_CHAINING,
+    P_GROUNDING,
     P_PREFLIGHT,
+    P_REASONING,
     P_SCAN,
+    RESUMABLE_PHASES,
     PhaseLedger,
 )
 from framework.v2.scanner.campaign import ScanReport
@@ -157,6 +164,26 @@ def test_resume_should_run_skips_only_completed(isolate):
     assert led.completed_prior() == {P_SCAN}
 
 
+def test_resume_reruns_completed_pure_reasoning_phases(isolate):
+    """The BLOCK fix: resume is a strict allowlist — only the scan and the spine-emitting
+    reasoning pass may be skipped when completed. A COMPLETED pure-reasoning phase (chaining, and
+    above all the GROUNDING veracity firewall) MUST still re-run on resume, because its output
+    lives only in the prior process and the oracle must re-fire before findings are facts."""
+    isolate("alpha")
+    seed = PhaseLedger("alpha")
+    # A prior run completed EVERY phase, including the veracity firewall.
+    for ph in (P_SCAN, P_CHAINING, P_GROUNDING, P_REASONING):
+        seed.complete(ph)
+    led = PhaseLedger("alpha", resume=True)
+    # The two RESUMABLE phases (completed) are skipped...
+    assert RESUMABLE_PHASES == {P_SCAN, P_REASONING}
+    assert led.should_run(P_SCAN) is False
+    assert led.should_run(P_REASONING) is False
+    # ...but the pure-reasoning phases re-run even though the prior run completed them.
+    assert led.should_run(P_CHAINING) is True
+    assert led.should_run(P_GROUNDING) is True     # the veracity firewall is NEVER skipped on resume
+
+
 def test_resume_disabled_never_skips(isolate):
     isolate("alpha")
     PhaseLedger("alpha").complete(P_SCAN)
@@ -174,15 +201,31 @@ def test_run_phase_runs_and_records(isolate):
     assert _statuses(_read_ledger("alpha"), "chaining") == ["started", "completed"]
 
 
-def test_run_phase_skips_completed_without_calling_fn(isolate):
+def test_run_phase_skips_completed_resumable_phase_without_calling_fn(isolate):
+    # A RESUMABLE phase (the spine-emitting reasoning pass) completed in a prior run IS skipped
+    # on resume — fn is not called and the default is returned.
     isolate("alpha")
-    PhaseLedger("alpha").complete("chaining")
+    PhaseLedger("alpha").complete(P_REASONING)
     led = PhaseLedger("alpha", resume=True)
     calls = []
-    out = led.run_phase("chaining", lambda: calls.append(1), default="DFLT")
+    out = led.run_phase(P_REASONING, lambda: calls.append(1), default="DFLT")
     assert out == "DFLT"
-    assert calls == []                                 # the completed phase did NOT re-execute
-    assert _statuses(_read_ledger("alpha"), "chaining")[-1] == "skipped"
+    assert calls == []                                 # the completed resumable phase did NOT re-execute
+    assert _statuses(_read_ledger("alpha"), P_REASONING)[-1] == "skipped"
+
+
+def test_run_phase_reruns_completed_pure_reasoning_phase_on_resume(isolate):
+    # The BLOCK fix at the run_phase level: a COMPLETED pure-reasoning phase (chaining) RE-RUNS on
+    # resume — fn IS called and a fresh started/completed pair is appended (append-only).
+    isolate("alpha")
+    PhaseLedger("alpha").complete(P_CHAINING)
+    led = PhaseLedger("alpha", resume=True)
+    calls = []
+    out = led.run_phase(P_CHAINING, lambda: (calls.append(1) or "fresh"), default="DFLT")
+    assert out == "fresh"                               # re-derived, not the skipped default
+    assert calls == [1]                                # the reasoning phase DID re-execute on resume
+    assert _statuses(_read_ledger("alpha"), P_CHAINING)[-1] == "completed"
+    assert "skipped" not in _statuses(_read_ledger("alpha"), P_CHAINING)
 
 
 def test_run_phase_disabled_records_nothing(isolate):
@@ -288,14 +331,33 @@ def test_engage_persists_ledger_and_report_snapshot(isolate, monkeypatch):
     assert len(snap.active_findings) == 1
 
 
+def _grounding_sig(result) -> list:
+    """The veracity-firewall verdict per finding, reduced to its load-bearing signal (is_fact).
+    An empty list means the firewall NEVER RAN — the exact silent drop the BLOCK described."""
+    return [getattr(g, "is_fact", g) for g in (result.grounding or [])]
+
+
+def _confidence_sig(result) -> list:
+    """The per-finding confidence assessment reduced to its presence pattern (None == could not
+    assess). Empty means the assess-findings reasoning phase never ran on this result."""
+    return [g is not None for g in (result.finding_confidence or [])]
+
+
 def test_resume_skips_the_scan_and_does_not_double_execute(isolate, monkeypatch):
     isolate("alpha")
     seed = "http://127.0.0.1:9/"
     report = _sample_report(seed)
 
     Fake, state = _fake_campaign(report)
-    _run("alpha", seed, Fake, monkeypatch)
+    fresh = _run("alpha", seed, Fake, monkeypatch)      # a FULL fresh run — every phase executes
     assert state["runs"] == 1                           # first run scanned once
+
+    # The fresh run's authoritative DERIVED deliverable — the firewall fired and produced a verdict
+    # per finding, and confidence was assessed. These live ONLY in this process; nothing reloads them.
+    fresh_grounding = _grounding_sig(fresh)
+    fresh_confidence = _confidence_sig(fresh)
+    assert len(fresh_grounding) == 1                    # the veracity firewall produced a live verdict
+    assert len(fresh_confidence) == 1
 
     # RESUME: a NEW fake so we can prove .run() is never called again
     Fake2, state2 = _fake_campaign(report)
@@ -304,8 +366,25 @@ def test_resume_skips_the_scan_and_does_not_double_execute(isolate, monkeypatch)
     # the authoritative report was reloaded from the snapshot, not recrawled
     assert len(result.report.active_findings) == 1
     assert result.report.pages_crawled == 2
+
+    # THE FIX (was green-washed): a resumed run must produce the SAME authoritative deliverable as a
+    # fresh run — minus only the re-crawl — NOT a bare reloaded snapshot with its derived fields
+    # dropped. Assert the resume RE-COMPUTED every pure-reasoning field to equal the fresh run's.
+    assert _grounding_sig(result) == fresh_grounding    # veracity verdicts re-derived, identical
+    assert _grounding_sig(result) != []                 # ...and the firewall actually RE-FIRED on resume
+    assert _confidence_sig(result) == fresh_confidence
+    assert list(result.attack_paths or []) == list(fresh.attack_paths or [])
+    assert list(result.chained_conclusions or []) == list(fresh.chained_conclusions or [])
+
     recs = _read_ledger("alpha")
     assert recs[-1]["phase"] != "" and "skipped" in _statuses(recs, P_SCAN)
+    # the SCAN was skipped (reloaded) — completed exactly once, on the fresh run
+    assert _statuses(recs, P_SCAN).count("completed") == 1
+    # the GROUNDING veracity firewall was NEVER skipped and re-fired on resume (completed twice)
+    assert "skipped" not in _statuses(recs, P_GROUNDING)
+    assert _statuses(recs, P_GROUNDING).count("completed") == 2
+    # ...as did finding-confidence and chaining (pure reasoning always re-runs)
+    assert _statuses(recs, P_CHAINING).count("completed") == 2
     # preflight STILL re-ran on resume (authorization is never skipped)
     assert _statuses(recs, P_PREFLIGHT).count("completed") == 2
 
