@@ -103,6 +103,32 @@ def test_deny_removes_the_pending_and_writes_no_token():
     assert not signed.exists() or not list(signed.glob("*.json")), "deny must never write a token"
 
 
+def test_deny_cannot_traverse_out_of_the_pending_dir():
+    """The offense plane is the keyless writer of pending/, so a pending record's request_id FIELD is
+    attacker-controlled. A hostile record whose field is a traversal must NEVER delete a file outside
+    pending/ (red-pen BLOCK-1). Deny may only remove the real pending file that carries the field."""
+    import json
+
+    from sigil.ui import offense_approvals as oa
+    from vigil_integration.live.approval_broker import approvals_root
+    base = os.environ["VIGIL_BASE_DIR"]
+    root = approvals_root(base)
+    (root / "pending").mkdir(parents=True, exist_ok=True)
+    # a trust anchor OUTSIDE pending/ that the attack tries to delete
+    victim = root / "approval-authority.json"
+    victim.write_text('{"schema":"x","owner_key_id":"owner","owner_public_key_b64":"AAAA"}', encoding="utf-8")
+    # a hostile pending file: its FIELD is a traversal, its real filename is inside pending/
+    evil = root / "pending" / "evil.json"
+    evil.write_text(json.dumps({"schema": "vigil-approval-pending-v1",
+                                "request_id": "../../approval-authority", "tool_name": "x", "target": "y",
+                                "action_digest": "", "nonce": "n", "args_preview": "", "created_at_iso": ""}),
+                    encoding="utf-8")
+    out = oa.deny_pending("../../approval-authority")
+    assert victim.exists(), "deny traversed out of pending/ and deleted the trust anchor"
+    # it deleted the REAL hostile file that carried the field (inside pending/), which is fine
+    assert out["removed"] is True and not evil.exists()
+
+
 # --- dispatch + boundary ---------------------------------------------------------------------------
 def test_do_action_routes_the_three_offense_actions():
     from sigil.ui import actions

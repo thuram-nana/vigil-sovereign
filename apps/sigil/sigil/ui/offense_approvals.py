@@ -56,8 +56,14 @@ def authority_status() -> dict:
 
 def bind_authority() -> dict:
     """Pin the offense approval authority to the cockpit owner key (owner_key_id='owner'), so tokens this
-    cockpit signs are accepted by the offense broker. Idempotent. Writes ONLY the PUBLIC key under
-    ``<base>/approval-authority.json`` (persist_authority validates fail-closed first)."""
+    cockpit signs are accepted by the offense broker. Writes ONLY the PUBLIC key under
+    ``<base>/approval-authority.json`` (persist_authority validates fail-closed first).
+
+    This is an UNCONDITIONAL (re)pin to the sovereign owner key — the operator's chosen KEY MODEL (unify).
+    It can only ever install THIS owner's key (there is no key parameter), so it can never repoint trust to
+    an attacker; but if a SEPARATE offense authority was previously provisioned, binding collapses that
+    separation onto the sovereign key. Owner-gated: only reachable via do_action, which derives the owner
+    identity server-side."""
     from vigil_integration.live.approval_broker import persist_authority
     kp = _owner_keypair()
     path = persist_authority(_base_dir(), owner_key_id="owner", owner_public_key_b64=kp.public_key_b64)
@@ -125,21 +131,27 @@ def sign_pending(request_id: str, *, now: Optional[Any] = None) -> dict:
 def deny_pending(request_id: str) -> dict:
     """Deny ONE queued offense action: remove its pending request so it clears from the queue. No token is
     ever written, so the offense broker finds none and the call is refused (fail-closed) — denying only
-    removes the request the operator declined; it can never authorize anything. Total; safe on a
-    path-validated request_id (a traversal attempt matches no pending and is a clean no-op)."""
-    from vigil_integration.live.approval_broker import approvals_root, list_pending
+    removes the request the operator declined; it can never authorize anything.
+
+    SECURITY: the offense plane is the (keyless, semi-trusted) writer of ``pending/``, so a pending
+    record's ``request_id`` FIELD is attacker-controlled and must NEVER be joined into a path. We GLOB the
+    real files in ``pending/`` — each result is by construction a direct child of that dir, so no ``..``
+    can escape — and unlink the actual file whose ``request_id`` field matches. A spoofed field can at most
+    delete the very file that carries it (inside ``pending/``), never an arbitrary path. Total."""
+    import json as _json
+    from vigil_integration.live.approval_broker import approvals_root
     rid = str(request_id or "").strip()
     if not rid:
         return {"ok": False, "error": "no request_id"}
-    base = _base_dir()
+    pending_dir = approvals_root(_base_dir()) / "pending"
     removed = False
     try:
-        root = approvals_root(base)
-        for p in list_pending(root):        # match by CONTENT, then remove by the broker's own filename
-            if p.request_id == rid:
-                # the pending file is <root>/pending/<request_id>.json (approval_broker.publish_pending);
-                # rebuild the path via the broker's own dir so we never join an attacker string.
-                fp = root / "pending" / f"{p.request_id}.json"
+        for fp in sorted(pending_dir.glob("*.json")):   # fp is ALWAYS a real child of pending/ — no traversal
+            try:
+                obj = _json.loads(fp.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(obj, dict) and obj.get("request_id") == rid:
                 try:
                     fp.unlink()
                     removed = True
