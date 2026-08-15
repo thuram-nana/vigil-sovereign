@@ -108,14 +108,18 @@ def test_deny_cannot_traverse_out_of_the_pending_dir():
     attacker-controlled. A hostile record whose field is a traversal must NEVER delete a file outside
     pending/ (red-pen BLOCK-1). Deny may only remove the real pending file that carries the field."""
     import json
+    from pathlib import Path
 
     from sigil.ui import offense_approvals as oa
-    from vigil_integration.live.approval_broker import approvals_root
+    from vigil_integration.live.approval_broker import approvals_root, authority_path
     base = os.environ["VIGIL_BASE_DIR"]
     root = approvals_root(base)
     (root / "pending").mkdir(parents=True, exist_ok=True)
-    # a trust anchor OUTSIDE pending/ that the attack tries to delete
-    victim = root / "approval-authority.json"
+    # The REAL trust anchor the "../../approval-authority" traversal from pending/ actually lands on:
+    # authority_path is Path(base)/"approval-authority.json" (ONE dir above approvals/), so the victim
+    # MUST be there — a victim under approvals/ is never reached by the traversal and makes this vacuous.
+    victim = authority_path(base)
+    assert victim == Path(base) / "approval-authority.json"          # pin the target the exploit hits
     victim.write_text('{"schema":"x","owner_key_id":"owner","owner_public_key_b64":"AAAA"}', encoding="utf-8")
     # a hostile pending file: its FIELD is a traversal, its real filename is inside pending/
     evil = root / "pending" / "evil.json"
@@ -123,10 +127,42 @@ def test_deny_cannot_traverse_out_of_the_pending_dir():
                                 "request_id": "../../approval-authority", "tool_name": "x", "target": "y",
                                 "action_digest": "", "nonce": "n", "args_preview": "", "created_at_iso": ""}),
                     encoding="utf-8")
-    out = oa.deny_pending("../../approval-authority")
-    assert victim.exists(), "deny traversed out of pending/ and deleted the trust anchor"
-    # it deleted the REAL hostile file that carried the field (inside pending/), which is fine
-    assert out["removed"] is True and not evil.exists()
+    oa.deny_pending("../../approval-authority")
+    assert victim.exists(), "deny traversed out of pending/ and deleted the real trust anchor"
+
+
+def test_deny_does_not_follow_a_symlinked_pending_file_out_of_the_dir():
+    """A pending entry that is a SYMLINK pointing outside pending/ must not let deny delete the target — a
+    `resolve().unlink()` refactor would reintroduce traversal (red-pen BLOCK-2, mutant A)."""
+    import json
+    from pathlib import Path
+
+    from sigil.ui import offense_approvals as oa
+    from vigil_integration.live.approval_broker import approvals_root, authority_path
+    base = os.environ["VIGIL_BASE_DIR"]
+    root = approvals_root(base)
+    (root / "pending").mkdir(parents=True, exist_ok=True)
+    victim = authority_path(base)
+    victim.write_text('{"real":"anchor"}', encoding="utf-8")
+    # a pending FILE that is a symlink to the outside anchor; its request_id field matches
+    link = root / "pending" / "link.json"
+    victim2 = Path(base) / "some-other.json"
+    victim2.write_text(json.dumps({"request_id": "match-me"}), encoding="utf-8")
+    os.symlink(str(victim2), str(link))
+    oa.deny_pending("match-me")
+    assert victim2.exists(), "deny followed a symlinked pending file and deleted its target outside pending/"
+
+
+def test_deny_removes_the_RIGHT_pending_when_several_are_queued():
+    """With ≥2 pending, deny must remove only the one whose request_id matches — a content-match-drop
+    mutant that removes the first globbed file would corrupt the queue (red-pen BLOCK-2, mutant C)."""
+    from sigil.ui import offense_approvals as oa
+    br1, p1 = _publish(tool="exec_command")
+    br2, p2 = _publish(tool="write_stdin")
+    assert len(oa.list_offense_pending()["pending"]) == 2
+    assert oa.deny_pending(p2.request_id)["removed"] is True
+    remaining = [p["request_id"] for p in oa.list_offense_pending()["pending"]]
+    assert remaining == [p1.request_id], "deny removed the wrong pending item"
 
 
 # --- dispatch + boundary ---------------------------------------------------------------------------

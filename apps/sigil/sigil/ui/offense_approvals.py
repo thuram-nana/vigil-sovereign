@@ -135,9 +135,12 @@ def deny_pending(request_id: str) -> dict:
 
     SECURITY: the offense plane is the (keyless, semi-trusted) writer of ``pending/``, so a pending
     record's ``request_id`` FIELD is attacker-controlled and must NEVER be joined into a path. We GLOB the
-    real files in ``pending/`` — each result is by construction a direct child of that dir, so no ``..``
-    can escape — and unlink the actual file whose ``request_id`` field matches. A spoofed field can at most
-    delete the very file that carries it (inside ``pending/``), never an arbitrary path. Total."""
+    entries of ``pending/`` (a glob result never contains ``..``) and unlink the actual entry whose
+    ``request_id`` field matches — the field is comparison-only, never a path component. ``unlink`` removes
+    a matching entry that is itself a SYMLINK (the link, not its target), so a symlinked pending file can't
+    delete an outside file either. (A spoofed field can at most remove the pending entry that carries it.)
+    The one residual is a symlinked ``pending/`` DIRECTORY, which is out of the trust model — the offense
+    subprocess shares this OS user and base dir, so it could ``os.unlink`` directly anyway. Total."""
     import json as _json
     from vigil_integration.live.approval_broker import approvals_root
     rid = str(request_id or "").strip()
