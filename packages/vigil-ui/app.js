@@ -691,7 +691,11 @@
     const sections = window.VIGIL_MANUAL || [];
     const index = h("div.card", { style: { position: "sticky", top: "0", alignSelf: "start" } },
       [h("span.label", null, "CONTENTS"),
-       h("div.stack", { style: { gap: "2px", marginTop: "8px" } }, sections.map(function (s) {
+       // .man-toc: this is a table of CONTENTS, not the icon rail — a long section title must WRAP
+       // inside the 260px card rather than run out of it (the global .nav-item .txt is nowrap, which
+       // is right for the sidebar rail but overflows here). Ellipsis would be worse: the operator
+       // needs to read the whole title to navigate by it.
+       h("div.stack.man-toc", { style: { gap: "2px", marginTop: "8px" } }, sections.map(function (s) {
          return h("a.nav-item", { href: "#/manual", onClick: function (e) {
            e.preventDefault(); const t = document.getElementById("man-" + s.id);
            if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });

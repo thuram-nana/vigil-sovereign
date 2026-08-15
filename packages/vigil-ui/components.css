@@ -169,6 +169,11 @@ button { font: inherit; }
 .nav-item .glyph { width: 20px; height: 20px; flex: 0 0 auto; opacity: .85; }
 .nav-item .txt { white-space: nowrap; }
 #app.nav-collapsed .nav-item .txt { display: none; }
+/* Manual "CONTENTS" list: reuses the nav-item look, but holds full section TITLES inside a fixed
+   260px card — the rail's nowrap runs them out of the box. Wrap rather than truncate: in a table of
+   contents the title IS the navigation, so an ellipsis would hide what the operator is choosing. */
+.man-toc .nav-item { align-items: flex-start; padding-top: 8px; padding-bottom: 8px; }
+.man-toc .nav-item .txt { white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
 .nav-item .badge-count { margin-left: auto; font-size: var(--fs-xs); font-weight: 700; background: var(--bg-3); color: var(--text-1);
   border-radius: var(--r-pill); padding: 1px 8px; min-width: 20px; text-align: center; }
 .nav-item .badge-count.owner { background: var(--owner-dim); color: var(--owner); }
