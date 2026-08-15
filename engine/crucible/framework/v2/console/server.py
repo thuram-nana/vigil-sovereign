@@ -239,7 +239,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _sse(self, path, *, from_start: bool = False) -> None:
+    def _sse(self, path, *, allow_replay: bool = False, from_start: bool = False) -> None:
         """Stream a run's progress log. By default the tailer starts at EOF (live follow). With
         ``from_start`` it replays the file from byte 0 first — needed for a run that has ALREADY finished,
         whose whole record is in the file and would otherwise stream nothing at all (a viewer would see an
@@ -270,7 +270,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             delivered = max(0, int(self.headers.get("Last-Event-ID") or 0))
         except (TypeError, ValueError):
             delivered = 0
-        replay = bool(from_start or delivered)
+        # BOTH doors into replay are gated by `allow_replay`, not just the query flag. `Last-Event-ID` is
+        # a REQUEST HEADER, so gating only `from_start` left the whole replay path — the whole-file read
+        # AND the counter that cannot survive a rotation — reachable on any stream with one header. A
+        # non-replayable stream ignores the cursor entirely and stays a pure tail.
+        replay = bool(allow_replay and (from_start or delivered))
         # Replay reads from the top and numbers what it emits; a live tail opens at EOF and numbers
         # nothing — byte-for-byte the pre-cursor behaviour, at the pre-cursor cost.
         tailer = EventTailer(path, from_end=not replay)
@@ -288,7 +292,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     seq += 1
                     if seq <= delivered:
                         continue          # this client already has it — never re-deliver, never re-count
-                    if isinstance(ev, dict) and "_seq" not in ev:
+                    if isinstance(ev, dict):
+                        # Always overwrite: a producer-supplied _seq would DISAGREE with the id:
+                        # we emit, and both UI consumers dedup on _seq — a repeated value would
+                        # silently suppress genuine rows. Payload and cursor must be one number.
                         ev = {**ev, "_seq": seq}
                     payload = json.dumps(ev, ensure_ascii=False, default=str)
                     self.wfile.write(f"id: {seq}\ndata: {payload}\n\n".encode("utf-8"))
@@ -368,12 +375,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 q = parse_qs(parts.query)
                 run_q = (q.get("run") or [None])[0]
                 slug_q = (q.get("slug") or [None])[0]
-                # from_start is honoured for a RUN only. `run` is validated (_safe_run_id) whereas `slug`
-                # indexes straight into targets_root(), so a replay there would emit the whole contents of
-                # a file addressed by an unvalidated name. No caller needs it: the UI only ever replays
-                # `run=`, and the legacy SPA's `slug=` stream is a live tail.
+                # Replay (from_start OR a Last-Event-ID resume) is honoured for a RUN only. `run` is
+                # validated (_safe_run_id) whereas `slug` indexes straight into targets_root(), so a replay
+                # there would emit the whole contents of a file addressed by an unvalidated name — and put
+                # a ROTATING log into cursor mode, whose counter cannot survive the rotation. Gating only
+                # the query flag left the header as a second, ungated door. No caller needs it: the UI only
+                # ever replays `run=`, and the legacy SPA's `slug=` stream is a live tail.
+                allow_replay = (not slug_q and run_q is not None)
                 self._sse(stream_path(run=run_q, slug=slug_q),
-                          from_start=(not slug_q and run_q is not None
+                          allow_replay=allow_replay,
+                          from_start=(allow_replay
                                       and (q.get("from_start") or [""])[0] in ("1", "true", "yes")))
                 return
             if path == "/api/blackboard":

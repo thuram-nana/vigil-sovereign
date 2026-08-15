@@ -178,6 +178,40 @@ def test_from_start_is_refused_for_a_slug_stream(monkeypatch, tmp_path):
     with _serve(monkeypatch, tmp_path) as base:
         evs, _ = _read_events(f"{base}/api/events?slug=anything&from_start=1", want=1, timeout=2.0)
     assert evs == [], "from_start must not replay a slug-addressed log"
-    # NB: this bounds the REPLAY only. A slug live tail still streams what is appended next —
-    # the guard is about not emitting a whole file addressed by an unvalidated name, not
-    # confidentiality of that file.
+    # NB: this bounds the REPLAY only. A slug live tail still streams what is appended next — the guard
+    # is about not emitting a whole file addressed by an unvalidated name, not confidentiality.
+
+
+def test_a_last_event_id_header_cannot_force_a_slug_replay(monkeypatch, tmp_path):
+    """The SECOND door. `Last-Event-ID` is a request HEADER, so gating only the `from_start` query flag
+    left the whole replay path — the full-file read AND the counter that cannot survive a rotation —
+    reachable on any stream with one header. Both doors must share one gate.
+
+    A test that checks only the query param green-washes the guard: it passes while the header walks in."""
+    (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    log = tmp_path / "engagement.log"
+    with log.open("w", encoding="utf-8") as f:
+        for i in range(4):
+            f.write(json.dumps({"event": "historic", "n": i}) + "\n")
+    monkeypatch.setattr(server, "stream_path", lambda run=None, slug=None: log)
+    with _serve(monkeypatch, tmp_path) as base:
+        evs, ids = _read_events(f"{base}/api/events?slug=anything",
+                                last_event_id=1, want=1, timeout=2.0)
+    assert evs == [], "a Last-Event-ID header replayed a slug-addressed log"
+    assert ids == [], "a non-replayable stream must emit no cursor at all"
+
+
+
+def test_a_producer_supplied_seq_is_overwritten_by_the_stream_cursor(monkeypatch, tmp_path):
+    """`_seq` must always be the stream's own cursor. If a line on disk carried its own `_seq`, it would
+    DISAGREE with the emitted `id:` — and both UI consumers dedup on `_seq`, so a repeated value would
+    silently suppress genuine rows."""
+    rd = tmp_path / "runs" / "run-seq"
+    rd.mkdir(parents=True)
+    with (rd / "progress.jsonl").open("w", encoding="utf-8") as f:
+        for i in range(2):
+            f.write(json.dumps({"event": "warden.block", "_seq": "PRODUCER", "n": i}) + "\n")
+    with _serve(monkeypatch, tmp_path) as base:
+        evs, ids = _read_events(f"{base}/api/events?run=run-seq&from_start=1", want=2)
+    assert [e["_seq"] for e in evs] == [1, 2], "a producer-supplied _seq survived and shadowed the cursor"
+    assert ids == [1, 2] and [e["_seq"] for e in evs] == ids, "payload and id: cursor must agree"
