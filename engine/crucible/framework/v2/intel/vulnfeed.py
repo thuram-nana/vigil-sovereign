@@ -141,11 +141,18 @@ def _tb_vulnfeed_exit(ctx) -> None:
 # ``refresh_vulnintel`` used to fetch EVERY source then ingest ONCE at the very end, so a crash before
 # that end-ingest lost every fetched observation and the recovery pull re-fetched the whole catalog. The
 # fix has two halves: (1) ingest INCREMENTALLY per source (so each source's leads are durable the moment
-# it finishes), and (2) persist a small JSON checkpoint — the highest ``seq`` durably ingested, per
-# engagement-slug and per plan-fingerprint, next to the intel store — advanced after each completed
-# source. Because the plan is deterministic and ``IntelIngest`` is seq-keyed idempotent, the seq a given
-# fetch consumes is stable across pulls, so the recovery pull SKIPS every source whose seqs are already
-# ``<= cursor`` (no network) and re-projects those durable leads locally to keep the belief graph coherent.
+# it finishes), and (2) persist a small JSON checkpoint — a PER-SOURCE map of the last seq each source
+# durably ingested (plus a scalar high-water mark used only for local re-projection), per engagement-slug
+# and per plan-fingerprint, next to the intel store — advanced ONLY for a source that genuinely fetched-
+# AND-ingested durable rows. Because the plan is deterministic and ``IntelIngest`` is seq-keyed idempotent,
+# the seq a given fetch consumes is stable across pulls, so the recovery pull SKIPS a source ONLY when that
+# source is recorded as durable in the per-source map (no network) and re-projects those durable leads
+# locally to keep the belief graph coherent. A source that produced ZERO durable rows — a failed / rate-
+# limited fetch (a routine NVD 503 makes ``GuardedHttpTransport`` set ``ok=False``; ``live_cve_observations``
+# then yields [] WITHOUT raising) or a genuinely empty advisory — is NOT recorded, so resume RE-FETCHES it
+# rather than silently dropping its leads. The skip decision trusts the per-source map, NEVER the scalar
+# high-water mark alone (which may have holes below it: an earlier source can have failed while a later one
+# succeeded, so "everything ``<= cursor`` is durable" is FALSE).
 #
 # The checkpoint is a CRASH-RECOVERY marker, not a permanent skip-list: a pull that runs to completion
 # DELETES it, so the next scheduled/manual pull does a fresh full refresh and the auto-updating feed keeps
@@ -194,9 +201,12 @@ def _cursor_path(ingest, plan, base_seq: int):
 
 
 def _read_cursor(path, fp: str):
-    """Return ``(done_through, per_source)`` from the cursor file. ``done_through`` is the highest durably
-    ingested seq (``-1`` = nothing / no reusable cursor). Fail-open: any error, a mismatched plan
-    fingerprint, or a malformed file yields ``(-1, {})`` so the refresh degrades to a full pull."""
+    """Return ``(done_through, per_source)`` from the cursor file. ``done_through`` is the highest seq
+    reached by ANY durably-ingested source — a high-water mark used ONLY for local re-projection, which
+    may have holes below it (an earlier source can have failed while a later one succeeded); it is the
+    ``per_source`` map, NOT this scalar, that decides whether a source is skippable on resume. ``-1`` =
+    nothing / no reusable cursor. Fail-open: any error, a mismatched plan fingerprint, or a malformed
+    file yields ``(-1, {})`` so the refresh degrades to a full pull."""
     if path is None:
         return -1, {}
     try:
@@ -302,7 +312,8 @@ def refresh_vulnintel(plan, *, transport_for, ingest, seq: int = 0, cancel=None)
     every already-finished source's leads. When ``ingest`` carries a durable store, a per-plan checkpoint
     (see the cursor section above) lets an interrupted pull RESUME: the recovery pull re-projects the
     already-durable leads locally and skips their NETWORK fetch, pulling only the sources that did not
-    finish. A pull that completes clears its checkpoint so the next pull refreshes in full. All checkpoint
+    durably ingest — a source whose fetch failed or returned zero obs is RE-FETCHED, never skipped. A pull
+    that completes clears its checkpoint so the next pull refreshes in full. All checkpoint
     IO is fail-open — a read/write/delete failure degrades to the pre-existing full-refresh, never raises.
     """
     cancel = cancel or (lambda: False)
@@ -340,21 +351,24 @@ def refresh_vulnintel(plan, *, transport_for, ingest, seq: int = 0, cancel=None)
             refused[source.name] = str(exc)
             continue
         n = 1 if source.mode == "bulk" else len(queries)
-        if n > 0 and done_through >= 0 and (cur + n - 1) <= done_through:
-            # every seq this source would consume is already durably ingested (reloaded above) — skip
-            # the NETWORK fetch entirely and just advance the deterministic clock. This is the resume win.
+        last_seq_for_source = cur + n - 1
+        if n > 0 and per_source_cursor.get(source.name, -1) >= last_seq_for_source:
+            # THIS source genuinely fetched-AND-ingested durable rows in the interrupted run — its
+            # per-source high-water covers every seq it would consume now (re-projected locally above) —
+            # so skip the NETWORK fetch and just advance the deterministic clock. This is the resume win.
+            # A source that failed or returned ZERO obs has NO per-source entry, so it is RE-FETCHED, not
+            # skipped: resume NEVER skips a source whose rows are not durable. (The scalar high-water mark
+            # is deliberately NOT consulted here — it can sit above a lower-seq source that never ingested.)
             cur += n
             skipped[source.name] = n
             continue
         got = 0
         src_obs: list = []
-        source_ok = False
         if source.mode == "bulk":
             fetch_seq = cur
             cur += 1
             rec = transport.fetch(source.source_kind, "", seq=fetch_seq)
             qrun += 1
-            source_ok = bool(rec.ok)
             if rec.ok:
                 obs = observations_from_kev(rec.payload, seq=fetch_seq)
                 src_obs.extend(obs)
@@ -370,13 +384,20 @@ def refresh_vulnintel(plan, *, transport_for, ingest, seq: int = 0, cancel=None)
                 qrun += 1
                 src_obs.extend(obs)
                 got += len(obs)
-            source_ok = not cancelled            # completed every query without a STOP
         minted[source.name] = minted.get(source.name, 0) + got
         # INCREMENTAL ingest of just this source, THEN advance the cursor — durable-BEFORE-cursor, so a
         # crash between the two only ever re-fetches (idempotent), never skips un-ingested leads.
+        durable = False
         if src_obs:
-            applied += ingest.ingest(src_obs).applied
-        if cpath is not None and source_ok and n > 0 and not cancelled:
+            res = ingest.ingest(src_obs)
+            applied += res.applied
+            durable = res.persisted > 0      # rows ACTUALLY landed in the durable store (reloadable on resume)
+        # Advance the cursor ONLY for a source that ACTUALLY produced durable rows (fetched-AND-ingested),
+        # NOT merely "not cancelled". A source that returned zero obs — a failed / rate-limited fetch
+        # (GuardedHttpTransport sets ok=False on any non-2xx / network error; live_cve_observations then
+        # yields [] WITHOUT raising) OR a genuinely empty advisory — is left UN-recorded, so resume
+        # re-fetches it instead of silently dropping its leads.
+        if cpath is not None and durable and n > 0 and not cancelled:
             per_source_cursor[source.name] = cur - 1
             done_through = max(done_through, cur - 1)
             _write_cursor(cpath, fp, slug, seq, done_through, per_source_cursor)

@@ -51,15 +51,18 @@ _PAYLOAD_BY_NAME = {"nvd": _NVD, "osv": _OSV, "cisa-kev": _KEV}
 
 class _RecTransport:
     """A per-source stand-in that records every fetch into a SHARED log and returns a fixed payload.
-    A ``boom`` source raises on fetch (simulate a mid-run network crash); an ``on_fetch`` hook lets a
-    test observe on-disk state at the exact moment a source is fetched."""
+    A ``boom`` source raises on fetch (simulate a mid-run network crash); a ``fail`` source returns an
+    ``ok=False`` record (a routine non-2xx / rate-limit — zero obs, NO raise, the way
+    ``GuardedHttpTransport`` reports a 503); an ``on_fetch`` hook lets a test observe on-disk state at the
+    exact moment a source is fetched."""
 
-    def __init__(self, name, payload, log, boom, on_fetch):
+    def __init__(self, name, payload, log, boom, on_fetch, fail=frozenset()):
         self.name = name
         self.payload = payload
         self.log = log
         self.boom = boom
         self.on_fetch = on_fetch
+        self.fail = fail
 
     def fetch(self, source_kind, query, *, seq):
         self.log.append((self.name, query, seq))
@@ -67,15 +70,18 @@ class _RecTransport:
             self.on_fetch(self.name)
         if self.name in self.boom:
             raise RuntimeError(f"network boom for {self.name}")
-        return RawRecord(source_kind=source_kind, query=query, payload=self.payload, ok=True)
+        ok = self.name not in self.fail
+        # an ok=False record carries no usable payload — exactly what a 503 / rate-limit looks like.
+        return RawRecord(source_kind=source_kind, query=query,
+                         payload=(self.payload if ok else {}), ok=ok)
 
 
-def _factory(log, *, boom=frozenset(), refuse=frozenset(), on_fetch=None):
-    """Build a transport_for(source) that records fetches, and can refuse / crash / probe named sources."""
+def _factory(log, *, boom=frozenset(), refuse=frozenset(), fail=frozenset(), on_fetch=None):
+    """Build a transport_for(source) that records fetches, and can refuse / crash / fail / probe sources."""
     def transport_for(source):
         if source.name in refuse:
             raise CollectorEgressRefused(f"{source.name} refused")
-        return _RecTransport(source.name, _PAYLOAD_BY_NAME[source.name], log, boom, on_fetch)
+        return _RecTransport(source.name, _PAYLOAD_BY_NAME[source.name], log, boom, on_fetch, fail)
     return transport_for
 
 
@@ -167,6 +173,55 @@ def test_crash_midop_keeps_ingested_and_resume_skips_done(tmp_path):
     assert set(r2.skipped_by_source) == {"nvd", "osv"}     # done sources skipped, not re-fetched
     assert r2.applied > 0                                   # the KEV leads are finally ingested
     assert istore.observation_count(engagement_slug="acme") > obs_after_crash
+    assert _cursor_file(tmp_path) is None                  # resume completed → checkpoint cleared
+    store.close()
+
+
+# ---- (b') NEGATIVE CONTROL: resume must RE-FETCH an EARLIER source that never durably ingested ----
+#
+# Every crash test above crashes the LAST source while all EARLIER sources genuinely succeeded, so it
+# cannot catch the silent-data-loss bug where the "completed" marker was ``not cancelled``: a per-CVE
+# source whose fetch returned ok=False (a routine NVD 503 / rate-limit → live_cve_observations yields []
+# WITHOUT raising) minted zero obs yet still advanced the scalar high-water mark, so resume SKIPPED it and
+# dropped its leads. This is the missing control: an EARLIER source fails (ok=False) BEFORE a later source
+# crashes; resume must RE-FETCH the failed earlier source, not skip it.
+
+def test_resume_refetches_an_earlier_failed_source_not_just_the_last(tmp_path):
+    store, istore, ing1 = _ingest(tmp_path)
+    log1: list = []
+    # nvd (per-cve @ seq0) FETCH RETURNS ok=False → zero obs, NO raise; osv (@ seq1) genuinely succeeds;
+    # cisa-kev (bulk @ seq2) then crashes → the pull raises with the checkpoint on disk.
+    with pytest.raises(RuntimeError):
+        vulnfeed.refresh_vulnintel(
+            _plan(), transport_for=_factory(log1, fail={"nvd"}, boom={"cisa-kev"}), ingest=ing1, seq=0)
+
+    # nvd WAS actually fetched (the network call happened) but produced zero durable rows...
+    assert [c[0] for c in log1] == ["nvd", "osv", "cisa-kev"]
+    # ...so the surviving checkpoint records ONLY the source that genuinely ingested (osv @ seq1), and
+    # deliberately NOT nvd — a failed / empty fetch must never advance the cursor for that source.
+    cf = _cursor_file(tmp_path)
+    assert cf is not None
+    saved = json.loads(cf.read_text())
+    assert "nvd" not in saved["per_source"]                # the failed earlier source is NOT durable
+    assert saved["per_source"].get("osv") == 1             # the genuinely-ingested source IS
+    obs_after_crash = istore.observation_count(engagement_slug="acme")
+    assert obs_after_crash > 0
+
+    # RESUME with a healthy transport (nvd now returns rows). The bug: nvd would be SKIPPED because its
+    # seq0 sits <= the scalar high-water mark (1). The fix: nvd is RE-FETCHED (no per-source entry), osv
+    # is skipped (genuinely durable), cisa-kev is fetched (it crashed before finishing).
+    ing2 = IntelIngest(WorldModel(), store=istore, engagement_slug="acme")
+    log2: list = []
+    r2 = vulnfeed.refresh_vulnintel(_plan(), transport_for=_factory(log2), ingest=ing2, seq=0)
+
+    fetched = [c[0] for c in log2]
+    assert "nvd" in fetched                                # the failed EARLIER source is RE-FETCHED...
+    assert "nvd" not in r2.skipped_by_source               # ...and NOT skipped (the data-loss guard)
+    assert "cisa-kev" in fetched                           # the crashed source is fetched too
+    assert set(r2.skipped_by_source) == {"osv"}            # ONLY the genuinely-durable source is skipped
+    assert r2.queries_run == 2                             # nvd + cisa-kev re-fetched; osv skipped
+    assert r2.applied > 0                                  # nvd's (and kev's) leads are finally ingested
+    assert istore.observation_count(engagement_slug="acme") > obs_after_crash   # nvd's leads recovered
     assert _cursor_file(tmp_path) is None                  # resume completed → checkpoint cleared
     store.close()
 
