@@ -806,6 +806,78 @@ def engage_instruct(slug: str, text: str) -> dict:
     return {"ok": True, "slug": out.get("slug"), "seq": out.get("seq"), "running": running}
 
 
+def _repo_name(repo: str) -> str:
+    """A safe local directory name from a repo URL/scp form (last component, ``.git`` stripped, sanitised
+    to ``[A-Za-z0-9._-]``). Never a path separator, never empty."""
+    r = str(repo or "").strip().rstrip("/")
+    tail = r.split("/")[-1].split(":")[-1]
+    if tail.endswith(".git"):
+        tail = tail[:-4]
+    tail = re.sub(r"[^A-Za-z0-9._-]", "-", tail).strip("-.")
+    return (tail or "repo")[:64]
+
+
+def clone_codebase(chat_id: str, repo: str) -> dict:
+    """Phase D — GATED clone of a git repo into a CONFINED per-chat workdir, so the chat can then read it
+    and run a gated codebase assessment on it (the cloned directory is a `codebase` target). Returns
+    ``{ok, path, name}`` or ``{ok: False, error}``; fail-closed on a bad repo / gate deny / clone failure.
+
+    SAFETY — the sharpest surface in the chat orchestrator, hardened on every axis:
+      * source is validated by the SAME guard the remediation clone uses (``_repo_ok``): no leading-dash
+        (git-flag injection), no ``ext::``/``fd::`` transport-helper (command execution), scheme on a
+        short allowlist;
+      * the workdir is confined STRICTLY under the console clone area (abspath-confirmed), per chat;
+      * the clone is a `--`-terminated argv (no shell), ``--depth 1`` to bound size;
+      * it is GATED as ``git_clone`` (WARDEN tier); a deny refuses. The clone is the ONE outbound step
+        (git needs the network) — gated + argv-pinned, correlatable, never free host exec."""
+    from . import sessions
+    cid = ""
+    if chat_id:
+        try:
+            cid = sessions._safe_session_id(str(chat_id))
+        except ValueError:
+            return {"ok": False, "error": "unsafe chat id"}
+    repo = str(repo or "").strip()
+    try:
+        from vigil_integration.live.codefix_runner import _repo_ok
+        from vigil_integration.live.executor import subprocess_runner
+        from vigil_integration.live.wiring import default_classify
+        from vigil_integration.warden_gate import decide_tool
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"the clone toolchain is unavailable ({type(e).__name__})"}
+    ok, why = _repo_ok(repo)
+    if not ok:
+        return {"ok": False, "error": why}
+    try:
+        d = decide_tool("git_clone", classify=default_classify, floor="A2", ceiling="A1")
+    except Exception as e:  # noqa: BLE001 — a gate that cannot decide is a DENY (fail-closed)
+        return {"ok": False, "error": f"the gate could not evaluate the clone ({type(e).__name__})"}
+    if getattr(d, "outcome", "deny") == "deny":
+        return {"ok": False, "error": "clone refused by the gate: " + getattr(d, "reason", "")}
+    base = Path(_live_base()) / "clones" / (cid or "adhoc")
+    name = _repo_name(repo)
+    try:
+        base_abs = base.resolve()
+        dest_abs = (base_abs / name).resolve()
+        # confinement: dest must sit STRICTLY under the per-chat clone base
+        if os.path.commonpath([str(base_abs), str(dest_abs)]) != str(base_abs) or dest_abs == base_abs:
+            return {"ok": False, "error": "refused: the clone destination escaped the confined area"}
+        if dest_abs.exists():
+            shutil.rmtree(dest_abs, ignore_errors=True)   # dest_abs is confirmed under base_abs
+        base_abs.mkdir(parents=True, exist_ok=True)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"clone workdir prep failed ({type(e).__name__})"}
+    # `--` ends option parsing so the repo can never be read as a git flag; --depth 1 bounds the fetch.
+    try:
+        r = subprocess_runner(["git", "clone", "--no-hardlinks", "--depth", "1", "--quiet", "--",
+                               repo, str(dest_abs)], timeout=300)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"git clone could not run ({type(e).__name__})"}
+    if getattr(r, "exit_code", 1) != 0:
+        return {"ok": False, "error": "git clone failed: " + (getattr(r, "stderr", "") or "")[:200]}
+    return {"ok": True, "path": str(dest_abs), "name": name}
+
+
 def launch_assessment(body: dict) -> dict:
     """Route the New-Assessment wizard body to the SAME gated CLI a hand-run engagement uses and
     spawn it. Returns ``{run_id, status, mode, slug, stream}`` or ``{error}`` (a clean, fail-closed
