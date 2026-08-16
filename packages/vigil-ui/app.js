@@ -6654,16 +6654,30 @@
       function streamSend(payload, msg, outgoing) {
         C.stream = { text: "", msg: msg };
         drawStreamBubble();
+        // `committed` guards against a DUPLICATE turn (red-pen MEDIUM-1): once the server has sent an
+        // event-stream response it has ALREADY persisted the turn (it appends before emitting `done`), so a
+        // later abort or a render error must NOT re-POST to /send — that would double-record the turn AND
+        // make a second billable model call. We only re-send when the stream never established.
+        let committed = false;
         return streamChat(payload, function (tok) { C.stream.text += tok; drawStreamBubble(); })
           .then(function (res) {
-            if (res && res.fallback) { C.stream = null; removeStreamBubble(); return sendViaPost(payload, outgoing); }
+            if (res && res.fallback) {                 // not streamable — the server persisted NOTHING → /send
+              C.stream = null; removeStreamBubble();
+              return sendViaPost(payload, outgoing);
+            }
+            committed = true;                          // got an event-stream ⇒ the server committed the turn
+            if (res && res.incomplete) {               // stream aborted after commit — reload the saved answer
+              C.stream = null; removeStreamBubble();
+              V.toast("The connection dropped mid-reply — the answer was saved; reloading it.", false);
+              return refreshTranscript().then(finishSend);
+            }
             afterSendResult(res, outgoing);
             return refreshTranscript().then(finishSend);
           })
           .catch(function () {
-            // never lose the turn on a streaming hiccup — fall back to the reliable path
             C.stream = null; removeStreamBubble();
-            return sendViaPost(payload, outgoing);
+            if (committed) return finishSend();        // a post-commit (e.g. render) error — never re-send
+            return sendViaPost(payload, outgoing);     // the stream never established — safe to send once
           });
       }
 
@@ -6704,7 +6718,12 @@
               return pump();
             });
           }
-          return pump();
+          // Reaching here means the event-stream response was ESTABLISHED (headers received). If the read
+          // aborts before `done`, the server has still very likely committed the turn (it persists before
+          // emitting done), so resolve with the final result if we got it, else an `incomplete` marker —
+          // NEVER reject into streamSend's re-send path (which would double-record). A pre-response fetch
+          // failure rejects the outer promise instead, and that IS safe to re-send.
+          return pump().catch(function () { return final || { established: true, incomplete: true }; });
         });
       }
 

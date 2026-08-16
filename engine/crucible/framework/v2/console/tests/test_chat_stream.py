@@ -57,10 +57,27 @@ def streamed(monkeypatch: pytest.MonkeyPatch):
         def get_final_message(self):
             return _Final()
 
+    class _Block:
+        type = "text"
+
+        def __init__(self, text):
+            self.text = text
+
+    class _Resp:
+        stop_reason = "end_turn"
+        usage = None
+
+        def __init__(self, text):
+            self.content = [_Block(text)]
+
     class _Messages:
         def stream(self, **kw):
             cap["kwargs"] = kw
             return _Stream(["Two ", "leads ", "here."])
+
+        def create(self, **kw):                 # the BLOCKING path — same text, so records must match
+            cap["create_kwargs"] = kw
+            return _Resp("Two leads here.")
 
     class _Client:
         def __init__(self, api_key=None, **kw):
@@ -145,10 +162,30 @@ def test_air_gapped_cloud_pick_refuses_no_tokens(streamed, monkeypatch):
     evs, emit = _events()
     out = chat.chat_stream({"chat_id": CHAT, "message": "look", "model": "claude-opus-5"}, emit)
     assert [e for e in evs if e.get("event") == "token"] == []      # nothing streamed (no egress)
+    assert streamed["kwargs"] is None, "messages.stream was called under a forbidden tier — an egress"
     done = [e for e in evs if e.get("event") == "done"]
     assert len(done) == 1
     # the done event carries the honest sovereignty refusal, not an answer
     assert out["status"] in ("unavailable", "need_key") or "tier" in str(out.get("error", "")).lower()
+
+
+def test_streamed_and_blocking_records_match(streamed, monkeypatch):
+    """No drift (red-pen LOW-2): the SAME question answered via chat_stream and via chat_send persists an
+    IDENTICAL assistant record — same kind, grounding, and reply text — because both run the shared
+    _finish_question_turn over the same model text."""
+    _reason_wanted(monkeypatch, wanted=True)
+    chat.chat_send({"chat_id": "c-blocking", "message": "any weaknesses?"})
+    evs, emit = _events()
+    chat.chat_stream({"chat_id": "c-stream", "message": "any weaknesses?"}, emit)
+
+    def _answer(cid):
+        recs = [r for r in chat.read_session(cid) if r.get("role") == "assistant" and r.get("kind") == "answer"]
+        assert recs, cid
+        return recs[-1]
+
+    a_block, a_stream = _answer("c-blocking"), _answer("c-stream")
+    assert a_block["grounding"] == a_stream["grounding"] == "lead"
+    assert a_block["text"] == a_stream["text"]                       # identical persisted reply
 
 
 def test_local_pick_answers_non_streamed_through_the_stream_path(monkeypatch):
