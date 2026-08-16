@@ -729,8 +729,11 @@ def retry_run(run_id: str) -> dict:
 # The raw offense `framework.v2 engage` the console spawns uses an in-memory world-model and has NO Neo4j
 # projection (by the two-env boundary — the offense plane carries no Neo4j code). The per-session knowledge
 # graph lives ONLY on the integration `vigil engage` path (partitions by `--session`, unions connected
-# sessions by `--connect`; F3/F4). So a graph-backed run must be routed to that separate `vigil` process —
-# subprocessed, never imported (the console is offense-plane; importing vigil_integration is FATAL-2).
+# sessions by `--connect`; F3/F4). So a graph-backed run is routed to that separate `vigil` process — the
+# ENGINE runs subprocessed so its authoritative gate/keys live in their own process, not duplicated here.
+# (This is NOT a FATAL-2 rule: the console is offense-plane, so it MAY import the stdlib-only
+# `vigil_integration.live` helpers — as `api.py` and `engage_instruct` do; FATAL-2 bars the SOVEREIGN
+# interpreter from loading framework/strix, which is a different boundary — see kb/two-env-boundary.md.)
 _GRAPH_ITERS = {"quick": 6, "standard": 12, "deep": 20}
 
 
@@ -753,11 +756,54 @@ def _integration_engage_cmd(target: str, slug: str, session_id: str, scan_mode: 
         return None
     from . import sessions
     conns = ",".join(sessions.connections_of(session_id))
+    # Pin --base-dir to the console's live dir so the engine's operator-instruction queue
+    # (drain(slug, base=config.base_dir)) is the SAME file the console enqueues to in `engage_instruct`
+    # (B1 mid-run steering). Absolute, so it holds regardless of the child's cwd / $VIGIL_LIVE_DIR default.
     cmd = [vigil, "engage", target, "--slug", slug, "--scope", "127.0.0.1",
-           "--session", session_id, "--max-iterations", str(_GRAPH_ITERS.get(scan_mode, 12))]
+           "--session", session_id, "--base-dir", _live_base(),
+           "--max-iterations", str(_GRAPH_ITERS.get(scan_mode, 12))]
     if conns:
         cmd += ["--connect", conns]
     return cmd
+
+
+def _live_base() -> str:
+    """The console's live dir as an ABSOLUTE path — the single base shared by the integration engage
+    run's instruction queue and the console's `engage_instruct` enqueue, so a mid-run message reaches the
+    running engine's drain. Mirrors `sessions._live_dir()` ($VIGIL_LIVE_DIR or .vigil-live), resolved."""
+    from . import sessions
+    try:
+        return str(sessions._live_dir().resolve())
+    except Exception:  # noqa: BLE001
+        return str(Path(os.environ.get("VIGIL_LIVE_DIR") or ".vigil-live").resolve())
+
+
+def engage_instruct(slug: str, text: str) -> dict:
+    """B1 — enqueue an operator message for a RUNNING integration `vigil engage` (mid-run steering). The
+    engine drains it via its operator_messages seam and folds it into the NEXT think as advisory context;
+    it never re-runs a completed tool, relaxes scope, or fires anything ungated (an instruction can only
+    change what the model READS). Offense-plane, in-process — the console already imports
+    `vigil_integration.live.*`, and the queue is stdlib-only + append-only. Returns {ok, slug, seq} or a
+    clean {ok: False, error}; fail-closed on a bad slug/empty text (never a traceback)."""
+    try:
+        from vigil_integration.live.instructions import enqueue
+    except Exception as e:  # noqa: BLE001 — queue module unavailable → honest refusal, never a 500
+        return {"ok": False, "error": f"the instruction queue is unavailable ({type(e).__name__})"}
+    try:
+        out = enqueue(str(slug or ""), str(text or ""), base=_live_base())
+    except ValueError as e:                     # unsafe slug / empty text — a clean operator-input refusal
+        return {"ok": False, "error": str(e)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"could not enqueue the instruction ({type(e).__name__})"}
+    # HONESTY (red-pen BLOCK-1): a queued message is only STEERED if a run with this slug is actually
+    # alive to drain it. Report the truth so the UI never claims "it steers on its next step" for a run
+    # that has already ended (the message then waits, and only a resume would pick it up).
+    running = False
+    try:
+        running = _slug_has_running_run(str(slug or ""))
+    except Exception:  # noqa: BLE001 — a liveness-probe hiccup is reported as "not confirmed running"
+        running = False
+    return {"ok": True, "slug": out.get("slug"), "seq": out.get("seq"), "running": running}
 
 
 def launch_assessment(body: dict) -> dict:
