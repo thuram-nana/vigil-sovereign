@@ -371,6 +371,15 @@ jobs:
             # claimed to be "enforced by a required check". This job IS required, and
             # VIGIL_REQUIRE_FRONTIER_CHECK=1 turns an import failure into a FAILURE rather than a skip,
             # so the guard cannot go dark again without the build going red.
+            #
+            # The cloud/K8s/IaC/mesh posture + cloud live-capture suites at the tail of this list are
+            # framework-dependent (importorskip framework.v2.*), so they can ONLY execute in THIS leg — in
+            # the sovereign leg they are collected-but-skipped. They were omitted from BOTH legs and so
+            # never ran in CI (readiness fix — same silent-skip class as the two named cloud files).
+            # test_ci_framework_tests_run_in_offense_leg.py now FAILS the build if a file that either
+            # importorskips `framework` OR is --ignore'd in the sovereign leg (a hard framework import) is
+            # missing from this offense list — covering both ways a framework-dependent test can hide, so the
+            # gap cannot silently reopen.
             VIGIL_REQUIRE_FRONTIER_CHECK=1 \
             PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
               docs/tests/test_out_of_scope_is_honest.py \
@@ -428,7 +437,14 @@ jobs:
               integration/tests/test_k8s_rbac_grant_verify.py \
               integration/tests/test_dossier_case_file.py \
               integration/tests/test_brain_engine.py \
-              integration/tests/test_sovereignty_governs_llm_egress.py -q
+              integration/tests/test_sovereignty_governs_llm_egress.py \
+              integration/tests/test_cloud_live_posture.py \
+              integration/tests/test_cloud_benchmark.py \
+              integration/tests/test_cloud_scope.py \
+              integration/tests/test_iac_posture.py \
+              integration/tests/test_k8s_posture.py \
+              integration/tests/test_live_executor.py \
+              integration/tests/test_mesh_cicd_posture.py -q
           else
             echo "integration/ not present on this ref (pre-merge) — nothing to test"
           fi
