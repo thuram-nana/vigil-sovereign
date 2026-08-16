@@ -5563,6 +5563,12 @@
       // the chat drives the AGENTIC engine by default (OODA loop, steerable, resumable). Off = a lighter
       // gated scan. Sent as `agentic` so the server-side default can be opted out of (red-pen F2).
       agentic: true,
+      // E3 — per-session model sovereignty. `models` is the picker roster (each with its trust class +
+      // whether the current sovereignty tier permits it + the consequence of choosing it); `model` is THIS
+      // session's choice ("" = the server default, Claude Opus 5), remembered per session in localStorage so
+      // it survives a reload. A LOCAL choice means an uploaded codebase never leaves the machine.
+      models: [], modelTier: "",
+      model: "",
       // D2b: per-run codebase working state, keyed by run_id — a proposed dev-mode diff (awaiting the
       // operator's review-and-apply), the last test result, and per-run busy flags. Kept OUT of the DOM so
       // a transcript redraw (which rebuilds every bubble from the saved records) does not drop a diff the
@@ -5589,15 +5595,26 @@
           C.profiles = (d && d.profiles) || []; C.profilesErr = !!(d && d.error);
         }).catch(function () { C.profiles = []; C.profilesErr = true; }),
         V.getJSON(OFF("/api/capabilities")).then(function (d) { C.caps = capsOf(d); }).catch(function () { C.caps = []; }),
+        // E3: the model-sovereignty roster — each selectable model + trust class + whether the tier permits it.
+        V.getJSON(OFF("/api/chat/models")).then(function (d) {
+          C.models = (d && d.models) || []; C.modelTier = (d && d.tier) || "";
+        }).catch(function () { C.models = []; C.modelTier = ""; }),
       ]);
       V.getJSON(SOV("/api/settings")).then(function (st) { C.st = st; }).catch(function () { C.st = null; })
         .then(function () { return roster; })
         .then(loadChatList)
         .then(function () {
+          restoreModel();                 // E3: this session's remembered model choice (default = server default)
           if (!C.id) { C.messages = []; drawSessions(); drawMain(); return; }
           return refreshTranscript().then(refreshHyps).then(function () { drawSessions(); drawMain(); });
         });
     }
+
+    // E3 — the per-session model choice is remembered in localStorage keyed by session id, so a reload keeps
+    // it (the operator's decision was "ask per session"). A blank/unknown choice means the server default.
+    function modelKey(id) { return "vigil.chat.model." + (id || "new"); }
+    function restoreModel() { try { C.model = localStorage.getItem(modelKey(C.id)) || ""; } catch (e) { C.model = ""; } }
+    function rememberModel() { try { localStorage.setItem(modelKey(C.id), C.model || ""); } catch (e) {} }
 
     // The sidebar reads the SESSIONS listing rather than /api/chat/sessions, because only that one
     // carries `connections` — the other chats this one draws on. The chat listing is still read and
@@ -6385,12 +6402,13 @@
     function drawMain() {
       const host = V.$("#chat-main"); if (!host) return;
       const st = C.st || {};
-      // MODEL + EFFORT ARE SYSTEM-WIDE, NOT PER-CHAT. Both buttons post the SAME owner-plane actions the
-      // Settings screen posts (`set_model` / `set_effort`), which a running engine only picks up on the
-      // next `vigil up`. Neither touches THIS conversation: an answer here is produced by a model the
-      // console pins itself, and the send never carries a model or an effort. Sitting unlabelled on top
-      // of the transcript, "Use model" / "Apply effort" read as "answer me with this" — which is the one
-      // thing they do not do. So they are named for what they change and say what they don't.
+      // THESE controls are SYSTEM-WIDE: they set the model + effort the ENGINE reasons with (engagements,
+      // scans, the codebase agent) via the SAME owner-plane actions the Settings screen posts
+      // (`set_model` / `set_effort`), effective on the engine's next `vigil up`. They are DISTINCT from the
+      // per-session model picker in the composer below (E3), which chooses the model that answers THIS
+      // conversation — immediately, with sovereignty (a local pick keeps everything on this machine). So a
+      // reply here now comes from the per-session pick when set (else the console default); these buttons
+      // change the ENGINE's model, not this chat's answer. Named for what they change, and kept separate.
       const modelSel = h("select.input", { style: { minWidth: "160px" } },
         (st.models || []).map(function (m) {
           const o = h("option", { value: m.id }, m.label || m.id);
@@ -6403,8 +6421,9 @@
       const controls = st.models ? h("div.chat-sysctl", null, [
         h("div.hint.wide", null, "System-wide settings, not this chat. These are the same controls as Settings: "
           + "they set the model and effort the ENGINE reasons with (engagements, scans, the codebase agent) "
-          + "and take effect on its next `vigil up`. Replies in this conversation come from a model this "
-          + "console pins, so changing them here will not change the answer below."),
+          + "and take effect on its next `vigil up`. To choose the model that answers THIS conversation "
+          + "(immediately, with sovereignty — a local model keeps everything on this machine), use the model "
+          + "picker in the composer below."),
         modelSel,
         h("button.btn.sm.owner", { onClick: function () { settingsAct({ action: "set_model", model: modelSel.value, reason: "set model from Chat" }, "System model set — effective on the next `vigil up`.", load); } }, "Set system model"),
         effortSel,
@@ -6476,6 +6495,16 @@
           const o = h("option", { value: p[0] }, p[1]); if (p[0] === C.reasonMode) o.selected = true; return o;
         }));
       reasonSel.addEventListener("change", function () { C.reasonMode = reasonSel.value; });
+      // E3 — the per-session MODEL picker. This is a sovereignty control, not a preference: a LOCAL model
+      // means an uploaded codebase never leaves the machine (no cloud fallback). Each option shows its trust
+      // class; one the current sovereignty tier forbids is DISABLED with the reason in its tooltip (told up
+      // front, never a surprise at send time). The choice is remembered per session.
+      const sessModelSel = buildModelSelect();
+      const modelNote = h("div.chat-model-note", null, modelConsequence());
+      sessModelSel.addEventListener("change", function () {
+        C.model = sessModelSel.value; rememberModel();
+        modelNote.textContent = modelConsequence();
+      });
       // Agentic-engine opt-out (red-pen F2): on = the live OODA engine (reasons, runs tools, steerable,
       // resumable, live steps); off = a lighter gated scan. Loopback engagements only; a remote target is
       // charter-gated regardless.
@@ -6485,6 +6514,38 @@
         [agenticChk, h("span", null, "Agentic")]);
       const send = h("button.btn.primary", { onClick: doSend }, [V.icon("bolt"), "Send"]);
       input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); } });
+
+      // E3 — build the model <select> from the sovereignty-aware roster. A model the current tier FORBIDS is
+      // rendered disabled with the reason in its tooltip; the trust class rides each label. If the roster
+      // could not be read, fall back to a single default option (the send still works — the server defaults).
+      function buildModelSelect() {
+        const sel = h("select.input", { style: { minWidth: "170px" },
+          title: "The model that reasons on your messages. A LOCAL model keeps everything on this machine (no cloud fallback)." });
+        const roster = (C.models && C.models.length) ? C.models
+          : [{ id: "", label: "Claude Opus 5 (default)", kind: "cloud", trust_class: "cloud_only", permitted: true, why_not: "" }];
+        roster.forEach(function (m) {
+          const tc = m.trust_class ? (" · " + m.trust_class) : "";
+          const o = h("option", { value: m.id }, m.label + tc);
+          if (!m.permitted) { o.disabled = "disabled"; o.title = m.why_not || "not permitted under this sovereignty tier"; }
+          // restore this session's remembered pick; if it is now forbidden, fall through to the default
+          if (m.id === C.model && m.permitted) o.selected = true;
+          sel.appendChild(o);
+        });
+        // if the remembered choice is gone/forbidden, reflect the effective (default) selection in state AND
+        // persist it, so a stale forbidden id does not linger in localStorage (red-pen LOW-7)
+        if (C.model && !roster.some(function (m) { return m.id === C.model && m.permitted; })) { C.model = ""; rememberModel(); }
+        return sel;
+      }
+
+      // The plain-language consequence of the current pick — shown under the picker so the sovereignty
+      // trade-off is visible at the moment of choosing, not buried.
+      function modelConsequence() {
+        const m = (C.models || []).find(function (x) { return x.id === C.model; })
+          || (C.models || []).find(function (x) { return x.default; });
+        if (!m) return "";
+        const tier = C.modelTier ? (" (sovereignty tier: " + C.modelTier + ")") : "";
+        return (m.kind === "local" ? "Local · " : "Cloud · ") + (m.consequence || "") + tier;
+      }
 
       // CONSENT COVERS WHAT ACTUALLY GOES. A turn is answered over EVERYTHING the chat still holds —
       // the console assembles the attachment block from the chat's stored attachments, not from a
@@ -6517,7 +6578,8 @@
         C.busy = true; send.disabled = true;
         const payload = { chat_id: C.id || undefined, message: msg, target: (target.value || "").trim(),
           mode: C.mode || undefined, reason_mode: (C.reasonMode && C.reasonMode !== "ask") ? C.reasonMode : undefined,
-          agentic: C.agentic };   // explicit so the operator can opt OUT of the agentic engine (default on)
+          agentic: C.agentic,     // explicit so the operator can opt OUT of the agentic engine (default on)
+          model: C.model || undefined };   // E3: the per-session model choice (blank = server default; local = no egress)
         // No per-message attachment list: the console answers over everything the chat HOLDS, so a
         // list here would be decoration that reads like a control. Removing an attachment is the control.
         if (C.mode === "tool" && C.tool) {
@@ -6547,7 +6609,8 @@
         h("div#chat-attach"),
         h("div#chat-links"),
         h("div#chat-hyps"),
-        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } }, [target, modeSel, reasonSel, agenticTog]),
+        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } }, [target, modeSel, reasonSel, sessModelSel, agenticTog]),
+        modelNote,
         toolRow,
         h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "flex-end", flexWrap: "wrap" } }, [attachBtn, fileInput, input, send]),
         h("div.hint", { style: { marginTop: "6px" } },
