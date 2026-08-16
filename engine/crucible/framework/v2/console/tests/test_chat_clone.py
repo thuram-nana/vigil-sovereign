@@ -25,6 +25,11 @@ from framework.v2.console import chat
 # job, so run these there and skip cleanly where the offense deps are absent (the clone CODE lazy-imports
 # them guarded; this guard is only for the TEST's own direct import). Coverage is preserved: P5 runs them.
 pytest.importorskip("vigil_integration.live.executor")
+# Import codefix_runner NOW, at collection, so its module-level `from .executor import subprocess_runner`
+# binds the REAL runner BEFORE any test monkeypatches `executor.subprocess_runner`. Otherwise the first
+# clone_codebase call (which lazily imports codefix_runner) would bind codefix_runner to the fake while a
+# test's patch is active, and that stale binding would leak into a later test's `CodefixSession.build`.
+pytest.importorskip("vigil_integration.live.codefix_runner")
 
 CHAT = "clone-chat"
 

@@ -935,6 +935,94 @@ def clone_codebase(chat_id: str, repo: str, *, operator_present: bool = False) -
     return {"ok": True, "path": str(dest_abs), "name": name}
 
 
+def _confined_clone_path(chat_id: str, path: str) -> str:
+    """The abspath of ``path`` IFF it sits strictly under THIS chat's clone area (``<live>/clones/<chat>/``),
+    else ``""``. A dev-mode edit may only touch a codebase this chat itself cloned — never an arbitrary
+    directory named by the caller."""
+    from . import sessions
+    try:
+        cid = sessions._safe_session_id(str(chat_id)) if chat_id else ""
+    except ValueError:
+        return ""
+    if not cid or not path:
+        return ""
+    try:
+        base = (Path(_live_base()) / "clones" / cid).resolve()
+        p = Path(str(path)).resolve()
+        if os.path.commonpath([str(base), str(p)]) == str(base) and p != base and p.is_dir():
+            return str(p)
+    except (ValueError, OSError):
+        return ""
+    return ""
+
+
+def _files_in_instruction(workdir: str, instruction: str) -> list:
+    """Repo-relative file paths the instruction names that ACTUALLY EXIST under ``workdir`` — so the model
+    diffs against real content (red-pen LOW-2: without this the model never sees the code and its diff
+    won't apply). Path-token candidates are confinement-checked; only existing files are returned, capped."""
+    out: list = []
+    for tok in re.findall(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9_]+", str(instruction or "")):
+        tok = tok.strip(".,);]'\"")
+        try:
+            from vigil_integration.remediation.codefix import is_safe_repo_path
+        except Exception:  # noqa: BLE001
+            return out
+        ok, _ = is_safe_repo_path(tok)
+        if not ok or tok in out:
+            continue
+        try:
+            p = os.path.join(workdir, tok)
+            if os.path.commonpath([os.path.abspath(workdir), os.path.abspath(p)]) == os.path.abspath(workdir) \
+                    and os.path.isfile(p):
+                out.append(tok)
+        except (OSError, ValueError):
+            continue
+        if len(out) >= 8:
+            break
+    return out
+
+
+def propose_codebase_edit(chat_id: str, path: str, instruction: str) -> dict:
+    """Phase D2 — DEV-MODE: propose a change to a codebase THIS chat cloned, as a unified diff for the
+    operator to review. General software editing (no oracle-FACT gate). The path is confined to the chat's
+    own clone area; the engagement kill-switch is honored; the model call is sovereignty-gated. Returns
+    ``{ok, diff}`` or ``{ok: False, error}``."""
+    wd = _confined_clone_path(chat_id, path)
+    if not wd:
+        return {"ok": False, "error": "no such cloned codebase for this chat (edits are confined to repos "
+                                      "you cloned here)"}
+    if _chat_killswitch_tripped(chat_id):          # emergency stop — mirror clone_codebase (red-pen BLOCK-1)
+        return {"ok": False, "error": "refused: the engagement kill-switch is engaged"}
+    try:
+        from vigil_integration.live.dev_edit import propose_dev_edit
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"the dev-edit toolchain is unavailable ({type(e).__name__})"}
+    # feed the model the ACTUAL content of the files the instruction names (else its diff won't apply)
+    diff = propose_dev_edit(wd, str(instruction or ""), files=_files_in_instruction(wd, str(instruction or "")))
+    if not diff:
+        return {"ok": False, "error": "no change proposed (the model declined, was refused by the "
+                                      "sovereignty policy, or no API key is set)"}
+    return {"ok": True, "diff": diff}
+
+
+def apply_codebase_edit(chat_id: str, path: str, diff: str) -> dict:
+    """Phase D2 — apply an operator-reviewed unified diff into the chat's cloned codebase. Gated as an A2
+    ``code_edit`` opened by operator-presence (the operator reviewed the diff and clicked apply); the
+    engagement kill-switch is honored (emergency stop); the diff is path-confined + applied clone-only
+    (``git apply`` backstops any rename/symlink escape). Returns ``{ok, applied}`` or ``{ok: False, error}``."""
+    wd = _confined_clone_path(chat_id, path)
+    if not wd:
+        return {"ok": False, "error": "no such cloned codebase for this chat"}
+    if _chat_killswitch_tripped(chat_id):          # emergency stop BEFORE any write (red-pen BLOCK-1)
+        return {"ok": False, "error": "refused: the engagement kill-switch is engaged"}
+    try:
+        from vigil_integration.live.dev_edit import apply_dev_edit
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"the dev-edit toolchain is unavailable ({type(e).__name__})"}
+    # operator_present=True: an apply is only reachable from the operator's explicit review-and-click.
+    return apply_dev_edit(wd, str(diff or ""), operator_present=True)
+
+
 def launch_assessment(body: dict) -> dict:
     """Route the New-Assessment wizard body to the SAME gated CLI a hand-run engagement uses and
     spawn it. Returns ``{run_id, status, mode, slug, stream}`` or ``{error}`` (a clean, fail-closed
