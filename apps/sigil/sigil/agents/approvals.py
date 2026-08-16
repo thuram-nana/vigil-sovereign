@@ -92,12 +92,17 @@ class ApprovalError(Exception):
 
 class ApprovalQueue:
     def __init__(self, store: Optional[SpineStore] = None, *, owner_key=None,
-                 trusted_pubkey_b64: Optional[str] = None):
+                 trusted_pubkey_b64: Optional[str] = None, principal=None):
         from ..governor.identity import owner_keypair, owner_pubkey
         self.store = store or SpineStore()
         self.owner_key = owner_key if owner_key is not None else owner_keypair()
         # PINNED to the persisted owner identity — never defaulted to the supplied key (RP-APPROVAL-2)
         self.trusted_pubkey_b64 = trusted_pubkey_b64 if trusted_pubkey_b64 is not None else owner_pubkey()
+        # Claim 6 RBAC: the authenticated REQUESTER (an `accounts.Principal`). When set, `_decide` runs a
+        # tier-based permission check BEFORE the owner key signs — ≤A2 needs `approve_a2` (operator+), an
+        # A3/destructive target needs `approve_a3` (owner). `principal is None` means the CLI owner (physically
+        # at the host) or an internal caller, which skips the RBAC gate — back-compat, byte-identical.
+        self.principal = principal
 
     def _target(self, seq: int):
         for r in pending(self.store, self.trusted_pubkey_b64):
@@ -106,7 +111,26 @@ class ApprovalQueue:
         raise ApprovalError(f"seq {seq} is not a pending approval (already decided, or not queued)")
 
     def _decide(self, seq: int, decision: str, *, approver: str, reason: str = "") -> int:
+        # Claim 6 RBAC admission gate. The MINIMUM bar to resolve ANY approval is `approve_a2` (operator+),
+        # checked BEFORE the target lookup so a viewer/analyst learns nothing about the queue contents.
+        if self.principal is not None:
+            from ..governor.accounts import PermissionDenied, role_can
+            if not role_can(getattr(self.principal, "role", None), "approve_a2"):
+                raise PermissionDenied(
+                    f"{getattr(self.principal, 'username', '?')} "
+                    f"({getattr(self.principal, 'role', '?')}) may not resolve approvals (requires operator+)")
         target = self._target(seq)
+        # An A3 (or a target flagged destructive) is OWNER-ONLY: it needs `approve_a3`, which only the owner
+        # role carries. An operator with only `approve_a2` is refused here (fail-closed → 403).
+        if self.principal is not None:
+            from ..governor.accounts import PermissionDenied, role_can
+            tier = str(target.payload.get("tier") or "").upper()
+            if (tier == "A3" or bool(target.payload.get("destructive"))) \
+                    and not role_can(getattr(self.principal, "role", None), "approve_a3"):
+                raise PermissionDenied(
+                    f"{getattr(self.principal, 'username', '?')} "
+                    f"({getattr(self.principal, 'role', '?')}) may not resolve an A3/destructive approval "
+                    f"(owner-only)")
         # the signing key MUST be the trusted owner key — not merely "some key present" (RP-APPROVAL-2).
         if (self.owner_key is None or self.trusted_pubkey_b64 is None
                 or self.owner_key.public_key_b64 != self.trusted_pubkey_b64):

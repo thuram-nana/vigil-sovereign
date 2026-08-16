@@ -380,6 +380,53 @@ def cmd_capability(a) -> None:
         print(f"  {c} {'DISABLED' if a.state == 'off' else 'ENABLED (owner-signed)'} (seq {seq})")
 
 
+def cmd_accounts(a) -> None:
+    """Bootstrap + manage per-user RBAC accounts (Claim 6). Accounts are OWNER-SIGNED spine grants; the
+    owner key (auto-created once) is the sole signer. `create` mints a per-user bearer token and prints it
+    ONCE (only its salted hash is stored). `assign` changes a role; `revoke` disables an account (the safe
+    direction). `list` needs no key.
+
+        sigil accounts create <username> <viewer|analyst|operator>
+        sigil accounts assign <username> <viewer|analyst|operator>
+        sigil accounts revoke <username>
+        sigil accounts list
+    """
+    import time as _time
+
+    from .governor.accounts import ROLES, AccountsRegistry
+    from .governor.identity import ensure_owner_keypair
+    store = SpineStore()
+    if a.accounts_cmd == "list":
+        accts = AccountsRegistry(store).accounts()
+        if not accts:
+            print("  (no accounts — `sigil accounts create <username> <role>` to add one)")
+            return
+        for ac in accts:
+            print(f"  {ac.username:<24} {ac.role:<10} {ac.state}")
+        return
+    if not a.username:
+        print("  usage: sigil accounts <create|assign|revoke> <username> [role]", file=sys.stderr)
+        sys.exit(2)
+    if a.accounts_cmd in ("create", "assign") and not a.role:
+        print(f"  usage: sigil accounts {a.accounts_cmd} <username> <viewer|analyst|operator>",
+              file=sys.stderr)
+        sys.exit(2)
+    reg = AccountsRegistry(store, owner_key=ensure_owner_keypair())
+    if a.accounts_cmd == "create":
+        import secrets as _secrets
+        bearer = _secrets.token_urlsafe(32)
+        seq = reg.create(a.username, a.role, bearer_token=bearer, issued_at=_time.time())
+        print(f"  account CREATED: {a.username} → {a.role} (owner-signed, seq {seq})")
+        print(f"  bearer token (shown ONCE — copy it now; only its salted hash is stored):\n    {bearer}")
+    elif a.accounts_cmd == "assign":
+        seq = reg.assign_role(a.username, a.role, issued_at=_time.time())
+        print(f"  role ASSIGNED: {a.username} → {a.role} (owner-signed, seq {seq})")
+    elif a.accounts_cmd == "revoke":
+        seq = reg.revoke(a.username)
+        print(f"  account REVOKED: {a.username} (seq {seq}) — its bearer token no longer authenticates")
+    _ = ROLES  # (choices are enforced by argparse below)
+
+
 def cmd_gesture_nav(a) -> None:
     """Toggle gesture NAV-MODE (S3). Off by default (opt-in). While ON, a live owner-armed gesture
     session's swipes/pinch NAVIGATE the UI (an A1 `sigil.nav` signal that injects NOTHING) instead of
@@ -1302,6 +1349,14 @@ def main(argv=None) -> None:
     pcap.add_argument("state", nargs="?", choices=["on", "off"], help="on|off (omit for `status`)")
     pcap.add_argument("--reason", default="", help="reason recorded on the spine")
     pcap.set_defaults(fn=cmd_capability)
+    pacc = sub.add_parser("accounts",
+                          help="per-user RBAC accounts (Claim 6): create|assign|revoke|list "
+                               "(owner-signed bearer grants)")
+    pacc.add_argument("accounts_cmd", choices=["create", "assign", "revoke", "list"])
+    pacc.add_argument("username", nargs="?", default=None, help="the account username")
+    pacc.add_argument("role", nargs="?", default=None, choices=[None, "viewer", "analyst", "operator"],
+                      help="role for create/assign (viewer|analyst|operator; 'owner' is not grantable)")
+    pacc.set_defaults(fn=cmd_accounts)
     pgn = sub.add_parser("gesture-nav",
                          help="toggle gesture NAV-MODE (S3): in nav-mode a live armed session's swipes/pinch "
                               "NAVIGATE the UI (an A1 signal that injects nothing) instead of scroll/click")

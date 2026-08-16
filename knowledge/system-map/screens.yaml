@@ -201,6 +201,14 @@ screens:
     description: System settings — the AI model, effort, providers, and other configuration.
     synonyms: [settings, config, configuration, preferences, options]
 
+  - id: users
+    label: Users & Roles
+    group: MANAGE
+    owner: true
+    plane: unified
+    description: Owner-only multi-user access control (Claim 6) — create per-user accounts with a role (viewer, analyst, operator), hand out a one-time bearer token, change a role, or revoke an account. Every account is an owner-signed grant; the owner key stays the sole signer and RBAC is an admission gate in front of it.
+    synonyms: [users, roles, users and roles, accounts, rbac, access control, permissions, add a user, create account, revoke user, assign role, teammates, team members]
+
   - id: trust
     label: Trust Center
     group: LEARN

@@ -122,9 +122,9 @@
       { id: "library", label: "Engagement Library", icon: "book", ready: true },
       { id: "sessions", label: "Sessions", icon: "book", ready: true },
       { id: "activity", label: "Activity", icon: "live", ready: true },
-      { id: "safety", label: "Approvals & Safety", icon: "key", owner: true, ready: true },
-      { id: "charter", label: "Charter & Attestation", icon: "key", owner: true, ready: true },
-      { id: "apikeys", label: "API Keys", icon: "key", owner: true, ready: true },
+      { id: "safety", label: "Approvals & Safety", icon: "key", owner: true, perm: "approve_a2", ready: true },
+      { id: "charter", label: "Charter & Attestation", icon: "key", owner: true, perm: "manage_users", ready: true },
+      { id: "apikeys", label: "API Keys", icon: "key", owner: true, perm: "secrets", ready: true },
       { id: "tools", label: "Tools", icon: "bolt", ready: true },
       { id: "brain", label: "Brain", icon: "brain", ready: true },
       { id: "mcp", label: "MCP Servers", icon: "bolt", ready: true },
@@ -132,7 +132,8 @@
       { id: "budgets", label: "Token Budgets", icon: "bolt", ready: true },
       { id: "compliance", label: "Compliance", icon: "shield", ready: true },
       { id: "assurance", label: "Assurance", icon: "find", ready: true },
-      { id: "settings", label: "Settings", icon: "gear", owner: true, ready: true },
+      { id: "settings", label: "Settings", icon: "gear", owner: true, perm: "config_nonsecret", ready: true },
+      { id: "users", label: "Users & Roles", icon: "key", owner: true, perm: "manage_users", ready: true },
       { id: "governance", label: "Governance", icon: "shield", ready: true },
     ]},
     { group: "LEARN", items: [
@@ -202,7 +203,74 @@
     // an existing `#offense-chip` — so without a seat here on first render there is nothing for the state
     // poll to update, and the button never appears. It was written and then left out of this array,
     // which is exactly why the screen carried no way to start the offense side without a terminal.
-    return h("div#topbar", null, [seg, scope, cmdk, h("div.spacer"), counts, live, offenseChip(), keysBadge, safety, themeBtn, cta]);
+    return h("div#topbar", null, [seg, scope, cmdk, h("div.spacer"), counts, live, offenseChip(), keysBadge, safety, userChip(), themeBtn, cta]);
+  }
+
+  // ---- current-user chip (Claim 6) -------------------------------------------
+  // Names WHO you are signed in as (username · role). Clicking opens a small account panel to switch user
+  // or sign out. Hidden until a principal is known (whoami resolves) so it never flashes a wrong identity.
+  function userChip() {
+    const p = V.principal();
+    if (!p || !p.authenticated) return h("span#user-chip", { style: { display: "none" } }, "");
+    return h("button.user-chip#user-chip", {
+      title: "Signed in as " + p.username + " (" + p.role + ") — click to switch user or sign out",
+      onClick: openUserMenu }, [V.icon("key"), h("span.txt", null, p.username + " · " + p.role)]);
+  }
+  function openUserMenu() {
+    const p = V.principal() || {};
+    openDrawer("Account", h("div", null, [
+      h("div.hint", null, "Signed in as " + (p.username || "?") + " (" + (p.role || "?") + ")."),
+      p.permissions ? h("div.legend", { style: { marginTop: "8px" } },
+        [V.icon("info"), h("span", null, "Permissions: " + p.permissions.join(", "))]) : null,
+      h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } }, [
+        h("button.btn", { onClick: function () { closeDrawer(); renderLoginGate(V.$("#screen")); } },
+          [V.icon("key"), "Switch user"]),
+        h("button.btn.danger", { onClick: logout }, [V.icon("x"), "Sign out"]),
+      ]),
+    ]));
+  }
+  function logout() {
+    V.setSessionToken(""); V.setPrincipal(null); closeDrawer();
+    loadPrincipal(function (pp, ok) {
+      refreshTopbar(); renderNav();
+      if (ok && pp && !pp.authenticated) { renderLoginGate(V.$("#screen")); }
+      else { location.hash = "#/home"; route(); }
+    });
+  }
+
+  // ---- login gate + principal load (Claim 6) ---------------------------------
+  function loadPrincipal(cb) {
+    V.getJSON(SOV("/api/whoami"))
+      .then(function (p) { V.setPrincipal(p); if (cb) cb(p, true); })
+      .catch(function () { V.setPrincipal(null); if (cb) cb(null, false); });   // plane offline → don't gate
+  }
+  function renderLoginGate(screen) {
+    if (!screen) return;
+    const input = h("input.input", { type: "password", placeholder: "Paste your VIGIL bearer token",
+      autocomplete: "off", style: { minWidth: "320px" } });
+    function submit() {
+      const tok = (input.value || "").trim();
+      if (!tok) { V.toast("Enter your bearer token.", true); return; }
+      V.postJSON(SOV("/api/login"), { token: tok })
+        .then(function (r) {
+          if (!r || !r.authenticated) { V.toast("That token was not accepted.", true); return; }
+          V.setSessionToken(tok); V.setPrincipal(r);
+          V.toast("Signed in as " + r.username + " (" + r.role + ").");
+          refreshTopbar(); renderNav(); location.hash = "#/home"; route();
+        })
+        .catch(function (e) { V.toast((e && e.message) || "Login failed.", true); });
+    }
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+    V.mount(screen, h("div.wrap", null, [
+      h("div.screen-head", null, [h("h1", null, "Sign in to VIGIL"),
+        h("span.sub", null, "Multi-user access control (Claim 6). The owner uses the token printed by `vigil up`.")]),
+      V.card("Bearer sign-in", null, [
+        h("div.hint", null, "Enter the bearer token the owner issued you (Users & Roles → Create account). "
+          + "Your role decides what you can do; every action is still gated and owner-signed on the server."),
+        h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } },
+          [input, h("button.btn.primary", { onClick: submit }, [V.icon("key"), "Sign in"])]),
+      ]),
+    ]));
   }
 
   // Poll the redacted settings status for the failing-key count and show/hide the top-bar badge. Cheap +
@@ -575,11 +643,20 @@
   function renderNav() {
     const nav = V.$("#nav"); if (!nav) return;
     const plane = app.get().plane;
+    const prin = V.principal();
     const visible = function (it) {
-      if (plane === "all") return true;
-      if (it.id === "defense") return plane === "defense";
-      if (["assess", "live", "findings", "fixes"].indexOf(it.id) >= 0) return plane === "offense";
-      return true; // home + manage always
+      // (1) plane filter (unchanged)
+      var planeOk = (plane === "all") ? true
+        : (it.id === "defense") ? (plane === "defense")
+        : (["assess", "live", "findings", "fixes"].indexOf(it.id) >= 0) ? (plane === "offense")
+        : true; // home + manage always
+      if (!planeOk) return false;
+      // (2) RBAC gate (Claim 6): once a principal is KNOWN, an owner-flagged screen is shown only if the
+      // role carries its permission (default owner-only). Before whoami resolves (prin == null) we don't
+      // restrict — the SERVER is the enforcement of record (every mutation is re-checked and 403s); this
+      // is the UX layer that stops a teammate seeing owner screens they cannot use.
+      if (prin && it.owner && !V.can(it.perm || "manage_users")) return false;
+      return true;
     };
     V.mount(nav, NAV.map(function (grp) {
       return [h("div.nav-group.label", null, grp.group),
@@ -4062,6 +4139,96 @@
   }
 
   // ---- API Keys screen (owner plane) — every secret the system uses, grouped, with LIVE health -------
+  // ---- Users & Roles (Claim 6 — OWNER-ONLY) ----------------------------------
+  // Create per-user accounts with a role, hand out a one-time bearer token, change a role, or revoke.
+  // Every account is an OWNER-SIGNED spine grant; the owner key stays the sole signer and RBAC is an
+  // admission gate in front of it. This screen is owner-only both in the nav (V.can) and here (defence in
+  // depth); the server also refuses create/assign/revoke to any non-owner (403).
+  var USER_ROLES = ["viewer", "analyst", "operator"];
+  function renderUsers(screen) {
+    if (!V.can("manage_users")) {
+      V.mount(screen, h("div.wrap", null, [
+        h("div.screen-head", null, [h("h1", null, "Users & Roles")]),
+        V.card("Owner only", null, h("div.empty", null,
+          "Managing users is owner-only. Sign in with the owner token to add or change accounts.")),
+      ]));
+      return;
+    }
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Users & Roles"),
+        h("span.sub", null, "Multi-user access control. Each account is an owner-signed grant; the owner key stays the sole signer.")]),
+      ownerBanner("Owner plane — accounts are owner-signed on the server. A bearer token is shown ONCE at creation; only its salted hash is stored."),
+      h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "16px" } }, [
+        V.card("Create an account", "OWNER", h("div#users-create", null, usersCreateForm()), true),
+        V.card("Accounts", "OWNER", h("div#users-list", null, h("div.empty", null, "Loading…")), true),
+      ]),
+    ]);
+    loadUsers();
+  }
+  function usersCreateForm() {
+    var name = h("input.input", { placeholder: "username (letters, digits, . _ -)", autocomplete: "off" });
+    var role = h("select.input", null, USER_ROLES.map(function (r) { return h("option", { value: r }, r); }));
+    var out = h("div", null, "");
+    var save = h("button.btn.owner", { onClick: function () {
+      var u = (name.value || "").trim();
+      if (!u) { V.toast("Enter a username.", true); return; }
+      save.disabled = true;
+      settingsAct({ action: "create_account", username: u, role: role.value,
+        reason: "create account from Users & Roles" }, "Account created.", function (r) {
+        save.disabled = false; name.value = "";
+        if (r && r.bearer_token) {
+          // show the one-time bearer with a copy control — it is NEVER retrievable again.
+          var tokBox = h("input.input.mono", { value: r.bearer_token, readonly: true,
+            onClick: function (e) { e.target.select(); } });
+          V.mount(out, h("div.set-status.ok", { style: { marginTop: "12px", flexDirection: "column", alignItems: "stretch" } }, [
+            h("div", null, [V.icon("check"), h("span", null, " Copy this bearer for " + r.username
+              + " (" + r.role + ") NOW — it is shown once and never stored in plaintext:")]),
+            h("div.acts", { style: { marginTop: "8px", display: "flex", gap: "8px" } }, [tokBox,
+              h("button.btn.sm", { onClick: function () {
+                try { navigator.clipboard.writeText(r.bearer_token); V.toast("Copied."); }
+                catch (e) { tokBox.select(); } } }, "Copy")]),
+          ]));
+        }
+        loadUsers();
+      });
+    } }, [V.icon("key"), "Create account"]);
+    return h("div", null, [
+      h("div.hint", null, "The account gets a bearer token to sign in with. viewer = read-only; analyst = queue proposals; operator = run engagements, approve ≤A2, tune non-secret config. Only the owner approves A3, manages secrets, or manages users."),
+      h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } },
+        [name, role, save]),
+      out,
+    ]);
+  }
+  function loadUsers() {
+    V.getJSON(SOV("/api/accounts")).then(function (d) {
+      var host = V.$("#users-list"); if (!host) return;
+      var accts = (d && d.accounts) || [];
+      if (!accts.length) { V.mount(host, h("div.empty", null, "No accounts yet — create one on the left.")); return; }
+      V.mount(host, accts.map(usersRow));
+    }).catch(function (e) {
+      var host = V.$("#users-list"); if (!host) return;
+      V.mount(host, h("div.empty", null, (e && e.status === 403)
+        ? "Managing users is owner-only." : "Accounts are on the sovereign plane, which is offline."));
+    });
+  }
+  function usersRow(a) {
+    var role = h("select.input.sm", null, USER_ROLES.map(function (r) {
+      var o = h("option", { value: r }, r); if (r === a.role) o.selected = true; return o; }));
+    var assign = h("button.btn.sm.owner", { onClick: function () {
+      settingsAct({ action: "assign_role", username: a.username, role: role.value,
+        reason: "assign role from Users & Roles" }, "Role updated for " + a.username + ".", loadUsers);
+    } }, "Assign role");
+    var revoke = h("button.btn.sm.danger", { onClick: function () {
+      settingsAct({ action: "revoke_account", username: a.username, reason: "revoke from Users & Roles" },
+        "Account " + a.username + " revoked.", loadUsers);
+    } }, [V.icon("x"), "Revoke"]);
+    return h("div.approval", null, [
+      h("div.ah", null, [V.icon("key"), h("span.t", null, a.username),
+        h("span.pill.sm", null, a.role), a.state === "revoked" ? h("span.pill.sm.danger", null, "revoked") : null]),
+      h("div.acts", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } }, [role, assign, revoke]),
+    ]);
+  }
+
   function renderApiKeys(screen) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "API Keys"),
@@ -4262,11 +4429,15 @@
           : "The kill-switch is released — the agent mesh runs normally."),
       ]),
       h("div.acts", { style: { marginTop: "12px" } }, engaged
-        ? h("button.btn.owner", { onClick: function () {
+        // Releasing is OWNER-ONLY (kill_release). Halting is safe (any authenticated role). Real action
+        // gating via V.can: an operator sees Release DISABLED (the server also refuses it → 403).
+        ? h("button.btn.owner", { disabled: !V.can("kill_release"),
+            title: V.can("kill_release") ? "" : "Releasing the kill-switch is owner-only.",
+            onClick: function () {
             settingsAct({ action: "release", reason: "release from Safety" }, "Kill-switch released.", loadSafety); } }, [V.icon("play"), "Release"])
         : h("button.btn.danger", { onClick: function () {
             settingsAct({ action: "kill", reason: "engage from Safety" }, "Kill-switch engaged — mesh halted.", loadSafety); } }, [V.icon("x"), "Engage kill-switch"])),
-      h("div.hint", { style: { marginTop: "10px" } }, "Halting is always safe and immediate. Releasing requires your signed request."),
+      h("div.hint", { style: { marginTop: "10px" } }, "Halting is always safe and immediate. Releasing requires the owner's signed request."),
     ]);
   }
 
@@ -8583,6 +8754,7 @@
     if (id === "findings") { renderFindings(screen); return; }
     if (id === "proof") { renderProof(screen); return; }
     if (id === "settings") { renderSettings(screen); return; }
+    if (id === "users") { renderUsers(screen); return; }
     if (id === "apikeys") { renderApiKeys(screen); return; }
     if (id === "safety") { renderSafety(screen); return; }
     if (id === "defense") { renderDefense(screen); return; }
@@ -8617,6 +8789,14 @@
     window.addEventListener("hashchange", route);
     if (!location.hash) location.hash = "#/home";
     route();
+    // Claim 6: learn WHO is signed in (owner token → owner; a per-user bearer → that principal; neither →
+    // the login gate). Re-render the nav (role gating) + topbar (current-user chip) once whoami answers.
+    loadPrincipal(function (p, ok) {
+      refreshTopbar();
+      renderNav();
+      if (ok && p && !p.authenticated) { renderLoginGate(V.$("#screen")); return; }
+      route();                    // authenticated (owner or per-user), or the plane is offline
+    });
     refreshKeysBadge();           // surface any failing API key in the top bar from first paint
     startSigilHud();              // S2: persistent SIGIL voice/gesture nav channel (survives route changes)
     watchOffensePlane();          // W0-B: probe the offense plane + keep the Start/Stop chip live. Without

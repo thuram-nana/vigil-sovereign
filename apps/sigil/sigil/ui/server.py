@@ -109,7 +109,32 @@ class Handler(BaseHTTPRequestHandler):
         tok = self.headers.get("X-SIGIL-Token") or (q.get("token", [""])[0])
         return bool(tok) and hmac.compare_digest(tok, self.server.token)
 
-    def _action_ok(self) -> bool:
+    def _principal_for_token(self, tok: str):
+        """Map a presented token to its `accounts.Principal`, or None (fail-closed). FAIL-OPEN is restricted
+        to the EXACT legacy shared owner token → OWNER_PRINCIPAL: the owner is physically at the host and
+        must never be locked out. Any OTHER token is resolved through the owner-signed account fold; an
+        unknown/blank/wrong token → None (unchanged 401 semantics). This is the ONLY fail-open path."""
+        from ..governor.accounts import OWNER_PRINCIPAL, AccountsRegistry
+        if not tok:
+            return None
+        if hmac.compare_digest(tok, self.server.token):
+            return OWNER_PRINCIPAL
+        try:
+            return AccountsRegistry(self.server.store()).resolve(tok)
+        except Exception:  # noqa: BLE001 — a hostile/corrupt spine must never crash auth → fail-closed None
+            return None
+
+    def _principal(self):
+        """The authenticated principal for THIS request (header `X-SIGIL-Token`, or `?token=` for SSE/
+        downloads), or None. The same carrier now bears either the legacy owner token or a per-user bearer
+        — zero change to the ~100 existing call sites."""
+        q = self._query()
+        tok = self.headers.get("X-SIGIL-Token") or (q.get("token", [""])[0])
+        return self._principal_for_token(tok or "")
+
+    def _origin_host_ok(self) -> bool:
+        """The anti-CSRF / anti-DNS-rebinding half of the action gate (Host + exact Origin/Referer), with no
+        token/principal check — the caller adds that."""
         if self.headers.get("Host", "") not in self.server.allowed_hosts:
             return False                                       # anti DNS-rebinding
         o = self.headers.get("Origin") or ""
@@ -120,7 +145,12 @@ class Handler(BaseHTTPRequestHandler):
             return False
         if ref and not any(ref.startswith(a + "/") or ref == a for a in self.server.allowed_origins):
             return False
-        return self._token_ok()
+        return True
+
+    def _action_ok(self) -> bool:
+        # /api/ask keeps the OWNER-token action gate (it dispatches a KERNEL subprocess): Host+Origin+the
+        # exact owner shared token. Per-user access to /api/ask is intentionally NOT granted in this slice.
+        return self._origin_host_ok() and self._token_ok()
 
     # --- response helpers -------------------------------------------------------------------------
     def _send(self, code: int, body: bytes, ctype="application/json"):
@@ -151,8 +181,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static(path.rsplit("/", 1)[-1])   # token-free bootstrap assets (no secret)
         if not path.startswith("/api/"):
             return self._deny(404, "not found")
-        if not self._token_ok():
+        # /api/whoami is TOKEN-OPTIONAL: the SPA calls it on boot to decide whether to show the login gate,
+        # so it must report {authenticated:false} rather than 401 for an anonymous caller.
+        if path == "/api/whoami":
+            return self._whoami()
+        # Every other read requires an authenticated principal (viewer+). The legacy owner token resolves to
+        # OWNER_PRINCIPAL; a valid per-user bearer resolves to its principal; anything else → 401.
+        principal = self._principal()
+        if principal is None:
             return self._deny(401, "missing/invalid token")
+        if path == "/api/accounts":
+            # Users & Roles list — OWNER-ONLY (manage_users). cred_hash/salt are NEVER surfaced.
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "manage_users"):
+                return self._deny(403, "owner only")
+            return self._accounts()
         if path == "/api/ask":
             # /api/ask DISPATCHES a KERNEL subprocess → it gets the FULL action gate, not just token.
             return self._ask(self._query().get("q", [""])[0]) if self._action_ok() else self._deny(403, "denied")
@@ -228,6 +271,45 @@ class Handler(BaseHTTPRequestHandler):
     def _ask(self, q):
         from ..voice.dispatch import KernelDispatch
         self._json({"q": q, "answer": KernelDispatch().send(q)})
+
+    # --- Claim 6 RBAC surface (whoami / accounts / login) -----------------------------------------
+    def _principal_json(self, principal) -> dict:
+        from ..governor.accounts import PERMISSIONS
+        return {"authenticated": True, "username": principal.username, "role": principal.role,
+                "permissions": sorted(PERMISSIONS.get(principal.role, frozenset()))}
+
+    def _whoami(self):
+        """The current principal from the presented token (token-optional). {authenticated:false} for an
+        anonymous/invalid caller so the SPA can render its login gate without a 401 round-trip."""
+        p = self._principal()
+        self._json(self._principal_json(p) if p is not None else {"authenticated": False})
+
+    def _accounts(self):
+        """The owner's Users & Roles list — username/role/state/issued_at only. cred_hash/salt never leave
+        the server (they are not even placed in the response)."""
+        from ..governor.accounts import AccountsRegistry
+        accts = AccountsRegistry(self.server.store()).accounts()
+        self._json({"accounts": [{"username": a.username, "role": a.role, "state": a.state,
+                                  "issued_at": a.issued_at} for a in accts]})
+
+    def _login(self):
+        """Verify a candidate bearer (or the owner token) presented in the POST body and return its
+        principal + permission set. Same-origin gated (Host+Origin), but requires NO pre-existing token —
+        verifying the token you supply is the whole point. Fail-closed 401 for an invalid token."""
+        if not self._origin_host_ok():
+            return self._deny(403, "denied (origin / host)")
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > self._MAX_BODY:
+                return self._deny(413, "body too large")
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, KeyError):
+            return self._deny(400, "bad request")
+        tok = str((body or {}).get("token", "") or "")
+        p = self._principal_for_token(tok)
+        if p is None:
+            return self._json({"ok": False, "authenticated": False, "error": "invalid token"}, 401)
+        self._json({"ok": True, **self._principal_json(p)})
 
     def _sse(self):
         self.send_response(200)
@@ -314,18 +396,28 @@ class Handler(BaseHTTPRequestHandler):
     # --- POST (action plane) ----------------------------------------------------------------------
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/login":
+            return self._login()
         if path != "/api/action":
             return self._deny(404, "not found")
-        if not self._action_ok():
-            return self._deny(403, "action denied (token / origin / host)")
+        # Anti-CSRF/rebinding (Host+Origin) first, THEN the principal. A per-user bearer or the legacy owner
+        # token both authenticate here; the per-action RBAC check lives inside do_action (before signing).
+        if not self._origin_host_ok():
+            return self._deny(403, "action denied (origin / host)")
+        principal = self._principal()
+        if principal is None:
+            return self._deny(401, "missing/invalid token")
+        from ..governor.accounts import PermissionDenied
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length > self._MAX_BODY:                         # BLOCK-4: cap the body (no CL hang / alloc)
                 return self._deny(413, "body too large")
             body = json.loads(self.rfile.read(length) or b"{}")
             action = str(body.get("action", ""))
-            result = _actions.do_action(action, body, store=self.server.store())
+            result = _actions.do_action(action, body, store=self.server.store(), principal=principal)
             self._json(result)
+        except PermissionDenied as e:                          # RBAC refusal → 403 (distinct from a bad request)
+            self._deny(403, f"permission denied: {str(e)[:200]}")
         except (ValueError, KeyError) as e:
             self._deny(400, f"bad request: {e}")
         except Exception as e:  # noqa: BLE001 — ApprovalError etc. → 400, never 500-leak internals

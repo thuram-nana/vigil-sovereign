@@ -534,7 +534,30 @@
         "recall baseline",
         "accuracy baseline"
       ]
+    },
+    {
+      "description": "Owner-only multi-user access control (Claim 6) — create per-user accounts with a role (viewer, analyst, operator), hand out a one-time bearer token, change a role, or revoke an account. Every account is an owner-signed grant; the owner key stays the sole signer and RBAC is an admission gate in front of it.",
+      "group": "MANAGE",
+      "id": "users",
+      "label": "Users & Roles",
+      "owner": true,
+      "plane": "unified",
+      "synonyms": [
+        "users",
+        "roles",
+        "users and roles",
+        "accounts",
+        "rbac",
+        "access control",
+        "permissions",
+        "add a user",
+        "create account",
+        "revoke user",
+        "assign role",
+        "teammates",
+        "team members"
+      ]
     }
   ],
-  "source_sha": "381b2123bc8a514069034857ab388d63dce5d9bfe0a65ea2ee2e073d524f7bb8"
+  "source_sha": "15f3ad14a7a79977e165a856f6e8d52827550c7c29e2e664b146bfa894910646"
 }
