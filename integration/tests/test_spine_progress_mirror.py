@@ -66,10 +66,17 @@ def test_no_run_dir_no_progress(tmp_path, monkeypatch):
 
 
 def test_mirror_runs_even_without_the_blackboard(tmp_path, monkeypatch):
-    """Force the framework blackboard open to fail → sink is None → the poster is STILL built and STILL
-    mirrors to progress (the operator sees steps even when there is no blackboard DB)."""
-    import framework.v2.agents.blackboard as bb
-    monkeypatch.setattr(bb, "open_blackboard", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no bb")))
+    """The sink is None (no blackboard DB) → the poster is STILL built and STILL mirrors to progress (the
+    operator sees steps even with no blackboard). Works in BOTH environments: where `framework` is present
+    (force open_blackboard to raise → sink None), and where it is ABSENT — the two-env P5 process runs with
+    no `framework` on the path, which is *itself* the no-blackboard case (`_build_spine_poster` catches the
+    ImportError → sink None). So we never hard-import `framework` here."""
+    try:
+        import framework.v2.agents.blackboard as bb
+        monkeypatch.setattr(bb, "open_blackboard",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no bb")))
+    except ModuleNotFoundError:
+        pass  # framework absent (the P5 sovereign-path process) — sink is already None: the case under test
     post = _build_spine_poster("mirror-slug")
     assert callable(post), "poster must be built even when the blackboard cannot open"
     post("observation", {"source": "lead:web", "surface": "/login", "summary": "LEAD (unconfirmed): x"})
