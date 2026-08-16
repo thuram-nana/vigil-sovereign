@@ -1072,15 +1072,28 @@ def _build_spine_poster(slug: str) -> Optional[Callable[..., Optional[int]]]:
         from framework.v2.agents.spine_sink import SpineSink
 
         sink = SpineSink(open_blackboard(), slug, agent_name="ooda")
-    except Exception as exc:  # noqa: BLE001 — no framework/blackboard ⇒ no spine mirror (fail-closed NO-OP)
+    except Exception as exc:  # noqa: BLE001 — no framework/blackboard ⇒ no blackboard mirror (best-effort)
         _log.info("live.wiring.build_spine_poster: no blackboard mirror for slug=%s (%s)", slug, exc)
-        return None
+        sink = None
 
     def spine_post(kind: str, payload: dict, *, parent_id: Optional[int] = None) -> Optional[int]:
+        p = payload or {}
+        # CONSOLE LIVE-STEPS BRIDGE: mirror EVERY OODA event to the console's progress feed in
+        # KIND_META-native shape ({kind, payload}), so the integration `vigil engage` engine's timeline
+        # shows in the console process box / Live view — not only in the blackboard DB the console does not
+        # tail. Best-effort and independent of the blackboard: append_progress is a stdlib-only sibling
+        # (FATAL-2 clean) and NO-OPS unless the console handed this child a run dir ($VIGIL_PROOF_RUN_DIR),
+        # so a hand-run engage is unaffected. Runs even when the blackboard sink is absent.
+        try:
+            from ..progress import append_progress
+            append_progress({"kind": kind, "payload": p})
+        except Exception:  # noqa: BLE001 — a progress write NEVER perturbs the run
+            pass
         # Translate the engine's plain (kind, payload) into a schema-valid blackboard event via SpineSink.
         # SpineSink._post already swallows write errors; the outer guard is belt-and-braces so a mapping bug
-        # can never raise into the loop.
-        p = payload or {}
+        # can never raise into the loop. No blackboard ⇒ the mirror is a no-op (progress already emitted).
+        if sink is None:
+            return None
         try:
             if kind == "decision":
                 return sink.decision(str(p.get("question", "")), str(p.get("choice", "")),
