@@ -6757,10 +6757,16 @@
         h("div#chat-attach"),
         h("div#chat-links"),
         h("div#chat-hyps"),
-        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } }, [target, modeSel, reasonSel, sessModelSel, agenticTog, fireteamBtn]),
-        modelNote,
-        toolRow,
-        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "flex-end", flexWrap: "wrap" } }, [attachBtn, fileInput, input, send]),
+        // F2 — the accreted controls grouped into ONE labeled "Run options" cluster (how the NEXT message is
+        // handled: target, mode, reasoning depth, model sovereignty, the agentic engine, a fireteam), visually
+        // set apart from the message composer below. Same controls, same behaviour — just legible.
+        h("div.chat-runopts", null, [
+          h("div.chat-runopts-cap", null, "Run options — how the next message is handled"),
+          h("div.chat-runopts-row", null, [target, modeSel, reasonSel, sessModelSel, agenticTog, fireteamBtn]),
+          modelNote,
+          toolRow,
+        ]),
+        h("div.chat-composer", null, [attachBtn, fileInput, input, send]),
         h("div.hint", { style: { marginTop: "6px" } },
           "Attachments are read on this machine and only sent to the model after you approve them once. "
           + "An answer about them is a lead — a finding becomes a fact only when an oracle confirms it in a "
