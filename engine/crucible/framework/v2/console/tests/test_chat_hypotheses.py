@@ -57,28 +57,56 @@ def test_close_supersedes_append_only():
 def test_reconcile_closes_only_on_a_precise_match():
     open_match = hypotheses.record(CHAT, "idor on the user API", bug_class="idor", surface="/api/user", now=1.0)
     open_wrongclass = hypotheses.record(CHAT, "sqli somewhere", bug_class="sqli", surface="/api/user", now=1.0)
+    open_sibling = hypotheses.record(CHAT, "idor on orders", bug_class="idor", surface="/api/v2/orders", now=1.0)
     open_nohint = hypotheses.record(CHAT, "auth feels weak", now=1.0)   # no bug_class → never auto-closes
-    facts = [{"bug_class": "idor", "surface": "/api/user/1", "ref": "run-42"}]
+    facts = [
+        {"bug_class": "idor", "surface": "http://t/api/user/1?x=1", "ref": "run-42"},        # closes open_match
+        {"bug_class": "idor", "surface": "http://t/api/v2/orders-legacy-export", "ref": "r"},  # SIBLING → no
+    ]
     closed = hypotheses.reconcile_confirmed(CHAT, facts, now=3.0)
-    assert [c["id"] for c in closed] == [open_match["id"]], "only the precise bug_class+surface match closes"
+    assert [c["id"] for c in closed] == [open_match["id"]], "only the precise bug_class+path match closes"
     by_id = {x["id"]: x for x in hypotheses.list_for(CHAT)}
     assert by_id[open_match["id"]]["status"] == "confirmed"
-    assert by_id[open_match["id"]]["finding_ref"] == "run-42"
-    assert by_id[open_wrongclass["id"]]["status"] == "open"   # different bug_class → untouched
+    assert by_id[open_match["id"]]["finding_ref"] == "run-42" and by_id[open_match["id"]]["finding_ref"]
+    assert by_id[open_wrongclass["id"]]["status"] == "open"    # different bug_class → untouched
+    assert by_id[open_sibling["id"]]["status"] == "open"       # RED-PEN F1: sibling endpoint → untouched
     assert by_id[open_nohint["id"]]["status"] == "open"        # no bug_class → untouched
 
 
+def test_confirmed_close_requires_a_finding_ref():
+    """RED-PEN F6: a 'confirmed' close is an evidence claim — with no proof pointer it must be refused,
+    so a hypothesis can never read 'confirmed' with nothing to point at."""
+    h = hypotheses.record(CHAT, "idor", bug_class="idor", surface="/api/user", now=1.0)
+    assert hypotheses.close(CHAT, h["id"], status="confirmed", finding_ref="", now=2.0) == {}
+    assert hypotheses.list_for(CHAT)[0]["status"] == "open"
+    # a fact with no ref cannot auto-confirm either
+    hypotheses.reconcile_confirmed(CHAT, [{"bug_class": "idor", "surface": "/api/user/1", "ref": ""}], now=3.0)
+    assert hypotheses.list_for(CHAT)[0]["status"] == "open"
+
+
 def test_matches_precision():
-    # same class + overlapping surface → match; different class → no; hyp constrains a surface the fact
-    # does not name → no
+    # exact endpoint, or the fact strictly UNDER it at a segment boundary → match
+    assert hypotheses._matches({"bug_class": "idor", "surface": "/api/user"},
+                               {"bug_class": "idor", "surface": "/api/user"}) is True
     assert hypotheses._matches({"bug_class": "idor", "surface": "/api/user"},
                                {"bug_class": "idor", "surface": "/api/user/1"}) is True
+    # different class → no
     assert hypotheses._matches({"bug_class": "idor", "surface": "/api/user"},
                                {"bug_class": "xss", "surface": "/api/user"}) is False
+    # RED-PEN F1: a SIBLING endpoint must NOT match (substring containment would have said yes)
     assert hypotheses._matches({"bug_class": "idor", "surface": "/api/user"},
-                               {"bug_class": "idor", "surface": ""}) is False
+                               {"bug_class": "idor", "surface": "/api/user-legacy-export"}) is False
+    # RED-PEN F2: a bug_class-only hunch (no/blank/root surface) never auto-confirms
     assert hypotheses._matches({"bug_class": "idor", "surface": ""},
-                               {"bug_class": "idor", "surface": "/anything"}) is True   # no surface constraint
+                               {"bug_class": "idor", "surface": "/anything"}) is False
+    assert hypotheses._matches({"bug_class": "idor", "surface": "/"},
+                               {"bug_class": "idor", "surface": "/api/invoices"}) is False
+    # a generic root FACT location does not close a specific hypothesis
+    assert hypotheses._matches({"bug_class": "idor", "surface": "/api/user"},
+                               {"bug_class": "idor", "surface": "/"}) is False
+    # the fact's surface may be a full URL — matching is over the PATH, not the URL text
+    assert hypotheses._matches({"bug_class": "idor", "surface": "/api/user"},
+                               {"bug_class": "idor", "location": "http://t:18080/api/user/9?x=1"}) is True
 
 
 # --- chat-side extractor / validator / accessor -----------------------------------------------------

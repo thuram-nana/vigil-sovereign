@@ -147,6 +147,10 @@ def close(chat_id: str, hyp_id: str, *, status: str, finding_ref: str = "", note
     unknown or already closed to the same status."""
     if status not in (_CONFIRMED, _REFUTED):
         raise ValueError(f"close status must be {_CONFIRMED!r} or {_REFUTED!r}")
+    # A "confirmed" close is an evidence claim — it MUST carry a proof pointer or it is not auditable
+    # (red-pen F6). A refuted close needs none. Fail-closed: a confirmed close without a ref is refused.
+    if status == _CONFIRMED and not str(finding_ref or "").strip():
+        return {}
     current = {r["id"]: r for r in list_for(chat_id) if r.get("id")}
     cur = current.get(str(hyp_id))
     if not cur or cur.get("status") == status:
@@ -157,22 +161,48 @@ def close(chat_id: str, hyp_id: str, *, status: str, finding_ref: str = "", note
     return rec
 
 
+def _path_of(s) -> str:
+    """The comparable PATH of a surface string. A finding's surface is a full URL
+    (``http://host/api/user/1?q=x``); a hypothesis's is usually a path (``/api/user``). Reduce both to a
+    normalised path — scheme+host+query+fragment dropped, trailing slash trimmed, root kept as ``/`` —
+    so the match is over the endpoint, not the incidental URL text."""
+    s = str(s or "").strip().lower()
+    if not s:
+        return ""
+    if "://" in s:
+        try:
+            from urllib.parse import urlsplit
+            s = urlsplit(s).path or "/"
+        except Exception:  # noqa: BLE001
+            pass
+    for sep in ("?", "#"):
+        i = s.find(sep)
+        if i >= 0:
+            s = s[:i]
+    s = s.rstrip("/")
+    return s or "/"
+
+
 def _matches(hyp: dict, fact: dict) -> bool:
-    """A PRECISE match between an open hypothesis and an oracle-confirmed FACT: the same bug_class AND an
-    overlapping surface (one contains the other, case-insensitive). Requiring an explicit bug_class on the
-    hypothesis is what keeps auto-close honest — a vague hunch never auto-confirms itself off an unrelated
-    finding; it stays open until the operator (or a bug_class-tagged restatement) makes the link precise."""
+    """A PRECISE, path-segment-aware match between an open hypothesis and an oracle-confirmed FACT.
+
+    Honest by construction (red-pen F1/F2): auto-close requires the same bug_class AND a SPECIFIC surface
+    on the hypothesis AND the fact's endpoint to be AT or UNDER that surface at a PATH-SEGMENT boundary.
+    Raw substring containment is NOT used — ``/api/user`` must not "confirm" a finding at
+    ``/api/user-legacy-export``, and a bare hunch (no surface, or just ``/``) never auto-confirms off an
+    unrelated finding; it stays open until the operator closes it or restates it with a specific surface."""
     hb = str(hyp.get("bug_class") or "").strip().lower()
     fb = str(fact.get("bug_class") or "").strip().lower()
     if not hb or hb != fb:
         return False
-    hs = str(hyp.get("surface") or "").strip().lower()
-    fs = str(fact.get("surface") or fact.get("location") or "").strip().lower()
-    if not hs:
-        return True                     # same bug_class, no surface constraint on the hypothesis → match
+    hs = _path_of(hyp.get("surface"))
+    if not hs or hs == "/":             # require a SPECIFIC endpoint on the hypothesis (a hunch stays open)
+        return False
+    fs = _path_of(fact.get("surface") or fact.get("location"))
     if not fs:
-        return False                    # the hypothesis constrained a surface the fact does not name
-    return hs in fs or fs in hs
+        return False                    # the fact does not name an endpoint → cannot precisely match
+    # the fact's endpoint is EXACTLY the hypothesis's, or strictly under it at a segment boundary
+    return fs == hs or fs.startswith(hs + "/")
 
 
 def reconcile_confirmed(chat_id: str, facts: list, *, now: float | None = None) -> list[dict]:
