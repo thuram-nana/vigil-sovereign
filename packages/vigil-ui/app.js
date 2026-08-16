@@ -6638,7 +6638,13 @@
       function finishSend() {
         C.busy = false; send.disabled = false;
         C.stream = null; removeStreamBubble();
-        return loadChatList().then(function () { drawSessions(); drawMain(); scrollDown(); });
+        // G3 — a RENDER exception here must never reject this promise: streamSend's .catch re-sends on a
+        // rejection, so a throw in drawSessions/drawMain/scrollDown could otherwise trigger a duplicate turn
+        // (the red-pen's one remaining non-reachable edge). Swallow render errors — the turn is already
+        // persisted; the worst case is a stale view the next interaction repaints, never a double-send.
+        return loadChatList().then(function () {
+          try { drawSessions(); drawMain(); scrollDown(); } catch (e) { /* render-only; turn is saved */ }
+        }).catch(function () { /* loadChatList failed — the turn is still saved; never re-send */ });
       }
       // The reliable non-streamed turn — the SAME gated launcher / question path.
       function sendViaPost(payload, outgoing) {
