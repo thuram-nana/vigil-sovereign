@@ -406,7 +406,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny(403, "action denied (origin / host)")
         principal = self._principal()
         if principal is None:
-            return self._deny(401, "missing/invalid token")
+            # Faithful to the pre-RBAC action-plane semantics: a missing/invalid credential on the action
+            # plane is a 403 "action denied" (reads use 401). Either way the request is refused.
+            return self._deny(403, "action denied (token / origin / host)")
         from ..governor.accounts import PermissionDenied
         try:
             length = int(self.headers.get("Content-Length", "0"))

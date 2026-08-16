@@ -117,7 +117,7 @@ def test_cred_hash_is_salted_sha256():
     s = _store()
     seq = _reg(s).create("carol", "analyst", bearer_token="tok-carol-1234567890", issued_at=_issue())
     p = s.get(seq).payload
-    assert p["cred_hash"] == sha256_hex(p["cred_salt"] + "tok-carol-1234567890")
+    assert p["cred_hash"] == sha256_hex((p["cred_salt"] + "tok-carol-1234567890").encode("utf-8"))
 
 
 # --- assign_role ----------------------------------------------------------------
@@ -213,7 +213,7 @@ def test_forged_elevation_does_not_change_an_existing_role():
     # attacker forges an active grant for nancy at operator, signed by the attacker key → not honored
     from sigil.governor.authn import signed_payload
     core = {"signal": acc.SIGNAL, "username": "nancy", "role": "operator",
-            "cred_hash": sha256_hex("s" + "nancy-tok-eeeeeeeeee"), "cred_salt": "s",
+            "cred_hash": sha256_hex(("s" + "nancy-tok-eeeeeeeeee").encode("utf-8")), "cred_salt": "s",
             "state": "active", "issued_at": 10_000.0}
     s.append(kind="event", source="governor", actor="WARDEN",
              payload={**signed_payload(core, ATTACKER), "by": "owner"})

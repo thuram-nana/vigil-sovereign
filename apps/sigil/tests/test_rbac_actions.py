@@ -56,14 +56,13 @@ class _Emitter(Agent):
 
 
 def _queue(store, tier):
-    """Queue one proposal at `tier` and return its seq."""
+    """Queue one proposal at `tier` and return its seq (via the real pending() view)."""
+    from sigil.agents.approvals import pending
     owner = ensure_owner_keypair()
     _Emitter(store, owner).run(tier)
-    # the queued item is the last governor 'queued' record
-    seqs = [r.seq for r in store.iter_records()
-            if r.payload.get("signal") == "governor.approval" and r.payload.get("decision") == "queued"]
-    assert seqs, "a proposal should have queued"
-    return seqs[-1]
+    pend = pending(store, owner.public_key_b64)
+    assert pend, "a proposal should have queued"
+    return pend[-1].seq
 
 
 # --- approvals: viewer/analyst refused, no record written ------------------------

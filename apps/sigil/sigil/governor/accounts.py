@@ -174,7 +174,7 @@ class AccountsRegistry:
         if not isinstance(bearer_token, str) or len(bearer_token) < 16:
             raise ValueError("bearer_token must be a >=16-char string")
         salt = secrets.token_hex(16)
-        cred_hash = sha256_hex(salt + bearer_token)
+        cred_hash = sha256_hex((salt + bearer_token).encode("utf-8"))
         return self._append_active(u, r, cred_hash=cred_hash, cred_salt=salt, issued_at=float(issued_at))
 
     def assign_role(self, username: str, role: str, *, issued_at: float) -> int:
@@ -252,7 +252,7 @@ class AccountsRegistry:
         fold = self._fold()
         for username in sorted(fold):
             a = fold[username]
-            if hmac.compare_digest(sha256_hex(a.cred_salt + token), a.cred_hash):
+            if hmac.compare_digest(sha256_hex((a.cred_salt + token).encode("utf-8")), a.cred_hash):
                 return Principal(username=a.username, role=a.role)
         return None
 
