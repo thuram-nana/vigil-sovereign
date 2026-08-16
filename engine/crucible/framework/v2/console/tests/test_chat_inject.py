@@ -22,13 +22,26 @@ def _live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yield tmp_path
 
 
-def test_engage_instruct_enqueues_where_the_engine_would_drain():
+def test_engage_instruct_enqueues_to_the_shared_live_base():
     out = actions.engage_instruct("eng-1", "also check the password-reset flow")
     assert out["ok"] is True and out.get("seq") is not None and out.get("slug") == "eng-1"
-    # the engine drains with base == config.base_dir == the --base-dir the launcher pins == _live_base()
+    # enqueue lands in _live_base(); the SEPARATE launcher-pin test proves the engine drains from that same
+    # base (config.base_dir == --base-dir == _live_base()), closing the loop.
     from vigil_integration.live.instructions import drain
     got = drain("eng-1", base=actions._live_base())
-    assert got == ["also check the password-reset flow"], "the message did not reach the engine's drain base"
+    assert got == ["also check the password-reset flow"], "the message did not reach the shared base"
+
+
+def test_engage_instruct_reports_running_truthfully(monkeypatch):
+    """RED-PEN BLOCK-1: never claim delivery to a run that isn't alive. `running` reflects whether a run
+    with this slug is actually alive to drain the message."""
+    # no running run → ok, but running=False (UI then says "queued, applied on resume", not "it steers")
+    out = actions.engage_instruct("eng-x", "steer me")
+    assert out["ok"] is True and out["running"] is False
+    # a live run for the slug → running=True
+    monkeypatch.setattr(actions, "_slug_has_running_run", lambda slug, **k: True)
+    out2 = actions.engage_instruct("eng-x", "steer me again")
+    assert out2["ok"] is True and out2["running"] is True
 
 
 def test_launcher_pins_base_dir_to_the_live_base(monkeypatch):

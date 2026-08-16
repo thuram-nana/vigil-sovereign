@@ -6182,7 +6182,11 @@
       if (!slug || !text) return;
       V.postJSON(OFF("/api/instruct"), { slug: slug, text: text }).then(function (r) {
         if (r && r.ok) {
-          V.toast("Sent to the run — it steers on its next step.", false);
+          // HONEST about delivery (red-pen BLOCK-1): only claim "steers" when a run is actually alive to
+          // drain it; otherwise say it's queued and will apply on resume.
+          V.toast(r.running
+            ? "Sent to the run — it steers on its next step."
+            : "Queued — this run isn't active right now, so it'll be applied only if you resume it.", false);
           if (inputEl) inputEl.value = "";
         } else {
           V.toast((r && r.error) || "Could not send the message to the run.", true);

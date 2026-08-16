@@ -729,8 +729,11 @@ def retry_run(run_id: str) -> dict:
 # The raw offense `framework.v2 engage` the console spawns uses an in-memory world-model and has NO Neo4j
 # projection (by the two-env boundary — the offense plane carries no Neo4j code). The per-session knowledge
 # graph lives ONLY on the integration `vigil engage` path (partitions by `--session`, unions connected
-# sessions by `--connect`; F3/F4). So a graph-backed run must be routed to that separate `vigil` process —
-# subprocessed, never imported (the console is offense-plane; importing vigil_integration is FATAL-2).
+# sessions by `--connect`; F3/F4). So a graph-backed run is routed to that separate `vigil` process — the
+# ENGINE runs subprocessed so its authoritative gate/keys live in their own process, not duplicated here.
+# (This is NOT a FATAL-2 rule: the console is offense-plane, so it MAY import the stdlib-only
+# `vigil_integration.live` helpers — as `api.py` and `engage_instruct` do; FATAL-2 bars the SOVEREIGN
+# interpreter from loading framework/strix, which is a different boundary — see kb/two-env-boundary.md.)
 _GRAPH_ITERS = {"quick": 6, "standard": 12, "deep": 20}
 
 
@@ -788,11 +791,19 @@ def engage_instruct(slug: str, text: str) -> dict:
         return {"ok": False, "error": f"the instruction queue is unavailable ({type(e).__name__})"}
     try:
         out = enqueue(str(slug or ""), str(text or ""), base=_live_base())
-        return {"ok": True, "slug": out.get("slug"), "seq": out.get("seq")}
     except ValueError as e:                     # unsafe slug / empty text — a clean operator-input refusal
         return {"ok": False, "error": str(e)}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"could not enqueue the instruction ({type(e).__name__})"}
+    # HONESTY (red-pen BLOCK-1): a queued message is only STEERED if a run with this slug is actually
+    # alive to drain it. Report the truth so the UI never claims "it steers on its next step" for a run
+    # that has already ended (the message then waits, and only a resume would pick it up).
+    running = False
+    try:
+        running = _slug_has_running_run(str(slug or ""))
+    except Exception:  # noqa: BLE001 — a liveness-probe hiccup is reported as "not confirmed running"
+        running = False
+    return {"ok": True, "slug": out.get("slug"), "seq": out.get("seq"), "running": running}
 
 
 def launch_assessment(body: dict) -> dict:
