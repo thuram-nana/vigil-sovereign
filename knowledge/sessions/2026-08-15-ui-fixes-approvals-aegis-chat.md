@@ -61,6 +61,21 @@ and [`../kb/approvals.md`](../kb/approvals.md). This file is the *process* recor
    and mutation-verifying that reverting the fix kills the test. Prefer mutation-checking a
    security-critical control ("does the old bug make this test fail?") over trusting a pass.
 
+7. **A red `integration two-env boundary (P5)` check is usually an egress-guard runner flake, not a
+   FATAL-2 violation.** On the final main HEAD, the P5 check came back red and read (by its name) like a
+   boundary breach — a scary result right after landing a cross-plane signing bridge. It was neither: the
+   P5 job runs the *whole* `integration/tests` suite, and the failure was `test_egress_guard.py` unable to
+   *acquire the seccomp listener* on the GitHub runner — a kernel/runner resource flake. Triage confirmed
+   it in three cheap steps: (a) the failing asserts were in `test_egress_guard.py:161/:256`, not a
+   boundary probe; (b) `git diff --name-only <last-green>..<HEAD> | grep -iE 'egress|seccomp'` was empty
+   (no session diff touched it); (c) the identical code had been green earlier the same day on a different
+   runner. A `gh run rerun <id> --failed` passed on a fresh runner (full ~14-min run), and main was green.
+   Root subtlety worth remembering: the skip guard is import-time (`_guard_usable()`), so it can arm
+   seccomp at import and still lose the listener at runtime — a probe→run TOCTOU that lets an occasional
+   red through. Durable playbook recorded in [`../kb/two-env-boundary.md`](../kb/two-env-boundary.md) §5.
+   **Lesson: read the actual failing assertion before trusting the job's name, and re-run before you
+   debug an environment-shaped failure.**
+
 ## Method notes
 
 - Every slice was built in an isolated `git worktree`, red-penned by an independent agent, and merged
