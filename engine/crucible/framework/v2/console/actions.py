@@ -1023,6 +1023,49 @@ def apply_codebase_edit(chat_id: str, path: str, diff: str) -> dict:
     return apply_dev_edit(wd, str(diff or ""), operator_present=True)
 
 
+def run_codebase_tests(chat_id: str, path: str, command: str = "pytest -q",
+                       *, operator_present: bool = False) -> dict:
+    """Phase D3 — run a cloned codebase's tests. Running arbitrary test code is A3 (arbitrary execution),
+    so this does NOT run the command itself — it launches the already-gated ``vigil sandbox`` verb, which
+    executes it inside the NETWORK-ISOLATED, workspace-confined bwrap sandbox (``--unshare-all``: no net,
+    writes confined to the workspace), classifies A3 (owner-approval-gated under the A1 ceiling), scope-
+    pins 127.0.0.1, checks the kill-switch, and writes a SIGNED exec record. The workspace is the chat's
+    OWN cloned repo (confined). ``operator_present`` (the operator clicked "run tests") supplies the A3
+    human-approval leg (``--approve``); a background caller QUEUES and does not run.
+
+    A passing test is a LEAD, never an oracle FACT — the deterministic oracle mints facts, not the test
+    runner. Returns ``{ok, passed, exit_code, stdout, stderr, outcome, record_id, note}`` or
+    ``{ok: False, error}``. Fail-closed at every stage."""
+    wd = _confined_clone_path(chat_id, path)
+    if not wd:
+        return {"ok": False, "error": "no such cloned codebase for this chat"}
+    if _chat_killswitch_tripped(chat_id):                     # emergency stop before any exec
+        return {"ok": False, "error": "refused: the engagement kill-switch is engaged"}
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "no `vigil` entrypoint to run the gated sandbox"}
+    cmd = str(command or "").strip() or "pytest -q"
+    argv = [vigil, "sandbox", cmd, "--workspace", wd, "--base-dir", _live_base()]
+    if operator_present:                                      # the A3 human-approval leg (operator clicked)
+        argv.append("--approve")
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=1800)  # noqa: S603
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"could not run the gated sandbox ({type(e).__name__})"}
+    try:
+        out = json.loads(proc.stdout or "{}")                # the verb prints the ExecResult as JSON
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "error": "the sandbox produced no parseable result",
+                "raw": (proc.stderr or proc.stdout or "")[:500]}
+    if not out.get("ran"):
+        return {"ok": False, "error": "the tests did not run: " + str(out.get("reason") or out.get("outcome")
+                                       or "refused"), "outcome": out.get("outcome"), "tier": out.get("tier")}
+    return {"ok": True, "passed": out.get("exit_code") == 0, "exit_code": out.get("exit_code"),
+            "stdout": str(out.get("stdout") or "")[:20000], "stderr": str(out.get("stderr") or "")[:20000],
+            "outcome": out.get("outcome"), "record_id": out.get("record_id"),
+            "note": "a passing test is a LEAD — an oracle mints FACTs, not the test runner"}
+
+
 def launch_assessment(body: dict) -> dict:
     """Route the New-Assessment wizard body to the SAME gated CLI a hand-run engagement uses and
     spawn it. Returns ``{run_id, status, mode, slug, stream}`` or ``{error}`` (a clean, fail-closed
