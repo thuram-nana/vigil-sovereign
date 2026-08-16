@@ -529,6 +529,41 @@ jobs:
             echo "apps/sigil offense-gate tests not present on this ref (pre-merge) — nothing to test"
           fi
 
+  sigil-lint:
+    name: SIGIL lint (ruff blocking + mypy can-complete)
+    runs-on: ubuntu-latest
+    # ruff and mypy were declared as dev extras but NEVER run in CI. A "# type:" PROSE comment in
+    # settings.py was parsed as a PEP 484 type comment and ABORTED mypy for the whole package ("mypy cannot
+    # complete") while ruff stayed green — it shipped precisely because neither tool ran here. This job
+    # wires both in: ruff is FULLY BLOCKING (E9/F/B real bug classes, green today); mypy is a CAN-COMPLETE
+    # gate — it fails ONLY if mypy cannot finish (exit 2: a parse/type-comment/config abort, the class just
+    # fixed), NOT on the pre-existing type errors it now surfaces (exit 1). Reducing that type-error debt is
+    # a tracked follow-on; this gate keeps mypy RUNNABLE, it does not claim type-cleanliness.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install ruff + mypy + sigil deps
+        run: |
+          pip install -e packages/core/vigil_core \
+            "pydantic>=2.10,<3" structlog httpx requests PyYAML "cryptography>=42" packaging \
+            ruff mypy
+      - name: ruff (BLOCKING — E9/F/B real bug classes)
+        working-directory: apps/sigil
+        run: ruff check sigil
+      - name: mypy must be able to COMPLETE (guards the parse-abort class; type-error debt not gated here)
+        working-directory: apps/sigil
+        run: |
+          set +e
+          python -m mypy sigil; rc=$?
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::mypy could NOT complete (exit 2) — a parse/type-comment/config abort regressed"
+            exit 1
+          fi
+          echo "mypy completed (exit $rc). Pre-existing type-error debt is surfaced above and tracked as a follow-on, not gated here."
+          exit 0
+
   formal-verification:
     name: formal (TLA+ core-invariant model check, F1)
     runs-on: ubuntu-latest
