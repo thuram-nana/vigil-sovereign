@@ -111,18 +111,21 @@ _MAX_PROPOSALS = 5
 _PROPOSAL_LABEL_MAX = 80
 _PROPOSAL_WHY_MAX = 160
 _PROPOSAL_TARGET_MAX = 512
-# The model wraps its optional proposals in a ```vigil-actions … ``` fence. Matched non-greedily; the
-# LAST such block wins (the model was told to place it at the very end). Stripped from the shown text
-# whether or not it parses, so raw JSON never reaches the operator.
+# The model wraps its optional proposals in a ```vigil-actions … ``` fence. PARSING is fail-closed: only
+# a well-formed terminated block yields proposals (the LAST one wins — the model was told to place it at
+# the very end); a malformed block yields none. STRIPPING is robust: the whole marker region is removed
+# from the shown text whether the fence is terminated, unterminated, or single-line — so raw JSON (and
+# any prompt-injection text a `why`/`label` carries) never reaches the operator even when malformed.
 _PROPOSAL_BLOCK_RE = re.compile(r"```vigil-actions\s*\n(.*?)\n?```", re.DOTALL | re.IGNORECASE)
+_PROPOSAL_STRIP_RE = re.compile(r"```vigil-actions[\s\S]*?(?:```|\Z)", re.IGNORECASE)
 
 
 def _extract_proposals(text: str) -> tuple[str, list]:
-    """Split a model reply into ``(clean_text, raw_proposals)``. Removes EVERY ``vigil-actions`` fence
-    from the shown text (so raw JSON is never displayed) and returns the parsed array from the last
-    parseable one. On any parse problem the proposals are simply empty — a malformed block never becomes
-    a traceback or leaks into the answer. The returned list is UNVALIDATED; `_validate_proposals` is the
-    authority on what the interface may act on."""
+    """Split a model reply into ``(clean_text, raw_proposals)``. Removes EVERY ``vigil-actions`` marker
+    region from the shown text — terminated, unterminated, or single-line — so raw JSON never displays,
+    and returns the parsed array from the last well-formed one. On any parse problem the proposals are
+    simply empty — a malformed block never becomes a traceback or leaks into the answer. The returned
+    list is UNVALIDATED; `_validate_proposals` is the authority on what the interface may act on."""
     if not text or "```vigil-actions" not in text.lower():
         return text, []
     raw: list = []
@@ -133,7 +136,7 @@ def _extract_proposals(text: str) -> tuple[str, list]:
             continue
         if isinstance(parsed, list):
             raw = parsed            # last parseable block wins
-    clean = _PROPOSAL_BLOCK_RE.sub("", text).strip()
+    clean = _PROPOSAL_STRIP_RE.sub("", text).strip()   # strips even an unterminated / single-line fence
     return clean, raw
 
 
@@ -154,11 +157,13 @@ _MAX_SOURCES = 12
 _SOURCE_REF_MAX = 512
 _SOURCE_NOTE_MAX = 160
 _SOURCE_BLOCK_RE = re.compile(r"```vigil-sources\s*\n(.*?)\n?```", re.DOTALL | re.IGNORECASE)
+_SOURCE_STRIP_RE = re.compile(r"```vigil-sources[\s\S]*?(?:```|\Z)", re.IGNORECASE)
 
 
 def _extract_sources(text: str) -> tuple[str, list]:
-    """Split off any ``vigil-sources`` fence, mirroring ``_extract_proposals``: the block is removed from
-    the shown text whether or not it parses; the last parseable array is returned UNVALIDATED."""
+    """Split off any ``vigil-sources`` marker region, mirroring ``_extract_proposals``: the block is
+    removed from the shown text whether the fence is terminated, unterminated, or single-line; the last
+    well-formed array is returned UNVALIDATED."""
     if not text or "```vigil-sources" not in text.lower():
         return text, []
     raw: list = []
@@ -169,7 +174,7 @@ def _extract_sources(text: str) -> tuple[str, list]:
             continue
         if isinstance(parsed, list):
             raw = parsed
-    return _SOURCE_BLOCK_RE.sub("", text).strip(), raw
+    return _SOURCE_STRIP_RE.sub("", text).strip(), raw
 
 
 def _listed_paths(view: dict) -> list:
@@ -264,7 +269,9 @@ def _validate_proposals(chat_id: str, raw: list, offer: dict) -> list:
             key = ("scan_codebase", offer_target)
         elif action == "scan_url":
             target = str(entry.get("target") or "").strip()[:_PROPOSAL_TARGET_MAX]
-            if not _URL_RE.fullmatch(target):       # a proper URL, not free text
+            # a proper URL, not free text — and no control chars / backtick (belt-and-suspenders: the
+            # value is only ever a chip label + a launch_assessment arg, but keep it a clean URL)
+            if not _URL_RE.fullmatch(target) or any(ord(c) < 0x20 or c in "`\x7f" for c in target):
                 continue
             spec["target"] = target
             spec["label"] = label or "Scan this URL"
@@ -1033,13 +1040,21 @@ def _engagement_shape(chat_id: str) -> dict:
     if refusals:
         shape["refusals"] = refusals
 
-    # Defense-in-depth: the same recursive credential masker the session context passes through, so a
-    # refusal reason or target that happens to carry a secret-shaped substring never egresses raw.
+    # Defense-in-depth: the SAME two-pass redaction the session context passes through
+    # (scrub_log_event ∘ _redact_ctx) — the recursive free-text credential masker, then the key-name
+    # scrub — so a refusal reason or target that happens to carry a secret-shaped substring never
+    # egresses raw. Applied in the same order as actions' own context path for parity.
     redact = getattr(actions, "_redact_ctx", None)
     if callable(redact):
         try:
             shape = redact(shape)
         except Exception:  # noqa: BLE001 — the fields are non-secret metadata; a redactor hiccup is not fatal
+            pass
+    scrub = getattr(actions, "scrub_log_event", None)
+    if callable(scrub):
+        try:
+            shape = scrub(shape)
+        except Exception:  # noqa: BLE001
             pass
     return shape
 

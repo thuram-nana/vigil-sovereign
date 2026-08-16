@@ -58,6 +58,13 @@ def test_extract_malformed_sources_block_is_stripped_and_empty():
     assert raw == [] and "vigil-sources" not in clean and "bad json" not in clean
 
 
+def test_extract_unterminated_sources_fence_is_still_stripped():
+    """Red-pen F1 mirror: an unterminated vigil-sources fence must not leak its raw JSON to the operator."""
+    clean, raw = chat._extract_sources('answer\n```vigil-sources\n[{"kind":"evidence","ref":"x"}]')
+    assert raw == [] and "vigil-sources" not in clean and "evidence" not in clean
+    assert clean.startswith("answer")
+
+
 # ---------------------------------------------------------------------------------------------------
 # _validate_sources — the server is the authority on what is a real source
 # ---------------------------------------------------------------------------------------------------
