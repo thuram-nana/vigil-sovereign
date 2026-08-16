@@ -67,6 +67,18 @@ See [`architecture.md`](./architecture.md) for the two-plane model, oracle autho
     `reverify/<run>`, `proof/export`, `authority/provision`, `killswitch/<slug>/trip`, `tools/install`,
     `session/*`, `chat/send`, `aegis/setup|stop`, `evolve/<slug>/tick`. Each dispatches to `actions.*`
     or `sessions.*`/`chat.*`.
+  - **Chat-orchestrator routes** (chat-orchestrator program, #343–#354; charter + built-vs-charter map in
+    `console/CHAT-VISION.md`): `GET /api/chat/hypotheses` (the first-class hypothesis ledger),
+    `GET /api/chat/models` (per-session model-sovereignty picker data), `POST /api/chat/stream` (F1 — a
+    streamed question turn; SSE from the response body with lazy headers, JSON fallback when not
+    streamable), `POST /api/instruct` (add a message to a running engagement), and
+    `POST /api/codebase/edit|apply|test` (the codebase agent — dev-mode diff / apply / no-net-sandbox
+    tests, path re-confined server-side to `<live>/clones/<chat>/`). The POSTs are behind
+    `_same_origin_as_console` (X-Requested-With + `Sec-Fetch-Site` + token + host); the two GET reads
+    (`hypotheses`, `models`) are behind the `do_GET` host-console + token guard (`_host_is_console` +
+    `_token_ok`) — appropriate for idempotent reads. The chat REASONS (leads, coverage-honest), proposes gated actions,
+    drives the integration OODA engine (live steps + fireteam, oracle-bounded), and honours a per-session
+    model choice where **local means no egress** — it mints no facts and bypasses no gate.
   - `_same_origin_as_console` (274–338) — anti-CSRF / anti-DNS-rebind guard on **every** POST:
     requires the custom `X-Requested-With` header (`_CSRF_HEADER`, 23), a same-origin/`none`
     `Sec-Fetch-Site`, and a loopback (or operator-allowlisted proxy) `Host`/`Origin` on the exact
