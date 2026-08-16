@@ -410,7 +410,8 @@ def _approve_all(decision, state):
 def test_approved_deploy_folds_wave_facts_leads_and_escalations():
     fact = Finding(ref="f1", bug_class="sqli", status="fact", evidence_ref="spine:" + "a" * 58)
     lead = Finding(ref="l1", bug_class="xss", status="lead")
-    esc = EscalationRequest(wave_id="w", member_id="a", tool_name="sqlmap", reason="destructive → queued")
+    esc = EscalationRequest(wave_id="w", member_id="a", tool_name="sqlmap", target="t",
+                            requested_tier="A3", reason="destructive → queued", seq=7)
     outcome = FireteamOutcome(facts=[fact], leads=[lead], escalations=[esc])
     eng = _engine(EngineSeams(attest=_attest_allow, think=ReplayThinker([_deploy(), _complete()]),
                               gate=_allow_gate, approval=_approve_all,
@@ -420,6 +421,14 @@ def test_approved_deploy_folds_wave_facts_leads_and_escalations():
     assert rep.fact_count == 1 and rep.facts[0].ref == "f1"          # the oracle-confirmed fact folded in
     assert any(ld.ref == "l1" for ld in rep.leads)                  # the lead folded in
     assert any("escalation" in q for q in rep.queued_edges)          # member escalation surfaced (never run)
+    # G1 (Tier A): the escalation is ALSO recorded as a STRUCTURED, durable row — the binding key +
+    # tool/target/tier/reason — so it can be reviewed after the wave (the foundation for a signed-resolve
+    # surface). It stays "queued": Tier A surfaces, it never runs the edge.
+    assert len(rep.fireteam_escalations) == 1
+    row = rep.fireteam_escalations[0]
+    assert row["wave_id"] == "w" and row["member_id"] == "a" and row["seq"] == 7
+    assert row["tool"] == "sqlmap" and row["target"] == "t" and row["requested_tier"] == "A3"
+    assert row["status"] == "queued" and "destructive" in row["reason"]
 
 
 def test_wave_fact_without_a_signed_ref_is_downgraded_to_a_lead():

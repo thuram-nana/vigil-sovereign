@@ -164,6 +164,12 @@ class RunReport(BaseModel):
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
     denied_edges: list[str] = Field(default_factory=list)
     queued_edges: list[str] = Field(default_factory=list)
+    # G1 (Tier A) — the STRUCTURED, durable record of fireteam member edges QUEUED for a signed operator
+    # approval (an over-cap/dangerous member tool that was never run). Each entry carries the binding key
+    # (wave_id/member_id/seq) + tool/target/requested_tier/reason, so the operator can review exactly what
+    # is pending after a wave — the foundation for a signed-resolve surface (Tier B) and an approved-edge
+    # runner (Tier C). Surfacing only: nothing here is executable, and a member edge still never auto-runs.
+    fireteam_escalations: list[dict] = Field(default_factory=list)
     facts: list[Finding] = Field(default_factory=list)
     leads: list[Finding] = Field(default_factory=list)
     detection_facts: int = 0
@@ -646,6 +652,19 @@ class VigilEngine:
         for esc in getattr(outcome, "escalations", []) or []:
             report.queued_edges.append(f"fireteam escalation (queued, never auto-run): "
                                        f"{getattr(esc, 'reason', '') or getattr(esc, 'tool_name', '')}")
+            # G1 (Tier A): also record the STRUCTURED escalation so the operator can review exactly what is
+            # pending (the binding key + tool/target/tier/reason), durably in the report — not just a string.
+            # Defensive getattr: a malformed escalation contributes a partial row, never a traceback.
+            report.fireteam_escalations.append({
+                "wave_id": str(getattr(esc, "wave_id", "") or ""),
+                "member_id": str(getattr(esc, "member_id", "") or ""),
+                "seq": int(getattr(esc, "seq", 0) or 0),
+                "tool": str(getattr(esc, "tool_name", "") or ""),
+                "target": str(getattr(esc, "target", "") or ""),
+                "requested_tier": str(getattr(esc, "requested_tier", "") or ""),
+                "reason": str(getattr(esc, "reason", "") or ""),
+                "status": "queued",   # queued for a signed operator approval; never auto-run (Tier B/C = sign/run)
+            })
         for ref in getattr(outcome, "spine_refs", []) or []:
             report.checkpoints.append(str(ref))
 

@@ -136,10 +136,18 @@ mid-stream disconnect).
 
 ### Honest follow-ups (built to a real edge, and named — not softened)
 
-- **Fireteam escalations are registered durably, but not yet operator-resolvable end-to-end.** An
-  over-cap member edge is registered in an append-only, spine-mirrored ledger (signed-resolve-only,
-  fail-closed) and surfaced in the feed; wiring the operator's signed-resolve SURFACE — register →
-  surface → sign → resolve → run the member edge — is the next slice.
+- **Fireteam escalations: surfaced (live + structured); sign-and-run is the remaining scoped tier.** An
+  over-cap member edge never runs — it is emitted to the console live feed as a `member.escalation` step
+  (E1) AND recorded as a STRUCTURED, durable row on the run report (`RunReport.fireteam_escalations`:
+  wave_id / member_id / seq / tool / target / requested_tier / reason / status — G1 Tier A), so the
+  operator can review exactly what is pending after a wave and a later tier can read it. What remains is
+  genuinely tiered, not a quick win: **Tier B (sign)** — publish each escalation through the existing
+  approval-token/broker stack and feed a signed-approval `ApproverFn` into `ConfirmationRegistry.resolve`
+  (the registry already fail-closes to REJECTED without one); **Tier C (run)** — actually EXECUTE an
+  approved edge, which needs a new escalated-edge runner that lifts the member A2 cap for exactly that
+  token-bound action. Tier C deliberately touches the one boundary the fireteam design makes hard (a
+  member is `≤A2`, never self-approving), so it is authorized solely by the owner token and constrained to
+  the single bound action — a real slice, not a config flag.
 - **Secret redaction differs by surface — and the difference is stated, not implied away.** The E1
   fireteam feed IS deterministically scrubbed: every member step record passes the shared F3 scrubber
   (`redact_tool_args`, in `fireteam/spine_queue.py`) before it reaches the feed, so structured secret
