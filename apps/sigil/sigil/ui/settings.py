@@ -366,6 +366,21 @@ CONFIG_META = {
     "CRUCIBLE_VERTEX_REGION_ALLOWLIST": {"group": "offense", "type": "str", "default": "", "optional": True,
         "label": "Vertex region allowlist", "plane": "offense", "placeholder": "europe-west4,us-central1",
         "purpose": "Comma-separated Vertex regions the backend may use (empty = the provider default)."},
+    # The protected-domain safety floor toggle. Polarity is ALLOW (the deviation), so unset/cleared ⇒ the
+    # value is NOT delivered to the offense children ⇒ the guard reads unset ⇒ ON (protected) — fail-safe.
+    # The ONLY OFF state is an explicit owner-set "1" (owner-signed via set_config, delivered by
+    # export_runtime_env). Consumed by vigil_core.hard_guardrail.protected_guard_enabled().
+    "VIGIL_ALLOW_PROTECTED_DOMAINS": {"group": "offense", "type": "bool", "default": "",
+        "label": "Allow government / military / education / intergovernmental domains", "plane": "offense",
+        "purpose": "Off (default) = a hard safety floor blocks .gov/.mil/.edu/.int and known IGOs "
+                   "(UN, EU, ICRC, World Bank, …) before your charter is even consulted.",
+        "warn": "DANGER — turning this ON disables the categorical safety floor for .gov / .mil / .edu / "
+                ".int and known intergovernmental hosts. With it on, only your SIGNED CHARTER SCOPE stands "
+                "between an autonomous agent and one of these targets; a prompt-injection or a typo can no "
+                "longer be caught by the floor. Leave this OFF unless you own and are explicitly authorized "
+                "to test a host on one of these domains AND it is listed in your signed charter. Every "
+                "change here is owner-signed and recorded on the audit spine, and takes effect for "
+                "engagements started after the next engine restart (vigil up)."},
     # --- Sovereign runtime (SIGIL) — NEVER delivered to offense ---
     "SIGIL_LOG_LEVEL": {"group": "sovereign", "type": "enum",
         "choices": ["DEBUG", "INFO", "WARNING", "ERROR"], "default": "INFO",
@@ -969,6 +984,7 @@ def settings_status() -> dict:
                 "choices": list(meta.get("choices", ())), "plane": meta.get("plane", "system"),
                 "value": os.environ.get(env, "").strip(),         # non-secret: the live value is safe to show
                 "min": meta.get("min"), "max": meta.get("max"),
+                "warn": meta.get("warn", ""),          # prominent danger banner (e.g. the protected-domain toggle)
             })
         if fields:
             config_groups.append({"id": gid, "label": _CONFIG_GROUP_LABEL[gid], "fields": fields})

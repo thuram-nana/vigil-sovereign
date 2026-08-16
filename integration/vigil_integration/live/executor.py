@@ -83,6 +83,7 @@ from ..tools import authorize_tool_call
 from ..tools.mcp_registry import _redact_arg_list, _redact_str
 from .egress_guard import EgressGuardUnavailable
 from .egress_guard import wrap_argv as _wrap_egress
+from ..safety.hard_guardrail import is_hard_blocked, protected_guard_enabled
 
 __all__ = ["ExecResult", "ExecRecord", "RunOutcome", "execute", "execute_terminal", "subprocess_runner",
            "derive_gate_binding"]
@@ -327,6 +328,16 @@ def _resolve_scoped_target(target: str, *, scope: Any = None,
     raw = (target or "").strip()
     if not raw:
         return None, "no target host/url in tool_args (fail-closed)"
+    # Protected-domain categorical guard (gov/mil/edu/IGO), gated by the owner toggle (default ON).
+    # Runs on the RAW target so the client-independent host analysis (candidate_hosts) applies, ABOVE
+    # both the legacy loopback path and the scoped path. This fn is contractually total (never raises),
+    # so use the predicate + return the native (None, reason) refusal. When the owner has turned the
+    # guard OFF this is skipped, and scope.matches(host) + the egress floor below remain the sole
+    # enforcers — turning the guard off does NOT relax charter scope.
+    if protected_guard_enabled():
+        blocked, why = is_hard_blocked(raw)
+        if blocked:
+            return None, f"REFUSED: {why}"
     try:
         parts = urlsplit(raw if "://" in raw else "//" + raw)
         host = parts.hostname

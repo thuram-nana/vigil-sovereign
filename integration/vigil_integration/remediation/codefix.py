@@ -40,6 +40,7 @@ from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from ..safety.hard_guardrail import is_hard_blocked, protected_guard_enabled
 from ..safety.llm_intake import parse_proposal
 from ..safety.prompt_safety import wrap_untrusted
 from ..tools.governance import redact_tool_args
@@ -430,6 +431,16 @@ def run_codefix(
         return _result(rec, request, "refused-not-confirmed", reason)
 
     repo = request.target_repo or request.finding.target or request.remediation_id
+
+    # (0b) Protected-domain categorical floor (gov/mil/edu/IGO), gated by the owner toggle (default ON).
+    # Refuses cloning from a .gov/.mil/.edu/.int/IGO git host — categorical, even for an operator's own
+    # legitimately-hosted repo (the refusal reason says why so it is not a silent mystery). Return-form
+    # (run_codefix is total). OFF skips only this pre-filter; the clone gate below still authorizes.
+    if protected_guard_enabled():
+        blocked, gwhy = is_hard_blocked(repo)
+        if blocked:
+            rec.add("clone", TIER_CLONE, "deny", f"hard scope floor: {gwhy}", {"repo": repo})
+            return _result(rec, request, "clone-denied", f"hard scope floor: {gwhy}")
 
     # (1) CLONE + branch — A1.
     allowed, outcome, why = _gate_allows(gate, "git_clone", repo, False)

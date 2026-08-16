@@ -56,6 +56,7 @@ from typing import Any, Callable, Mapping, Optional
 from urllib.parse import quote, urlsplit
 
 from .imds_runner import TransportResult
+from ..safety.hard_guardrail import assert_not_hard_blocked, protected_guard_enabled
 
 # The bounded read. Matches ``imds_runner._MAX_BODY`` (the cap ``response_digest`` hashes under), so the
 # digest we retain is a digest of bytes we actually held, never of a silently-truncated prefix.
@@ -245,6 +246,12 @@ class LiveTransport:
 
     # -- the Transport call ---------------------------------------------------------------------------
     def __call__(self, method: str, url: str) -> TransportResult:
+        # Protected-domain categorical floor (gov/mil/edu/IGO), gated by the owner toggle (default ON).
+        # A real network capture against a protected host must HARD-fail (raise) before any bytes leave,
+        # fed the raw url (client-independent host analysis). OFF skips only this pre-filter; the signed
+        # scope + egress floor upstream remain in force.
+        if protected_guard_enabled():
+            assert_not_hard_blocked(url)
         scheme = (urlsplit(url).scheme or "").lower()
         content = self._content if method.upper() not in ("GET", "HEAD") else None
         headers = dict(self._headers)

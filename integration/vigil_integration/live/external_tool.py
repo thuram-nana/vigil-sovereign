@@ -50,6 +50,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol, Sequence, runtime_checkable
 
+from ..safety.hard_guardrail import is_hard_blocked, protected_guard_enabled
+
 
 # ---------------------------------------------------------------------------
 # vigil_gateway bootstrap — the gateway package is path-based (PYTHONPATH=gateway in CI); locate it
@@ -434,6 +436,14 @@ class ScopeGate:
         h = (host or "").strip()
         if not h:
             return False, "empty target (fail-closed)"
+        # 0. Protected-domain categorical floor (gov/mil/edu/IGO), gated by the owner toggle (default ON).
+        #    Non-raising predicate → clean (False, reason) refusal before scope/egress are consulted. When
+        #    the owner turns the guard OFF this is skipped and scope.matches (below) + the egress floor
+        #    remain the sole enforcers — the toggle never relaxes charter scope.
+        if protected_guard_enabled():
+            blocked, why = is_hard_blocked(h)
+            if blocked:
+                return False, why
         # 1. charter scope — the hostname must be in the signed scope.
         if not self.scope.matches(h):
             return False, f"{h!r} is not in the charter scope"

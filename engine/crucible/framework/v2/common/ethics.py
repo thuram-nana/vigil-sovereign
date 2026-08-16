@@ -28,6 +28,10 @@ from .errors import (
     OutOfScope,
 )
 
+# The deterministic protected-domain scope floor lives in the neutral shared core (Slice 0 / FATAL-2):
+# framework.v2 already hard-depends on vigil_core (see .errors), so this adds no new import edge.
+from vigil_core.hard_guardrail import assert_not_hard_blocked, protected_guard_enabled
+
 
 # ---------------------------------------------------------------------------
 # Charter signature check
@@ -277,6 +281,12 @@ def host_matches_scope(host: str, scope_entries: list[str]) -> bool:
 
 
 def require_in_scope(slug: str, target_url: str) -> None:
+    # Categorical protected-domain floor (gov/mil/edu/IGO), gated by the owner toggle (default ON).
+    # Runs FIRST, on the RAW target_url, so the client-independent host analysis applies before the
+    # charter is even parsed. Raises HardBlockError (categorical; callers must not catch-and-continue).
+    # Turning the guard OFF does NOT relax scope — the host_matches_scope check below always applies.
+    if protected_guard_enabled():
+        assert_not_hard_blocked(target_url)
     host = extract_hostname(target_url)
     if not host:
         raise OutOfScope(f"could not parse hostname from {target_url!r}")
@@ -345,6 +355,13 @@ def is_authorized_for_intake(target_url: str) -> bool:
 
 
 def require_authorized_intake(target_url: str) -> None:
+    # Categorical protected-domain floor (gov/mil/edu/IGO), gated by the owner toggle (default ON).
+    # Intake is the FIRST target-touching lifecycle step and fetches OUTSIDE the HttpExecutor (raw
+    # httpx in intake/http.py), so A3 (SovereignHttpxTransport) never covers it — it carries its own
+    # floor here, before the authorization ledger is even consulted. Raises HardBlockError; turning
+    # the guard OFF does not relax the authorization-ledger / SSRF checks below.
+    if protected_guard_enabled():
+        assert_not_hard_blocked(target_url)
     if not is_authorized_for_intake(target_url):
         raise AuthorizationMissing(
             f"no operator-attested authorization for {target_url!r}.\n"

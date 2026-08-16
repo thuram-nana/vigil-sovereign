@@ -23,6 +23,10 @@ from .capability import (
 )
 from .chain import append_entry, build_chain, sign_head, verify_chain, verify_head
 from .crypto import IntegrityError, KeyPair, generate_keypair, sign, verify_one, verify_threshold
+from .hard_guardrail import (
+    HardBlockError, assert_not_hard_blocked, candidate_hosts, is_hard_blocked, normalize_domain,
+    protected_guard_enabled,
+)
 from .highwater import (
     HighWaterDowngrade, HighWaterError, advance_highwater, check_highwater, highwater_lock, load_highwater,
 )
@@ -36,6 +40,8 @@ __all__ = [
     "load_highwater", "check_highwater", "advance_highwater", "highwater_lock",
     "HighWaterError", "HighWaterDowngrade",
     "generate_keypair", "sign", "verify_one", "verify_threshold", "KeyPair", "IntegrityError",
+    "HardBlockError", "assert_not_hard_blocked", "candidate_hosts", "is_hard_blocked",
+    "normalize_domain", "protected_guard_enabled",
     "AuthorizerKey", "ChainEntry", "Signature", "SignedChainHead", "TrustRoot",
     "seal", "unseal", "new_kek", "is_sealed", "SealError",
     "Vault", "VaultLocked",

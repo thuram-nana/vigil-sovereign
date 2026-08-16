@@ -36,6 +36,7 @@ from ..common import ethics
 from ..common import logging as v2log
 from ..common import paths
 from ..common.errors import OutOfScope
+from vigil_core.hard_guardrail import HardBlockError
 from . import executor as planner_executor
 from . import resume
 from .budget import Budget
@@ -213,6 +214,21 @@ class Planner:
                 return StepResult(
                     leaf_id=leaf.id, leaf_label=leaf.label,
                     dispatched=False, error=f"out-of-scope: {e}",
+                    pruned_this_step=pruned,
+                )
+            except HardBlockError as e:
+                # Categorical protected-domain floor (gov/mil/edu/IGO). Prune the leaf cleanly — same
+                # graceful handling as OutOfScope — instead of letting the raise fall into the generic
+                # `except Exception: pass` below (which would swallow it and DISPATCH the protected leaf).
+                self.tree.mark_status(leaf.id, "pruned", reason=f"protected-domain floor: {e}")
+                _log.warning(
+                    "planner.protected_domain_blocked",
+                    leaf_id=leaf.id, url=leaf_url, error=str(e),
+                )
+                self.watchdog.record_step(node_id=leaf.id, error=True)
+                return StepResult(
+                    leaf_id=leaf.id, leaf_label=leaf.label,
+                    dispatched=False, error=f"protected-domain floor: {e}",
                     pruned_this_step=pruned,
                 )
             except Exception:

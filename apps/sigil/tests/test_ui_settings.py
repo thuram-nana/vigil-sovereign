@@ -36,7 +36,8 @@ def env(tmp_path, monkeypatch):
         self._kr = None                     # no OS keyring in tests → the envfile tier under tmp_path
 
     monkeypatch.setattr(secmod.SecretStore, "__init__", _no_kr)
-    for var in (*smod.MODEL_ENV_VARS, smod._CHOICE_ENV, *smod.SECRET_NAMES, "SIGIL_ANTHROPIC_API_KEY"):
+    for var in (*smod.MODEL_ENV_VARS, smod._CHOICE_ENV, *smod.SECRET_NAMES, "SIGIL_ANTHROPIC_API_KEY",
+                "VIGIL_ALLOW_PROTECTED_DOMAINS"):
         monkeypatch.setenv(var, "")         # monkeypatch restores the ORIGINAL after the test
         monkeypatch.delenv(var, raising=False)
     store = SpineStore(str(tmp_path / "spine.jsonl"))
@@ -440,3 +441,57 @@ def test_non_offense_config_never_in_offense_allowlist():
     non_offense = [e for e in smod.CONFIG_VARS if smod.CONFIG_META[e].get("plane") != "offense"]
     leaked = [e for e in non_offense if e in uiproxy._OFFENSE_ENV_ALLOWLIST]
     assert not leaked, f"non-offense config vars present in the offense allowlist: {leaked}"
+
+
+# --- Claim 5: the protected-domain safety-floor toggle (VIGIL_ALLOW_PROTECTED_DOMAINS) -----------------
+_ALLOW = "VIGIL_ALLOW_PROTECTED_DOMAINS"
+
+
+def test_protected_domains_toggle_is_a_registered_offense_bool(env):
+    # The toggle exists, is a bool, lives in the offense plane (so export_runtime_env delivers it), and
+    # defaults to "" (⇒ not delivered ⇒ guard reads ON — fail-safe polarity is ALLOW, not protect).
+    meta = smod.CONFIG_META[_ALLOW]
+    assert meta["type"] == "bool" and meta["plane"] == "offense" and meta.get("default", "") == ""
+    assert _ALLOW in smod.CONFIG_OFFENSE_VARS
+    assert meta.get("warn"), "the danger toggle must carry a prominent warn banner string"
+
+
+def test_protected_domains_toggle_change_is_owner_signed_on_the_spine(env):
+    # The load-bearing audit requirement: turning the floor OFF appends exactly ONE owner-signed spine
+    # event carrying WHO (pubkey), the env, the new value, and the operator reason — verifiable against
+    # the owner pubkey, and a tampered value must fail verification.
+    from sigil.governor.authn import verify_signed
+    store, owner, _ = env
+    out = smod.set_config(_ALLOW, "1", store=store, owner_key=owner,
+                          reason="authorized .gov engagement per signed charter")
+    assert out["ok"] and out["value"] == "1"
+    rec = store.get(out["recorded_seq"])
+    assert rec is not None
+    p = rec.payload
+    assert p["signal"] == "governor.config_set" and p["env"] == _ALLOW and p["value"] == "1"
+    assert p["by"] == "owner" and p["reason"].startswith("authorized .gov")
+    # authentic owner signature over the canonical core {signal, env, value}
+    assert verify_signed(p, ["signal", "env", "value"], owner.public_key_b64) is True
+    # tamper the value → the same signature no longer verifies (the audit record is unforgeable)
+    assert verify_signed({**p, "value": ""}, ["signal", "env", "value"], owner.public_key_b64) is False
+
+
+def test_protected_domains_toggle_fail_safe_delivery(env):
+    # Delivery fail-safe: the offense plane receives the OFF flag ONLY when explicitly set to "1".
+    # Unset ⇒ absent ⇒ guard reads ON; "1" ⇒ present; cleared back to "" ⇒ absent again + line removed.
+    store, owner, tmp_path = env
+    assert _ALLOW not in smod.export_runtime_env(include_secrets=False)      # unset ⇒ not delivered ⇒ ON
+    smod.set_config(_ALLOW, "1", store=store, owner_key=owner, reason="on")
+    assert smod.export_runtime_env(include_secrets=False).get(_ALLOW) == "1"  # explicit OFF ⇒ delivered
+    smod.set_config(_ALLOW, "", store=store, owner_key=owner, reason="re-protect")
+    assert _ALLOW not in smod.export_runtime_env(include_secrets=False)      # re-protect ⇒ not delivered
+    envfile = (tmp_path / "sigil.env")
+    assert _ALLOW not in (envfile.read_text(encoding="utf-8") if envfile.exists() else "")
+
+
+def test_protected_domains_toggle_status_carries_the_warn_banner(env):
+    # settings_status must surface the warn copy so the UI can render the prominent danger banner.
+    st = smod.settings_status()
+    fields = [f for g in st["config_groups"] for f in g["fields"] if f["env"] == _ALLOW]
+    assert fields, "the toggle must appear in the config groups"
+    assert "DANGER" in fields[0]["warn"] and "safety floor" in fields[0]["warn"]

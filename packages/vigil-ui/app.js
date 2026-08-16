@@ -3819,6 +3819,9 @@
         return h("div.field", { style: { marginBottom: "10px" } }, [
           h("label", null, [f.label || f.env, h("code.mono", { style: { marginLeft: "8px", opacity: "0.6" } }, f.env)]),
           h("div.hint", { style: { margin: "2px 0 6px" } }, f.purpose || ""),
+          // Prominent danger banner for a safety-floor toggle (e.g. VIGIL_ALLOW_PROTECTED_DOMAINS).
+          f.warn ? h("div.set-status.off", { style: { color: "var(--warn,#d9a441)", fontWeight: "600", margin: "4px 0 8px" } },
+            [V.icon("info"), h("span", null, f.warn)]) : null,
           h("div.row", { style: { display: "flex", gap: "8px", alignItems: "center" } }, [input, save]),
         ]);
       });

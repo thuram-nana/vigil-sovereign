@@ -396,6 +396,7 @@ jobs:
               integration/tests/test_cli_terminal.py \
               integration/tests/test_cli_sandbox.py \
               integration/tests/test_detection_vocabulary.py \
+              integration/tests/test_protected_guard_corpus.py \
               integration/tests/test_live_executor_report_builders.py \
               integration/tests/test_proof_engine.py \
               integration/tests/test_proof_run.py \
