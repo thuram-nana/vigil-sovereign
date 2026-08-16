@@ -140,11 +140,18 @@ mid-stream disconnect).
   over-cap member edge is registered in an append-only, spine-mirrored ledger (signed-resolve-only,
   fail-closed) and surfaced in the feed; wiring the operator's signed-resolve SURFACE — register →
   surface → sign → resolve → run the member edge — is the next slice.
-- **Secret redaction on the live feed covers structured secrets, not prose.** Member step summaries and
-  streamed reasoning are scrubbed of structured secret forms (`api_key=`, `Bearer …`, `user:pass@host`,
-  `--flag …`) by the shared F3 scrubber before anything reaches the feed. A secret written in prose
-  ("the password is …") or a key-vocabulary gap (`sess=` vs `session`) is the documented shared F3
-  limitation; F1/E1 add reasoning free-text and member summaries as additional surfaces for it.
+- **Secret redaction differs by surface — and the difference is stated, not implied away.** The E1
+  fireteam feed IS deterministically scrubbed: every member step record passes the shared F3 scrubber
+  (`redact_tool_args`, in `fireteam/spine_queue.py`) before it reaches the feed, so structured secret
+  forms (`api_key=`, `Bearer …`, `user:pass@host`, `--flag …`) are masked — leaving only the documented
+  prose/vocabulary residual (a secret written in prose, or a key-name gap like `sess=` vs `session`).
+  The F1 chat reasoning ANSWER is **not** run through that scrubber: the deterministic scrubber runs on
+  the model's INPUT (the session-context block) and on the E1 feed, not on the model's free-text answer
+  or its persisted transcript. So a structured secret an operator uploaded can appear verbatim in the
+  chat answer and its record — acceptable for a single-operator, loopback, same-origin tool reasoning
+  over its own operator's data, but named here rather than hidden. Scrubbing (or operator-redacting) the
+  chat answer + transcript before it can flow into a dossier/report is the honest follow-up if that
+  record ever leaves the operator's own view.
 - **A mid-stream disconnect reloads the saved answer; it never double-charges.** If a streamed reply's
   connection drops *after* the server committed the turn, the client reloads the persisted record (no
   re-send); a pre-response failure falls back to `/api/chat/send` exactly once.
