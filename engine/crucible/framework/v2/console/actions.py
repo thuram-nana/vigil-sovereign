@@ -935,6 +935,61 @@ def clone_codebase(chat_id: str, repo: str, *, operator_present: bool = False) -
     return {"ok": True, "path": str(dest_abs), "name": name}
 
 
+def _confined_clone_path(chat_id: str, path: str) -> str:
+    """The abspath of ``path`` IFF it sits strictly under THIS chat's clone area (``<live>/clones/<chat>/``),
+    else ``""``. A dev-mode edit may only touch a codebase this chat itself cloned — never an arbitrary
+    directory named by the caller."""
+    from . import sessions
+    try:
+        cid = sessions._safe_session_id(str(chat_id)) if chat_id else ""
+    except ValueError:
+        return ""
+    if not cid or not path:
+        return ""
+    try:
+        base = (Path(_live_base()) / "clones" / cid).resolve()
+        p = Path(str(path)).resolve()
+        if os.path.commonpath([str(base), str(p)]) == str(base) and p != base and p.is_dir():
+            return str(p)
+    except (ValueError, OSError):
+        return ""
+    return ""
+
+
+def propose_codebase_edit(chat_id: str, path: str, instruction: str) -> dict:
+    """Phase D2 — DEV-MODE: propose a change to a codebase THIS chat cloned, as a unified diff for the
+    operator to review. General software editing (no oracle-FACT gate). The path is confined to the chat's
+    own clone area; the model call is sovereignty-gated. Returns ``{ok, diff}`` or ``{ok: False, error}``."""
+    wd = _confined_clone_path(chat_id, path)
+    if not wd:
+        return {"ok": False, "error": "no such cloned codebase for this chat (edits are confined to repos "
+                                      "you cloned here)"}
+    try:
+        from vigil_integration.live.dev_edit import propose_dev_edit
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"the dev-edit toolchain is unavailable ({type(e).__name__})"}
+    diff = propose_dev_edit(wd, str(instruction or ""))
+    if not diff:
+        return {"ok": False, "error": "no change proposed (the model declined, was refused by the "
+                                      "sovereignty policy, or no API key is set)"}
+    return {"ok": True, "diff": diff}
+
+
+def apply_codebase_edit(chat_id: str, path: str, diff: str) -> dict:
+    """Phase D2 — apply an operator-reviewed unified diff into the chat's cloned codebase. Gated as an A2
+    ``code_edit`` opened by operator-presence (the operator reviewed the diff and clicked apply); the diff
+    is path-confined + applied clone-only (``git apply``). Returns ``{ok, applied}`` or ``{ok: False, error}``."""
+    wd = _confined_clone_path(chat_id, path)
+    if not wd:
+        return {"ok": False, "error": "no such cloned codebase for this chat"}
+    try:
+        from vigil_integration.live.dev_edit import apply_dev_edit
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"the dev-edit toolchain is unavailable ({type(e).__name__})"}
+    # operator_present=True: an apply is only reachable from the operator's explicit review-and-click.
+    return apply_dev_edit(wd, str(diff or ""), operator_present=True)
+
+
 def launch_assessment(body: dict) -> dict:
     """Route the New-Assessment wizard body to the SAME gated CLI a hand-run engagement uses and
     spawn it. Returns ``{run_id, status, mode, slug, stream}`` or ``{error}`` (a clean, fail-closed

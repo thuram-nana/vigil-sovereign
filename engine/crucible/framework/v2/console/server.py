@@ -646,6 +646,21 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # relaxes no scope, fires nothing ungated. Same-origin + token gated (do_POST guard above).
                 self._json(actions.engage_instruct(str(body.get("slug", "")), str(body.get("text", ""))))
                 return
+            if path == "/api/codebase/edit":
+                # D2 dev-mode: propose a change to a codebase THIS chat cloned, as a unified diff for review.
+                # Path-confined to the chat's clone area; the model call is sovereignty-gated; nothing is
+                # applied here (propose only). Same-origin + token gated.
+                self._json(actions.propose_codebase_edit(str(body.get("chat_id", "")),
+                                                         str(body.get("path", "")),
+                                                         str(body.get("instruction", ""))))
+                return
+            if path == "/api/codebase/apply":
+                # D2 dev-mode: apply an operator-REVIEWED unified diff into the chat's cloned codebase. A2
+                # code_edit, opened by operator-presence; path-confined + clone-only git-apply.
+                self._json(actions.apply_codebase_edit(str(body.get("chat_id", "")),
+                                                      str(body.get("path", "")),
+                                                      str(body.get("diff", ""))))
+                return
             if path == "/api/launch/assessment":
                 # The New-Assessment wizard's one action. It spawns only the SAME gated CLIs; it
                 # cannot relax scope (charter-signed, never an arg) or bypass a gate. A clean JSON
