@@ -17,6 +17,21 @@ members = [
     "integration",
 ]
 
+# Resolve every first-party member from the workspace, never the package index. Without this a
+# member that depends on another by NAME (e.g. `vigil-integration` -> `vigil-core`) makes `uv sync`/
+# `uv lock` fail — uv refuses a workspace member that has no `tool.uv.sources` entry ("`vigil-core`
+# is included as a workspace member, but is missing an entry in `tool.uv.sources`"). The isolated
+# env builds still install third-party deps from the committed HASH LOCKS (see envs/build_envs.sh);
+# this table only makes uv's own workspace resolution / repo-wide tooling work. Declaring all
+# members is safe and future-proofs any new inter-member dependency.
+[tool.uv.sources]
+vigil-core = { workspace = true }
+sigil = { workspace = true }
+crucible = { workspace = true }
+strix-agent = { workspace = true }
+vigil-gateway = { workspace = true }
+vigil-integration = { workspace = true }
+
 # The two isolated environments, as documentation of the boundary (built via envs/):
 #   env-sovereign : vigil_core + apps/sigil + integration      (NEVER framework.* or strix.*)
 #   env-offense   : vigil_core + engine/crucible + vendor/strix + gateway + integration
