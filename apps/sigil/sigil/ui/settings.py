@@ -322,7 +322,9 @@ _OFFENSE_DELIVERED_SECRETS = tuple(n for n in SECRET_NAMES if n not in _OFFENSE_
 #   plane: "offense"   → also delivered to the keyless offense children by export_runtime_env
 #          "sovereign" → the sovereign process reads it from its own env (NEVER delivered to offense: FATAL-2)
 #          "gateway"/"system" → persisted to sigil.env; the gateway/`vigil up` launcher reads it at start
-#   type:  int|number|bool|enum|url|cidr|host|ports|str  (with min/max, choices as needed)
+#   type field:  int|number|bool|enum|url|cidr|host|ports|str  (with min/max, choices as needed)
+#     (worded "type field:" not "type:" — a leading "# type:" comment is parsed by mypy as a PEP 484
+#      type comment and, being prose, aborts the whole run with "invalid type comment")
 CONFIG_META = {
     # --- Offense engine (CRUCIBLE) performance + tuning ---
     "CRUCIBLE_LLM_MAX_WORKERS": {"group": "offense", "type": "int", "min": 1, "max": 64, "default": "4",
