@@ -5563,6 +5563,12 @@
       // the chat drives the AGENTIC engine by default (OODA loop, steerable, resumable). Off = a lighter
       // gated scan. Sent as `agentic` so the server-side default can be opted out of (red-pen F2).
       agentic: true,
+      // D2b: per-run codebase working state, keyed by run_id — a proposed dev-mode diff (awaiting the
+      // operator's review-and-apply), the last test result, and per-run busy flags. Kept OUT of the DOM so
+      // a transcript redraw (which rebuilds every bubble from the saved records) does not drop a diff the
+      // operator is mid-review on. The PATH it acts on is always read from the record (m.codebase_path) and
+      // RE-CONFINED server-side — this cache never becomes an authority on which directory is touched.
+      codebase: {},
     };
 
     V.mount(screen, [
@@ -6097,6 +6103,13 @@
           ]));
         }
       }
+      // D2b: when this run is over a codebase THIS chat cloned, offer the gated dev-mode affordances —
+      // propose an edit (reviewed as a diff, applied only on the operator's click), and run its tests in
+      // the no-net sandbox. The panel appears only for a launched CODEBASE run that carries a path; the
+      // path is re-confined server-side on every call, so the client never becomes an authority on it.
+      if (m.kind === "launched" && m.mode === "codebase" && m.codebase_path && m.run_id) {
+        kids.push(codebasePanel(m));
+      }
       const scanPath = isLead ? scanTargetOf(m) : "";
       if (scanPath) {
         // The reply read an extracted codebase. Offer the REAL thing on the same files: a gated run,
@@ -6192,6 +6205,145 @@
           V.toast((r && r.error) || "Could not send the message to the run.", true);
         }
       }).catch(function (e) { V.toast((e && e.message) || "Could not reach the run — is the offense console up?", true); });
+    }
+
+    // D2b — the dev-mode codebase panel on a launched CODEBASE bubble: propose an edit (reviewed as a
+    // diff), apply it (the operator's click IS the approval), and run tests in the no-net sandbox. Every
+    // call re-confines the path server-side; nothing here can touch a directory this chat did not clone.
+    function codebasePanel(m) {
+      const runId = String(m.run_id || "");
+      const st = C.codebase[runId] || (C.codebase[runId] = { busy: "", diff: "", test: null });
+      const path = String(m.codebase_path || "");
+      // display the tail relative to the per-chat clone base, but the FULL path is what is sent (and
+      // re-confined server-side); the title carries the whole path for the curious.
+      const shortPath = path.replace(/^.*\/clones\/[^/]+\//, "") || path;
+      const kids = [
+        h("div.cb-head", null, [V.icon("book"), h("span", null, "Work on this cloned codebase"),
+          h("span.cb-path", { title: path }, shortPath)]),
+        h("div.dim", { style: { fontSize: "var(--fs-xs)", margin: "2px 0 8px" } },
+          "Dev-mode edits and tests act on the repo this chat cloned. A diff is a proposal you approve by "
+          + "clicking Apply; a passing test is a lead, never an oracle-confirmed fact."),
+      ];
+      // Propose-an-edit
+      const instr = h("input.input", { type: "text",
+        placeholder: "Describe the change… (e.g. fix the off-by-one in utils/pagination.py)",
+        style: { flex: "1 1 auto", minWidth: "0" } });
+      function doPropose() { cbProposeEdit(m, instr); }
+      instr.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); doPropose(); } });
+      kids.push(h("div.cb-row", null, [instr,
+        h("button.btn.sm.primary", { onClick: doPropose, disabled: st.busy ? "disabled" : null },
+          [V.icon("bolt"), st.busy === "edit" ? "Proposing…" : "Propose an edit"])]));
+      // The proposed diff (if any) + review/apply/discard
+      if (st.diff) {
+        kids.push(h("div", { style: { marginTop: "8px" } },
+          h("span.shield.lead", null, [V.icon("info"), "Proposed change — review before applying"])));
+        kids.push(diffView(st.diff));
+        kids.push(h("div.cb-row", null, [
+          h("button.btn.sm.primary", { onClick: function () { cbApplyEdit(m); }, disabled: st.busy ? "disabled" : null },
+            [V.icon("check"), st.busy === "apply" ? "Applying…" : "Apply this diff"]),
+          h("button.btn.sm", { onClick: function () { st.diff = ""; drawMain(); } }, [V.icon("x"), "Discard"]),
+        ]));
+      }
+      // Run tests (no-net sandbox)
+      const cmd = h("input.input", { type: "text", value: "pytest -q", placeholder: "pytest -q",
+        style: { flex: "1 1 auto", minWidth: "0" } });
+      function doTest() { cbRunTests(m, cmd); }
+      cmd.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); doTest(); } });
+      kids.push(h("div.cb-row", null, [cmd,
+        h("button.btn.sm", { onClick: doTest, disabled: st.busy ? "disabled" : null },
+          [V.icon("play"), st.busy === "test" ? "Running…" : "Run tests (no-net sandbox)"])]));
+      if (st.test) kids.push(testResultView(st.test));
+      return h("div.chat-cb", { style: { marginTop: "10px", paddingTop: "10px", borderTop: "1px solid var(--border)" } }, kids);
+    }
+
+    // Render a unified diff, add/remove/hunk-coloured. XSS-SAFE BY CONSTRUCTION: every line becomes a
+    // text node (h() with a string child sets textContent, never innerHTML), so diff content — which comes
+    // from a cloned repo + the model — can never inject markup. Wide lines scroll inside the box; the page
+    // body never scrolls sideways.
+    function diffView(diffText) {
+      const lines = String(diffText || "").split("\n");
+      const rows = lines.map(function (ln) {
+        let cls = "diff-ctx";
+        if (ln.indexOf("+++ ") === 0 || ln.indexOf("--- ") === 0 || ln.indexOf("diff --git") === 0) cls = "diff-file";
+        else if (ln.indexOf("@@") === 0) cls = "diff-hunk";
+        else if (ln.charAt(0) === "+") cls = "diff-add";
+        else if (ln.charAt(0) === "-") cls = "diff-del";
+        return h("div.diff-line." + cls, null, ln === "" ? " " : ln);
+      });
+      return h("pre.chat-diff", null, rows);
+    }
+
+    // A test run's result — a LEAD. Green frame on pass, amber on fail, but never the confirmed-finding
+    // shield: a passing test is not an oracle FACT, and this says so.
+    function testResultView(t) {
+      const passed = !!(t && t.passed);
+      const rc = (t && typeof t.rc === "number") ? t.rc : null;
+      const head = h("div", { style: { marginBottom: "4px" } }, [
+        h("span.shield.lead", null, [V.icon("info"),
+          passed ? "Tests passed (a lead — not an oracle-confirmed fact)"
+                 : "Tests failed" + (rc !== null ? " (exit " + rc + ")" : "")]),
+      ]);
+      const kids = [head];
+      const out = String((t && t.output) || "").slice(-4000);
+      if (out) kids.push(h("pre.chat-diff", { style: { borderColor: passed ? "var(--sev-low, #3a9)" : "var(--sev-high, #e5a13a)" } },
+        h("div.diff-line.diff-ctx", null, out)));
+      return h("div", { style: { marginTop: "8px" } }, kids);
+    }
+
+    // Propose a dev-mode edit → a unified diff for review (D2). The path rides the record and is
+    // re-confined server-side; a store hiccup or refusal is reported honestly, never as a silent success.
+    function cbProposeEdit(m, instrEl) {
+      const runId = String(m.run_id || "");
+      const st = C.codebase[runId] || (C.codebase[runId] = { busy: "", diff: "", test: null });
+      const instruction = ((instrEl && instrEl.value) || "").trim();
+      if (st.busy || !instruction) return;
+      st.busy = "edit"; drawMain();
+      V.postJSON(OFF("/api/codebase/edit"), { chat_id: C.id || "", path: String(m.codebase_path || ""), instruction: instruction })
+        .then(function (r) {
+          st.busy = "";
+          if (r && r.ok && r.diff) { st.diff = String(r.diff); if (instrEl) instrEl.value = ""; }
+          else { V.toast((r && r.error) || "No change was proposed.", true); }
+        })
+        .catch(function (e) { st.busy = ""; V.toast((e && e.message) || "Could not reach the codebase tool.", true); })
+        .then(function () { drawMain(); });
+    }
+
+    // Apply the reviewed diff (D2). Gated A2 code_edit; the operator's click is the human-approval leg.
+    // git-apply is clone-only, so a rename/symlink in the diff cannot escape the confined workdir.
+    function cbApplyEdit(m) {
+      const runId = String(m.run_id || "");
+      const st = C.codebase[runId]; if (!st || !st.diff || st.busy) return;
+      st.busy = "apply"; drawMain();
+      V.postJSON(OFF("/api/codebase/apply"), { chat_id: C.id || "", path: String(m.codebase_path || ""), diff: st.diff })
+        .then(function (r) {
+          st.busy = "";
+          if (r && r.ok) { st.diff = ""; V.toast("Applied to the cloned repo. Run the tests to check it.", false); }
+          else { V.toast((r && r.error) || "The diff did not apply.", true); }
+        })
+        .catch(function (e) { st.busy = ""; V.toast((e && e.message) || "Could not reach the codebase tool.", true); })
+        .then(function () { drawMain(); });
+    }
+
+    // Run the repo's tests in the no-net sandbox (D3). A3-gated; the operator's click is the approval. The
+    // result is a LEAD — a passing test is not an oracle-confirmed fact — and testResultView says so.
+    function cbRunTests(m, cmdEl) {
+      const runId = String(m.run_id || "");
+      const st = C.codebase[runId] || (C.codebase[runId] = { busy: "", diff: "", test: null });
+      const command = ((cmdEl && cmdEl.value) || "").trim() || "pytest -q";
+      if (st.busy) return;
+      st.busy = "test"; st.test = null; drawMain();
+      V.postJSON(OFF("/api/codebase/test"), { chat_id: C.id || "", path: String(m.codebase_path || ""), command: command })
+        .then(function (r) {
+          st.busy = "";
+          if (r && r.ok) {
+            // D3 returns {passed, exit_code, stdout, stderr}. Show both streams; stderr carries pytest's
+            // failure summary. A passing test is a LEAD — testResultView says so.
+            const body = [String(r.stdout || ""), String(r.stderr || "")].filter(Boolean).join("\n");
+            st.test = { passed: !!r.passed, rc: (typeof r.exit_code === "number" ? r.exit_code : null), output: body };
+          } else { V.toast((r && r.error) || "The test run was refused or could not start.", true); }
+        })
+        .catch(function (e) { st.busy = ""; V.toast((e && e.message) || "Could not reach the sandbox.", true); })
+        .then(function () { drawMain(); });
     }
 
     // The gated web/API launcher for a proposed URL scan — the same launch_assessment path, url mode.

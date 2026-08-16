@@ -2101,8 +2101,18 @@ def chat_send(body: dict) -> dict:
     reply = ((f"{resolution_note} " if resolution_note else "")
              + f"Started {what} run against {target} (engagement '{launch['slug']}'). Watch it live below — "
              + how)
-    _append(chat_id, {"role": "assistant", "text": reply, "kind": "launched",
-                      "run_id": launch.get("run_id"), "slug": launch.get("slug"),
-                      "stream": launch.get("stream"), "engine": engine})
-    return {"chat_id": chat_id, "status": "running", "reply": reply, "engine": engine,
-            "run_id": launch.get("run_id"), "slug": launch.get("slug"), "stream": launch.get("stream")}
+    rec_launched = {"role": "assistant", "text": reply, "kind": "launched",
+                    "run_id": launch.get("run_id"), "slug": launch.get("slug"),
+                    "stream": launch.get("stream"), "engine": engine, "mode": mode}
+    if mode == "codebase":
+        # D2b: this launched run is over a codebase THIS chat cloned/extracted, so the interface can offer
+        # the gated edit/test affordances on it. The path rides the record for the client's convenience
+        # ONLY — every codebase route (edit/apply/test) RE-CONFINES it server-side to this chat's own
+        # `<live>/clones/<chat>/`, so a path the client tampered with is refused, never trusted.
+        rec_launched["codebase_path"] = target
+    _append(chat_id, rec_launched)
+    res = {"chat_id": chat_id, "status": "running", "reply": reply, "engine": engine, "mode": mode,
+           "run_id": launch.get("run_id"), "slug": launch.get("slug"), "stream": launch.get("stream")}
+    if mode == "codebase":
+        res["codebase_path"] = target
+    return res
