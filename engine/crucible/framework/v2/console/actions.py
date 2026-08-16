@@ -806,6 +806,135 @@ def engage_instruct(slug: str, text: str) -> dict:
     return {"ok": True, "slug": out.get("slug"), "seq": out.get("seq"), "running": running}
 
 
+# The ONLY hosts a chat clone may fetch from — the SSRF/scope boundary for git egress (red-pen BLOCK-2).
+# Public git hosts only: a `.git` URL to an internal/loopback/metadata host is NOT cloneable. This is the
+# single source of truth; chat.py's git-repo detector reads it, so detection and the clone can never drift.
+_CLONE_HOSTS = frozenset({"github.com", "www.github.com", "gitlab.com", "bitbucket.org", "codeberg.org",
+                          "git.sr.ht", "gitea.com"})
+
+
+def _repo_name(repo: str) -> str:
+    """A safe local directory name from a repo URL/scp form (last component, ``.git`` stripped, sanitised
+    to ``[A-Za-z0-9._-]``). Never a path separator, never empty."""
+    r = str(repo or "").strip().rstrip("/")
+    tail = r.split("/")[-1].split(":")[-1]
+    if tail.endswith(".git"):
+        tail = tail[:-4]
+    tail = re.sub(r"[^A-Za-z0-9._-]", "-", tail).strip("-.")
+    return (tail or "repo")[:64]
+
+
+def _repo_host(repo: str) -> str:
+    """The host of a repo URL or ``git@host:path`` scp form, lowercased (``""`` if none) — checked against
+    ``_CLONE_HOSTS`` so a clone can only egress to an allowlisted public git host."""
+    r = str(repo or "").strip()
+    if "://" in r:
+        try:
+            from urllib.parse import urlsplit
+            return (urlsplit(r).hostname or "").lower()
+        except Exception:  # noqa: BLE001
+            return ""
+    if r.startswith("git@") and ":" in r:
+        return r.split("@", 1)[1].split(":", 1)[0].lower()
+    return ""
+
+
+def _chat_killswitch_tripped(chat_id: str) -> bool:
+    """Best-effort emergency-stop for a chat clone: if the chat already projects an engagement whose
+    kill-switch is tripped, refuse the clone. Pre-engagement (no slug) → not tripped. Fail-closed on an
+    unreadable state (treated as tripped) — the same posture as the per-engagement gate."""
+    try:
+        from . import sessions
+        from ..authority.killswitch import KillSwitch
+        rec = sessions.get_session(chat_id)
+        slugs = sessions._session_engagements(rec) if isinstance(rec, dict) else []
+    except Exception:  # noqa: BLE001 — no engagement resolvable → nothing to halt
+        return False
+    for slug in slugs:
+        try:
+            if KillSwitch(str(slug)).is_tripped():
+                return True
+        except Exception:  # noqa: BLE001 — an unreadable kill-switch fails closed
+            return True
+    return False
+
+
+def clone_codebase(chat_id: str, repo: str, *, operator_present: bool = False) -> dict:
+    """Phase D — GATED clone of a git repo into a CONFINED per-chat workdir, so the chat can then read it
+    and run a gated codebase assessment on it (the cloned directory is a `codebase` target). Returns
+    ``{ok, path, name}`` or ``{ok: False, error}``; fail-closed on every axis below.
+
+    SAFETY — the sharpest surface in the chat orchestrator (egress + fetching arbitrary code):
+      * SOURCE validated by the SAME guard the remediation clone uses (``_repo_ok``): no leading-dash
+        (git-flag injection), no ``ext::``/``fd::`` transport-helper (command execution), scheme allowlist.
+      * DESTINATION-HOST allowlist (``_CLONE_HOSTS``): the clone may only egress to a public git host — a
+        ``.git`` URL to a loopback / internal / cloud-metadata host is REFUSED (SSRF boundary + a clone's
+        real scope). This is the single source of truth the message detector reads too.
+      * WORKDIR confined STRICTLY under the console clone area (abspath-confirmed), per chat.
+      * ARGV is `--`-terminated (no shell); ``--depth 1`` bounds history and ``--filter=blob:limit=50m``
+        best-effort-bounds blob size on hosts that support partial clone.
+      * GATE-OF-RECORD posture: WARDEN ``auto`` opens; WARDEN ``queue`` (git_clone is A2 → needs owner
+        approval) opens ONLY when ``operator_present`` — the operator personally typed the clone request
+        (mirrors ``CodefixSession.gate``'s operator-present leg); anything else DENIES. Plus a best-effort
+        kill-switch check for the chat's engagement. The clone is the one outbound step — gated,
+        host-scoped, argv-pinned, correlatable; never free host exec, never auto-fired unattended."""
+    from . import sessions
+    cid = ""
+    if chat_id:
+        try:
+            cid = sessions._safe_session_id(str(chat_id))
+        except ValueError:
+            return {"ok": False, "error": "unsafe chat id"}
+    repo = str(repo or "").strip()
+    try:
+        from vigil_integration.live.codefix_runner import _repo_ok
+        from vigil_integration.live.executor import subprocess_runner
+        from vigil_integration.live.wiring import default_classify
+        from vigil_integration.warden_gate import decide_tool
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"the clone toolchain is unavailable ({type(e).__name__})"}
+    ok, why = _repo_ok(repo)
+    if not ok:
+        return {"ok": False, "error": why}
+    host = _repo_host(repo)
+    if host not in _CLONE_HOSTS:            # SSRF boundary — public git hosts only (never internal/metadata)
+        return {"ok": False, "error": f"clone source host {host or '(none)'!r} is not an allowed git host "
+                                      f"(allowed: {', '.join(sorted(_CLONE_HOSTS))})"}
+    if _chat_killswitch_tripped(cid or str(chat_id or "")):
+        return {"ok": False, "error": "clone refused: the engagement kill-switch is engaged"}
+    # WARDEN tier, honored: auto opens; queue opens only when the operator personally invoked it; else deny.
+    try:
+        d = decide_tool("git_clone", classify=default_classify, floor="A2", ceiling="A1")
+    except Exception as e:  # noqa: BLE001 — a gate that cannot decide is a DENY (fail-closed)
+        return {"ok": False, "error": f"the gate could not evaluate the clone ({type(e).__name__})"}
+    outcome = getattr(d, "outcome", "deny")
+    if not (outcome == "auto" or (outcome == "queue" and operator_present)):
+        return {"ok": False, "error": "clone refused by the gate: " + getattr(d, "reason", "") +
+                (" (needs an operator-present request)" if outcome == "queue" else "")}
+    base = Path(_live_base()) / "clones" / (cid or "adhoc")
+    name = _repo_name(repo)
+    try:
+        base_abs = base.resolve()
+        dest_abs = (base_abs / name).resolve()
+        # confinement: dest must sit STRICTLY under the per-chat clone base
+        if os.path.commonpath([str(base_abs), str(dest_abs)]) != str(base_abs) or dest_abs == base_abs:
+            return {"ok": False, "error": "refused: the clone destination escaped the confined area"}
+        if dest_abs.exists():
+            shutil.rmtree(dest_abs, ignore_errors=True)   # dest_abs is confirmed under base_abs
+        base_abs.mkdir(parents=True, exist_ok=True)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"clone workdir prep failed ({type(e).__name__})"}
+    # `--` ends option parsing so the repo can never be read as a git flag; --depth 1 + blob-size filter bound it.
+    try:
+        r = subprocess_runner(["git", "clone", "--no-hardlinks", "--depth", "1", "--filter=blob:limit=50m",
+                               "--quiet", "--", repo, str(dest_abs)], timeout=300)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"git clone could not run ({type(e).__name__})"}
+    if getattr(r, "exit_code", 1) != 0:
+        return {"ok": False, "error": "git clone failed: " + (getattr(r, "stderr", "") or "")[:200]}
+    return {"ok": True, "path": str(dest_abs), "name": name}
+
+
 def launch_assessment(body: dict) -> dict:
     """Route the New-Assessment wizard body to the SAME gated CLI a hand-run engagement uses and
     spawn it. Returns ``{run_id, status, mode, slug, stream}`` or ``{error}`` (a clean, fail-closed
