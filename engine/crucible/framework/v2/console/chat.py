@@ -41,30 +41,35 @@ from . import actions
 # can just talk; an explicit `target` in the request always wins over this.
 _URL_RE = re.compile(r"https?://[^\s'\"<>]+")
 
-# Phase D: a git REPO the operator wants CLONED (vs a URL to scan). A known git host, a `.git` URL, or a
-# `git@host:path` scp form. Detected BEFORE the generic URL grab so a github URL is cloned, not scanned.
-_GIT_HOSTS = frozenset({"github.com", "www.github.com", "gitlab.com", "bitbucket.org", "codeberg.org",
-                        "git.sr.ht", "gitea.com"})
+# Phase D: a git REPO the operator wants CLONED (vs a URL to scan). Detected BEFORE the generic URL grab
+# so a github URL is cloned, not scanned. The host allowlist is `actions._CLONE_HOSTS` (single source of
+# truth, shared with the clone itself) — a `.git` URL to a non-allowlisted (internal/loopback/metadata)
+# host is NEVER routed to a clone (red-pen BLOCK-2: SSRF), it stays a scan target.
 _SCP_REPO_RE = re.compile(r"git@[A-Za-z0-9._-]+:[A-Za-z0-9._/-]+")
 
 
 def _git_repo_in_message(message: str) -> str:
-    """A git repo URL to CLONE if the message names one — a known-git-host https URL, any ``.git`` URL, or
-    a ``git@host:path`` scp form — else ``""``. A loopback / other http URL (a scan target) returns ``""``,
-    so 'scan http://127.0.0.1:8080' is never mistaken for a clone."""
+    """A git repo URL to CLONE if the message names one on an ALLOWLISTED git host (https URL or
+    ``git@host:path`` scp) — else ``""``. Matching is by HOST (``urlsplit``), never substring, so
+    ``https://github.com.evil.com/x`` and ``http://127.0.0.1:8080/github.com/x`` are NOT clones; a loopback
+    / other web URL stays a scan target."""
     from urllib.parse import urlsplit
+    hosts = actions._CLONE_HOSTS
     m = str(message or "")
     for u in _URL_RE.findall(m):
         u = u.rstrip(".,);]'\"")
-        host = ""
         try:
             host = (urlsplit(u).hostname or "").lower()
         except Exception:  # noqa: BLE001
             host = ""
-        if host in _GIT_HOSTS or u.lower().rstrip("/").endswith(".git"):
+        if host in hosts:
             return u
     sm = _SCP_REPO_RE.search(m)
-    return sm.group(0) if sm else ""
+    if sm:
+        raw = sm.group(0)
+        if raw.split("@", 1)[1].split(":", 1)[0].lower() in hosts:
+            return raw
+    return ""
 
 # ...and the same convenience for a PATH pasted into the message. Two shapes: a bare absolute path
 # (stops at whitespace) and a quoted one (so a path containing spaces survives). Both are candidates
@@ -1940,7 +1945,9 @@ def chat_send(body: dict) -> dict:
 
     clone_note = ""
     if repo:
-        cl = actions.clone_codebase(chat_id, repo)
+        # operator_present=True: the operator personally typed this clone request in the chat (the
+        # owner-present leg that opens the WARDEN A2 'queue' for a reversible, host-allowlisted fetch).
+        cl = actions.clone_codebase(chat_id, repo, operator_present=True)
         if not cl.get("ok"):
             reply = f"I couldn't clone {repo}: {cl.get('error') or 'the clone failed'}"
             _append(chat_id, {"role": "assistant", "text": reply, "kind": "refused", "error": cl.get("error")})
