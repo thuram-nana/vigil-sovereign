@@ -5575,6 +5575,9 @@
       // it survives a reload. A LOCAL choice means an uploaded codebase never leaves the machine.
       models: [], modelTier: "",
       model: "",
+      // F1 — the in-flight STREAMING turn ({text, msg}) or null. The tokens render in a transient live bubble;
+      // when the turn completes the transcript is refreshed from the persisted record and this is cleared.
+      stream: null,
       // D2b: per-run codebase working state, keyed by run_id — a proposed dev-mode diff (awaiting the
       // operator's review-and-apply), the last test result, and per-run busy flags. Kept OUT of the DOM so
       // a transcript redraw (which rebuilds every bubble from the saved records) does not drop a diff the
@@ -6615,22 +6618,119 @@
           const pick = toolPickable((C.profiles || []).find(function (p) { return p.name === C.tool; }));
           if (pick.ok) payload.tools = [pick.cap];
         }
+        // F1: a pure QUESTION turn (no explicit target/mode) STREAMS the reply token-by-token. A launch/clone
+        // turn is not streamable — send it straight through /api/chat/send. The stream endpoint itself falls
+        // back to a JSON response for anything it can't stream, and any stream error falls back too, so the
+        // turn is never lost.
+        const streamable = !payload.target && !payload.mode;
+        return streamable ? streamSend(payload, msg, outgoing) : sendViaPost(payload, outgoing);
+      }
 
-        V.postJSON(OFF("/api/chat/send"), payload).then(function (r) {
-          if (r && r.error && !r.reply) { V.toast(r.error, true); }
-          // a turn that LAUNCHED a run is a new job starting, exactly like the wizard: scope to it
-          if (r && r.run_id && r.slug) setEngagement(String(r.slug));
-          if (r && r.chat_id) adoptChatId(String(r.chat_id));
-          if (r && Array.isArray(r.hypotheses)) C.hyps = r.hypotheses;   // Phase C: show the ledger at once
-          outgoing.forEach(function (a) { a.sent = true; });
-          input.value = ""; target.value = "";
+      // Apply a turn's result to the UI (shared by the streamed + non-streamed paths).
+      function afterSendResult(r, outgoing) {
+        if (r && r.error && !r.reply) { V.toast(r.error, true); }
+        if (r && r.run_id && r.slug) setEngagement(String(r.slug));   // a LAUNCH turn scopes to its run
+        if (r && r.chat_id) adoptChatId(String(r.chat_id));
+        if (r && Array.isArray(r.hypotheses)) C.hyps = r.hypotheses;  // Phase C: show the ledger at once
+        (outgoing || []).forEach(function (a) { a.sent = true; });
+        input.value = ""; target.value = "";
+      }
+      function finishSend() {
+        C.busy = false; send.disabled = false;
+        C.stream = null; removeStreamBubble();
+        return loadChatList().then(function () { drawSessions(); drawMain(); scrollDown(); });
+      }
+      // The reliable non-streamed turn — the SAME gated launcher / question path.
+      function sendViaPost(payload, outgoing) {
+        return V.postJSON(OFF("/api/chat/send"), payload).then(function (r) {
+          afterSendResult(r, outgoing);
           return refreshTranscript();
         }).catch(function (e) { V.toast((e && e.message) || "Send failed — is the offense console up?", true); })
-          .then(function () {
-            C.busy = false; send.disabled = false;
-            return loadChatList().then(function () { drawSessions(); drawMain(); scrollDown(); });
+          .then(finishSend);
+      }
+      // F1: try the streamed endpoint; render tokens live; on done refresh from the PERSISTED record (the
+      // authoritative bubble with its lead badge / proposals / sources / coverage). Any fallback or error
+      // routes to the reliable /send path so a turn is never dropped.
+      function streamSend(payload, msg, outgoing) {
+        C.stream = { text: "", msg: msg };
+        drawStreamBubble();
+        return streamChat(payload, function (tok) { C.stream.text += tok; drawStreamBubble(); })
+          .then(function (res) {
+            if (res && res.fallback) { C.stream = null; removeStreamBubble(); return sendViaPost(payload, outgoing); }
+            afterSendResult(res, outgoing);
+            return refreshTranscript().then(finishSend);
+          })
+          .catch(function () {
+            // never lose the turn on a streaming hiccup — fall back to the reliable path
+            C.stream = null; removeStreamBubble();
+            return sendViaPost(payload, outgoing);
           });
       }
+
+      // F1 — the fetch-stream reader. POSTs the turn to /api/chat/stream and parses the SSE frames: a
+      // "text/event-stream" response streams `token`/`done` events (onToken per delta, resolves with the
+      // final result); a JSON response (the server couldn't stream this turn) resolves with {fallback:true}.
+      // Same credentials the rest of the page uses (custom header + token); the browser sets Sec-Fetch-Site.
+      function streamChat(payload, onToken) {
+        const hh = { "X-Requested-With": "vigil-ui", "Content-Type": "application/json" };
+        const t = V.token(); if (t) hh["X-SIGIL-Token"] = t;
+        return fetch(OFF("/api/chat/stream"), { method: "POST", headers: hh, credentials: "same-origin",
+            cache: "no-store", body: JSON.stringify(payload) }).then(function (resp) {
+          const ct = (resp.headers.get("Content-Type") || "").toLowerCase();
+          if (ct.indexOf("text/event-stream") < 0) {
+            // not streamable (fallback) or an error status — read JSON and signal fallback
+            return resp.json().then(function (j) { return (j && j.fallback) ? { fallback: true } : j; })
+              .catch(function () { return { fallback: true }; });
+          }
+          if (!resp.body || !resp.body.getReader) return { fallback: true };   // very old browser — use /send
+          const reader = resp.body.getReader();
+          const dec = new TextDecoder();
+          let buf = "";
+          let final = null;
+          function pump() {
+            return reader.read().then(function (r) {
+              if (r.done) return final || {};
+              buf += dec.decode(r.value, { stream: true });
+              let idx;
+              while ((idx = buf.indexOf("\n\n")) >= 0) {
+                const frame = buf.slice(0, idx); buf = buf.slice(idx + 2);
+                const dl = frame.split("\n").filter(function (l) { return l.indexOf("data:") === 0; });
+                for (let i = 0; i < dl.length; i++) {
+                  let ev; try { ev = JSON.parse(dl[i].slice(5).trim()); } catch (e) { continue; }
+                  if (ev && ev.event === "token") { if (onToken) onToken(String(ev.text || "")); }
+                  else if (ev && ev.event === "done") { final = ev.result || {}; }
+                }
+              }
+              return pump();
+            });
+          }
+          return pump();
+        });
+      }
+
+      // A transient live bubble for the streaming turn: the operator's message + the reply-so-far with a
+      // caret. Honest during streaming — it wears the same "Lead" register as any model answer. Replaced by
+      // the persisted record on refresh. Text is set via textContent (never innerHTML) — XSS-safe.
+      function drawStreamBubble() {
+        const l = V.$("#chat-list"); if (!l || !C.stream) return;
+        let wrap = V.$("#chat-stream-wrap");
+        if (!wrap) {
+          const textEl = h("div#chat-stream-text", { style: { whiteSpace: "pre-wrap", wordBreak: "break-word" } }, "");
+          const box = h("div", { style: { maxWidth: "80%", padding: "10px 12px", borderRadius: "var(--r-3)",
+            background: "var(--bg-2)", color: "var(--text-0)", border: "1px solid var(--border)" } },
+            [h("div", { style: { marginBottom: "6px" } },
+               h("span.shield.lead", null, [V.icon("info"), "Lead — streaming…"])), textEl]);
+          wrap = h("div#chat-stream-wrap", null, [
+            bubble({ role: "user", text: C.stream.msg }),
+            h("div", { style: { display: "flex", justifyContent: "flex-start", margin: "8px 0" } }, box),
+          ]);
+          l.appendChild(wrap);
+        }
+        const te = V.$("#chat-stream-text");
+        if (te) te.textContent = (C.stream.text || "") + " ▌";
+        l.scrollTop = l.scrollHeight;
+      }
+      function removeStreamBubble() { const w = V.$("#chat-stream-wrap"); if (w && w.parentNode) w.parentNode.removeChild(w); }
 
       V.mount(host, [
         controls,

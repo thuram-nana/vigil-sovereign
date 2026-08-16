@@ -1727,28 +1727,12 @@ def _reason_local(chat_id: str, question: str, entry: dict, reason_mode: str) ->
     return _reason_finish(chat_id, text, view, notes, coverage)
 
 
-def _reason(chat_id: str, question: str, *, reason_mode: str = "ask", model: str = "") -> dict:
-    """ONE model call over the operator's question + the redacted session context + the fenced attachment
-    block (+ image blocks). Returns ``{ok, reply, notes, coverage}``, ``{ok: False, need_key: True, note}``
-    when no key is present, or ``{ok: False, error}``. ``coverage`` is how many files of the attached
-    codebase actually went into this call and how many did not — the model is told the same two numbers,
-    so it cannot describe a partial read as a review of the whole tree.
-
-    E3 — MODEL SOVEREIGNTY: ``model`` is the operator's per-session choice. A LOCAL choice dispatches to
-    ``_reason_local`` (provider layer, no cloud failover — nothing leaves the machine); a cloud Claude choice
-    (or the default) takes the direct-SDK path below with the chosen model string.
-
-    SOVEREIGNTY: this is a model egress, so it passes the SAME ladder that governs the URK backend registry
-    and ``actions.terminal_propose`` — applied BEFORE the SDK is imported or a client is built. Under
-    AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD nothing leaves the host and the gated launcher is
-    unaffected. Fail-closed: a policy that cannot be evaluated REFUSES rather than egresses."""
-    entry = _model_entry(model)
-    if entry.get("kind") == "local":
-        return _reason_local(chat_id, question, entry, reason_mode)
-
-    # SOVEREIGNTY BEFORE THE KEY (red-pen LOW): check the tier permits this cloud backend FIRST, so a
-    # forbidden tier returns the honest tier refusal even when no key is set — rather than "add a key",
-    # which would imply a key is all that stands between the operator and a cloud egress the tier forbids.
+def _cloud_gate_and_key() -> dict:
+    """The security gate for ANY direct-Anthropic cloud model call — blocking OR streaming: the sovereignty
+    ladder (checked BEFORE the key, so a forbidden tier gives the honest tier refusal, not "add a key"), then
+    the API key, then the SDK import. Returns ``{ok: True, anthropic, key}`` or a fail-closed
+    ``{ok: False, need_key?/error}``. ONE home so the streaming path cannot bypass the ladder the blocking
+    path enforces."""
     from ..common.errors import SovereigntyViolation
     from ..kernel import sovereignty as _sovereignty
     try:
@@ -1768,6 +1752,112 @@ def _reason(chat_id: str, question: str, *, reason_mode: str = "ask", model: str
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"the Claude SDK is not installed ({type(e).__name__}); the gated "
                                       f"assessment still runs."}
+    return {"ok": True, "anthropic": anthropic, "key": key}
+
+
+def _reason_stream_cloud(chat_id: str, question: str, *, reason_mode: str, model: str, emit) -> dict:
+    """F1 — the CLOUD reasoning path, streamed. Same security gate + context + system/thinking as ``_reason``
+    (shared ``_cloud_gate_and_key`` + ``_assemble_reason_parts`` + ``_reason_finish``), but the single
+    ``messages.create`` becomes ``messages.stream``: each text delta is handed to ``emit`` as it arrives.
+    Returns the SAME ``{ok, reply, notes, coverage, proposals_raw, sources, hypotheses}`` shape ``_reason``
+    returns (via ``_reason_finish``), so the caller's finish/persist is identical to the non-streamed turn.
+    Images/history/adaptive-thinking are supported; on any stream error it returns a fail-closed dict (the
+    caller falls back to an honest reply) — it NEVER retries text-only silently (that nicety is the blocking
+    path's; a streamed error is surfaced honestly)."""
+    _gk = _cloud_gate_and_key()
+    if not _gk.get("ok"):
+        return _gk
+    anthropic, key = _gk["anthropic"], _gk["key"]
+    parts, coverage, notes, view = _assemble_reason_parts(chat_id, question)
+    images, image_note = _image_blocks(chat_id)
+    if image_note:
+        notes.append(image_note)
+    content: list = [{"type": "text", "text": "\n\n".join(parts)}]
+    if images:
+        content.append({"type": "text", "text": "The attached images follow, in the order the attachment "
+                                                "block lists them."})
+        content.extend(images)
+    try:
+        from vigil_core import token_budget as _tb
+    except Exception:  # noqa: BLE001
+        _tb = None
+    _mx = 16000
+    if _tb is not None:
+        try:
+            _tb.throttle("chat")
+            _mx = _tb.clamp_output("chat", 16000)
+        except Exception:  # noqa: BLE001
+            _tb = None
+    history = _history_messages(chat_id)
+    if history:
+        notes.append(f"continuing this conversation with {len(history)} earlier turn(s) in context.")
+    rmode = _resolve_reason_mode(reason_mode)
+    system = _CHAT_SYSTEM + _REASON_MODE_SUFFIX.get(rmode, "")
+    thinks = rmode in _REASON_MODE_THINKS
+    if thinks:
+        notes.append(f"{rmode} mode — reasoning with extended thinking.")
+    entry = _model_entry(model)
+    kwargs = {"model": entry["model"], "max_tokens": _mx, "system": system,
+              "messages": history + [{"role": "user", "content": content}]}
+    if thinks:
+        kwargs["thinking"] = {"type": "adaptive"}
+    client = anthropic.Anthropic(api_key=key, timeout=600.0) if thinks else anthropic.Anthropic(api_key=key)
+    chunks: list[str] = []
+    try:
+        with client.messages.stream(**kwargs) as stream:
+            for delta in stream.text_stream:            # only text deltas; thinking blocks are excluded
+                if delta:
+                    chunks.append(delta)
+                    try:
+                        emit({"event": "token", "text": delta})
+                    except Exception:  # noqa: BLE001 — a client hiccup never aborts the model read
+                        pass
+            final = stream.get_final_message()
+    except Exception as e:  # noqa: BLE001 — a streamed error is an honest refusal; never surface the key
+        return {"ok": False, "error": f"the model could not be reached ({type(e).__name__}); the gated "
+                                      f"assessment still runs."}
+    if _tb is not None:
+        try:
+            _tb.record_usage("chat", getattr(final, "usage", None))
+        except Exception:  # noqa: BLE001
+            pass
+    if getattr(final, "stop_reason", None) == "refusal":
+        return {"ok": False, "error": "the model declined this request. Rephrase it, or run the gated "
+                                      "assessment over the same files for oracle-confirmed findings."}
+    text = "".join(chunks).strip()
+    if not text:                                        # fall back to the final message's text blocks
+        text = "".join(getattr(b, "text", "") for b in (getattr(final, "content", None) or [])
+                       if getattr(b, "type", None) == "text").strip()
+    if not text:
+        return {"ok": False, "error": "the model returned nothing usable; the gated assessment still runs."}
+    return _reason_finish(chat_id, text, view, notes, coverage)
+
+
+def _reason(chat_id: str, question: str, *, reason_mode: str = "ask", model: str = "") -> dict:
+    """ONE model call over the operator's question + the redacted session context + the fenced attachment
+    block (+ image blocks). Returns ``{ok, reply, notes, coverage}``, ``{ok: False, need_key: True, note}``
+    when no key is present, or ``{ok: False, error}``. ``coverage`` is how many files of the attached
+    codebase actually went into this call and how many did not — the model is told the same two numbers,
+    so it cannot describe a partial read as a review of the whole tree.
+
+    E3 — MODEL SOVEREIGNTY: ``model`` is the operator's per-session choice. A LOCAL choice dispatches to
+    ``_reason_local`` (provider layer, no cloud failover — nothing leaves the machine); a cloud Claude choice
+    (or the default) takes the direct-SDK path below with the chosen model string.
+
+    SOVEREIGNTY: this is a model egress, so it passes the SAME ladder that governs the URK backend registry
+    and ``actions.terminal_propose`` — applied BEFORE the SDK is imported or a client is built. Under
+    AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD nothing leaves the host and the gated launcher is
+    unaffected. Fail-closed: a policy that cannot be evaluated REFUSES rather than egresses."""
+    entry = _model_entry(model)
+    if entry.get("kind") == "local":
+        return _reason_local(chat_id, question, entry, reason_mode)
+
+    # The security gate for a direct-Anthropic cloud call (sovereignty ladder → key → SDK), shared verbatim
+    # with the STREAMING path so a stream can never bypass the ladder the blocking path enforces.
+    _gk = _cloud_gate_and_key()
+    if not _gk.get("ok"):
+        return _gk
+    anthropic, key = _gk["anthropic"], _gk["key"]
 
     # The shared TEXT context (question + session context + engagement shape + attached material with its
     # coverage line) — the SAME builder the local path uses, so the two can never drift. Images are cloud-only
@@ -2083,6 +2173,126 @@ def _resolve_target(chat_id: str, target: str, mode: str) -> dict:
                      f"regular readable file). Give me a folder, an archive, or a URL."}
 
 
+def _finish_question_turn(chat_id: str, out: dict, offer: dict) -> dict:
+    """Shared post-processing for a SUCCESSFUL reasoning turn — used by both chat_send (blocking) and the
+    streaming path (F1), so a streamed answer and a non-streamed one can NEVER diverge. ``out`` is the
+    ``{ok, reply, notes, coverage, proposals_raw, sources, hypotheses}`` shape that ``_reason`` and
+    ``_reason_finish`` both return. Appends the coverage footer, validates the proposals, records + reconciles
+    the hypotheses, PERSISTS the answer record (so a reload redraws it identically), and returns the response
+    dict."""
+    coverage = out.get("coverage") or {}
+    reply = out["reply"] + _answer_footer(out.get("notes") or [], coverage, offer)
+    proposals = _validate_proposals(chat_id, out.get("proposals_raw") or [], offer)
+    sources = out.get("sources") or []      # already validated in _reason (A2)
+    hyps_open: list = []
+    try:
+        from . import hypotheses as _hyp
+        for hraw in (out.get("hypotheses") or []):
+            try:
+                _hyp.record(chat_id, hraw.get("statement", ""),
+                            would_confirm=hraw.get("would_confirm", ""),
+                            would_refute=hraw.get("would_refute", ""),
+                            bug_class=hraw.get("bug_class", ""), surface=hraw.get("surface", ""),
+                            source="chat")
+            except Exception:  # noqa: BLE001 — a bad single hypothesis is skipped, not fatal
+                pass
+        _hyp.reconcile_confirmed(chat_id, _confirmed_facts(chat_id))
+        hyps_open = _hyp.list_for(chat_id)
+    except Exception:  # noqa: BLE001 — the ledger is additive; never sink a chat answer
+        hyps_open = []
+    rec = {"role": "assistant", "text": reply, "kind": "answer", "grounding": "lead"}
+    if offer:
+        rec["scan_target"] = str(offer.get("target") or "")[:512]
+    if coverage:
+        rec["coverage"] = coverage
+    if proposals:
+        rec["proposals"] = proposals
+    if sources:
+        rec["sources"] = sources
+    _append(chat_id, rec)
+    res = {"chat_id": chat_id, "status": "answer", "reply": reply, "grounding": "lead",
+           "notes": out.get("notes") or [], "stream": "none"}
+    if coverage:
+        res["coverage"] = coverage
+    if offer:
+        res["scan_offer"] = offer
+    if proposals:
+        res["proposals"] = proposals
+    if sources:
+        res["sources"] = sources
+    if hyps_open:
+        res["hypotheses"] = hyps_open
+    return res
+
+
+def _finish_failed_reason(chat_id: str, out: dict, offer: dict) -> dict:
+    """Shared handling for a reasoning turn the model could not answer (no key / sovereign refusal / SDK or
+    model error). Persists the HONEST reply and keeps the deterministic gated scan on offer. Used by both
+    chat_send and the streaming path."""
+    status = "need_key" if out.get("need_key") else "unavailable"
+    reply = str(out.get("note") or out.get("error") or "I can't read the attachments right now.")
+    _append(chat_id, {"role": "assistant", "text": reply, "kind": status})
+    res = {"chat_id": chat_id, "status": status, "reply": reply, "stream": "none"}
+    if out.get("error"):
+        res["error"] = out["error"]
+    if offer:
+        res["scan_offer"] = offer
+    return res
+
+
+def chat_stream(body: dict, emit) -> dict:
+    """F1 — a STREAMED chat turn. Handles ONLY a pure QUESTION turn (reason over attachments / linked chats /
+    an ongoing conversation), streaming the cloud model's tokens through ``emit`` as they arrive; it then runs
+    the SAME finish + persist as chat_send (``_finish_question_turn``), so a streamed record is byte-identical
+    to a non-streamed one and a reload redraws it the same.
+
+    A turn that would LAUNCH a run or CLONE a repo is NOT streamable here: chat_stream returns
+    ``{"stream": False, "fallback": True}`` WITHOUT appending anything, and the caller re-POSTs to
+    /api/chat/send (the launcher path). Detection MIRRORS chat_send's target extraction (explicit mode /
+    target field / a git repo / a URL / a path in the message) and is conservative — when in doubt it falls
+    back, so at worst a streamable turn is answered non-streamed, never a launch mis-streamed. A LOCAL model
+    pick is answered NON-streamed (the provider layer is not a token stream) but still through this path, so
+    its sovereignty guarantee (no egress) is unchanged. ``emit(event_dict)`` sends one SSE event."""
+    chat_id = _safe_chat_id(str(body.get("chat_id") or "").strip() or actions._new_run_id())
+    message = str(body.get("message") or "").strip()[:_MAX_MSG]
+    model = str(body.get("model") or "").strip()[:64]
+    effort = str(body.get("effort") or "").strip().lower()
+    # LAUNCH/CLONE intent ⇒ not streamable here (mirror chat_send's extraction). Checked BEFORE any append,
+    # so a fallback never double-records the user message (chat_send appends it on the re-POST).
+    fallback = {"stream": False, "fallback": True, "chat_id": chat_id}
+    if not message:
+        return fallback
+    if str(body.get("mode") or "").strip():                 # any explicit mode is a launch intent
+        return fallback
+    if str(body.get("target") or "").strip():
+        return fallback
+    if _git_repo_in_message(message) or _URL_RE.search(message) or _path_in_message(message):
+        return fallback
+    _ensure_session(chat_id)
+    if not _reason_wanted(chat_id, body):                    # nothing to reason over ⇒ /send's need-target reply
+        return fallback
+    # COMMIT to a streamed question turn. Record the user message exactly as chat_send does for a question
+    # turn (no target, no mode), so the transcript is identical.
+    _append(chat_id, {"role": "user", "text": message, "target": "", "mode": "", "model": model,
+                      "effort": effort})
+    offer = _scan_offer(chat_id)
+    rmode = _resolve_reason_mode(body.get("reason_mode"))
+    entry = _model_entry(model)
+    if entry.get("kind") == "local":
+        # a local pick is not a token stream — answer it in one shot through the SAME sovereignty-gated path
+        # (_reason → _reason_local, no cloud fallback). The UI still shows the final answer; just not typed.
+        out = _reason(chat_id, message, reason_mode=rmode, model=model)
+    else:
+        out = _reason_stream_cloud(chat_id, message, reason_mode=rmode, model=model, emit=emit)
+    res = _finish_question_turn(chat_id, out, offer) if out.get("ok") \
+        else _finish_failed_reason(chat_id, out, offer)
+    try:
+        emit({"event": "done", "result": res})
+    except Exception:  # noqa: BLE001 — the record is already persisted; a client hangup never breaks the turn
+        pass
+    return res
+
+
 def chat_send(body: dict) -> dict:
     """One chat turn. Persists the user message, resolves the target, then — if a target + mode resolve —
     launches the SAME gated assessment a hand-run engagement uses and persists the assistant reply with
@@ -2182,78 +2392,12 @@ def chat_send(body: dict) -> dict:
             # through the provider layer with no cloud failover (nothing leaves the machine).
             out = _reason(chat_id, message, reason_mode=_resolve_reason_mode(body.get("reason_mode")),
                           model=model)
+            # HOW MUCH WAS READ IS PART OF THE ANSWER, the model-proposed chips, the "grounded in" legend, the
+            # hypothesis ledger, and the persisted record — all live in _finish_question_turn now, SHARED with
+            # the streaming path so the two answers can never diverge. A failed reason is handled the same way.
             if out.get("ok"):
-                # HOW MUCH WAS READ IS PART OF THE ANSWER. The model reads a budget-limited selection
-                # because its context is finite; the gated scan walks the whole tree. The footer states
-                # the counts and offers the scan, and it is appended to the TEXT because the interface
-                # redraws the transcript from the saved records — a caveat carried only alongside the
-                # reply is gone by the next redraw, and a partial read that stops saying so reads from
-                # then on exactly like a complete one.
-                coverage = out.get("coverage") or {}
-                reply = out["reply"] + _answer_footer(out.get("notes") or [], coverage, offer)
-                # Validate any model-proposed next-actions against the fixed vocabulary (A1). These are
-                # inert suggestion chips; the interface routes a click through the same gated path a
-                # hand-run uses. A codebase-scan proposal uses the server-computed offer target, never
-                # anything the model named.
-                proposals = _validate_proposals(chat_id, out.get("proposals_raw") or [], offer)
-                sources = out.get("sources") or []      # already validated in _reason (A2)
-                # Phase C: RECORD any hypotheses the model minted, then auto-close the ones a confirmed
-                # FACT now settles (precise bug_class+surface match). Best-effort — a store hiccup never
-                # breaks the turn. The reply then carries the live ledger (open first).
-                hyps_open: list = []
-                try:
-                    from . import hypotheses as _hyp
-                    for hraw in (out.get("hypotheses") or []):
-                        try:
-                            _hyp.record(chat_id, hraw.get("statement", ""),
-                                        would_confirm=hraw.get("would_confirm", ""),
-                                        would_refute=hraw.get("would_refute", ""),
-                                        bug_class=hraw.get("bug_class", ""), surface=hraw.get("surface", ""),
-                                        source="chat")
-                        except Exception:  # noqa: BLE001 — a bad single hypothesis is skipped, not fatal
-                            pass
-                    _hyp.reconcile_confirmed(chat_id, _confirmed_facts(chat_id))
-                    hyps_open = _hyp.list_for(chat_id)
-                except Exception:  # noqa: BLE001 — the ledger is additive; never sink a chat answer
-                    hyps_open = []
-                # The scan target rides the RECORD, not just the response, so the offer survives a reload.
-                # A transcript is re-read to redraw the screen; an offer that lived only in the live reply
-                # would vanish on refresh and the lead would lose its one route to becoming a fact. The
-                # proposals and the "grounded in" legend ride the record for the same reason.
-                rec = {"role": "assistant", "text": reply, "kind": "answer", "grounding": "lead"}
-                if offer:
-                    rec["scan_target"] = str(offer.get("target") or "")[:512]
-                if coverage:
-                    rec["coverage"] = coverage
-                if proposals:
-                    rec["proposals"] = proposals
-                if sources:
-                    rec["sources"] = sources
-                _append(chat_id, rec)
-                res = {"chat_id": chat_id, "status": "answer", "reply": reply, "grounding": "lead",
-                       "notes": out.get("notes") or [], "stream": "none"}
-                if coverage:
-                    res["coverage"] = coverage
-                if offer:
-                    res["scan_offer"] = offer
-                if proposals:
-                    res["proposals"] = proposals
-                if sources:
-                    res["sources"] = sources
-                if hyps_open:
-                    res["hypotheses"] = hyps_open
-                return res
-            # No key / sovereign refusal / SDK or model error — say so HONESTLY rather than pretending the
-            # operator forgot a target, and keep the deterministic path (the gated scan) on offer.
-            status = "need_key" if out.get("need_key") else "unavailable"
-            reply = str(out.get("note") or out.get("error") or "I can't read the attachments right now.")
-            _append(chat_id, {"role": "assistant", "text": reply, "kind": status})
-            res = {"chat_id": chat_id, "status": status, "reply": reply, "stream": "none"}
-            if out.get("error"):
-                res["error"] = out["error"]
-            if offer:
-                res["scan_offer"] = offer
-            return res
+                return _finish_question_turn(chat_id, out, offer)
+            return _finish_failed_reason(chat_id, out, offer)
 
         reply = ("Tell me what to test and give me a target — a URL like http://127.0.0.1:8080 for a "
                  "web / API / infra target, or a path to a codebase. I'll launch a gated, oracle-confirmed "
