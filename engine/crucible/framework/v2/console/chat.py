@@ -1346,7 +1346,40 @@ def _has_api_key() -> bool:
     return isinstance(key, str) and bool(key.strip())
 
 
-def _reason(chat_id: str, question: str) -> dict:
+# ---------------------------------------------------------------------------
+# CHAT REASONING MODES (Phase B-reason). The chat reply is a LEAD either way; the mode changes HOW hard
+# the model reasons, not what counts as truth. "ask" is the default and byte-identical to the prior
+# single-shot behaviour. "research" and "plan" turn on EXTENDED THINKING (adaptive) and steer the system
+# prompt — research = exhaustive+cited enumeration incl. what was NOT examined; plan = an ordered
+# confirm/refute plan + hypotheses + the gated next actions that would execute it. Nothing here mints a
+# fact or starts anything — deeper reasoning still ends at a proposal the operator clicks through the gate.
+# ---------------------------------------------------------------------------
+_REASON_MODES = frozenset({"ask", "research", "plan"})
+_REASON_MODE_THINKS = frozenset({"research", "plan"})   # these turn on extended (adaptive) thinking
+_REASON_MODE_SUFFIX = {
+    "ask": "",
+    "research": (
+        "\n\nRESEARCH MODE: be exhaustive and systematic. Enumerate what you examined AND what you did "
+        "not; give every relevant observation with its citation; end with the concrete open questions and, "
+        "for each, the exact evidence (a gated run, a specific file, an oracle) that would settle it. Depth "
+        "over brevity — but never invent to fill a gap: an honest 'the material does not show this' is the "
+        "correct answer."),
+    "plan": (
+        "\n\nPLAN MODE: before any conclusion, produce a short ORDERED PLAN to confirm-or-refute the "
+        "concern — each step: what to do, what would confirm it, what would refute it. Then state the "
+        "leading hypotheses (each with its confirm/refute test). Prefer proposing the gated next actions "
+        "that would execute the plan (a scan of the attached code, a URL scan, opening findings). It is "
+        "still a lead, not a fact; the operator runs the plan through the gate."),
+}
+
+
+def _resolve_reason_mode(raw) -> str:
+    """Normalise an operator-supplied reasoning mode to one of ``_REASON_MODES`` (default 'ask')."""
+    m = str(raw or "").strip().lower()
+    return m if m in _REASON_MODES else "ask"
+
+
+def _reason(chat_id: str, question: str, *, reason_mode: str = "ask") -> dict:
     """ONE Claude call over the operator's question + the redacted session context + the fenced attachment
     block (+ image blocks). Returns ``{ok, reply, notes, coverage}``, ``{ok: False, need_key: True, note}``
     when no key is present, or ``{ok: False, error}``. ``coverage`` is how many files of the attached
@@ -1437,13 +1470,25 @@ def _reason(chat_id: str, question: str) -> dict:
     if history:
         notes.append(f"continuing this conversation with {len(history)} earlier turn(s) in context.")
 
+    # Reasoning mode (default "ask" → byte-identical to the prior call). research/plan add extended
+    # thinking and steer the system prompt; a thinking call can run longer, so give the client a generous
+    # timeout (non-streaming; streaming is a later slice). Thinking blocks come back as type "thinking"
+    # and are already excluded when we read only type=="text" below — the reply is the answer, not the
+    # scratchpad.
+    reason_mode = _resolve_reason_mode(reason_mode)
+    system = _CHAT_SYSTEM + _REASON_MODE_SUFFIX.get(reason_mode, "")
+    thinks = reason_mode in _REASON_MODE_THINKS
+    if thinks:
+        notes.append(f"{reason_mode} mode — reasoning with extended thinking.")
+
     def _call(blocks):
-        client = anthropic.Anthropic(api_key=key)
-        return client.messages.create(
-            model="claude-opus-5", max_tokens=_mx,
-            system=_CHAT_SYSTEM,
-            messages=history + [{"role": "user", "content": blocks}],
-        )
+        client = anthropic.Anthropic(api_key=key, timeout=600.0) if thinks \
+            else anthropic.Anthropic(api_key=key)
+        kwargs = {"model": "claude-opus-5", "max_tokens": _mx, "system": system,
+                  "messages": history + [{"role": "user", "content": blocks}]}
+        if thinks:
+            kwargs["thinking"] = {"type": "adaptive"}   # Opus 5 adaptive thinking (budget_tokens rejected)
+        return client.messages.create(**kwargs)
 
     try:
         resp = _chat_call_with_backoff(_call, content)   # auto-heal a transient blip before giving up
@@ -1498,6 +1543,8 @@ def _reason_wanted(chat_id: str, body: dict) -> bool:
     behaviour (the ask-for-a-target reply), so no existing flow changes underneath the operator."""
     if body.get("reason") is True:
         return True
+    if _resolve_reason_mode(body.get("reason_mode")) != "ask":
+        return True                    # picking Research/Plan is an explicit ask to reason this turn
     if _manifests(chat_id):
         return True
     # A chat the operator has ALREADY been talking with keeps conversing: a follow-up continues the
@@ -1774,7 +1821,7 @@ def chat_send(body: dict) -> dict:
         # GATED real scan of those same files, which the interface starts through launch_assessment.
         offer = _scan_offer(chat_id)
         if _reason_wanted(chat_id, body):
-            out = _reason(chat_id, message)
+            out = _reason(chat_id, message, reason_mode=_resolve_reason_mode(body.get("reason_mode")))
             if out.get("ok"):
                 # HOW MUCH WAS READ IS PART OF THE ANSWER. The model reads a budget-limited selection
                 # because its context is finite; the gated scan walks the whole tree. The footer states

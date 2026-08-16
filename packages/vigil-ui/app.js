@@ -5550,6 +5550,9 @@
       // the composer's own selections, kept OUT of the DOM so a redraw after a send does not quietly
       // reset the mode (and with it the picked tool) back to "auto" under the operator
       mode: "", tool: "",
+      // how hard to reason on THIS reply (Ask / Research / Plan). "ask" = default, byte-identical to the
+      // prior single-shot behaviour; research/plan turn on extended thinking backend-side.
+      reasonMode: "ask",
     };
 
     V.mount(screen, [
@@ -6228,6 +6231,15 @@
       function syncToolRow() { toolRow.style.display = C.mode === "tool" ? "flex" : "none"; }
       modeSel.addEventListener("change", function () { C.mode = modeSel.value; syncToolRow(); });
       syncToolRow();
+      // How hard to reason on THIS reply. Ask = quick (default, unchanged). Research = exhaustive + cited,
+      // with extended thinking. Plan = an ordered confirm/refute plan + hypotheses + gated next actions.
+      // The reply is a LEAD in every mode; the mode changes depth, not what counts as truth.
+      const reasonSel = h("select.input", { style: { minWidth: "150px" },
+        title: "How hard to reason on the reply — Ask (quick) · Research (exhaustive, deep thinking) · Plan (a confirm/refute plan)" },
+        [["ask", "Reasoning: Ask"], ["research", "Research (deep)"], ["plan", "Plan"]].map(function (p) {
+          const o = h("option", { value: p[0] }, p[1]); if (p[0] === C.reasonMode) o.selected = true; return o;
+        }));
+      reasonSel.addEventListener("change", function () { C.reasonMode = reasonSel.value; });
       const send = h("button.btn.primary", { onClick: doSend }, [V.icon("bolt"), "Send"]);
       input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); } });
 
@@ -6260,7 +6272,8 @@
 
       function reallySend(msg, outgoing) {
         C.busy = true; send.disabled = true;
-        const payload = { chat_id: C.id || undefined, message: msg, target: (target.value || "").trim(), mode: C.mode || undefined };
+        const payload = { chat_id: C.id || undefined, message: msg, target: (target.value || "").trim(),
+          mode: C.mode || undefined, reason_mode: (C.reasonMode && C.reasonMode !== "ask") ? C.reasonMode : undefined };
         // No per-message attachment list: the console answers over everything the chat HOLDS, so a
         // list here would be decoration that reads like a control. Removing an attachment is the control.
         if (C.mode === "tool" && C.tool) {
@@ -6288,7 +6301,7 @@
         list,
         h("div#chat-attach"),
         h("div#chat-links"),
-        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } }, [target, modeSel]),
+        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } }, [target, modeSel, reasonSel]),
         toolRow,
         h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "flex-end", flexWrap: "wrap" } }, [attachBtn, fileInput, input, send]),
         h("div.hint", { style: { marginTop: "6px" } },
