@@ -6083,6 +6083,19 @@
           h("button.btn.sm", { onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(m.run_id); } }, [V.icon("book"), "Open live view"]),
           m.slug ? h("span.pill.sm", null, m.slug) : null,
         ]));
+        // B1: steer a RUNNING agentic engagement mid-flight. Only the integration engine consumes
+        // operator messages (the scanner has no such seam), so the affordance appears only for it — an
+        // honest control, never a dead one. The message is advisory: the engine folds it into its next
+        // think; it re-runs no completed tool and fires nothing ungated.
+        if (m.engine === "integration" && m.slug) {
+          var steer = h("input.input", { type: "text", placeholder: "Add a message to this run… (e.g. also check the password-reset flow)",
+            style: { flex: "1 1 auto", minWidth: "0" } });
+          function sendSteer() { injectIntoRun(String(m.slug), steer); }
+          steer.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); sendSteer(); } });
+          kids.push(h("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center" } }, [
+            steer, h("button.btn.sm", { onClick: sendSteer }, [V.icon("play"), "Send to the run"]),
+          ]));
+        }
       }
       const scanPath = isLead ? scanTargetOf(m) : "";
       if (scanPath) {
@@ -6159,6 +6172,22 @@
                   stream: String((m && m.stream) || ""), status: "running" };
       PBOX.ui.open = true; PBOX.ui.dismissed = false; pboxSaveUI();
       pboxFollow(run);
+    }
+
+    // B1: add a message to a running engagement. Advisory mid-run steering — the engine folds it into its
+    // next think (it re-runs no completed tool, relaxes no scope, fires nothing ungated). Only offered for
+    // the integration engine, which is the one that drains this queue.
+    function injectIntoRun(slug, inputEl) {
+      var text = ((inputEl && inputEl.value) || "").trim();
+      if (!slug || !text) return;
+      V.postJSON(OFF("/api/instruct"), { slug: slug, text: text }).then(function (r) {
+        if (r && r.ok) {
+          V.toast("Sent to the run — it steers on its next step.", false);
+          if (inputEl) inputEl.value = "";
+        } else {
+          V.toast((r && r.error) || "Could not send the message to the run.", true);
+        }
+      }).catch(function (e) { V.toast((e && e.message) || "Could not reach the run — is the offense console up?", true); });
     }
 
     // The gated web/API launcher for a proposed URL scan — the same launch_assessment path, url mode.

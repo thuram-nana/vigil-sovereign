@@ -753,11 +753,46 @@ def _integration_engage_cmd(target: str, slug: str, session_id: str, scan_mode: 
         return None
     from . import sessions
     conns = ",".join(sessions.connections_of(session_id))
+    # Pin --base-dir to the console's live dir so the engine's operator-instruction queue
+    # (drain(slug, base=config.base_dir)) is the SAME file the console enqueues to in `engage_instruct`
+    # (B1 mid-run steering). Absolute, so it holds regardless of the child's cwd / $VIGIL_LIVE_DIR default.
     cmd = [vigil, "engage", target, "--slug", slug, "--scope", "127.0.0.1",
-           "--session", session_id, "--max-iterations", str(_GRAPH_ITERS.get(scan_mode, 12))]
+           "--session", session_id, "--base-dir", _live_base(),
+           "--max-iterations", str(_GRAPH_ITERS.get(scan_mode, 12))]
     if conns:
         cmd += ["--connect", conns]
     return cmd
+
+
+def _live_base() -> str:
+    """The console's live dir as an ABSOLUTE path — the single base shared by the integration engage
+    run's instruction queue and the console's `engage_instruct` enqueue, so a mid-run message reaches the
+    running engine's drain. Mirrors `sessions._live_dir()` ($VIGIL_LIVE_DIR or .vigil-live), resolved."""
+    from . import sessions
+    try:
+        return str(sessions._live_dir().resolve())
+    except Exception:  # noqa: BLE001
+        return str(Path(os.environ.get("VIGIL_LIVE_DIR") or ".vigil-live").resolve())
+
+
+def engage_instruct(slug: str, text: str) -> dict:
+    """B1 — enqueue an operator message for a RUNNING integration `vigil engage` (mid-run steering). The
+    engine drains it via its operator_messages seam and folds it into the NEXT think as advisory context;
+    it never re-runs a completed tool, relaxes scope, or fires anything ungated (an instruction can only
+    change what the model READS). Offense-plane, in-process — the console already imports
+    `vigil_integration.live.*`, and the queue is stdlib-only + append-only. Returns {ok, slug, seq} or a
+    clean {ok: False, error}; fail-closed on a bad slug/empty text (never a traceback)."""
+    try:
+        from vigil_integration.live.instructions import enqueue
+    except Exception as e:  # noqa: BLE001 — queue module unavailable → honest refusal, never a 500
+        return {"ok": False, "error": f"the instruction queue is unavailable ({type(e).__name__})"}
+    try:
+        out = enqueue(str(slug or ""), str(text or ""), base=_live_base())
+        return {"ok": True, "slug": out.get("slug"), "seq": out.get("seq")}
+    except ValueError as e:                     # unsafe slug / empty text — a clean operator-input refusal
+        return {"ok": False, "error": str(e)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"could not enqueue the instruction ({type(e).__name__})"}
 
 
 def launch_assessment(body: dict) -> dict:

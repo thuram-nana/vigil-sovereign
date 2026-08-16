@@ -640,6 +640,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # widen scope or bypass a gate (a resumed engage re-attests + re-gates every edge).
                 self._json(actions.retry_run(path[len("/api/run/"):-len("/retry")].strip("/")))
                 return
+            if path == "/api/instruct":
+                # B1: enqueue an operator message for a RUNNING integration engagement (mid-run steering).
+                # Advisory-only — the engine folds it into the next think; it re-runs no completed tool,
+                # relaxes no scope, fires nothing ungated. Same-origin + token gated (do_POST guard above).
+                self._json(actions.engage_instruct(str(body.get("slug", "")), str(body.get("text", ""))))
+                return
             if path == "/api/launch/assessment":
                 # The New-Assessment wizard's one action. It spawns only the SAME gated CLIs; it
                 # cannot relax scope (charter-signed, never an arg) or bypass a gate. A clean JSON
