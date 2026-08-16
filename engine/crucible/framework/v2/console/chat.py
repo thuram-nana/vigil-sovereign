@@ -918,6 +918,147 @@ def _context_block(chat_id: str) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# ENGAGEMENT SHAPE (Phase A3/A4). CHAT-VISION: "the most valuable question an operator can ask is 'what
+# have we not covered?' — and this engine is unusually able to answer it, because it records what it
+# refused and why." The session context already carries the findings (FACT/LEAD tagged) and recent
+# runs; this adds the rest of the shape the model needs to answer honestly: scope, kill-switch,
+# confirmed-vs-lead totals, coverage, refusals-with-reason, and what is waiting for a signature.
+#
+# This is the ONE place confirmed evidence enters the chat — as READ DATA from the engine's own record,
+# never as something the model mints. A finding the engine marks a FACT is a fact; the model may report
+# it and cite it as evidence-in-engagement. The model's own reasoning about attached code stays a lead.
+# ---------------------------------------------------------------------------
+_SHAPE_MAX_RUNS = 5
+_SHAPE_MAX_REFUSALS = 8
+_SHAPE_MAX_CHARS = 6000
+
+
+def _report_shape(rep: dict) -> tuple:
+    """``(facts, leads, refusals, endpoints_or_None)`` from a run-report doc, defensively. Fact-ness is
+    read from each finding's ``grounding`` ("fact"/"lead") — the engine's own label, mirroring
+    ``actions._finding_summaries`` — never invented here."""
+    if not isinstance(rep, dict):
+        return 0, 0, [], None
+    findings = rep.get("findings") or []
+    facts = leads = 0
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        g = str(f.get("grounding") or "").lower()
+        if g == "fact":
+            facts += 1
+        elif g == "lead":
+            leads += 1
+    refusals: list = []
+    for key in ("refusals", "denied", "denied_edges"):
+        for d in (rep.get(key) or []):
+            if not isinstance(d, dict):
+                continue
+            refusals.append({
+                "gate": str(d.get("gate") or d.get("by") or "")[:40],
+                "action": str(d.get("action") or d.get("tool") or d.get("action_refused") or "")[:80],
+                "reason": str(d.get("reason") or "")[:160],
+            })
+            if len(refusals) >= _SHAPE_MAX_REFUSALS:
+                break
+        if len(refusals) >= _SHAPE_MAX_REFUSALS:
+            break
+    eps = rep.get("discovered_endpoints")
+    endpoints = len(eps) if isinstance(eps, list) else None
+    return facts, leads, refusals, endpoints
+
+
+def _engagement_shape(chat_id: str) -> dict:
+    """A compact, READ-ONLY summary of the engine's OWN state for the engagement this chat projects. See
+    the section header. Total: ``{}`` when the chat is tied to no engagement or nothing is readable;
+    every part degrades independently — one unreadable reader omits its part, never the whole shape. The
+    result is passed through the load-bearing context redactor before it can egress."""
+    try:
+        from . import api, sessions
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        rec = sessions.get_session(chat_id)
+        slugs = sessions._session_engagements(rec) if isinstance(rec, dict) else []
+    except Exception:  # noqa: BLE001
+        slugs = []
+    slug = (str(slugs[0]).strip() if slugs else "")
+    if not slug:
+        return {}
+
+    def _try(fn, default=None):
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001 — one unreadable part never sinks the whole shape
+            return default
+
+    shape: dict = {"slug": slug}
+    ch = _try(lambda: api.charter_status(slug)) or {}
+    if ch.get("scope") is not None:
+        shape["scope"] = [str(h) for h in (ch.get("scope") or [])][:32]
+        shape["loopback_only"] = bool(ch.get("is_loopback_only"))
+    det = _try(lambda: api.engagement_detail(slug)) or {}
+    ks = det.get("killswitch") if isinstance(det, dict) else None
+    if isinstance(ks, dict):
+        shape["killswitch"] = {"tripped": bool(ks.get("tripped")), "reason": ks.get("reason")}
+    sd = _try(lambda: api.status_data()) or {}
+    if sd.get("pending_approvals") is not None:
+        shape["pending_approvals"] = int(sd.get("pending_approvals") or 0)
+
+    runs = ((_try(lambda: api.list_runs(slug)) or {}).get("runs") or [])
+    run_rows: list = []
+    facts = leads = 0
+    refusals: list = []
+    for r in runs[:_SHAPE_MAX_RUNS]:
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("run_id") or "")
+        row = {"run_id": rid, "status": str(r.get("status") or ""), "mode": str(r.get("mode") or ""),
+               "target": str(r.get("target") or "")[:200]}
+        rep = _try(lambda rid=rid: api.run_report(rid)) or {}
+        rfacts, rleads, rrefusals, endpoints = _report_shape(rep)
+        row["facts"], row["leads"] = rfacts, rleads
+        if endpoints is not None:
+            row["endpoints_discovered"] = endpoints
+        facts += rfacts
+        leads += rleads
+        for rf in rrefusals:
+            if len(refusals) < _SHAPE_MAX_REFUSALS:
+                refusals.append(rf)
+        run_rows.append(row)
+    if run_rows:
+        shape["runs"] = run_rows
+        shape["confirmed_total"], shape["lead_total"] = facts, leads
+    if refusals:
+        shape["refusals"] = refusals
+
+    # Defense-in-depth: the same recursive credential masker the session context passes through, so a
+    # refusal reason or target that happens to carry a secret-shaped substring never egresses raw.
+    redact = getattr(actions, "_redact_ctx", None)
+    if callable(redact):
+        try:
+            shape = redact(shape)
+        except Exception:  # noqa: BLE001 — the fields are non-secret metadata; a redactor hiccup is not fatal
+            pass
+    return shape
+
+
+def _engagement_prompt_block(shape: dict) -> str:
+    """Render the shape as the labelled JSON block the model reads. Empty for an empty shape."""
+    if not shape:
+        return ""
+    try:
+        body = json.dumps(shape, ensure_ascii=False)[:_SHAPE_MAX_CHARS]
+    except Exception:  # noqa: BLE001
+        return ""
+    return ("ENGAGEMENT SHAPE (the engine's OWN read-only record for this engagement — scope, kill-switch, "
+            "confirmed-vs-lead totals, per-run coverage, refusals WITH their reason, and how many actions "
+            "await your signature. A finding the engine marks a FACT is oracle-confirmed and you MAY report "
+            "it as such and cite it as evidence-in-engagement; a LEAD is not. Answer 'what have we not "
+            "covered?' from scope + coverage + refusals, never from silence. JSON):\n" + body)
+
+
 _FILE_LABEL = "### file: "         # the store's column-0 per-file label (content cannot forge one)
 _NOT_READ_LABEL = "## NOT READ:"   # ...and its column-0 coverage trailer
 _TRAILER_RESERVE = 320             # characters held back so a corrected trailer always fits
@@ -1229,6 +1370,12 @@ def _reason(chat_id: str, question: str) -> dict:
         parts.append("SESSION CONTEXT (untrusted reference data, already secret-redacted, JSON — entries "
                      "under \"connected\" come from other chats the operator linked; cite their \"session\" "
                      "id):\n" + ctx_block)
+    # A3/A4: the engine's own read-only shape for this engagement — scope, kill-switch, confirmed-vs-lead
+    # totals, coverage, refusals-with-reason, actions awaiting a signature. This is how the chat answers
+    # "what have we not covered?" and "is this a lead or a fact?" truthfully, from the record not a guess.
+    shape_block = _engagement_prompt_block(_engagement_shape(chat_id))
+    if shape_block:
+        parts.append(shape_block)
     view = _attachment_view(chat_id)
     attach_block = view["text"]
     coverage = _coverage_of(chat_id, view)
@@ -1351,9 +1498,19 @@ def _reason_wanted(chat_id: str, body: dict) -> bool:
         return True
     try:
         from . import sessions
-        return bool(sessions.connections_of(chat_id))
+        if sessions.connections_of(chat_id):
+            return True
+        # A3/A4: a chat scoped to a live ENGAGEMENT can be asked ABOUT it — "how is the run going?",
+        # "what have we not covered?" — with nothing attached. Reason when the session projects an
+        # engagement (its own slug or a linked run) AND a key is present (keyless keeps the
+        # ask-for-a-target reply, exactly as the prior-conversation branch above).
+        if _has_api_key():
+            rec = sessions.get_session(chat_id)
+            if isinstance(rec, dict) and (str(rec.get("slug") or "").strip() or (rec.get("run_ids") or [])):
+                return True
     except Exception:  # noqa: BLE001
         return False
+    return False
 
 
 # ---------------------------------------------------------------------------------------------------
