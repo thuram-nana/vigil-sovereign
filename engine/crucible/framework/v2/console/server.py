@@ -855,6 +855,44 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path == "/api/session/disconnect":
                 self._json(sessions.disconnect_session(str(body.get("id", "")), str(body.get("other", ""))))
                 return
+            if path == "/api/chat/stream":
+                # F1: a STREAMED question turn. chat_stream emits SSE token events; the FIRST emit lazily
+                # sends the event-stream headers. If the turn is NOT streamable (a launch/clone/need-target
+                # turn — nothing emitted), chat_stream returns {"stream": False, "fallback": True} and we send
+                # it as ordinary JSON so the SPA re-POSTs to /api/chat/send. Same-origin + token gated above;
+                # the reasoning egress is sovereignty-gated inside chat (a local pick answers non-streamed,
+                # no egress). Persistence is identical to /send (shared _finish_question_turn).
+                started = {"on": False}
+
+                def _emit(ev: dict) -> None:
+                    if not started["on"]:
+                        started["on"] = True
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.send_header("Cache-Control", "no-cache")
+                        self.send_header("Connection", "keep-alive")
+                        self._sec_headers()
+                        self.end_headers()
+                    try:
+                        payload = json.dumps(ev, ensure_ascii=False, default=str)
+                        self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                        self.wfile.flush()
+                    except (BrokenPipeError, OSError):
+                        pass          # the operator navigated away mid-stream — the record is already persisted
+
+                try:
+                    result = chat.chat_stream(body, _emit)
+                except ValueError as e:                         # unsafe chat id → 404 (parity with the rest)
+                    if not started["on"]:
+                        self._json({"error": str(e)}, status=404)
+                    return
+                except Exception as e:  # noqa: BLE001
+                    if not started["on"]:
+                        self._json({"error": f"{type(e).__name__}: {e}"}, status=500)
+                    return
+                if not started["on"]:
+                    self._json(result)                          # fallback: nothing streamed → JSON, UI uses /send
+                return
             if path == "/api/chat/send":
                 # the operator chatbot turn — a natural-language front door to the SAME gated launcher.
                 # CSRF/rebind-gated above; launches only via actions.launch_assessment (scope/charter/gate
