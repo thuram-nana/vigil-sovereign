@@ -8,13 +8,18 @@ NOT require a fired oracle. It reuses the SAME hardened primitives the remediati
 FACT gate, so every other control still holds:
 
   * model egress is sovereignty-gated (``llm_egress_refusal``) — a refusal degrades to "no proposal";
-  * the diff is parsed fail-closed and PATH-CONFINED (``parse_unified_diff`` — repo-relative, no ``..``,
-    capped), so an edit can never touch a file outside the clone;
+  * the diff's ``+++`` target paths are parsed fail-closed + confined (``parse_unified_diff`` — repo-relative,
+    no ``..``, capped); ``apply_dev_edit`` additionally refuses a diff whose git-extended headers
+    (``rename to`` / ``copy to``) name an unconfined path (defense-in-depth), and **git apply itself**
+    (run ``-C workdir``, no ``--unsafe-paths``) is the backstop that rejects any remaining out-of-tree /
+    rename / through-symlink escape — the three layers together keep an edit inside the clone;
   * apply is ``git apply --check`` then ``git apply`` into the DISPOSABLE clone workdir only, never the
     source repo (``CodefixSession.build``);
   * every edit passes the WARDEN gate at tier A2 (``code_edit``) — auto-runs never; it opens only when the
-    operator is PRESENT (they reviewed the diff and clicked approve) and the kill-switch is clear
-    (``CodefixSession.gate``);
+    operator is PRESENT (they reviewed the diff and clicked approve); the ENGAGEMENT kill-switch (emergency
+    stop) is enforced by the console wrapper (``actions.propose/apply_codebase_edit`` →
+    ``_chat_killswitch_tripped``), and ``CodefixSession.gate`` also honors a ``killswitch`` when one is
+    injected here;
   * the destructive open-PR leg stays OFF (``pr_enabled=False``).
 
 Offense-plane, import-clean of ``framework``/``strix``/``sigil`` (only sibling live/remediation/autopatch
@@ -114,9 +119,21 @@ def apply_dev_edit(workdir: str, diff_text: str, *, operator_present: bool = Fal
     ``{ok: False, error}``. Fail-closed: an empty/malformed/unconfined diff applies nothing."""
     if not workdir or not os.path.isdir(workdir):
         return {"ok": False, "error": "no clone workdir to edit"}
-    patches = parse_unified_diff(diff_text)          # confined repo-relative paths, capped, fail-closed
+    patches = parse_unified_diff(diff_text)          # confines the +++ target paths (capped, fail-closed)
     if not patches:
         return {"ok": False, "error": "no applicable, path-confined changes in the diff"}
+    # Defense-in-depth (red-pen MEDIUM-1): parse_unified_diff validates only the +++/--- target, not the
+    # git-extended headers. Refuse a patch whose `rename to`/`copy to`/`rename from`/`copy from` names an
+    # UNCONFINED path — so we do not lean solely on git apply's own out-of-tree rejection.
+    for pf in patches:
+        for ln in str(getattr(pf, "diff_text", "") or "").split("\n"):
+            for pfx in ("rename to ", "rename from ", "copy to ", "copy from "):
+                if ln.startswith(pfx):
+                    cand = ln[len(pfx):].strip()
+                    ok, _ = is_safe_repo_path(cand)
+                    if not ok:
+                        return {"ok": False, "error": "refused: the diff renames/copies to a path outside "
+                                                      "the repository"}
     cfg = CodefixConfig(target_repo=workdir, base_dir=os.path.dirname(os.path.abspath(workdir)) or ".",
                         git_bin=git_bin, pr_enabled=False)
     sess = CodefixSession(cfg, killswitch=killswitch, operator_present=operator_present)

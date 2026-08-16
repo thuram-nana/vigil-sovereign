@@ -75,3 +75,29 @@ def test_apply_applies_a_reviewed_diff_into_the_confined_repo():
     out = actions_mod.apply_codebase_edit(CHAT, wd, _DIFF)   # operator_present forced True inside
     assert out["ok"] is True and out["applied"] == ["x.py"]
     assert (Path(wd) / "x.py").read_text() == "a = 2\n"
+
+
+def test_killswitch_refuses_apply_and_propose(monkeypatch):
+    """RED-PEN BLOCK-1: the engagement kill-switch (emergency stop) refuses BOTH propose and apply — a
+    code-mutating action must be at least as protected as the read-only clone (which already honors it)."""
+    wd = _clone_area_repo()
+    monkeypatch.setattr(actions_mod, "_chat_killswitch_tripped", lambda cid: True)
+    ap = actions_mod.apply_codebase_edit(CHAT, wd, _DIFF)
+    assert ap["ok"] is False and "kill-switch" in ap["error"]
+    assert (Path(wd) / "x.py").read_text() == "a = 1\n", "an edit applied while the kill-switch was engaged"
+    pr = actions_mod.propose_codebase_edit(CHAT, wd, "bump a")
+    assert pr["ok"] is False and "kill-switch" in pr["error"]
+
+
+def test_symlinked_clone_path_is_refused(tmp_path):
+    """A symlink under the clone area pointing OUTSIDE must not let an edit escape: .resolve()+commonpath
+    collapses it and _confined_clone_path refuses."""
+    import os
+    cid = sessions._safe_session_id(CHAT)
+    area = Path(actions_mod._live_base()) / "clones" / cid
+    area.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = area / "sneaky"
+    os.symlink(str(outside), str(link))
+    assert actions_mod._confined_clone_path(CHAT, str(link)) == ""

@@ -63,6 +63,29 @@ def test_apply_no_workdir(tmp_path):
     assert dev_edit.apply_dev_edit(str(tmp_path / "nope"), _DIFF, operator_present=True)["ok"] is False
 
 
+def test_apply_refuses_rename_to_outside_the_repo(tmp_path):
+    """RED-PEN MEDIUM-1 defense-in-depth: a diff whose +++ is confined but whose git `rename to` header
+    escapes the tree is refused by dev_edit BEFORE git apply (not relying solely on git's own rejection)."""
+    wd = _git_repo(tmp_path)
+    poison = ("diff --git a/x.py b/x.py\nrename from x.py\nrename to ../../evil\n"
+              "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n")
+    out = dev_edit.apply_dev_edit(wd, poison, operator_present=True)
+    assert out["ok"] is False and "outside the repository" in out["error"]
+    assert (Path(wd) / "x.py").read_text() == "a = 1\n", "a rename-escape diff mutated the file"
+
+
+def test_apply_honors_an_injected_killswitch(tmp_path):
+    """When a killswitch IS injected (as the console wrapper does via its own check), a tripped one refuses."""
+    wd = _git_repo(tmp_path)
+
+    class _KS:
+        def is_tripped(self):
+            return True
+
+    out = dev_edit.apply_dev_edit(wd, _DIFF, operator_present=True, killswitch=_KS())
+    assert out["ok"] is False and (Path(wd) / "x.py").read_text() == "a = 1\n"
+
+
 # --- propose -----------------------------------------------------------------------------------------
 
 def _fake_client(diff: str):
