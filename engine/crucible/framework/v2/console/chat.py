@@ -2022,6 +2022,11 @@ def chat_send(body: dict) -> dict:
         "slug": str(body.get("slug", "")), "model": model,
         "session_id": chat_id,                        # F2: link the launched run to this chat's session
         "tools": [str(t) for t in (body.get("tools") or [])],
+        # The chat IS the agentic operator: route its LOOPBACK engagements to the integration `vigil
+        # engage` engine (OODA loop + mid-run steering + --resume + fireteam), whose live steps now stream
+        # to the process box (the bridge). Loopback-gated in the launcher; a remote target falls through
+        # to the charter-gated offense engage unchanged. Honours an explicit opt-out (agentic: false).
+        "agentic": bool(body.get("agentic", True)),
     })
     if launch.get("error"):
         # An archive that was unpacked and then could not be launched must still SAY it was unpacked —

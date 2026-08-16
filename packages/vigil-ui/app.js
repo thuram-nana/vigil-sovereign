@@ -2478,7 +2478,12 @@
 
     // convert a scan progress-log row into a timeline-shaped event
     function progressToEvent(ev) {
-      if (!ev || !ev.event) return null;
+      if (!ev) return null;
+      // Integration-engine OODA mirror (bridge): a progress line already in spine shape ({kind, payload})
+      // passes straight through — KIND_META renders every OODA kind natively, so `vigil engage`'s full
+      // timeline (decision/tool_call/tool_result/finding/refusal/hypothesis/observation) shows in the feed.
+      if (ev.kind && KIND_META[ev.kind]) return { kind: ev.kind, payload: ev.payload || {}, _progress: true };
+      if (!ev.event) return null;
       if (ev.event === "scan.phase") return { kind: "observation", payload: { source: "scan", summary: "phase: " + (ev.phase || "") }, _progress: true };
       if (ev.event === "scan.finding") return { kind: "finding", payload: { bug_class: ev.bug_class, title: (ev.param || "") + " @ " + (ev.endpoint || ""),
         confidence: ev.confidence, verified_by_oracle: false, oracle_kind: ev.confirmed_by, severity: "" }, _progress: true };
@@ -7547,7 +7552,11 @@
     pboxRenderShell();
   }
   function pboxProgressToEvent(ev) {
-    if (!ev || !ev.event) return null;
+    if (!ev) return null;
+    // Integration-engine OODA mirror (bridge): a progress line already in spine shape ({kind, payload})
+    // passes straight through so `vigil engage`'s full timeline renders in the process box via KIND_META.
+    if (ev.kind && KIND_META[ev.kind]) return { kind: ev.kind, payload: ev.payload || {} };
+    if (!ev.event) return null;
     if (ev.event === "scan.phase") return { kind: "observation", payload: { source: "scan", summary: "phase: " + (ev.phase || "") } };
     if (ev.event === "scan.finding") return { kind: "finding", payload: { bug_class: ev.bug_class, title: (ev.param || "") + " @ " + (ev.endpoint || "") } };
     if (ev.event === "scan.done") return { kind: "decision", payload: { question: "scan complete", choice: (ev.findings || 0) + " findings" } };
