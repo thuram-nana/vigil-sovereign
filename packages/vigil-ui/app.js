@@ -5560,6 +5560,9 @@
       reasonMode: "ask",
       // Phase C: this chat's hypothesis ledger (open first, then confirmed/refuted with the finding ref).
       hyps: [],
+      // the chat drives the AGENTIC engine by default (OODA loop, steerable, resumable). Off = a lighter
+      // gated scan. Sent as `agentic` so the server-side default can be opted out of (red-pen F2).
+      agentic: true,
     };
 
     V.mount(screen, [
@@ -5912,7 +5915,9 @@
       if (!hyps.length) { V.clear(host); return; }
       const rows = hyps.map(function (hp) {
         const st = String(hp.status || "open");
-        const badge = st === "confirmed" ? h("span.shield", null, [V.icon("check"), "Confirmed"])
+        // "Confirmed by a finding" (not a bare FACT badge): the hypothesis is LINKED to a real
+        // oracle-confirmed finding (shown by its ref below), it is not itself the minted fact (red-pen F3).
+        const badge = st === "confirmed" ? h("span.shield", null, [V.icon("check"), "Confirmed by a finding"])
           : st === "refuted" ? h("span.pill.sm", null, "Refuted")
             : h("span.shield.lead", null, [V.icon("info"), "Open"]);
         const meta = [];
@@ -6286,6 +6291,13 @@
           const o = h("option", { value: p[0] }, p[1]); if (p[0] === C.reasonMode) o.selected = true; return o;
         }));
       reasonSel.addEventListener("change", function () { C.reasonMode = reasonSel.value; });
+      // Agentic-engine opt-out (red-pen F2): on = the live OODA engine (reasons, runs tools, steerable,
+      // resumable, live steps); off = a lighter gated scan. Loopback engagements only; a remote target is
+      // charter-gated regardless.
+      const agenticChk = h("input", { type: "checkbox", checked: C.agentic ? "checked" : null });
+      agenticChk.addEventListener("change", function () { C.agentic = !!agenticChk.checked; });
+      const agenticTog = h("label.chat-agentic", { title: "Agentic engine: the live OODA engine that reasons, runs tools, steers, and resumes. Off = a lighter gated scan." },
+        [agenticChk, h("span", null, "Agentic")]);
       const send = h("button.btn.primary", { onClick: doSend }, [V.icon("bolt"), "Send"]);
       input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); } });
 
@@ -6319,7 +6331,8 @@
       function reallySend(msg, outgoing) {
         C.busy = true; send.disabled = true;
         const payload = { chat_id: C.id || undefined, message: msg, target: (target.value || "").trim(),
-          mode: C.mode || undefined, reason_mode: (C.reasonMode && C.reasonMode !== "ask") ? C.reasonMode : undefined };
+          mode: C.mode || undefined, reason_mode: (C.reasonMode && C.reasonMode !== "ask") ? C.reasonMode : undefined,
+          agentic: C.agentic };   // explicit so the operator can opt OUT of the agentic engine (default on)
         // No per-message attachment list: the console answers over everything the chat HOLDS, so a
         // list here would be decoration that reads like a control. Removing an attachment is the control.
         if (C.mode === "tool" && C.tool) {
@@ -6349,7 +6362,7 @@
         h("div#chat-attach"),
         h("div#chat-links"),
         h("div#chat-hyps"),
-        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } }, [target, modeSel, reasonSel]),
+        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } }, [target, modeSel, reasonSel, agenticTog]),
         toolRow,
         h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "flex-end", flexWrap: "wrap" } }, [attachBtn, fileInput, input, send]),
         h("div.hint", { style: { marginTop: "6px" } },
