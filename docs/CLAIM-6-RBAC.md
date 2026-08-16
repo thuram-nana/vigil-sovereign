@@ -73,8 +73,22 @@ and records the requesting principal for attribution.
 The existing `X-SIGIL-Token` header (`?token=` for SSE/downloads) now bears **either** the legacy owner
 shared token **or** a per-user bearer — zero change to the ~100 existing call sites. `POST /api/login`
 verifies a candidate bearer; `GET /api/whoami` reports the current principal; the SPA keeps a per-user
-bearer in `sessionStorage` (`ui.js` `token()` prefers it), with a login gate + current-user chip + real
-nav/action gating via `V.can`.
+bearer in `sessionStorage` (`ui.js` `token()` prefers it).
+
+### Where per-user enforcement is real today (the honest boundary)
+
+RBAC is enforced by the **server** for any client that presents **only** a bearer: the CLI
+(`sigil accounts …`), the sovereign/offense HTTP API directly, and a browser session that has logged in
+with a per-user bearer (no owner token present).
+
+The `vigil up` **command UI (uiproxy) is OWNER-ONLY in this foundation.** It embeds the owner shared token
+into `index.html` (`uiproxy.py`) as an owner-local convenience, so **any browser that can reach it
+authenticates as `owner`** — the login gate / current-user chip / `V.can` gating there is shipped but
+**inert as an isolation boundary** (it never triggers, because the embedded owner token auto-authenticates
+as owner). **Do not hand a teammate the command-UI URL expecting the browser to constrain them** — give
+them a bearer for the CLI/API, or wait for the per-user proxy-auth slice below. This is consistent with the
+design's explicit deferral of per-user proxy auth (RBAC hooks #12/#13); the enforcement core is real, the
+command-UI isolation is not yet.
 
 ## Deferred (honest scope — flagged, not built)
 
@@ -82,9 +96,14 @@ nav/action gating via `V.can`.
   enforcement at the enumerated load-bearing actions + a demonstrated per-button gate (Safety → Release).
   Comprehensive per-button gating on every screen is not done; the **server is the enforcement of record**
   (every mutation is re-checked and 403s).
-- **Per-user offense-plane auth.** The offense read plane / gated API (8787/8799) and the uiproxy
-  plane-control (start/stop offense) stay owner-boot-token gated. Owner-signed offense *mutations* ARE
-  gated (`offense_authority`). Per-user proxy auth is a later upgrade.
+- **Per-user auth for the command UI + offense plane — the command UI is OWNER-ONLY today.** The `vigil up`
+  command UI (uiproxy) embeds the owner shared token, and the offense read plane / gated API (8787/8799) +
+  the uiproxy plane-control (start/stop offense) stay owner-boot-token gated. So the **browser command UI
+  does not enforce per-user roles yet**; per-user RBAC is live only for bearer-only clients (CLI / API /
+  a logged-in cockpit session). Owner-signed offense *mutations* ARE gated (`offense_authority`). **The next
+  slice:** stop embedding the owner token and require a per-user login before the command UI serves a
+  session (embed only on loopback for the owner-local case), which makes the command UI a real isolation
+  boundary. Until then, treat the command-UI URL as an owner credential.
 - **Hard-prune fold.** The accounts fold is a genesis scan (byte-safe under the Slice-C empty snapshot). A
   future cold-archive prune must extend `SnapshotState` with an accounts seed (per-username LWW state +
   high-water) + a referential-floor assert, mirrored in `resolve()` and `accounts()`.

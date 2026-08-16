@@ -4158,6 +4158,12 @@
       h("div.screen-head", null, [h("h1", null, "Users & Roles"),
         h("span.sub", null, "Multi-user access control. Each account is an owner-signed grant; the owner key stays the sole signer.")]),
       ownerBanner("Owner plane — accounts are owner-signed on the server. A bearer token is shown ONCE at creation; only its salted hash is stored."),
+      h("div.set-status.off", { style: { color: "var(--warn,#d9a441)", fontWeight: "600", margin: "4px 0 12px" } },
+        [V.icon("info"), h("span", null,
+          "Foundation scope: these accounts enforce per-user roles for the CLI (sigil accounts …) and the "
+          + "direct API. The vigil up command UI you are using is OWNER-ONLY — it embeds the owner token, so "
+          + "do NOT share this URL with a teammate expecting their role to constrain them in the browser; give "
+          + "them a bearer for the CLI/API. A per-user command-UI login is the next slice.")]),
       h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "16px" } }, [
         V.card("Create an account", "OWNER", h("div#users-create", null, usersCreateForm()), true),
         V.card("Accounts", "OWNER", h("div#users-list", null, h("div.empty", null, "Loading…")), true),
