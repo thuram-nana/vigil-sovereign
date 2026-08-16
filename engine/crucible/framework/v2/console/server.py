@@ -417,6 +417,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 q = parse_qs(parts.query)
                 self._json(chat.attachments_list((q.get("chat_id") or [""])[0]))
                 return
+            if path == "/api/chat/hypotheses":
+                # Phase C: one chat's hypothesis ledger (open first, then closed with their finding ref).
+                # Read-only; reconciles against the engine's confirmed FACTs so a hypothesis a run has since
+                # settled shows as confirmed. An unsafe chat id raises ValueError → 404.
+                q = parse_qs(parts.query)
+                self._json(chat.chat_hypotheses((q.get("chat_id") or [""])[0]))
+                return
             if path == "/api/aegis/verdicts":
                 # the live Defense verdict feed — tail the managed gateway's browser-safe verdicts JSONL
                 # (oracle-context already stripped at the sink). EventTailer is robust to a missing file.

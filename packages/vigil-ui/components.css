@@ -463,6 +463,13 @@ textarea { min-height: 80px; resize: vertical; }
 .chat-toolrow select { width: auto; }
 .chat-toolrow .hint { flex: 1 1 260px; color: var(--text-2); font-size: var(--fs-xs); }
 
+/* hypothesis ledger (Phase C): suspicions recorded from the chat; each closes itself when an oracle
+   confirms a matching finding. Open = the lead register; confirmed = the green FACT shield. */
+.hyp-panel { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-2); background: var(--bg-1); }
+.hyp-panel .label { font-weight: 600; }
+.hyp-row { padding: 8px 0; border-top: 1px solid var(--border); }
+.hyp-row:first-of-type { border-top: 0; }
+
 /* grounded-in legend (A2): the four sources of an answer must LOOK different, and model inference must
    never wear evidence's clothes. A chat answer is a LEAD, so these registers are deliberately NOT the
    green confirmed-finding shield (.shield) — attached code reads neutral/blue, a linked chat reads
