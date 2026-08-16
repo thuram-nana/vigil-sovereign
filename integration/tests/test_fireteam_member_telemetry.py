@@ -32,9 +32,11 @@ def _allow_gate(t, tg, d):
     return SimpleNamespace(allowed=True, outcome="allow", reason="ok")
 
 
-def _use(tool="nmap", *, rationale="probing the login flow"):
+def _use(tool="nmap", *, reasoning="probing the login flow"):
+    # the model's reasoning rides `.reasoning` (LLMDecision has NO `.rationale` — pydantic would silently
+    # drop that kwarg, which is exactly what made an earlier redaction test vacuous). Set the real field.
     return LLMDecision(action=ActionType.USE_TOOL, tool=ToolCall(tool_name=tool, tool_args={"target": "t"}),
-                       rationale=rationale,
+                       reasoning=reasoning,
                        output_analysis=OutputAnalysis(findings=[{"title": "x", "bug_class": "info"}]))
 
 
@@ -80,17 +82,26 @@ def test_over_cap_edge_emits_an_escalation_step():
     assert "approval" in esc["summary"].lower()
 
 
-def test_secret_in_a_step_summary_is_redacted_before_the_feed():
+def test_reasoning_flows_to_the_feed_but_a_structured_secret_is_redacted():
+    """BLOCK-2: the member's REASONING must actually reach the feed — that IS how the operator sees the agent
+    work (it rides `decision.reasoning`; an earlier version read a non-existent `.rationale`, so nothing
+    flowed). BLOCK-1: and a credential-shaped token inside that reasoning must be scrubbed by the queue
+    BEFORE the feed. The control is real: the non-secret words survive (proving reasoning flows) while the
+    secret VALUE does not (proving the F3 scrubber fired — this second assertion FAILS if _redact_record is
+    neutered, unlike the prior vacuous test where the secret never entered the summary at all)."""
     q, written = _recording_queue()
     rt = lambda tool, phase, seq, *, approved=False: SimpleNamespace(ran=True, stdout="x", reason="")
-    # a rationale carrying a credential-shaped token must be scrubbed by the queue before it can reach the feed
-    runner = build_member_runner(think=_think(_use("nmap", rationale="using api_key=SBX-super-secret-value")),
-                                 run_tool=rt)
+    runner = build_member_runner(
+        think=_think(_use("nmap", reasoning="probing the login flow with api_key=SBX-SECRET-VALUE-123")),
+        run_tool=rt)
     ctx = MemberRunContext(seq=0, phase=Phase.INFORMATIONAL, gate=_allow_gate, oracle=None, spine=q)
     runner(_member(), ctx)
     q.flush()
-    blob = " ".join(str(r.get("summary", "")) for r in written)
-    assert "super-secret-value" not in blob, "a secret in a member step summary reached the feed unredacted"
+    think = next(r for r in written if r["step"] == "think")
+    assert "probing the login flow" in think["summary"], "member reasoning did not reach the feed (BLOCK-2)"
+    assert "SBX-SECRET-VALUE-123" not in think["summary"], "a structured secret reached the feed unredacted (BLOCK-1)"
+    # the scrubber masks the structured form (belt-and-braces on the exact scrubbed shape)
+    assert "api_key=SBX-SECRET-VALUE-123" not in think["summary"]
 
 
 def test_no_spine_wired_is_safe():

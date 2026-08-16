@@ -111,9 +111,12 @@ def build_member_runner(*, think: ThinkFn, run_tool: RunToolFn, parent_objective
                 break
             action = getattr(decision, "action", None)
             _tool_name = getattr(getattr(decision, "tool", None), "tool_name", "")
+            # the model's reasoning lives on `.reasoning` (NOT `.rationale` — that field does not exist; the
+            # parent engine reads `.reasoning` too). Emitting it is what lets the operator SEE the member's work.
+            _reasoning = str(getattr(decision, "reasoning", "") or "")
             _emit("think", f"{getattr(action, 'name', str(action))}"
                            + (f" · {_tool_name}" if _tool_name else "")
-                           + (f" — {getattr(decision, 'rationale', '')}" if getattr(decision, "rationale", "") else ""))
+                           + (f" — {_reasoning}" if _reasoning else ""))
             if action == ActionType.COMPLETE:
                 break
             if action == ActionType.ASK_USER:

@@ -562,19 +562,29 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         from ..fireteam.confirmation import ConfirmationRegistry
         from ..fireteam.spine_queue import SingleWriterSpineQueue
 
-        def _member_writer(record: Any) -> None:
+        _member_ref_seq = {"n": 0}
+
+        def _member_writer(record: Any) -> str:
+            # Return a NON-EMPTY ref for EVERY write so the queue's per-member flush counts as fully durable
+            # (``flush_ok = len(refs) == attempted``). Returning None would make flush_member report [] and,
+            # once a follow-up wires crash-resume (progress=), silently checkpoint NO member — every resume
+            # re-running the whole wave (red-pen E1 LOW). The live feed is fire-and-forget, so we mint a
+            # synthetic deterministic ref (no wallclock/RNG) rather than a spine hash.
             try:
                 if spine_post is not None:
                     payload = record if isinstance(record, dict) else {"value": str(record)}
                     spine_post("fireteam", payload)
             except Exception:  # noqa: BLE001 — a live-feed write NEVER perturbs the wave
-                return None
-            return None
+                pass
+            _member_ref_seq["n"] += 1
+            return f"ft-{config.slug}-{_member_ref_seq['n']}"
 
         fireteam_spine = SingleWriterSpineQueue(writer=_member_writer)
-        # E1 — register each member's over-cap escalation in an append-only, spine-mirrored registry so it is
-        # DURABLE (offline-verifiable) rather than only recorded in the report. Resolution stays signed-only
-        # and fail-closed inside the registry; wiring the operator's signed-resolve surface is the next step.
+        # E1 — register each member's over-cap escalation in an append-only registry whose redacted
+        # `confirmation.register` events are flushed to the spine (run_fireteam registers BEFORE its final
+        # flush), so the escalation ledger is durably written rather than only recorded in the report.
+        # Resolution stays signed-only and fail-closed inside the registry; wiring the operator's
+        # signed-resolve surface is the next step.
         fireteam_registry = ConfirmationRegistry(spine=fireteam_spine)
         return asyncio.run(run_fireteam(plan, runner, phase=state.phase, gate=gate, oracle=oracle,
                                         spine=fireteam_spine, registry=fireteam_registry,
