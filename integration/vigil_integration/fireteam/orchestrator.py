@@ -255,9 +255,19 @@ async def run_fireteam(
             except Exception:  # noqa: BLE001
                 pass
 
+    # register every escalation as PENDING (signed-approval-only resolution happens elsewhere) BEFORE the
+    # final flush, so the registry's redacted `confirmation.register` events are in the buffer when we drain
+    # — otherwise they strand un-written and the "durable escalation ledger" is a claim the spine never keeps
+    # (red-pen E1 MEDIUM). register is append-only/idempotent, so re-registering a restored member's
+    # escalation on resume is a safe no-op.
+    if registry is not None:
+        for r in results:
+            for esc in r.escalations:
+                registry.register(esc)
+
     # Per-member records were already flushed as each member completed; this final drain writes anything
-    # still buffered (e.g. the confirmation registry's redacted escalation events) in deterministic order,
-    # and returns the FULL this-run ref list in write order.
+    # still buffered (member tail + the confirmation registry's redacted escalation events just submitted)
+    # in deterministic order, and returns the FULL this-run ref list in write order.
     this_run_refs = spine.flush() if spine is not None else []
     # A resumed wave's outcome refs = the refs restored for skipped members (flushed on the run that
     # completed them) + everything written this run. The two are disjoint: a skipped member is never
@@ -267,13 +277,6 @@ async def run_fireteam(
         if m.member_id in done:
             restored_refs.extend(done[m.member_id].refs)
     spine_refs = restored_refs + list(this_run_refs)
-
-    # register every escalation as PENDING (signed-approval-only resolution happens elsewhere). register is
-    # append-only/idempotent, so re-registering a restored member's escalation on resume is a safe no-op.
-    if registry is not None:
-        for r in results:
-            for esc in r.escalations:
-                registry.register(esc)
 
     rolled: CollectOutcome = collect(results, oracle=oracle, source_prefix=wave_id)
     return FireteamOutcome(
