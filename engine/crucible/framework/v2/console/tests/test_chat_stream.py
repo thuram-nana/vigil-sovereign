@@ -131,10 +131,11 @@ def test_nothing_to_reason_over_answers_need_target_in_place(monkeypatch):
     evs, emit = _events()
     out = chat.chat_stream({"chat_id": CHAT, "message": "hello"}, emit)
     assert out.get("status") == "need_target" and not out.get("fallback")
-    # the user message is recorded exactly once, plus the need_target reply
+    # the user message is recorded EXACTLY once (the whole point of G4 — no double-append), plus the
+    # need_target reply
     recs = chat.read_session(CHAT)
-    assert [r for r in recs if r.get("role") == "user" and r.get("text") == "hello"]
-    assert [r for r in recs if r.get("kind") == "need_target"]
+    assert len([r for r in recs if r.get("role") == "user" and r.get("text") == "hello"]) == 1
+    assert len([r for r in recs if r.get("kind") == "need_target"]) == 1
     assert len([e for e in evs if e.get("event") == "done"]) == 1
 
 
@@ -142,11 +143,11 @@ def test_launch_intent_still_falls_back_without_appending(monkeypatch):
     # the launch/clone/url/path/mode fallbacks stay BEFORE the append, so /send (which appends) never
     # double-records — G4 must not regress this.
     _reason_wanted(monkeypatch, wanted=True)
-    for body in ({"message": "assess", "target": "http://127.0.0.1:8080"},
-                 {"message": "clone https://github.com/org/repo"},
-                 {"message": "look", "mode": "url"}):
+    for i, body in enumerate(({"message": "assess", "target": "http://127.0.0.1:8080"},
+                              {"message": "clone https://github.com/org/repo"},
+                              {"message": "look", "mode": "url"})):
         evs, emit = _events()
-        body["chat_id"] = "cx-" + str(len(body))
+        body["chat_id"] = "cx-%d" % i                          # unique per case (no id collision)
         out = chat.chat_stream(body, emit)
         assert out.get("fallback") is True and evs == []
         assert chat.read_session(body["chat_id"]) == []      # nothing appended before a fallback

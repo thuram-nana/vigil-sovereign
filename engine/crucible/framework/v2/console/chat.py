@@ -2282,6 +2282,16 @@ def chat_stream(body: dict, emit) -> dict:
     if _git_repo_in_message(message) or _URL_RE.search(message) or _path_in_message(message):
         return fallback
     _ensure_session(chat_id)
+    # ESTABLISH the stream BEFORE the first append (red-pen LOW-1). Once the client has received any SSE
+    # frame it takes the "committed" path on a later abort (reload the saved record, never re-POST to /send),
+    # so this closes the sub-millisecond window between the append and the first content frame in which a
+    # dropped connection could otherwise cause a duplicate transcript entry. An unknown `start` event is
+    # ignored by the reader. Past this point chat_stream ALWAYS emits a terminal `done` and never returns a
+    # {fallback} dict — so the server never sends a JSON fallback after an append (the double-append invariant).
+    try:
+        emit({"event": "start"})
+    except Exception:  # noqa: BLE001 — a client hangup here just means no stream; nothing was appended yet
+        pass
     # Record the user message FIRST (exactly as chat_send does), THEN decide — so `_reason_wanted` →
     # `_has_prior_conversation` sees the true prior history. `_prior_records` strips the TRAILING current
     # user turn; checking BEFORE the append stripped a REAL prior turn instead, so the FIRST conversational
