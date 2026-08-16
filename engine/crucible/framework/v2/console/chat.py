@@ -2101,18 +2101,23 @@ def chat_send(body: dict) -> dict:
     reply = ((f"{resolution_note} " if resolution_note else "")
              + f"Started {what} run against {target} (engagement '{launch['slug']}'). Watch it live below — "
              + how)
+    # D2b: offer the dev-mode edit/test panel ONLY for a codebase THIS chat actually CLONED into its
+    # confined clone area (`<live>/clones/<chat>/`), tested with the SAME predicate the edit/apply/test
+    # routes enforce. A `codebase` run also arises from an extracted archive or a directly-typed local
+    # directory; those are real codebases but sit OUTSIDE the clone area, so the routes would (correctly)
+    # REFUSE them — offering the panel there would be three buttons that always dead-fail under a header
+    # that says "cloned" (red-pen MEDIUM). Those codebases keep the gated-scan offer, which is their right
+    # affordance. The stored path is the confined, resolved one — echoed for the client's convenience only;
+    # every route re-confines it, so a client-tampered path is refused, never trusted.
+    cb_path = actions._confined_clone_path(chat_id, target) if mode == "codebase" else ""
     rec_launched = {"role": "assistant", "text": reply, "kind": "launched",
                     "run_id": launch.get("run_id"), "slug": launch.get("slug"),
                     "stream": launch.get("stream"), "engine": engine, "mode": mode}
-    if mode == "codebase":
-        # D2b: this launched run is over a codebase THIS chat cloned/extracted, so the interface can offer
-        # the gated edit/test affordances on it. The path rides the record for the client's convenience
-        # ONLY — every codebase route (edit/apply/test) RE-CONFINES it server-side to this chat's own
-        # `<live>/clones/<chat>/`, so a path the client tampered with is refused, never trusted.
-        rec_launched["codebase_path"] = target
+    if cb_path:
+        rec_launched["codebase_path"] = cb_path
     _append(chat_id, rec_launched)
     res = {"chat_id": chat_id, "status": "running", "reply": reply, "engine": engine, "mode": mode,
            "run_id": launch.get("run_id"), "slug": launch.get("slug"), "stream": launch.get("stream")}
-    if mode == "codebase":
-        res["codebase_path"] = target
+    if cb_path:
+        res["codebase_path"] = cb_path
     return res

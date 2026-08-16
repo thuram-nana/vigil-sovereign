@@ -147,9 +147,12 @@ def test_clone_reports_git_failure(monkeypatch):
 # --- chat routing ------------------------------------------------------------------------------------
 
 def test_chat_send_routes_a_clone_request(monkeypatch, tmp_path):
-    # a real dir stands in for the clone, so _resolve_target sees a codebase; capture the launch
-    cloned = tmp_path / "cloned-repo"
-    cloned.mkdir()
+    # the clone lands under THIS chat's confined clone area (<live>/clones/<chat>/), where the edit/test
+    # routes will accept it — so _resolve_target sees a codebase AND the D2b panel guard (which reuses
+    # _confined_clone_path) admits it. A real dir stands in for the clone; the launch is captured.
+    clone_base = Path(actions_mod._live_base()) / "clones" / CHAT
+    cloned = clone_base / "cloned-repo"
+    cloned.mkdir(parents=True)
     monkeypatch.setattr(actions_mod, "clone_codebase",
                         lambda cid, repo, **kw: {"ok": True, "path": str(cloned), "name": "cloned-repo"})
     launched = {}
@@ -160,12 +163,14 @@ def test_chat_send_routes_a_clone_request(monkeypatch, tmp_path):
     assert out["status"] == "running", out
     assert launched["body"]["mode"] == "codebase" and launched["body"]["target"] == str(cloned)
     assert "Cloned https://github.com/org/repo" in out["reply"]
-    # D2b contract: the response AND the persisted launched record carry mode + the cloned path, so the
-    # interface can offer the gated edit/test affordances on THIS repo. The path is re-confined server-side
-    # on every codebase call, so echoing it here grants no authority — it only tells the UI which repo.
-    assert out["mode"] == "codebase" and out["codebase_path"] == str(cloned)
+    # D2b contract: because the clone is under the confined clone area, the response AND the persisted
+    # launched record carry mode + the codebase path (the resolved, confined form), so the interface offers
+    # the gated edit/test affordances on THIS repo. Every codebase route re-confines the path server-side,
+    # so echoing it grants no authority — it only tells the UI which repo the panel acts on.
+    base = str(clone_base.resolve())
+    assert out["mode"] == "codebase" and out["codebase_path"].startswith(base) and out["codebase_path"].endswith("cloned-repo")
     rec = [m for m in chat.read_session(CHAT) if m.get("kind") == "launched"][-1]
-    assert rec["mode"] == "codebase" and rec["codebase_path"] == str(cloned)
+    assert rec["mode"] == "codebase" and rec["codebase_path"] == out["codebase_path"]
 
 
 def test_a_url_launch_carries_no_codebase_path(monkeypatch):
@@ -175,6 +180,23 @@ def test_a_url_launch_carries_no_codebase_path(monkeypatch):
                         lambda body: {"run_id": "r", "slug": "s", "stream": "progress", "engine": "integration"})
     out = chat.chat_send({"chat_id": CHAT, "message": "assess it", "target": "http://127.0.0.1:8080", "mode": "url"})
     assert out["status"] == "running" and out["mode"] == "url"
+    assert "codebase_path" not in out
+    rec = [m for m in chat.read_session(CHAT) if m.get("kind") == "launched"][-1]
+    assert "codebase_path" not in rec
+
+
+def test_a_non_clone_codebase_launch_carries_no_codebase_path(monkeypatch, tmp_path):
+    """RED-PEN MEDIUM: a codebase run from an extracted archive or a directly-typed local directory is a
+    real codebase, but it sits OUTSIDE this chat's clone area — the edit/apply/test routes confine to
+    <live>/clones/<chat>/ and would refuse it. So the launched record must NOT carry codebase_path: no
+    dead edit/test panel, and no "cloned" label on something that was never cloned. (The gated scan is its
+    affordance instead.) This is the guard that makes the panel appear iff its actions can succeed."""
+    outside = tmp_path / "typed-project"       # a real dir, NOT under <live>/clones/<chat>/
+    outside.mkdir()
+    monkeypatch.setattr(actions_mod, "launch_assessment",
+                        lambda body: {"run_id": "r", "slug": "s", "stream": "none", "engine": ""})
+    out = chat.chat_send({"chat_id": CHAT, "message": "review this", "target": str(outside), "mode": "codebase"})
+    assert out["status"] == "running" and out["mode"] == "codebase", out
     assert "codebase_path" not in out
     rec = [m for m in chat.read_session(CHAT) if m.get("kind") == "launched"][-1]
     assert "codebase_path" not in rec
