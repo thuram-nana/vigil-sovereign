@@ -5550,6 +5550,11 @@
       // the composer's own selections, kept OUT of the DOM so a redraw after a send does not quietly
       // reset the mode (and with it the picked tool) back to "auto" under the operator
       mode: "", tool: "",
+      // how hard to reason on THIS reply (Ask / Research / Plan). "ask" = default, byte-identical to the
+      // prior single-shot behaviour; research/plan turn on extended thinking backend-side.
+      reasonMode: "ask",
+      // Phase C: this chat's hypothesis ledger (open first, then confirmed/refuted with the finding ref).
+      hyps: [],
     };
 
     V.mount(screen, [
@@ -5576,7 +5581,7 @@
         .then(loadChatList)
         .then(function () {
           if (!C.id) { C.messages = []; drawSessions(); drawMain(); return; }
-          return refreshTranscript().then(function () { drawSessions(); drawMain(); });
+          return refreshTranscript().then(refreshHyps).then(function () { drawSessions(); drawMain(); });
         });
     }
 
@@ -5626,6 +5631,15 @@
       return V.getJSON(OFF("/api/chat/session/" + encodeURIComponent(C.id)))
         .then(function (d) { C.messages = (d && d.messages) || []; })
         .catch(function () { C.messages = []; });
+    }
+
+    // Phase C: the hypothesis ledger. Reconciled server-side against the engine's confirmed FACTs, so a
+    // hypothesis a run has since settled shows as confirmed on a plain reload. Never blocks the transcript.
+    function refreshHyps() {
+      if (!C.id) { C.hyps = []; return Promise.resolve(); }
+      return V.getJSON(OFF("/api/chat/hypotheses?chat_id=" + encodeURIComponent(C.id)))
+        .then(function (d) { C.hyps = (d && d.hypotheses) || []; })
+        .catch(function () { /* keep the last-known ledger on a transient error */ });
     }
 
     // One writer for "this conversation now has an id": the URL, the state and the upload's chat
@@ -5882,6 +5896,36 @@
 
     // -- linked histories ----------------------------------------------------
     // The chat id IS the session id, so the session connect/disconnect actions take a chat id verbatim.
+    // Phase C: the hypothesis ledger. Open first (a lead badge), then confirmed (a green shield + the
+    // finding that closed it) / refuted. Rendered only when there is something to show, so it never
+    // clutters a fresh chat. An open hypothesis is a suspicion recorded from the conversation; it closes
+    // itself when an oracle confirms a matching finding (server-side reconcile) — the loop CHAT-VISION
+    // asks for: "the thing you suspected on Tuesday is now confirmed — here is the proof."
+    function drawHyps() {
+      const host = V.$("#chat-hyps"); if (!host) return;
+      const hyps = C.hyps || [];
+      if (!hyps.length) { V.clear(host); return; }
+      const rows = hyps.map(function (hp) {
+        const st = String(hp.status || "open");
+        const badge = st === "confirmed" ? h("span.shield", null, [V.icon("check"), "Confirmed"])
+          : st === "refuted" ? h("span.pill.sm", null, "Refuted")
+            : h("span.shield.lead", null, [V.icon("info"), "Open"]);
+        const meta = [];
+        if (hp.would_confirm) meta.push(h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, "Confirm if: " + hp.would_confirm));
+        if (hp.would_refute) meta.push(h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, "Refute if: " + hp.would_refute));
+        if (st === "confirmed" && hp.finding_ref) meta.push(h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, "Closed by run: " + hp.finding_ref));
+        return h("div.hyp-row", null, [
+          h("div", { style: { display: "flex", gap: "8px", alignItems: "baseline", flexWrap: "wrap" } },
+            [badge, h("span", null, String(hp.statement || ""))]),
+        ].concat(meta));
+      });
+      V.mount(host, h("div.hyp-panel", null, [
+        h("div.label", null, "Hypotheses"),
+        h("div.hint", { style: { marginBottom: "6px", fontSize: "var(--fs-xs)" } },
+          "Suspicions recorded from this conversation. Each closes itself when an oracle confirms a matching finding."),
+      ].concat(rows)));
+    }
+
     function drawLinks() {
       const host = V.$("#chat-links"); if (!host) return;
       if (!C.id) {
@@ -6228,6 +6272,15 @@
       function syncToolRow() { toolRow.style.display = C.mode === "tool" ? "flex" : "none"; }
       modeSel.addEventListener("change", function () { C.mode = modeSel.value; syncToolRow(); });
       syncToolRow();
+      // How hard to reason on THIS reply. Ask = quick (default, unchanged). Research = exhaustive + cited,
+      // with extended thinking. Plan = an ordered confirm/refute plan + hypotheses + gated next actions.
+      // The reply is a LEAD in every mode; the mode changes depth, not what counts as truth.
+      const reasonSel = h("select.input", { style: { minWidth: "150px" },
+        title: "How hard to reason on the reply — Ask (quick) · Research (exhaustive, deep thinking) · Plan (a confirm/refute plan)" },
+        [["ask", "Reasoning: Ask"], ["research", "Research (deep)"], ["plan", "Plan"]].map(function (p) {
+          const o = h("option", { value: p[0] }, p[1]); if (p[0] === C.reasonMode) o.selected = true; return o;
+        }));
+      reasonSel.addEventListener("change", function () { C.reasonMode = reasonSel.value; });
       const send = h("button.btn.primary", { onClick: doSend }, [V.icon("bolt"), "Send"]);
       input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); } });
 
@@ -6260,7 +6313,8 @@
 
       function reallySend(msg, outgoing) {
         C.busy = true; send.disabled = true;
-        const payload = { chat_id: C.id || undefined, message: msg, target: (target.value || "").trim(), mode: C.mode || undefined };
+        const payload = { chat_id: C.id || undefined, message: msg, target: (target.value || "").trim(),
+          mode: C.mode || undefined, reason_mode: (C.reasonMode && C.reasonMode !== "ask") ? C.reasonMode : undefined };
         // No per-message attachment list: the console answers over everything the chat HOLDS, so a
         // list here would be decoration that reads like a control. Removing an attachment is the control.
         if (C.mode === "tool" && C.tool) {
@@ -6273,6 +6327,7 @@
           // a turn that LAUNCHED a run is a new job starting, exactly like the wizard: scope to it
           if (r && r.run_id && r.slug) setEngagement(String(r.slug));
           if (r && r.chat_id) adoptChatId(String(r.chat_id));
+          if (r && Array.isArray(r.hypotheses)) C.hyps = r.hypotheses;   // Phase C: show the ledger at once
           outgoing.forEach(function (a) { a.sent = true; });
           input.value = ""; target.value = "";
           return refreshTranscript();
@@ -6288,7 +6343,8 @@
         list,
         h("div#chat-attach"),
         h("div#chat-links"),
-        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } }, [target, modeSel]),
+        h("div#chat-hyps"),
+        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } }, [target, modeSel, reasonSel]),
         toolRow,
         h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "flex-end", flexWrap: "wrap" } }, [attachBtn, fileInput, input, send]),
         h("div.hint", { style: { marginTop: "6px" } },
@@ -6299,6 +6355,7 @@
       ]);
       drawAttach();
       drawLinks();
+      drawHyps();
       scrollDown();
     }
 
