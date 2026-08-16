@@ -1748,6 +1748,12 @@
         + (p.fatal ? " (fatal)" : "") + (p.reason ? " — " + p.reason : ""); } },
     agent_message: { label: "Message", icon: "brain", cat: "review",
       sum: function (p) { return (p.sender || "?") + " → " + (p.recipient || "?") + (p.topic ? " [" + p.topic + "]" : "") + (p.body ? " · " + p.body : "") + " · advisory coordination (not evidence)"; } },
+    // E1 — a fireteam MEMBER's step, attributed by role, so the operator watches multiple agents work on
+    // different tasks. A member's claim is a LEAD until the oracle re-fires over it in collect() — the
+    // summary says so, and this never wears the confirmed-finding register.
+    fireteam:      { label: "Fireteam member", icon: "brain", cat: "act",
+      sum: function (p) { return (p.role || p.member_id || "member") + (p.step ? " · " + p.step : "")
+        + (p.summary ? ": " + p.summary : "") + " · member lead (oracle-pending)"; } },
   };
   function kindIcon(kind, p) { const m = KIND_META[kind]; if (!m) return "dot"; return typeof m.icon === "function" ? m.icon(p || {}) : m.icon; }
   function isFact(p) { return !!(p && p.verified_by_oracle); }
@@ -6512,6 +6518,13 @@
       agenticChk.addEventListener("change", function () { C.agentic = !!agenticChk.checked; });
       const agenticTog = h("label.chat-agentic", { title: "Agentic engine: the live OODA engine that reasons, runs tools, steers, and resumes. Off = a lighter gated scan." },
         [agenticChk, h("span", null, "Agentic")]);
+      // E1 — request a FIRETEAM (multiple agents on parallel subtasks). Honest: this composes a directive
+      // and ensures the agentic engine is on; the engine deploys a BOUNDED fireteam (each member ≤A2, never
+      // self-approving, facts minted only by the oracle) WHEN its plan calls for one, and any over-cap step
+      // still waits for your signed approval. Each member's steps stream into the live feed, attributed.
+      const fireteamBtn = h("button.btn.sm", { type: "button",
+        title: "Ask the agentic engine to fan out into a bounded fireteam — multiple agents on parallel subtasks (each ≤A2, oracle-bounded). Their steps stream below, attributed per member.",
+        onClick: function () { requestFireteam(); } }, [V.icon("brain"), "Fireteam"]);
       const send = h("button.btn.primary", { onClick: doSend }, [V.icon("bolt"), "Send"]);
       input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); } });
 
@@ -6535,6 +6548,22 @@
         // persist it, so a stale forbidden id does not linger in localStorage (red-pen LOW-7)
         if (C.model && !roster.some(function (m) { return m.id === C.model && m.permitted; })) { C.model = ""; rememberModel(); }
         return sel;
+      }
+
+      // E1 — compose a parallel-investigation (fireteam) directive. Honest by construction: it ensures the
+      // agentic engine is on (a fireteam only exists there) and drops a template the operator fills with
+      // subtasks; the engine decides + gates the actual fan-out. It never claims to force a fireteam.
+      function requestFireteam() {
+        C.agentic = true;
+        if (agenticChk) agenticChk.checked = true;
+        const tmpl = "Deploy a fireteam — investigate these in parallel, one agent per task "
+          + "(each stays ≤A2 and oracle-bounded; over-cap steps wait for my approval):\n1. \n2. \n3. ";
+        const cur = (input.value || "").trim();
+        input.value = cur ? (cur + "\n\n" + tmpl) : tmpl;
+        input.focus();
+        try { input.setSelectionRange(input.value.length, input.value.length); } catch (e) {}
+        V.toast("Fireteam directive added — list your subtasks and Send. The agentic engine fans out into "
+          + "bounded members when its plan calls for it; each member's steps stream below, attributed.", false);
       }
 
       // The plain-language consequence of the current pick — shown under the picker so the sovereignty
@@ -6609,7 +6638,7 @@
         h("div#chat-attach"),
         h("div#chat-links"),
         h("div#chat-hyps"),
-        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } }, [target, modeSel, reasonSel, sessModelSel, agenticTog]),
+        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } }, [target, modeSel, reasonSel, sessModelSel, agenticTog, fireteamBtn]),
         modelNote,
         toolRow,
         h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "flex-end", flexWrap: "wrap" } }, [attachBtn, fileInput, input, send]),

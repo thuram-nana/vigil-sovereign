@@ -78,6 +78,24 @@ def build_member_runner(*, think: ThinkFn, run_tool: RunToolFn, parent_objective
         state = _member_state(member, parent_objective, hints=tuple(getattr(ctx, "hints", ()) or ()))
         gate = getattr(ctx, "gate", None)
         seq = int(getattr(ctx, "seq", 0))
+
+        # E1 — per-member step telemetry. Each member submits its OODA steps to the injected single-writer
+        # spine queue (attributed by member_id/role/wave); the orchestrator drains them, and (when the engine
+        # wires a writer) they surface in the parent engagement's live feed so the operator SEES each agent
+        # work on its task. Best-effort: telemetry never breaks a member. The queue redacts every record (the
+        # F3 scrubber), and only non-secret summaries are emitted here — never raw tool output.
+        def _emit(step: str, summary: str) -> None:
+            spine = getattr(ctx, "spine", None)
+            if spine is None:
+                return
+            try:
+                spine.submit(member_id=member.member_id, seq=seq, kind=f"member.{step}",
+                             record={"member_id": member.member_id,
+                                     "role": member.spec.role or member.member_id,
+                                     "wave_id": member.wave_id, "phase": str(member.phase),
+                                     "step": step, "summary": str(summary or "")[:280]})
+            except Exception:  # noqa: BLE001 — a member's telemetry write never breaks the member or the wave
+                pass
         # hard ceiling: credit bounds EXECUTIONS, but denied edges don't spend credit — so cap total steps
         # to guarantee termination even if the model only ever proposes denied/inert edges.
         limit = max_steps if max_steps is not None else max(1, member.budget.credit_remaining) * 2 + 3
@@ -92,6 +110,10 @@ def build_member_runner(*, think: ThinkFn, run_tool: RunToolFn, parent_objective
                 status = MemberStatus.ERROR
                 break
             action = getattr(decision, "action", None)
+            _tool_name = getattr(getattr(decision, "tool", None), "tool_name", "")
+            _emit("think", f"{getattr(action, 'name', str(action))}"
+                           + (f" · {_tool_name}" if _tool_name else "")
+                           + (f" — {getattr(decision, 'rationale', '')}" if getattr(decision, "rationale", "") else ""))
             if action == ActionType.COMPLETE:
                 break
             if action == ActionType.ASK_USER:
@@ -105,6 +127,7 @@ def build_member_runner(*, think: ThinkFn, run_tool: RunToolFn, parent_objective
 
             if vs == MemberStatus.NEEDS_CONFIRMATION and outcome.verdict.escalation is not None:
                 escalations.append(outcome.verdict.escalation)   # QUEUED — never run here
+                _emit("escalation", f"{_tool_name or 'a tool'} over-cap → queued for signed approval")
                 status = MemberStatus.NEEDS_CONFIRMATION
                 break
             if vs == MemberStatus.TIMEOUT:
@@ -135,6 +158,8 @@ def build_member_runner(*, think: ThinkFn, run_tool: RunToolFn, parent_objective
                         raw_output=str(getattr(exec_res, "stdout", "") or ""),
                         analysis=getattr(decision, "output_analysis", None) or OutputAnalysis(),
                         source=getattr(tool, "tool_name", "")))
+                    # a member's finding is a LEAD until the oracle re-fires over it in collect() — say so
+                    _emit("claim", f"{getattr(tool, 'tool_name', 'tool')} produced a lead (oracle-pending)")
                     status = MemberStatus.SUCCESS
                 else:
                     notes.append(f"executor declined: {getattr(exec_res, 'reason', '')}")
