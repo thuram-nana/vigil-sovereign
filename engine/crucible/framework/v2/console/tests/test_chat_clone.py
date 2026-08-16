@@ -20,6 +20,11 @@ import pytest
 from framework.v2.console import actions as actions_mod
 from framework.v2.console import chat
 
+# The clone exercises `vigil_integration.live.executor` (subprocess_runner) — an OFFENSE-plane module that
+# transitively needs `vigil_gateway`. That is installed in the P5 (two-env) job but NOT in the CRUCIBLE-core
+# job, so run these there and skip cleanly where the offense deps are absent (the clone CODE lazy-imports
+# them guarded; this guard is only for the TEST's own direct import). Coverage is preserved: P5 runs them.
+pytest.importorskip("vigil_integration.live.executor")
 
 CHAT = "clone-chat"
 
