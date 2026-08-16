@@ -773,9 +773,12 @@
       V.tile("Confirmed findings", String(findings), "proven by oracle"),
       V.tile("Budget today", budgetLabel(snap && snap.budget_today), "spend so far"),
     ]);
-    // merged recent activity (sovereign spine snapshot has recent_by_agent / recent_decisions)
+    // recent activity — the sovereign snapshot exposes recent_events as an ARRAY of recent agent events;
+    // recent_by_agent / recent_decisions are COUNTER objects (not arrays), so never call .slice() on those.
+    // Array.isArray guards against any shape drift so the feed degrades to the empty state, never a TypeError.
     const rows = [];
-    if (snap && snap.recent_decisions) snap.recent_decisions.slice(0, 8).forEach(function (d) {
+    const recentEvents = Array.isArray(snap && snap.recent_events) ? snap.recent_events : [];
+    recentEvents.slice(0, 8).forEach(function (d) {
       rows.push(feedRow("decision", d.text || d.choice || "decision", d.ts || ""));
     });
     if (!rows.length) rows.push(h("div.empty", null, [h("div.big", null, "Nothing yet"),

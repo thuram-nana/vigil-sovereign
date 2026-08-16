@@ -23,6 +23,8 @@ def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int 
     decisions: Counter = Counter()
     interrupts_today: Counter = Counter()
     actions_today: Counter = Counter()
+    recent_events: list = []   # the "Recent activity" feed: a LIST of recent agent events (the UI renders
+    #                          # this as an array — recent_by_agent/recent_decisions are COUNTER objects).
     last_checkpoint = -1
     last_consolidation = -1
     for r in store.iter_records():
@@ -39,7 +41,10 @@ def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int 
                     interrupts_today[r.actor] += 1
         if r.source == "agent" and r.seq > head - lookback:
             per_agent[r.actor] += 1
-            decisions[str(r.payload.get("decision"))] += 1
+            decision = r.payload.get("decision")
+            decisions[str(decision)] += 1
+            recent_events.append({"ts": r.ts or "", "actor": r.actor, "kind": r.kind,
+                                  "choice": decision, "text": f"{r.actor} · {decision or r.kind}"})
 
     pend = pending(store, owner_pubkey())
     try:                       # read-only agent-promotion state (verified fold; fail-soft so it never sinks the snapshot)
@@ -58,6 +63,7 @@ def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int 
         "promotions": promotions,   # [{agent, scope}] currently granted (verified) — owner may revoke from the UI
         "recent_by_agent": dict(per_agent.most_common()),
         "recent_decisions": dict(decisions),
+        "recent_events": recent_events[-8:][::-1],   # the 8 most recent agent events, newest first (a LIST)
         "pending_approvals": [{"seq": r.seq, "tier": r.payload.get("tier"), "kind": r.kind,
                                "agent": r.actor, "subject": r.payload.get("subject")} for r in pend],
         "learn_proposals": learn_proposals,   # K2b: pending propose-to-learn items (subset of the approvals)
