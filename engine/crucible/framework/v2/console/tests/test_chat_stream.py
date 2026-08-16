@@ -109,21 +109,48 @@ def test_launch_turn_falls_back_without_appending(monkeypatch):
     assert chat.read_session(CHAT) == []                   # and NOTHING appended (no double-record on re-POST)
 
 
-def test_a_url_or_path_or_clone_in_the_message_falls_back(monkeypatch):
-    for msg in ("scan http://127.0.0.1:8080 for xss", "clone https://github.com/org/repo",
-                "review /etc/hosts"):
+def test_a_url_or_clone_in_the_message_falls_back(monkeypatch):
+    # a URL or a git repo in the message is a LAUNCH intent detected BEFORE the append → fallback to /send,
+    # nothing streamed, nothing recorded. (A bare filesystem path is intentionally NOT grabbed from prose by
+    # `_path_in_message`, so it is a question turn, covered by the need-target test above.)
+    _reason_wanted(monkeypatch, wanted=True)   # isolate launch-intent: even "wanted", a launch must fall back
+    for i, msg in enumerate(("scan http://127.0.0.1:8080 for xss", "clone https://github.com/org/repo")):
         evs, emit = _events()
-        out = chat.chat_stream({"chat_id": CHAT, "message": msg}, emit)
+        cid = "cu-%d" % i
+        out = chat.chat_stream({"chat_id": cid, "message": msg}, emit)
         assert out.get("fallback") is True, msg
-        assert evs == []
+        assert evs == [] and chat.read_session(cid) == []
 
 
-def test_nothing_to_reason_over_falls_back(monkeypatch):
+def test_nothing_to_reason_over_answers_need_target_in_place(monkeypatch):
+    # G4: a turn with nothing to reason over is handled IN chat_stream (append the user msg + the
+    # ask-for-a-target reply), NOT bounced to /send — because chat_stream now appends BEFORE the
+    # reason-wanted check (so `_has_prior_conversation` sees the true prior history and the first
+    # conversational follow-up streams). No /send fallback here means no double-record.
     _reason_wanted(monkeypatch, wanted=False)
     evs, emit = _events()
     out = chat.chat_stream({"chat_id": CHAT, "message": "hello"}, emit)
-    assert out.get("fallback") is True and evs == []
-    assert chat.read_session(CHAT) == []
+    assert out.get("status") == "need_target" and not out.get("fallback")
+    # the user message is recorded EXACTLY once (the whole point of G4 — no double-append), plus the
+    # need_target reply
+    recs = chat.read_session(CHAT)
+    assert len([r for r in recs if r.get("role") == "user" and r.get("text") == "hello"]) == 1
+    assert len([r for r in recs if r.get("kind") == "need_target"]) == 1
+    assert len([e for e in evs if e.get("event") == "done"]) == 1
+
+
+def test_launch_intent_still_falls_back_without_appending(monkeypatch):
+    # the launch/clone/url/path/mode fallbacks stay BEFORE the append, so /send (which appends) never
+    # double-records — G4 must not regress this.
+    _reason_wanted(monkeypatch, wanted=True)
+    for i, body in enumerate(({"message": "assess", "target": "http://127.0.0.1:8080"},
+                              {"message": "clone https://github.com/org/repo"},
+                              {"message": "look", "mode": "url"})):
+        evs, emit = _events()
+        body["chat_id"] = "cx-%d" % i                          # unique per case (no id collision)
+        out = chat.chat_stream(body, emit)
+        assert out.get("fallback") is True and evs == []
+        assert chat.read_session(body["chat_id"]) == []      # nothing appended before a fallback
 
 
 # ── streaming: a question turn streams tokens + a done event, and persists the record ──────────────────────

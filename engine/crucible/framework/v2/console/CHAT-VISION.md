@@ -145,13 +145,19 @@ mid-stream disconnect).
   (`redact_tool_args`, in `fireteam/spine_queue.py`) before it reaches the feed, so structured secret
   forms (`api_key=`, `Bearer …`, `user:pass@host`, `--flag …`) are masked — leaving only the documented
   prose/vocabulary residual (a secret written in prose, or a key-name gap like `sess=` vs `session`).
-  The F1 chat reasoning ANSWER is **not** run through that scrubber: the deterministic scrubber runs on
-  the model's INPUT (the session-context block) and on the E1 feed, not on the model's free-text answer
-  or its persisted transcript. So a structured secret an operator uploaded can appear verbatim in the
-  chat answer and its record — acceptable for a single-operator, loopback, same-origin tool reasoning
-  over its own operator's data, but named here rather than hidden. Scrubbing (or operator-redacting) the
-  chat answer + transcript before it can flow into a dossier/report is the honest follow-up if that
-  record ever leaves the operator's own view.
+  The F1 chat reasoning ANSWER is **not** run through that scrubber in the LIVE view: the deterministic
+  scrubber runs on the model's INPUT (the session-context block) and on the E1 feed, not on the model's
+  free-text answer as it streams. So a structured secret an operator uploaded can appear verbatim in the
+  live chat answer and its on-disk transcript — acceptable for a single-operator, loopback, same-origin
+  tool reasoning over its own operator's data. **But every point where the transcript LEAVES the operator's
+  own view is already scrubbed:** the session dossier scrubs it (`report.dossier.build_session_dossier` →
+  `_scrub_jsonl_file`, key-name + value-level; regression-tested by
+  `test_no_secret_leaks_into_the_session_dossier`), and a linked chat feeding another model's context is
+  scrubbed (`actions._linked_chat_summaries` → `_redact_ctx` + `scrub_log_event`). Uploaded attachment
+  bytes are sent to the model UNredacted by design — that is the operator's own consented egress (they
+  attached the file to have it analysed; redacting it would defeat the analysis). So the residual is
+  strictly operator-local (live view + on-disk transcript); scrubbing those too is optional hardening, not
+  a leak.
 - **A mid-stream disconnect reloads the saved answer; it never double-charges.** If a streamed reply's
   connection drops *after* the server committed the turn, the client reloads the persisted record (no
   re-send); a pre-response failure falls back to `/api/chat/send` exactly once.

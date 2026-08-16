@@ -2225,6 +2225,19 @@ def _finish_question_turn(chat_id: str, out: dict, offer: dict) -> dict:
     return res
 
 
+def _finish_need_target(chat_id: str) -> dict:
+    """The shared 'ask for a target' reply — a turn with nothing to reason over and no launchable target.
+    Persisted + returned; used by chat_send AND chat_stream, so the streaming path can handle a need-target
+    turn ITSELF (after it has appended the user message) rather than falling back to /send and double-
+    recording it."""
+    reply = ("Tell me what to test and give me a target — a URL like http://127.0.0.1:8080 for a "
+             "web / API / infra target, or a path to a codebase. I'll launch a gated, oracle-confirmed "
+             "run and stream it here; low-tier recon runs automatically and any higher-tier, exploit, "
+             "or destructive step waits for your signed approval.")
+    _append(chat_id, {"role": "assistant", "text": reply, "kind": "need_target"})
+    return {"chat_id": chat_id, "status": "need_target", "reply": reply, "stream": "none"}
+
+
 def _finish_failed_reason(chat_id: str, out: dict, offer: dict) -> dict:
     """Shared handling for a reasoning turn the model could not answer (no key / sovereign refusal / SDK or
     model error). Persists the HONEST reply and keeps the deterministic gated scan on offer. Used by both
@@ -2269,12 +2282,32 @@ def chat_stream(body: dict, emit) -> dict:
     if _git_repo_in_message(message) or _URL_RE.search(message) or _path_in_message(message):
         return fallback
     _ensure_session(chat_id)
-    if not _reason_wanted(chat_id, body):                    # nothing to reason over ⇒ /send's need-target reply
-        return fallback
-    # COMMIT to a streamed question turn. Record the user message exactly as chat_send does for a question
-    # turn (no target, no mode), so the transcript is identical.
+    # ESTABLISH the stream BEFORE the first append (red-pen LOW-1). Once the client has received any SSE
+    # frame it takes the "committed" path on a later abort (reload the saved record, never re-POST to /send),
+    # so this closes the sub-millisecond window between the append and the first content frame in which a
+    # dropped connection could otherwise cause a duplicate transcript entry. An unknown `start` event is
+    # ignored by the reader. Past this point chat_stream ALWAYS emits a terminal `done` and never returns a
+    # {fallback} dict — so the server never sends a JSON fallback after an append (the double-append invariant).
+    try:
+        emit({"event": "start"})
+    except Exception:  # noqa: BLE001 — a client hangup here just means no stream; nothing was appended yet
+        pass
+    # Record the user message FIRST (exactly as chat_send does), THEN decide — so `_reason_wanted` →
+    # `_has_prior_conversation` sees the true prior history. `_prior_records` strips the TRAILING current
+    # user turn; checking BEFORE the append stripped a REAL prior turn instead, so the FIRST conversational
+    # follow-up wrongly fell back to non-streamed (G4). The launch/clone/url/path/mode fallbacks above stay
+    # BEFORE the append (those re-POST to /send, which appends) — so there is still no double-record.
     _append(chat_id, {"role": "user", "text": message, "target": "", "mode": "", "model": model,
                       "effort": effort})
+    if not _reason_wanted(chat_id, body):
+        # nothing to reason over — the ask-for-a-target reply, handled HERE (the user message is already
+        # appended, so falling back to /send would double-record it). Emit it as the terminal done event.
+        res = _finish_need_target(chat_id)
+        try:
+            emit({"event": "done", "result": res})
+        except Exception:  # noqa: BLE001
+            pass
+        return res
     offer = _scan_offer(chat_id)
     rmode = _resolve_reason_mode(body.get("reason_mode"))
     entry = _model_entry(model)
@@ -2399,12 +2432,7 @@ def chat_send(body: dict) -> dict:
                 return _finish_question_turn(chat_id, out, offer)
             return _finish_failed_reason(chat_id, out, offer)
 
-        reply = ("Tell me what to test and give me a target — a URL like http://127.0.0.1:8080 for a "
-                 "web / API / infra target, or a path to a codebase. I'll launch a gated, oracle-confirmed "
-                 "run and stream it here; low-tier recon runs automatically and any higher-tier, exploit, "
-                 "or destructive step waits for your signed approval.")
-        _append(chat_id, {"role": "assistant", "text": reply, "kind": "need_target"})
-        return {"chat_id": chat_id, "status": "need_target", "reply": reply, "stream": "none"}
+        return _finish_need_target(chat_id)
 
     launch = actions.launch_assessment({
         "mode": mode, "target": target, "objective": message,
