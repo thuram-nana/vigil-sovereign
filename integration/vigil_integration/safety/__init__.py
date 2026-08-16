@@ -25,7 +25,14 @@ Import-clean: stdlib + ``vigil_gateway.denylist`` (a pure, offense-free module) 
 ``framework.*``/``strix.*``, so it runs in either environment.
 """
 
-from .hard_guardrail import HardBlockError, is_hard_blocked, normalize_domain
+from .hard_guardrail import (
+    HardBlockError,
+    assert_not_hard_blocked,
+    candidate_hosts,
+    is_hard_blocked,
+    normalize_domain,
+    protected_guard_enabled,
+)
 from .llm_intake import (
     ProposalParseError,
     extract_json,
@@ -41,8 +48,11 @@ __all__ = [
     "wrap_untrusted",
     "wrap_untrusted_inline",
     "HardBlockError",
+    "assert_not_hard_blocked",
+    "candidate_hosts",
     "is_hard_blocked",
     "normalize_domain",
+    "protected_guard_enabled",
     "ProposalParseError",
     "extract_json",
     "parse_proposal",

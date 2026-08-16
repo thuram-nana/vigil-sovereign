@@ -53,6 +53,11 @@ from ..common import ethics, paths
 from ..common.errors import SovereigntyViolation
 from ..kernel import sovereignty
 
+# The deterministic protected-domain scope floor (Slice 0 / vigil_core). Applied here as the last-mile
+# unconditional floor on the raw request URL — ABOVE the permissive passthrough — so a protected host is
+# refused even in non-sovereign/permissive mode. Toggle-gated (default ON) per the uniform owner toggle.
+from vigil_core.hard_guardrail import assert_not_hard_blocked, protected_guard_enabled
+
 
 # Backends classified `local` by sovereignty.classify() expose
 # endpoints on these hosts. Sovereign mode permits egress to these
@@ -247,6 +252,13 @@ class SovereignHttpxTransport(httpx.BaseTransport):
         self._sovereign_only = sovereign_only
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        # Protected-domain categorical floor (gov/mil/edu/IGO). This runs UNCONDITIONALLY — above the
+        # permissive/sovereign passthrough below — so a request to a protected host raises even in
+        # permissive mode. Fed the RAW request URL (not request.url.host) so the client-independent host
+        # analysis applies. Gated only by the owner toggle (default ON); when OFF this pre-filter is
+        # skipped and the sovereign allowlist below remains the sole egress control (scope not relaxed).
+        if protected_guard_enabled():
+            assert_not_hard_blocked(str(request.url))
         # In permissive mode the guard logs but does not refuse — the
         # operator may want development workflows that hit external
         # docs / package mirrors. In sovereign mode it always refuses.

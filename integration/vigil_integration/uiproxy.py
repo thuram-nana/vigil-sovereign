@@ -1045,6 +1045,10 @@ _OFFENSE_ENV_ALLOWLIST = frozenset({
     # sovereign side then silently dropped here). test_config_plane_allowlists_agree guards the two sets.
     "CRUCIBLE_LLM_MAX_WORKERS", "CRUCIBLE_LLM_MIN_INTERVAL_S", "CRUCIBLE_RECON_MAX_WORKERS",
     "VIGIL_APPROVAL_WAIT_SECONDS",              # how long a queued offense action waits for an owner signature
+    # The protected-domain safety-floor toggle (VIGIL_ALLOW_PROTECTED_DOMAINS). Must be mirrored here or the
+    # owner's OFF setting is silently dropped and the guard stays ON forever (fails safe, but the operator
+    # thinks it is off). Delivered only when set to a truthy "1"; unset ⇒ absent ⇒ guard reads ON (protected).
+    "VIGIL_ALLOW_PROTECTED_DOMAINS",
     # The sovereignty ladder itself. Without these on the allowlist an operator's tier choice would be
     # silently DROPPED on the way to the offense children — i.e. an AIR_GAPPED deployment would run
     # PERMISSIVE. Passing them can only ever narrow what the child may call, never widen it.

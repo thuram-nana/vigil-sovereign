@@ -33,6 +33,12 @@ from ..common.errors import (
     OutOfScope,
 )
 
+# The deterministic protected-domain scope floor (Slice 0 / vigil_core). Used here in its non-raising
+# predicate form so a hard-blocked target becomes a clean, logged ScopeDecision refusal (the executor
+# posts a ScopeViolation) rather than an uncaught exception. The raising floor still backstops any direct
+# ethics.require_in_scope caller (A1).
+from vigil_core.hard_guardrail import is_hard_blocked, protected_guard_enabled
+
 
 Posture = Literal["TEST", "AUDIT", "EMULATE"]
 DESTRUCTIVE_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
@@ -72,6 +78,7 @@ class ScopeDecision:
         "url_invalid",
         "out_of_scope",
         "posture_forbidden",
+        "hard_blocked",
     ] = ""
 
 
@@ -116,6 +123,20 @@ def validate_action(
     """
     method_norm = method.upper().strip() or "GET"
     destructive = is_destructive(method_norm, target_url)
+
+    # 0. Protected-domain categorical floor (gov/mil/edu/IGO), gated by the owner toggle (default ON).
+    # Checked FIRST and on the RAW target_url (client-independent host analysis), so a hard-blocked target
+    # is refused as a clean, logged ScopeDecision before the charter is even read. Turning the guard OFF
+    # skips ONLY this pre-filter; the scope check (step 4) still decides — the toggle never relaxes scope.
+    if protected_guard_enabled():
+        blocked, why = is_hard_blocked(target_url)
+        if blocked:
+            return ScopeDecision(
+                allowed=False, reason=why,
+                method=method_norm, url=target_url,
+                is_destructive=destructive,
+                refusal_kind="hard_blocked",
+            )
 
     # 1+2. Charter file + signature.
     try:

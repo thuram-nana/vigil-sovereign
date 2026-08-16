@@ -22,6 +22,7 @@ from typing import Iterable
 from ..common import ethics
 from ..common import logging as v2log
 from ..common.errors import OutOfScope
+from vigil_core.hard_guardrail import HardBlockError
 from .budget import Budget
 from .goal_tree import GoalTree
 
@@ -119,4 +120,9 @@ class Watchdog:
                 ethics.require_in_scope(self.engagement_slug, url)
             except OutOfScope as e:
                 self._halt(f"scope drift: {e}")
+                return
+            except HardBlockError as e:
+                # Categorical protected-domain floor (gov/mil/edu/IGO) — halt cleanly, same as scope
+                # drift, rather than letting the raise propagate uncaught out of planner.step().
+                self._halt(f"protected-domain floor: {e}")
                 return

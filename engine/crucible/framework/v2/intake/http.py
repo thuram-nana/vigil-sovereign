@@ -31,6 +31,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
+
+from vigil_core.hard_guardrail import assert_not_hard_blocked, protected_guard_enabled
 from urllib.parse import urlparse
 
 import httpx
@@ -259,6 +261,11 @@ class Fetcher:
         # address BEFORE opening the socket. Resolving here (not at
         # authorisation time) is what catches DNS-rebinding of an
         # authorised hostname to 169.254.169.254 / 127.0.0.1 / 10.x etc.
+        # Protected-domain floor (last-mile, defense-in-depth): intake fetches via raw httpx, not the
+        # HttpExecutor, so A3 (SovereignHttpxTransport) does not cover this path. Gated by the owner
+        # toggle (default ON); runs on the raw url so the client-independent host analysis applies.
+        if protected_guard_enabled():
+            assert_not_hard_blocked(url)
         assert_public_target(url)
 
         headers = {"User-Agent": self.user_agent, **self.extra_headers}
