@@ -160,6 +160,24 @@ def test_chat_send_routes_a_clone_request(monkeypatch, tmp_path):
     assert out["status"] == "running", out
     assert launched["body"]["mode"] == "codebase" and launched["body"]["target"] == str(cloned)
     assert "Cloned https://github.com/org/repo" in out["reply"]
+    # D2b contract: the response AND the persisted launched record carry mode + the cloned path, so the
+    # interface can offer the gated edit/test affordances on THIS repo. The path is re-confined server-side
+    # on every codebase call, so echoing it here grants no authority — it only tells the UI which repo.
+    assert out["mode"] == "codebase" and out["codebase_path"] == str(cloned)
+    rec = [m for m in chat.read_session(CHAT) if m.get("kind") == "launched"][-1]
+    assert rec["mode"] == "codebase" and rec["codebase_path"] == str(cloned)
+
+
+def test_a_url_launch_carries_no_codebase_path(monkeypatch):
+    """Negative control: a NON-codebase (url) launch must NOT carry a codebase_path — the edit/test panel
+    is offered only for a repo this chat cloned, never for a web target."""
+    monkeypatch.setattr(actions_mod, "launch_assessment",
+                        lambda body: {"run_id": "r", "slug": "s", "stream": "progress", "engine": "integration"})
+    out = chat.chat_send({"chat_id": CHAT, "message": "assess it", "target": "http://127.0.0.1:8080", "mode": "url"})
+    assert out["status"] == "running" and out["mode"] == "url"
+    assert "codebase_path" not in out
+    rec = [m for m in chat.read_session(CHAT) if m.get("kind") == "launched"][-1]
+    assert "codebase_path" not in rec
 
 
 def test_chat_send_reports_a_clone_failure(monkeypatch):
