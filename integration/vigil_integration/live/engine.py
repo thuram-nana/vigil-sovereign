@@ -164,11 +164,13 @@ class RunReport(BaseModel):
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
     denied_edges: list[str] = Field(default_factory=list)
     queued_edges: list[str] = Field(default_factory=list)
-    # G1 (Tier A) — the STRUCTURED, durable record of fireteam member edges QUEUED for a signed operator
-    # approval (an over-cap/dangerous member tool that was never run). Each entry carries the binding key
-    # (wave_id/member_id/seq) + tool/target/requested_tier/reason, so the operator can review exactly what
-    # is pending after a wave — the foundation for a signed-resolve surface (Tier B) and an approved-edge
-    # runner (Tier C). Surfacing only: nothing here is executable, and a member edge still never auto-runs.
+    # G1 (Tier A) — the STRUCTURED record of fireteam member edges QUEUED for a signed operator approval (an
+    # over-cap/dangerous member tool that was never run). Each entry carries the binding key
+    # (wave_id/member_id/seq) + tool/target/requested_tier/reason (target/reason scrubbed at source), so the
+    # operator can review exactly what is pending at END OF RUN. NB this report is IN-MEMORY (the run's return
+    # value, not persisted); the DURABLE append-only ledger a separate-process resolve tier (B) reads is the
+    # ConfirmationRegistry (`fireteam/confirmation.py`). Surfacing only: nothing here is executable, and a
+    # member edge still never auto-runs.
     fireteam_escalations: list[dict] = Field(default_factory=list)
     facts: list[Finding] = Field(default_factory=list)
     leads: list[Finding] = Field(default_factory=list)
@@ -653,18 +655,27 @@ class VigilEngine:
             report.queued_edges.append(f"fireteam escalation (queued, never auto-run): "
                                        f"{getattr(esc, 'reason', '') or getattr(esc, 'tool_name', '')}")
             # G1 (Tier A): also record the STRUCTURED escalation so the operator can review exactly what is
-            # pending (the binding key + tool/target/tier/reason), durably in the report — not just a string.
-            # Defensive getattr: a malformed escalation contributes a partial row, never a traceback.
-            report.fireteam_escalations.append({
-                "wave_id": str(getattr(esc, "wave_id", "") or ""),
-                "member_id": str(getattr(esc, "member_id", "") or ""),
-                "seq": int(getattr(esc, "seq", 0) or 0),
-                "tool": str(getattr(esc, "tool_name", "") or ""),
-                "target": str(getattr(esc, "target", "") or ""),
-                "requested_tier": str(getattr(esc, "requested_tier", "") or ""),
-                "reason": str(getattr(esc, "reason", "") or ""),
-                "status": "queued",   # queued for a signed operator approval; never auto-run (Tier B/C = sign/run)
-            })
+            # pending (the binding key + tool/target/tier/reason) on the run report. This is genuinely TOTAL:
+            # the whole row build is guarded, so a malformed escalation contributes nothing rather than
+            # propagating out of engage() (which must never raise). `target`/`reason` are the only free-text
+            # here, so they are SCRUBBED at source (the F3 value-redactor) — the row is secret-safe by
+            # construction, so a later tier / UI that surfaces it cannot leak a credential in a target URL.
+            try:
+                from ..tools.governance import redact_tool_args
+                _safe = redact_tool_args({"target": str(getattr(esc, "target", "") or ""),
+                                          "reason": str(getattr(esc, "reason", "") or "")})
+                report.fireteam_escalations.append({
+                    "wave_id": str(getattr(esc, "wave_id", "") or ""),
+                    "member_id": str(getattr(esc, "member_id", "") or ""),
+                    "seq": int(getattr(esc, "seq", 0) or 0),
+                    "tool": str(getattr(esc, "tool_name", "") or ""),
+                    "target": str(_safe.get("target", "")),
+                    "requested_tier": str(getattr(esc, "requested_tier", "") or ""),
+                    "reason": str(_safe.get("reason", "")),
+                    "status": "queued",   # queued for a signed operator approval; never auto-run (Tier B/C = sign/run)
+                })
+            except Exception:  # noqa: BLE001 — a malformed row is dropped; engage() never raises over telemetry
+                pass
         for ref in getattr(outcome, "spine_refs", []) or []:
             report.checkpoints.append(str(ref))
 

@@ -431,6 +431,22 @@ def test_approved_deploy_folds_wave_facts_leads_and_escalations():
     assert row["status"] == "queued" and "destructive" in row["reason"]
 
 
+def test_escalation_target_credential_is_scrubbed_at_source():
+    # G1 red-pen forward-caution: the structured row copies target/reason, so scrub them AT SOURCE (the F3
+    # value-redactor) — the row is secret-safe by construction, so a later tier/UI that surfaces it cannot
+    # leak a credential in a target URL. (A bare token in prose is the documented F3 residual, not asserted.)
+    esc = EscalationRequest(wave_id="w", member_id="a", tool_name="sqlmap",
+                            target="http://admin:s3cr3t@10.0.0.5/", reason="over-cap", seq=1)
+    outcome = FireteamOutcome(escalations=[esc])
+    eng = _engine(EngineSeams(attest=_attest_allow, think=ReplayThinker([_deploy(), _complete()]),
+                              gate=_allow_gate, approval=_approve_all,
+                              deploy_fireteam=lambda d, s, seq: outcome))
+    rep = eng.engage(TARGET)
+    assert len(rep.fireteam_escalations) == 1
+    row = rep.fireteam_escalations[0]
+    assert "s3cr3t" not in row["target"] and "10.0.0.5" in row["target"]   # credential masked, host kept
+
+
 def test_wave_fact_without_a_signed_ref_is_downgraded_to_a_lead():
     # honesty guard: a Finding that lands in outcome.facts WITHOUT a signed evidence ref must NOT become a
     # fact in the run — it degrades to a lead (a FACT needs a signed ref, even from a wave).
