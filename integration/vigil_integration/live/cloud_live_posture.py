@@ -27,8 +27,9 @@ scope are bound into the signed certificate (bounded honesty).
 
 ADMISSION, not a direct mint (Phase-D BLOCKER-1). Both branches are ``clean_capable:false`` in
 ``docs/capability-matrix/evidence-branches.json``; a conclusive non-fire is demoted to INCONCLUSIVE, never
-escapes as CLEAN. The oracle yields ``(fired, conclusive)`` → ``verdict.admit(...)`` → ``certify_admitted``
-mints ONLY a FACT. provenance="reproduced" (VIGIL re-derives the evidence over the retained capture bytes).
+escapes as CLEAN. The oracle yields ``(fired, conclusive, rules)`` (``rules`` = the fired evidence-rule ids,
+retained for a future per-rule branch attribution refinement) → ``verdict.admit(fired, conclusive, ...)`` →
+``certify_admitted`` mints ONLY a FACT. provenance="reproduced" (VIGIL re-derives the evidence over the retained capture bytes).
 
 D2 BINDING. The captured evidence sha256, ``capture_method="api:list"``, the per-FACT ``resource_scope``
 (provider/account/region/resource) naming the FACT's ACTUAL subject, the requested scope,
@@ -264,7 +265,11 @@ def cloud_live_verify(
             "oracle_context": oracle_context,
         }
         binding = {**base_binding, "resource_scope": _subject_scope(rid)}
-        fired, conclusive = _oracle_signal("cloud_misconfiguration", oracle_context)
+        # ``rules`` (the fired evidence-rule ids) is returned for a future per-rule branch attribution
+        # refinement (readiness audit 2.7); this loop files every cloud firing under the single registered
+        # ``_BRANCH_CLOUD`` branch, so it is deliberately unused here — but it MUST be unpacked (the oracle
+        # returns a 3-tuple; unpacking 2 was a ValueError on every adjudicated resource).
+        fired, conclusive, _rules = _oracle_signal("cloud_misconfiguration", oracle_context)
         admitted = admit(_BRANCH_CLOUD, fired=fired, conclusive=conclusive, observed=observed)
         res.admissions.append((_BRANCH_CLOUD, admitted.verdict.value, admitted.reason))
         out = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
@@ -322,7 +327,9 @@ def cloud_live_verify(
             "oracle_context": oracle_context,
         }
         binding = {**base_binding, "resource_scope": _subject_scope(resource_id)}
-        fired, conclusive = _oracle_signal("privilege_path", oracle_context)
+        # ``rules`` unused here (single registered ``_BRANCH_POLICY`` branch — see the cloud_posture loop);
+        # unpacked in full because ``_oracle_signal`` returns ``(fired, conclusive, rules)``.
+        fired, conclusive, _rules = _oracle_signal("privilege_path", oracle_context)
         admitted = admit(_BRANCH_POLICY, fired=fired, conclusive=conclusive, observed=observed)
         res.admissions.append((_BRANCH_POLICY, admitted.verdict.value, admitted.reason))
         out = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
