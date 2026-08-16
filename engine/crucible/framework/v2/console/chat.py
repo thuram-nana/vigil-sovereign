@@ -2012,7 +2012,8 @@ def chat_send(body: dict) -> dict:
 
         reply = ("Tell me what to test and give me a target — a URL like http://127.0.0.1:8080 for a "
                  "web / API / infra target, or a path to a codebase. I'll launch a gated, oracle-confirmed "
-                 "run and stream it here; any target-touching step waits for your approval.")
+                 "run and stream it here; low-tier recon runs automatically and any higher-tier, exploit, "
+                 "or destructive step waits for your signed approval.")
         _append(chat_id, {"role": "assistant", "text": reply, "kind": "need_target"})
         return {"chat_id": chat_id, "status": "need_target", "reply": reply, "stream": "none"}
 
@@ -2022,6 +2023,11 @@ def chat_send(body: dict) -> dict:
         "slug": str(body.get("slug", "")), "model": model,
         "session_id": chat_id,                        # F2: link the launched run to this chat's session
         "tools": [str(t) for t in (body.get("tools") or [])],
+        # The chat IS the agentic operator: route its LOOPBACK engagements to the integration `vigil
+        # engage` engine (OODA loop + mid-run steering + --resume + fireteam), whose live steps now stream
+        # to the process box (the bridge). Loopback-gated in the launcher; a remote target falls through
+        # to the charter-gated offense engage unchanged. Honours an explicit opt-out (agentic: false).
+        "agentic": bool(body.get("agentic", True)),
     })
     if launch.get("error"):
         # An archive that was unpacked and then could not be launched must still SAY it was unpacked —
@@ -2031,11 +2037,25 @@ def chat_send(body: dict) -> dict:
         return {"chat_id": chat_id, "status": "refused", "reply": reply, "error": launch["error"],
                 "stream": "none"}
 
+    # HONEST about what "gated" means (red-pen F1/F2). The agentic engine AUTO-RUNS low-tier recon
+    # (WARDEN A0/A1) and QUEUES higher-tier/exploit/destructive steps for a signed approval — it does NOT
+    # wait for approval on *every* target-touching step. Name the engine too, so a run that used to be a
+    # read-only scan is not silently described the same as the agentic OODA engine.
+    engine = str(launch.get("engine") or "")
+    if engine == "integration":
+        how = ("It reasons, runs tools, and steers live — low-tier recon runs automatically and any "
+               "higher-tier, exploit, or destructive step waits for your signed approval. Add a message "
+               "below to steer it while it runs.")
+        what = "an agentic"
+    else:
+        how = ("Findings are oracle-confirmed; higher-tier, exploit, and destructive steps wait for your "
+               "signed approval.")
+        what = f"a {mode}"
     reply = ((f"{resolution_note} " if resolution_note else "")
-             + f"Started a {mode} run against {target} (engagement '{launch['slug']}'). Watch it live below — "
-             f"findings are oracle-confirmed and any target-touching step waits for your approval.")
+             + f"Started {what} run against {target} (engagement '{launch['slug']}'). Watch it live below — "
+             + how)
     _append(chat_id, {"role": "assistant", "text": reply, "kind": "launched",
                       "run_id": launch.get("run_id"), "slug": launch.get("slug"),
-                      "stream": launch.get("stream")})
-    return {"chat_id": chat_id, "status": "running", "reply": reply,
+                      "stream": launch.get("stream"), "engine": engine})
+    return {"chat_id": chat_id, "status": "running", "reply": reply, "engine": engine,
             "run_id": launch.get("run_id"), "slug": launch.get("slug"), "stream": launch.get("stream")}

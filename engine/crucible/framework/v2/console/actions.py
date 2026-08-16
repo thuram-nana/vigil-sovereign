@@ -740,14 +740,16 @@ def _vigil_bin() -> "str | None":
     return os.environ.get("VIGIL_BIN") or shutil.which("vigil")
 
 
-def _graph_backed_engage_cmd(target: str, slug: str, session_id: str, scan_mode: str) -> "list | None":
-    """The argv for a GRAPH-BACKED loopback engage via `vigil engage`, or None (→ caller falls back to the
-    offense engage) unless BOTH a `vigil` entrypoint is resolvable AND Neo4j is configured (NEO4J_URI). The
-    caller gates on is_loopback, so `--scope 127.0.0.1` is the owner's own machine — no charter downgrade is
-    possible. `--session` partitions the per-session graph; `--connect` unions the operator-connected
-    sessions (each prior stays origin-tagged + non-authoritative)."""
+def _integration_engage_cmd(target: str, slug: str, session_id: str, scan_mode: str) -> "list | None":
+    """The argv for a LOOPBACK agentic engage via the integration `vigil engage` engine — the OODA loop
+    with mid-run operator-message steering, ``--resume``, the owner-signed approval broker, and fireteam —
+    or None if no `vigil` entrypoint resolves. Graph projection is OPTIONAL: the engine mirrors facts to
+    Neo4j only when NEO4J_URI is set and reachable, and runs graph-free otherwise, so this NO LONGER
+    requires Neo4j (that was a console launch policy, never an engine dependency). The caller gates on
+    is_loopback, so `--scope 127.0.0.1` is the owner's own machine — no charter downgrade is possible.
+    `--session` partitions the per-session graph; `--connect` unions the operator-connected sessions."""
     vigil = _vigil_bin()
-    if not vigil or not os.environ.get("NEO4J_URI"):
+    if not vigil:
         return None
     from . import sessions
     conns = ",".join(sessions.connections_of(session_id))
@@ -920,26 +922,32 @@ def launch_assessment(body: dict) -> dict:
         return {"error": f"target must be an absolute URL (got {target!r})"}
     is_loopback = host in _LOOPBACK
 
-    # console→live-engine bridge (OPT-IN): a session-linked LOOPBACK run can go GRAPH-BACKED through the
-    # integration `vigil engage` — which partitions the per-session Neo4j graph and unions the connected
-    # sessions (F3/F4), the thing the offense engine the console otherwise spawns cannot do. Loopback-only
-    # (owner's own machine — no charter downgrade). If opted-in but `vigil`/Neo4j is unavailable, fall
-    # through to the normal path with an honest note; the run still launches (session linkage is kept).
-    if bool(body.get("graph_backed")) and session_id and is_loopback:
+    # console→live-engine bridge (OPT-IN): a session-linked LOOPBACK run can go through the integration
+    # `vigil engage` AGENTIC engine — the OODA loop with mid-run operator-message steering, `--resume`, the
+    # owner-signed approval broker, and fireteam, plus the per-session graph partition/union (F3/F4) WHEN
+    # Neo4j is present (graph-free otherwise). Loopback-only (owner's own machine — no charter downgrade).
+    # Its live steps stream to the console process box via progress.jsonl (VIGIL_PROOF_RUN_DIR +
+    # stream:"progress"). Opt-in via `agentic` (or the legacy `graph_backed`). If opted-in but no `vigil`
+    # entrypoint resolves, fall through to the offense engine with an honest note (session linkage kept).
+    if bool(body.get("agentic") or body.get("graph_backed")) and session_id and is_loopback:
         gslug = _slugify(body.get("slug") or "loopback", fallback="loopback")
-        gcmd = _graph_backed_engage_cmd(target, gslug, session_id, scan_mode)
+        gcmd = _integration_engage_cmd(target, gslug, session_id, scan_mode)
         if gcmd is not None:
-            unapplied = _unapplied("a graph-backed run (the `vigil engage` bridge takes no pack flags)",
-                                       "Re-run it with graph-backed OFF to use them.")
-            meta = {**base, **unapplied, "slug": gslug, "cmd": gcmd, "stream": "none", "status": "running",
-                    "engine": "integration-graph", "graph_partition": session_id}
+            unapplied = _unapplied("an agentic `vigil engage` run (the bridge takes no pack flags)",
+                                       "Re-run it with the agentic engine OFF to use them.")
+            graphed = bool(os.environ.get("NEO4J_URI"))
+            meta = {**base, **unapplied, "slug": gslug, "cmd": gcmd, "stream": "progress", "status": "running",
+                    "engine": "integration", "graph": graphed, "graph_partition": session_id}
             _write_meta(run_id, **meta)
-            _spawn_background(run_id, rd, gcmd, meta, capture_report=False)
+            # the child needs the run dir so its OODA-timeline mirror (wiring.py spine_post → progress.jsonl)
+            # lands where /api/events?run= tails it — mirroring the codebase/Strix branch.
+            _spawn_background(run_id, rd, gcmd, meta, capture_report=False,
+                              env_extra={"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": gslug})
             return {"run_id": run_id, "status": "running", "mode": mode, "slug": gslug,
-                    "stream": "none", "engine": "integration-graph", "graph_partition": session_id,
-                    **unapplied}
-        base["graph_note"] = ("graph-backed requested but unavailable (needs the `vigil` entrypoint + "
-                              "NEO4J_URI + a loopback target); ran the offense engine — session linkage kept")
+                    "stream": "progress", "engine": "integration", "graph": graphed,
+                    "graph_partition": session_id, **unapplied}
+        base["engine_note"] = ("the agentic engine was requested but no `vigil` entrypoint resolved; ran "
+                               "the offense engine instead — session linkage kept")
 
     # url + loopback → the SAME gated loopback scan (progress-log stream, JSON report captured).
     if mode == "url" and is_loopback:

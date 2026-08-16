@@ -194,50 +194,84 @@ def graph_env(monkeypatch):
 def test_graph_backed_loopback_routes_to_vigil_engage(stub_launch, graph_env):
     r = actions.launch_assessment({"mode": "url", "target": "http://127.0.0.1:8000/",
                                    "session_id": "sess-A", "graph_backed": True, "scan_mode": "standard"})
-    assert r["engine"] == "integration-graph" and r["graph_partition"] == "sess-A"
+    assert r["engine"] == "integration" and r["graph_partition"] == "sess-A"
+    assert r["graph"] is True                                 # NEO4J_URI is set in graph_env → graph on
+    assert r["stream"] == "progress"                          # live steps stream to the console box (bridge)
     cmd, meta = stub_launch(r["run_id"])
     assert cmd[0] == "/opt/vigil/bin/vigil" and cmd[1] == "engage" and cmd[2] == "http://127.0.0.1:8000/"
     assert "--session" in cmd and "sess-A" in cmd
     assert cmd[cmd.index("--scope") + 1] == "127.0.0.1"       # owner's own machine — no charter downgrade
     assert cmd[cmd.index("--connect") + 1] == "sess-B"        # F4 connected session unioned as priors
     assert "-m" not in cmd and "framework.v2" not in cmd      # NOT the offense engine
-    assert meta["engine"] == "integration-graph" and meta["graph_partition"] == "sess-A"
+    assert meta["engine"] == "integration" and meta["graph_partition"] == "sess-A"
+    assert meta["stream"] == "progress"                       # PERSISTED stream (what the UI reads)
 
 
-def test_graph_backed_falls_back_when_unavailable(stub_launch, monkeypatch):
+def test_agentic_falls_back_when_no_vigil_entrypoint(stub_launch, monkeypatch):
     monkeypatch.setattr(actions, "_vigil_bin", lambda: None)   # vigil not installed
     monkeypatch.delenv("NEO4J_URI", raising=False)
     r = actions.launch_assessment({"mode": "url", "target": "http://127.0.0.1:8000/",
-                                   "session_id": "sess-A", "graph_backed": True, "scan_mode": "quick"})
-    assert r.get("engine") != "integration-graph"
+                                   "session_id": "sess-A", "agentic": True, "scan_mode": "quick"})
+    assert r.get("engine") != "integration"
     cmd, meta = stub_launch(r["run_id"])
     assert "framework.v2" in cmd and "scan" in cmd            # fell back to the offense loopback scan
-    assert "graph-backed requested but unavailable" in (meta.get("graph_note") or "")
+    assert "no `vigil` entrypoint resolved" in (meta.get("engine_note") or "")
 
 
-def test_graph_backed_ignored_for_remote_target(stub_launch, graph_env, monkeypatch):
+def test_agentic_engine_runs_graph_free_without_neo4j(stub_launch, monkeypatch):
+    # B0: the integration engine NO LONGER requires Neo4j — with a `vigil` bin and no NEO4J_URI it still
+    # routes to the agentic engine (graph projection simply off), and it STILL streams live steps.
+    monkeypatch.setattr(actions, "_vigil_bin", lambda: "/opt/vigil/bin/vigil")
+    monkeypatch.delenv("NEO4J_URI", raising=False)
+    from framework.v2.console import sessions
+    monkeypatch.setattr(sessions, "connections_of", lambda sid: [])
+    r = actions.launch_assessment({"mode": "url", "target": "http://127.0.0.1:8000/",
+                                   "session_id": "sess-A", "agentic": True})
+    assert r["engine"] == "integration" and r["graph"] is False and r["stream"] == "progress"
+
+
+def test_agentic_run_hands_the_child_the_run_dir_for_live_steps(monkeypatch):
+    # the bridge: the integration child must receive VIGIL_PROOF_RUN_DIR so its OODA-timeline mirror lands
+    # where /api/events?run= tails it (without it, the process box would show nothing for the run).
+    monkeypatch.setattr(actions, "_vigil_bin", lambda: "/opt/vigil/bin/vigil")
+    from framework.v2.console import sessions
+    monkeypatch.setattr(sessions, "connections_of", lambda sid: [])
+    captured = {}
+    monkeypatch.setattr(actions, "_spawn_background",
+                        lambda *a, **k: captured.update(env_extra=k.get("env_extra")))
+    r = actions.launch_assessment({"mode": "url", "target": "http://127.0.0.1:8000/",
+                                   "session_id": "sess-A", "agentic": True})
+    assert (captured.get("env_extra") or {}).get("VIGIL_PROOF_RUN_DIR"), "no run dir handed to the child"
+    assert r["run_id"] in captured["env_extra"]["VIGIL_PROOF_RUN_DIR"]
+
+
+def test_agentic_ignored_for_remote_target(stub_launch, graph_env, monkeypatch):
     # remote stays on the offense engage (its signed-charter gate), NEVER the self-scoped vigil engage.
     monkeypatch.setattr(actions, "_has_charter", lambda slug: True)
     r = actions.launch_assessment({"mode": "url", "target": "https://app.example.com/", "slug": "acme",
-                                   "session_id": "sess-A", "graph_backed": True})
+                                   "session_id": "sess-A", "agentic": True})
     cmd, meta = stub_launch(r["run_id"])
-    assert "framework.v2" in cmd and "engage" in cmd and meta.get("engine") != "integration-graph"
+    assert "framework.v2" in cmd and "engage" in cmd and meta.get("engine") != "integration"
 
 
-def test_graph_backed_requires_the_opt_in_flag(stub_launch, graph_env):
-    # available infra + a session is NOT enough — WITHOUT graph_backed it stays the normal loopback scan.
+def test_agentic_requires_the_opt_in_flag(stub_launch, graph_env):
+    # available infra + a session is NOT enough — WITHOUT the opt-in it stays the normal loopback scan.
     r = actions.launch_assessment({"mode": "url", "target": "http://127.0.0.1:8000/", "session_id": "sess-A"})
     cmd, meta = stub_launch(r["run_id"])
-    assert "framework.v2" in cmd and "scan" in cmd and meta.get("engine") != "integration-graph"
+    assert "framework.v2" in cmd and "scan" in cmd and meta.get("engine") != "integration"
 
 
-def test_graph_backed_cmd_is_none_without_infra(monkeypatch):
+def test_integration_cmd_needs_only_a_vigil_bin(monkeypatch):
     monkeypatch.setattr(actions, "_vigil_bin", lambda: "/opt/vigil/bin/vigil")
     monkeypatch.delenv("NEO4J_URI", raising=False)
-    assert actions._graph_backed_engage_cmd("http://127.0.0.1/", "s", "sess-A", "standard") is None  # no Neo4j
+    from framework.v2.console import sessions
+    monkeypatch.setattr(sessions, "connections_of", lambda sid: [])
+    # B0: Neo4j NOT required — a resolvable vigil bin is enough
+    assert actions._integration_engage_cmd("http://127.0.0.1/", "s", "sess-A", "standard") is not None
     monkeypatch.setattr(actions, "_vigil_bin", lambda: None)
     monkeypatch.setenv("NEO4J_URI", "neo4j+s://x")
-    assert actions._graph_backed_engage_cmd("http://127.0.0.1/", "s", "sess-A", "standard") is None  # no vigil
+    # no vigil bin → None even WITH Neo4j (a bin is the one hard requirement)
+    assert actions._integration_engage_cmd("http://127.0.0.1/", "s", "sess-A", "standard") is None
 
 
 def test_codebase_routes_to_strix_and_validates_path(stub_launch, tmp_path):
