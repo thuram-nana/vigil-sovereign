@@ -506,6 +506,30 @@ textarea { min-height: 80px; resize: vertical; }
 .chat-prop .glyph svg { width: 15px; height: 15px; }
 .chat-prop .pl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
 
+/* D2b — the codebase panel on a launched CODEBASE bubble: propose a dev-mode edit (reviewed as a diff),
+   apply it (the operator's click is the approval), and run tests in the no-net sandbox. */
+.chat-cb { display: flex; flex-direction: column; gap: 8px; }
+.chat-cb .cb-head { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+.chat-cb .cb-head .glyph { width: 15px; height: 15px; flex: 0 0 auto; opacity: .85; }
+.chat-cb .cb-head .glyph svg { width: 15px; height: 15px; }
+.chat-cb .cb-path { font-family: var(--mono, ui-monospace, monospace); font-size: var(--fs-xs); font-weight: 400;
+  color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.chat-cb .cb-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* the unified-diff viewer — add/remove/hunk-coloured, monospace, its OWN horizontal scroll so a wide
+   line never scrolls the page body. Content is inserted as text nodes (never innerHTML) — see diffView(). */
+.chat-diff { margin: 0; border: 1px solid var(--border); border-radius: var(--r-2); background: var(--bg-1);
+  font-family: var(--mono, ui-monospace, monospace); font-size: var(--fs-xs); line-height: 1.45;
+  max-height: 340px; overflow: auto; padding: 6px 0; }
+.chat-diff .diff-line { padding: 0 10px; white-space: pre; }
+.chat-diff .diff-ctx  { color: var(--text-0); }
+.chat-diff .diff-file { color: var(--text-2); font-weight: 600; }
+.chat-diff .diff-hunk { color: color-mix(in srgb, var(--st-running, #4a90d9) 80%, var(--text-0)); background: var(--bg-2); }
+.chat-diff .diff-add  { background: color-mix(in srgb, #2ea043 16%, transparent);
+  color: color-mix(in srgb, #2ea043 82%, var(--text-0)); }
+.chat-diff .diff-del  { background: color-mix(in srgb, #e5484d 16%, transparent);
+  color: color-mix(in srgb, #e5484d 82%, var(--text-0)); }
+
 /* command palette (⌘K) -------------------------------------------------------
    z-index 70 = the modal layer: above the drawer (60) and the process box (55), below toasts (80),
    so a toast fired by an action stays readable. Pure overlay — it never enters the page flow. */
