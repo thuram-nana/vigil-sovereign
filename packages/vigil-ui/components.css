@@ -463,6 +463,38 @@ textarea { min-height: 80px; resize: vertical; }
 .chat-toolrow select { width: auto; }
 .chat-toolrow .hint { flex: 1 1 260px; color: var(--text-2); font-size: var(--fs-xs); }
 
+/* grounded-in legend (A2): the four sources of an answer must LOOK different, and model inference must
+   never wear evidence's clothes. A chat answer is a LEAD, so these registers are deliberately NOT the
+   green confirmed-finding shield (.shield) — attached code reads neutral/blue, a linked chat reads
+   violet. Anything uncited is model inference, marked by the Lead badge on the bubble. */
+.chat-srcs { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.chat-srcs-lbl { font-size: var(--fs-xs); color: var(--text-2); text-transform: uppercase; letter-spacing: .04em; }
+.chat-src-row { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.chat-src { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: var(--r-pill);
+  font-size: var(--fs-xs); border: 1px solid var(--border-strong); background: var(--bg-2); max-width: 100%; }
+.chat-src .glyph { width: 13px; height: 13px; flex: 0 0 auto; opacity: .85; }
+.chat-src .glyph svg { width: 13px; height: 13px; }
+.chat-src .rf { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono, ui-monospace, monospace); }
+.chat-src.src-attached { border-color: color-mix(in srgb, var(--st-running, #4a90d9) 45%, var(--border));
+  color: color-mix(in srgb, var(--st-running, #4a90d9) 80%, var(--text-0)); }
+.chat-src.src-linked { border-color: color-mix(in srgb, #8b7bd8 45%, var(--border));
+  color: color-mix(in srgb, #8b7bd8 80%, var(--text-0)); }
+
+/* propose-gated-actions (A1): the model's suggested next steps, as clickable chips. A chip is INERT —
+   the click runs the same gated launcher / navigation as everywhere else; the model proposes, the
+   operator's click through the gate is what acts. Kept visually distinct from an attachment .chip. */
+.chat-props { padding-top: 10px; border-top: 1px solid var(--border); }
+.chat-prop-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; }
+.chat-prop { display: inline-flex; align-items: center; gap: 7px; padding: 6px 11px; cursor: pointer;
+  border: 1px solid var(--border-strong); border-radius: var(--r-pill); background: var(--bg-1);
+  color: var(--text-0); font-family: inherit; font-size: var(--fs-xs); font-weight: 600; text-align: left; }
+.chat-prop:hover:not(:disabled) { background: var(--bg-2); border-color: var(--primary-bg, var(--border-strong)); }
+.chat-prop:disabled { opacity: .5; cursor: default; }
+.chat-prop .glyph { width: 15px; height: 15px; flex: 0 0 auto; opacity: .85; }
+.chat-prop .glyph svg { width: 15px; height: 15px; }
+.chat-prop .pl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+
 /* command palette (⌘K) -------------------------------------------------------
    z-index 70 = the modal layer: above the drawer (60) and the process box (55), below toasts (80),
    so a toast fired by an action stays readable. Pure overlay — it never enters the page flow. */

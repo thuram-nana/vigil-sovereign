@@ -6008,9 +6008,25 @@
       kids.push(h("div", null, String(m.text || m.reply || "")));
       const atts = recordAttachments(m);
       if (atts) kids.push(atts);
+      // GROUNDED-IN legend (A2): the VERIFIED sources this lead drew on, in visibly distinct registers —
+      // attached code vs a linked chat. Everything uncited is the model's own inference (the Lead badge
+      // above). "Evidence" is never rendered here: chat mints no facts, so this can never wear the green
+      // confirmed-finding register.
+      const srcs = (!isUser && Array.isArray(m.sources)) ? m.sources : [];
+      if (srcs.length) {
+        kids.push(h("div.chat-srcs", null, [
+          h("span.chat-srcs-lbl", null, "Grounded in"),
+          h("span.chat-src-row", null, srcs.map(function (s) { return sourceChip(s); })),
+        ]));
+      }
       if (m.kind === "launched" && m.run_id) {
+        // A5: surface the run's LIVE STEPS without leaving the chat. "Show live steps" focuses the
+        // persistent process box on THIS run and reveals it — reusing the tested, redraw-safe SSE feed
+        // (its EventSource lives outside the transcript, so it survives every chat redraw). "Open live
+        // view" is the full-screen route for when the operator wants the whole timeline + graph.
         kids.push(h("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } }, [
-          h("button.btn.sm", { onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(m.run_id); } }, [V.icon("live"), "Watch live"]),
+          h("button.btn.sm.primary", { onClick: function () { chatShowSteps(m); } }, [V.icon("live"), "Show live steps"]),
+          h("button.btn.sm", { onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(m.run_id); } }, [V.icon("book"), "Open live view"]),
           m.slug ? h("span.pill.sm", null, m.slug) : null,
         ]));
       }
@@ -6024,8 +6040,89 @@
           h("button.btn.sm.primary", { onClick: function () { launchScan(scanPath); } }, [V.icon("bolt"), "Run the gated scan on these files"]),
         ]));
       }
+      // PROPOSE-GATED-ACTIONS (A1): the model may suggest a few next steps as clickable chips. They are
+      // inert — a click routes through the same gated launcher / navigation as everywhere else. Rendered
+      // for assistant records only, and de-duplicated against the scan-offer button above so a codebase
+      // scan is never shown twice.
+      const props = (!isUser && Array.isArray(m.proposals)) ? m.proposals : [];
+      const shownProps = props.filter(function (p) {
+        return !(p && p.action === "scan_codebase" && scanPath && String(p.target || "") === scanPath);
+      });
+      if (shownProps.length) {
+        kids.push(h("div.chat-props", { style: { marginTop: "10px" } }, [
+          h("div.dim", { style: { fontSize: "var(--fs-xs)", marginBottom: "6px" } }, "Suggested next steps — you choose:"),
+          h("div.chat-prop-row", null, shownProps.map(function (p) { return proposalChip(p); })),
+        ]));
+      }
       if (m.kind === "refused" || m.kind === "error") { box.style.borderColor = "var(--sev-high, #e5a13a)"; }
       return h("div", wrap, h("div", box, kids));
+    }
+
+    // One "grounded in" source chip (A2). A verified attachment or a linked chat, each in its own
+    // register — deliberately NOT the green confirmed-finding shield, because a chat answer is a lead.
+    function sourceChip(s) {
+      const kind = s && String(s.kind || "");
+      const ref = String((s && s.ref) || "");
+      const note = String((s && s.note) || "");
+      if (kind === "attached") {
+        return h("span.chat-src.src-attached", { title: note || ref }, [V.icon("clip"), h("span.rf", null, ref)]);
+      }
+      if (kind === "linked") {
+        return h("span.chat-src.src-linked", { title: note || ("chat " + ref) }, [V.icon("link"), h("span.rf", null, ref)]);
+      }
+      return null;
+    }
+
+    // One suggested-action chip. Inert until clicked; the click runs the SAME gated path a hand-run uses
+    // (launch_assessment for a scan, navigation for a screen). The model proposed it; the operator's
+    // click, through the gate, is the only thing that acts.
+    function proposalChip(p) {
+      const action = p && String(p.action || "");
+      const label = String((p && p.label) || "Do this");
+      const why = String((p && p.why) || "");
+      let onClick = null;
+      let icon = "bolt";
+      if (action === "scan_codebase") { onClick = function () { launchScan(String(p.target || "")); }; }
+      else if (action === "scan_url") { icon = "live"; onClick = function () { launchUrlScan(String(p.target || "")); }; }
+      else if (action === "open_screen") {
+        icon = "book";
+        onClick = function () { location.hash = "#/" + String(p.screen || ""); };
+      }
+      if (!onClick) return null;
+      return h("button.chat-prop", { onClick: onClick, title: why || label, disabled: C.busy ? "disabled" : null },
+        [V.icon(icon), h("span.pl", null, label)]);
+    }
+
+    // A5: focus the persistent process box on THIS chat-launched run and reveal it, so the operator
+    // sees the ongoing steps (with the same lead/fact + blocked/failed/network tagging the box already
+    // does) without leaving the conversation. Reuses pboxFollow — the EventSource lives outside the
+    // transcript (PBOX.es, never liveES), so it is not churned by chat redraws; the box's own poll
+    // reconciles the run's final status. A run with no live spine (stream:"none") still shows its status.
+    function chatShowSteps(m) {
+      var runId = String((m && m.run_id) || "");
+      if (!runId) return;
+      var run = { run_id: runId, slug: String((m && m.slug) || ""),
+                  stream: String((m && m.stream) || ""), status: "running" };
+      PBOX.ui.open = true; PBOX.ui.dismissed = false; pboxSaveUI();
+      pboxFollow(run);
+    }
+
+    // The gated web/API launcher for a proposed URL scan — the same launch_assessment path, url mode.
+    // Scope is charter-signed; target-touching steps still wait for approval.
+    function launchUrlScan(url) {
+      if (C.busy || !url) return;
+      C.busy = true;
+      V.postJSON(OFF("/api/chat/send"), {
+        chat_id: C.id || undefined,
+        message: "Run the gated assessment against " + url,
+        target: url, mode: "url",
+      }).then(function (r) {
+        if (r && r.error && !r.reply) V.toast(r.error, true);
+        if (r && r.run_id && r.slug) setEngagement(String(r.slug));
+        if (r && r.chat_id) adoptChatId(String(r.chat_id));
+        return refreshTranscript();
+      }).catch(function (e) { V.toast((e && e.message) || "Could not start the scan — is the offense console up?", true); })
+        .then(function () { C.busy = false; loadChatList().then(function () { drawSessions(); drawMain(); scrollDown(); }); });
     }
 
     // The same gated launcher every other entry point uses — scope charter-signed, target-touching steps
