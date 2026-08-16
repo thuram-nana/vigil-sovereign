@@ -1631,6 +1631,37 @@ def _local_chat_schema():
     return ChatReply
 
 
+def _endpoint_host_is_local(backend) -> tuple[bool, str]:
+    """True IFF the constructed local backend's ACTUAL resolved endpoint is loopback. Read from the backend's
+    OWN resolved URL — ``base`` (self-hosted / vLLM / llama-cpp / tgi) or ``host`` (Ollama) — which is fixed
+    at construction, so there is no window between this check and the call for the target to change.
+
+    RED-PEN BLOCK-1: the ``local`` trust class is assigned by backend NAME, but a self-hosted/vLLM endpoint
+    (``CRUCIBLE_SELFHOSTED_ENDPOINT``) is arbitrary and a remote-configured Ollama host is too — so a name-
+    based "local" pick could POST the operator's prompt + codebase to a REMOTE host while the UI says nothing
+    left the machine. This is where "local means nothing leaves this machine" is made TRUE, not merely
+    claimed: only ``localhost`` or a loopback IP LITERAL passes. A non-loopback host — or a hostname whose DNS
+    could point anywhere now or later — does NOT (we never assert locality we cannot back). Fail-closed: an
+    endpoint we cannot read is NOT local."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    url = str(getattr(backend, "base", "") or getattr(backend, "host", "") or "").strip()
+    if not url:
+        return False, "(no endpoint resolved)"
+    try:
+        host = (urlsplit(url).hostname or "").strip().strip("[]").lower()
+    except ValueError:
+        return False, url
+    if not host:
+        return False, url
+    if host == "localhost":
+        return True, host
+    try:
+        return (ipaddress.ip_address(host).is_loopback, host)
+    except ValueError:
+        return False, host          # a hostname (not a loopback literal) — refuse; DNS can point anywhere
+
+
 def _reason_local(chat_id: str, question: str, entry: dict, reason_mode: str) -> dict:
     """E3 — reason with a LOCAL model through the kernel provider layer. Sovereignty-correct by construction:
     the backend is built via ``get_backend(force=...)`` which asserts the sovereignty policy FIRST (a local
@@ -1652,6 +1683,16 @@ def _reason_local(chat_id: str, question: str, entry: dict, reason_mode: str) ->
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"the local model backend could not be initialised ({type(e).__name__}); "
                                       f"nothing was sent anywhere. The gated assessment still runs."}
+    # ENFORCE the "nothing leaves this machine" promise before we assert it (red-pen BLOCK-1): a name-classed
+    # "local" backend whose endpoint is REMOTE would egress the prompt + codebase. Check the backend's own
+    # resolved endpoint is loopback FIRST — before is_available() (Ollama's probe would itself reach the host)
+    # and before the call. A remote/hostname endpoint REFUSES; nothing is sent.
+    local_ok, ep_host = _endpoint_host_is_local(backend)
+    if not local_ok:
+        return {"ok": False, "error": f"the selected local model's endpoint ({ep_host}) is not on this "
+                f"machine, so choosing it would send your prompt and files off-host — refused, to keep the "
+                f"'nothing leaves this machine' guarantee true. Point the local model at a loopback address "
+                f"(localhost / 127.0.0.1), or pick a cloud model. Nothing was sent; the gated assessment still runs."}
     try:
         ok_avail, why = backend.is_available()
     except Exception as e:  # noqa: BLE001
@@ -1704,12 +1745,10 @@ def _reason(chat_id: str, question: str, *, reason_mode: str = "ask", model: str
     entry = _model_entry(model)
     if entry.get("kind") == "local":
         return _reason_local(chat_id, question, entry, reason_mode)
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if not (isinstance(key, str) and key.strip()):
-        return {"ok": False, "need_key": True,
-                "note": "Add a Claude API key in Settings and I can read what you attached. Without one I "
-                        "can still launch a gated, oracle-confirmed run over the same files."}
 
+    # SOVEREIGNTY BEFORE THE KEY (red-pen LOW): check the tier permits this cloud backend FIRST, so a
+    # forbidden tier returns the honest tier refusal even when no key is set — rather than "add a key",
+    # which would imply a key is all that stands between the operator and a cloud egress the tier forbids.
     from ..common.errors import SovereigntyViolation
     from ..kernel import sovereignty as _sovereignty
     try:
@@ -1719,6 +1758,11 @@ def _reason(chat_id: str, question: str, *, reason_mode: str = "ask", model: str
     except Exception as e:  # noqa: BLE001 — "cannot decide" is never "permitted"
         return {"ok": False, "error": f"the sovereignty policy could not be evaluated ({type(e).__name__}); "
                                       f"refusing the model call. The gated assessment still runs."}
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not (isinstance(key, str) and key.strip()):
+        return {"ok": False, "need_key": True,
+                "note": "Add a Claude API key in Settings and I can read what you attached. Without one I "
+                        "can still launch a gated, oracle-confirmed run over the same files."}
     try:
         import anthropic  # lazy: the console must not require the SDK unless a key is present
     except Exception as e:  # noqa: BLE001

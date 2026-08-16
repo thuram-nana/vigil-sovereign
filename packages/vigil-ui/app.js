@@ -6531,8 +6531,9 @@
           if (m.id === C.model && m.permitted) o.selected = true;
           sel.appendChild(o);
         });
-        // if the remembered choice is gone/forbidden, reflect the effective (default) selection in state
-        if (C.model && !roster.some(function (m) { return m.id === C.model && m.permitted; })) { C.model = ""; }
+        // if the remembered choice is gone/forbidden, reflect the effective (default) selection in state AND
+        // persist it, so a stale forbidden id does not linger in localStorage (red-pen LOW-7)
+        if (C.model && !roster.some(function (m) { return m.id === C.model && m.permitted; })) { C.model = ""; rememberModel(); }
         return sel;
       }
 

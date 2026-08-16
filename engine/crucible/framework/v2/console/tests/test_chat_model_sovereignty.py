@@ -72,8 +72,11 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict:
 
 
 # ── a fake kernel provider layer — _reason_local routes HERE, never to the SDK ────────────────────────────
-def _fake_llm(monkeypatch, *, available=True, reply="LOCAL ANSWER", raise_on_complete=False):
-    seen = {"complete_called": False, "force": None, "prompt": None}
+def _fake_llm(monkeypatch, *, available=True, reply="LOCAL ANSWER", raise_on_complete=False,
+              endpoint="http://localhost:11434"):
+    # `endpoint` is the backend's OWN resolved URL (base/host); the loopback default lets the routing tests
+    # proceed, and a remote value drives the BLOCK-1 negative control (a remote "local" endpoint must refuse).
+    seen = {"complete_called": False, "avail_called": False, "force": None, "prompt": None}
     import framework.v2.kernel.llm as llm_mod
 
     class _Parsed:
@@ -88,8 +91,11 @@ def _fake_llm(monkeypatch, *, available=True, reply="LOCAL ANSWER", raise_on_com
 
     class _Backend:
         name = "ollama"
+        base = endpoint     # the resolved endpoint _endpoint_host_is_local reads (base first, then host)
+        host = endpoint
 
         def is_available(self):
+            seen["avail_called"] = True
             return (available, "" if available else "connection refused")
 
         def complete(self, prompt):
@@ -154,6 +160,18 @@ def test_cloud_choice_uses_the_chosen_model(captured):
     assert captured["create_kw"]["model"] == "claude-sonnet-5"
 
 
+def test_forbidden_cloud_tier_refuses_before_asking_for_a_key(monkeypatch):
+    """RED-PEN LOW: under a sovereign tier a cloud pick is refused for SOVEREIGNTY even with NO key — not
+    'add a key', which would imply a key is all that stands between the operator and a forbidden egress."""
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "AIR_GAPPED")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    cloud = _forbid_cloud(monkeypatch)
+    out = chat._reason(CHAT, "any weakness?", model="claude-opus-5")
+    assert out["ok"] is False and not out.get("need_key")
+    assert "tier" in out["error"].lower() or "sovereign" in out["error"].lower()
+    assert cloud["called"] is False
+
+
 def test_blank_model_defaults_to_opus5(captured):
     out = chat._reason(CHAT, "hi", model="")
     assert out["ok"] is True and captured["create_kw"]["model"] == "claude-opus-5"
@@ -198,4 +216,40 @@ def test_local_call_failure_refuses_with_no_cloud_fallback(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-present")
     out = chat._reason(CHAT, "review the auth", model="self-hosted")
     assert out["ok"] is False and "no cloud fallback" in out["error"].lower()
+    assert seen["complete_called"] is True and cloud["called"] is False
+
+
+def test_local_with_a_REMOTE_endpoint_refuses_and_sends_nothing(monkeypatch):
+    """RED-PEN BLOCK-1: a name-classed 'local' backend whose resolved endpoint is REMOTE must REFUSE — it
+    would otherwise POST the prompt + codebase off-host while the UI claims nothing left the machine. The
+    guarantee is enforced (endpoint must be loopback), not merely asserted. Nothing is sent: neither the
+    local call (complete) NOR even the availability probe (which for Ollama would itself reach the host)
+    runs, and the cloud SDK is never touched."""
+    seen = _fake_llm(monkeypatch, available=True, endpoint="https://vllm.evil-remote-cloud.example.com/v1")
+    cloud = _forbid_cloud(monkeypatch)
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "AIR_GAPPED")   # the tier where the operator most trusts "local"
+    out = chat._reason(CHAT, "review the private codebase", model="self-hosted")
+    assert out["ok"] is False
+    assert "not on this machine" in out["error"] and "loopback" in out["error"]
+    assert seen["complete_called"] is False      # the prompt was never sent to the remote
+    assert seen["avail_called"] is False         # not even the probe reached it (checked before is_available)
+    assert cloud["called"] is False
+
+
+def test_local_with_a_hostname_endpoint_refuses(monkeypatch):
+    """A hostname (not a loopback literal) is refused even though it could resolve to loopback right now —
+    DNS can point anywhere later, so we never assert a locality we cannot back."""
+    seen = _fake_llm(monkeypatch, available=True, endpoint="http://my-gpu-box.lan:11434")
+    out = chat._reason(CHAT, "review", model="ollama")
+    assert out["ok"] is False and "not on this machine" in out["error"]
+    assert seen["complete_called"] is False
+
+
+def test_local_loopback_ip_literal_is_accepted(monkeypatch):
+    """A loopback IP literal (127.0.0.x, not just 'localhost') is accepted — the guarantee holds and the call
+    proceeds through the provider layer."""
+    seen = _fake_llm(monkeypatch, available=True, reply="LOCAL OK", endpoint="http://127.0.0.5:8000/v1")
+    cloud = _forbid_cloud(monkeypatch)
+    out = chat._reason(CHAT, "review", model="self-hosted")
+    assert out["ok"] is True and "LOCAL OK" in out["reply"]
     assert seen["complete_called"] is True and cloud["called"] is False
