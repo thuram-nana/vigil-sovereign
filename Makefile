@@ -3,10 +3,13 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup up down services services-down logs smoke strix systemd envs clean-services bench benchmark
+.PHONY: help all setup up down services services-down logs smoke strix systemd envs clean-services bench benchmark
 
 # extra flags for `make up`, e.g.  make up ARGS="--domain vigil.example.com --no-browser"
 ARGS ?=
+# extra flags for the bootstrap step of `make all`, e.g.  make all BOOTSTRAP_ARGS="--yes --with-strix"
+# (a truly non-interactive fresh-machine run needs --yes so Rust/host-tool installs are auto-approved)
+BOOTSTRAP_ARGS ?=
 # Canonical committed benchmark artifacts live beside the engine, so `make bench` /
 # `make benchmark` regenerate exactly the files that ship. BENCH_KEY is a repo-local,
 # gitignored signing key that pins a STABLE, reproducible trust-root fingerprint; when it is
@@ -21,6 +24,15 @@ VIGIL := $(shell if [ -x .venv-offense/bin/vigil ]; then echo .venv-offense/bin/
 help: ## show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN{FS=":.*?## "}{printf "  \033[1m%-14s\033[0m %s\n",$$1,$$2}'
+
+all: ## fresh-machine one-liner: full setup THEN bring the UI up in the browser (= setup + up)
+	# Prereqs it does NOT install for you: Python 3.13 (the hash locks target it; bootstrap also accepts
+	# 3.12 but the --require-hashes build may then fail on missing cp313 wheels) and, for real
+	# containers, Docker (optional — Qdrant has an embedded fallback). Rust auto-installs with consent
+	# (use BOOTSTRAP_ARGS=--yes for non-interactive). bootstrap builds both venvs from the hash locks;
+	# the sub-make re-resolves the `vigil` launcher it just installed, then opens the UI in the browser.
+	./bootstrap.sh $(BOOTSTRAP_ARGS)
+	@$(MAKE) up ARGS="$(ARGS)"
 
 setup: ## full one-command setup on a fresh machine (venvs + kernel + services + config + vault + smoke)
 	./bootstrap.sh

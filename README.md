@@ -573,6 +573,8 @@ bash envs/build_envs.sh
 
 This creates `.venv-sovereign` (`vigil_core` + `apps/sigil` + `integration`) and `.venv-offense` (`vigil_core` + `engine/crucible` + `vendor/strix` + `gateway` + `integration`), then **verifies the boundary** — it fails loudly with "SOVEREIGNTY VIOLATION" if the sovereign environment can even *import* the offensive code. (Building the sovereign env compiles the Rust WARDEN kernel, so the Rust toolchain must be present.)
 
+Third-party runtime deps are installed **reproducibly from the committed, `--hash`-pinned supply-chain locks** (the same ones deployment uses — [`docs/SUPPLY-CHAIN.md`](docs/SUPPLY-CHAIN.md)), and the first-party members editable on top; the sovereign env is fully hash-locked, and the offense env's framework closure is hash-locked (Strix's live-scan extras stay install-as-needed). After it runs it **`pip check`s and smoke-imports each env** — the `pip check` verifies every installed package's declared dependencies are satisfied, so a member that declares a dep the lock **omitted** fails at build time (metadata-based, deeper than the import), not at runtime. For a *fresh machine end-to-end* — install/build/services **and** the browser UI in one shot — use `make all` (`BOOTSTRAP_ARGS=--yes` for non-interactive; the locks target **Python 3.13** so have it present — bootstrap also accepts 3.12 but the hash-locked build may fail on it — and Docker only if you want the optional sidecar containers).
+
 ### 3. Build the WARDEN kernel (if you didn't via step 2)
 
 ```bash
