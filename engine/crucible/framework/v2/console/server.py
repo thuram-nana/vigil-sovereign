@@ -424,6 +424,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 q = parse_qs(parts.query)
                 self._json(chat.chat_hypotheses((q.get("chat_id") or [""])[0]))
                 return
+            if path == "/api/chat/models":
+                # E3: the per-session model picker's data — each selectable model with its sovereignty trust
+                # class, whether the current tier permits it (and why not), and the consequence of choosing it
+                # ("local · nothing leaves this machine" vs "cloud · sent to a third party"). Read-only.
+                self._json(chat.chat_models())
+                return
             if path == "/api/aegis/verdicts":
                 # the live Defense verdict feed — tail the managed gateway's browser-safe verdicts JSONL
                 # (oracle-context already stripped at the sink). EventTailer is robust to a missing file.
