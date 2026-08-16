@@ -1530,11 +1530,19 @@ def _cmd_sandbox(args: argparse.Namespace) -> int:
     if rt.signer is None:
         return _refuse("no signer wired — refusing to run an unrecordable command (fail-closed)")
 
-    workspace = _Path(args.base_dir) / "sandbox-workspace"        # the ONLY writable path inside the box
-    try:
-        workspace.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        return _refuse(f"could not create the sandbox workspace ({type(e).__name__}) — refused (fail-closed)")
+    # D3: run in an explicit existing dir (a cloned codebase) when --workspace is given, else the default
+    # sandbox-workspace. Either way it is the ONLY writable path bound into the no-net box.
+    ws_arg = str(getattr(args, "workspace", "") or "").strip()
+    if ws_arg:
+        workspace = _Path(ws_arg)
+        if not workspace.is_dir():
+            return _refuse(f"--workspace {ws_arg!r} is not an existing directory — refused (fail-closed)")
+    else:
+        workspace = _Path(args.base_dir) / "sandbox-workspace"    # the ONLY writable path inside the box
+        try:
+            workspace.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return _refuse(f"could not create the sandbox workspace ({type(e).__name__}) — refused (fail-closed)")
     history = str(_Path(args.base_dir) / "sandbox-history.jsonl")
 
     active_gate = rt.approval_gate if (args.approve and rt.approval_gate is not None) else rt.gate
@@ -2034,6 +2042,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="engine home (holds the signed-authority gate + the sealed spine signer + the "
                           "sandbox-workspace)")
     psb.add_argument("--slug", default="loopback", help="loopback engagement slug for the gate authority")
+    psb.add_argument("--workspace", default="",
+                     help="run in THIS existing directory (e.g. a cloned codebase) instead of the default "
+                          "<base-dir>/sandbox-workspace — still the ONLY writable path inside the no-net box "
+                          "(D3: run a repo's tests). Must be an existing directory.")
     psb.set_defaults(func=_cmd_sandbox)
 
     return p

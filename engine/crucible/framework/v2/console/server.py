@@ -661,6 +661,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                                                       str(body.get("path", "")),
                                                       str(body.get("diff", ""))))
                 return
+            if path == "/api/codebase/test":
+                # D3: run the cloned codebase's tests in the network-isolated, workspace-confined bwrap
+                # sandbox via the gated `vigil sandbox` verb (A3, signed, scope-pinned, kill-switch). The
+                # operator clicked "run tests" → the A3 human-approval leg (operator_present=True). A green
+                # test is a LEAD, not an oracle FACT.
+                self._json(actions.run_codebase_tests(str(body.get("chat_id", "")),
+                                                     str(body.get("path", "")),
+                                                     str(body.get("command", "") or "pytest -q"),
+                                                     operator_present=True))
+                return
             if path == "/api/launch/assessment":
                 # The New-Assessment wizard's one action. It spawns only the SAME gated CLIs; it
                 # cannot relax scope (charter-signed, never an arg) or bypass a gate. A clean JSON
