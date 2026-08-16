@@ -6008,6 +6008,17 @@
       kids.push(h("div", null, String(m.text || m.reply || "")));
       const atts = recordAttachments(m);
       if (atts) kids.push(atts);
+      // GROUNDED-IN legend (A2): the VERIFIED sources this lead drew on, in visibly distinct registers —
+      // attached code vs a linked chat. Everything uncited is the model's own inference (the Lead badge
+      // above). "Evidence" is never rendered here: chat mints no facts, so this can never wear the green
+      // confirmed-finding register.
+      const srcs = (!isUser && Array.isArray(m.sources)) ? m.sources : [];
+      if (srcs.length) {
+        kids.push(h("div.chat-srcs", null, [
+          h("span.chat-srcs-lbl", null, "Grounded in"),
+          h("span.chat-src-row", null, srcs.map(function (s) { return sourceChip(s); })),
+        ]));
+      }
       if (m.kind === "launched" && m.run_id) {
         kids.push(h("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } }, [
           h("button.btn.sm", { onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(m.run_id); } }, [V.icon("live"), "Watch live"]),
@@ -6040,6 +6051,21 @@
       }
       if (m.kind === "refused" || m.kind === "error") { box.style.borderColor = "var(--sev-high, #e5a13a)"; }
       return h("div", wrap, h("div", box, kids));
+    }
+
+    // One "grounded in" source chip (A2). A verified attachment or a linked chat, each in its own
+    // register — deliberately NOT the green confirmed-finding shield, because a chat answer is a lead.
+    function sourceChip(s) {
+      const kind = s && String(s.kind || "");
+      const ref = String((s && s.ref) || "");
+      const note = String((s && s.note) || "");
+      if (kind === "attached") {
+        return h("span.chat-src.src-attached", { title: note || ref }, [V.icon("clip"), h("span.rf", null, ref)]);
+      }
+      if (kind === "linked") {
+        return h("span.chat-src.src-linked", { title: note || ("chat " + ref) }, [V.icon("link"), h("span.rf", null, ref)]);
+      }
+      return null;
     }
 
     // One suggested-action chip. Inert until clicked; the click runs the SAME gated path a hand-run uses
