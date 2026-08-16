@@ -65,3 +65,30 @@ def test_sandbox_runs_with_approve_confined_and_signs(tmp_path, capsys):
     assert hist.is_file()
     row = json.loads(hist.read_text(encoding="utf-8").splitlines()[0])
     assert row["tool"] == "sandbox.exec" and row["signature"]
+
+
+def test_sandbox_workspace_nonexistent_is_refused(tmp_path, capsys):
+    # D3 --workspace: a non-existent dir is a clean fail-closed refusal (before any exec), needs no bwrap.
+    rc, res = _run(["sandbox", "echo hi", "--approve", "--base-dir", str(tmp_path),
+                    "--workspace", str(tmp_path / "nope")], capsys)
+    assert rc == 2 and res["ran"] is False and "not an existing directory" in (res.get("reason") or "")
+
+
+@_needs_bwrap
+def test_sandbox_runs_in_an_explicit_workspace(tmp_path, capsys):
+    # D3 --workspace: the sandbox runs in the given existing dir (a cloned repo), and the write lands THERE
+    # (the only writable bind) — not in the default sandbox-workspace.
+    ws = tmp_path / "myrepo"
+    ws.mkdir()
+    rc, res = _run(["sandbox", "echo D3-WS > out.txt; cat out.txt", "--approve",
+                    "--base-dir", str(tmp_path), "--workspace", str(ws)], capsys)
+    assert rc == 0 and res["ran"] is True and "D3-WS" in res["stdout"]
+    assert (ws / "out.txt").read_text().strip() == "D3-WS"                 # wrote in the explicit workspace
+    assert not (tmp_path / "sandbox-workspace" / "out.txt").exists()       # NOT the default workspace
+
+
+def test_sandbox_flag_shaped_command_is_fail_closed(tmp_path, capsys):
+    # LOW-2: a command that is exactly a flag can never both run code AND flip --approve — argparse consumes
+    # it as the option and then errors on the missing positional (SystemExit), so nothing runs.
+    with pytest.raises(SystemExit):
+        _run(["sandbox", "--approve", "--base-dir", str(tmp_path)], capsys)
