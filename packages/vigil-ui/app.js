@@ -6020,8 +6020,13 @@
         ]));
       }
       if (m.kind === "launched" && m.run_id) {
+        // A5: surface the run's LIVE STEPS without leaving the chat. "Show live steps" focuses the
+        // persistent process box on THIS run and reveals it — reusing the tested, redraw-safe SSE feed
+        // (its EventSource lives outside the transcript, so it survives every chat redraw). "Open live
+        // view" is the full-screen route for when the operator wants the whole timeline + graph.
         kids.push(h("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } }, [
-          h("button.btn.sm", { onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(m.run_id); } }, [V.icon("live"), "Watch live"]),
+          h("button.btn.sm.primary", { onClick: function () { chatShowSteps(m); } }, [V.icon("live"), "Show live steps"]),
+          h("button.btn.sm", { onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(m.run_id); } }, [V.icon("book"), "Open live view"]),
           m.slug ? h("span.pill.sm", null, m.slug) : null,
         ]));
       }
@@ -6086,6 +6091,20 @@
       if (!onClick) return null;
       return h("button.chat-prop", { onClick: onClick, title: why || label, disabled: C.busy ? "disabled" : null },
         [V.icon(icon), h("span.pl", null, label)]);
+    }
+
+    // A5: focus the persistent process box on THIS chat-launched run and reveal it, so the operator
+    // sees the ongoing steps (with the same lead/fact + blocked/failed/network tagging the box already
+    // does) without leaving the conversation. Reuses pboxFollow — the EventSource lives outside the
+    // transcript (PBOX.es, never liveES), so it is not churned by chat redraws; the box's own poll
+    // reconciles the run's final status. A run with no live spine (stream:"none") still shows its status.
+    function chatShowSteps(m) {
+      var runId = String((m && m.run_id) || "");
+      if (!runId) return;
+      var run = { run_id: runId, slug: String((m && m.slug) || ""),
+                  stream: String((m && m.stream) || ""), status: "running" };
+      PBOX.ui.open = true; PBOX.ui.dismissed = false; pboxSaveUI();
+      pboxFollow(run);
     }
 
     // The gated web/API launcher for a proposed URL scan — the same launch_assessment path, url mode.
