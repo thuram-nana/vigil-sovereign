@@ -6024,8 +6024,60 @@
           h("button.btn.sm.primary", { onClick: function () { launchScan(scanPath); } }, [V.icon("bolt"), "Run the gated scan on these files"]),
         ]));
       }
+      // PROPOSE-GATED-ACTIONS (A1): the model may suggest a few next steps as clickable chips. They are
+      // inert — a click routes through the same gated launcher / navigation as everywhere else. Rendered
+      // for assistant records only, and de-duplicated against the scan-offer button above so a codebase
+      // scan is never shown twice.
+      const props = (!isUser && Array.isArray(m.proposals)) ? m.proposals : [];
+      const shownProps = props.filter(function (p) {
+        return !(p && p.action === "scan_codebase" && scanPath && String(p.target || "") === scanPath);
+      });
+      if (shownProps.length) {
+        kids.push(h("div.chat-props", { style: { marginTop: "10px" } }, [
+          h("div.dim", { style: { fontSize: "var(--fs-xs)", marginBottom: "6px" } }, "Suggested next steps — you choose:"),
+          h("div.chat-prop-row", null, shownProps.map(function (p) { return proposalChip(p); })),
+        ]));
+      }
       if (m.kind === "refused" || m.kind === "error") { box.style.borderColor = "var(--sev-high, #e5a13a)"; }
       return h("div", wrap, h("div", box, kids));
+    }
+
+    // One suggested-action chip. Inert until clicked; the click runs the SAME gated path a hand-run uses
+    // (launch_assessment for a scan, navigation for a screen). The model proposed it; the operator's
+    // click, through the gate, is the only thing that acts.
+    function proposalChip(p) {
+      const action = p && String(p.action || "");
+      const label = String((p && p.label) || "Do this");
+      const why = String((p && p.why) || "");
+      let onClick = null;
+      let icon = "bolt";
+      if (action === "scan_codebase") { onClick = function () { launchScan(String(p.target || "")); }; }
+      else if (action === "scan_url") { icon = "live"; onClick = function () { launchUrlScan(String(p.target || "")); }; }
+      else if (action === "open_screen") {
+        icon = "book";
+        onClick = function () { location.hash = "#/" + String(p.screen || ""); };
+      }
+      if (!onClick) return null;
+      return h("button.chat-prop", { onClick: onClick, title: why || label, disabled: C.busy ? "disabled" : null },
+        [V.icon(icon), h("span.pl", null, label)]);
+    }
+
+    // The gated web/API launcher for a proposed URL scan — the same launch_assessment path, url mode.
+    // Scope is charter-signed; target-touching steps still wait for approval.
+    function launchUrlScan(url) {
+      if (C.busy || !url) return;
+      C.busy = true;
+      V.postJSON(OFF("/api/chat/send"), {
+        chat_id: C.id || undefined,
+        message: "Run the gated assessment against " + url,
+        target: url, mode: "url",
+      }).then(function (r) {
+        if (r && r.error && !r.reply) V.toast(r.error, true);
+        if (r && r.run_id && r.slug) setEngagement(String(r.slug));
+        if (r && r.chat_id) adoptChatId(String(r.chat_id));
+        return refreshTranscript();
+      }).catch(function (e) { V.toast((e && e.message) || "Could not start the scan — is the offense console up?", true); })
+        .then(function () { C.busy = false; loadChatList().then(function () { drawSessions(); drawMain(); scrollDown(); }); });
     }
 
     // The same gated launcher every other entry point uses — scope charter-signed, target-touching steps

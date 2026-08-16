@@ -463,6 +463,20 @@ textarea { min-height: 80px; resize: vertical; }
 .chat-toolrow select { width: auto; }
 .chat-toolrow .hint { flex: 1 1 260px; color: var(--text-2); font-size: var(--fs-xs); }
 
+/* propose-gated-actions (A1): the model's suggested next steps, as clickable chips. A chip is INERT —
+   the click runs the same gated launcher / navigation as everywhere else; the model proposes, the
+   operator's click through the gate is what acts. Kept visually distinct from an attachment .chip. */
+.chat-props { padding-top: 10px; border-top: 1px solid var(--border); }
+.chat-prop-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; }
+.chat-prop { display: inline-flex; align-items: center; gap: 7px; padding: 6px 11px; cursor: pointer;
+  border: 1px solid var(--border-strong); border-radius: var(--r-pill); background: var(--bg-1);
+  color: var(--text-0); font-family: inherit; font-size: var(--fs-xs); font-weight: 600; text-align: left; }
+.chat-prop:hover:not(:disabled) { background: var(--bg-2); border-color: var(--primary-bg, var(--border-strong)); }
+.chat-prop:disabled { opacity: .5; cursor: default; }
+.chat-prop .glyph { width: 15px; height: 15px; flex: 0 0 auto; opacity: .85; }
+.chat-prop .glyph svg { width: 15px; height: 15px; }
+.chat-prop .pl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+
 /* command palette (⌘K) -------------------------------------------------------
    z-index 70 = the modal layer: above the drawer (60) and the process box (55), below toasts (80),
    so a toast fired by an action stays readable. Pure overlay — it never enters the page flow. */
