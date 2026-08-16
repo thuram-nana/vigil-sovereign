@@ -106,3 +106,51 @@ choosing, and a failure to reach a local model must never fall back to a cloud o
 
 That is the whole feature: **the continuity of reasoning across an engagement, and the shortest
 honest path from suspicion to evidence.**
+
+---
+
+## What is built, against this charter
+
+This charter is now largely executed. The table maps each idea above to what shipped; the section after
+it names — as the constitution requires — what is an honest follow-up rather than softening the claim.
+Every slice merged only after an adversarial red-pen, and the sharp ones each caught (and fixed) a real
+defect before merge (SSRF-to-metadata on the clone, a kill-switch bypass on a mutating edit, a name-based
+"local" model that would have egressed under a "nothing leaves this machine" label, a fireteam whose
+"show its work" feature read a field that did not exist, a streamed turn that could double-record on a
+mid-stream disconnect).
+
+| Charter idea | What shipped | PRs |
+|---|---|---|
+| Hypotheses as first-class objects, auto-closing on an oracle fire | `console/hypotheses.py` — append-only JSONL, minted from a chat turn, reconciled against confirmed FACTs on every turn + reload; path-segment-precise match; a confirmed close requires a non-empty finding ref | #345 |
+| The four sources, visibly distinct | per-claim source legend (attached / linked-chat / model), a Lead badge on every model answer; evidence's confirmed register is never worn by inference | #343–#344 |
+| Seeing the engagement's shape ("what have we not covered?") | scope / phase, confirmed-vs-lead totals, attack-path + chokepoints, **refusals-with-reason**, coverage, kill-switch — fed read-only to the reasoner | #344–#345 |
+| Propose gated actions, not just launch | model-proposed next-actions render as inert chips; a click routes through the SAME approve-then-run gate | #343 |
+| Coverage never implied | a "read N of M files" footer rides every attachment-grounded answer AND its record; the gated scan is one click away | #343 |
+| Sovereignty a first-class choice | E3 — a per-session model picker showing each option's trust class + consequence; a **local** pick routes through the provider layer with **no cloud failover**, and its endpoint-loopback is ENFORCED before the "nothing leaves this machine" claim, not merely asserted | #351 |
+| Chat as the agentic operator, steerable | the chat drives the integration OODA engine (reason → gate → tool → oracle → checkpoint); its live steps stream in-thread; a message can be added to a running engagement (advisory — re-runs no completed tool, relaxes no scope) | #346 |
+| Change + test a codebase; clone a repo; show diffs | the codebase agent — a gated, SSRF-hardened clone, dev-mode edits reviewed as unified diffs (apply is A2-gated, git-apply clone-only), and tests run in the network-isolated sandbox (A3, signed) — all operable from chat | #347–#350 |
+| Deploy multiple agents on different tasks, oracle-bounded | the engine deploys gated, bounded (≤A2, never self-approving) fireteams whose facts are minted only by the oracle; each member's steps stream to the feed, attributed by role | #352 |
+| Deep reasoning: research / plan / think | ask / research / plan modes (extended thinking); the reply is a LEAD in every mode | #344 |
+| Streamed replies (the typing feel) | F1 — a pure question turn streams tokens over SSE; a local pick answers non-streamed (no egress); the persisted record is byte-identical to a non-streamed turn (one shared finish path) | #353 |
+| A coherent screen for all of it | F2 — the run-options grouped into one labeled panel, set apart from the message composer | #354 |
+
+### Honest follow-ups (built to a real edge, and named — not softened)
+
+- **Fireteam escalations are registered durably, but not yet operator-resolvable end-to-end.** An
+  over-cap member edge is registered in an append-only, spine-mirrored ledger (signed-resolve-only,
+  fail-closed) and surfaced in the feed; wiring the operator's signed-resolve SURFACE — register →
+  surface → sign → resolve → run the member edge — is the next slice.
+- **Secret redaction on the live feed covers structured secrets, not prose.** Member step summaries and
+  streamed reasoning are scrubbed of structured secret forms (`api_key=`, `Bearer …`, `user:pass@host`,
+  `--flag …`) by the shared F3 scrubber before anything reaches the feed. A secret written in prose
+  ("the password is …") or a key-vocabulary gap (`sess=` vs `session`) is the documented shared F3
+  limitation; F1/E1 add reasoning free-text and member summaries as additional surfaces for it.
+- **A mid-stream disconnect reloads the saved answer; it never double-charges.** If a streamed reply's
+  connection drops *after* the server committed the turn, the client reloads the persisted record (no
+  re-send); a pre-response failure falls back to `/api/chat/send` exactly once.
+- **The first follow-up in a purely conversational chat answers non-streamed** (the reason-to-stream
+  decision runs before the turn is appended); every subsequent turn streams. Benign, conservative.
+
+The doctrine held throughout: **chat proposes, the gate decides; nothing said here is a fact until an
+oracle fires; a local model means nothing leaves the machine; and the model's reasoning never wears
+evidence's clothes.**
