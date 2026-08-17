@@ -773,3 +773,145 @@ def test_new_plane_routes_are_guarded_like_start(proxy):
             raise AssertionError(f"{method} {path} should have been refused (no token)")
         except urllib.error.HTTPError as e:  # type: ignore[attr-defined]
             assert e.code in (401, 403), f"{method} {path} → {e.code} (expected a fail-closed refusal)"
+
+
+# ==================================================================================================
+# DEFECT-1 (K8s HA): `--proxy-only` federation + configurable REMOTE backend addresses.
+#
+# The HA proxy tier must (a) bind an RFC1918 pod IP, not 0.0.0.0, and (b) run a PROXY-ONLY mode that
+# spawns NO backends and federates to REMOTE addresses — otherwise each replica spawns its own sovereign
+# cockpit (a second signed-spine writer = a fork) and collides on the fixed backend ports.
+# ==================================================================================================
+def test_bind_ok_accepts_rfc1918_pod_ip_and_refuses_public_and_unspecified():
+    """The pod-IP bind the manifests use (`--host $(POD_IP)`, an RFC1918 address) is accepted; 0.0.0.0 /
+    a public / an unparseable address is refused. This is the reimplemented predicate the up-path uses."""
+    for ok in ("127.0.0.1", "10.1.2.3", "172.16.5.9", "172.31.255.254", "192.168.0.7", "100.64.0.1"):
+        assert uiproxy.bind_ok(ok) is True, f"{ok} (loopback/RFC1918/CGNAT pod-IP form) must bind"
+    # NB: genuinely globally-routable / unspecified / unparseable only — Python's is_private (which
+    # bind_ok uses for IPv4) classifies the documentation ranges (e.g. 203.0.113.0/24) as private, so
+    # those are NOT the public examples here (mirrors apps/sigil/tests/test_ui_remote.py's note).
+    for bad in ("0.0.0.0", "::", "8.8.8.8", "1.1.1.1", "not-an-ip", ""):
+        assert uiproxy.bind_ok(bad) is False, f"{bad} (public/unspecified/malformed) must be refused"
+
+
+def test_split_hostport_parses_and_fails_closed():
+    assert uiproxy._split_hostport("", "127.0.0.1", 8733) == ("127.0.0.1", 8733)   # empty → default
+    assert uiproxy._split_hostport("vigil-sovereign:8733", "x", 1) == ("vigil-sovereign", 8733)  # DNS name kept
+    assert uiproxy._split_hostport("10.0.0.5:9001", "x", 1) == ("10.0.0.5", 9001)
+    assert uiproxy._split_hostport("[fd7a::1]:8787", "x", 1) == ("fd7a::1", 8787)  # bracketed IPv6
+    for bad in ("host-no-port", "h:notaport", "h:0", "h:70000", "[::1", ":8733"):
+        with pytest.raises(ValueError):
+            uiproxy._split_hostport(bad, "x", 1)
+
+
+def test_route_uses_configured_backends_not_the_module_ports():
+    """`route` maps to the CONFIGURED backends when given (proxy-only federation), and to the loopback
+    defaults when not (the historical path). Proves the targets are configurable, not hardcoded."""
+    remote = {"sovereign": ("sov.svc", 1111), "console": ("con.svc", 2222), "api": ("api.svc", 3333)}
+    assert uiproxy.route("/sovereign/x", remote) == ("sov.svc", 1111, "/x")
+    assert uiproxy.route("/offense/api/v1/y", remote) == ("api.svc", 3333, "/api/v1/y")
+    assert uiproxy.route("/offense/api/status", remote) == ("con.svc", 2222, "/api/status")
+    # default (None) → the loopback trio at the module ports (byte-identical to before)
+    assert uiproxy.route("/sovereign/x", None) == ("127.0.0.1", uiproxy.SOVEREIGN_PORT, "/x")
+
+
+def test_proxy_forwards_to_configured_remote_backends(tmp_path):
+    """End-to-end: a proxy built with explicit `backends` forwards to THOSE upstreams — with the module
+    SOVEREIGN_PORT/CONSOLE_PORT/API_PORT left at their real defaults (NOT monkeypatched). If the addresses
+    were still hardcoded to 127.0.0.1:<fixed>, the request could not reach these ephemeral echo servers."""
+    a, sov_port = _start_echo("cockpit")
+    b, con_port = _start_echo("console")
+    c, api_port = _start_echo("api")
+    backends = {"sovereign": ("127.0.0.1", sov_port), "console": ("127.0.0.1", con_port),
+                "api": ("127.0.0.1", api_port)}
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "tokens.css").write_text(":root{}", encoding="utf-8")
+    (src / "components.css").write_text(".x{}", encoding="utf-8")
+    for j in uiproxy.BUNDLE_JS:
+        (src / j).write_text(f"/*{j}*/", encoding="utf-8")
+    (src / "index.html").write_text("<body></body>", encoding="utf-8")
+    serve = tmp_path / "serve"
+    uiproxy.assemble_serve_dir(src, serve, token=OWNER_TOKEN)
+    port = _free_port()
+    httpd = uiproxy.make_proxy_server("127.0.0.1", port, serve, token=OWNER_TOKEN, backends=backends)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{port}"
+    try:
+        _st, body = _get(base + "/sovereign/ping")           # auth is delegated to the CONFIGURED sovereign
+        assert "UP=cockpit" in body and "PATH=/ping" in body
+        _st2, body2 = _get(base + "/offense/api/status")
+        assert "UP=console" in body2 and "PATH=/api/status" in body2
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        for s in (a, b, c):
+            s.shutdown()
+            s.server_close()
+
+
+def test_run_up_proxy_only_spawns_nothing_and_wires_remote_backends(tmp_path, monkeypatch):
+    """`run_up(proxy_only=True)` must NOT spawn any backend (no dispatch.resolve, no _spawn*) and must
+    build the proxy with the parsed REMOTE addresses + plane_control=None. We stub the serve loop so the
+    call returns; any spawn helper firing raises."""
+    captured = {}
+
+    class _FakeHTTPD:
+        def serve_forever(self, poll_interval=0.5):  # returns immediately → run_up unwinds cleanly
+            return
+        def server_close(self):
+            return
+
+    def _boom(*a, **k):
+        raise AssertionError("proxy-only must not spawn a backend / resolve a venv")
+
+    monkeypatch.setattr(uiproxy, "assemble_serve_dir", lambda *a, **k: None)
+    monkeypatch.setattr(uiproxy.dispatch, "resolve", _boom)
+    monkeypatch.setattr(uiproxy, "_spawn", _boom)
+    monkeypatch.setattr(uiproxy, "_spawn_capture", _boom)
+    monkeypatch.setattr(uiproxy, "_spawn_tracked", _boom)
+
+    def _fake_make(host, port, serve_dir, **kwargs):
+        captured.update(kwargs)
+        captured["host"] = host
+        captured["port"] = port
+        return _FakeHTTPD()
+    monkeypatch.setattr(uiproxy, "make_proxy_server", _fake_make)
+
+    rc = uiproxy.run_up(host="127.0.0.1", port=0, domain="", base_dir=str(tmp_path),
+                        no_browser=True, proxy_only=True,
+                        sovereign_addr="10.0.0.5:9001",
+                        offense_console_addr="10.0.0.6:9002",
+                        offense_api_addr="10.0.0.7:9003")
+    assert rc == 0
+    assert captured["backends"] == {"sovereign": ("10.0.0.5", 9001),
+                                    "console": ("10.0.0.6", 9002),
+                                    "api": ("10.0.0.7", 9003)}
+    assert captured["plane_control"] is None       # k8s/systemd owns backend restarts, not the proxy
+
+
+def test_run_up_proxy_only_rejects_a_bad_backend_addr(tmp_path):
+    rc = uiproxy.run_up(host="127.0.0.1", port=0, domain="", base_dir=str(tmp_path),
+                        no_browser=True, proxy_only=True, sovereign_addr="no-port-here")
+    assert rc == 2                                  # fail-closed on a malformed --sovereign-addr
+
+
+def test_ha_proxy_manifest_uses_only_real_vigil_up_flags():
+    """The k8s HA proxy manifest's `vigil up ...` command must parse cleanly against the REAL `vigil`
+    argparse — so the manifest can never reference a flag that does not exist (the exact way the reported
+    DEFECT-1 manifest was broken: it used --host 0.0.0.0, which the runtime rejects)."""
+    yaml = pytest.importorskip("yaml")
+    from pathlib import Path as _P
+    from vigil_integration.cli import build_parser
+    root = _P(__file__).resolve().parents[2]
+    docs = list(yaml.safe_load_all((root / "infra/ha/k8s/proxy-deployment.yaml").read_text()))
+    dep = next(d for d in docs if d and d.get("kind") == "Deployment")
+    cmd = dep["spec"]["template"]["spec"]["containers"][0]["command"]
+    assert cmd[:2] == ["vigil", "up"] and "--proxy-only" in cmd
+    assert "--sovereign-addr" in cmd and "0.0.0.0" not in cmd and "--host" in cmd
+    # every flag after `vigil up` must be accepted by the real parser (a fake $(POD_IP) value is fine).
+    parser = build_parser()
+    ns = parser.parse_args(cmd[1:])                 # drop the leading "vigil" argv0
+    assert ns.proxy_only is True
+    assert ns.sovereign_addr == "vigil-sovereign:8733"
+    assert ns.host == "$(POD_IP)"                   # the downward-API bind (RFC1918 at runtime)

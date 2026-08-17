@@ -175,6 +175,46 @@ _REDACT_MAX_DECODED = 64 * 1024 * 1024
 _DECODE_STEP = 1024 * 1024       # inflate 1 MiB of OUTPUT per step → peak allocation stays ~budget, never
                                  # the full (possibly 1032:1) decompressed body; the bomb is caught mid-stream.
 
+# ==================================================================================================
+# VALUE-AGNOSTIC token-carrier scrub for a relayed HTML body (the --proxy-only owner-token leak fix).
+#
+# BOTH the sovereign cockpit AND the offense console embed their OWN session token as `<body
+# data-token="...">`, and static `/` is NOT token-gated — so a mere VIEWER's GET /sovereign/ (or
+# /offense/) relays a backend's index with an OWNER token embedded, which the viewer replays as OWNER.
+# The exact-`self.server.token` redaction below only catches a token the proxy HOLDS — which in
+# --proxy-only is FALSE for the sovereign cockpit (a REMOTE backend that mints its own random token the
+# proxy never captured). So for any relayed HTML body we ALSO blank the token carrier REGARDLESS of value.
+#
+# EXACT SCOPE (do not overclaim): this covers the token carrier the cockpit + console ACTUALLY use today —
+# a QUOTED `data-token="..."` / `data-token='...'` attribute, and the `__SIGIL/CONSOLE/VIGIL_TOKEN__`
+# template placeholders — in a body whose Content-Type is `text/html` / `application/xhtml+xml`. It does
+# NOT cover an UNQUOTED attribute, a `<meta content="<token>">`, a `<script>window.x="<token>"</script>`
+# inline, a token in a NON-HTML body (JSON/text), or a token in a response HEADER / Set-Cookie. Soundness
+# therefore depends on the producer-side invariant that the cockpit/console expose the owner token ONLY via
+# this HTML `data-token` carrier — pinned by the `test_*_never_returns_the_owner_token_*` producer tests
+# (a future backend that starts leaking the token elsewhere fails those, rather than silently slipping past
+# this body-only scrub). Within that scope it closes the local case, the remote case, and any future
+# backend that mints its own token, with no dependence on the proxy knowing the secret.
+_HTML_CTYPES = frozenset({"text/html", "application/xhtml+xml"})
+# `data-token = "<anything>"` / `'<anything>'` (quote-agnostic via the \2 backref; DOTALL so a value can
+# contain any byte). Rewrites to `data-token=""` — group 1 (the `data-token=` lead) + the two quotes.
+_TOKEN_ATTR_RE = re.compile(rb'(data-token\s*=\s*)(["\'])(.*?)(\2)', re.IGNORECASE | re.DOTALL)
+_TOKEN_PLACEHOLDER_RE = re.compile(rb'__(?:SIGIL|CONSOLE|VIGIL)_TOKEN__')
+
+
+def _scrub_html_tokens(data: bytes, needle: bytes) -> bytes:
+    """Blank the token carrier in a relayed HTML body REGARDLESS of value (`data-token="..."` → `""`,
+    any `__SIGIL/CONSOLE/VIGIL_TOKEN__` placeholder → empty) — so a REMOTE backend's own owner token the
+    proxy never holds can NEVER reach the browser — PLUS the exact hop credential (belt-and-suspenders for
+    the spawn-local case + any other placement). The length changes, so callers send a corrected
+    Content-Length (this path always buffers the whole body; it is never used on the streaming path)."""
+    data = _TOKEN_ATTR_RE.sub(rb'\g<1>\g<2>\g<4>', data)
+    data = _TOKEN_PLACEHOLDER_RE.sub(b'', data)
+    if needle:
+        data = data.replace(needle, b'X' * len(needle))
+    return data
+
+
 # the bundle files the proxy serves from the runtime serve dir
 BUNDLE_JS = ("ui.js", "manual.js", "app.js")
 _STATIC_TYPES = {
@@ -478,26 +518,86 @@ def is_plane_path(path: str) -> bool:
     return path == PLANE_BASE or path.startswith(PLANE_BASE + "/")
 
 
-def route(path: str) -> Optional[tuple[str, int, str]]:
+# ==================================================================================================
+# federation targets — the three backends the proxy forwards to. DEFAULT is the local loopback trio
+# `vigil up` spawns (byte-identical to the historical behaviour); `--proxy-only` overrides them with
+# REMOTE addresses so N stateless proxy replicas can federate to ONE central sovereign writer (HA).
+# ==================================================================================================
+def _split_hostport(spec: str, default_host: str, default_port: int) -> "tuple[str, int]":
+    """Parse a ``host:port`` (or ``[ipv6]:port``) federation target into ``(host, port)``. An empty/blank
+    spec returns the loopback default UNCHANGED, so the default (spawn-local) path stays byte-identical.
+    A DNS name (a k8s Service like ``vigil-sovereign``) is kept verbatim — only the port is parsed.
+    Fail-closed: a malformed authority or an absent/out-of-range port raises ValueError (the caller
+    refuses to start), never silently binding a wrong or default port behind the operator's back."""
+    s = (spec or "").strip()
+    if not s:
+        return (default_host, default_port)
+    if s.startswith("["):                                   # bracketed IPv6 literal: [::1]:8733
+        end = s.find("]")
+        if end == -1:
+            raise ValueError(f"malformed IPv6 backend address {spec!r} (missing ']')")
+        host, rest = s[1:end], s[end + 1:]
+        if not rest.startswith(":"):
+            raise ValueError(f"backend address {spec!r} must be [ipv6]:port")
+        port_s = rest[1:]
+    else:
+        if s.count(":") != 1:                               # bare host, or an unbracketed IPv6 literal
+            raise ValueError(f"backend address {spec!r} must be host:port (bracket an IPv6 literal)")
+        host, port_s = s.rsplit(":", 1)
+    if not host:
+        raise ValueError(f"backend address {spec!r} has an empty host")
+    try:
+        port = int(port_s)
+    except ValueError:
+        raise ValueError(f"backend address {spec!r} has a non-integer port {port_s!r}") from None
+    if not (1 <= port <= 65535):
+        raise ValueError(f"backend address {spec!r} port {port} out of range 1..65535")
+    return (host, port)
+
+
+def _default_backends() -> dict:
+    """The three loopback backends `vigil up` spawns locally. Read from the module port globals at CALL
+    time so a test that monkeypatches SOVEREIGN_PORT/CONSOLE_PORT/API_PORT still repoints routing + auth."""
+    return {"sovereign": ("127.0.0.1", SOVEREIGN_PORT),
+            "console": ("127.0.0.1", CONSOLE_PORT),
+            "api": ("127.0.0.1", API_PORT)}
+
+
+def _remote_backends(sovereign_addr: str, offense_console_addr: str, offense_api_addr: str) -> dict:
+    """Resolve the three configurable federation targets for ``--proxy-only``. Each EMPTY flag falls back
+    to the loopback default (a co-located backend); a non-empty flag is parsed host:port (fail-closed)."""
+    return {"sovereign": _split_hostport(sovereign_addr, "127.0.0.1", SOVEREIGN_PORT),
+            "console": _split_hostport(offense_console_addr, "127.0.0.1", CONSOLE_PORT),
+            "api": _split_hostport(offense_api_addr, "127.0.0.1", API_PORT)}
+
+
+def route(path: str, backends: "Optional[dict]" = None) -> Optional[tuple[str, int, str]]:
     """Map a request path to ``(backend_host, backend_port, upstream_path)`` or ``None`` (serve
     static). Strips the mount prefix so the upstream sees its own path; the query is preserved by the
-    caller. The offense api is disambiguated by its ``/api/v1`` sub-prefix (see the module docstring)."""
+    caller. The offense api is disambiguated by its ``/api/v1`` sub-prefix (see the module docstring).
+
+    ``backends`` (from the server, ``None`` in the default spawn-local path) names the three federation
+    targets; ``None`` ⇒ the local loopback trio (``_default_backends``), so the default path is unchanged."""
     # PROXY-LOCAL, never forwarded: a backend that is DOWN cannot answer a request to start itself, so
     # `/__vigil/plane/*` must never resolve to a backend. `_handle` already intercepts it BEFORE routing;
     # this is the belt-and-braces half — if a mount prefix ever changed such that it could match, the
     # request would still be refused here rather than proxied to (or smuggled through) a backend.
     if is_plane_path(path):
         return None
+    b = backends or _default_backends()
     if path == SOVEREIGN_BASE or path.startswith(SOVEREIGN_BASE + "/"):
         rest = path[len(SOVEREIGN_BASE):] or "/"
-        return ("127.0.0.1", SOVEREIGN_PORT, rest)
+        host, port = b["sovereign"]
+        return (host, port, rest)
     api_v1 = OFFENSE_BASE + "/api/v1"
     if path == api_v1 or path.startswith(api_v1 + "/"):
         rest = path[len(OFFENSE_BASE):] or "/"       # → /api/v1 or /api/v1/...
-        return ("127.0.0.1", API_PORT, rest)
+        host, port = b["api"]
+        return (host, port, rest)
     if path == OFFENSE_BASE or path.startswith(OFFENSE_BASE + "/"):
         rest = path[len(OFFENSE_BASE):] or "/"       # → / or /api/status, /api/events, ...
-        return ("127.0.0.1", CONSOLE_PORT, rest)
+        host, port = b["console"]
+        return (host, port, rest)
     return None
 
 
@@ -700,7 +800,7 @@ def _plane_ports_status(ports, *, starting: bool = False) -> dict:
     return {"ok": True, "planes": out, "running": bool(out) and all(out.values()), "starting": starting}
 
 
-def plane_status(pc: "Optional[PlaneControl]") -> dict:
+def plane_status(pc: "Optional[PlaneControl]", backends: "Optional[dict]" = None) -> dict:
     """What each plane is doing right now, measured — never remembered.
 
     A LIVE port probe, so the answer is true even when the backend was started by a different `vigil up`,
@@ -708,13 +808,20 @@ def plane_status(pc: "Optional[PlaneControl]") -> dict:
     proxy built without plane control (a test harness, an older boot path) reports the truth and offers
     no button, rather than showing one that cannot work.
 
+    ``backends`` (the federation targets; ``None`` ⇒ the local loopback trio) is what is probed — so in
+    ``--proxy-only`` the status honestly reflects the REMOTE sovereign/offense addresses, not 127.0.0.1.
+
     Works with ``pc is None``: probing needs no configuration, and a status route that fails closed
     would leave the interface unable to say why the offense side is dark."""
-    ports = pc.ports() if pc is not None else [("offense-console", "127.0.0.1", CONSOLE_PORT),
-                                               ("offense-api", "127.0.0.1", API_PORT)]
+    b = backends or _default_backends()
+    con_host, con_port = b["console"]
+    api_host, api_port = b["api"]
+    sov_host, sov_port = b["sovereign"]
+    ports = pc.ports() if pc is not None else [("offense-console", con_host, con_port),
+                                               ("offense-api", api_host, api_port)]
     st = _plane_ports_status(ports, starting=bool(pc is not None and pc.is_starting()))
     st["can_start"] = pc is not None
-    st["sovereign"] = _listening("127.0.0.1", SOVEREIGN_PORT)
+    st["sovereign"] = _listening(sov_host, sov_port)
     return st
 
 
@@ -725,8 +832,12 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
     def __init__(self, addr, handler, *, serve_dir: Path, token: str = "", hop_key: str = "",
                  allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
-                 plane_control: "Optional[PlaneControl]" = None):
+                 plane_control: "Optional[PlaneControl]" = None, backends: "Optional[dict]" = None):
         self.serve_dir = serve_dir
+        # The three federation targets. None (the default, spawn-local `vigil up`) ⇒ the local loopback
+        # trio; `--proxy-only` supplies REMOTE addresses so a stateless proxy replica federates to ONE
+        # central sovereign writer (+ co-located/remote offense) instead of routing to 127.0.0.1.
+        self.backends = backends
         # The offense CONSOLE credential (= the owner boot token `vigil up` captured, which it also hands the
         # console as VIGIL_CONSOLE_TOKEN). Claim 6: it is NO LONGER embedded in index.html and NO LONGER the
         # gate every request is checked against — per-user auth is delegated to the sovereign whoami. It is
@@ -805,7 +916,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if is_plane_path(split.path):
                 self._plane_control(split.path, split.query)
                 return
-            target = route(split.path)
+            target = route(split.path, getattr(self.server, "backends", None))
             if target is None:
                 self._serve_static(split.path)
                 return
@@ -831,7 +942,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             hit = cache.get(key)
             if hit is not _MISS:
                 return hit                                    # may be a cached negative (None)
-        principal = _whoami(bearer)
+        # Per-user auth is DELEGATED to the sovereign whoami — which lives on the sovereign backend, so in
+        # `--proxy-only` it is the REMOTE sovereign address, not 127.0.0.1. None (default path) ⇒ the local
+        # loopback default, byte-identical to the historical `_whoami(bearer)`.
+        sov_host, sov_port = (getattr(self.server, "backends", None) or _default_backends())["sovereign"]
+        principal = _whoami(bearer, host=sov_host, port=sov_port)
         if cache is not None:
             cache.put(key, principal, _AUTH_TTL_S if principal is not None else _AUTH_NEG_TTL_S)
         return principal
@@ -1006,7 +1121,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if self.command not in ("GET", "HEAD"):
                 self._plane_json({"ok": False, "error": "method not allowed"}, status=405, drained=True)
                 return
-            self._plane_json(plane_status(pc), drained=True)
+            self._plane_json(plane_status(pc, getattr(self.server, "backends", None)), drained=True)
             return
         if path == PLANE_VERSION_PATH:
             # The current bundle build id (a content hash), so a long-open tab can notice a redeploy and
@@ -1037,7 +1152,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._plane_json({"ok": False, "action": "start-offense",
                                   "error": "this proxy has no plane control configured — start the "
                                            "planes with `vigil up`.",
-                                  "status": plane_status(None)}, status=503, drained=True)
+                                  "status": plane_status(None, getattr(self.server, "backends", None))},
+                                 status=503, drained=True)
                 return
             self._plane_json(pc.start_offense(), drained=True)
             return
@@ -1057,7 +1173,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._plane_json({"ok": False, "action": "stop-offense",
                                   "error": "this proxy has no plane control configured — stop the "
                                            "planes with `vigil down`.",
-                                  "status": plane_status(None)}, status=503, drained=True)
+                                  "status": plane_status(None, getattr(self.server, "backends", None))},
+                                 status=503, drained=True)
                 return
             self._plane_json(pc.stop_offense(), drained=True)
             return
@@ -1187,14 +1304,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _relay_response(self, resp: http.client.HTTPResponse):
         ctype = resp.getheader("Content-Type", "") or ""
-        is_sse = ctype.split(";", 1)[0].strip().lower() == "text/event-stream"
+        cmajor = ctype.split(";", 1)[0].strip().lower()
+        is_sse = cmajor == "text/event-stream"
+        is_html = cmajor in _HTML_CTYPES
         # HOP-ONLY CREDENTIAL — the owner backend credential the proxy presents on the hop
-        # (`self.server.token`, = the offense console's VIGIL_CONSOLE_TOKEN AND the cockpit's own token)
-        # must NEVER reach the browser. A backend's OWN static index.html embeds it (the console's
-        # __CONSOLE_TOKEN__ / the cockpit's __SIGIL_TOKEN__), and static `/` is NOT token-gated on the
-        # backend — so a plain relay would stream `data-token="<owner token>"` to a mere VIEWER, who could
-        # replay it and be resolved as OWNER. So every relayed NON-SSE body is scanned and any exact
-        # occurrence of the credential is blanked with an EQUAL-LENGTH marker (Content-Length stays valid).
+        # (`self.server.token`, = the offense console's VIGIL_CONSOLE_TOKEN AND, spawn-local, the cockpit's
+        # own token) must NEVER reach the browser. A backend's OWN static index.html embeds it (the
+        # console's __CONSOLE_TOKEN__ / the cockpit's __SIGIL_TOKEN__ as `data-token="..."`), and static `/`
+        # is NOT token-gated on the backend — so a plain relay would send `data-token="<owner token>"` to a
+        # mere VIEWER, who could replay it and be resolved as OWNER. Two layers neutralise it:
+        #   (a) every relayed NON-SSE body has the exact `self.server.token` blanked (equal-length marker);
+        #   (b) every relayed HTML body ALSO has its token CARRIER blanked value-agnostically
+        #       (`_scrub_html_tokens`) — which is the ONLY thing that catches a REMOTE (`--proxy-only`)
+        #       sovereign cockpit whose own random token the proxy never captured (self.server.token != it).
         needle = (getattr(self.server, "token", "") or "").encode("utf-8")
         enc = (resp.getheader("Content-Encoding", "") or "").strip().lower()
         # BLOCK-A defense-in-depth: the hop forces `Accept-Encoding: identity`, so a backend we control
@@ -1202,25 +1324,27 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # body anyway, the literal-byte redactor would scan ciphertext and MISS the token — so we DECODE it
         # here (gzip/deflate) before scanning, or FAIL CLOSED (never relay an un-scannable, possibly
         # token-bearing body). Handled BEFORE headers are sent, so we can drop the stale Content-Encoding /
-        # Content-Length and send the correct ones for the decoded, redacted cleartext.
-        if (not is_sse) and needle and enc not in ("", "identity"):
-            prepared = self._decode_and_redact(resp, enc, needle)
+        # Content-Length and send the correct ones for the decoded, redacted cleartext. HTML enters this
+        # path even with an EMPTY needle (proxy-only, no held token) because it must still be scrubbed.
+        if (not is_sse) and (needle or is_html) and enc not in ("", "identity"):
+            prepared = self._decode_and_redact(resp, enc, needle, is_html)
             if prepared is None:
                 self._fail(502, f"proxy refused to relay a {enc}-encoded body it could not scan for the "
                                 f"hop credential")
                 return
-            self.send_response_only(resp.status, resp.reason or "")
-            for key, value in resp.getheaders():
-                lk = key.lower()
-                if lk in _HOP_BY_HOP or lk in ("content-encoding", "content-length"):
-                    continue            # drop the stale encoding/length — we send decoded cleartext
-                self.send_header(key, value)
-            self.send_header("Content-Length", str(len(prepared)))
-            self.send_header("Connection", "close")
-            self.close_connection = True
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(prepared)
+            self._send_prepared(resp, prepared)
+            return
+        # CLEARTEXT HTML (the normal cockpit/console index): BUFFER the whole body (bounded) and scrub the
+        # token carrier value-agnostically. Buffered (not streamed) because `data-token="<value>"` has an
+        # unbounded value a fixed streaming carry cannot span — and an index.html is a few KB, far under the
+        # cap. Over the cap → FAIL CLOSED (never relay an un-scrubbable, possibly token-bearing HTML body).
+        if (not is_sse) and is_html:
+            body = self._read_bounded_body(resp, _REDACT_MAX_DECODED)
+            if body is None:
+                self._fail(502, "proxy refused to relay an oversized HTML body it could not scrub for an "
+                                "embedded backend token")
+                return
+            self._send_prepared(resp, _scrub_html_tokens(body, needle))
             return
         # normal path — identity (or SSE). Stream (SSE / no-token) or stream-redact (non-SSE cleartext).
         self.send_response_only(resp.status, resp.reason or "")
@@ -1251,14 +1375,48 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         self._relay_redacting(resp, needle)
 
+    def _send_prepared(self, resp: http.client.HTTPResponse, prepared: bytes):
+        """Send a fully-buffered, already-redacted body with a corrected Content-Length (the length changed
+        under redaction) and the stale Content-Encoding/Content-Length dropped. Used by both buffered
+        redaction paths (the compressed-decode path and the cleartext-HTML scrub path)."""
+        self.send_response_only(resp.status, resp.reason or "")
+        for key, value in resp.getheaders():
+            lk = key.lower()
+            if lk in _HOP_BY_HOP or lk in ("content-encoding", "content-length"):
+                continue            # drop the stale encoding/length — we send the redacted cleartext
+            self.send_header(key, value)
+        self.send_header("Content-Length", str(len(prepared)))
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(prepared)
+
+    def _read_bounded_body(self, resp: http.client.HTTPResponse, budget: int) -> "Optional[bytes]":
+        """Read a cleartext body fully into memory, bounded by ``budget``. Returns the bytes, or None
+        (FAIL CLOSED) if the body exceeds ``budget`` (never buffer an unbounded body from a backend).
+        Accumulate into a list + one ``b"".join`` (NOT ``raw += chunk``) so the fail-closed path over an
+        oversize body stays O(n), not O(n²) — a 64 MiB oversize body must not burn ~20 s of CPU before
+        the 502."""
+        chunks: list = []
+        total = 0
+        while total <= budget:
+            chunk = resp.read1(65536)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+            total += len(chunk)
+        return None                                       # exceeded the cap → fail closed
+
     def _decode_and_redact(self, resp: http.client.HTTPResponse, enc: str,
-                           needle: bytes) -> "Optional[bytes]":
+                           needle: bytes, is_html: bool) -> "Optional[bytes]":
         """Read a compressed NON-SSE body (encoded read bounded by ``_REDACT_MAX_ENCODED``), DECODE it with
-        a STREAMING bounded budget so the hop credential can be scanned in cleartext, then redact it
-        (equal-length marker). Returns the redacted CLEARTEXT bytes, or None (FAIL CLOSED) if the encoding
-        is one we cannot decode, the body is malformed / truncated, or it decodes past ``_REDACT_MAX_DECODED``
-        (a decompression bomb — caught mid-stream, never fully materialised). The proxy then refuses to relay
-        it, never forwarding an un-scannable body that might carry the token."""
+        a STREAMING bounded budget so the token can be scanned in cleartext, then redact it: for HTML the
+        VALUE-AGNOSTIC carrier scrub (`_scrub_html_tokens` — catches a remote backend's own token even with
+        an empty needle), else the exact-needle equal-length blank. Returns the redacted CLEARTEXT bytes, or
+        None (FAIL CLOSED) if the encoding is one we cannot decode, the body is malformed / truncated, or it
+        decodes past ``_REDACT_MAX_DECODED`` (a decompression bomb — caught mid-stream, never fully
+        materialised). The proxy then refuses to relay it, never forwarding an un-scannable body."""
         raw = b""
         while len(raw) <= _REDACT_MAX_ENCODED:
             chunk = resp.read1(65536)
@@ -1270,6 +1428,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         data = _inflate_bounded(raw, enc, _REDACT_MAX_DECODED)
         if data is None:
             return None                                   # undecodable / malformed / bomb → fail closed
+        if is_html:
+            return _scrub_html_tokens(data, needle)
         return data.replace(needle, b"X" * len(needle))
 
     def _relay_redacting(self, resp: http.client.HTTPResponse, needle: bytes):
@@ -1316,7 +1476,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
 def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "", hop_key: str = "",
                       allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
-                      plane_control: "Optional[PlaneControl]" = None) -> _ProxyServer:
+                      plane_control: "Optional[PlaneControl]" = None,
+                      backends: "Optional[dict]" = None) -> _ProxyServer:
     """Build (do not run) the reverse proxy bound to ``host:port``. Refuses a public/unspecified bind
     (``bind_ok``) — the proxy is the only listener a human points a browser at, so it must never be
     reachable from the open internet.
@@ -1324,7 +1485,10 @@ def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
     The plane-control credentials are OPTIONAL and default to nothing, which fails CLOSED: a proxy
     built without a token (a test harness, an embedding caller) answers 401 on every plane-control
     route, and one built without a ``plane_control`` can report plane status but starts nothing (503).
-    Only ``run_up`` — the boot path that owns the backends' lifecycle — supplies either."""
+    Only ``run_up`` — the boot path that owns the backends' lifecycle — supplies either.
+
+    ``backends`` (``None`` ⇒ the local loopback trio) names the three federation targets; ``run_up
+    --proxy-only`` supplies REMOTE addresses so a stateless replica federates to a central sovereign."""
     if not bind_ok(host):
         raise ValueError(
             f"refusing to bind {host!r}: the vigil up proxy binds loopback or a PRIVATE "
@@ -1332,7 +1496,7 @@ def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
             f"Front a real domain with a TLS reverse proxy (--domain; see deploy/reverse-proxy/).")
     return _ProxyServer((host, port), ProxyHandler, serve_dir=serve_dir, token=token, hop_key=hop_key,
                         allowed_hosts=tuple(allowed_hosts), allowed_origins=tuple(allowed_origins),
-                        plane_control=plane_control)
+                        plane_control=plane_control, backends=backends)
 
 
 # ==================================================================================================
@@ -1710,14 +1874,132 @@ def _terminate(pid: int, *, grace: float = 5.0) -> bool:
     return True
 
 
+def _run_up_proxy_only(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool,
+                       authority: str, scheme: str, origin: str, want_browser: bool,
+                       src_dir: Optional[Path], sovereign_addr: str,
+                       offense_console_addr: str, offense_api_addr: str) -> int:
+    """`vigil up --proxy-only` — run ONLY the reverse proxy and federate to REMOTE backends. Spawns
+    NOTHING: no sovereign cockpit, no offense console/api, no sidecars. This is the HA read/proxy tier —
+    N stateless replicas in front of ONE central sovereign writer (docs/architecture/HA-PROFILE.md).
+
+    Why a distinct path (and not a flag inside the spawn flow): the default flow's whole body is spawning
+    and lifecycle-owning the three children. Proxy-only owns none of them, so it has no children to track,
+    no cockpit token to capture, and no plane-control (k8s/systemd owns backend restarts, not the proxy —
+    ``plane_control=None`` ⇒ status is reported, start/stop is 503). Keeping it separate leaves the default
+    spawn-local path byte-for-byte unchanged."""
+    try:
+        backends = _remote_backends(sovereign_addr, offense_console_addr, offense_api_addr)
+    except ValueError as exc:
+        print(f"vigil up --proxy-only: invalid backend address — {exc}", file=sys.stderr)
+        return 2
+
+    base = Path(base_dir)
+    ui_dir = base.joinpath(*_LIVE_UI_SUBDIR)
+    root = dispatch._repo_root()
+    src = src_dir or (root / "packages" / "vigil-ui")
+
+    # The shared offense-console credential + the S1 hop key come from the ENV — the co-located/remote
+    # offense backends were handed the SAME values out-of-band (a Secret in k8s). The proxy presents the
+    # credential on the offense hop AFTER a request is per-user authenticated; the browser never holds it.
+    # EMPTY ⇒ the offense console receives "" and fails CLOSED (401) — never open. Per-user auth itself is
+    # delegated to the REMOTE sovereign whoami (backends["sovereign"]), so it needs no local token.
+    token = os.environ.get("VIGIL_CONSOLE_TOKEN", "")
+    hop_key = os.environ.get(_CONSOLE_HOP_KEY_ENV, "")
+
+    # Preflight: ONLY the proxy's own listener must be free — the backends are remote/co-located and are
+    # NOT ours to bind (spawning none, we collide with none). This is exactly the property that lets many
+    # proxy replicas share a host/cluster: they own no fixed backend ports.
+    if not _port_free(host, port):
+        print(f"vigil up --proxy-only: the UI proxy port {host}:{port} is already in use — is another "
+              "`vigil up` already running? Stop it (or free the port), then retry.", file=sys.stderr)
+        return 2
+
+    try:
+        assemble_serve_dir(src, ui_dir, token=token)
+    except (OSError, ValueError) as exc:
+        print(f"vigil up --proxy-only: could not assemble the UI serve dir from {src}: {exc}",
+              file=sys.stderr)
+        return 1
+
+    try:
+        # plane_control=None: this proxy does NOT own the backends' lifecycle (k8s/systemd does), so it
+        # honestly reports plane status (a live probe of the REMOTE addresses) but offers no start/stop.
+        httpd = make_proxy_server(host, port, ui_dir, token=token, hop_key=hop_key,
+                                  allowed_hosts=(authority,), allowed_origins=(origin,),
+                                  plane_control=None, backends=backends)
+    except (ValueError, OSError) as exc:
+        print(f"vigil up --proxy-only: could not bind the UI proxy on {host}:{port}: {exc}", file=sys.stderr)
+        return 2
+
+    # A pids file with the orchestrator ONLY (no children) so `vigil down` can still stop this proxy.
+    try:
+        _write_pids(base, [{"name": "orchestrator", "pid": os.getpid()}])
+    except OSError as exc:
+        print(f"vigil up --proxy-only: could not write the pids file ({exc}) — aborting. "
+              "Check that .vigil-live/ is writable.", file=sys.stderr)
+        try:
+            httpd.server_close()
+        except Exception:  # noqa: BLE001
+            pass
+        return 1
+
+    sov_h, sov_p = backends["sovereign"]
+    url = f"{origin}/?token={token}" if token else f"{origin}/"
+    print("\n  ┌──────────────────────────────────────────────────────────────┐")
+    print("  │  VIGIL COMMAND proxy (--proxy-only) is up — ONE origin:       │")
+    print("  └──────────────────────────────────────────────────────────────┘")
+    print(f"      {url}")
+    print(f"      federating: /sovereign/* → {sov_h}:{sov_p}   "
+          f"/offense/* → {backends['console'][0]}:{backends['console'][1]} "
+          f"(api {backends['api'][0]}:{backends['api'][1]})")
+    print("      (spawns NO backends; the central sovereign writer + offense plane run elsewhere)")
+    if domain:
+        print(f"      (bound {host}:{port}; front {authority} with your TLS reverse proxy / Ingress)")
+    else:
+        print(f"      (private bind {host}:{port} — reach it over your tunnel, never a public listener)")
+    print("      stop: vigil down  (or Ctrl-C)\n", flush=True)
+
+    def _on_signal(*_a):
+        threading.Thread(target=httpd.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
+
+    if want_browser and not no_browser:
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:  # noqa: BLE001 — a missing browser must never stop the server
+            pass
+
+    try:
+        httpd.serve_forever(poll_interval=0.5)
+    finally:
+        httpd.server_close()
+        try:
+            _pids_path(base).unlink()
+        except FileNotFoundError:
+            pass
+    print("vigil up --proxy-only: stopped (proxy down; no backends were owned by this process).")
+    return 0
+
+
 def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool,
            insecure_no_api_key: bool = False, src_dir: Optional[Path] = None,
            with_feed: bool = False, feed_slug: str = "", feed_interval: int = 3600,
            with_voice: bool = False, with_gesture: bool = False,
-           with_telemetry: bool = False, telemetry_interval: int = 15) -> int:
+           with_telemetry: bool = False, telemetry_interval: int = 15,
+           proxy_only: bool = False, sovereign_addr: str = "",
+           offense_console_addr: str = "", offense_api_addr: str = "") -> int:
     """Bring the whole unified UI up: refuse a public bind, spawn the three backends in their own
     venvs, capture the cockpit token, assemble the runtime serve dir, and serve the single origin
-    behind the reverse proxy. Blocks until SIGINT/SIGTERM, then tears the children + proxy down."""
+    behind the reverse proxy. Blocks until SIGINT/SIGTERM, then tears the children + proxy down.
+
+    ``proxy_only`` (HA): run ONLY the reverse proxy — spawn NEITHER the sovereign cockpit NOR the offense
+    backends — and federate to the REMOTE ``*_addr`` targets instead. This is what makes N stateless
+    proxy replicas safe in front of ONE central sovereign writer: without it, each replica would spawn its
+    OWN cockpit (a second signed-spine writer = a detectable fork) and collide on the fixed backend ports.
+    The DEFAULT (proxy_only=False, no ``*_addr``) is byte-identical to the historical spawn-local path."""
     if not bind_ok(host):
         print(f"vigil up: refusing to bind {host!r} — loopback or a PRIVATE (WireGuard/Tailscale) "
               f"address only, never 0.0.0.0 / a public address. A real domain goes behind a TLS "
@@ -1736,6 +2018,13 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
               "deploy/REMOTE-HOSTING.md), or pass --insecure-no-api-key if your edge proxy adds auth.",
               file=sys.stderr)
         return 2
+
+    if proxy_only:
+        return _run_up_proxy_only(
+            host=host, port=port, domain=domain, base_dir=base_dir, no_browser=no_browser,
+            authority=authority, scheme=scheme, origin=origin, want_browser=want_browser,
+            src_dir=src_dir, sovereign_addr=sovereign_addr,
+            offense_console_addr=offense_console_addr, offense_api_addr=offense_api_addr)
 
     root = dispatch._repo_root()
     src = src_dir or (root / "packages" / "vigil-ui")

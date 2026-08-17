@@ -358,8 +358,10 @@ def test_viewer_cannot_read_owner_token_via_offense_index(proxy):
         st, body = _req(port, "GET", path, headers=_tok(VIEWER_BEARER))
         assert st == 200, path
         assert OWNER_TOKEN not in body, f"{path} relayed the owner token to a viewer (escalation)"
-        # the value is blanked with an equal-length marker (Content-Length preserved), never the secret.
-        assert ("X" * len(OWNER_TOKEN)) in body, f"{path} body should carry the redaction marker"
+        # HTML is scrubbed VALUE-AGNOSTICALLY: the token carrier `data-token="..."` is blanked to
+        # `data-token=""` regardless of value (so it also catches a REMOTE backend's own token the proxy
+        # never holds — the --proxy-only case). Assert the carrier fired, not just that the token is absent.
+        assert 'data-token=""' in body, f"{path} body should carry the blanked token attribute"
 
 
 def test_replaying_the_relayed_offense_index_does_not_resolve_as_owner(proxy):
@@ -390,6 +392,85 @@ def test_cockpit_index_owner_token_is_redacted_on_sovereign_relay(proxy):
     st, body = _req(port, "GET", "/sovereign/", headers=_tok(VIEWER_BEARER))
     assert st == 200
     assert OWNER_TOKEN not in body
+
+
+# ---- the REMOTE (--proxy-only) negative control: the CRITICAL red-pen BLOCK-1 -----------------------
+# The prior suite only covered SPAWN-LOCAL, where self.server.token IS the backend's token, so the exact
+# redaction happened to catch it. In --proxy-only the sovereign cockpit is a REMOTE backend that mints its
+# OWN random token (`sigil serve` → secrets.token_urlsafe) the proxy NEVER captured — so the exact-needle
+# redaction is blind to it. This is the escalation: a viewer's GET /sovereign/ must NOT contain that remote
+# owner token. It passes ONLY because the HTML scrub is VALUE-AGNOSTIC; reverting the scrub flips it to leak.
+_REMOTE_OWNER_TOKEN = "remote-cockpit-OWNER-tok-ZZZZZZZZZZZZ"   # a token the proxy does NOT hold
+
+
+class _RemoteCockpit(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):  # quiet
+        pass
+
+    def do_GET(self):  # noqa: N802
+        parts = urlsplit(self.path)
+        if parts.path in ("/", "/index.html"):
+            # the cockpit's own token-embedding index, served token-free — with a token the proxy never holds
+            html = f'<!doctype html><body data-token="{_REMOTE_OWNER_TOKEN}">cockpit</body>'.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html)))
+            self.end_headers()
+            self.wfile.write(html)
+            return
+        if parts.path == "/api/whoami":
+            tok = self.headers.get("X-SIGIL-Token") or (parse_qs(parts.query).get("token") or [""])[0]
+            raw = json.dumps(_WHOAMI.get(tok, {"authenticated": False})).encode()
+        else:
+            raw = json.dumps({"ok": True, "path": self.path}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+def test_proxy_only_remote_cockpit_owner_token_is_not_relayed_to_a_viewer(tmp_path):
+    """NEGATIVE CONTROL for --proxy-only (red-pen BLOCK-1). A REMOTE sovereign cockpit embeds an owner token
+    the proxy does NOT hold; a viewer authenticates (whoami is delegated to that remote cockpit) and reads
+    /sovereign/. The relayed body must NOT contain the remote owner token, and the carrier must be blanked.
+    The proxy holds token="" (the shipped manifest sets no VIGIL_CONSOLE_TOKEN), proving the fix does not
+    depend on the proxy knowing the secret. Mutation: dropping _scrub_html_tokens leaks _REMOTE_OWNER_TOKEN."""
+    srv = _Srv(("127.0.0.1", 0), _RemoteCockpit)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    sov_port = srv.server_address[1]
+    # a proxy-only proxy: no local backends, federating /sovereign/* to the REMOTE cockpit; token="" (the
+    # manifest sets no VIGIL_CONSOLE_TOKEN), so self.server.token can never coincide with the remote token.
+    backends = {"sovereign": ("127.0.0.1", sov_port), "console": ("127.0.0.1", 1), "api": ("127.0.0.1", 2)}
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "tokens.css").write_text(":root{}", encoding="utf-8")
+    (src / "components.css").write_text(".x{}", encoding="utf-8")
+    for j in uiproxy.BUNDLE_JS:
+        (src / j).write_text(f"/*{j}*/", encoding="utf-8")
+    (src / "index.html").write_text('<body data-token="__VIGIL_TOKEN__">x</body>', encoding="utf-8")
+    serve = tmp_path / "serve"
+    uiproxy.assemble_serve_dir(src, serve, token="")
+    port = _free_port()
+    httpd = uiproxy.make_proxy_server("127.0.0.1", port, serve, token="", backends=backends)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        for path in ("/sovereign/", "/sovereign/index.html"):
+            st, body = _req(port, "GET", path, headers=_tok(VIEWER_BEARER))
+            assert st == 200, path
+            assert _REMOTE_OWNER_TOKEN not in body, f"{path} relayed the REMOTE cockpit owner token (escalation)"
+            assert 'data-token=""' in body, f"{path} carrier must be blanked value-agnostically"
+        # end-to-end: whatever the viewer could scrape is empty and never resolves as owner.
+        _st, body = _req(port, "GET", "/sovereign/", headers=_tok(VIEWER_BEARER))
+        scraped = body.split('data-token="', 1)[1].split('"', 1)[0]
+        assert scraped == "" and scraped != _REMOTE_OWNER_TOKEN
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        srv.shutdown()
+        srv.server_close()
 
 
 def test_underscore_identity_header_variant_is_stripped(proxy):
@@ -424,7 +505,7 @@ def test_hop_forces_identity_so_a_gzip_honoring_backend_serves_cleartext(proxy):
     idx = next(r for r in console.records if r["path"] in ("/", "/index.html"))
     assert idx["accept_encoding"] == "identity", "the hop must force identity, never forward the client's gzip"
     assert OWNER_TOKEN not in body, "cleartext body must be redacted"
-    assert ("X" * len(OWNER_TOKEN)) in body
+    assert 'data-token=""' in body, "the HTML token carrier must be blanked value-agnostically"
 
 
 def test_backend_that_ignores_identity_and_gzips_is_decoded_then_redacted(proxy):
@@ -438,7 +519,7 @@ def test_backend_that_ignores_identity_and_gzips_is_decoded_then_redacted(proxy)
     assert st == 200
     assert not ce, "the proxy must not relay a Content-Encoding it had to decode away"
     assert OWNER_TOKEN.encode() not in raw, "decoded, relayed body must have the token redacted"
-    assert (b"X" * len(OWNER_TOKEN)) in raw, "the redaction marker must be present in the decoded cleartext"
+    assert b'data-token=""' in raw, "the decoded HTML must carry the blanked token attribute"
     # belt-and-braces: even trying to gunzip whatever came back must not yield the token.
     try:
         assert OWNER_TOKEN.encode() not in gzip.decompress(raw)
