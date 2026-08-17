@@ -154,9 +154,26 @@ owner token spliced in (the console's `__CONSOLE_TOKEN__`, the cockpit's `__SIGI
 would stream `data-token="<owner token>"` to a mere **viewer**, who could scrape it and replay it as owner.
 So the proxy **redacts `self.server.token` out of every relayed NON-SSE response body** (`_relay_response` →
 `_relay_redacting`), replacing any exact occurrence with an equal-length marker (Content-Length preserved;
-a `len-1` carry catches a split across read boundaries). SSE is exempt (its event data never carries the
-session token, and a carry-window would break incremental delivery). Invariant: **no body relayed to the
-browser, on any route/method/path, contains the owner credential.**
+a `len-1` carry catches a split across read boundaries).
+
+The redactor is a **literal-byte** scan, so it works only on **cleartext** — which the proxy guarantees by
+**mechanism** (RED-PEN BLOCK-A), not by assumption:
+
+1. The proxy **forces `Accept-Encoding: identity` on the backend hop** (`_forward_request_headers`, stripping
+   any client `Accept-Encoding`), so a backend it controls never compresses and the scan always sees
+   cleartext. (An nginx *in front* of the proxy that gzips the proxy's **already-redacted** output is safe.)
+2. **Defense-in-depth:** if a relayed non-SSE body nonetheless arrives with a `Content-Encoding` (a backend
+   or middleware that ignored the identity request), the proxy **decodes it (gzip/deflate) before scanning**,
+   or — for an encoding it cannot decode (brotli/zstd/unknown), a malformed body, or one over the
+   decompression-bomb caps — **fails closed (502)** rather than relay an un-scannable, possibly token-bearing
+   body (`_decode_and_redact`).
+
+**SSE is the one exemption** — streamed as-is (a carry-window would break incremental delivery). That rests
+on a checked property, not an assumption: no viewer-reachable SSE stream (offense `_sse`/`_sse_blackboard`,
+cockpit `_sse`/`_hud`) emits the session token, pinned by a negative-control test so it cannot silently rot.
+
+Net: **for every non-SSE body relayed to the browser, on any route/method/path, the redactor operates on
+cleartext and the owner credential is removed — or the relay is refused.**
 
 ### Session hygiene
 

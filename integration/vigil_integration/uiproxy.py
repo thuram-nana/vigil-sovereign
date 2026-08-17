@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import gzip
 import hashlib
 import http.client
 import http.server
@@ -60,6 +61,7 @@ import subprocess
 import sys
 import threading
 import time
+import zlib
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Optional
@@ -151,6 +153,12 @@ _AUTH_TTL_S = 30.0
 _AUTH_NEG_TTL_S = 5.0
 _WHOAMI_MAX = 64 * 1024          # cap the whoami response read (a Principal JSON is tiny)
 _MISS = object()                 # cache sentinel: "not present" — distinct from a cached negative (None)
+# BLOCK-A defense-in-depth caps: the ONLY time the proxy buffers+decodes a relayed body is the abnormal
+# case where a backend returned a compressed NON-SSE body despite the forced `Accept-Encoding: identity`
+# hop. Bound both the encoded read and the decoded size so a rogue/compromised backend cannot make the
+# proxy a decompression bomb — exceed either → fail closed (never relay an un-scannable body).
+_REDACT_MAX_ENCODED = 16 * 1024 * 1024
+_REDACT_MAX_DECODED = 64 * 1024 * 1024
 
 # the bundle files the proxy serves from the runtime serve dir
 BUNDLE_JS = ("ui.js", "manual.js", "app.js")
@@ -1064,12 +1072,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # allowlist is configured with the proxy authority), minus hop-by-hop + Content-Length
         # (http.client recomputes the latter from the body we pass). ALWAYS strip any client-supplied
         # X-VIGIL-* identity header (anti-spoof): identity is set by the proxy, never accepted from a client.
+        # ALSO strip the client's Accept-Encoding (see below).
         out: dict[str, str] = {}
         for key in self.headers.keys():
             lk = key.lower()
-            if lk in _HOP_BY_HOP or lk == "content-length" or _is_vigil_identity_header(key):
+            if (lk in _HOP_BY_HOP or lk == "content-length" or lk == "accept-encoding"
+                    or _is_vigil_identity_header(key)):
                 continue
             out[key] = self.headers[key]
+        # BLOCK-A: force IDENTITY encoding on the proxy→backend hop so the response is CLEARTEXT the hop
+        # credential redactor can scan. A compressed body has no literal token bytes to find, so a forwarded
+        # `Accept-Encoding: gzip` would let a token-embedding backend index slip past redaction and reach the
+        # browser, which decompresses and recovers the owner token. The backends we control never compress;
+        # an nginx sitting IN FRONT of the proxy that gzips the proxy's ALREADY-redacted output is safe (it
+        # compresses redacted bytes). Set for BOTH planes and the login bootstrap alike.
+        out["Accept-Encoding"] = "identity"
         if offense_principal is not None:
             # Present the offense CONSOLE's OWN credential (never the user's bearer): the console gates on
             # VIGIL_CONSOLE_TOKEN, the browser must never hold it, and only an already-authenticated request
@@ -1084,6 +1101,41 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _relay_response(self, resp: http.client.HTTPResponse):
         ctype = resp.getheader("Content-Type", "") or ""
         is_sse = ctype.split(";", 1)[0].strip().lower() == "text/event-stream"
+        # HOP-ONLY CREDENTIAL — the owner backend credential the proxy presents on the hop
+        # (`self.server.token`, = the offense console's VIGIL_CONSOLE_TOKEN AND the cockpit's own token)
+        # must NEVER reach the browser. A backend's OWN static index.html embeds it (the console's
+        # __CONSOLE_TOKEN__ / the cockpit's __SIGIL_TOKEN__), and static `/` is NOT token-gated on the
+        # backend — so a plain relay would stream `data-token="<owner token>"` to a mere VIEWER, who could
+        # replay it and be resolved as OWNER. So every relayed NON-SSE body is scanned and any exact
+        # occurrence of the credential is blanked with an EQUAL-LENGTH marker (Content-Length stays valid).
+        needle = (getattr(self.server, "token", "") or "").encode("utf-8")
+        enc = (resp.getheader("Content-Encoding", "") or "").strip().lower()
+        # BLOCK-A defense-in-depth: the hop forces `Accept-Encoding: identity`, so a backend we control
+        # returns cleartext and `enc` is empty. If a backend/middleware IGNORED that and compressed a NON-SSE
+        # body anyway, the literal-byte redactor would scan ciphertext and MISS the token — so we DECODE it
+        # here (gzip/deflate) before scanning, or FAIL CLOSED (never relay an un-scannable, possibly
+        # token-bearing body). Handled BEFORE headers are sent, so we can drop the stale Content-Encoding /
+        # Content-Length and send the correct ones for the decoded, redacted cleartext.
+        if (not is_sse) and needle and enc not in ("", "identity"):
+            prepared = self._decode_and_redact(resp, enc, needle)
+            if prepared is None:
+                self._fail(502, f"proxy refused to relay a {enc}-encoded body it could not scan for the "
+                                f"hop credential")
+                return
+            self.send_response_only(resp.status, resp.reason or "")
+            for key, value in resp.getheaders():
+                lk = key.lower()
+                if lk in _HOP_BY_HOP or lk in ("content-encoding", "content-length"):
+                    continue            # drop the stale encoding/length — we send decoded cleartext
+                self.send_header(key, value)
+            self.send_header("Content-Length", str(len(prepared)))
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(prepared)
+            return
+        # normal path — identity (or SSE). Stream (SSE / no-token) or stream-redact (non-SSE cleartext).
         self.send_response_only(resp.status, resp.reason or "")
         for key, value in resp.getheaders():
             lk = key.lower()
@@ -1099,16 +1151,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         if self.command == "HEAD":
             return
-        # HOP-ONLY CREDENTIAL — the owner backend credential the proxy presents on the hop
-        # (`self.server.token`, = the offense console's VIGIL_CONSOLE_TOKEN AND the cockpit's own token)
-        # must NEVER reach the browser. A backend's OWN static index.html embeds it (the console's
-        # __CONSOLE_TOKEN__ / the cockpit's __SIGIL_TOKEN__), and static `/` is NOT token-gated on the
-        # backend — so a plain relay would stream `data-token="<owner token>"` to a mere VIEWER, who could
-        # replay it and be resolved as OWNER. So every relayed NON-SSE body is scanned and any exact
-        # occurrence of the credential is blanked with an EQUAL-LENGTH marker (Content-Length stays valid).
-        # SSE is exempt: its event data provably never carries the session token, and a carry-window would
-        # break incremental delivery — the property that the SSE relay exists to preserve.
-        needle = (getattr(self.server, "token", "") or "").encode("utf-8")
+        # SSE is exempt from redaction: its event data provably never carries the session token (pinned by
+        # the SSE negative-control test), and a carry-window would break incremental delivery — the property
+        # the SSE relay exists to preserve. A token-free response (no needle) streams straight through.
         if is_sse or not needle:
             while True:
                 chunk = resp.read1(65536)   # ONE underlying read → forwards each SSE event as it arrives
@@ -1118,6 +1163,36 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.flush()          # push it to the browser live (do NOT buffer the stream)
             return
         self._relay_redacting(resp, needle)
+
+    def _decode_and_redact(self, resp: http.client.HTTPResponse, enc: str,
+                           needle: bytes) -> "Optional[bytes]":
+        """Read a compressed NON-SSE body, DECODE it (gzip / deflate) so the hop credential can be scanned
+        in cleartext, then redact it (equal-length marker). Returns the redacted CLEARTEXT bytes, or None
+        (FAIL CLOSED) if the encoding is one we cannot decode, or the body is malformed / oversized — the
+        proxy then refuses to relay it, never forwarding an un-scannable body that might carry the token."""
+        raw = b""
+        while len(raw) <= _REDACT_MAX_ENCODED:
+            chunk = resp.read1(65536)
+            if not chunk:
+                break
+            raw += chunk
+        else:
+            return None                                   # encoded body exceeded the cap → fail closed
+        try:
+            if enc == "gzip":
+                data = gzip.decompress(raw)
+            elif enc == "deflate":
+                try:
+                    data = zlib.decompress(raw)
+                except zlib.error:
+                    data = zlib.decompress(raw, -zlib.MAX_WBITS)   # raw DEFLATE (no zlib header)
+            else:
+                return None                               # br / zstd / unknown → cannot scan → fail closed
+        except (OSError, zlib.error, EOFError, ValueError):
+            return None                                   # malformed → fail closed
+        if len(data) > _REDACT_MAX_DECODED:
+            return None                                   # decompression bomb → fail closed
+        return data.replace(needle, b"X" * len(needle))
 
     def _relay_redacting(self, resp: http.client.HTTPResponse, needle: bytes):
         """Stream a NON-SSE body, replacing every exact occurrence of ``needle`` (the hop-only owner

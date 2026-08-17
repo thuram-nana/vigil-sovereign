@@ -27,6 +27,9 @@ import http.client
 import http.server
 import json
 import socket
+import ast
+import gzip
+import pathlib
 import sys
 import threading
 from urllib.parse import parse_qs, urlsplit
@@ -34,6 +37,9 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from vigil_integration import uiproxy
+
+# repo root (…/integration/tests/this_file → parents[2]) — for the SSE-emitter source guard.
+_REPO = pathlib.Path(__file__).resolve().parents[2]
 
 # ---- test principals the fake sovereign whoami resolves -------------------------------------------
 OWNER_TOKEN = "owner-boot-tok-AAAAAAAAAAAAAAAA"    # the offense console credential AND the owner's login
@@ -67,6 +73,7 @@ class _AuthHandler(http.server.BaseHTTPRequestHandler):
             "path": self.path,
             "method": self.command,
             "token": self.headers.get("X-SIGIL-Token", ""),
+            "accept_encoding": self.headers.get("Accept-Encoding", ""),   # what the hop offered the backend
             "vigil_role": self.headers.get("X-VIGIL-Role", ""),
             "vigil_role_us": self.headers.get("X_VIGIL_Role", ""),   # underscore variant (advisory)
             "vigil_principal": self.headers.get("X-VIGIL-Principal", ""),
@@ -75,10 +82,25 @@ class _AuthHandler(http.server.BaseHTTPRequestHandler):
         # A backend's OWN static index (console `__CONSOLE_TOKEN__` / cockpit `__SIGIL_TOKEN__`) embeds the
         # owner token and is served token-free. Model that faithfully so the proxy's hop-only-credential
         # redaction is exercised: `/` and `/index.html` return HTML carrying the owner token verbatim.
+        # `srv.compress` models a backend/middleware's content-encoding behaviour (BLOCK-A):
+        #   None     → cleartext (default);
+        #   "honor"  → gzip IFF the (hop) Accept-Encoding offers gzip — a totally ordinary web server;
+        #   "always" → gzip regardless (a backend that IGNORED our forced identity request);
+        #   "fake-br"→ Content-Encoding: br over an UNDECODABLE body (proxy must fail closed).
         if parts.path in ("/", "/index.html"):
             html = f'<!doctype html><body data-token="{OWNER_TOKEN}">console-index</body>'.encode()
+            mode = getattr(srv, "compress", None)
+            enc = ""
+            if mode == "always":
+                html, enc = gzip.compress(html), "gzip"
+            elif mode == "honor" and "gzip" in self.headers.get("Accept-Encoding", ""):
+                html, enc = gzip.compress(html), "gzip"
+            elif mode == "fake-br":
+                enc = "br"       # claim brotli but send bytes the proxy cannot decode → fail closed
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            if enc:
+                self.send_header("Content-Encoding", enc)
             self.send_header("Content-Length", str(len(html)))
             self.end_headers()
             self.wfile.write(html)
@@ -162,6 +184,18 @@ def _req(port: int, method: str, path: str, *, headers=None, body: bytes | None 
         conn.request(method, path, body=body, headers=headers or {})
         r = conn.getresponse()
         return r.status, r.read().decode("utf-8", "replace")
+    finally:
+        conn.close()
+
+
+def _req_raw(port: int, method: str, path: str, headers=None):
+    """Like _req but returns (status, Content-Encoding, RAW body bytes) — http.client does NOT auto-decode,
+    so this sees exactly what the browser would receive on the wire."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=6)
+    try:
+        conn.request(method, path, headers=headers or {})
+        r = conn.getresponse()
+        return r.status, r.getheader("Content-Encoding"), r.read()
     finally:
         conn.close()
 
@@ -358,6 +392,102 @@ def test_underscore_identity_header_variant_is_stripped(proxy):
     rec = console.records[0]
     assert rec["vigil_role"] == "viewer", "hyphen spoof must be overwritten with the resolved role"
     assert rec["vigil_role_us"] == "", "the underscore X_VIGIL_Role variant must be stripped, not forwarded"
+
+
+# ==================================================================================================
+# 6b) CONTENT-ENCODING must not smuggle the hop credential past the literal-byte redactor (RED-PEN
+#     BLOCK-A). A compressed body has no literal token bytes to scan; a naive relay would forward it
+#     `Content-Encoding: gzip` and the browser would decompress → owner token. Two layers close it:
+#       Fix 1 — the hop forces `Accept-Encoding: identity` so a backend we control never compresses;
+#       Fix 2 — a body that arrives compressed anyway is DECODED before scanning, or FAILS CLOSED.
+# ==================================================================================================
+def test_hop_forces_identity_so_a_gzip_honoring_backend_serves_cleartext(proxy):
+    """Fix 1: the proxy forces `Accept-Encoding: identity` on the backend hop. A viewer offering gzip must
+    NOT make the backend compress — so the redactor scans cleartext and the owner token never reaches the
+    browser. Mutation-sensitive: reverting the identity-forcing makes the backend record 'gzip...' here."""
+    port, console = proxy["port"], proxy["console"]
+    console.compress = "honor"       # a normal web server: gzips IFF the request offers gzip
+    st, body = _req(port, "GET", "/offense/",
+                    headers=_tok(VIEWER_BEARER, {"Accept-Encoding": "gzip, deflate, br"}))
+    assert st == 200
+    idx = next(r for r in console.records if r["path"] in ("/", "/index.html"))
+    assert idx["accept_encoding"] == "identity", "the hop must force identity, never forward the client's gzip"
+    assert OWNER_TOKEN not in body, "cleartext body must be redacted"
+    assert ("X" * len(OWNER_TOKEN)) in body
+
+
+def test_backend_that_ignores_identity_and_gzips_is_decoded_then_redacted(proxy):
+    """Fix 2 (defense-in-depth): a backend that compresses ANYWAY (ignored our identity request) is DECODED
+    before scanning — the proxy relays cleartext with the token redacted and NO Content-Encoding, so the
+    browser never recovers the owner token. Mutation-sensitive: without the decode step the compressed
+    token-bearing body would pass straight through and gunzip back to the owner token."""
+    port, console = proxy["port"], proxy["console"]
+    console.compress = "always"      # ignores Accept-Encoding; always gzips
+    st, ce, raw = _req_raw(port, "GET", "/offense/", _tok(VIEWER_BEARER))
+    assert st == 200
+    assert not ce, "the proxy must not relay a Content-Encoding it had to decode away"
+    assert OWNER_TOKEN.encode() not in raw, "decoded, relayed body must have the token redacted"
+    assert (b"X" * len(OWNER_TOKEN)) in raw, "the redaction marker must be present in the decoded cleartext"
+    # belt-and-braces: even trying to gunzip whatever came back must not yield the token.
+    try:
+        assert OWNER_TOKEN.encode() not in gzip.decompress(raw)
+    except (OSError, EOFError, gzip.BadGzipFile):
+        pass                         # not gzip (it is cleartext) — expected
+
+
+def test_undecodable_content_encoding_fails_closed(proxy):
+    """Fix 2 fail-closed: a Content-Encoding the proxy cannot decode (brotli/zstd/unknown) on a token-bearing
+    body must be REFUSED (502), never relayed un-scanned."""
+    port, console = proxy["port"], proxy["console"]
+    console.compress = "fake-br"     # Content-Encoding: br over bytes the proxy cannot decode
+    st, _ce, raw = _req_raw(port, "GET", "/offense/", _tok(VIEWER_BEARER))
+    assert st == 502, "an un-scannable encoding must fail closed, not relay the body"
+    assert OWNER_TOKEN.encode() not in raw
+
+
+def test_gzip_bypass_repro_is_closed_end_to_end(proxy):
+    """The red-pen repro (rp2/repro_gzip.py) in one assertion: a viewer offering gzip against a gzip-honoring
+    token-embedding backend cannot recover the owner token from what the browser ultimately receives."""
+    port, console = proxy["port"], proxy["console"]
+    console.compress = "honor"
+    _st, ce, raw = _req_raw(port, "GET", "/offense/", _tok(VIEWER_BEARER, {"Accept-Encoding": "gzip"}))
+    recovered = gzip.decompress(raw) if ce == "gzip" else raw
+    assert OWNER_TOKEN.encode() not in recovered
+
+
+# ==================================================================================================
+# 6c) SSE is EXEMPT from redaction (it is streamed as-is to preserve incremental delivery). That
+#     exemption rests on: no viewer-reachable SSE stream emits self.server.token. Pin it so it can't
+#     silently rot — the real emitters (offense _sse/_sse_blackboard, cockpit _sse/_hud) must not
+#     reference the session token.
+# ==================================================================================================
+_SSE_EMITTERS = [
+    ("apps/sigil/sigil/ui/server.py", ["_sse", "_hud"]),
+    ("engine/crucible/framework/v2/console/server.py", ["_sse", "_sse_blackboard"]),
+]
+
+
+def _func_segments(rel_path: str, name: str):
+    src = (_REPO / rel_path).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    return [ast.get_source_segment(src, n) for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name]
+
+
+def test_sse_emitters_never_reference_the_session_token():
+    """Negative control for the SSE redaction exemption: the streams a viewer can reach must not emit the
+    session token, so streaming them un-redacted is safe. If a future change makes an SSE emitter reference
+    self.server.token (or the token-embedding placeholders), this fails — the exemption cannot rot silently."""
+    for rel, names in _SSE_EMITTERS:
+        for name in names:
+            segs = _func_segments(rel, name)
+            assert segs, f"{rel}::{name} not found — did an SSE emitter move? update the exemption pin"
+            for seg in segs:
+                assert "self.server.token" not in seg, (
+                    f"{rel}::{name} references self.server.token — the SSE redaction exemption assumes SSE "
+                    f"never carries the session token; this reference would break that invariant")
+                assert "__SIGIL_TOKEN__" not in seg and "__CONSOLE_TOKEN__" not in seg, (
+                    f"{rel}::{name} references a token-embedding placeholder")
 
 
 # ==================================================================================================

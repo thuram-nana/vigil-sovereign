@@ -109,9 +109,12 @@ _UP_ALLOWED_STDLIB = {
     # `hashlib` is on this list for the deploy-hygiene build id: a SHA-256 over the served bundle bytes,
     # stamped as the `?v=<build>` cache-buster + the /__vigil/plane/version ETag. A stdlib primitive, not
     # a dependency — it crosses no env boundary.
-    "__future__", "base64", "binascii", "hashlib", "hmac", "http", "ipaddress", "json", "os", "re",
+    # `gzip`/`zlib` are on this list for the BLOCK-A hop-credential redaction: the relay forces identity
+    # encoding, but if a backend compresses anyway it must be DECODED before the literal-byte scan (or the
+    # relay fails closed). Stdlib codecs, not a dependency — they cross no env boundary.
+    "__future__", "base64", "binascii", "gzip", "hashlib", "hmac", "http", "ipaddress", "json", "os", "re",
     "signal", "socket", "socketserver", "subprocess", "sys", "threading", "time", "pathlib", "queue",
-    "typing", "urllib", "webbrowser",
+    "typing", "urllib", "webbrowser", "zlib",
 }
 _BANNED = ("framework", "strix", "sigil")
 
