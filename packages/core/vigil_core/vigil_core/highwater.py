@@ -165,8 +165,9 @@ def check_highwater(head, hw: Optional[dict]) -> tuple[bool, str]:
 # closes: the tamper-of-a-SIGNED-floor case (any edit to a signed floor's content breaks the signature) for a
 # verifier holding the governance anchor. What it does NOT close: (1) strip-to-unsigned — an unsigned floor is
 # still WARN-ACCEPTED, not rejected (the honest residual, closed only by the retained out-of-band witnessed
-# checkpoint anchor, a separate slice); (2) the fully-dishonest-producer-owns-all-keys case (only an INDEPENDENT
-# out-of-band witness closes that).
+# checkpoint anchor: C-S4 ``vigil_integration.floor_witness`` — DETECTION for a verifier that retained an
+# off-box copy); (2) the fully-dishonest-producer-owns-all-keys case (only an INDEPENDENT out-of-band witness
+# closes that).
 
 
 def _hw_core_bytes(hw: dict, domain: bytes = _HW_DOMAIN) -> bytes:
@@ -205,7 +206,7 @@ def verify_highwater_signature(hw: dict, trusted_pubkeys, domain: bytes = _HW_DO
     ``trusted_pubkeys`` is any iterable of base64 governance public keys the caller trusts (out-of-band the
     owner authenticates them via the ``OFFENSE_GOVERNANCE_ROLE`` delegation). Note: this alone does NOT close
     the strip-to-unsigned case (an unsigned floor is still WARN-ACCEPTED) — that is closed only by the retained
-    out-of-band witnessed checkpoint (a separate slice)."""
+    out-of-band witnessed checkpoint (C-S4 ``vigil_integration.floor_witness.verify_highwater_against_witnessed``)."""
     global _warned_unsigned_highwater
     trusted = set(trusted_pubkeys or ())
     sig, pub = hw.get("sig"), hw.get("pubkey")
