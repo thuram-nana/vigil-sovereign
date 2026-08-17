@@ -901,6 +901,60 @@ def cmd_floor(a) -> None:
         fl = reset_floor(head, owner_key=owner_keypair())
         print(f"durable floor RE-SEEDED to current head: last_seq={fl.last_seq} base_seq={fl.base_seq} "
               f"base_count={fl.base_count}")
+    elif a.action == "witness":
+        # C-S4 emit-on-advance: witness the just-advanced floor's head + PERSIST it off-box. The retained
+        # copy is the anchor that catches a same-host head+floor co-rewrite the LOCAL floor cannot.
+        from pathlib import Path
+        from vigil_integration.transparency import Witness
+        from .spine import floor_witness as FW
+        from .spine.checkpoint import _read_head_on_disk
+        if not a.retain:
+            print("!! `sigil floor witness` needs --retain <path> (the OFF-BOX path a verifier keeps)",
+                  file=sys.stderr)
+            sys.exit(2)
+        head = _read_head_on_disk()
+        if head is None:
+            print("!! no signed spine head — run `sigil sign` first", file=sys.stderr)
+            sys.exit(1)
+        kp = owner_keypair()
+        if kp is None:
+            print("!! no owner key to co-sign with — run `sigil sign` first", file=sys.stderr)
+            sys.exit(1)
+        fl = load_floor()
+        W, config, roster_path, _tip, owner_pub = _witness_ctx()
+        try:
+            wc = FW.emit_floor_witness(head, fl, [Witness(config.OWNER_KEY_ID, kp.private_key_b64)],
+                                       retain_path=Path(a.retain), scope=config.SCOPE)
+        except (FW.FloorWitnessError, Exception) as e:  # noqa: BLE001 — surface any emit failure, never fake
+            print(f"!! floor witness failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"floor witnessed + retained: {a.retain} (count {wc.checkpoint.entry_count}, "
+              f"last_seq {wc.checkpoint.last_seq}, {len(wc.witness_signatures)} witness sig(s))")
+        print("RETAIN THIS OFF-BOX — a copy kept only here is rolled back WITH the spine and is NOT an anchor.")
+        _r, tr = _witness_trust_root(W, config, roster_path, owner_pub)
+        print(f"guarantee: {FW.WA.guarantee_label(tr)}")
+    elif a.action == "verify-witnessed":
+        # C-S4 anchor-on-verify: REQUIRE the local head+floor to be consistent with the HIGHEST retained
+        # witnessed checkpoint. Catches a head+floor co-rewrite / a floor stripped below a witnessed height.
+        from pathlib import Path
+        from .spine import floor_witness as FW
+        from .spine.checkpoint import _read_head_on_disk
+        if not a.external:
+            print("!! `sigil floor verify-witnessed` needs --external <path> (repeatable) — the OFF-BOX "
+                  "retained witnessed checkpoint(s)", file=sys.stderr)
+            sys.exit(2)
+        head = _read_head_on_disk()
+        if head is None:
+            print("!! no local head to verify — run `sigil sign` first", file=sys.stderr)
+            sys.exit(1)
+        sources = [sys.stdin.read() if x == "-" else Path(x).read_text() for x in a.external]
+        fl = load_floor()
+        W, config, roster_path, _tip, owner_pub = _witness_ctx()
+        _r, tr = _witness_trust_root(W, config, roster_path, owner_pub)
+        ok, msg, _label = FW.verify_floor_against_witnessed(head, fl, sources, scope=config.SCOPE,
+                                                            trust_root=tr)
+        print(("floor anti-rollback OK: " if ok else "floor anti-rollback FAIL: ") + msg)
+        sys.exit(0 if ok else 2)
 
 
 def cmd_budget(a) -> None:
@@ -1416,9 +1470,15 @@ def main(argv=None) -> None:
     pop = sub.add_parser("owner-pubkey",
                          help="print the base64 owner PUBLIC key (read-only; for pinning the offense learn-drain)")
     pop.set_defaults(fn=cmd_owner_pubkey)
-    pfl = sub.add_parser("floor", help="durable external anti-rollback floor: status; reset (deliberate downward re-seed)")
-    pfl.add_argument("action", choices=["status", "reset"])
+    pfl = sub.add_parser("floor", help="durable external anti-rollback floor: status; reset (deliberate "
+                                       "downward re-seed); witness (emit+retain off-box); verify-witnessed (anchor)")
+    pfl.add_argument("action", choices=["status", "reset", "witness", "verify-witnessed"])
     pfl.add_argument("--yes", action="store_true", help="confirm `reset` deliberately lowers the floor")
+    pfl.add_argument("--retain", default="",
+                     help="(witness) OFF-BOX path to persist the witnessed checkpoint the verifier retains")
+    pfl.add_argument("--external", action="append", default=[],
+                     help="(verify-witnessed) an OFF-BOX retained witnessed checkpoint (path or '-'); "
+                          "repeatable — the HIGHEST valid one anchors")
     pfl.set_defaults(fn=cmd_floor)
     psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact; convert; status; prune-plan; verify-archive")
     psp.add_argument("action", choices=["migrate", "rotate", "compact", "convert", "status",
