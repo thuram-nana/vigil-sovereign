@@ -3,16 +3,29 @@
 The accounts fold used to be a GENESIS scan with NO snapshot seed, so a hard prune below the first
 `governor.account` grant would SILENTLY vanish an active account (`resolve()`→None, dropped from
 `accounts()`) AND reset the per-username anti-replay high-water (re-opening the LWW replay-resurrection
-HIGH). This slice seeds the fold from `SnapshotState` (per-username LWW state + high-water + the cred fields
-to rebuild an active `Account`), mirroring promotion/killswitch/capability. This file pins:
+HIGH). This slice seeds the fold from `SnapshotState`, mirroring promotion/killswitch/capability.
 
-  (a) an active account whose only grant sits BELOW base_seq STILL resolves + appears in accounts() — seeded,
-      not dropped (simulated by building a snapshot with base_seq ABOVE the grant, then windowing it out);
-  (b) the per-username high-water SURVIVES the prune, so a replayed old owner-signed `active` grant for a
-      revoked user does NOT resurrect it;
-  (c) the empty-identity load path (no prune shipped) leaves `_fold` BYTE-IDENTICAL to the genesis scan —
-      proven by the split == full == known-correct equivalence (fold([0..K)) + fold([K..T]) == scan([0..T]));
-  (d) `check_prune_safe` refuses a prune that would strand an active account's only grant.
+PHYSICAL-PRUNE HARNESS (this is the substance the red-pen required): the survival + high-water tests read
+through a `PrunedView` wrapper that PHYSICALLY HIDES every record with `seq < K` from `iter_records`
+REGARDLESS of `since_seq` — i.e. `[0..K)` is gone as if deleted. Windowing alone (relying on `_fold`'s
+`since = base_seq - 1`) is NOT enough: the records still sit on disk, so a pre-S2 genesis scan (`since=-1`)
+would just re-read the "pruned" grant and pass. Under `PrunedView`, only the SEED can carry the pruned state.
+
+MUTATION-VERIFIED: reverting `AccountsRegistry._fold` to its exact pre-S2 body (`since=-1`, no snapshot
+seed — the code this slice fixes) makes `test_active_account_survives_a_hard_prune` AND
+`test_high_water_survives_the_prune_no_replay_resurrection` FAIL under this harness (alice no longer
+resolves; the replayed grant resurrects bob). Each test also carries an inline NEUTERED control
+(`SnapshotState.load` → the empty identity) that reproduces the pre-S2 behaviour without a source edit, so
+the seed is proven load-bearing from inside the test itself.
+
+  (a) an active account whose only grant sits BELOW base_seq STILL resolves + appears in accounts() — from
+      the seed alone, over a store from which the grant is physically absent;
+  (b) the per-username high-water SURVIVES the prune (the seq that SET it is physically pruned away), so a
+      replayed old owner-signed `active` grant for a revoked user does NOT resurrect it;
+  (c) the empty-identity load path (no prune) leaves `_fold` BYTE-IDENTICAL to the genesis scan, proven by
+      split == full == known-correct with the prefix PHYSICALLY absent from the split store;
+  (d) `check_prune_safe`'s referential floor DETECTS a seed that would strand an active account (real
+      positive control: a build that omits the account) and refuses.
 
 Run: SIGIL_HOME=$(mktemp -d) PYTHONPATH=apps/sigil:packages/core/vigil_core \
      .venv-sovereign/bin/python -m pytest tests/test_snapshot_fold_accounts.py -q
@@ -27,6 +40,7 @@ from sigil.governor.accounts import AccountsRegistry
 from sigil.governor.authn import signed_payload
 from sigil.reuse import generate_keypair
 from sigil.spine import prune
+from sigil.spine.manifest import read_manifest
 from sigil.spine.snapshot import SnapshotState, build
 from sigil.spine.store import SpineStore
 
@@ -51,31 +65,58 @@ def _reg(store):
     return AccountsRegistry(store, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
 
 
-# ---- (a) an active account whose only grant is PRUNED survives via the seed -------------------------
+class PrunedView:
+    """A REAL hard prune: physically hide every record with `seq < K` from `iter_records` (as if `[0..K)`
+    were deleted), REGARDLESS of the caller's `since_seq`. The pruned records still sit on disk in the inner
+    store, so a fold that does NOT seed from the snapshot cannot see them — exactly the deleted-prefix world a
+    live prune produces. `_fold` reaches the store only via `iter_records` (and `SnapshotState.load`, which
+    the tests monkeypatch)."""
+
+    def __init__(self, inner, K):
+        self._inner = inner
+        self._K = K
+
+    def iter_records(self, *, since_seq=-1):
+        for r in self._inner.iter_records(since_seq=since_seq):
+            if r.seq >= self._K:
+                yield r
+
+    def get(self, seq):
+        return self._inner.get(seq)
+
+    def append(self, **kw):
+        return self._inner.append(**kw)
+
+
+# ---- (a) an active account whose only grant is PHYSICALLY PRUNED survives via the seed ----------------
 def test_active_account_survives_a_hard_prune(monkeypatch):
     store = _store()
     reg = _reg(store)
     reg.create("alice", "operator", bearer_token="alice-bearer-xxxxxxxxxxxx", issued_at=5.0)   # seq 0
-    # a marker marks the split boundary K — build a snapshot with base_seq ABOVE alice's grant (a prune past it)
-    k = store.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "marker"})
+    k = store.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "marker"})  # seq 1
     prefix = [r for r in store.iter_records() if r.seq < k]
     snap = build(prefix, trusted_pubkey=OWNER_PUB, base_seq=k, snapshot_seq=k - 1)
-
     # the seed carries alice: active state + the high-water + the cred fields to rebuild the Account
     assert snap.account_state_map().get("alice") == "active"
     assert snap.account_issued_map().get("alice") == 5.0
     assert any(row[0] == "alice" for row in snap.account_cred)
 
-    # with the grant PRUNED (load() returns the snapshot => the fold windows [K..T], skipping seq 0), alice
-    # STILL resolves and lists — from the seed alone. Dropping the seed would make both fail (the guard below).
+    pruned = PrunedView(store, k)                    # [0..k) physically GONE — alice's grant is not readable
     monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
-    reg2 = _reg(store)
+    reg2 = AccountsRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
     p = reg2.resolve("alice-bearer-xxxxxxxxxxxx")
     assert p is not None and p.role == "operator", "a pruned active account must survive via the seed (resolve)"
     assert "alice" in {a.username for a in reg2.accounts()}, "…and appear in accounts() too"
 
+    # NEUTERED control (== the pre-S2 genesis scan): with the seed removed, alice is GONE — proving the seed
+    # is load-bearing, not that the record was merely still on disk.
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: SnapshotState.empty()))
+    reg2b = AccountsRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+    assert reg2b.resolve("alice-bearer-xxxxxxxxxxxx") is None, "no seed over a physically-pruned store ⇒ vanished"
+    assert "alice" not in {a.username for a in reg2b.accounts()}
 
-# ---- (b) the per-username high-water SURVIVES the prune (no replay resurrection) --------------------
+
+# ---- (b) the per-username high-water SURVIVES the prune (no replay resurrection) ----------------------
 def test_high_water_survives_the_prune_no_replay_resurrection(monkeypatch):
     store = _store()
     reg = _reg(store)
@@ -86,22 +127,28 @@ def test_high_water_survives_the_prune_no_replay_resurrection(monkeypatch):
 
     prefix = [r for r in store.iter_records() if r.seq < k]
     snap = build(prefix, trusted_pubkey=OWNER_PUB, base_seq=k, snapshot_seq=k - 1)
-    # the seed keeps bob REVOKED and PRESERVES the high-water (5.0) even though bob is not active — this is the
-    # anti-replay floor that must cross the prune.
+    # the seed keeps bob REVOKED and PRESERVES the high-water (5.0) though bob is not active — the anti-replay
+    # floor that MUST cross the prune. The seqs that SET the high-water (0 and 1) are pruned away below.
     assert snap.account_state_map().get("bob") == "revoked"
     assert snap.account_issued_map().get("bob") == 5.0
 
-    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
     # ATTACK: replay the captured owner-signed active grant AFTER the prune boundary (into the live window).
-    # Its issued_at (5.0) <= the SEEDED high-water (5.0) => ignored. Without the seed the floor would be -inf
-    # and this replay would resurrect bob.
-    store.append(kind="event", source="governor", actor="WARDEN", payload=captured)
-    reg2 = _reg(store)
-    assert reg2.resolve("bob-bearer-yyyyyyyyyyyy") is None, "replayed grant must NOT resurrect (resolve path)"
+    store.append(kind="event", source="governor", actor="WARDEN", payload=captured)   # seq 3 (live)
+    pruned = PrunedView(store, k)                    # [0..k) GONE: bob's create AND revoke are unreadable
+
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
+    reg2 = AccountsRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+    assert reg2.resolve("bob-bearer-yyyyyyyyyyyy") is None, "replayed grant must NOT resurrect (seed high-water)"
     assert "bob" not in {a.username for a in reg2.accounts()}, "…nor via accounts()"
 
+    # NEUTERED control (== pre-S2): with the seed removed the high-water resets to -inf, so the replayed grant
+    # (issued_at 5.0 > -inf) RESURRECTS bob — the exact LWW replay HIGH this slice closes.
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: SnapshotState.empty()))
+    reg2b = AccountsRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+    assert reg2b.resolve("bob-bearer-yyyyyyyyyyyy") is not None, "no seed ⇒ high-water lost ⇒ replay resurrects"
 
-# ---- (c) empty-identity load == genesis scan, proven by split == full == known-correct --------------
+
+# ---- (c) empty-identity load == genesis scan, proven by split == full == known-correct ---------------
 _TOK = {"seeded": "seeded-tok-000000000000", "regrant": "regrant-new-11111111", "live": "live-tok-222222222"}
 
 
@@ -130,6 +177,9 @@ _EXPECTED = {"seeded": "operator", "regrant": "viewer", "live": "analyst"}   # t
 
 
 def test_identity_empty_load_matches_known_correct():
+    """Byte-identity of the empty-load path: with NO prune, load() is the empty identity and _fold is a full
+    genesis scan == the pre-S2 semantics (passes under fix AND pre-S2, which is exactly the byte-identity
+    contract). Mutation-sensitivity for the SURVIVAL property lives in the physical-prune tests above."""
     store = _store()
     _populate(store)
     assert SnapshotState.load(store).base_seq == 0                # no prune -> the empty identity (genesis scan)
@@ -139,35 +189,40 @@ def test_identity_empty_load_matches_known_correct():
     assert _reg(store).resolve("regrant-old-44444444") is None   # the old (revoked) bearer stays dead
 
 
-def test_split_fold_equals_full_scan(monkeypatch):
+def test_split_fold_equals_full_scan_with_prefix_physically_absent(monkeypatch):
+    """fold([0..K)) + fold([K..T]) == scan([0..T]), with [0..K) PHYSICALLY absent from the split store. The
+    'seeded' account (granted only in the prefix) is reachable in `split` ONLY via the seed, so this is
+    mutation-sensitive: pre-S2 (no seed) drops 'seeded' from split and the equality FAILS."""
     store = _store()
     k = _populate(store)
 
-    # full = the real (empty-load) genesis scan over the WHOLE store
+    # full = the real (empty-load) genesis scan over the WHOLE store — the ground truth
     full = {a.username: a.role for a in _reg(store).accounts()}
+    assert full == _EXPECTED
 
     prefix = [r for r in store.iter_records() if r.seq < k]
     snap = build(prefix, trusted_pubkey=OWNER_PUB, base_seq=k, snapshot_seq=k - 1)
-    # the prefix snapshot is NON-TRIVIAL: it carries the load-bearing state
     sm = snap.account_state_map()
-    assert sm.get("seeded") == "active"      # the discriminator lives ONLY in the prefix
-    assert sm.get("revlive") == "active"     # (overridden live)
-    assert sm.get("regrant") == "revoked"    # (overridden live)
-    assert snap.trusted_pubkey == OWNER_PUB  # so the consumer takes the fold (non-bypass) path
+    assert sm.get("seeded") == "active" and sm.get("revlive") == "active" and sm.get("regrant") == "revoked"
+    assert snap.trusted_pubkey == OWNER_PUB                       # so the consumer takes the fold (non-bypass) path
 
-    # seed the synthetic prefix + fold ONLY the live window [K..T] from the SAME store
+    pruned = PrunedView(store, k)                                 # [0..k) physically gone
     monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
-    split = {a.username: a.role for a in _reg(store).accounts()}
+    split = {a.username: a.role
+             for a in AccountsRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB).accounts()}
+    assert split == full, f"fold != scan over a physically-pruned store\n full={full}\n split={split}"
+    # resolve() honors the seed too: the seed-only 'seeded' account authenticates from the seed alone.
+    reg_pruned = AccountsRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+    assert reg_pruned.resolve(_TOK["seeded"]).role == "operator"
 
-    assert split == full, f"fold != scan\n full={full}\n split={split}"
-    # both equal the independently-known-correct table (no green-wash: "seeded" active proves the seed was
-    # actually consumed — dropping it would make "seeded" absent in split while full keeps it).
-    assert full == _EXPECTED
-    # resolve() honors the seed too: the seed-only account authenticates from the seed alone.
-    assert _reg(store).resolve(_TOK["seeded"]).role == "operator"
+    # NEUTERED control (== pre-S2): no seed over the pruned store ⇒ 'seeded' vanishes ⇒ split != full.
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: SnapshotState.empty()))
+    split_neutered = {a.username: a.role
+                      for a in AccountsRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB).accounts()}
+    assert split_neutered != full and "seeded" not in split_neutered
 
 
-# ---- (d) check_prune_safe refuses a prune that would strand an active account's only grant ----------
+# ---- (d) check_prune_safe referential floor ----------------------------------------------------------
 def _account_segmented_store(tmp_path):
     """A migrated store with TWO sealed segments (so K=5 is a valid boundary) — an owner-signed active
     account grant sits at seq 0, inside the segment that a prune at K=5 would archive+delete."""
@@ -186,12 +241,19 @@ def _account_segmented_store(tmp_path):
     return s
 
 
+def _archived_below(store, K):
+    return [seg for seg in read_manifest(store._layout).sealed_in_order()
+            if seg.last_seq is not None and seg.last_seq < K]
+
+
 def test_check_prune_safe_allows_a_carried_active_account(tmp_path, monkeypatch):
+    """Happy path: the detector is EMPTY when the seed carries every verified-active account below K, so
+    check_prune_safe returns the archive set without raising."""
     monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OWNER_PUB)
     s = _account_segmented_store(tmp_path)
     archived = prune.check_prune_safe(s, 5)                       # must NOT raise: alice IS carried
     assert [seg.first_seq for seg in archived] == [0]
-    assert prune.stranded_active_accounts(s, archived, 5) == []   # nothing stranded
+    assert prune.stranded_active_accounts(s, archived, 5) == []   # detector empty on a complete seed
     # the seed genuinely carries alice as active (survival proof at the seed level)
     below = []
     for seg in archived:
@@ -200,13 +262,41 @@ def test_check_prune_safe_allows_a_carried_active_account(tmp_path, monkeypatch)
     assert seed.account_state_map().get("alice") == "active"
 
 
-def test_check_prune_safe_refuses_a_stranded_active_account(tmp_path, monkeypatch):
+def test_referential_floor_detects_a_seed_that_omits_an_active_account(tmp_path, monkeypatch):
+    """A1 REAL positive control (not just the re-raise wiring): if build()/the seed ever DROPPED an active
+    account whose only grant is below K — a seed/build regression — the referential floor must DETECT it
+    (non-empty) and refuse, not silently prune the account away. We simulate the regression by making
+    build() emit a seed with 'alice' stripped; the detector still folds the REAL below-K records (alice
+    active) so it genuinely finds her missing from the seed."""
     monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OWNER_PUB)
     s = _account_segmented_store(tmp_path)
-    # force the referential-floor detector to report a stranded active account (the fold-carry regression the
-    # guard exists to catch) — mirrors test_referential_floor_blocks_open_workflow monkeypatching the floor.
-    monkeypatch.setattr(prune, "stranded_active_accounts", lambda store, archived, K: ["alice"])
+    real_build = prune.build
+
+    def incomplete_build(records, **kw):
+        seed = real_build(records, **kw)
+        return seed.model_copy(update={
+            "account_state": [r for r in seed.account_state if r[0] != "alice"],
+            "account_issued": [r for r in seed.account_issued if r[0] != "alice"],
+            "account_cred": [r for r in seed.account_cred if r[0] != "alice"],
+        })
+
+    monkeypatch.setattr(prune, "build", incomplete_build)
+    # the detector genuinely returns the stranded account (real diff: active={alice} minus carried={})
+    assert prune.stranded_active_accounts(s, _archived_below(s, 5), 5) == ["alice"]
+    # …and check_prune_safe refuses the prune, fail-closed.
     with pytest.raises(prune.PruneUnsafe) as e:
         prune.check_prune_safe(s, 5)
     msg = str(e.value).lower()
     assert "strand" in msg and "alice" in msg
+
+
+def test_check_prune_safe_reraises_a_nonempty_floor_wiring_only(tmp_path, monkeypatch):
+    """Pure WIRING check: check_prune_safe re-raises PruneUnsafe when the detector reports a non-empty
+    stranded list (mirrors test_referential_floor_blocks_open_workflow). The detector's real substance is
+    covered by test_referential_floor_detects_a_seed_that_omits_an_active_account above."""
+    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OWNER_PUB)
+    s = _account_segmented_store(tmp_path)
+    monkeypatch.setattr(prune, "stranded_active_accounts", lambda store, archived, K: ["ghost"])
+    with pytest.raises(prune.PruneUnsafe) as e:
+        prune.check_prune_safe(s, 5)
+    assert "strand" in str(e.value).lower() and "ghost" in str(e.value)

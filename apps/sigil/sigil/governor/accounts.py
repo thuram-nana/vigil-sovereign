@@ -33,6 +33,13 @@ neither vanishes an active account (`resolve()`→None) nor resets its per-usern
 (which would re-open the LWW replay-resurrection HIGH). `SnapshotState.build()` carries the account seed, and
 `spine.prune.check_prune_safe` refuses a boundary that would strand an active account's only grant. Under the
 empty Slice-C snapshot the seed is empty and the window is a full genesis scan (BYTE-IDENTICAL to before).
+
+HONESTY (head coupling): `_fold` now calls `SnapshotState.load` on every read, so per-user auth
+(`resolve`/`accounts`) is coupled to `head.json` integrity — a corrupt / future-schema / unverifiable-pruned
+head fails CLOSED (`SnapshotError`), exactly as the already-merged promotion/killswitch/capability folds. So
+the "BYTE-IDENTICAL" claim is scoped to a VALID head: with an absent or clean no-prune head, load is the
+empty identity and the fold is the prior genesis scan; a tampered head now fails auth closed rather than
+silently scanning a truncated window (the intended, fail-safe direction).
 """
 from __future__ import annotations
 
