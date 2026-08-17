@@ -277,6 +277,41 @@ def test_restore_refuses_a_spine_with_no_reverify_key_handcrafted(tmp_path):
         restore_offense_backup(dest, str(tmp_path / "nb"), PW)
 
 
+def test_restore_refuses_a_subdir_spine_with_no_reverify_key(tmp_path):
+    """BLOCK-1a: `create` packages spines RECURSIVELY (rglob), so a spine can land in a SUBDIR. The post-write
+    re-verify must enumerate spines the same way — a non-recursive glob would miss `sub/evil.spine` and wave it
+    through to `verified: True`. Craft one at a subdir with no spine key → restore must fail closed."""
+    dest = tmp_path / "subdir.vglbk"
+    junk = base64.b64encode(b"THIS IS NOT A VALID SIGNED SPINE - attacker junk in a subdir").decode("ascii")
+    _craft_backup(dest, files={"sub/evil.spine": junk}, secrets_body={}, secrets_names=[])
+    with pytest.raises(OffenseBackupError, match="no usable offense-spine public key|cannot re-verify"):
+        restore_offense_backup(dest, str(tmp_path / "nb"), PW)
+
+
+def test_restore_refuses_a_crucible_routed_spine_with_no_reverify_key(tmp_path):
+    """BLOCK-1a (crucible leg): a spine routed under the `crucible/` prefix lands in crucible_root, which the
+    old non-recursive `new_base`-only glob never looked at. It must be re-verified (or refused) too."""
+    dest = tmp_path / "cruspine.vglbk"
+    junk = base64.b64encode(b"attacker junk spine under the crucible run tree").decode("ascii")
+    _craft_backup(dest, files={"crucible/.console/runs/eng/evil.spine": junk}, secrets_body={}, secrets_names=[])
+    with pytest.raises(OffenseBackupError, match="no usable offense-spine public key|cannot re-verify"):
+        restore_offense_backup(dest, str(tmp_path / "nb"), PW, crucible_root=str(tmp_path / "nc"))
+
+
+def test_restore_refuses_a_records_free_spine_even_with_a_key(tmp_path):
+    """BLOCK-1b: a spine whose body has NO complete (newline-terminated) records verifies VACUOUSLY — the
+    binder's empty-chain verify is trivially true even under a NON-matching key. Restore must refuse a
+    content-free spine rather than stamp it `verified` (it attests nothing, yet passed under a wrong key)."""
+    kp = generate_keypair()
+    sk_json = json.dumps({"public_key_b64": kp.public_key_b64, "private_key_b64": kp.private_key_b64})
+    dest = tmp_path / "recfree.vglbk"
+    junk = base64.b64encode(b"not a valid spine").decode("ascii")     # no trailing newline -> 0 complete records
+    _craft_backup(dest, files={f"{SLUG}.spine": junk},
+                  secrets_body={DEFAULT_SPINE_KEY_FILE: sk_json}, secrets_names=[DEFAULT_SPINE_KEY_FILE])
+    with pytest.raises(OffenseBackupError, match="complete records|did NOT re-verify"):
+        restore_offense_backup(dest, str(tmp_path / "nb"), PW)
+
+
 def test_restore_refuses_a_corrupt_spine_when_the_key_is_present(tmp_path):
     """Contrast control (the teeth exist when the key IS present): corrupt a spine byte in the SOURCE before
     backing up (so the packaged hash matches the corrupted bytes → passes the pre-write hash check), then
@@ -289,7 +324,7 @@ def test_restore_refuses_a_corrupt_spine_when_the_key_is_present(tmp_path):
     spine.write_bytes(bytes(data))
     dest = tmp_path / "o.vglbk"
     create_offense_backup(dest, PW, base_dir=str(base))
-    with pytest.raises(OffenseBackupError, match="FAILED integrity re-verification"):
+    with pytest.raises(OffenseBackupError, match="did NOT re-verify"):
         restore_offense_backup(dest, str(tmp_path / "nb"), PW)
 
 

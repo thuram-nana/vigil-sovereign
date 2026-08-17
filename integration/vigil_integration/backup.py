@@ -19,10 +19,12 @@ Boundary-clean and honest by construction:
     the sovereign leg, whose docstring states the same residual). Passing ``expect_pubkey`` (the orchestrator's
     ``--expect-governance-pubkey``) pins the expected governance pubkey out of band and UPGRADES this to real
     authenticity: a passphrase-holder who does NOT also hold the governance PRIVATE key cannot forge a manifest
-    that verifies under the pinned key. The governance key's OWNER tie is the existing owner-signed
-    ``OFFENSE_GOVERNANCE_ROLE`` delegation. (The offense side holds no owner private key — the two-env boundary
-    — so the manifest cannot be owner-signed as the sovereign leg's is; this is the honest residual of a
-    keyless plane, closed only by the out-of-band pin.)
+    that verifies under the pinned key. Restore does NOT itself consume the ``OFFENSE_GOVERNANCE_ROLE``
+    delegation — it pins the KEY; the pinned key's tie back to the owner rests on the recipient having
+    validated that owner-signed delegation OUT OF BAND (the same trusted channel that told them which pubkey to
+    pin). (The offense side holds no owner private key — the two-env boundary — so the manifest cannot be
+    owner-signed as the sovereign leg's is; this is the honest residual of a keyless plane, closed only by the
+    out-of-band pin + the out-of-band delegation check.)
   * **Two SEPARATE encrypted files, one per plane — NEVER a merged archive.** A single archive covering both
     planes would require ONE process to hold both plane secrets at once = a FATAL-2 violation. The orchestrator
     (`vigil backup`) writes this offense file in-venv and drives the sovereign leg as a SUBPROCESS; the two
@@ -37,13 +39,16 @@ Boundary-clean and honest by construction:
 Integrity is layered exactly like the sovereign leg. The whole body is AEAD-sealed; inside it a manifest
 (sha256 of every packaged file) is governance-signed. A wrong passphrase, or ANY tamper of the sealed bytes,
 fails to decrypt / fails the manifest signature / fails a per-file hash check BEFORE a single file is
-written. AFTER the write, the restore RE-VERIFIES: every restored ``{slug}.spine`` re-checks its chain +
-signatures under the restored spine pubkey, the segment view (`verify_offense_home`) reports no FAILED
-segment, and every restored self-contained evidence bundle re-runs the deterministic evidence verify — the
-restore reports ``verified: True`` ONLY if all pass, else it raises. Critically, ``verified: True`` is NEVER
-returned for a check that did not RUN: a restored ``{slug}.spine`` with no usable offense-spine public key to
-re-verify it under is a fail-closed refusal, not a silent skip (and ``create`` refuses at the source to
-produce a spine-bearing backup that omits its spine key, so this only bites a hand-crafted/legacy body).
+written. AFTER the write, the restore RE-VERIFIES: EVERY restored ``*.spine`` — enumerated RECURSIVELY over
+both ``base_dir`` and ``crucible_root``, the same way ``create`` packages them — re-checks its chain +
+signatures under the restored spine pubkey AND must carry ≥1 complete record (a content-free spine verifies
+vacuously and is refused), the segment view (`verify_offense_home`) reports no FAILED segment, and every
+restored self-contained evidence bundle re-runs the deterministic evidence verify — the restore reports
+``verified: True`` ONLY if all pass, else it raises. Critically, ``verified: True`` is NEVER returned for a
+check that did not RUN: a restored spine (wherever it landed — a subdir or the crucible tree included) with
+no usable offense-spine public key to re-verify it under is a fail-closed refusal, not a silent skip (and
+``create`` refuses at the source to produce a spine-bearing backup that omits its spine key, so a
+key-present spine is always re-verified and a key-absent one is always refused).
 
 Honest limit on what is re-verified: ``.blackboard/store.sqlite`` and the run dirs are captured as OPAQUE
 bytes. Their internal database consistency is NOT re-checked on restore — only the signed offense spine and
@@ -391,13 +396,20 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
 
 
 def _reverify_restored(new_base: Path, croot, secrets: dict) -> int:
-    """Post-write re-verification (the honest teeth). Import-local (FATAL-2 hygiene): re-verify every restored
-    ``{slug}.spine`` under the restored spine pubkey, assert the segment view reports no FAILED segment, and
+    """Post-write re-verification (the honest teeth). Import-local (FATAL-2 hygiene): re-verify EVERY restored
+    ``*.spine`` — enumerated RECURSIVELY over both ``new_base`` and ``crucible_root`` (the SAME way ``create``
+    packages them) — under the restored spine pubkey, assert the segment view reports no FAILED segment, and
     re-run the deterministic evidence verify over every restored self-contained bundle. Raises
     OffenseBackupError unless ALL pass. Returns the count of evidence bundles that re-verified."""
-    from .live.spine_verify import FAILED, verify_offense_home, verify_offense_spine
+    from .live.spine_verify import FAILED, VERIFIED, _count_records, verify_offense_home, verify_offense_spine
 
-    spine_files = sorted(new_base.glob("*.spine"))
+    # Enumerate restored spines the SAME way `create` PACKAGES them — RECURSIVELY, over BOTH the base_dir AND
+    # the crucible root (create uses rglob and routes crucible-tree files under ``crucible/``). A non-recursive
+    # ``new_base``-only glob would MISS a spine that landed in a subdir or under the crucible tree and wave it
+    # through un-verified — the rglob/glob asymmetry a red-pen exploited to reforge an unearned `verified: True`.
+    spine_files = sorted(new_base.rglob("*.spine"))
+    if croot is not None:
+        spine_files += sorted(Path(croot).rglob("*.spine"))
     spine_pub = None
     sk = secrets.get(DEFAULT_SPINE_KEY_FILE)
     if sk:
@@ -405,7 +417,7 @@ def _reverify_restored(new_base: Path, croot, secrets: dict) -> int:
             spine_pub = json.loads(sk).get("public_key_b64")
         except Exception:  # noqa: BLE001 — a malformed spine key must NOT silently drop the check (fail closed)
             spine_pub = None
-    # FAIL CLOSED: a restored spine we cannot integrity-check (no usable spine pubkey) must NEVER be reported
+    # FAIL CLOSED: any restored spine we cannot integrity-check (no usable spine pubkey) must NEVER be reported
     # as verified. `create` refuses to mint such a backup at the source; this catches a hand-crafted/legacy
     # body too. Reporting success for a re-verify that did not RUN is exactly the unearned `verified: True`
     # the red-pen flagged — the segment view below can't cover it (a keyless spine segment is UNVERIFIABLE,
@@ -416,10 +428,17 @@ def _reverify_restored(new_base: Path, croot, secrets: dict) -> int:
             f"offense-spine public key — refusing to report an unverified restore as verified")
     for sp in spine_files:
         v = verify_offense_spine(spine_path=str(sp), spine_pubkey=spine_pub)
-        if v.status == FAILED:
+        if v.status != VERIFIED:                       # require a POSITIVE verdict, not merely "not FAILED"
             raise OffenseBackupError(
-                f"restored spine {sp.name} FAILED integrity re-verification ({v.detail}) — the restore is "
+                f"restored spine {sp} did NOT re-verify (status={v.status}: {v.detail}) — the restore is "
                 f"NOT trustworthy")
+        # A spine that "verifies" with ZERO complete records attests nothing and passes VACUOUSLY even under a
+        # NON-matching key (a torn-tail-only / garbage body — the binder's empty-chain verify is trivially
+        # true). Refuse it rather than stamp a content-free file `verified`.
+        if _count_records(str(sp)) < 1:
+            raise OffenseBackupError(
+                f"restored spine {sp} re-verified with NO complete records (torn/garbage) — refusing to "
+                f"report a content-free spine as verified")
     # the segment view: any PRESENT segment that FAILS integrity (e.g. a corrupt usage ledger) is fatal;
     # ABSENT / UNVERIFIABLE segments are honest non-failures (nothing to attest / no owner tie supplied here).
     for seg in verify_offense_home(str(new_base)):
