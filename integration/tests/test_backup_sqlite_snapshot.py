@@ -31,7 +31,7 @@ from vigil_integration.backup import (
 )
 
 # reuse the offense-home seeder (spine + the three identity keys) so create/restore find a *.spine to protect.
-from tests.test_backup_roundtrip import PW, _seed_offense_home  # type: ignore
+from test_backup_roundtrip import PW, _seed_offense_home  # type: ignore
 
 
 def _make_store(path: Path, rows: int = 200) -> None:

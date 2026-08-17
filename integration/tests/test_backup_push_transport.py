@@ -34,7 +34,7 @@ from tools.backup.transport import (  # noqa: E402
 )
 
 from vigil_integration.cli import main  # noqa: E402
-from tests.test_backup_roundtrip import PW, SLUG, _seed_offense_home  # type: ignore  # noqa: E402
+from test_backup_roundtrip import PW, SLUG, _seed_offense_home  # type: ignore  # noqa: E402
 
 
 # --- the pluggable transport backend -------------------------------------------------------------------

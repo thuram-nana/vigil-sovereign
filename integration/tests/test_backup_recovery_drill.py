@@ -23,7 +23,7 @@ pytest.importorskip("framework.v2.evidence.cli")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DRILL = _REPO_ROOT / "tools" / "backup" / "recovery_drill.sh"
 
-from tests.test_backup_roundtrip import PW, _seed_offense_home  # type: ignore  # noqa: E402
+from test_backup_roundtrip import PW, _seed_offense_home  # type: ignore  # noqa: E402
 
 
 def _offense_pythonpath() -> str:

@@ -27,7 +27,7 @@ from vigil_integration.backup import (
 )
 from vigil_integration.live.spine_identity import DEFAULT_SPINE_KEY_FILE
 
-from tests.test_backup_roundtrip import PW, SLUG, _seed_offense_home  # type: ignore
+from test_backup_roundtrip import PW, SLUG, _seed_offense_home  # type: ignore
 
 
 def _make_backup(tmp_path: Path) -> Path:
