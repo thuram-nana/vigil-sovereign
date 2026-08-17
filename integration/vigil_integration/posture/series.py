@@ -20,10 +20,12 @@ certificate's own (bundle-layer) time anchor, not the chain.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Optional
 
 from vigil_core import canonical_json, digest_payload
+from vigil_core.crypto import KeyPair
 from vigil_core.chain import append_entry, build_chain, sign_head, verify_chain, verify_head
 from vigil_core.highwater import (
     HighWaterDowngrade,
@@ -33,6 +35,12 @@ from vigil_core.highwater import (
     load_highwater,
 )
 from vigil_core.models import ChainEntry, SignedChainHead, TrustRoot
+
+_log = logging.getLogger(__name__)
+
+# One-time warning that a run persisted an UNSIGNED floor (no governance key threaded) — mirrors the
+# process-once warn in vigil_core.highwater so a normal, keyless run is non-bricking but honestly noisy once.
+_warned_unsigned_floor_writer = False
 
 
 class PostureSeriesError(Exception):
@@ -61,10 +69,19 @@ def append_posture_tick(
     *,
     engagement_slug: str,
     signers: list[tuple[str, str]],
+    hw_signer: Optional[KeyPair] = None,
 ) -> SignedChainHead:
     """Append ``cert`` as the next tick: chain its digest, re-sign the head (m-of-n), and advance the
     durable anti-rollback floor — upward-only. Fail-closed: a head that would lower the high-water raises
-    (a rollback/truncation is refused before anything is written)."""
+    (a rollback/truncation is refused before anything is written).
+
+    ``hw_signer`` (C-S5) is the offense GOVERNANCE keypair — the SAME key that signs the head (owner-tied only
+    via the ``OFFENSE_GOVERNANCE_ROLE`` delegation, NEVER an owner key). When threaded, the durable floor is
+    GOVERNANCE-SIGNED under the attestation-log variant domain (``_HW_DOMAIN``), so a normal posture run
+    persists a signed floor a strict verifier accepts. When ``None`` (a context with no governance key) the
+    floor is written UNSIGNED — byte-identical to before, non-bricking — with a one-time warning; a strict
+    verifier holding the anchor would then reject that unsigned floor (the honest residual)."""
+    global _warned_unsigned_floor_writer
     d, ticks, chain_p, head_p, hw_p = _paths(series_dir)
     ticks.mkdir(parents=True, exist_ok=True)
     with highwater_lock(hw_p):
@@ -83,7 +100,12 @@ def append_posture_tick(
         chain_p.write_text(json.dumps([e.model_dump(mode="json") for e in entries], sort_keys=True),
                            encoding="utf-8")
         head_p.write_text(head.model_dump_json(), encoding="utf-8")
-        advance_highwater(hw_p, head, _locked=True)
+        if hw_signer is None and not _warned_unsigned_floor_writer:
+            _warned_unsigned_floor_writer = True
+            _log.warning("posture series: no offense governance key threaded — persisting an UNSIGNED "
+                         "high-water floor (non-bricking). A strict verifier holding the governance anchor "
+                         "would reject it; provide hw_signer for a strict-verifiable floor.")
+        advance_highwater(hw_p, head, signer=hw_signer, _locked=True)
         return head
 
 

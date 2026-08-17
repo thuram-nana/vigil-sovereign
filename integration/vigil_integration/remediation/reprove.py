@@ -121,6 +121,11 @@ class ReproveConfig:
     corpus: "list[ProveTarget]"
     witnesses: "list[tuple[KeyPair, str]]" = field(default_factory=list)
     run_id_prefix: str = "reprove"
+    # C-S5: the offense GOVERNANCE keypair that also signs the attestation-log floor (``provision_authority``'s
+    # ``prov.keypair`` — the SAME key behind ``signers``; owner-tied via OFFENSE_GOVERNANCE_ROLE, NEVER an owner
+    # key). ``None`` ⇒ the floor is written UNSIGNED (non-bricking, byte-identical to before; a strict verifier
+    # holding the anchor would reject it).
+    gov_signer: Optional[KeyPair] = None
 
 
 @dataclass
@@ -233,6 +238,7 @@ def _run_cycle(
             config.log_dir, cert, engagement_slug=config.engagement_slug,
             signers=config.signers, trust_root=config.trust_root,
             signer_pubkeys=config.signer_pubkeys,
+            hw_signer=config.gov_signer,             # C-S5: GOVERNANCE-sign the durable floor too
         )
         witnessed = _witness_head(config, now)       # (3) WITNESS — time-co-sign that NEW head; persist it
         out.append(ReproveTick(cycle=cycle, finding_id=tgt.finding_id, append=appended, witnessed=witnessed))

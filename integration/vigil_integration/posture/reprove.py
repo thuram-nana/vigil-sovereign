@@ -65,7 +65,10 @@ def run_posture_reprove(
     last_head = None
     for i in range(int(cycles)):
         cert = build_cert()
-        last_head = append_posture_tick(series_dir, cert, engagement_slug=engagement, signers=signers)
+        # C-S5: sign the durable floor with the SAME offense governance key that signs the head, so a normal
+        # posture run persists a GOVERNANCE-SIGNED floor (a strict verifier accepts it).
+        last_head = append_posture_tick(series_dir, cert, engagement_slug=engagement, signers=signers,
+                                        hw_signer=gov)
         if i < int(cycles) - 1:
             sleep(interval)
     return {

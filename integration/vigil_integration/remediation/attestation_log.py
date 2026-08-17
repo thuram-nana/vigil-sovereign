@@ -47,6 +47,7 @@ fully-dishonest producer is closed only by the independent out-of-band witness (
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,6 +64,7 @@ from vigil_core import (
     sign_head,
     verify_head,
 )
+from vigil_core.crypto import KeyPair
 
 # prove_driver's module scope is stdlib + vigil_core only (its framework re-execute is function-local), so
 # importing these here is FATAL-2 safe — the framework loads only when verify_prove_certificate adjudicates
@@ -74,6 +76,12 @@ _PathLike = Union[str, os.PathLike]
 _TICKS_FILE = "ticks.jsonl"
 _HEAD_FILE = "head.json"
 _HIGHWATER_FILE = "highwater.json"
+
+_log = logging.getLogger(__name__)
+
+# One-time warning that an append persisted an UNSIGNED floor (no governance key threaded) — non-bricking
+# fallback for a context with no key; mirrors the process-once warn in vigil_core.highwater.
+_warned_unsigned_floor_writer = False
 
 
 # --------------------------------------------------------------------------------------------------------
@@ -238,6 +246,7 @@ def append_tick(
     signers: "list[tuple[str, str]]",
     trust_root,
     signer_pubkeys: "dict[str, str]",
+    hw_signer: Optional[KeyPair] = None,
 ) -> AppendResult:
     """Admit + append one remediation re-proof tick to the log at ``log_dir`` and return an
     :class:`AppendResult`. FAIL-CLOSED at every step — if any check fails, NOTHING is persisted:
@@ -256,7 +265,15 @@ def append_tick(
 
     ``signers`` signs the chain head (governance m-of-n); ``trust_root`` verifies it; ``signer_pubkeys`` pins
     the prove-cert admission key. (In production all three derive from one governance authority — see
-    ``live/wiring.py:provision_authority``.)"""
+    ``live/wiring.py:provision_authority``.)
+
+    ``hw_signer`` (C-S5) is the offense GOVERNANCE keypair (``provision_authority``'s ``prov.keypair`` — the
+    same key behind ``signers``; owner-tied only via ``OFFENSE_GOVERNANCE_ROLE``, NEVER an owner key). When
+    threaded, the durable attestation-log floor is GOVERNANCE-SIGNED under the default ``_HW_DOMAIN`` variant,
+    so a normal re-proof run persists a signed floor a strict verifier accepts. When ``None`` (no governance
+    key in this context) the floor is written UNSIGNED — byte-identical to before, non-bricking — with a
+    one-time warning; a strict verifier holding the anchor would then reject that unsigned floor."""
+    global _warned_unsigned_floor_writer
     if not signers:
         raise AttestationError("append_tick: governance signers are required (never an unsigned head)")
 
@@ -294,7 +311,13 @@ def append_tick(
         # e. persist ticks + head, then advance the floor UPWARD-ONLY — all under the held lock (atomic).
         _write_ticks(log_dir, new_ticks)
         _write_head(log_dir, head)
-        advance_highwater(hw_path, head, _locked=True)   # re-checks under the lock; raises on any downgrade
+        if hw_signer is None and not _warned_unsigned_floor_writer:
+            _warned_unsigned_floor_writer = True
+            _log.warning("attestation log: no offense governance key threaded — persisting an UNSIGNED "
+                         "high-water floor (non-bricking). A strict verifier holding the governance anchor "
+                         "would reject it; provide hw_signer for a strict-verifiable floor.")
+        # C-S5: GOVERNANCE-sign the floor (default _HW_DOMAIN variant) when a key is available.
+        advance_highwater(hw_path, head, signer=hw_signer, _locked=True)  # re-checks under lock; raises on downgrade
 
     series = _derive_series(new_ticks)
     return AppendResult(state=str(cert.get("state") or ""), seq=int(head.last_seq), head=head,
