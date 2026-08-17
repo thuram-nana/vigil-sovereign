@@ -1,0 +1,42 @@
+# VIGIL HA — Qdrant vector store.
+# =============================================================================
+# HONEST CAVEAT: this manifest is a DURABLE SINGLE INSTANCE, not an HA cluster.
+# Qdrant HA needs DISTRIBUTED mode: replicas >= 2 that bootstrap to each other AND
+# a per-collection replication_factor >= 2. That is a real, separate configuration
+# (peer discovery, a bootstrap peer, raft) — this file gives you the durable node
+# and enables clustering so you CAN scale it; it does not pretend one node is HA.
+# Point SIGIL at it with QDRANT_URL=http://qdrant:6333 (replacing the embedded store).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: qdrant
+  labels: { app: qdrant, tier: vector-store }
+spec:
+  serviceName: qdrant
+  replicas: 1                          # durable single node. For HA: raise to >=2 AND set replication_factor>=2 per collection.
+  selector:
+    matchLabels: { app: qdrant }
+  template:
+    metadata:
+      labels: { app: qdrant, tier: vector-store }
+    spec:
+      containers:
+        - name: qdrant
+          image: qdrant/qdrant:v1.19.0@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc
+          env:
+            - { name: QDRANT__CLUSTER__ENABLED, value: "true" }   # clustering on so a 2nd node CAN join; one node is not HA
+          ports:
+            - { name: rest, containerPort: 6333 }
+            - { name: grpc, containerPort: 6334 }
+            - { name: p2p,  containerPort: 6335 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: rest }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - { name: qdrant-data, mountPath: /qdrant/storage }
+  volumeClaimTemplates:
+    - metadata: { name: qdrant-data }
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources: { requests: { storage: 20Gi } }

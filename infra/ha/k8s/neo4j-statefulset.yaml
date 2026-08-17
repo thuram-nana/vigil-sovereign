@@ -1,0 +1,44 @@
+# VIGIL HA — Neo4j knowledge graph.
+# =============================================================================
+# HONEST CAVEAT (the important one): this is neo4j:5-COMMUNITY, a SINGLE INSTANCE.
+# COMMUNITY EDITION HAS NO CLUSTERING. A highly-available Neo4j (causal cluster:
+# multiple core members + read replicas, raft-replicated) is a Neo4j ENTERPRISE
+# feature and a different image/licence. This manifest gives you a DURABLE single
+# instance (PVC-backed) — it does NOT, and cannot on community, give you HA. Do not
+# read replicas:1 here as a bug to "fix" by scaling: community will not form a
+# cluster, and two independent community instances are two divergent graphs.
+# For real graph HA, deploy Neo4j Enterprise per its clustering docs.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: neo4j
+  labels: { app: neo4j, tier: graph }
+spec:
+  serviceName: neo4j
+  replicas: 1                          # community edition = single instance; clustering requires Enterprise.
+  selector:
+    matchLabels: { app: neo4j }
+  template:
+    metadata:
+      labels: { app: neo4j, tier: graph }
+    spec:
+      containers:
+        - name: neo4j
+          image: neo4j:5-community@sha256:d9dd3dc7d1c78fa959191ff02dbdcbefadceaf83eee23428fb92a58cac8ad3fe
+          env:
+            - name: NEO4J_AUTH
+              valueFrom: { secretKeyRef: { name: vigil-secrets, key: neo4j-auth } }
+          ports:
+            - { name: http, containerPort: 7474 }
+            - { name: bolt, containerPort: 7687 }
+          readinessProbe:
+            tcpSocket: { port: bolt }
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          volumeMounts:
+            - { name: neo4j-data, mountPath: /data }
+  volumeClaimTemplates:
+    - metadata: { name: neo4j-data }
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources: { requests: { storage: 20Gi } }

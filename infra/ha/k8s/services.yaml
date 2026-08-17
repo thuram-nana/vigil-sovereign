@@ -1,0 +1,69 @@
+# VIGIL HA — Services. All ClusterIP (in-cluster only); front them with your own
+# Ingress + TLS. Nothing here is a NodePort/LoadBalancer — the network boundary is
+# the Ingress/tunnel, never a raw exposed Service (mirrors REMOTE-HOSTING.md).
+# =============================================================================
+
+# The stateless read/proxy tier. sessionAffinity: ClientIP = sticky sessions, which
+# `vigil up`'s per-instance session token requires (see proxy-deployment.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: vigil-proxy
+  labels: { app: vigil-proxy }
+spec:
+  type: ClusterIP
+  sessionAffinity: ClientIP           # sticky: return each client to the replica that issued its token
+  sessionAffinityConfig:
+    clientIP: { timeoutSeconds: 10800 }
+  selector: { app: vigil-proxy }
+  ports:
+    - { name: http, port: 8770, targetPort: http }
+---
+# HEADLESS Service for the sovereign StatefulSet — stable network identity
+# (vigil-sovereign-0.vigil-sovereign) for the single writer. clusterIP: None.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vigil-sovereign
+  labels: { app: vigil-sovereign }
+spec:
+  clusterIP: None                      # headless: DNS resolves to the pod, not a VIP (StatefulSet identity)
+  selector: { app: vigil-sovereign }
+  ports:
+    - { name: cockpit, port: 8733, targetPort: cockpit }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant
+  labels: { app: qdrant }
+spec:
+  clusterIP: None                      # headless: Qdrant peers address each other by stable pod DNS
+  selector: { app: qdrant }
+  ports:
+    - { name: rest, port: 6333, targetPort: rest }
+    - { name: grpc, port: 6334, targetPort: grpc }
+    - { name: p2p,  port: 6335, targetPort: p2p }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neo4j
+  labels: { app: neo4j }
+spec:
+  clusterIP: None
+  selector: { app: neo4j }
+  ports:
+    - { name: http, port: 7474, targetPort: http }
+    - { name: bolt, port: 7687, targetPort: bolt }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  labels: { app: otel-collector }
+spec:
+  type: ClusterIP
+  selector: { app: otel-collector }
+  ports:
+    - { name: otlp-http, port: 4318, targetPort: otlp-http }

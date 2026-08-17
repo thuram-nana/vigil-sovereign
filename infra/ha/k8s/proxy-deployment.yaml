@@ -1,0 +1,62 @@
+# VIGIL HA — the STATELESS read/proxy tier (`vigil up`), horizontally scalable.
+# =============================================================================
+# This is the ONE tier that is genuinely active-active: N stateless replicas.
+# It is NOT the spine writer (that is the single-replica StatefulSet). Scaling
+# this Deployment scales reads/proxying only — see docs/architecture/HA-PROFILE.md.
+#
+# Sticky sessions: `vigil up` holds a per-instance session token, so the Service /
+# Ingress in front of this Deployment MUST use session affinity (services.yaml sets
+# sessionAffinity: ClientIP) or a shared token store. Without one, a request routed
+# to a different replica than the one that issued the token is rejected.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vigil-proxy
+  labels: { app: vigil-proxy, tier: read-proxy }
+spec:
+  replicas: 3                          # active-active; safe to scale — stateless read/proxy tier
+  selector:
+    matchLabels: { app: vigil-proxy }
+  template:
+    metadata:
+      labels: { app: vigil-proxy, tier: read-proxy }
+    spec:
+      containers:
+        - name: vigil-up
+          image: vigil/runtime:local   # operator-built (sovereign venv + repo); digest-pin before prod
+          command: ["vigil", "up", "--host", "0.0.0.0", "--port", "8770", "--no-browser"]
+          # --host 0.0.0.0 is INSIDE the pod network only; never NodePort/LoadBalancer this
+          # directly — front it with the cluster-internal Service (services.yaml) + your Ingress/TLS.
+          env:
+            - name: VIGIL_UI_ALLOWED_HOSTS
+              value: "vigil.example.com"
+            - name: CRUCIBLE_API_KEY
+              valueFrom: { secretKeyRef: { name: vigil-secrets, key: crucible-api-key } }
+          ports:
+            - { name: http, containerPort: 8770 }
+          readinessProbe:                # do not route to a replica until it can serve
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket: { port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+---
+# Optional: an HPA can scale the stateless proxy tier on CPU. (The StatefulSet writer
+# is deliberately NOT autoscaled — it is single-writer by design.)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vigil-proxy
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: vigil-proxy }
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
