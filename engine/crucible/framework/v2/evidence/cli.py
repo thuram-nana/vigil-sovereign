@@ -27,8 +27,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+from vigil_core.highwater import _HW_EVIDENCE_DOMAIN, _sign_highwater, verify_highwater_signature
+
 from ..common import paths
-from ..entitlement.crypto import generate_keypair
+from ..entitlement.crypto import KeyPair, generate_keypair
 from ..entitlement.models import TrustRoot
 from .certify import build_certificate, sign_certificate, verify_bundle
 from .chain import build_chain, sign_head
@@ -97,11 +99,17 @@ class _HighwaterCorrupt(Exception):
     """The anti-rollback state file EXISTS but cannot be trusted — verification must REFUSE (fail-closed)."""
 
 
-def _load_highwater(path: Path) -> int | None:
+def _load_highwater(path: Path, *, trusted_pubkeys=None) -> int | None:
     """None iff the file is ABSENT (a legitimate first verification). If the file EXISTS but is a symlink,
     unreadable, malformed, or carries a non-integer last_seq, raise _HighwaterCorrupt so verification REFUSES
     — anti-rollback state you cannot trust must NEVER silently degrade to 'no previous mark' (that disables
-    rollback protection exactly when its state is compromised)."""
+    rollback protection exactly when its state is compromised).
+
+    OFFENSE-PARITY (C.2): when ``trusted_pubkeys`` (the offense GOVERNANCE keys) is supplied, a PRESENT
+    signature must verify against a trusted key — a tampered SIGNED high-water raises _HighwaterCorrupt and
+    fails CLOSED down the SAME exit-2 path as any corrupt state. An ABSENT signature is warn-accepted
+    (back-compat). With NO anchor (``trusted_pubkeys`` falsy — every pre-C.2 caller) NO signature check runs,
+    so the return value and raises are BYTE-IDENTICAL to before."""
     # is_symlink() is True for a DANGLING link too (it checks the link, not the target), so it MUST precede
     # exists() — exists() FOLLOWS the link and returns False for a dangling one, which would wrongly read as
     # "absent / first run" and silently disable anti-rollback (red-pen: a planted dangling symlink bypass).
@@ -110,28 +118,48 @@ def _load_highwater(path: Path) -> int | None:
     if not path.exists():
         return None
     try:
-        seq = json.loads(path.read_text(encoding="utf-8"))["last_seq"]
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        seq = raw["last_seq"]
     except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
         raise _HighwaterCorrupt(f"{path} unreadable/malformed: {e}") from e
     if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
         raise _HighwaterCorrupt(f"{path} last_seq is not a non-negative integer: {seq!r}")
+    if trusted_pubkeys and isinstance(raw, dict):
+        # Verify under the EVIDENCE variant's domain — an attestation-log floor signed under the default
+        # ``_HW_DOMAIN`` (which shares the ``last_seq`` field) MUST NOT verify here as an evidence floor.
+        ok, why = verify_highwater_signature(raw, trusted_pubkeys, domain=_HW_EVIDENCE_DOMAIN)
+        if not ok:
+            raise _HighwaterCorrupt(f"{path} governance signature check failed: {why}")
     return seq
 
 
-def _save_highwater(path: Path, seq: int) -> None:
+def _save_highwater(path: Path, seq: int, *, signer=None) -> None:
     """Atomic + owner-only persist: temp file in the same dir → fsync → atomic rename → chmod 0600. Refuses a
-    symlink target. (This is LOCAL rollback detection; a governance-signed or platform-monotonic store would be
-    needed for cryptographically-guaranteed rollback PREVENTION — documented, not claimed here.)"""
+    symlink target.
+
+    OFFENSE-PARITY (C.2): when ``signer`` (the offense GOVERNANCE KeyPair, NEVER an owner key) is supplied, the
+    ``{last_seq}`` core is GOVERNANCE-SIGNED via the SAME ``vigil_core.highwater`` helper the sovereign-parity
+    floor uses (one signing implementation, no divergence) under the EVIDENCE variant's domain
+    (``_HW_EVIDENCE_DOMAIN``), so it can never cross-verify as the attestation-log floor. With ``signer is
+    None`` the persisted bytes are ``{"last_seq": N}`` — BYTE-IDENTICAL to before. Signing this LOCAL state
+    closes the tamper-of-a-SIGNED-floor case for a verifier that has the governance anchor; it does NOT close
+    strip-to-unsigned (an unsigned floor is still WARN-ACCEPTED — the honest residual, closed only by the
+    out-of-band witnessed checkpoint anchor), nor the fully-dishonest-producer-owns-all-keys case."""
     # Check the UN-resolved path for a symlink BEFORE any resolve — path.resolve() would dereference it and the
     # is_symlink() check would then always be False (dead code), letting the atomic write follow the link and
     # overwrite its target (red-pen). os.replace(tmp, path) on a non-symlink path is an atomic in-place rename.
     if path.is_symlink():
         raise ValueError(f"high-water path {path} is a symlink (refusing)")
     path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"last_seq": int(seq)}
+    if signer is not None:
+        # sign under the EVIDENCE variant's domain so this {last_seq} floor is cryptographically distinct from
+        # the attestation-log floor that also carries last_seq (cross-variant separation).
+        payload = _sign_highwater(payload, signer, domain=_HW_EVIDENCE_DOMAIN)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".hw-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps({"last_seq": int(seq)}))
+            fh.write(json.dumps(payload))
             fh.flush()
             os.fsync(fh.fileno())
         os.chmod(tmp, 0o600)
@@ -152,6 +180,19 @@ def _verify(args: argparse.Namespace) -> int:
     report = json.loads(Path(args.report).read_text(encoding="utf-8"))
     trust_root = TrustRoot.model_validate_json(Path(args.trust_root).read_text(encoding="utf-8"))
     evidence_root = Path(args.evidence_root) if args.evidence_root else None
+
+    # OFFENSE high-water GOVERNANCE anchor (C.2 — parity with the signed sovereign floor). The anti-rollback
+    # high-water is signed by the offense GOVERNANCE key (owner-tied via the OFFENSE_GOVERNANCE_ROLE delegation),
+    # NEVER an owner key. The trusted set is the bundle's governance authorizers (∪ the --highwater-signer-file
+    # key when given). A PRESENT-but-tampered signature then fails the verify CLOSED; an UNSIGNED high-water
+    # (every pre-C.2 file) is warn-accepted, so exit codes / SOUND-bundle gating are unchanged for such bundles.
+    hw_signer = None
+    hw_trusted = {a.public_key_b64 for a in trust_root.authorizers}
+    signer_file = str(getattr(args, "highwater_signer_file", "") or "").strip()
+    if signer_file:
+        kd = json.loads(Path(signer_file).read_text(encoding="utf-8"))
+        hw_signer = KeyPair(public_key_b64=kd["public_key_b64"], private_key_b64=kd["private_key_b64"])
+        hw_trusted.add(hw_signer.public_key_b64)
 
     # AUTHENTICITY ANCHOR (the one thing a verifier must trust): the trust root's public keys. Print its
     # fingerprint so it can be compared to a value the operator PUBLISHED OUT-OF-BAND. A --trust-root-
@@ -201,7 +242,7 @@ def _verify(args: argparse.Namespace) -> int:
     # smaller bundle (a suppressed finding) is refused.
     hw_path = Path(args.highwater) if args.highwater else None
     try:
-        prev_hw = _load_highwater(hw_path) if hw_path else None
+        prev_hw = _load_highwater(hw_path, trusted_pubkeys=hw_trusted) if hw_path else None
     except _HighwaterCorrupt as e:
         print(f"  [BAD] anti-rollback high-water state is corrupt: {e}", file=sys.stderr)
         print("bundle NOT SOUND (untrustworthy rollback state — refusing, fail-closed)")
@@ -242,10 +283,11 @@ def _verify(args: argparse.Namespace) -> int:
     print(f"verified {ok_n}/{len(result.certificate_results)} certificate(s) sound; "
           f"bundle {'SOUND' if result.ok else 'NOT SOUND'}")
 
-    # advance the high-water only on a fully-sound bundle (atomic + owner-only + symlink-refusing)
+    # advance the high-water only on a fully-sound bundle (atomic + owner-only + symlink-refusing), GOVERNANCE-
+    # signed when --highwater-signer-file was supplied (offense parity), else byte-identical unsigned.
     if result.ok and hw_path is not None and head is not None:
         new_hw = max(prev_hw or 0, head.last_seq)
-        _save_highwater(hw_path, new_hw)
+        _save_highwater(hw_path, new_hw, signer=hw_signer)
 
     return 0 if result.ok else 2
 
@@ -333,6 +375,12 @@ def main(argv: list[str]) -> int:
     p.add_argument("--highwater", default="",
                    help="persisted anti-rollback high-water file: refuses a stale bundle "
                         "whose head last_seq is below the highest previously accepted")
+    p.add_argument("--highwater-signer-file", default="", dest="highwater_signer_file",
+                   help="a governance keypair JSON {public_key_b64,private_key_b64} (as `keygen` emits). When "
+                        "given, the advanced anti-rollback high-water is GOVERNANCE-SIGNED (offense parity with "
+                        "the signed sovereign floor) — NEVER an owner key (owner tie = OFFENSE_GOVERNANCE_ROLE "
+                        "delegation). Without it the high-water is written UNSIGNED (byte-identical to before). "
+                        "A PRESENT-but-tampered signature fails the verify CLOSED regardless of this flag.")
     p.set_defaults(fn=_verify)
 
     p = sub.add_parser("pcf-export", help="project a signed evidence bundle into PCF v0.1 certificates")
