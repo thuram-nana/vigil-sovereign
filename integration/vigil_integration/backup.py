@@ -52,16 +52,21 @@ no usable offense-spine public key to re-verify it under is a fail-closed refusa
 ``create`` refuses at the source to produce a spine-bearing backup that omits its spine key, so a
 key-present spine is always re-verified and a key-absent one is always refused).
 
-Honest limit on what is re-verified: ``.blackboard/store.sqlite`` and the run dirs are captured as OPAQUE
-bytes. Their internal database consistency is NOT re-checked on restore — only the signed offense spine and
-the signed evidence chain are. The passphrase is the recovery secret; it is NEVER stored — lose it and the
-backup is unrecoverable BY DESIGN (the off-box confidentiality guarantee, unchanged from the sovereign leg).
+Honest limit on what is re-verified: ``.blackboard/store.sqlite`` is captured as a CONSISTENT point-in-time
+snapshot (the stdlib sqlite3 online backup API — so a live writer mid-transaction is captured as a coherent
+db, not a torn page mix; a non-SQLite file falls back to a raw byte copy with a logged note). That snapshot
+is consistent as of the snapshot INSTANT — NOT against writers that commit afterwards. The run dirs are
+still captured as OPAQUE bytes. Neither the store db's internal consistency nor the run dirs are re-checked
+on restore — only the signed offense spine and the signed evidence chain are. The passphrase is the recovery
+secret; it is NEVER stored — lose it and the backup is unrecoverable BY DESIGN (the off-box confidentiality
+guarantee, unchanged from the sovereign leg).
 """
 from __future__ import annotations
 
 import base64
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -98,6 +103,65 @@ _REWRAP_KEYS: tuple[tuple[str, bytes], ...] = (
 )
 # Crucible-side files travel under this rel prefix so restore routes them to ``crucible_root`` (not base_dir).
 _CRUCIBLE_PREFIX = "crucible/"
+# The CRUCIBLE blackboard db — captured as a CONSISTENT point-in-time snapshot (not a torn raw byte copy) via
+# the stdlib sqlite3 online backup API. Its packaged rel; matched in the create read loop to route it through
+# ``_read_sqlite_consistent``.
+_STORE_SQLITE_REL = _CRUCIBLE_PREFIX + ".blackboard/store.sqlite"
+# A real SQLite database file begins with this fixed 16-byte header; a file that does not is copied raw.
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+_log = logging.getLogger(__name__)
+
+
+def _read_sqlite_consistent(src: Path) -> bytes:
+    """Return the bytes of ``.blackboard/store.sqlite`` as a CONSISTENT point-in-time snapshot.
+
+    A live CRUCIBLE writer may be mid-transaction when the backup runs; a naive ``read_bytes`` of the db file
+    can capture a TORN mix of pages (half of an in-flight write) that fails ``PRAGMA integrity_check`` on
+    restore. This uses the stdlib ``sqlite3`` ONLINE BACKUP API (``sqlite3.Connection.backup``) into a temp
+    file, which copies a coherent snapshot even while another connection writes (WAL or rollback journal),
+    and packages THOSE bytes.
+
+    Falls back to a raw byte copy — with a logged note — ONLY if ``src`` is not a valid SQLite database (bad
+    magic / not-a-db / open error): an opaque non-db file is better preserved verbatim than lost. The snapshot
+    is consistent as of the snapshot INSTANT; it is not a guarantee about writers that commit afterwards."""
+    import sqlite3
+    import tempfile
+
+    try:
+        with open(src, "rb") as fh:
+            magic = fh.read(len(_SQLITE_MAGIC))
+    except OSError as e:
+        _log.warning("store.sqlite at %s could not be read for a snapshot (%s) — raw byte copy", src, e)
+        return src.read_bytes()
+    if magic != _SQLITE_MAGIC:
+        _log.warning("store.sqlite at %s is not a SQLite database (bad header) — raw byte copy", src)
+        return src.read_bytes()
+
+    fd, tmpname = tempfile.mkstemp(prefix="vigil-sqlite-snap-", suffix=".sqlite")
+    os.close(fd)
+    tmp = Path(tmpname)
+    try:
+        s = d = None
+        try:
+            s = sqlite3.connect(str(src), timeout=30.0)   # read-write open handles a WAL db's checkpoint state
+            d = sqlite3.connect(str(tmp))
+            s.backup(d)                                   # online backup: a coherent snapshot of committed pages
+        except sqlite3.Error as e:
+            _log.warning("store.sqlite at %s failed a consistent snapshot (%s) — raw byte copy", src, e)
+            return src.read_bytes()
+        finally:
+            if d is not None:
+                d.close()
+            if s is not None:
+                s.close()
+        return tmp.read_bytes()                           # connections closed → tmp is a complete, flushed db
+    finally:
+        for p in (tmp, Path(str(tmp) + "-wal"), Path(str(tmp) + "-shm"), Path(str(tmp) + "-journal")):
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
 
 class OffenseBackupError(Exception):
@@ -197,7 +261,10 @@ def create_offense_backup(dest, passphrase: str, *, base_dir, crucible_root=None
     if crucible_root:
         sources += list(_iter_crucible_files(Path(crucible_root)))
     for f, rel in sources:
-        raw = f.read_bytes()
+        # ``.blackboard/store.sqlite`` is captured as a CONSISTENT snapshot (online backup API); every other
+        # file is an opaque raw byte copy. The snapshot bytes are what gets hashed + packaged, so the pre-write
+        # hash check and the restored file agree.
+        raw = _read_sqlite_consistent(f) if rel == _STORE_SQLITE_REL else f.read_bytes()
         file_blobs[rel] = base64.b64encode(raw).decode("ascii")
         file_hashes[rel] = sha256_hex(raw)
 
