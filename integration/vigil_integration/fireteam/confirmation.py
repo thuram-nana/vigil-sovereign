@@ -218,6 +218,21 @@ class _TerminalCas:
             # cannot atomically reserve ⇒ deny our write (fail-closed); the caller re-reads the durable ledger.
             return False
 
+    def release(self, key: tuple[str, str, int]) -> None:
+        """RELEASE (unlink) a marker THIS caller previously ``claim``ed, so a later retry can re-claim it.
+        Used ONLY on a fail-closed durable-commit failure for an APPROVED terminal (DEFECT 2): the resolver
+        won the atomic claim but could NOT durably persist the signed terminal, so it must relinquish the
+        claim (fail-closed) rather than hold a slot for a terminal that never landed — otherwise the
+        escalation would be permanently un-resolvable. Total/best-effort: a blank dir or an already-gone
+        marker is a no-op, never raises. A stuck (un-released) marker would at worst DENY a retry, which is
+        itself fail-safe — it can never manufacture an allow."""
+        if not self._dir:
+            return
+        try:
+            os.unlink(os.path.join(self._dir, _key_digest(key)))
+        except OSError:
+            pass
+
     def _fsync_dir(self) -> None:
         try:
             dfd = os.open(self._dir, os.O_RDONLY)
@@ -505,16 +520,26 @@ class ConfirmationRegistry:
                 self._pending.pop(key, None)
 
     # -- mutation (append-only) -----------------------------------------------------------------
-    def _emit(self, event: str, key: tuple[str, str, int], detail: dict[str, Any]) -> None:
-        record = {"event": event, "wave_id": key[0], "member_id": key[1], "seq": key[2], **detail}
-        self._log.append(record)
-        if self._ledger is not None:
-            # DURABLE substrate: append the (already-redacted) event to the append-only JSONL ledger so a
-            # fresh registry can rehydrate it. Best-effort — a ledger write must not corrupt the registry.
-            try:
-                self._ledger.append(record)
-            except Exception:  # noqa: BLE001 — an emit failure must not corrupt the registry
-                pass
+    @staticmethod
+    def _new_record(event: str, key: tuple[str, str, int], detail: dict[str, Any]) -> dict[str, Any]:
+        """The single canonical shape of a ledger/spine event line for ``key``."""
+        return {"event": event, "wave_id": key[0], "member_id": key[1], "seq": key[2], **detail}
+
+    def _append_ledger(self, record: dict[str, Any]) -> bool:
+        """Append ONE record to the durable ledger. Returns ``True`` iff it was durably written OR there is
+        no ledger backing (nothing to persist). :meth:`EscalationLedger.append` is already total (never
+        raises, ``False`` on any failure); the guard is defence-in-depth. Callers that gate an actionable
+        allow on durability (see :meth:`_finish`) MUST check this return — a swallowed ``False`` is the
+        DEFECT 2 durability-ordering bug (a valid-but-not-durable APPROVED becoming actionable)."""
+        if self._ledger is None:
+            return True
+        try:
+            return bool(self._ledger.append(record))
+        except Exception:  # noqa: BLE001 — a ledger write must never break the registry
+            return False
+
+    def _mirror_spine(self, event: str, key: tuple[str, str, int], record: dict[str, Any]) -> None:
+        """Best-effort mirror of a record onto the single-writer signed spine (when wired). Never raises."""
         if self._spine is not None:
             # never let a spine hiccup crash the registry; the write is redacted single-writer.
             try:
@@ -522,6 +547,18 @@ class ConfirmationRegistry:
                                    record=record)
             except Exception:  # noqa: BLE001 — an emit failure must not corrupt the registry
                 pass
+
+    def _emit(self, event: str, key: tuple[str, str, int], detail: dict[str, Any]) -> None:
+        """Best-effort emit for a NON-durability-critical terminal (register / reject / expire, or an
+        APPROVED in a pure in-memory registry). Appends the (already-redacted) record to the in-memory log,
+        the durable ledger (best-effort — a lost non-approval merely reappears pending on a fresh reader,
+        which is fail-SAFE), and the spine mirror (best-effort). An APPROVED-with-ledger terminal does NOT
+        pass through here: it takes :meth:`_finish`'s durable-FIRST branch, where the ledger append MUST
+        succeed BEFORE the allow becomes actionable (DEFECT 2 — the durability-ordering guarantee)."""
+        record = self._new_record(event, key, detail)
+        self._log.append(record)
+        self._append_ledger(record)
+        self._mirror_spine(event, key, record)
 
     def register(self, escalation: Any, *, deadline_seq: Optional[int] = None) -> Optional[tuple[str, str, int]]:
         """Enqueue a dangerous-tool escalation as PENDING. Fail-closed: a malformed escalation is
@@ -560,8 +597,6 @@ class ConfirmationRegistry:
         if not self._cas.claim(key):
             return self._adopt_durable_terminal(key)
         res = ConfirmationResolution(key=key, outcome=outcome, approved=approved, reason=reason)
-        self._resolved[key] = res
-        self._pending.pop(key, None)
         # The in-memory resolution keeps the RAW reason (returned to the caller); the DURABLE record carries
         # the scrubbed reason (an approver-supplied reason string could echo a secret), so nothing sensitive
         # lands at rest. SCRUB with the SAME F3 value-redactor used for the register event.
@@ -571,6 +606,39 @@ class ConfirmationRegistry:
         # re-verify it on replay. The envelope is a base64 signature — no secret — so it is NOT redacted.
         if outcome == ConfirmationOutcome.APPROVED and envelope is not None:
             detail["approval"] = envelope
+
+        # DURABILITY-BEFORE-ACTIONABLE (DEFECT 2). An APPROVED terminal authorizes a dangerous action, so it
+        # must NOT become actionable until its signed terminal is DURABLY committed. When a ledger is backing
+        # this registry we therefore append the APPROVED record to the durable ledger FIRST and CHECK it;
+        # only a CONFIRMED durable write may then be recorded in-memory as ``_resolved`` and returned as
+        # APPROVED. Otherwise a valid-but-not-durable APPROVED (e.g. ledger unwritable) would be actionable
+        # in this process while a restart/failover reader sees NO durable terminal — the exact defect.
+        # (A REJECT/EXPIRE stays best-effort below: a lost non-approval merely reappears PENDING on a fresh
+        # reader — fail-SAFE. Only the actionable allow needs the durable-FIRST guarantee. A pure in-memory
+        # registry has no ledger, so this branch is skipped and behaviour is unchanged.)
+        if outcome == ConfirmationOutcome.APPROVED and self._ledger is not None:
+            record = self._new_record(outcome.value, key, detail)
+            if not self._append_ledger(record):
+                # FAIL CLOSED: the approval VERIFIED but is NOT yet durable. Do NOT record it as ``_resolved``
+                # (so a later in-process call does not return it APPROVED), keep the escalation PENDING (we
+                # neither pop ``_pending`` nor persist a terminal — it stays resolvable), and RELEASE the
+                # atomic claim so a retry (once the ledger is writable) can re-claim and durably commit.
+                # This transient not-approved is NEVER persisted as a FINAL ``_resolved`` entry — else the
+                # escalation would be permanently dead. Non-actionable: ``approved=False``, non-terminal.
+                self._cas.release(key)
+                return ConfirmationResolution(
+                    key=key, outcome=ConfirmationOutcome.PENDING, approved=False,
+                    reason="approval verified but not yet durably committed (fail-closed) — retry")
+            # Durable — the allow is now safe to make actionable. Record in-memory + mirror to the spine.
+            self._resolved[key] = res
+            self._pending.pop(key, None)
+            self._log.append(record)
+            self._mirror_spine(outcome.value, key, record)
+            return res
+
+        # A non-APPROVED terminal, or a pure in-memory (no-ledger) APPROVED: best-effort emit (unchanged).
+        self._resolved[key] = res
+        self._pending.pop(key, None)
         self._emit(outcome.value, key, detail)
         return res
 
@@ -622,7 +690,13 @@ class ConfirmationRegistry:
         exception, or a non-approving verdict. If ``seq`` is supplied and the pending escalation is already
         past its deadline it EXPIRES (auto-reject) rather than being approved by a late signature. The
         atomic single-terminal claim in :meth:`_finish` guarantees two resolvers cannot durably record
-        divergent terminals for one key. Never raises."""
+        divergent terminals for one key.
+
+        DURABILITY-BEFORE-ACTIONABLE (DEFECT 2): a verified APPROVED over a ledger-backed registry is
+        returned APPROVED **only after** its signed terminal is durably committed. If the durable append
+        fails, it fails CLOSED — a NON-terminal, non-actionable resolution (``approved=False``), the
+        escalation stays PENDING, and the atomic claim is released so a later retry can durably commit.
+        Never raises."""
         if key in self._resolved:
             return self._resolved[key]
         pending = self._pending.get(key)
