@@ -208,6 +208,13 @@ class EngineConfig:
     # think backend
     replay: Optional[Any] = None            # a ReplayThinker (keyless-live) — else the live Claude path
     api_key: Optional[str] = None
+    # GAP-1 — the per-session MODEL SOVEREIGNTY pick, threaded from the console (chat picker → `vigil engage
+    # --model/--backend`). `model` is an EXPLICIT cloud model string (a CLOUD pick); `backend` names a LOCAL
+    # kernel backend (ollama / self-hosted / …). A LOCAL backend routes `think` through the loopback-enforced
+    # provider with NO cloud failover (or REFUSES) — the prompt + source never egress to a cloud model. Both
+    # None ⇒ no explicit pick: `think` resolves its own default under the sovereignty tier gate (unchanged).
+    model: Optional[str] = None
+    backend: Optional[str] = None
     brain: Optional[Any] = None             # a propose-only brain ThinkFn(state)->LLMDecision (the "brain
                                             # slot", e.g. brains.engine_think.BrainThink); when set it drives
                                             # `think` instead of the Claude/replay path — gate/executor/oracle
@@ -511,7 +518,13 @@ def build_engine(config: EngineConfig) -> VigilEngine:
                 # earlier run's findings, or this run's so far). A prior confirmed in an earlier run must be
                 # RE-confirmed by THIS run's oracle to mint a fact here. think() nonce-fences the whole digest.
                 ctx += " " + _format_priors(priors)
-        return think(state, ctx, replay=config.replay, api_key=config.api_key)
+        # GAP-1 — carry the per-session pick into EVERY think call the engine makes: the parent OODA loop
+        # AND (since fireteam members reuse this same seam via build_member_runner) each member. A LOCAL
+        # `backend` routes through the loopback-enforced provider with no cloud failover; a CLOUD `model`
+        # is sent as the model string; both None keeps the prior behaviour. This is what makes the pick
+        # first-class in the spawned work, not display metadata.
+        return think(state, ctx, replay=config.replay, api_key=config.api_key,
+                     model=config.model, backend=config.backend)
 
     # -- detection mirror (WS-4) ---------------------------------------------------------------------
     def _cert_signer(message: bytes) -> str:

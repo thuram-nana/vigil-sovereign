@@ -193,17 +193,23 @@ def test_an_undeclared_or_unknown_injected_backend_fails_closed(state, monkeypat
         assert d.action == ActionType.ASK_USER, backend
 
 
+@pytest.mark.parametrize("tier", ["AIR_GAPPED", "TRUSTED_CLOUD"])
 def test_backend_declaration_cannot_relabel_the_real_sdk_path(state, monkeypatch,
-                                                              no_client_may_be_built):
-    """The key path always constructs a DIRECT Anthropic client, so it is always classified as one: a
-    caller cannot pass backend="ollama" to launder a cloud call past an AIR_GAPPED tier."""
+                                                              no_client_may_be_built, tier):
+    """A declared LOCAL backend ROUTES to a real loopback-enforced local provider (GAP-1) and can NEVER
+    reach the direct Anthropic SDK — so a caller cannot pass backend="ollama" to launder a cloud call, under
+    ANY tier, INCLUDING one that PERMITS cloud (TRUSTED_CLOUD). The `no_client_may_be_built` trip-wire proves
+    no direct Anthropic client is ever constructed; with no local daemon present the local route fails CLOSED
+    (ASK_USER — never a cloud fallback), and the key never leaks. (Pre-GAP-1 the backend label was advisory
+    and the key path always built the SDK, so the tier caught it; now the label ROUTES, so the guarantee is
+    stronger — a local declaration never even reaches the cloud path.)"""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key")
-    monkeypatch.setenv(_TIER_ENV, "AIR_GAPPED")
+    monkeypatch.setenv(_TIER_ENV, tier)
 
     d = think(state, {"prior": "x"}, backend="ollama")
 
-    assert d.action == ActionType.ASK_USER
-    assert "AIR_GAPPED" in f"{d.reasoning} {d.question}"
+    assert d.action == ActionType.ASK_USER                       # fail-closed: no cloud fallback
+    assert "sk-ant-not-a-real-key" not in f"{d.reasoning} {d.question}"   # secret-free
 
 
 # --- the tier is read from the real environment / the real policy holder ------------------------------

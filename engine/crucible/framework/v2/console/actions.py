@@ -743,14 +743,22 @@ def _vigil_bin() -> "str | None":
     return os.environ.get("VIGIL_BIN") or shutil.which("vigil")
 
 
-def _integration_engage_cmd(target: str, slug: str, session_id: str, scan_mode: str) -> "list | None":
+def _integration_engage_cmd(target: str, slug: str, session_id: str, scan_mode: str,
+                            *, model: str = "", backend: str = "") -> "list | None":
     """The argv for a LOOPBACK agentic engage via the integration `vigil engage` engine — the OODA loop
     with mid-run operator-message steering, ``--resume``, the owner-signed approval broker, and fireteam —
     or None if no `vigil` entrypoint resolves. Graph projection is OPTIONAL: the engine mirrors facts to
     Neo4j only when NEO4J_URI is set and reachable, and runs graph-free otherwise, so this NO LONGER
     requires Neo4j (that was a console launch policy, never an engine dependency). The caller gates on
     is_loopback, so `--scope 127.0.0.1` is the owner's own machine — no charter downgrade is possible.
-    `--session` partitions the per-session graph; `--connect` unions the operator-connected sessions."""
+    `--session` partitions the per-session graph; `--connect` unions the operator-connected sessions.
+
+    GAP-1 model sovereignty: the per-session pick is threaded as a FIRST-CLASS launch field (not display
+    metadata). A LOCAL pick appends ``--backend <name>`` — the child's think seam (and every fireteam
+    member) then routes through the loopback-enforced provider with NO cloud failover, or REFUSES; it never
+    egresses the prompt + source to a cloud model. A CLOUD pick appends ``--model <string>`` so the child
+    sends exactly that model (positive control). ``backend`` wins if both are somehow set (the sovereign,
+    fail-closed choice — never silently prefer the cloud one)."""
     vigil = _vigil_bin()
     if not vigil:
         return None
@@ -762,6 +770,12 @@ def _integration_engage_cmd(target: str, slug: str, session_id: str, scan_mode: 
     cmd = [vigil, "engage", target, "--slug", slug, "--scope", "127.0.0.1",
            "--session", session_id, "--base-dir", _live_base(),
            "--max-iterations", str(_GRAPH_ITERS.get(scan_mode, 12))]
+    be = str(backend or "").strip()
+    md = str(model or "").strip()
+    if be:
+        cmd += ["--backend", be]      # LOCAL pick → child routes local-or-refuse, never cloud
+    elif md:
+        cmd += ["--model", md]        # CLOUD pick → child sends this model string (no regression)
     if conns:
         cmd += ["--connect", conns]
     return cmd
@@ -776,6 +790,33 @@ def _live_base() -> str:
         return str(sessions._live_dir().resolve())
     except Exception:  # noqa: BLE001
         return str(Path(os.environ.get("VIGIL_LIVE_DIR") or ".vigil-live").resolve())
+
+
+def _resolve_launch_model(model_id: str, session_id: str) -> "tuple[str, str]":
+    """GAP-1 — resolve the per-session model pick for SPAWNED work → ``(cloud_model_string, backend_name)``.
+
+    Prefers the turn's explicit ``model_id`` (a chat-model id, e.g. ``ollama`` / ``claude-sonnet-5``); when
+    the turn omits it, falls back to the session's PERSISTED pin (``sessions.session_model``), so a later
+    launch — or a mid-run steer — stays on the operator's chosen sovereignty backend. The id is mapped
+    through the SAME ``chat._CHAT_MODELS`` registry the chat's own reasoning resolves against (via
+    ``chat.resolve_session_model``): a LOCAL pick → ``("", backend)``, a CLOUD pick → ``(model, "")``, no
+    pick → ``("", "")`` (the child keeps its ambient default under the tier gate). Total: any resolution
+    failure degrades to ``("", "")`` — no explicit pick — NEVER a fabricated cloud model string."""
+    mid = str(model_id or "").strip()
+    if not mid and session_id:
+        try:
+            from . import sessions
+            mid = sessions.session_model(session_id)
+        except Exception:  # noqa: BLE001
+            mid = ""
+    if not mid:
+        return "", ""
+    try:
+        from . import chat as _chat
+        cloud_model, backend = _chat.resolve_session_model(mid)
+        return str(cloud_model or ""), str(backend or "")
+    except Exception:  # noqa: BLE001 — unresolvable ⇒ no explicit pick (child default + tier gate), not cloud
+        return "", ""
 
 
 def engage_instruct(slug: str, text: str) -> dict:
@@ -997,11 +1038,24 @@ def propose_codebase_edit(chat_id: str, path: str, instruction: str) -> dict:
         from vigil_integration.live.dev_edit import propose_dev_edit
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"the dev-edit toolchain is unavailable ({type(e).__name__})"}
+    # GAP-1 — honor the chat's per-session model pick for the edit too. The chat id IS the session id, so the
+    # persisted pin carries the pick even though this call (from the Apply/Propose button) has no body model.
+    # A LOCAL pick routes propose_dev_edit through the loopback-enforced local provider (no cloud failover —
+    # the source never egresses to a cloud model); a CLOUD pick sends the chosen model string; no pick keeps
+    # the default. Resolution is fail-closed: an unresolvable pick is "no explicit pick", never a cloud egress.
+    cloud_model, backend = _resolve_launch_model("", chat_id)
+    edit_kwargs: dict = {}
+    if backend:
+        edit_kwargs["backend"] = backend
+    elif cloud_model:
+        edit_kwargs["model"] = cloud_model
     # feed the model the ACTUAL content of the files the instruction names (else its diff won't apply)
-    diff = propose_dev_edit(wd, str(instruction or ""), files=_files_in_instruction(wd, str(instruction or "")))
+    diff = propose_dev_edit(wd, str(instruction or ""), files=_files_in_instruction(wd, str(instruction or "")),
+                            **edit_kwargs)
     if not diff:
         return {"ok": False, "error": "no change proposed (the model declined, was refused by the "
-                                      "sovereignty policy, or no API key is set)"}
+                                      "sovereignty policy — e.g. a local pick that isn't reachable, which "
+                                      "never falls back to cloud — or no API key is set)"}
     return {"ok": True, "diff": diff}
 
 
@@ -1237,13 +1291,20 @@ def launch_assessment(body: dict) -> dict:
     # entrypoint resolves, fall through to the offense engine with an honest note (session linkage kept).
     if bool(body.get("agentic") or body.get("graph_backed")) and session_id and is_loopback:
         gslug = _slugify(body.get("slug") or "loopback", fallback="loopback")
-        gcmd = _integration_engage_cmd(target, gslug, session_id, scan_mode)
+        # GAP-1 — thread the per-session model pick into the CHILD engage as a first-class launch field, not
+        # display metadata. A LOCAL pick makes the child route its think (and every fireteam member) through
+        # the loopback-enforced provider with NO cloud failover; a CLOUD pick sends the chosen model string.
+        # Prefer the turn's model, else the session's persisted pin (so a later/steered launch stays pinned).
+        launch_model, launch_backend = _resolve_launch_model(model, session_id)
+        gcmd = _integration_engage_cmd(target, gslug, session_id, scan_mode,
+                                       model=launch_model, backend=launch_backend)
         if gcmd is not None:
             unapplied = _unapplied("an agentic `vigil engage` run (the bridge takes no pack flags)",
                                        "Re-run it with the agentic engine OFF to use them.")
             graphed = bool(os.environ.get("NEO4J_URI"))
             meta = {**base, **unapplied, "slug": gslug, "cmd": gcmd, "stream": "progress", "status": "running",
-                    "engine": "integration", "graph": graphed, "graph_partition": session_id}
+                    "engine": "integration", "graph": graphed, "graph_partition": session_id,
+                    "model_backend": launch_backend, "model_string": launch_model}
             _write_meta(run_id, **meta)
             # the child needs the run dir so its OODA-timeline mirror (wiring.py spine_post → progress.jsonl)
             # lands where /api/events?run= tails it — mirroring the codebase/Strix branch.

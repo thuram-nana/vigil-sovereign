@@ -33,7 +33,14 @@ from typing import Any, Optional
 from ..autopatch.loop import parse_unified_diff
 from ..remediation.codefix import is_safe_repo_path
 from .codefix_runner import CodefixConfig, CodefixSession
-from .think_claude import _build_live_client, _extract_text, _resolve_key, llm_egress_refusal
+from .think_claude import (
+    _build_live_client,
+    _extract_text,
+    _resolve_key,
+    is_local_backend,
+    llm_egress_refusal,
+    local_backend_or_refusal,
+)
 
 _MAX_FILE_BYTES = 20000        # per-file context handed to the model
 _MAX_CONTEXT_FILES = 8
@@ -62,15 +69,66 @@ def _read_context(workdir: str, files) -> list:
     return out
 
 
+def _propose_dev_edit_local(backend_name: str, instruction: str, ctx: list, *, max_tokens: int) -> str:
+    """GAP-1 — propose the diff on a LOOPBACK-enforced LOCAL backend (a per-session local pick), with NO
+    cloud failover. Uses ``local_backend_or_refusal`` (loopback check + reachability + sovereignty assert);
+    on ANY refusal it returns ``""`` (no proposal) — it NEVER constructs or calls a cloud client, so the
+    operator's source never egresses to a cloud model. The kernel provider layer is structured-output only,
+    so the diff rides a single ``diff`` field, mirroring the console chat's local schema."""
+    backend, refusal = local_backend_or_refusal(backend_name)
+    if refusal is not None:
+        return ""                                  # fail-closed: no proposal, NEVER a cloud egress
+    try:
+        from pydantic import BaseModel, Field
+
+        from framework.v2.kernel.llm import Prompt
+    except Exception:  # noqa: BLE001 — provider/prompt layer unavailable ⇒ no proposal, never cloud
+        return ""
+
+    class DiffReply(BaseModel):
+        diff: str = Field(default="", description=(
+            "the requested change as a MINIMAL unified diff; each file starts with `--- a/<repo-relative>` "
+            "then `+++ b/<repo-relative>` (repo-relative paths only; no absolute paths, no `..`)"))
+
+    ctx_block = "\n\n".join(f"### {rel}\n```\n{body}\n```" for rel, body in ctx)
+    system = ("You are a senior software engineer working in a cloned repository. Make the requested change "
+              "as a MINIMAL unified diff against the current files. Change only what the request needs.")
+    user = (
+        f"CHANGE REQUESTED:\n{instruction}\n\n"
+        + (f"CURRENT FILE CONTENT (edit against exactly this):\n{ctx_block}\n\n" if ctx_block else "")
+        + "Return the change as a unified diff in the `diff` field. Each file MUST start with consecutive "
+          "lines `--- a/<repo-relative-path>` then `+++ b/<repo-relative-path>` (repo-relative paths only; "
+          "no absolute paths, no `..`)."
+    )
+    try:
+        prompt = Prompt(system=system, user=user, schema=DiffReply, schema_name="DiffReply",
+                        cognitive_doc="", max_tokens=max_tokens, temperature=0.2)
+        result = backend.complete(prompt)          # ONE backend, NO failover
+    except Exception:  # noqa: BLE001 — a local failure yields no proposal; it never reaches for a cloud model
+        return ""
+    return str(getattr(getattr(result, "parsed", None), "diff", "") or "")
+
+
 def propose_dev_edit(workdir: str, instruction: str, files=None, *, client: Any = None,
-                     model: str = "claude-opus-5", max_tokens: int = 4000) -> str:
+                     model: str = "claude-opus-5", backend: str = "", max_tokens: int = 4000) -> str:
     """Propose the requested change to the code in ``workdir`` as a unified diff. GENERAL dev editing (no
     security-fix framing, no ``finding``, no oracle-FACT gate). Returns the diff string, or ``""`` on a
-    sovereignty refusal / no key / model failure (fail-closed — the caller then applies nothing)."""
+    sovereignty refusal / no key / model failure (fail-closed — the caller then applies nothing).
+
+    GAP-1 model sovereignty: ``backend`` is the per-session LOCAL pick (ollama / self-hosted / …). When set
+    (and no ``client`` is injected) the diff is proposed on that loopback-enforced local backend with NO
+    cloud failover — the source never egresses to a cloud model, and an unreachable local backend yields no
+    proposal rather than a cloud call. ``model`` is the CLOUD model string used on the direct-SDK path."""
     instruction = str(instruction or "").strip()
     if not instruction or not workdir:
         return ""
     ctx = _read_context(workdir, files)
+    # GAP-1 — a LOCAL per-session pick routes through the loopback-enforced provider FIRST, before the cloud
+    # key/SDK path, so a LOCAL pick with an ANTHROPIC_API_KEY in the env can never egress source to a cloud
+    # model. Only when no client is injected (the console path injects none); an injected client is the
+    # explicit cloud-test seam and keeps precedence.
+    if client is None and is_local_backend(backend):
+        return _propose_dev_edit_local(str(backend), instruction, ctx, max_tokens=max_tokens)
     ctx_block = "\n\n".join(f"### {rel}\n```\n{body}\n```" for rel, body in ctx)
     prompt = (
         "You are a senior software engineer working in a cloned repository. Make the change described "

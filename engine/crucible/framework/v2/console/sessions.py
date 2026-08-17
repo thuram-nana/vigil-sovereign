@@ -182,6 +182,7 @@ def _public(rec: dict) -> dict:
         "run_ids": list(rec.get("run_ids", []) or []),
         "slug": rec.get("slug", ""),
         "connections": list(rec.get("connections", []) or []),
+        "model": rec.get("model", ""),        # GAP-1: the pinned per-session model pick (may be "")
         "deleted": bool(rec.get("deleted", False)),
         "created_seq": int(rec.get("created_seq", 0)),
         "updated_seq": int(rec.get("updated_seq", 0)),
@@ -238,6 +239,41 @@ def rename_session(session_id: str, name: str) -> dict:
         rec["updated_ts"] = time.time()
         _write(rec)
         return {"ok": True, "session": _public(rec)}
+
+
+def set_session_model(session_id: str, model_id: str) -> dict:
+    """GAP-1 — PIN the per-session model PICK on the session (the E3 sovereignty control), so work the chat
+    later LAUNCHES (agentic engage / fireteam / codebase edit) stays on the operator's chosen backend even
+    when a later turn omits the pick. Stored as the opaque chat-model id (resolved to a cloud model string /
+    local backend at launch time by ``chat.resolve_session_model``); a blank id CLEARS the pin. Get-or-create
+    so a chat's very first turn can pin it. Fail-closed on an unsafe id (raises ValueError → the caller
+    swallows it; the turn is never sunk)."""
+    sid = _safe_session_id(session_id)
+    mid = str(model_id or "").strip()[:64]
+    with _LOCK:
+        rec = _read(sid)
+        if rec is None:
+            create_session(kind="chat", session_id=sid)
+            rec = _read(sid) or {}
+        rec["model"] = mid
+        rec["updated_seq"] = _next_seq()
+        rec["updated_ts"] = time.time()
+        _write(rec)
+        return {"ok": True, "session": _public(rec)}
+
+
+def session_model(session_id: str) -> str:
+    """The persisted per-session model pick (GAP-1), or ``""`` when none/unknown/unsafe. Total — never
+    raises (an unsafe or absent session yields ``""``, i.e. "no pick": the launcher then keeps its default
+    under the tier gate, never a silent cloud egress in place of a lost local pin)."""
+    try:
+        sid = _safe_session_id(session_id)
+    except ValueError:
+        return ""
+    rec = _read(sid)
+    if not rec:
+        return ""
+    return str(rec.get("model", "") or "").strip()
 
 
 def delete_session(session_id: str, *, hard: bool = False) -> dict:

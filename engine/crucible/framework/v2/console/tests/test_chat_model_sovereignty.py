@@ -253,3 +253,191 @@ def test_local_loopback_ip_literal_is_accepted(monkeypatch):
     out = chat._reason(CHAT, "review", model="self-hosted")
     assert out["ok"] is True and "LOCAL OK" in out["reply"]
     assert seen["complete_called"] is True and cloud["called"] is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+# GAP-1 — the per-session pick is threaded into SPAWNED work (agentic engage, fireteam, codebase edit), not
+# just the chat's own turn. Before GAP-1 a LOCAL pick on a cloud-permitting tier still egressed to a cloud
+# model in the work the chat launched. These tests pin the console half of the fix: the id→(cloud/backend)
+# resolver, the engage argv, the launch threading, the session pin, and the codebase-edit routing.
+# ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+from framework.v2.console import sessions as sessions_mod  # noqa: E402
+
+
+def test_resolve_session_model_maps_local_cloud_and_no_pick():
+    # a CLOUD pick → (model_string, "")
+    assert chat.resolve_session_model("claude-sonnet-5") == ("claude-sonnet-5", "")
+    # a LOCAL pick → ("", backend_name) — the loopback-enforced backend the spawned work must route through
+    assert chat.resolve_session_model("ollama") == ("", "ollama")
+    assert chat.resolve_session_model("self-hosted") == ("", "self-hosted")
+    # blank → no explicit pick (the child keeps its ambient default under the tier gate)
+    assert chat.resolve_session_model("") == ("", "")
+    assert chat.resolve_session_model("   ") == ("", "")
+    # an UNKNOWN non-blank id degrades to the tested cloud default (same as the chat's own reasoning path),
+    # never to a fabricated local backend that would skip the cloud gate
+    assert chat.resolve_session_model("totally-made-up-9000") == ("claude-opus-5", "")
+
+
+def test_integration_engage_cmd_local_pick_emits_backend_flag_not_model(monkeypatch):
+    monkeypatch.setattr(actions_mod, "_vigil_bin", lambda: "vigil")
+    cmd = actions_mod._integration_engage_cmd("http://127.0.0.1:8080", "s", "sess", "standard",
+                                              backend="ollama")
+    assert cmd is not None
+    assert "--backend" in cmd and cmd[cmd.index("--backend") + 1] == "ollama"
+    assert "--model" not in cmd            # a LOCAL pick NEVER also carries a cloud model
+
+
+def test_integration_engage_cmd_cloud_pick_emits_model_flag_not_backend(monkeypatch):
+    monkeypatch.setattr(actions_mod, "_vigil_bin", lambda: "vigil")
+    cmd = actions_mod._integration_engage_cmd("http://127.0.0.1:8080", "s", "sess", "standard",
+                                              model="claude-sonnet-5")
+    assert cmd is not None
+    assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "claude-sonnet-5"
+    assert "--backend" not in cmd
+
+
+def test_integration_engage_cmd_no_pick_emits_neither(monkeypatch):
+    monkeypatch.setattr(actions_mod, "_vigil_bin", lambda: "vigil")
+    cmd = actions_mod._integration_engage_cmd("http://127.0.0.1:8080", "s", "sess", "standard")
+    assert cmd is not None and "--model" not in cmd and "--backend" not in cmd
+
+
+def test_integration_engage_cmd_backend_wins_over_model_failclosed(monkeypatch):
+    """If both are somehow set, the LOCAL backend wins — never silently prefer the cloud model (an egress the
+    operator did not intend). (The CLI additionally refuses both-at-once; this is defence in depth.)"""
+    monkeypatch.setattr(actions_mod, "_vigil_bin", lambda: "vigil")
+    cmd = actions_mod._integration_engage_cmd("http://127.0.0.1:8080", "s", "sess", "standard",
+                                              model="claude-opus-5", backend="ollama")
+    assert "--backend" in cmd and "--model" not in cmd
+
+
+def test_session_model_pin_persists_and_survives_a_blank_turn():
+    sessions_mod.set_session_model("pin-sess", "ollama")
+    assert sessions_mod.session_model("pin-sess") == "ollama"
+    # a later turn that omits the pick does NOT clear the pin (chat_send only pins on a non-blank pick)
+    assert sessions_mod.session_model("pin-sess") == "ollama"
+    # an explicit change re-pins
+    sessions_mod.set_session_model("pin-sess", "claude-sonnet-5")
+    assert sessions_mod.session_model("pin-sess") == "claude-sonnet-5"
+    # an unknown / never-set session has no pin (→ "no pick", never a silent cloud substitution)
+    assert sessions_mod.session_model("never-set-sess") == ""
+
+
+def test_launch_assessment_local_pick_threads_backend_into_the_child_engage(monkeypatch):
+    """chat_send → launch_assessment → engage CHILD: a LOCAL pick reaches the spawned agentic engage as
+    ``--backend ollama`` (so the child routes local-or-refuse, never cloud). The launcher itself constructs
+    no cloud client; the child's no-cloud guarantee is pinned in the integration suite."""
+    spawned: dict = {}
+    monkeypatch.setattr(actions_mod, "_vigil_bin", lambda: "vigil")
+    monkeypatch.setattr(actions_mod, "_spawn_background",
+                        lambda run_id, rd, cmd, meta, **kw: spawned.update(cmd=cmd, meta=meta))
+    out = actions_mod.launch_assessment({
+        "mode": "url", "target": "http://127.0.0.1:8080", "objective": "check it",
+        "session_id": "launch-local-sess", "agentic": True, "model": "ollama",
+    })
+    assert out.get("engine") == "integration"
+    cmd = spawned["cmd"]
+    assert "--backend" in cmd and cmd[cmd.index("--backend") + 1] == "ollama"
+    assert "--model" not in cmd
+    assert spawned["meta"].get("model_backend") == "ollama"
+
+
+def test_launch_assessment_cloud_pick_threads_model_into_the_child_engage(monkeypatch):
+    spawned: dict = {}
+    monkeypatch.setattr(actions_mod, "_vigil_bin", lambda: "vigil")
+    monkeypatch.setattr(actions_mod, "_spawn_background",
+                        lambda run_id, rd, cmd, meta, **kw: spawned.update(cmd=cmd, meta=meta))
+    out = actions_mod.launch_assessment({
+        "mode": "url", "target": "http://127.0.0.1:8080", "objective": "check it",
+        "session_id": "launch-cloud-sess", "agentic": True, "model": "claude-sonnet-5",
+    })
+    assert out.get("engine") == "integration"
+    cmd = spawned["cmd"]
+    assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "claude-sonnet-5"
+    assert "--backend" not in cmd
+
+
+def test_launch_assessment_falls_back_to_the_session_pin_when_the_turn_omits_the_model(monkeypatch):
+    """A launch whose body omits ``model`` still stays pinned to the session's LOCAL pick — the guarantee
+    holds across a mid-run steer / later launch, not just the first turn that set it."""
+    spawned: dict = {}
+    sessions_mod.set_session_model("pinned-launch-sess", "self-hosted")
+    monkeypatch.setattr(actions_mod, "_vigil_bin", lambda: "vigil")
+    monkeypatch.setattr(actions_mod, "_spawn_background",
+                        lambda run_id, rd, cmd, meta, **kw: spawned.update(cmd=cmd))
+    actions_mod.launch_assessment({
+        "mode": "url", "target": "http://127.0.0.1:8080", "objective": "check it",
+        "session_id": "pinned-launch-sess", "agentic": True,   # NO "model" in the body
+    })
+    cmd = spawned["cmd"]
+    assert "--backend" in cmd and cmd[cmd.index("--backend") + 1] == "self-hosted"
+
+
+def test_propose_codebase_edit_local_pick_passes_backend_and_never_cloud(monkeypatch, tmp_path):
+    """A codebase edit in a chat pinned to a LOCAL model passes ``backend`` (not a cloud model) to
+    propose_dev_edit — so the edit routes local-or-refuse, never a silent cloud egress of the source."""
+    import sys
+    import types
+
+    CHATID = "edit-local-chat"
+    sessions_mod.set_session_model(CHATID, "ollama")
+
+    # a real clone dir under THIS chat's confined clone area (edits are confined to repos the chat cloned)
+    clone = Path(actions_mod._live_base()) / "clones" / CHATID / "repo"
+    clone.mkdir(parents=True, exist_ok=True)
+
+    # fake the offense-plane dev_edit toolchain (not on the console test path) with a spy that records kwargs
+    captured: dict = {}
+    vi = types.ModuleType("vigil_integration")
+    vi_live = types.ModuleType("vigil_integration.live")
+    vi_dev = types.ModuleType("vigil_integration.live.dev_edit")
+
+    def _spy_propose_dev_edit(workdir, instruction, files=None, *, client=None,
+                              model="claude-opus-5", backend="", max_tokens=4000):
+        captured.update(model=model, backend=backend, workdir=workdir)
+        return "--- a/x\n+++ b/x\n"
+
+    vi_dev.propose_dev_edit = _spy_propose_dev_edit
+    vi.live = vi_live
+    vi_live.dev_edit = vi_dev
+    monkeypatch.setitem(sys.modules, "vigil_integration", vi)
+    monkeypatch.setitem(sys.modules, "vigil_integration.live", vi_live)
+    monkeypatch.setitem(sys.modules, "vigil_integration.live.dev_edit", vi_dev)
+
+    # instruction with NO file-path token → _files_in_instruction returns [] without importing codefix
+    out = actions_mod.propose_codebase_edit(CHATID, str(clone), "make the login flow safer")
+    assert out.get("ok") is True
+    assert captured["backend"] == "ollama"                 # the LOCAL pick was threaded through
+    assert captured["model"] == "claude-opus-5"            # the CLOUD model default was NOT selected/sent
+
+
+def test_propose_codebase_edit_cloud_pick_passes_the_chosen_model(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    CHATID = "edit-cloud-chat"
+    sessions_mod.set_session_model(CHATID, "claude-sonnet-5")
+    clone = Path(actions_mod._live_base()) / "clones" / CHATID / "repo"
+    clone.mkdir(parents=True, exist_ok=True)
+
+    captured: dict = {}
+    vi = types.ModuleType("vigil_integration")
+    vi_live = types.ModuleType("vigil_integration.live")
+    vi_dev = types.ModuleType("vigil_integration.live.dev_edit")
+
+    def _spy(workdir, instruction, files=None, *, client=None, model="claude-opus-5", backend="",
+             max_tokens=4000):
+        captured.update(model=model, backend=backend)
+        return "--- a/x\n+++ b/x\n"
+
+    vi_dev.propose_dev_edit = _spy
+    vi.live = vi_live
+    vi_live.dev_edit = vi_dev
+    monkeypatch.setitem(sys.modules, "vigil_integration", vi)
+    monkeypatch.setitem(sys.modules, "vigil_integration.live", vi_live)
+    monkeypatch.setitem(sys.modules, "vigil_integration.live.dev_edit", vi_dev)
+
+    out = actions_mod.propose_codebase_edit(CHATID, str(clone), "improve the code")
+    assert out.get("ok") is True
+    assert captured["model"] == "claude-sonnet-5" and captured["backend"] == ""
