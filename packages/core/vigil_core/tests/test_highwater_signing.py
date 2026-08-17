@@ -181,6 +181,31 @@ def test_evidence_shaped_core_signs_and_verifies_with_the_same_helpers(tmp_path)
     assert not ok2
 
 
+def test_cross_variant_domain_separation_both_directions():
+    """HIGH-1 fix: the attestation-log floor (default ``_HW_DOMAIN``) and the evidence ``{last_seq}`` floor
+    (``_HW_EVIDENCE_DOMAIN``) MUST NOT cross-verify even when their field sets are compatible — a signature
+    minted for one VARIANT is rejected under the other's domain, in BOTH directions. Without this, a
+    ``{schema_version, entry_count, last_seq}`` attestation-log floor (which carries the ``last_seq`` the
+    evidence side reads) would be accepted by the evidence verifier as an evidence floor (the red-pen's
+    cross-context defect)."""
+    from vigil_core.highwater import _HW_DOMAIN, _HW_EVIDENCE_DOMAIN, _sign_highwater
+
+    kp = generate_keypair()
+    trusted = [kp.public_key_b64]
+
+    # an attestation-log floor signed under the DEFAULT domain verifies as itself, but is REJECTED under the
+    # evidence variant's domain (the exact cross-context scenario the evidence verifier now passes domain= to block)
+    attest = _sign_highwater({"schema_version": 1, "entry_count": 5, "last_seq": 5}, kp)   # default _HW_DOMAIN
+    assert verify_highwater_signature(attest, trusted, domain=_HW_DOMAIN)[0] is True
+    assert verify_highwater_signature(attest, trusted, domain=_HW_EVIDENCE_DOMAIN)[0] is False
+
+    # and the reverse: an evidence {last_seq} floor signed under the EVIDENCE domain does NOT verify as an
+    # attestation-log floor under the default domain
+    evidence = _sign_highwater({"last_seq": 5}, kp, domain=_HW_EVIDENCE_DOMAIN)
+    assert verify_highwater_signature(evidence, trusted, domain=_HW_EVIDENCE_DOMAIN)[0] is True
+    assert verify_highwater_signature(evidence, trusted, domain=_HW_DOMAIN)[0] is False
+
+
 # --------------------------------------------------------------------------- read_highwater_dict guards
 
 

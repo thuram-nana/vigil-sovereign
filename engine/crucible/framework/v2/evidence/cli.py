@@ -27,7 +27,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from vigil_core.highwater import _sign_highwater, verify_highwater_signature
+from vigil_core.highwater import _HW_EVIDENCE_DOMAIN, _sign_highwater, verify_highwater_signature
 
 from ..common import paths
 from ..entitlement.crypto import KeyPair, generate_keypair
@@ -125,7 +125,9 @@ def _load_highwater(path: Path, *, trusted_pubkeys=None) -> int | None:
     if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
         raise _HighwaterCorrupt(f"{path} last_seq is not a non-negative integer: {seq!r}")
     if trusted_pubkeys and isinstance(raw, dict):
-        ok, why = verify_highwater_signature(raw, trusted_pubkeys)
+        # Verify under the EVIDENCE variant's domain — an attestation-log floor signed under the default
+        # ``_HW_DOMAIN`` (which shares the ``last_seq`` field) MUST NOT verify here as an evidence floor.
+        ok, why = verify_highwater_signature(raw, trusted_pubkeys, domain=_HW_EVIDENCE_DOMAIN)
         if not ok:
             raise _HighwaterCorrupt(f"{path} governance signature check failed: {why}")
     return seq
@@ -137,10 +139,12 @@ def _save_highwater(path: Path, seq: int, *, signer=None) -> None:
 
     OFFENSE-PARITY (C.2): when ``signer`` (the offense GOVERNANCE KeyPair, NEVER an owner key) is supplied, the
     ``{last_seq}`` core is GOVERNANCE-SIGNED via the SAME ``vigil_core.highwater`` helper the sovereign-parity
-    floor uses (one signing implementation, no divergence). With ``signer is None`` the persisted bytes are
-    ``{"last_seq": N}`` — BYTE-IDENTICAL to before. Signing this LOCAL state closes the strip-to-unsigned and
-    signed-tamper cases for a verifier that has the governance anchor; a platform-monotonic / independently
-    witnessed store is still what a fully-dishonest-producer case would need (documented, not claimed here)."""
+    floor uses (one signing implementation, no divergence) under the EVIDENCE variant's domain
+    (``_HW_EVIDENCE_DOMAIN``), so it can never cross-verify as the attestation-log floor. With ``signer is
+    None`` the persisted bytes are ``{"last_seq": N}`` — BYTE-IDENTICAL to before. Signing this LOCAL state
+    closes the tamper-of-a-SIGNED-floor case for a verifier that has the governance anchor; it does NOT close
+    strip-to-unsigned (an unsigned floor is still WARN-ACCEPTED — the honest residual, closed only by the
+    out-of-band witnessed checkpoint anchor), nor the fully-dishonest-producer-owns-all-keys case."""
     # Check the UN-resolved path for a symlink BEFORE any resolve — path.resolve() would dereference it and the
     # is_symlink() check would then always be False (dead code), letting the atomic write follow the link and
     # overwrite its target (red-pen). os.replace(tmp, path) on a non-symlink path is an atomic in-place rename.
@@ -149,7 +153,9 @@ def _save_highwater(path: Path, seq: int, *, signer=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"last_seq": int(seq)}
     if signer is not None:
-        payload = _sign_highwater(payload, signer)   # governance signature over the domain-tagged {last_seq}
+        # sign under the EVIDENCE variant's domain so this {last_seq} floor is cryptographically distinct from
+        # the attestation-log floor that also carries last_seq (cross-variant separation).
+        payload = _sign_highwater(payload, signer, domain=_HW_EVIDENCE_DOMAIN)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".hw-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:

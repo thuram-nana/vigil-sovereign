@@ -22,7 +22,7 @@ import pytest
 
 from framework.v2.entitlement.crypto import generate_keypair
 from framework.v2.evidence.cli import _HighwaterCorrupt, _load_highwater, _save_highwater, main
-from vigil_core.highwater import verify_highwater_signature
+from vigil_core.highwater import _HW_DOMAIN, _HW_EVIDENCE_DOMAIN, verify_highwater_signature
 
 from .test_evidence import _DIVERGENT, _finding, _trust_root
 
@@ -69,12 +69,28 @@ def test_signed_save_verifies_and_load_is_still_int(tmp_path):
     _save_highwater(p, 11, signer=kp)
     raw = json.loads(p.read_text(encoding="utf-8"))
     assert raw["last_seq"] == 11 and raw["pubkey"] == kp.public_key_b64 and isinstance(raw["sig"], str)
-    ok, why = verify_highwater_signature(raw, [kp.public_key_b64])
+    ok, why = verify_highwater_signature(raw, [kp.public_key_b64], domain=_HW_EVIDENCE_DOMAIN)
     assert ok, why
+    # cross-variant separation: this evidence floor must NOT verify under the attestation-log default domain
+    assert verify_highwater_signature(raw, [kp.public_key_b64], domain=_HW_DOMAIN)[0] is False
     # load without an anchor → pure int (back-compat interface preserved for verify_bundle)
     assert _load_highwater(p) == 11
     # load WITH the governance anchor → still 11 (valid sig verifies, no raise)
     assert _load_highwater(p, trusted_pubkeys=[kp.public_key_b64]) == 11
+
+
+def test_load_rejects_a_floor_signed_under_the_attestation_log_domain(tmp_path):
+    """HIGH-1 fix — the exploit path. A floor signed under the ATTESTATION-LOG default domain (which shares the
+    ``last_seq`` field the evidence side reads) must be REJECTED by the evidence ``_load_highwater``, not
+    accepted as an evidence floor. Before the per-variant domain, this cross-context floor verified here."""
+    from vigil_core.highwater import _sign_highwater
+    p = tmp_path / "hw.json"
+    kp = generate_keypair()
+    # a WRONG-variant floor: correctly signed, but under the DEFAULT (attestation-log) domain
+    wrong = _sign_highwater({"schema_version": 1, "entry_count": 9, "last_seq": 9}, kp)   # default _HW_DOMAIN
+    p.write_text(json.dumps(wrong), encoding="utf-8")
+    with pytest.raises(_HighwaterCorrupt):
+        _load_highwater(p, trusted_pubkeys=[kp.public_key_b64])
 
 
 def test_tampered_signed_highwater_fails_closed(tmp_path):
@@ -140,7 +156,7 @@ def test_e2e_verify_writes_a_verifiable_signed_highwater_and_gating_unchanged(tm
     assert main(base + ["--highwater-signer-file", str(signer_file)]) == 0
     raw = json.loads(hw.read_text(encoding="utf-8"))
     assert "sig" in raw and raw["pubkey"] == hw_kp.public_key_b64
-    ok, why = verify_highwater_signature(raw, [hw_kp.public_key_b64])
+    ok, why = verify_highwater_signature(raw, [hw_kp.public_key_b64], domain=_HW_EVIDENCE_DOMAIN)
     assert ok, why
     # re-verify over the SIGNED high-water → still exit 0 (a signed floor loads + verifies + gating unchanged)
     assert main(base + ["--highwater-signer-file", str(signer_file)]) == 0

@@ -47,13 +47,20 @@ _log = logging.getLogger(__name__)
 _PathLike = Union[str, os.PathLike]
 _SCHEMA_VERSION = 1
 
-# DOMAIN-SEPARATION tag for the OFFENSE high-water GOVERNANCE signature (C.2 — bring the offense floor to
-# parity with the signed sovereign floor). It mirrors the sovereign floor's ``sigil-floor-v1\x00`` and the
-# evidence ``crucible-evidence-v1\x00`` convention: the signing bytes begin with this tag so a governance
-# signature over a high-water floor can NEVER be confused with a signature over any other artifact — even a
-# future dict that happened to share the floor's field set. Bump the version suffix if the signed-core shape
-# ever changes (it invalidates every prior high-water signature, exactly like a floor re-sign).
-_HW_DOMAIN = b"vigil-highwater-v1\x00"
+# DOMAIN-SEPARATION tags for the OFFENSE high-water GOVERNANCE signature (C.2 — bring the offense floor to
+# parity with the signed sovereign floor). The signing bytes begin with the tag so a governance signature over
+# a high-water floor can NEVER be confused with a signature over any other artifact.
+#
+# There are TWO high-water VARIANTS that share these signing helpers, and they MUST NOT cross-verify: this
+# module's attestation-log floor commits ``{schema_version, entry_count, last_seq}`` while the evidence twin
+# (``framework/v2/evidence/cli.py``) commits only ``{last_seq}``. Because ``_hw_core_bytes`` signs a DENY-list
+# core (every field except the sig envelope), a signature minted for one variant would otherwise verify for the
+# other whenever their field sets are compatible (the evidence verifier reads ``last_seq`` from the richer
+# attestation-log core). So each variant carries its OWN domain tag; a signature under one tag can never verify
+# under the other. Bump a version suffix if that variant's signed-core shape ever changes (invalidates its prior
+# signatures, exactly like a floor re-sign).
+_HW_DOMAIN = b"vigil-highwater-v1\x00"                    # this module's attestation-log floor variant
+_HW_EVIDENCE_DOMAIN = b"vigil-highwater-evidence-v1\x00"  # the evidence-cli {last_seq} floor variant
 # Persisted fields that are NOT part of the signed core (the signature envelope itself); stripped before the
 # signing bytes are computed so sign() and verify() operate over the SAME monotonic core.
 _SIG_ENVELOPE = ("sig", "pubkey")
@@ -151,45 +158,54 @@ def check_highwater(head, hw: Optional[dict]) -> tuple[bool, str]:
 # Structure mirrors ``apps/sigil/sigil/spine/floor.py`` (``_sign_floor`` / ``verify_floor_signature``), but
 # the offense floor signs with the GOVERNANCE key (owner-tied only via the ``OFFENSE_GOVERNANCE_ROLE``
 # delegation), NEVER an owner key — the offense side holds no owner key by construction (the two-env boundary).
-# The helpers are generic over the persisted *core* dict, so BOTH this module's ``{schema_version, entry_count,
-# last_seq}`` floor and the evidence twin's ``{last_seq}`` floor sign/verify with ONE implementation (the twin
-# in ``framework/v2/evidence/cli.py`` imports these). The signature CLOSES the strip-to-unsigned downgrade and
-# the tamper-of-a-signed-floor cases; it does NOT close the fully-dishonest-producer-owns-all-keys case — only
-# an INDEPENDENT out-of-band witness (the witnessed-checkpoint anchor, a separate slice) closes that.
+# The helpers are generic over the persisted *core* dict AND its domain tag, so BOTH this module's
+# ``{schema_version, entry_count, last_seq}`` attestation-log floor (default ``_HW_DOMAIN``) and the evidence
+# twin's ``{last_seq}`` floor (``_HW_EVIDENCE_DOMAIN``, passed by the twin in ``framework/v2/evidence/cli.py``)
+# sign/verify with ONE implementation while staying cryptographically NON-interchangeable. What the signature
+# closes: the tamper-of-a-SIGNED-floor case (any edit to a signed floor's content breaks the signature) for a
+# verifier holding the governance anchor. What it does NOT close: (1) strip-to-unsigned — an unsigned floor is
+# still WARN-ACCEPTED, not rejected (the honest residual, closed only by the retained out-of-band witnessed
+# checkpoint anchor, a separate slice); (2) the fully-dishonest-producer-owns-all-keys case (only an INDEPENDENT
+# out-of-band witness closes that).
 
 
-def _hw_core_bytes(hw: dict) -> bytes:
+def _hw_core_bytes(hw: dict, domain: bytes = _HW_DOMAIN) -> bytes:
     """Domain-tagged canonical signing bytes over the monotonic core: every field EXCEPT the ``sig``/``pubkey``
-    envelope. ``sign`` (build path) and ``verify`` (check path) both route through here so they operate over
-    the identical bytes; a signed floor's CONTENT cannot be edited without breaking the signature."""
+    envelope, prefixed with the VARIANT's ``domain`` tag. ``sign`` (build path) and ``verify`` (check path)
+    both route through here with the SAME ``domain`` so they operate over identical bytes; a signed floor's
+    CONTENT cannot be edited without breaking the signature, and a signature minted under one variant's domain
+    can never verify under another's (the two-variant separation — see the module notes above)."""
     core = {k: v for k, v in hw.items() if k not in _SIG_ENVELOPE}
-    return _HW_DOMAIN + canonical_json(core)
+    return domain + canonical_json(core)
 
 
-def _sign_highwater(core: dict, signer) -> dict:
-    """Attach a GOVERNANCE Ed25519 signature over the domain-tagged core. ``signer`` is a
+def _sign_highwater(core: dict, signer, domain: bytes = _HW_DOMAIN) -> dict:
+    """Attach a GOVERNANCE Ed25519 signature over the ``domain``-tagged core. ``signer`` is a
     :class:`vigil_core.crypto.KeyPair` (``.private_key_b64`` / ``.public_key_b64``) — the offense governance
-    key. Returns ``{**core, "sig": …, "pubkey": …}``. Pure: no IO, no wallclock, so it stays deterministic
-    and testable in isolation."""
-    signature = sign(signer.private_key_b64, _hw_core_bytes(core))
+    key. ``domain`` selects the variant (default this module's attestation-log floor; the evidence twin passes
+    ``_HW_EVIDENCE_DOMAIN``). Returns ``{**core, "sig": …, "pubkey": …}``. Pure: no IO, no wallclock, so it
+    stays deterministic and testable in isolation."""
+    signature = sign(signer.private_key_b64, _hw_core_bytes(core, domain))
     return {**core, "sig": signature, "pubkey": signer.public_key_b64}
 
 
-def verify_highwater_signature(hw: dict, trusted_pubkeys) -> tuple[bool, str]:
-    """The offense floor's OWN governance-signature check (mirrors ``floor.verify_floor_signature``).
-    Fail-closed + non-bricking:
+def verify_highwater_signature(hw: dict, trusted_pubkeys, domain: bytes = _HW_DOMAIN) -> tuple[bool, str]:
+    """The offense floor's OWN governance-signature check (mirrors ``floor.verify_floor_signature``). ``domain``
+    MUST match the variant the floor was signed under (default this module's attestation-log floor; the evidence
+    twin passes ``_HW_EVIDENCE_DOMAIN``) — a floor signed under a different variant's domain fails the verify,
+    which is the cross-variant separation. Fail-closed + non-bricking:
 
       * sig ABSENT (legacy unsigned floor) → ``(True, …)``; warn ONCE if a trusted key exists (the next
         advance re-signs it). No trusted key at all → silent accept (byte-identical to the pre-signing floor,
         so an out-of-band verifier that never provisioned a key is not bricked).
-      * sig PRESENT + ``pubkey`` is a trusted governance key + verifies → ``(True, …)``.
-      * sig PRESENT + untrusted key / malformed / does not verify → ``(False, …)`` — a tampered SIGNED floor
-        is TAMPERING, the caller certifies NOTHING.
+      * sig PRESENT + ``pubkey`` is a trusted governance key + verifies UNDER ``domain`` → ``(True, …)``.
+      * sig PRESENT + untrusted key / malformed / does not verify (incl. a wrong-variant domain) → ``(False,
+        …)`` — a tampered or cross-variant SIGNED floor is TAMPERING, the caller certifies NOTHING.
 
     ``trusted_pubkeys`` is any iterable of base64 governance public keys the caller trusts (out-of-band the
     owner authenticates them via the ``OFFENSE_GOVERNANCE_ROLE`` delegation). Note: this alone does NOT close
-    the strip-to-unsigned case (an unsigned floor is still accepted with a warning) — that is closed only by
-    the retained out-of-band witnessed checkpoint (a separate slice)."""
+    the strip-to-unsigned case (an unsigned floor is still WARN-ACCEPTED) — that is closed only by the retained
+    out-of-band witnessed checkpoint (a separate slice)."""
     global _warned_unsigned_highwater
     trusted = set(trusted_pubkeys or ())
     sig, pub = hw.get("sig"), hw.get("pubkey")
@@ -203,7 +219,7 @@ def verify_highwater_signature(hw: dict, trusted_pubkeys) -> tuple[bool, str]:
     if not isinstance(sig, str) or pub not in trusted:
         return False, "durable high-water signature is not from a trusted governance key (possible tamper)"
     try:
-        ok = verify_one(pub, _hw_core_bytes(hw), sig)
+        ok = verify_one(pub, _hw_core_bytes(hw, domain), sig)
     except Exception as e:  # noqa: BLE001 — malformed sig/key material → fail-closed, never a silent accept
         return False, f"durable high-water signature is malformed (possible tamper): {e}"
     return (True, "high-water signature verified") if ok else \
