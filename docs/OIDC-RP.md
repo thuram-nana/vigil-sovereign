@@ -58,9 +58,30 @@ already spent, and a `state`/`nonce` mix-and-match cannot pass.
   (`second_factor_required`) — OIDC establishes the first factor only; that account uses the interactive
   `/api/login` path for its second factor. This is a deliberate, honest bound, not a bypass.
 - The callback returns the minted bearer as JSON (`{ok, authenticated, username, role, bearer}`), the same
-  shape as the S3/S4 logins. Wiring that bearer into the browser session via a small callback landing page is
-  a UI concern layered on top; the security core (verification + owner-signed mapping) is what this slice
-  ships.
+  shape as the S3/S4 logins. This slice ships the security core (id_token verification + owner-signed
+  mapping); it does **not** auto-adopt the bearer into a browser session.
+- **The `/api/oidc/login` state ledger is token-free** (it must be — it bootstraps a login for a caller
+  with no bearer). It is bounded: capped at `max_outstanding` and self-healing via a per-mint TTL sweep, so
+  a stale entry cannot accumulate. A direct client on the private tunnel could still *transiently* fill the
+  live cap (the mint refuses with a retry hint until the TTL clears) — acceptable because the endpoint is
+  opt-in and private-tunnel-only, but worth knowing.
+
+## Required follow-on before a UI landing page adopts the bearer (NOT done here)
+
+This slice deliberately stops at returning the verified bearer as JSON. **Before** any UI landing page
+auto-adopts that bearer into the browser session, two things are REQUIRED — omitting them makes login-CSRF
+/ authorization-code injection live:
+
+1. **Bind `state` to the initiating browser session.** The single-use `state` currently proves the
+   callback corresponds to a login *this server* minted; it does not yet prove it is the *same browser*
+   that started the flow. The landing page must tie the `state` to the initiating session (e.g. a
+   `HttpOnly; SameSite` session cookie set at `/api/oidc/login` and checked at the callback) so an
+   attacker cannot feed a victim their own authorization response.
+2. **Add PKCE** (`code_challenge`/`code_verifier`, S256). The verifier must be bound to the session and
+   sent at token exchange, closing authorization-code injection/interception.
+
+Until both land, treat the RP as a verification core to be driven by tests / a trusted local caller — not
+as a browser-facing SSO endpoint.
 
 ## Configuration (only read when enabled)
 
@@ -75,7 +96,7 @@ already spent, and a `state`/`nonce` mix-and-match cannot pass.
 | `SIGIL_OIDC_TOKEN_ENDPOINT` | IdP token endpoint (code → tokens) |
 | `SIGIL_OIDC_JWKS_URI` | IdP JWKS URL (id_token signature keys) |
 | `SIGIL_OIDC_SIGNING_ALGS` | asymmetric-only allowlist, default `RS256` (e.g. `RS256,ES256`) |
-| `SIGIL_OIDC_USERNAME_CLAIM` | which verified claim maps to a `governor.account` username (default `preferred_username`) |
+| `SIGIL_OIDC_USERNAME_CLAIM` | which verified claim maps to a `governor.account` username. **Prefer an IdP-guaranteed-unique, IMMUTABLE claim** (e.g. `sub`). `preferred_username`/`email` are MUTABLE at some IdPs — if a user can change theirs, the account mapping can drift or be steered onto another account. Default `preferred_username` for usability; set to `sub` (or an immutable unique claim) for the strongest binding. |
 | `SIGIL_OIDC_CLOCK_SKEW_SECONDS` | exp/iat/nbf tolerance (default `60`) |
 
 A configured `none`/`HS*` in `SIGIL_OIDC_SIGNING_ALGS`, or any missing endpoint, is refused at load — the RP

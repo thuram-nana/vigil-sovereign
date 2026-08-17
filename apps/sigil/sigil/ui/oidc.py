@@ -29,6 +29,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 import time
 import urllib.parse
@@ -228,11 +229,22 @@ def _select_jwk(jwks_keys: list, kid: str) -> dict:
 
 
 # --- the id_token verification (the red-pen keystone) ------------------------------------------------
+def _reject_non_finite(literal: str):
+    """`json.loads` calls this for the JSON tokens NaN / Infinity / -Infinity (RFC 8259 forbids them).
+    We fail CLOSED so an id_token carrying a non-finite numeric literal is rejected at PARSE — a token with
+    exp:NaN / Infinity (or nbf:NaN) would otherwise SLIP the freshness checks, since every comparison with
+    NaN is False. Belt-and-suspenders with the `math.isfinite` guard in `_num`."""
+    raise OidcError(f"id_token contains a non-finite JSON literal ({literal})")
+
+
 def _num(claim, name: str) -> float:
     try:
-        return float(claim)
+        v = float(claim)
     except (TypeError, ValueError) as e:
         raise OidcError(f"id_token {name} claim is not numeric") from e
+    if not math.isfinite(v):                              # NaN / +/-Infinity => INVALID (fail closed)
+        raise OidcError(f"id_token {name} claim is not a finite number")
+    return v
 
 
 def verify_id_token(id_token: str, *, jwks_keys: list, issuer: str, client_id: str,
@@ -253,7 +265,7 @@ def verify_id_token(id_token: str, *, jwks_keys: list, issuer: str, client_id: s
     header_b64, payload_b64, sig_b64 = id_token.split(".")
 
     try:
-        header = json.loads(_b64url_decode(header_b64))
+        header = json.loads(_b64url_decode(header_b64), parse_constant=_reject_non_finite)
     except (ValueError, json.JSONDecodeError) as e:
         raise OidcError("id_token header is not valid JSON") from e
     if not isinstance(header, dict):
@@ -280,7 +292,7 @@ def verify_id_token(id_token: str, *, jwks_keys: list, issuer: str, client_id: s
 
     # Signature verified — NOW the payload can be trusted enough to parse and check.
     try:
-        claims = json.loads(_b64url_decode(payload_b64))
+        claims = json.loads(_b64url_decode(payload_b64), parse_constant=_reject_non_finite)
     except (ValueError, json.JSONDecodeError) as e:
         raise OidcError("id_token payload is not valid JSON") from e
     if not isinstance(claims, dict):
@@ -340,6 +352,18 @@ def build_authorize_url(config: OidcConfig, state: str, nonce: str) -> str:
     return config.authorize_endpoint + sep + urllib.parse.urlencode(params)
 
 
+# A JWKS / token response is a few KiB; cap the read so a compromised/misconfigured IdP cannot stream an
+# unbounded body into the cockpit (defence-in-depth — the token path already fails closed on any parse error).
+_MAX_IDP_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+def _read_capped(resp) -> bytes:
+    raw = resp.read(_MAX_IDP_RESPONSE_BYTES + 1)
+    if len(raw) > _MAX_IDP_RESPONSE_BYTES:
+        raise OidcError("IdP response exceeded the response-size cap")
+    return raw
+
+
 def _http_post_form(url: str, form: dict, *, timeout: float = 10.0) -> dict:
     """POST an application/x-www-form-urlencoded body and parse a JSON response. The ONLY outbound network
     call on the token path (used only when OIDC is enabled and a callback is processed). Refuses a non-http(s)
@@ -352,7 +376,7 @@ def _http_post_form(url: str, form: dict, *, timeout: float = 10.0) -> dict:
                                  headers={"Content-Type": "application/x-www-form-urlencoded",
                                           "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 — scheme guarded above
-        return json.loads(r.read().decode("utf-8"))
+        return json.loads(_read_capped(r).decode("utf-8"))
 
 
 def _http_get_json(url: str, *, timeout: float = 10.0) -> dict:
@@ -361,7 +385,7 @@ def _http_get_json(url: str, *, timeout: float = 10.0) -> dict:
         raise OidcError(f"refusing JWKS request to non-http(s) URL scheme {scheme!r}")
     req = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 — scheme guarded above
-        return json.loads(r.read().decode("utf-8"))
+        return json.loads(_read_capped(r).decode("utf-8"))
 
 
 def exchange_code(config: OidcConfig, code: str, *, http_post=None) -> dict:

@@ -309,7 +309,8 @@ def test_verified_identity_with_no_owner_signed_account_is_refused(monkeypatch):
 
 # ================================================================== id_token verification attacks
 @pytest.mark.parametrize("variant", ["alg_none", "hs256_confusion", "wrong_kid", "bad_signature",
-                                     "bad_iss", "bad_aud", "expired", "missing_nonce", "mismatched_nonce"])
+                                     "bad_iss", "bad_aud", "expired", "missing_nonce", "mismatched_nonce",
+                                     "exp_nan", "exp_inf", "nbf_inf"])
 def test_id_token_verification_rejects_every_attack(monkeypatch, variant):
     idp = MockIdP()
     _enable_oidc(monkeypatch, idp)
@@ -335,6 +336,12 @@ def test_id_token_verification_rejects_every_attack(monkeypatch, variant):
             token = idp.mint(nonce=nonce, include_nonce=False)
         elif variant == "mismatched_nonce":
             token = idp.mint(nonce="a-different-nonce-entirely")
+        elif variant == "exp_nan":
+            token = idp.mint(nonce=nonce, extra={"exp": float("nan")})     # NaN slips `now > exp+skew`
+        elif variant == "exp_inf":
+            token = idp.mint(nonce=nonce, extra={"exp": float("inf")})     # a never-expiring token
+        elif variant == "nbf_inf":
+            token = idp.mint(nonce=nonce, extra={"nbf": float("inf")})     # non-finite nbf
         status, doc, _ = _callback(port, idp, token, state)
         assert status == 401, f"{variant} should be refused"
         assert doc.get("authenticated") is False and "bearer" not in doc, variant
@@ -424,6 +431,11 @@ def test_verify_id_token_unit_rejects_none_and_hs256_directly():
         tok = idp.mint(nonce="n", alg=alg, sign_key="none" if alg == "none" else "correct")
         with pytest.raises(_oidc.OidcError):
             _oidc.verify_id_token(tok, **common)
+    # non-finite time claims (NaN / Infinity) are rejected at parse — they must never slip the freshness
+    # checks (every comparison with NaN is False; Infinity never expires)
+    for bad in ({"exp": float("nan")}, {"exp": float("inf")}, {"nbf": float("inf")}):
+        with pytest.raises(_oidc.OidcError):
+            _oidc.verify_id_token(idp.mint(nonce="n", extra=bad), **common)
     # a blank expected_nonce can never be satisfied (a token omitting nonce must not slip through)
     good = idp.mint(nonce="n")
     with pytest.raises(_oidc.OidcError):
