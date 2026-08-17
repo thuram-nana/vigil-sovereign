@@ -39,7 +39,7 @@ from urllib.parse import parse_qs, urlparse
 from vigil_core.spine_domains import DOMAIN_TAGS
 
 from ..bridge.daemon import bind_ok
-from ..config import SPINE_PATH
+from ..config import SPINE_PATH, oidc_enabled
 from ..reuse import verify_one
 from ..spine.store import SpineStore
 from ..spine.tail import SpineTailer
@@ -61,7 +61,7 @@ class UIServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, addr, handler, *, token: str, spine_path: Path,
-                 extra_hosts=(), extra_origins=()):
+                 extra_hosts=(), extra_origins=(), oidc_http_post=None, oidc_jwks_fetcher=None):
         host = addr[0]
         if not bind_ok(host):
             raise ValueError(
@@ -92,6 +92,11 @@ class UIServer(ThreadingHTTPServer):
         origins |= {o.strip().rstrip("/") for o in extra_origins if o and o.strip()}
         self.allowed_hosts = frozenset(hosts)
         self.allowed_origins = frozenset(origins)
+        # OIDC (S5): injectable network hooks so a test can drive the callback against an in-process mock
+        # IdP with NO real network. Both default to None → the real urllib egress (used only when OIDC is
+        # enabled AND a callback is actually processed). Never touched when OIDC is off.
+        self.oidc_http_post = oidc_http_post           # (url, form) -> dict  (token exchange)
+        self.oidc_jwks_fetcher = oidc_jwks_fetcher     # (url) -> dict        (JWKS fetch)
 
     def store(self) -> SpineStore:
         return SpineStore(self.spine_path)         # fresh read each request (cheap, current)
@@ -197,6 +202,14 @@ class Handler(BaseHTTPRequestHandler):
         # so it must report {authenticated:false} rather than 401 for an anonymous caller.
         if path == "/api/whoami":
             return self._whoami()
+        # OIDC (S5) — token-OPTIONAL, and REGISTERED ONLY when SIGIL_OIDC_ENABLED is on. When off these
+        # paths are unknown → the fall-through 404 (byte-identical to a build without OIDC; no egress). The
+        # login redirect and the callback both bootstrap a session for a caller that has no token yet, so
+        # they must sit BEFORE the principal/401 gate below.
+        if oidc_enabled() and path == "/api/oidc/login":
+            return self._oidc_login()
+        if oidc_enabled() and path == "/api/oidc/callback":
+            return self._oidc_callback()
         # Every other read requires an authenticated principal (viewer+). The legacy owner token resolves to
         # OWNER_PRINCIPAL; a valid per-user bearer resolves to its principal; anything else → 401.
         principal = self._principal()
@@ -450,6 +463,110 @@ class Handler(BaseHTTPRequestHandler):
         p = Principal(username=acct.username, role=acct.role)
         self._json({"ok": True, **self._principal_json(p), "bearer": bearer})
 
+    # --- OIDC Relying Party (S5, SHIPPED OFF BY DEFAULT) ------------------------------------------
+    def _oidc_state_store(self):
+        """The single-use OIDC state→nonce ledger, rooted next to the spine file (one dir per spine, so a
+        test's temp spine gets its own isolated ledger — mirrors the S3 challenge ledger)."""
+        from .oidc import OidcStateStore
+        base = Path(self.server.spine_path)
+        return OidcStateStore(base.parent / (base.name + ".oidc-state"))
+
+    def _oidc_login(self):
+        """POST/GET /api/oidc/login — 302 redirect to the IdP authorize endpoint with a fresh, unguessable,
+        SINGLE-USE `state` + `nonce` (bound together and recorded OUTSTANDING). Same-origin/Host gated (anti
+        DNS-rebinding) like `_login`, but token-free: the point is to bootstrap a session for a caller that
+        holds no bearer yet. A misconfigured OIDC (missing SIGIL_OIDC_* settings) fails LOUD (500), never a
+        silent half-login. Reached ONLY when SIGIL_OIDC_ENABLED is on (the route is otherwise unregistered)."""
+        if not self._origin_host_ok():
+            return self._deny(403, "denied (origin / host)")
+        from . import oidc as _oidc
+        try:
+            config = _oidc.load_config()
+        except _oidc.OidcError as e:
+            return self._deny(500, f"oidc is enabled but misconfigured: {str(e)[:200]}")
+        state = secrets.token_urlsafe(32)              # 256-bit CSPRNG — unguessable, single-use
+        nonce = secrets.token_urlsafe(32)              # bound to `state`; echoed back inside the id_token
+        try:
+            self._oidc_state_store().issue(state, nonce)
+        except Exception:  # noqa: BLE001 — a ledger I/O error must not leak internals; refuse the mint
+            return self._deny(500, "could not mint an oidc login state")
+        location = _oidc.build_authorize_url(config, state, nonce)
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.send_header("Content-Security-Policy", _CSP)
+        self.send_header("Referrer-Policy", "no-referrer")     # the state/nonce never leak via Referer
+        self.end_headers()
+
+    def _oidc_callback(self):
+        """GET /api/oidc/callback?code&state — the IdP redirects here after the user authenticates. Steps,
+        each fail-closed to 401 with NO bearer:
+          1. Host/Origin gate (anti-rebind).
+          2. CONSUME the single-use `state` → recover the `nonce` bound to it (CSRF + replay + a state/nonce
+             mix-and-match all fail here; a replayed callback finds its state already spent).
+          3. Exchange `code` at the token endpoint; VERIFY the id_token (RS256/ES256 against the IdP JWKS,
+             rejecting alg:none/symmetric/wrong-kid/bad-sig/bad-iss/bad-aud/expired, and requiring the
+             nonce to equal the one minted at login).
+          4. Map the VERIFIED identity claim to an owner-signed `governor.account`. The ROLE comes from that
+             grant — NEVER from an OIDC claim. NO owner-signed active account ⇒ REFUSE. A TOTP-enrolled
+             account still needs its second factor (unsatisfiable by the redirect alone ⇒ refused here).
+          5. Mint a fresh owner-signed session bearer for the mapped principal's role.
+        Reached ONLY when SIGIL_OIDC_ENABLED is on."""
+        if not self._origin_host_ok():
+            return self._deny(403, "denied (origin / host)")
+        from . import oidc as _oidc
+        q = self._query()
+        err = q.get("error", [""])[0]
+        if err:
+            return self._json({"ok": False, "authenticated": False,
+                               "error": f"idp returned an error: {str(err)[:120]}"}, 401)
+        code = q.get("code", [""])[0]
+        state = q.get("state", [""])[0]
+        # (2) single-use state → bound nonce. Unknown / expired / already-used → refuse before any token work.
+        nonce = self._oidc_state_store().consume(state)
+        if not nonce:
+            return self._json({"ok": False, "authenticated": False,
+                               "error": "unknown, expired, or already-used oidc state"}, 401)
+        try:
+            config = _oidc.load_config()
+            token_resp = _oidc.exchange_code(config, code, http_post=self.server.oidc_http_post)
+            provider = _oidc.JwksProvider(config.jwks_uri, fetcher=self.server.oidc_jwks_fetcher)
+            claims = _oidc.verify_id_token(
+                token_resp["id_token"], jwks_keys=provider.keys(), issuer=config.issuer,
+                client_id=config.client_id, expected_nonce=nonce, allowed_algs=config.signing_algs,
+                now=time.time(), skew=config.clock_skew_seconds)
+            username = _oidc.identity_from_claims(claims, config.username_claim)
+        except _oidc.OidcError as e:
+            return self._json({"ok": False, "authenticated": False,
+                               "error": f"oidc verification failed: {str(e)[:160]}"}, 401)
+        except Exception:  # noqa: BLE001 — an IdP/network fault is a fail-closed refusal, not a 500 leak
+            return self._json({"ok": False, "authenticated": False,
+                               "error": "oidc token exchange or verification failed"}, 401)
+        # (4) ROLE FROM AN OWNER-SIGNED GRANT, NEVER FROM A CLAIM. `account()` returns only ACTIVE accounts
+        # (a revoked/unknown username is absent), so an OIDC identity with no owner-signed active account is
+        # REFUSED — the verified token alone never mints access or a role.
+        from ..governor.accounts import AccountsRegistry, Principal
+        from ..governor.identity import ensure_owner_keypair
+        store = self.server.store()
+        try:
+            acct = AccountsRegistry(store).account(username)
+        except Exception:  # noqa: BLE001 — hostile/corrupt spine must never crash auth → fail-closed
+            acct = None
+        if acct is None:
+            return self._json({"ok": False, "authenticated": False,
+                               "error": "no owner-signed account for this verified OIDC identity"}, 401)
+        # S4 second factor still applies. The redirect flow carries no place to submit a TOTP code, so a
+        # TOTP-enrolled account is refused here (OIDC establishes the first factor only) — `_check_totp`
+        # returns None for a non-enrolled account (proceed) and an error string for an enrolled one.
+        terr = self._check_totp(username, {})
+        if terr is not None:
+            return self._json({"ok": False, "authenticated": False, "error": terr,
+                               "second_factor_required": True}, 401)
+        reg = AccountsRegistry(store, owner_key=ensure_owner_keypair())
+        bearer, _seq = reg.mint_session_bearer(username, issued_at=time.time())
+        p = Principal(username=acct.username, role=acct.role)   # role FROM the owner-signed account
+        self._json({"ok": True, **self._principal_json(p), "bearer": bearer})
+
     def _totp_replay_ledger(self):
         """The per-account TOTP replay ledger, rooted next to the spine file (its own dir per spine, so a
         test's temp spine gets an isolated ledger)."""
@@ -579,6 +696,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._login_challenge()
         if path == "/api/login":
             return self._login()
+        # OIDC login initiation also accepts POST (a form/fetch), gated ON only when enabled (byte-identical
+        # otherwise). GET is handled in do_GET for a plain top-level navigation.
+        if oidc_enabled() and path == "/api/oidc/login":
+            return self._oidc_login()
         if path != "/api/action":
             return self._deny(404, "not found")
         # Anti-CSRF/rebinding (Host+Origin) first, THEN the principal. A per-user bearer or the legacy owner
@@ -608,13 +729,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def build_server(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=None,
-                 allowed_hosts=(), allowed_origins=()) -> UIServer:
+                 allowed_hosts=(), allowed_origins=(), oidc_http_post=None,
+                 oidc_jwks_fetcher=None) -> UIServer:
     """Build (do not run) the cockpit bound to ``host:port`` (asserted ``bind_ok`` — never public).
     ``allowed_hosts``/``allowed_origins`` are the operator's reverse-proxy domain forms (e.g.
-    ``cockpit.example.com`` / ``https://cockpit.example.com``) unioned into the anti-rebind allowlist."""
+    ``cockpit.example.com`` / ``https://cockpit.example.com``) unioned into the anti-rebind allowlist.
+    ``oidc_http_post``/``oidc_jwks_fetcher`` are OPTIONAL injection hooks (default None → real urllib
+    egress) so a test can drive the OIDC callback against an in-process mock IdP with no network."""
     return UIServer((host, port), Handler, token=token,
                     spine_path=Path(spine_path) if spine_path else SPINE_PATH,
-                    extra_hosts=allowed_hosts, extra_origins=allowed_origins)
+                    extra_hosts=allowed_hosts, extra_origins=allowed_origins,
+                    oidc_http_post=oidc_http_post, oidc_jwks_fetcher=oidc_jwks_fetcher)
 
 
 def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=None,
