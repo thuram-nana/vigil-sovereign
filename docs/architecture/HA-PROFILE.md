@@ -86,11 +86,16 @@ multi-active. Anyone who tells you a signed, single-owner, anti-rollback spine i
 
 The sovereign spine runs as **one ACTIVE writer** plus one or more **PASSIVE**
 standbys that hold a **synced mirror** of `~/.sigil` but do **NOT** write. Failover
-promotes a passive to active. The danger this runbook exists to prevent is a
-**rollback on promotion**: a passive booting from a *stale* mirror would carry an
-older head, and naively promoting it would roll the durable floor backwards —
-exactly the "cold verifier off an untrusted mirror" gap documented in
-`floor.py` (HONEST LIMIT, lines ~15-24).
+promotes a passive to active. The danger this runbook exists to prevent is
+promoting an **untrusted mirror** — a mirror whose head has been **rolled back**
+(stale), **forged** (a head not signed by the owner), or **forked** (a *different*
+owner-signed history at the same height, since a passive shares the owner key —
+§4). Promoting any of those would roll the durable floor backwards or activate a
+divergent history — the "cold verifier off an untrusted mirror" gap documented in
+`floor.py` (HONEST LIMIT, lines ~15-24). The interlock closes it by
+**authenticating the local head's owner signature and binding it to the off-box
+witnessed checkpoint** (head authenticated + fork-bound + extension-proven) before
+it will promote — not merely comparing self-declared record counts.
 
 ### 3.1 Prerequisite: retain a witnessed checkpoint OFF-BOX
 
@@ -125,34 +130,58 @@ promote-passive` verb) **refuses to activate (exit 2, fail-closed)** unless:
 
 1. the off-box envelope parses, is for **this** scope, and is signed by a
    **trusted witness quorum** (a forged/unsigned "checkpoint" is not a floor);
-2. `check_floor(local_head, floor_of_the_witnessed_checkpoint)` passes — the
-   local synced head does not roll back any monotonic quantity below the
-   witnessed anchor; **and**
-3. the local head's `entry_count` **and** `last_seq` are **≥** the witnessed
-   checkpoint's (belt-and-suspenders on the exact witnessed height).
+2. the **local head is authenticated** — the guard runs the *same* owner-signature
+   authentication the live spine runs before `check_floor`
+   (`checkpoint.classify_head` → `reuse.verify_head`): the **owner Ed25519
+   signature** at the owner threshold **and** binding of `head_hash`/`last_seq`/
+   `entry_count` to the passive's actual live chain. An unsigned, attacker-key-signed,
+   or count-inflated head is refused *before any of its scalar fields is trusted*;
+3. `check_floor(local_head, floor_of_the_witnessed_checkpoint)` passes — the
+   authenticated head does not roll any monotonic quantity below the witnessed
+   anchor, and its `entry_count`/`last_seq` are **≥** the witnessed checkpoint's
+   (belt-and-suspenders on the exact witnessed height); **and**
+4. the authenticated head is **tied to the witnessed history**, not merely at/above
+   its count: at **equal height** `local_head.head_hash` **must equal** the witnessed
+   `head_hash` (a different one is an owner-key equivocation / same-height fork); when
+   **grown**, `witness.verify_against_external` proves an **append-only extension**
+   (the current record at the retained `last_seq` carries the retained `head_hash`, so
+   records `0..retained` are byte-identical — a real superset, not a divergent longer
+   history).
 
-A passive booting from a stale mirror (local head **below** the witnessed
-checkpoint) therefore **cannot** be promoted — the guard exits non-zero and the
-floor is never rolled back. Only a passive whose head is **at or above** the
-retained witnessed height activates.
+A passive on a **stale** mirror (head below the witnessed checkpoint), a **forged**
+head (attacker key, or a self-declared count past the live chain), or a **forked**
+head (same/grown height, divergent `head_hash`) therefore **cannot** be promoted —
+the guard exits non-zero and no rollback/fork is activated. Only a passive whose
+**authenticated** head equals-and-is-head_hash-bound-to, or **provably extends**, the
+retained witnessed checkpoint activates.
 
 ### 3.3 The manual cutover (after the guard passes)
 
 1. **Fence the old active.** Stop the old active writer (or confirm it is
    already down). Two writers must never be live at once — see §2.
-2. **Run the guard on the passive** (§3.2). If it exits non-zero, DO NOT
-   promote; investigate the stale mirror / retain a fresher off-box checkpoint.
-3. **Repoint the LB / VIP** at the newly-promoted node's loopback backend.
-4. **Emit a fresh witnessed checkpoint** from the new active and retain it
+2. **Authenticate the head** on the passive with `sigil verify` (a mandatory,
+   independent head-authentication step). It **fail-closes (exit 2)** if the synced
+   head exists but is **not authentically owner-signed** (absent/bad signature,
+   rewritten, or stale). This enforces head authentication **by composition** — even
+   if the guard in step 3 is ever bypassed, a forged/unsigned head fails here first.
+3. **Run the guard on the passive** (§3.2). If it exits non-zero, DO NOT
+   promote; investigate the untrusted mirror (stale/forged/forked) / retain a
+   fresher off-box checkpoint. (The guard *also* re-authenticates the head, then
+   binds/extension-proves it against the witnessed checkpoint — step 2 is the
+   independent, composition-level backstop.)
+4. **Repoint the LB / VIP** at the newly-promoted node's loopback backend.
+5. **Emit a fresh witnessed checkpoint** from the new active and retain it
    off-box, so the next failover has a current anchor.
 
-In k8s the same interlock runs as the sovereign StatefulSet's **anti-rollback
-readiness-gate initContainer** (`infra/ha/k8s/sovereign-statefulset.yaml`): the
-writer pod does not become Ready — and the Service does not route to it — until
-the guard passes. The StatefulSet is pinned `replicas: 1` **by design** (a
-`PodDisruptionBudget{minAvailable: 1}` keeps the single writer scheduled); a
-comment block in that file states plainly that `replicas > 1` there is a
-**data-corruption bug, not scale.**
+In k8s the same interlock runs as **two sequential initContainers** on the
+sovereign StatefulSet (`infra/ha/k8s/sovereign-statefulset.yaml`): a
+**head-authentication gate** (`sigil verify`) runs first, then the **anti-rollback
+readiness-gate** (the failover guard). The writer pod does not become Ready — and
+the Service does not route to it — until **both** pass, so head authentication is
+enforced by composition even if the guard is bypassed. The StatefulSet is pinned
+`replicas: 1` **by design** (a `PodDisruptionBudget{minAvailable: 1}` keeps the
+single writer scheduled); a comment block in that file states plainly that
+`replicas > 1` there is a **data-corruption bug, not scale.**
 
 ---
 

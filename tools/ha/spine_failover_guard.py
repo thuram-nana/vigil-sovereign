@@ -3,31 +3,50 @@
 
 Claim 6, Piece B (B-S4). See docs/architecture/HA-PROFILE.md §3.
 
-The sovereign spine is SINGLE-WRITER. HA of the writer is active-PASSIVE failover, and the one real
-hazard on promotion is a ROLLBACK: a passive that came up on a STALE mirror carries an older head, and
-promoting it blindly would roll the durable anti-rollback floor BACKWARDS — the exact "cold verifier off
-an untrusted mirror" gap documented in ``apps/sigil/sigil/spine/floor.py`` (HONEST LIMIT). This guard
-closes that: it REFUSES to activate (fail-closed, exit 2) unless the local synced head is at or above an
-OFF-BOX-retained, witness-signed checkpoint.
+The sovereign spine is SINGLE-WRITER. HA of the writer is active-PASSIVE failover, and the hazard on
+promotion is a passive coming up on an UNTRUSTED MIRROR — a mirror whose head has been rolled back
+(STALE), forged (a head not signed by the owner), or forked (a different owner-signed history at the
+same height). Promoting any of those would roll the durable anti-rollback floor BACKWARDS or activate a
+divergent history — the "cold verifier off an untrusted mirror" gap documented in
+``apps/sigil/sigil/spine/floor.py`` (HONEST LIMIT). This guard CLOSES that gap (up to the all-keys
+limit below): it AUTHENTICATES the local head's OWNER signature and BINDS it to an OFF-BOX-retained,
+witness-signed checkpoint before it will activate — head authenticated + fork-bound + extension-proven —
+and REFUSES (fail-closed, exit 2) otherwise.
 
 What it checks (fail-closed at every step):
   1. the off-box witnessed-checkpoint envelope parses and is for THIS scope;
   2. the envelope is signed by a TRUSTED WITNESS QUORUM — a forged/unsigned "checkpoint" is not a floor;
-  3. ``check_floor(local_head, floor_of_the_witnessed_checkpoint)`` passes — no monotonic quantity rolls
-     back below the witnessed anchor; AND
-  4. the local head's ``entry_count`` AND ``last_seq`` are >= the witnessed checkpoint's (belt-and-braces
-     on the exact witnessed height).
+  3. the LOCAL HEAD is AUTHENTICATED, running the SAME owner-signature authentication the live spine runs
+     before ``check_floor`` — ``checkpoint.classify_head`` -> ``reuse.verify_head``: the owner Ed25519
+     signature at the owner threshold AND binding of ``head_hash``/``last_seq``/``entry_count`` to the
+     passive's actual live chain. An unsigned, attacker-key-signed, or count-inflated head is REFUSED
+     (a self-declared scalar is never trusted before this). This is the step the earlier build was
+     MISSING — it applied (4)/(5) to an UNAUTHENTICATED head;
+  4. ``check_floor(local_head, floor_of_the_witnessed_checkpoint)`` passes — no monotonic quantity rolls
+     back below the witnessed anchor — and the head's ``entry_count``/``last_seq`` are >= the witnessed
+     checkpoint's (belt-and-braces on the exact witnessed height); AND
+  5. the authenticated head is TIED to the witnessed HISTORY, not merely at/above its count: at EQUAL
+     height ``local_head.head_hash`` MUST equal the witnessed ``head_hash`` (a different one is an
+     owner-key EQUIVOCATION / same-height fork -> refuse); when GROWN, ``witness.verify_against_external``
+     proves an append-only EXTENSION (the current record at the retained ``last_seq`` carries the retained
+     ``head_hash``, so records ``0..retained`` are byte-identical — a real superset, not a divergent
+     longer history) -> unprovable -> refuse.
 
 HONEST LIMITS (do NOT overclaim):
-  * The anchor's strength is EXTERNAL RETENTION + witness independence, not this code. At the default
-    owner-only, threshold-1 witness set this is rollback DETECTION via retention, NOT independent
-    split-view prevention — the sole witness is the head signer itself. This guard LABELS that honestly
-    ("retention-based DETECTION, NOT independence") and never prints "split-view-resistant" for a solo
-    self-witness. Independent prevention needs >=2 independent witness keys at a strict majority, a
-    DEPLOYMENT property code cannot verify (see ``witness.guarantee_label``).
-  * A fully-dishonest producer who ALSO holds the witness key(s) can forge any checkpoint; that case is
-    NOT closed here (it is the irreducible all-keys-compromised limit). This guard closes the STALE-MIRROR
-    rollback (a passive that legitimately synced an old mirror), which is the failover hazard.
+  * TWO SEPARATE properties, do not conflate them. (a) The LOCAL HEAD's authenticity is CRYPTOGRAPHIC and
+    holds regardless of witness independence — its owner signature is verified and it is bound to the
+    witnessed head_hash / proven to extend it (steps 3 + 5). (b) The ANCHOR's strength is EXTERNAL
+    RETENTION + witness independence, NOT this code: at the default owner-only, threshold-1 witness set
+    the anchor is rollback DETECTION via retention, NOT independent split-view PREVENTION — the sole
+    witness is the head signer itself. This guard LABELS that honestly ("retention-based DETECTION, NOT
+    independence") and never prints "split-view-resistant" for a solo self-witness. Independent prevention
+    needs >=2 independent witness keys at a strict majority, a DEPLOYMENT property code cannot verify (see
+    ``witness.guarantee_label``).
+  * IRREDUCIBLE LIMIT: an attacker who holds BOTH the owner key AND a witness quorum can mint a mutually
+    consistent forged anchor+head; that all-keys-compromised case is NOT closed here (no code can). What
+    IS now closed — for any adversary short of that — is the untrusted-mirror ROLLBACK (stale head), the
+    FORGED head (attacker key or a self-declared count past the live chain), and the same-height / grown
+    FORK: each is refused because the head is authenticated and bound to the retained witnessed history.
 
 FATAL-2: this module is SOVEREIGN-SIDE. It may import ``sigil`` and ``vigil_core``/``vigil_integration``
 (``vigil_integration.transparency`` is vigil_core-only). It MUST NOT be imported by any OFFENSE-plane
