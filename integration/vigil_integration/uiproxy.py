@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hmac
 import hashlib
 import http.client
 import http.server
@@ -61,10 +60,11 @@ import subprocess
 import sys
 import threading
 import time
+import zlib
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Optional
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from . import dispatch
 
@@ -109,6 +109,60 @@ _PLANE_START_GRACE_S = 45.0
 _TOKEN_HEADER = "X-SIGIL-Token"
 _TOKEN_QUERY = "token"
 _CSRF_HEADER = "X-Requested-With"
+
+# ==================================================================================================
+# PER-USER AUTHENTICATION at the proxy boundary (Claim 6). See docs/CLAIM-6-RBAC.md.
+#
+# The proxy is the ONE listener a browser points at, so it is where per-user identity must be established.
+# It is OFFENSE-side (`vigil_integration`) and MUST NOT import the sovereign accounts registry (FATAL-2 —
+# a single interpreter never co-loads the two trust domains). It therefore DELEGATES verification to the
+# sovereign plane's token-optional `/api/whoami`: a loopback GET carrying the request's bearer returns the
+# resolved Principal (owner token → owner; a per-user bearer → that principal; anything else →
+# authenticated:false). The sovereign plane is the AUTHORITY on the owner-signed accounts spine, so trusting
+# its resolution is trusting exactly the right root — and the proxy stays PURE STDLIB (http.client, no
+# cross-domain import). Fail-closed everywhere: any transport/parse error, a non-200, or authenticated:false
+# resolves to None → 401, the request is NEVER forwarded.
+# ==================================================================================================
+_WHOAMI_PATH = "/api/whoami"
+# Bootstrap routes that reach the sovereign plane WITHOUT proxy auth: the login-state probe and the login
+# endpoint (verifying the token you present is their whole purpose). Everything else past these is gated.
+_UNAUTH_FORWARD = frozenset({SOVEREIGN_BASE + "/api/whoami", SOVEREIGN_BASE + "/api/login"})
+# The permission a MUTATING offense request / an offense-plane lifecycle action requires — an operator+
+# capability. Offense reads/SSE need only an authenticated principal (viewer+). This is a COARSE proxy-side
+# floor (read vs. run) over the offense plane, which does not itself do per-action RBAC; the sovereign plane
+# keeps its fine-grained action→permission map, and owner-authority offense actions are sovereign-gated.
+_OFFENSE_RUN_PERM = "run_engagement"
+_READ_METHODS = frozenset({"GET", "HEAD"})
+# Trusted identity headers the proxy STAMPS on an authenticated offense forward (and STRIPS from every
+# inbound request, so a client can never spoof them). The offense side uses them for attribution.
+_PRINCIPAL_HDR = "X-VIGIL-Principal"
+_ROLE_HDR = "X-VIGIL-Role"
+# Anti-spoof: strip the WHOLE `X-VIGIL-*` class from inbound requests, normalising case AND hyphen↔
+# underscore — so no variant (`X_VIGIL_ROLE`, which some upstreams / WSGI stacks fold to the header the
+# offense gate would read) survives to be mistaken for a proxy-set identity header.
+_VIGIL_HDR_PREFIX = "x-vigil-"
+
+
+def _is_vigil_identity_header(name: str) -> bool:
+    return name.lower().replace("_", "-").startswith(_VIGIL_HDR_PREFIX)
+# Short-TTL cache of sha256(bearer) → resolved principal (or None). Bounds whoami round-trips under SSE /
+# polling; a revocation is visible after at most _AUTH_TTL_S (documented residual). A rejected bearer is
+# cached briefly too, to blunt a guessing flood without pinning a wrong answer for long.
+_AUTH_TTL_S = 30.0
+_AUTH_NEG_TTL_S = 5.0
+_WHOAMI_MAX = 64 * 1024          # cap the whoami response read (a Principal JSON is tiny)
+_MISS = object()                 # cache sentinel: "not present" — distinct from a cached negative (None)
+# BLOCK-A defense-in-depth caps: the ONLY time the proxy buffers+decodes a relayed body is the abnormal
+# case where a backend returned a compressed NON-SSE body despite the forced `Accept-Encoding: identity`
+# hop. Bound BOTH the encoded read AND the decoded output so a rogue/compromised backend cannot make the
+# proxy a decompression bomb. The decoded bound is enforced DURING streaming decompression (never a
+# one-shot `decompress()` that materialises the whole body first): inflate in `_DECODE_STEP` output steps
+# and STOP the instant the running total would exceed `_REDACT_MAX_DECODED` → fail closed. A body under the
+# encoded cap can deflate ~1032:1 (≈16 GiB), so a post-hoc size check would OOM the proxy before it fired.
+_REDACT_MAX_ENCODED = 16 * 1024 * 1024
+_REDACT_MAX_DECODED = 64 * 1024 * 1024
+_DECODE_STEP = 1024 * 1024       # inflate 1 MiB of OUTPUT per step → peak allocation stays ~budget, never
+                                 # the full (possibly 1032:1) decompressed body; the bomb is caught mid-stream.
 
 # the bundle files the proxy serves from the runtime serve dir
 BUNDLE_JS = ("ui.js", "manual.js", "app.js")
@@ -223,6 +277,119 @@ def parse_cockpit_token(line: str) -> Optional[str]:
 
 
 # ==================================================================================================
+# per-user auth: the delegated whoami verifier + its short-TTL cache
+# ==================================================================================================
+class _PrincipalCache:
+    """A tiny thread-safe TTL cache of ``sha256(bearer) → principal|None``. Keyed by the digest so a
+    plaintext bearer never lingers in the map; a cached ``None`` is a (short-lived) negative result."""
+
+    def __init__(self, *, max_entries: int = 4096):
+        self._d: dict[str, tuple[object, float]] = {}
+        self._lock = threading.Lock()
+        self._max = max_entries
+
+    def get(self, key: str):
+        """The cached value, or the ``_MISS`` sentinel if absent/expired. A cached ``None`` (a negative)
+        is returned as ``None``, distinct from ``_MISS``."""
+        with self._lock:
+            v = self._d.get(key)
+            if v is None:
+                return _MISS
+            value, exp = v
+            if time.monotonic() >= exp:
+                self._d.pop(key, None)
+                return _MISS
+            return value
+
+    def put(self, key: str, value, ttl: float) -> None:
+        with self._lock:
+            if len(self._d) >= self._max:
+                now = time.monotonic()
+                self._d = {k: v for k, v in self._d.items() if v[1] > now}  # prune expired
+                if len(self._d) >= self._max:
+                    self._d.clear()                                          # hard cap: never grow unbounded
+            self._d[key] = (value, time.monotonic() + ttl)
+
+
+def _whoami(bearer: str, *, host: str = "127.0.0.1", port: Optional[int] = None,
+            timeout: float = 4.0) -> Optional[dict]:
+    """DELEGATE bearer verification to the sovereign plane's token-optional ``/api/whoami`` (loopback GET,
+    the bearer in ``X-SIGIL-Token``). Returns the resolved principal dict ``{username, role, permissions}``
+    on ``authenticated:true``, else ``None``. PURE STDLIB (imports no sigil). Fail-closed: a blank bearer,
+    any transport/parse error, a non-200, or ``authenticated:false`` all yield ``None``."""
+    if not bearer:
+        return None
+    p = SOVEREIGN_PORT if port is None else port
+    try:
+        conn = http.client.HTTPConnection(host, p, timeout=timeout)
+        try:
+            conn.request("GET", _WHOAMI_PATH,
+                         headers={_TOKEN_HEADER: bearer, "Host": f"{host}:{p}",
+                                  "Accept": "application/json"})
+            resp = conn.getresponse()
+            raw = resp.read(_WHOAMI_MAX)
+            if resp.status != 200:
+                return None
+            data = json.loads(raw.decode("utf-8", "replace"))
+        finally:
+            conn.close()
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    if not isinstance(data, dict) or not data.get("authenticated"):
+        return None
+    perms = data.get("permissions")
+    return {"username": str(data.get("username") or ""),
+            "role": str(data.get("role") or ""),
+            "permissions": [str(x) for x in perms] if isinstance(perms, list) else []}
+
+
+# ==================================================================================================
+# BLOCK-A: streaming, MEMORY-BOUNDED inflate for the hop-credential redactor's defense-in-depth path.
+# A backend that ignored the forced `Accept-Encoding: identity` and compressed anyway would hand the
+# redactor ciphertext, so the proxy DECODES before scanning — but a one-shot `gzip.decompress(raw)` would
+# fully materialise a 1032:1 bomb (≈16 GiB from a <16 MiB body) and OOM the proxy before any size check.
+# So the decode is bounded DURING the stream: never more than ~budget+step decoded bytes are ever held.
+# ==================================================================================================
+def _inflate_wbits(raw: bytes, wbits: int, budget: int) -> "Optional[bytes]":
+    """Streaming inflate of ``raw`` with ``wbits``, producing at most ~``budget`` (+ one step) decoded
+    bytes — the running total is checked after every ``_DECODE_STEP`` output chunk and the moment it would
+    exceed ``budget`` we STOP and return None (a decompression bomb is caught mid-stream, never fully
+    materialised). Returns the decoded bytes (len ≤ budget) for a CLEAN, COMPLETE stream, or None (fail
+    closed) on: over-budget, a truncated/incomplete stream, trailing garbage, or any zlib error (wrong
+    wbits / corruption)."""
+    d = zlib.decompressobj(wbits)
+    out = bytearray()
+    pending = raw
+    try:
+        while True:
+            chunk = d.decompress(pending, _DECODE_STEP)   # ≤ _DECODE_STEP output bytes per call
+            out += chunk
+            if len(out) > budget:
+                return None                               # bomb → stop NOW (≤ budget + one step allocated)
+            pending = d.unconsumed_tail                    # input held back because output hit the step cap
+            if not chunk and not pending:
+                break                                      # no output and no unconsumed input → stream done
+        if not d.eof:
+            return None                                    # truncated / incomplete / wrong wbits
+        if d.unused_data:
+            return None                                    # trailing garbage after the compressed stream
+    except (zlib.error, OSError, ValueError):
+        return None
+    return bytes(out)
+
+
+def _inflate_bounded(raw: bytes, enc: str, budget: int) -> "Optional[bytes]":
+    """Decode a ``gzip``/``deflate`` body under a bounded decoded budget (see ``_inflate_wbits``), or None
+    (fail closed) for an encoding we cannot decode (br/zstd/unknown), a bomb, or a malformed stream."""
+    if enc == "gzip":
+        return _inflate_wbits(raw, 16 + zlib.MAX_WBITS, budget)          # gzip header
+    if enc == "deflate":
+        out = _inflate_wbits(raw, zlib.MAX_WBITS, budget)                # zlib-wrapped DEFLATE
+        return out if out is not None else _inflate_wbits(raw, -zlib.MAX_WBITS, budget)  # raw DEFLATE
+    return None                                                          # br / zstd / unknown → cannot scan
+
+
+# ==================================================================================================
 # runtime serve dir — assembled by `vigil up` under .vigil-live/ui/ (gitignored)
 # ==================================================================================================
 def assemble_serve_dir(src_dir: Path, serve_dir: Path, *, token: str,
@@ -231,10 +398,20 @@ def assemble_serve_dir(src_dir: Path, serve_dir: Path, *, token: str,
 
     * ``style.css`` = ``tokens.css`` + ``components.css`` concatenated,
     * ``ui.js`` / ``manual.js`` / ``app.js`` copied verbatim (+ ``manifest.json`` if present),
-    * ``index.html`` written with the three placeholders substituted (token + federated mount bases).
+    * ``index.html`` written with the mount-base + build placeholders substituted — and the
+      ``__VIGIL_TOKEN__`` placeholder emptied (Claim 6): the served page carries NO credential.
+
+    PER-USER AUTH (Claim 6): the owner shared token is deliberately NOT embedded. If it were, every browser
+    that reached the proxy would carry the owner's token and the sovereign plane would resolve everyone to
+    ``OWNER_PRINCIPAL`` — the whole multi-user gate would be inert. Instead the SPA's login gate is the entry
+    (``app.js renderLoginGate`` → ``POST /sovereign/api/login``) and each user carries THEIR OWN bearer in
+    ``sessionStorage``. The ``token`` argument is retained for signature stability (``run_up`` passes the
+    offense CONSOLE credential the PROXY presents to the offense backend after per-user auth — see
+    ``ProxyHandler._forward_request``); it is never written into any served asset.
     """
-    # 0700 dir: index.html embeds the sovereign session TOKEN (a live bearer credential), so the runtime
-    # serve dir and its files must never be world-readable on a multi-user host.
+    # 0700 dir / 0600 index: the serve dir is runtime state assembled per `vigil up`. It no longer embeds a
+    # credential (Claim 6), but keeping it owner-only is defense-in-depth — a build id / mount config is not
+    # something to expose to every local user, and the perms cost nothing.
     serve_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(serve_dir, 0o700)
     tokens_css = (src_dir / "tokens.css").read_text(encoding="utf-8")
@@ -267,13 +444,16 @@ def assemble_serve_dir(src_dir: Path, serve_dir: Path, *, token: str,
     if system_map.exists():
         (serve_dir / "system-map.json").write_text(system_map.read_text(encoding="utf-8"), encoding="utf-8")
     html = (src_dir / "index.html").read_text(encoding="utf-8")
-    html = (html.replace("__VIGIL_TOKEN__", token)
+    # __VIGIL_TOKEN__ → "" : NO credential in the served page (Claim 6 per-user auth). `ui.js` treats an
+    # empty/placeholder data-token as "no owner token", so `token()` returns only the per-user session
+    # bearer and the SPA renders its login gate until a user signs in.
+    html = (html.replace("__VIGIL_TOKEN__", "")
                 .replace("__VIGIL_SOVEREIGN__", sovereign_base)
                 .replace("__VIGIL_OFFENSE__", offense_base)
                 .replace("__VIGIL_BUILD__", build_id))
     index = serve_dir / "index.html"
     index.write_text(html, encoding="utf-8")
-    os.chmod(index, 0o600)   # token-bearing → owner-only
+    os.chmod(index, 0o600)   # runtime state → owner-only (defense-in-depth; no secret embedded)
     return serve_dir
 
 
@@ -536,9 +716,12 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                  allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
                  plane_control: "Optional[PlaneControl]" = None):
         self.serve_dir = serve_dir
-        # The session token `vigil up` captured from the cockpit and embedded in index.html — the SAME
-        # credential the two federated planes take. It gates the proxy-local plane-control routes.
-        # Empty (a proxy built without one) ⇒ those routes FAIL CLOSED (401), never open.
+        # The offense CONSOLE credential (= the owner boot token `vigil up` captured, which it also hands the
+        # console as VIGIL_CONSOLE_TOKEN). Claim 6: it is NO LONGER embedded in index.html and NO LONGER the
+        # gate every request is checked against — per-user auth is delegated to the sovereign whoami. It is
+        # now presented by the proxy on the outbound hop to the offense console AFTER a request has been
+        # authenticated per-user (`_forward_request_headers`), so the browser never holds it. Empty (a proxy
+        # built without one) ⇒ the offense console receives "" and fails closed (401), never open.
         self.token = token or ""
         # The browser-visible authority/origin of THIS proxy (`--domain`, or a tunnel bind) — the same
         # values handed to the backends as --allow-host/--allow-origin. Loopback with the proxy's own
@@ -548,6 +731,9 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         # None ⇒ the proxy can still REPORT plane status (a live port probe needs no configuration) but
         # cannot start anything (503). Only `vigil up`'s boot path supplies one.
         self.plane_control = plane_control
+        # Claim 6: per-user auth is DELEGATED to the sovereign whoami; this caches the resolution briefly so
+        # SSE / polling do not stampede it. Built here so every request handler shares one cache.
+        self.auth_cache = _PrincipalCache()
         family = socket.AF_INET
         try:
             if ipaddress.ip_address(addr[0]).version == 6:
@@ -606,14 +792,89 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if target is None:
                 self._serve_static(split.path)
                 return
-            host, port, upstream_path = target
-            if split.query:
-                upstream_path = f"{upstream_path}?{split.query}"
-            self._proxy(host, port, upstream_path)
+            self._forward_request(split, target)
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception as exc:  # noqa: BLE001 — never 500 the whole proxy on one bad request
             self._fail(502, f"proxy error: {type(exc).__name__}: {exc}")
+
+    # -- per-user auth boundary (Claim 6): every forward past the login bootstrap is authenticated ----
+    def _request_bearer(self, query: str) -> str:
+        """The bearer on THIS request: the ``X-SIGIL-Token`` header, or ``?token=`` (SSE / downloads)."""
+        return self.headers.get(_TOKEN_HEADER) or (parse_qs(query).get(_TOKEN_QUERY) or [""])[0]
+
+    def _authenticate(self, bearer: str) -> Optional[dict]:
+        """Resolve the request's bearer to a principal dict via the sovereign whoami (cached, short TTL),
+        or None (fail-closed). A blank bearer is never resolved."""
+        if not bearer:
+            return None
+        cache = getattr(self.server, "auth_cache", None)
+        key = hashlib.sha256(bearer.encode("utf-8")).hexdigest()
+        if cache is not None:
+            hit = cache.get(key)
+            if hit is not _MISS:
+                return hit                                    # may be a cached negative (None)
+        principal = _whoami(bearer)
+        if cache is not None:
+            cache.put(key, principal, _AUTH_TTL_S if principal is not None else _AUTH_NEG_TTL_S)
+        return principal
+
+    def _auth_fail(self, status: int, msg: str):
+        """A fail-closed JSON refusal that DRAINS the request body and closes the connection — so a refused
+        POST cannot leave an unread body to be re-parsed as a pipelined (smuggled) request, and nothing is
+        forwarded to a backend."""
+        self.close_connection = True
+        self._plane_json({"ok": False, "error": msg}, status=status)   # not drained → reads+discards body
+
+    def _forward_request(self, split, target):
+        """Authenticate (per-user, fail-closed) then forward to a loopback backend.
+
+        * The login BOOTSTRAP (`/sovereign/api/whoami`, `/sovereign/api/login`) is forwarded WITHOUT proxy
+          auth — establishing a session is its whole purpose (the sovereign verifies the presented token).
+        * Every other route requires a bearer the sovereign whoami resolves → else 401, NEVER forwarded.
+        * Sovereign routes forward the user's OWN bearer (native `role_can`).
+        * Offense routes enforce a coarse role floor (read vs. `run_engagement`), substitute the offense
+          console credential (the browser never holds it), and stamp the resolved identity headers."""
+        host, port, upstream_path = target
+        path = split.path
+        is_sovereign = path == SOVEREIGN_BASE or path.startswith(SOVEREIGN_BASE + "/")
+        # 1) login bootstrap — forward verbatim, no proxy auth.
+        if path in _UNAUTH_FORWARD:
+            self._proxy(host, port, self._with_query(upstream_path, split.query))
+            return
+        # 2) authenticate, fail-closed.
+        principal = self._authenticate(self._request_bearer(split.query))
+        if principal is None:
+            self._auth_fail(401, "missing/invalid token")
+            return
+        # 3a) sovereign plane — forward the user's own bearer; the sovereign self-enforces role_can.
+        if is_sovereign:
+            self._proxy(host, port, self._with_query(upstream_path, split.query))
+            return
+        # 3b) offense plane — coarse floor: a mutation needs run_engagement (operator+); reads need viewer+.
+        if self.command not in _READ_METHODS and _OFFENSE_RUN_PERM not in principal["permissions"]:
+            self._auth_fail(403, "offense action requires the run_engagement capability (operator+)")
+            return
+        # substitute the offense console credential in ?token= (SSE/downloads); the header is substituted in
+        # _forward_request_headers. The browser's own bearer never reaches the offense backend.
+        upstream = self._with_query(upstream_path, self._sub_token_query(split.query))
+        self._proxy(host, port, upstream, offense_principal=principal)
+
+    @staticmethod
+    def _with_query(upstream_path: str, query: str) -> str:
+        return f"{upstream_path}?{query}" if query else upstream_path
+
+    def _sub_token_query(self, query: str) -> str:
+        """Replace ``?token=`` (the SSE / download credential carrier) with the offense console credential,
+        preserving every other query parameter. If there is no ``token`` param, the query is returned
+        verbatim (nothing to substitute)."""
+        if not query:
+            return query
+        parsed = parse_qs(query, keep_blank_values=True)
+        if _TOKEN_QUERY not in parsed:
+            return query
+        parsed[_TOKEN_QUERY] = [getattr(self.server, "token", "") or ""]
+        return urlencode(parsed, doseq=True)
 
     # -- static bundle from the runtime serve dir ---------------------------------------------------
     def _serve_static(self, path: str):
@@ -699,8 +960,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._plane_json({"ok": False, "error": f"plane control refused ({why})"},
                              status=403, drained=True)
             return
-        # 4) the session credential — the same token the rest of the UI presents.
-        if not self._plane_token_ok(query):
+        # 4) per-user authentication (Claim 6) — the SAME sovereign-delegated identity the forwarded routes
+        #    use. Fail-closed: an unresolved bearer is 401 before anything is inspected or spawned. Plane
+        #    control talks to the SOVEREIGN plane (which is up even when the offense backends are down), so
+        #    delegated auth is always available here. Reads (status/version) need viewer+; start/stop below
+        #    additionally require run_engagement (operator+).
+        principal = self._authenticate(self._request_bearer(query))
+        if principal is None:
             self._plane_json({"ok": False, "error": "missing/invalid token"}, status=401, drained=True)
             return
         # 5) a mutating POST additionally needs the SPA's custom header (a cross-site HTML <form>
@@ -745,6 +1011,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._plane_json({"ok": False, "error": "method not allowed (POST only)"},
                                  status=405, drained=True)
                 return
+            if _OFFENSE_RUN_PERM not in principal["permissions"]:   # operator+ lifecycle floor
+                self._plane_json({"ok": False, "action": "start-offense",
+                                  "error": "starting the offense plane requires the run_engagement "
+                                           "capability (operator+)"}, status=403, drained=True)
+                return
             if pc is None:
                 self._plane_json({"ok": False, "action": "start-offense",
                                   "error": "this proxy has no plane control configured — start the "
@@ -759,6 +1030,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if self.command != "POST":
                 self._plane_json({"ok": False, "error": "method not allowed (POST only)"},
                                  status=405, drained=True)
+                return
+            if _OFFENSE_RUN_PERM not in principal["permissions"]:   # operator+ lifecycle floor
+                self._plane_json({"ok": False, "action": "stop-offense",
+                                  "error": "stopping the offense plane requires the run_engagement "
+                                           "capability (operator+)"}, status=403, drained=True)
                 return
             if pc is None:
                 self._plane_json({"ok": False, "action": "stop-offense",
@@ -790,16 +1066,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return False, f"Origin={origin!r}"
         return True, ""
 
-    def _plane_token_ok(self, query: str) -> bool:
-        """The session credential on THIS request: the ``X-SIGIL-Token`` header, or ``?token=``.
-        Constant-time compare. Fail-closed — a missing/blank/wrong token, or a proxy built with no
-        token at all, is False."""
-        expected = getattr(self.server, "token", "") or ""
-        tok = self.headers.get(_TOKEN_HEADER) or (parse_qs(query).get(_TOKEN_QUERY) or [""])[0]
-        if not tok or not expected:
-            return False
-        return hmac.compare_digest(str(tok), str(expected))
-
     def _plane_json(self, payload: dict, status: int = 200, *, drained: bool = False):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         if not drained:
@@ -821,7 +1087,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
 
     # -- faithful forward to a loopback backend, STREAMING the response ------------------------------
-    def _proxy(self, host: str, port: int, upstream_path: str):
+    def _proxy(self, host: str, port: int, upstream_path: str, *,
+               offense_principal: "Optional[dict]" = None):
         try:
             clen = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -831,7 +1098,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._fail(413, "request body too large")
             return
         body = self._read_request_body()
-        req_headers = self._forward_request_headers()
+        req_headers = self._forward_request_headers(offense_principal=offense_principal)
         conn = http.client.HTTPConnection(host, port, timeout=None)  # no read timeout → SSE stays open
         try:
             conn.request(self.command, upstream_path, body=body or None, headers=req_headers)
@@ -850,21 +1117,75 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         n = min(n, _MAX_BODY)  # bounded read (the connection is closed after, so any excess is dropped)
         return self.rfile.read(n) if n > 0 else b""
 
-    def _forward_request_headers(self) -> dict:
+    def _forward_request_headers(self, *, offense_principal: "Optional[dict]" = None) -> dict:
         # forward the client's headers verbatim (incl. Host + Origin — the upstreams' anti-rebind
         # allowlist is configured with the proxy authority), minus hop-by-hop + Content-Length
-        # (http.client recomputes the latter from the body we pass).
+        # (http.client recomputes the latter from the body we pass). ALWAYS strip any client-supplied
+        # X-VIGIL-* identity header (anti-spoof): identity is set by the proxy, never accepted from a client.
+        # ALSO strip the client's Accept-Encoding (see below).
         out: dict[str, str] = {}
         for key in self.headers.keys():
             lk = key.lower()
-            if lk in _HOP_BY_HOP or lk == "content-length":
+            if (lk in _HOP_BY_HOP or lk == "content-length" or lk == "accept-encoding"
+                    or _is_vigil_identity_header(key)):
                 continue
             out[key] = self.headers[key]
+        # BLOCK-A: force IDENTITY encoding on the proxy→backend hop so the response is CLEARTEXT the hop
+        # credential redactor can scan. A compressed body has no literal token bytes to find, so a forwarded
+        # `Accept-Encoding: gzip` would let a token-embedding backend index slip past redaction and reach the
+        # browser, which decompresses and recovers the owner token. The backends we control never compress;
+        # an nginx sitting IN FRONT of the proxy that gzips the proxy's ALREADY-redacted output is safe (it
+        # compresses redacted bytes). Set for BOTH planes and the login bootstrap alike.
+        out["Accept-Encoding"] = "identity"
+        if offense_principal is not None:
+            # Present the offense CONSOLE's OWN credential (never the user's bearer): the console gates on
+            # VIGIL_CONSOLE_TOKEN, the browser must never hold it, and only an already-authenticated request
+            # reaches here. Stamp the resolved identity so the offense side can attribute the action (and a
+            # future per-action offense gate can read the role). A proxy with no token presents "" → the
+            # console fails closed (401), never open.
+            out[_TOKEN_HEADER] = getattr(self.server, "token", "") or ""
+            out[_PRINCIPAL_HDR] = str(offense_principal.get("username") or "")
+            out[_ROLE_HDR] = str(offense_principal.get("role") or "")
         return out
 
     def _relay_response(self, resp: http.client.HTTPResponse):
         ctype = resp.getheader("Content-Type", "") or ""
         is_sse = ctype.split(";", 1)[0].strip().lower() == "text/event-stream"
+        # HOP-ONLY CREDENTIAL — the owner backend credential the proxy presents on the hop
+        # (`self.server.token`, = the offense console's VIGIL_CONSOLE_TOKEN AND the cockpit's own token)
+        # must NEVER reach the browser. A backend's OWN static index.html embeds it (the console's
+        # __CONSOLE_TOKEN__ / the cockpit's __SIGIL_TOKEN__), and static `/` is NOT token-gated on the
+        # backend — so a plain relay would stream `data-token="<owner token>"` to a mere VIEWER, who could
+        # replay it and be resolved as OWNER. So every relayed NON-SSE body is scanned and any exact
+        # occurrence of the credential is blanked with an EQUAL-LENGTH marker (Content-Length stays valid).
+        needle = (getattr(self.server, "token", "") or "").encode("utf-8")
+        enc = (resp.getheader("Content-Encoding", "") or "").strip().lower()
+        # BLOCK-A defense-in-depth: the hop forces `Accept-Encoding: identity`, so a backend we control
+        # returns cleartext and `enc` is empty. If a backend/middleware IGNORED that and compressed a NON-SSE
+        # body anyway, the literal-byte redactor would scan ciphertext and MISS the token — so we DECODE it
+        # here (gzip/deflate) before scanning, or FAIL CLOSED (never relay an un-scannable, possibly
+        # token-bearing body). Handled BEFORE headers are sent, so we can drop the stale Content-Encoding /
+        # Content-Length and send the correct ones for the decoded, redacted cleartext.
+        if (not is_sse) and needle and enc not in ("", "identity"):
+            prepared = self._decode_and_redact(resp, enc, needle)
+            if prepared is None:
+                self._fail(502, f"proxy refused to relay a {enc}-encoded body it could not scan for the "
+                                f"hop credential")
+                return
+            self.send_response_only(resp.status, resp.reason or "")
+            for key, value in resp.getheaders():
+                lk = key.lower()
+                if lk in _HOP_BY_HOP or lk in ("content-encoding", "content-length"):
+                    continue            # drop the stale encoding/length — we send decoded cleartext
+                self.send_header(key, value)
+            self.send_header("Content-Length", str(len(prepared)))
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(prepared)
+            return
+        # normal path — identity (or SSE). Stream (SSE / no-token) or stream-redact (non-SSE cleartext).
         self.send_response_only(resp.status, resp.reason or "")
         for key, value in resp.getheaders():
             lk = key.lower()
@@ -880,12 +1201,66 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         if self.command == "HEAD":
             return
-        while True:
-            chunk = resp.read1(65536)   # ONE underlying read → forwards each SSE event as it arrives
+        # SSE is exempt from redaction: its event data provably never carries the session token (pinned by
+        # the SSE negative-control test), and a carry-window would break incremental delivery — the property
+        # the SSE relay exists to preserve. A token-free response (no needle) streams straight through.
+        if is_sse or not needle:
+            while True:
+                chunk = resp.read1(65536)   # ONE underlying read → forwards each SSE event as it arrives
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()          # push it to the browser live (do NOT buffer the stream)
+            return
+        self._relay_redacting(resp, needle)
+
+    def _decode_and_redact(self, resp: http.client.HTTPResponse, enc: str,
+                           needle: bytes) -> "Optional[bytes]":
+        """Read a compressed NON-SSE body (encoded read bounded by ``_REDACT_MAX_ENCODED``), DECODE it with
+        a STREAMING bounded budget so the hop credential can be scanned in cleartext, then redact it
+        (equal-length marker). Returns the redacted CLEARTEXT bytes, or None (FAIL CLOSED) if the encoding
+        is one we cannot decode, the body is malformed / truncated, or it decodes past ``_REDACT_MAX_DECODED``
+        (a decompression bomb — caught mid-stream, never fully materialised). The proxy then refuses to relay
+        it, never forwarding an un-scannable body that might carry the token."""
+        raw = b""
+        while len(raw) <= _REDACT_MAX_ENCODED:
+            chunk = resp.read1(65536)
             if not chunk:
                 break
-            self.wfile.write(chunk)
-            self.wfile.flush()          # push it to the browser live (do NOT buffer the stream)
+            raw += chunk
+        else:
+            return None                                   # encoded body exceeded the cap → fail closed
+        data = _inflate_bounded(raw, enc, _REDACT_MAX_DECODED)
+        if data is None:
+            return None                                   # undecodable / malformed / bomb → fail closed
+        return data.replace(needle, b"X" * len(needle))
+
+    def _relay_redacting(self, resp: http.client.HTTPResponse, needle: bytes):
+        """Stream a NON-SSE body, replacing every exact occurrence of ``needle`` (the hop-only owner
+        credential) with an equal-length marker so it can NEVER reach the browser. Bounded memory: only a
+        ``len(needle)-1`` carry is held back, so a needle split across two read boundaries is still caught.
+        Equal-length replacement keeps the backend's Content-Length valid; only the exact secret is touched,
+        so any other byte (HTML, JSON, a download) passes through unchanged."""
+        mark = b"X" * len(needle)
+        keep = len(needle) - 1
+        carry = b""
+        while True:
+            chunk = resp.read1(65536)
+            if not chunk:
+                break
+            buf = (carry + chunk).replace(needle, mark)
+            if keep and len(buf) >= keep:
+                emit, carry = buf[:-keep], buf[-keep:]
+            elif keep:
+                emit, carry = b"", buf          # not enough yet — hold it all as carry
+            else:
+                emit, carry = buf, b""
+            if emit:
+                self.wfile.write(emit)
+                self.wfile.flush()
+        if carry:
+            self.wfile.write(carry.replace(needle, mark))   # flush the residual (a full needle cannot fit it)
+            self.wfile.flush()
 
     def _fail(self, status: int, message: str):
         try:

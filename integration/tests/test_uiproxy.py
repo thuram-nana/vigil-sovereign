@@ -20,15 +20,35 @@ from __future__ import annotations
 
 import http.client
 import http.server
+import json
 import socket
 import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from vigil_integration import uiproxy
+
+
+# ---- Claim 6 per-user auth: test principals the fake sovereign whoami resolves ---------------------
+# The proxy delegates verification to the sovereign `/api/whoami`; the "cockpit" echo upstream below
+# stands in for it, resolving these bearers to principals (owner token → owner; per-user bearers → their
+# role). An unknown bearer → {authenticated:false} → the proxy 401s.
+OWNER_TOKEN = "owner-boot-tok-AAAAAAAAAAAAAAAA"      # the offense console credential + the owner login
+OP_BEARER = "op-bearer-BBBBBBBBBBBBBBBBBBBB"          # operator (has run_engagement)
+VIEWER_BEARER = "viewer-bearer-CCCCCCCCCCCCCCCC"      # viewer (read only)
+_OWNER_PERMS = ["read", "queue_proposal", "run_engagement", "approve_a2", "toggle_guard",
+                "config_nonsecret", "approve_a3", "kill_release", "promote", "secrets",
+                "offense_authority", "manage_users", "toggle_protected_guard"]
+_OP_PERMS = ["read", "queue_proposal", "run_engagement", "approve_a2", "toggle_guard", "config_nonsecret"]
+_WHOAMI_PRINCIPALS = {
+    OWNER_TOKEN: {"authenticated": True, "username": "owner", "role": "owner", "permissions": _OWNER_PERMS},
+    OP_BEARER: {"authenticated": True, "username": "op", "role": "operator", "permissions": _OP_PERMS},
+    VIEWER_BEARER: {"authenticated": True, "username": "vv", "role": "viewer", "permissions": ["read"]},
+}
 
 
 # ---- a trivial echo/SSE upstream ------------------------------------------------------------------
@@ -39,6 +59,18 @@ class _EchoHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def _echo(self):
+        # The "cockpit" upstream stands in for the sovereign plane's token-optional /api/whoami: resolve the
+        # presented bearer to a principal (the proxy calls this to authenticate every forwarded request).
+        if urlsplit(self.path).path == "/api/whoami" and getattr(self.server, "tag", "") == "cockpit":
+            q = parse_qs(urlsplit(self.path).query)
+            tok = self.headers.get("X-SIGIL-Token") or (q.get("token") or [""])[0]
+            raw = json.dumps(_WHOAMI_PRINCIPALS.get(tok, {"authenticated": False})).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         # /sse streams events with real gaps so a buffering proxy would be caught out.
         if self.path.startswith("/sse"):
             self.send_response(200)
@@ -113,7 +145,9 @@ def proxy(tmp_path, monkeypatch):
     uiproxy.assemble_serve_dir(src, serve, token="TESTTOKEN")
 
     port = _free_port()
-    httpd = uiproxy.make_proxy_server("127.0.0.1", port, serve)
+    # Claim 6: build the proxy WITH the offense console credential (= OWNER_TOKEN) it substitutes on an
+    # authenticated offense forward. Per-user auth is delegated to the cockpit upstream's /api/whoami above.
+    httpd = uiproxy.make_proxy_server("127.0.0.1", port, serve, token=OWNER_TOKEN)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{port}"
     try:
@@ -126,14 +160,19 @@ def proxy(tmp_path, monkeypatch):
             s.server_close()
 
 
-def _get(url: str) -> tuple[int, str]:
-    with urllib.request.urlopen(url, timeout=5) as r:  # noqa: S310 (loopback test)
+def _get(url: str, token: str = OWNER_TOKEN) -> tuple[int, str]:
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("X-SIGIL-Token", token)   # Claim 6: every forwarded route is per-user authenticated
+    with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 (loopback test)
         return r.status, r.read().decode("utf-8", "replace")
 
 
-def _post(url: str, body: bytes) -> str:
+def _post(url: str, body: bytes, token: str = OWNER_TOKEN) -> str:
     req = urllib.request.Request(url, method="POST", data=body)
     req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("X-SIGIL-Token", token)
     with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310
         return r.read().decode("utf-8", "replace")
 
@@ -192,7 +231,10 @@ def test_root_serves_the_assembled_index_with_substituted_placeholders(proxy):
     base, _serve = proxy
     st, body = _get(base + "/")
     assert st == 200
-    assert 'data-token="TESTTOKEN"' in body
+    # Claim 6: the owner token is NOT embedded — the served page carries no credential. The placeholder is
+    # emptied (data-token=""), so the SPA's login gate is the entry and each user carries their own bearer.
+    assert 'data-token=""' in body
+    assert "TESTTOKEN" not in body
     assert 'data-sovereign="/sovereign"' in body
     assert 'data-offense="/offense"' in body
     assert "__VIGIL_TOKEN__" not in body
@@ -335,7 +377,7 @@ def test_sse_streams_incrementally(proxy):
     # the console upstream's /sse emits 4 events at 0.25s intervals. Read them one at a time and
     # assert the FIRST event arrives well before the LAST — proof the proxy is not buffering the body.
     conn = http.client.HTTPConnection(base.removeprefix("http://"), timeout=10)
-    conn.request("GET", "/offense/sse")
+    conn.request("GET", "/offense/sse", headers={"X-SIGIL-Token": OWNER_TOKEN})   # per-user authenticated
     resp = conn.getresponse()
     assert resp.getheader("Content-Type", "").startswith("text/event-stream")
 
@@ -379,12 +421,15 @@ def test_assemble_serve_dir_contents(tmp_path):
     for j in uiproxy.BUNDLE_JS:
         assert (out / j).read_text(encoding="utf-8") == j
     assert (out / "manifest.json").exists()
-    assert (out / "index.html").read_text(encoding="utf-8") == "TK|/sovereign|/offense"
+    # Claim 6: __VIGIL_TOKEN__ is emptied (no credential in the page); the mount bases still substitute.
+    assert (out / "index.html").read_text(encoding="utf-8") == "|/sovereign|/offense"
+    assert "TK" not in (out / "index.html").read_text(encoding="utf-8")
 
 
-def test_serve_dir_and_token_index_are_owner_only(tmp_path):
-    # BLOCK-2 fix: index.html embeds the sovereign session TOKEN, so the runtime serve dir must be 0700
-    # and the token-bearing index.html 0600 — never world-readable on a multi-user host.
+def test_serve_dir_index_are_owner_only_and_carry_no_token(tmp_path):
+    # BLOCK-2 posture kept as defense-in-depth: the runtime serve dir is 0700 and index.html 0600 (runtime
+    # state, owner-only). Claim 6 additionally requires the owner token is NOT embedded — the served page
+    # carries no credential, so a teammate given the URL still cannot read the owner token off the page.
     import stat
     src = tmp_path / "s"
     src.mkdir()
@@ -392,13 +437,15 @@ def test_serve_dir_and_token_index_are_owner_only(tmp_path):
     (src / "components.css").write_text("C", encoding="utf-8")
     for j in uiproxy.BUNDLE_JS:
         (src / j).write_text(j, encoding="utf-8")
-    (src / "index.html").write_text("__VIGIL_TOKEN__", encoding="utf-8")
+    (src / "index.html").write_text('data-token="__VIGIL_TOKEN__"', encoding="utf-8")
     out = tmp_path / "o"
     uiproxy.assemble_serve_dir(src, out, token="SECRET-TK")
     assert stat.S_IMODE(out.stat().st_mode) == 0o700, "serve dir must be owner-only"
-    assert stat.S_IMODE((out / "index.html").stat().st_mode) == 0o600, "token index must be owner-only"
-    # the token must NOT be world/group readable anywhere in the tree
+    assert stat.S_IMODE((out / "index.html").stat().st_mode) == 0o600, "index must be owner-only"
     assert not (out / "index.html").stat().st_mode & (stat.S_IRGRP | stat.S_IROTH)
+    # the owner token must never appear in the served page (Claim 6)
+    assert "SECRET-TK" not in (out / "index.html").read_text(encoding="utf-8")
+    assert 'data-token=""' in (out / "index.html").read_text(encoding="utf-8")
 
 
 def test_static_response_closes_the_connection(proxy):
