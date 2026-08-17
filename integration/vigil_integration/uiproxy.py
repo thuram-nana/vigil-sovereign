@@ -175,6 +175,38 @@ _REDACT_MAX_DECODED = 64 * 1024 * 1024
 _DECODE_STEP = 1024 * 1024       # inflate 1 MiB of OUTPUT per step → peak allocation stays ~budget, never
                                  # the full (possibly 1032:1) decompressed body; the bomb is caught mid-stream.
 
+# ==================================================================================================
+# VALUE-AGNOSTIC token-carrier scrub for a relayed HTML body (the --proxy-only owner-token leak fix).
+#
+# BOTH the sovereign cockpit AND the offense console embed their OWN session token as `<body
+# data-token="...">`, and static `/` is NOT token-gated — so a mere VIEWER's GET /sovereign/ (or
+# /offense/) relays a backend's index with an OWNER token embedded, which the viewer replays as OWNER.
+# The exact-`self.server.token` redaction below only catches a token the proxy HOLDS — which in
+# --proxy-only is FALSE for the sovereign cockpit (a REMOTE backend that mints its own random token the
+# proxy never captured). So for any relayed HTML body we ALSO blank the token carrier REGARDLESS of value:
+# the `data-token="..."` attribute → `data-token=""`, and any un-substituted `__SIGIL/CONSOLE/VIGIL_TOKEN__`
+# placeholder → empty. This closes the local case, the remote case, and any future independently-tokened
+# backend, with no dependence on the proxy knowing the secret.
+_HTML_CTYPES = frozenset({"text/html", "application/xhtml+xml"})
+# `data-token = "<anything>"` / `'<anything>'` (quote-agnostic via the \2 backref; DOTALL so a value can
+# contain any byte). Rewrites to `data-token=""` — group 1 (the `data-token=` lead) + the two quotes.
+_TOKEN_ATTR_RE = re.compile(rb'(data-token\s*=\s*)(["\'])(.*?)(\2)', re.IGNORECASE | re.DOTALL)
+_TOKEN_PLACEHOLDER_RE = re.compile(rb'__(?:SIGIL|CONSOLE|VIGIL)_TOKEN__')
+
+
+def _scrub_html_tokens(data: bytes, needle: bytes) -> bytes:
+    """Blank the token carrier in a relayed HTML body REGARDLESS of value (`data-token="..."` → `""`,
+    any `__SIGIL/CONSOLE/VIGIL_TOKEN__` placeholder → empty) — so a REMOTE backend's own owner token the
+    proxy never holds can NEVER reach the browser — PLUS the exact hop credential (belt-and-suspenders for
+    the spawn-local case + any other placement). The length changes, so callers send a corrected
+    Content-Length (this path always buffers the whole body; it is never used on the streaming path)."""
+    data = _TOKEN_ATTR_RE.sub(rb'\g<1>\g<2>\g<4>', data)
+    data = _TOKEN_PLACEHOLDER_RE.sub(b'', data)
+    if needle:
+        data = data.replace(needle, b'X' * len(needle))
+    return data
+
+
 # the bundle files the proxy serves from the runtime serve dir
 BUNDLE_JS = ("ui.js", "manual.js", "app.js")
 _STATIC_TYPES = {
@@ -1264,14 +1296,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _relay_response(self, resp: http.client.HTTPResponse):
         ctype = resp.getheader("Content-Type", "") or ""
-        is_sse = ctype.split(";", 1)[0].strip().lower() == "text/event-stream"
+        cmajor = ctype.split(";", 1)[0].strip().lower()
+        is_sse = cmajor == "text/event-stream"
+        is_html = cmajor in _HTML_CTYPES
         # HOP-ONLY CREDENTIAL — the owner backend credential the proxy presents on the hop
-        # (`self.server.token`, = the offense console's VIGIL_CONSOLE_TOKEN AND the cockpit's own token)
-        # must NEVER reach the browser. A backend's OWN static index.html embeds it (the console's
-        # __CONSOLE_TOKEN__ / the cockpit's __SIGIL_TOKEN__), and static `/` is NOT token-gated on the
-        # backend — so a plain relay would stream `data-token="<owner token>"` to a mere VIEWER, who could
-        # replay it and be resolved as OWNER. So every relayed NON-SSE body is scanned and any exact
-        # occurrence of the credential is blanked with an EQUAL-LENGTH marker (Content-Length stays valid).
+        # (`self.server.token`, = the offense console's VIGIL_CONSOLE_TOKEN AND, spawn-local, the cockpit's
+        # own token) must NEVER reach the browser. A backend's OWN static index.html embeds it (the
+        # console's __CONSOLE_TOKEN__ / the cockpit's __SIGIL_TOKEN__ as `data-token="..."`), and static `/`
+        # is NOT token-gated on the backend — so a plain relay would send `data-token="<owner token>"` to a
+        # mere VIEWER, who could replay it and be resolved as OWNER. Two layers neutralise it:
+        #   (a) every relayed NON-SSE body has the exact `self.server.token` blanked (equal-length marker);
+        #   (b) every relayed HTML body ALSO has its token CARRIER blanked value-agnostically
+        #       (`_scrub_html_tokens`) — which is the ONLY thing that catches a REMOTE (`--proxy-only`)
+        #       sovereign cockpit whose own random token the proxy never captured (self.server.token != it).
         needle = (getattr(self.server, "token", "") or "").encode("utf-8")
         enc = (resp.getheader("Content-Encoding", "") or "").strip().lower()
         # BLOCK-A defense-in-depth: the hop forces `Accept-Encoding: identity`, so a backend we control
@@ -1279,25 +1316,27 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # body anyway, the literal-byte redactor would scan ciphertext and MISS the token — so we DECODE it
         # here (gzip/deflate) before scanning, or FAIL CLOSED (never relay an un-scannable, possibly
         # token-bearing body). Handled BEFORE headers are sent, so we can drop the stale Content-Encoding /
-        # Content-Length and send the correct ones for the decoded, redacted cleartext.
-        if (not is_sse) and needle and enc not in ("", "identity"):
-            prepared = self._decode_and_redact(resp, enc, needle)
+        # Content-Length and send the correct ones for the decoded, redacted cleartext. HTML enters this
+        # path even with an EMPTY needle (proxy-only, no held token) because it must still be scrubbed.
+        if (not is_sse) and (needle or is_html) and enc not in ("", "identity"):
+            prepared = self._decode_and_redact(resp, enc, needle, is_html)
             if prepared is None:
                 self._fail(502, f"proxy refused to relay a {enc}-encoded body it could not scan for the "
                                 f"hop credential")
                 return
-            self.send_response_only(resp.status, resp.reason or "")
-            for key, value in resp.getheaders():
-                lk = key.lower()
-                if lk in _HOP_BY_HOP or lk in ("content-encoding", "content-length"):
-                    continue            # drop the stale encoding/length — we send decoded cleartext
-                self.send_header(key, value)
-            self.send_header("Content-Length", str(len(prepared)))
-            self.send_header("Connection", "close")
-            self.close_connection = True
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(prepared)
+            self._send_prepared(resp, prepared)
+            return
+        # CLEARTEXT HTML (the normal cockpit/console index): BUFFER the whole body (bounded) and scrub the
+        # token carrier value-agnostically. Buffered (not streamed) because `data-token="<value>"` has an
+        # unbounded value a fixed streaming carry cannot span — and an index.html is a few KB, far under the
+        # cap. Over the cap → FAIL CLOSED (never relay an un-scrubbable, possibly token-bearing HTML body).
+        if (not is_sse) and is_html:
+            body = self._read_bounded_body(resp, _REDACT_MAX_DECODED)
+            if body is None:
+                self._fail(502, "proxy refused to relay an oversized HTML body it could not scrub for an "
+                                "embedded backend token")
+                return
+            self._send_prepared(resp, _scrub_html_tokens(body, needle))
             return
         # normal path — identity (or SSE). Stream (SSE / no-token) or stream-redact (non-SSE cleartext).
         self.send_response_only(resp.status, resp.reason or "")
@@ -1328,14 +1367,43 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         self._relay_redacting(resp, needle)
 
+    def _send_prepared(self, resp: http.client.HTTPResponse, prepared: bytes):
+        """Send a fully-buffered, already-redacted body with a corrected Content-Length (the length changed
+        under redaction) and the stale Content-Encoding/Content-Length dropped. Used by both buffered
+        redaction paths (the compressed-decode path and the cleartext-HTML scrub path)."""
+        self.send_response_only(resp.status, resp.reason or "")
+        for key, value in resp.getheaders():
+            lk = key.lower()
+            if lk in _HOP_BY_HOP or lk in ("content-encoding", "content-length"):
+                continue            # drop the stale encoding/length — we send the redacted cleartext
+            self.send_header(key, value)
+        self.send_header("Content-Length", str(len(prepared)))
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(prepared)
+
+    def _read_bounded_body(self, resp: http.client.HTTPResponse, budget: int) -> "Optional[bytes]":
+        """Read a cleartext body fully into memory, bounded by ``budget``. Returns the bytes, or None
+        (FAIL CLOSED) if the body exceeds ``budget`` (never buffer an unbounded body from a backend)."""
+        raw = b""
+        while len(raw) <= budget:
+            chunk = resp.read1(65536)
+            if not chunk:
+                return raw
+            raw += chunk
+        return None                                       # exceeded the cap → fail closed
+
     def _decode_and_redact(self, resp: http.client.HTTPResponse, enc: str,
-                           needle: bytes) -> "Optional[bytes]":
+                           needle: bytes, is_html: bool) -> "Optional[bytes]":
         """Read a compressed NON-SSE body (encoded read bounded by ``_REDACT_MAX_ENCODED``), DECODE it with
-        a STREAMING bounded budget so the hop credential can be scanned in cleartext, then redact it
-        (equal-length marker). Returns the redacted CLEARTEXT bytes, or None (FAIL CLOSED) if the encoding
-        is one we cannot decode, the body is malformed / truncated, or it decodes past ``_REDACT_MAX_DECODED``
-        (a decompression bomb — caught mid-stream, never fully materialised). The proxy then refuses to relay
-        it, never forwarding an un-scannable body that might carry the token."""
+        a STREAMING bounded budget so the token can be scanned in cleartext, then redact it: for HTML the
+        VALUE-AGNOSTIC carrier scrub (`_scrub_html_tokens` — catches a remote backend's own token even with
+        an empty needle), else the exact-needle equal-length blank. Returns the redacted CLEARTEXT bytes, or
+        None (FAIL CLOSED) if the encoding is one we cannot decode, the body is malformed / truncated, or it
+        decodes past ``_REDACT_MAX_DECODED`` (a decompression bomb — caught mid-stream, never fully
+        materialised). The proxy then refuses to relay it, never forwarding an un-scannable body."""
         raw = b""
         while len(raw) <= _REDACT_MAX_ENCODED:
             chunk = resp.read1(65536)
@@ -1347,6 +1415,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         data = _inflate_bounded(raw, enc, _REDACT_MAX_DECODED)
         if data is None:
             return None                                   # undecodable / malformed / bomb → fail closed
+        if is_html:
+            return _scrub_html_tokens(data, needle)
         return data.replace(needle, b"X" * len(needle))
 
     def _relay_redacting(self, resp: http.client.HTTPResponse, needle: bytes):

@@ -16,6 +16,7 @@ availability of the sovereign spine.**
 | `neo4j-statefulset.yaml` | StatefulSet | 1 | **Community = no clustering.** Durable single instance only; HA needs Neo4j Enterprise. |
 | `otel-deployment.yaml` | Deployment | 2 | Active-active stateless. |
 | `services.yaml` | Services | — | ClusterIP + a **headless** Service for the StatefulSet. Sticky sessions on the proxy Service. |
+| `networkpolicy.yaml` | NetworkPolicy | — | **REQUIRED.** Restricts ingress to `vigil-sovereign:8733` to the proxy pods only — the cockpit serves its owner token token-free at `GET /`, so it must be reachable only via the authenticating proxy. |
 
 ## Why the proxy runs `--proxy-only` (and binds the pod IP)
 
@@ -39,9 +40,28 @@ Docker daemon; the two-process boundary keeps them out of the sovereign-only
 `vigil/runtime:local` image). They are therefore unreachable cross-pod. `/offense/*`
 works only against an offense plane **co-located** with the proxy on loopback (a
 sidecar the operator adds, holding the docker socket); left at the loopback default
-with no such sidecar it returns 502, while `/sovereign/*` serves normally. This
-profile clusters the **sovereign writer + the stateless proxy tier**, and does not
-pretend `/offense/*` is horizontally scalable. See HA-PROFILE.md §1.1.
+with no such sidecar it returns 502, while `/sovereign/*` serves through the proxy.
+This profile clusters the **sovereign writer + the stateless proxy tier**, and does
+not pretend `/offense/*` is horizontally scalable. See HA-PROFILE.md §1.1.
+
+## The sovereign cockpit is proxy-only — apply the NetworkPolicy (REQUIRED)
+
+`/sovereign/*` serving through the proxy does **not** make the sovereign plane safe to
+expose. The cockpit serves its OWN owner token at `GET /` **token-free**
+(`<body data-token="<owner token>">` — a single-operator surface by design), and the
+headless `vigil-sovereign` Service has no auth of its own. The **proxy is the
+authenticating boundary**: per-user identity (delegated whoami) **and** a value-agnostic
+scrub that blanks any backend's embedded `data-token="..."` out of relayed HTML (so even
+a remote cockpit's own token — which the proxy never holds — never reaches a browser).
+
+`networkpolicy.yaml` enforces that the cockpit is reachable **only** from the proxy
+pods (ingress to `vigil-sovereign:8733` restricted to `app: vigil-proxy`). **Apply it —
+do not run the sovereign StatefulSet without it**: any in-cluster workload that reached
+the Service directly could scrape the owner token off `GET /` and act as owner. Note the
+kubelet-probe caveat in that file (some CNIs need the node source allowed too). The
+proxy→cockpit hop is still cleartext HTTP on the pod network (bearer + owner console
+credential): the policy bounds *who* connects, not confidentiality — add a mesh mTLS /
+encrypted CNI if your pod network is untrusted (HA-PROFILE.md §1.2 / §4).
 
 ## The single-writer invariant (do not "fix" it)
 
@@ -86,6 +106,7 @@ current height.
 
 ```
 kubectl apply -f infra/ha/k8s/services.yaml
+kubectl apply -f infra/ha/k8s/networkpolicy.yaml   # REQUIRED — cockpit reachable only via the proxy
 kubectl apply -f infra/ha/k8s/qdrant-statefulset.yaml
 kubectl apply -f infra/ha/k8s/neo4j-statefulset.yaml
 kubectl apply -f infra/ha/k8s/otel-deployment.yaml
