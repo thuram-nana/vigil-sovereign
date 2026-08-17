@@ -113,9 +113,12 @@ _UP_ALLOWED_STDLIB = {
     # but if a backend compresses anyway the body must be DECODED (streaming, memory-bounded) before the
     # literal-byte scan, or the relay fails closed. gzip AND raw/zlib DEFLATE are both inflated through
     # `zlib.decompressobj` (no `gzip` module needed). A stdlib codec, not a dependency — crosses no boundary.
+    # `secrets` is on this list for the S1 offense per-action RBAC: `secrets.token_urlsafe` mints the
+    # per-`vigil up` VIGIL_CONSOLE_HOP_KEY (distinct from the session token) that the proxy uses to HMAC-stamp
+    # the offense hop's role assertion. A stdlib CSPRNG primitive, not a dependency — crosses no env boundary.
     "__future__", "base64", "binascii", "hashlib", "hmac", "http", "ipaddress", "json", "os", "re",
-    "signal", "socket", "socketserver", "subprocess", "sys", "threading", "time", "pathlib", "queue",
-    "typing", "urllib", "webbrowser", "zlib",
+    "secrets", "signal", "socket", "socketserver", "subprocess", "sys", "threading", "time", "pathlib",
+    "queue", "typing", "urllib", "webbrowser", "zlib",
 }
 _BANNED = ("framework", "strix", "sigil")
 
