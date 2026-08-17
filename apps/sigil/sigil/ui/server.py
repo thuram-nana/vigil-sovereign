@@ -28,6 +28,7 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import json
+import secrets
 import socket
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +37,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..bridge.daemon import bind_ok
 from ..config import SPINE_PATH
+from ..reuse import verify_one
 from ..spine.store import SpineStore
 from ..spine.tail import SpineTailer
 from ..spine.verify import verify_record
@@ -43,6 +45,11 @@ from . import actions as _actions
 
 _STATIC = Path(__file__).parent / "static"
 _CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+# S3 proof-of-possession login: the domain-separated message a user signs is DOMAIN_TAG + the raw challenge
+# bytes. The tag (a versioned, NUL-terminated label) namespaces the signature so a login proof can never be
+# a valid signature for any OTHER protocol that reuses the same user key, and vice-versa.
+_LOGIN_POP_DOMAIN_TAG = b"vigil-login-pop-v1\x00"
 
 
 class UIServer(ThreadingHTTPServer):
@@ -292,10 +299,35 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"accounts": [{"username": a.username, "role": a.role, "state": a.state,
                                   "issued_at": a.issued_at} for a in accts]})
 
+    def _challenge_ledger(self):
+        """The single-use login-challenge ledger, rooted next to the spine file (one dir per spine, so a
+        test's temp spine gets its own isolated ledger)."""
+        from .login_challenges import ChallengeLedger
+        base = Path(self.server.spine_path)
+        return ChallengeLedger(base.parent / (base.name + ".login-challenges"))
+
+    def _login_challenge(self):
+        """POST /api/login/challenge — mint a fresh, unpredictable, SINGLE-USE server nonce for the S3
+        challenge/response login. Same-origin gated (Host+Origin) like `_login`, but requires NO
+        pre-existing token (the whole point is to bootstrap a login for a caller that holds only its private
+        key). The challenge is recorded OUTSTANDING; `_login`'s PoP branch consumes it exactly once."""
+        if not self._origin_host_ok():
+            return self._deny(403, "denied (origin / host)")
+        challenge = secrets.token_urlsafe(32)          # 256 bits of CSPRNG entropy — unpredictable
+        try:
+            self._challenge_ledger().issue(challenge)
+        except Exception:  # noqa: BLE001 — a ledger I/O error must not leak internals; refuse the mint
+            return self._deny(500, "could not mint a challenge")
+        self._json({"ok": True, "challenge": challenge})
+
     def _login(self):
-        """Verify a candidate bearer (or the owner token) presented in the POST body and return its
-        principal + permission set. Same-origin gated (Host+Origin), but requires NO pre-existing token —
-        verifying the token you supply is the whole point. Fail-closed 401 for an invalid token."""
+        """Verify a login presented in the POST body and return its principal + permission set. Same-origin
+        gated (Host+Origin), but requires NO pre-existing token — verifying the credential you supply is the
+        whole point. TWO methods, both ending at the SAME X-SIGIL-Token bearer carrier:
+          * PoP (S3, stronger): body {username, challenge, signature} and no token → verify the owner-bound
+            Ed25519 key against a consumed single-use challenge, then mint a fresh session bearer.
+          * bearer (legacy): body {token} → resolve the per-user bearer (or the legacy owner token).
+        Fail-closed 401 for any invalid credential."""
         if not self._origin_host_ok():
             return self._deny(403, "denied (origin / host)")
         try:
@@ -305,11 +337,57 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, KeyError):
             return self._deny(400, "bad request")
-        tok = str((body or {}).get("token", "") or "")
+        body = body or {}
+        username = str(body.get("username", "") or "")
+        challenge = str(body.get("challenge", "") or "")
+        signature = str(body.get("signature", "") or "")
+        # PoP branch: a {username, challenge, signature} triple with NO bearer. (A body that also carries a
+        # token falls through to the legacy bearer branch — PoP never rides alongside a bearer.)
+        if username and challenge and signature and not body.get("token"):
+            return self._login_pop(username, challenge, signature)
+        tok = str(body.get("token", "") or "")
         p = self._principal_for_token(tok)
         if p is None:
             return self._json({"ok": False, "authenticated": False, "error": "invalid token"}, 401)
         self._json({"ok": True, **self._principal_json(p)})
+
+    def _login_pop(self, username: str, challenge: str, signature: str):
+        """The S3 proof-of-possession login. Fail-closed 401 unless: the account exists AND has an
+        owner-bound `user_pubkey`; the challenge is a known, unexpired, not-yet-consumed server nonce (spent
+        atomically here so a replay of the same triple is refused); and the signature verifies as this
+        account's key over `DOMAIN_TAG + challenge`. On success mint a fresh owner-signed session bearer
+        (the plaintext bearer is never stored, so PoP hands back a rotated one through the SAME carrier)."""
+        from ..governor.accounts import AccountsRegistry, Principal
+        from ..governor.identity import ensure_owner_keypair
+        store = self.server.store()
+        try:
+            acct = AccountsRegistry(store).account(username)
+        except Exception:  # noqa: BLE001 — a hostile/corrupt spine must never crash auth → fail-closed
+            acct = None
+        if acct is None or not acct.user_pubkey:
+            # No cryptographic identity bound for this account → refuse (fail-closed, never fall back to a
+            # weaker check). Same 401 shape whether the account is unknown, revoked, or bearer-only.
+            return self._json({"ok": False, "authenticated": False,
+                               "error": "no cryptographic identity bound for this account"}, 401)
+        # Consume the challenge FIRST (single-use + TTL). A replay of a captured triple finds it already
+        # spent → refused here, before any signature work.
+        if not self._challenge_ledger().consume(challenge):
+            return self._json({"ok": False, "authenticated": False,
+                               "error": "unknown, expired, or already-used challenge"}, 401)
+        message = _LOGIN_POP_DOMAIN_TAG + challenge.encode("utf-8")
+        try:
+            sig_ok = verify_one(acct.user_pubkey, message, signature)
+        except Exception:  # noqa: BLE001 — malformed sig/key material is a fail-closed refusal, not a crash
+            sig_ok = False
+        if not sig_ok:
+            return self._json({"ok": False, "authenticated": False,
+                               "error": "proof-of-possession signature invalid"}, 401)
+        # Proven. Mint a fresh owner-signed session bearer for this account (owner is the sole signer; the
+        # user proved possession, the server re-binds). Returned through the same X-SIGIL-Token carrier.
+        reg = AccountsRegistry(store, owner_key=ensure_owner_keypair())
+        bearer, _seq = reg.mint_session_bearer(username, issued_at=time.time())
+        p = Principal(username=acct.username, role=acct.role)
+        self._json({"ok": True, **self._principal_json(p), "bearer": bearer})
 
     def _sse(self):
         self.send_response(200)
@@ -396,6 +474,8 @@ class Handler(BaseHTTPRequestHandler):
     # --- POST (action plane) ----------------------------------------------------------------------
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/login/challenge":
+            return self._login_challenge()
         if path == "/api/login":
             return self._login()
         if path != "/api/action":

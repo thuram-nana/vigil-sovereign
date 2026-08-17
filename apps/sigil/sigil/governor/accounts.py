@@ -34,12 +34,14 @@ assert (no active account below `base_seq` without its grant), mirrored in `reso
 from __future__ import annotations
 
 import hmac
+import math
 import re
 import secrets
 from dataclasses import dataclass
 from typing import Optional
 
-from ..reuse import assert_no_offense, sha256_hex
+from ..reuse import IntegrityError, assert_no_offense, sha256_hex
+from ..reuse.crypto import load_public_key
 
 assert_no_offense()
 
@@ -91,13 +93,17 @@ PERMISSION_BY_ACTION: dict[str, Optional[str]] = {
     "offense_bind_authority": "offense_authority",
     "offense_approve": "offense_authority", "offense_deny": "offense_authority",
     "create_account": "manage_users", "assign_role": "manage_users", "revoke_account": "manage_users",
+    "enroll_pubkey": "manage_users",
 }
 
 # The owner-signed authenticated CORE. `issued_at` MUST be inside it (outside, an attacker could re-stamp a
 # captured grant's freshness past the high-water without breaking the signature — exactly the replay this
 # guard refuses); `cred_hash`/`cred_salt`/`role`/`username` MUST be inside it so an owner-signed grant for
-# one principal can never be re-aimed at another or have its role/credential rewritten.
-_CORE = ("signal", "username", "role", "cred_hash", "cred_salt", "state", "issued_at")
+# one principal can never be re-aimed at another or have its role/credential rewritten. `user_pubkey` (S3 —
+# the owner-bound Ed25519 login identity) rides inside it too, so a forged/unsigned key binding never
+# verifies in the fold (a user can never mint its own trust — single-owner doctrine). It is ALWAYS present
+# in the signed core (None ⇒ bearer-only), so signing and verification agree on every grant.
+_CORE = ("signal", "username", "role", "cred_hash", "cred_salt", "state", "issued_at", "user_pubkey")
 
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -115,6 +121,8 @@ class Account:
     cred_salt: str       # per-account random (secrets.token_hex(16))
     issued_at: float     # owner-set anti-replay high-water
     state: str           # "active" | "revoked"
+    user_pubkey: Optional[str] = None   # owner-bound Ed25519 pubkey for challenge/response PoP login (S3);
+    #                                     None ⇒ this account authenticates by bearer only (backward-compat)
 
 
 @dataclass(frozen=True)
@@ -153,6 +161,20 @@ def _check_role(role: str) -> str:
     return r
 
 
+def _check_user_pubkey(user_pubkey: str) -> str:
+    """Validate a candidate user Ed25519 public key at BINDING time. `load_public_key` rejects malformed,
+    non-canonical (y >= p) and low-order (keyless-forgery) keys fail-closed, so binding garbage is a clean
+    400 now instead of a silent, always-failing login later. Returns the canonical b64 key string."""
+    pk = str(user_pubkey or "").strip()
+    if not pk:
+        raise ValueError("user_pubkey must be a base64-encoded Ed25519 public key")
+    try:
+        load_public_key(pk)
+    except IntegrityError as e:
+        raise ValueError(f"invalid user public key: {e}")
+    return pk
+
+
 class AccountsRegistry:
     """Owner-signed account grants on the spine. Construction mirrors KillSwitch/PromotionPolicy: the owner
     signing key and trusted pubkey default to the persisted owner identity."""
@@ -163,19 +185,23 @@ class AccountsRegistry:
         self.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
 
     # -- owner mutations ---------------------------------------------------------------------------
-    def create(self, username: str, role: str, *, bearer_token: str, issued_at: float) -> int:
+    def create(self, username: str, role: str, *, bearer_token: str, issued_at: float,
+               user_pubkey: Optional[str] = None) -> int:
         """Owner-sign a new active account. The caller (the actions layer) generates the bearer token and
         never stores it in plaintext: only `sha256_hex(salt + bearer)` and the per-account salt are
         recorded. Requires the owner signing key (a grant with no owner signature never verifies in the
-        fold, so it would be inert)."""
+        fold, so it would be inert). `user_pubkey` optionally binds the S3 challenge/response login identity
+        at creation (usually bound later via `enroll_pubkey`); it is validated fail-closed when present."""
         if self.owner_key is None:
             raise ValueError("account creation requires the owner signing key")
         u, r = _check_username(username), _check_role(role)
         if not isinstance(bearer_token, str) or len(bearer_token) < 16:
             raise ValueError("bearer_token must be a >=16-char string")
+        pk = _check_user_pubkey(user_pubkey) if user_pubkey else None
         salt = secrets.token_hex(16)
         cred_hash = sha256_hex((salt + bearer_token).encode("utf-8"))
-        return self._append_active(u, r, cred_hash=cred_hash, cred_salt=salt, issued_at=float(issued_at))
+        return self._append_active(u, r, cred_hash=cred_hash, cred_salt=salt, issued_at=float(issued_at),
+                                   user_pubkey=pk)
 
     def assign_role(self, username: str, role: str, *, issued_at: float) -> int:
         """Owner-sign a role change — the DANGEROUS direction, so it is honored only if it verifies AND is
@@ -188,7 +214,48 @@ class AccountsRegistry:
         if acct is None:
             raise ValueError(f"no such active account {u!r} (create it first, or it was revoked)")
         return self._append_active(u, r, cred_hash=acct.cred_hash, cred_salt=acct.cred_salt,
-                                   issued_at=float(issued_at))
+                                   issued_at=float(issued_at), user_pubkey=acct.user_pubkey)
+
+    def enroll_pubkey(self, username: str, user_pubkey: str, *, issued_at: float) -> int:
+        """Owner-bind an Ed25519 PUBLIC key to an existing active account — the S3 stronger login identity.
+        This is the DANGEROUS direction (it grants the account a challenge/response proof-of-possession
+        login), so it is honored only if it verifies AND is FRESH (`issued_at` strictly exceeds the
+        per-username high-water). Re-signs the account KEEPING its role + bearer credential and SETTING the
+        key. The OWNER is the sole signer (single-owner doctrine — the user never mints its own trust); the
+        key is validated here (`load_public_key` rejects weak/non-canonical keys). Fail-closed on an
+        unknown/revoked account. Mirrors `mesh.registry.authorize_device` (owner binds a subject pubkey into
+        a fresh, per-key-LWW spine grant) — NOT a governance TrustRoot, a login Principal's identity."""
+        if self.owner_key is None:
+            raise ValueError("enroll_pubkey requires the owner signing key")
+        u = _check_username(username)
+        pk = _check_user_pubkey(user_pubkey)
+        acct = self._fold().get(u)
+        if acct is None:
+            raise ValueError(f"no such active account {u!r} (create it first, or it was revoked)")
+        return self._append_active(u, acct.role, cred_hash=acct.cred_hash, cred_salt=acct.cred_salt,
+                                   issued_at=float(issued_at), user_pubkey=pk)
+
+    def mint_session_bearer(self, username: str, *, issued_at: float) -> "tuple[str, int]":
+        """Mint a FRESH owner-signed session bearer for an existing active account, returning
+        (bearer, recorded_seq). The PoP login uses this: because the plaintext bearer is NEVER stored (only
+        its salted hash), a successful proof-of-possession cannot echo a pre-existing bearer — it hands back
+        a freshly-rotated one that flows through the SAME X-SIGIL-Token carrier + `resolve()` path (zero
+        change downstream). Preserves the account's role + bound `user_pubkey`; `issued_at` is bumped to
+        STRICTLY exceed the per-username high-water so the rotation is always honored (never silently dropped
+        as a stale replay under a same-tick clock). Owner-signed (single-owner doctrine)."""
+        if self.owner_key is None:
+            raise ValueError("mint_session_bearer requires the owner signing key")
+        u = _check_username(username)
+        acct = self._fold().get(u)
+        if acct is None:
+            raise ValueError(f"no such active account {u!r}")
+        iat = max(float(issued_at), math.nextafter(acct.issued_at, math.inf))
+        bearer = secrets.token_urlsafe(32)
+        salt = secrets.token_hex(16)
+        cred_hash = sha256_hex((salt + bearer).encode("utf-8"))
+        seq = self._append_active(u, acct.role, cred_hash=cred_hash, cred_salt=salt,
+                                  issued_at=iat, user_pubkey=acct.user_pubkey)
+        return bearer, seq
 
     def revoke(self, username: str) -> int:
         """Revoke an account — the SAFE direction. Owner-signed for provenance/audit, but takes effect
@@ -202,9 +269,10 @@ class AccountsRegistry:
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
     def _append_active(self, username: str, role: str, *, cred_hash: str, cred_salt: str,
-                       issued_at: float) -> int:
+                       issued_at: float, user_pubkey: Optional[str] = None) -> int:
         core = {"signal": SIGNAL, "username": username, "role": role, "cred_hash": cred_hash,
-                "cred_salt": cred_salt, "state": "active", "issued_at": float(issued_at)}
+                "cred_salt": cred_salt, "state": "active", "issued_at": float(issued_at),
+                "user_pubkey": user_pubkey}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"account {username} → {role} (owner-signed grant)"}
@@ -237,10 +305,12 @@ class AccountsRegistry:
                     continue                          # REPLAY / stale re-append of an already-honored grant
                 issued[username] = at                 # consume it so its own replay is refused hereafter
                 state[username] = "active"
+                upk = p.get("user_pubkey")
                 accts[username] = Account(
                     username=str(username), role=str(p.get("role") or ""),
                     cred_hash=str(p.get("cred_hash") or ""), cred_salt=str(p.get("cred_salt") or ""),
-                    issued_at=at, state="active")
+                    issued_at=at, state="active",
+                    user_pubkey=(str(upk) if upk else None))   # carried through unchanged (None ⇒ bearer-only)
         return {u: a for u, a in accts.items() if state.get(u) == "active"}
 
     def resolve(self, token: str) -> Optional[Principal]:
@@ -255,6 +325,14 @@ class AccountsRegistry:
             if hmac.compare_digest(sha256_hex((a.cred_salt + token).encode("utf-8")), a.cred_hash):
                 return Principal(username=a.username, role=a.role)
         return None
+
+    def account(self, username: str) -> Optional[Account]:
+        """The current active `Account` for `username` (carrying its bound `user_pubkey`), or None
+        (fail-closed — a revoked/unknown username is absent from the fold). Folds ONCE. Used by the PoP
+        login to look up the account's owner-bound login key before verifying the challenge signature."""
+        if not isinstance(username, str) or not username:
+            return None
+        return self._fold().get(username)
 
     def accounts(self) -> list[Account]:
         """The current active fold (for the owner's Users & Roles list). The cred_hash/cred_salt live on the
