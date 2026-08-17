@@ -83,7 +83,15 @@ def strict_highwater_enabled() -> bool:
     var (``VIGIL_STRICT_HIGHWATER``). Fail-SAFE default OFF (back-compat): returns ``True`` ONLY for an
     explicit affirmative (``1``/``true``/``yes``/``on``, case/space-insensitive); every other value (incl.
     unset/empty) is ``False`` = today's warn-accept. Used as the default ``strict=`` for
-    :func:`verify_highwater_signature` at call sites that don't thread an explicit flag."""
+    :func:`verify_highwater_signature` at call sites that don't thread an explicit flag.
+
+    SCOPE (honest): the strict profile is ENFORCED today at the evidence verifier
+    (``framework/v2/evidence/cli.py`` — the ``_HW_EVIDENCE_DOMAIN`` floor). The posture/attestation writers
+    now GOVERNANCE-SIGN their ``_HW_DOMAIN`` floors, but their own local verifiers (``verify_posture_series`` /
+    ``verify_log``) check floor MONOTONICITY + the head signature, NOT the floor's own signature — so for those
+    floors the writer-signing is defense-in-depth that a governance-anchored auditor CAN strict-verify, not an
+    end-to-end reject on the internal verify paths. Do not read "signed floors in the strict profile" as
+    end-to-end enforcement on every floor consumer."""
     return os.environ.get(_STRICT_HW_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 

@@ -401,7 +401,10 @@ def main(argv: list[str]) -> int:
                         "downgrade is rejected). Also enabled by VIGIL_STRICT_HIGHWATER=1. Default OFF = "
                         "warn-accept an unsigned floor (byte-identical to before). A signed floor verifies in "
                         "both modes; this closes strip-to-unsigned only for THIS verifier holding the anchor — "
-                        "a same-host head+floor co-rewrite still needs the out-of-band witnessed checkpoint.")
+                        "a same-host head+floor co-rewrite still needs the out-of-band witnessed checkpoint. "
+                        "PAIR IT with --highwater-signer-file so this verifier WRITES a signed floor; enabling "
+                        "strict WITHOUT a signer makes the first verify write an unsigned floor and the next "
+                        "strict-verify reject it (exit 2).")
     p.set_defaults(fn=_verify)
 
     p = sub.add_parser("pcf-export", help="project a signed evidence bundle into PCF v0.1 certificates")

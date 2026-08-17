@@ -37,12 +37,17 @@ call time, so importing this module in the sovereign env never co-loads the offe
 Determinism: no wallclock / rng in the signed math — the prove-cert already carries the caller-supplied
 ``now`` / ``run_id`` / nonces; ``seq`` is the tick index; the chain + head are pure functions of the ticks.
 
-HONEST LIMIT (do NOT overclaim, mirrors :mod:`vigil_core.highwater`): the durable floor is a LOCAL, unsigned
-0600 file. A SAME-HOST attacker with the owner's UID (or root) who rewrites the tick log, the head, AND the
-floor together defeats the LOCAL :func:`verify_log` path (it re-reads the floor from that same
-attacker-controlled disk). The sound anti-rollback guarantee therefore holds against (i) an attacker who can
-overwrite the log/head but NOT the floor, and (ii) an OUT-OF-BAND verifier that retained a newer floor. A
-fully-dishonest producer is closed only by the independent out-of-band witness (VF-1c), not by this file.
+HONEST LIMIT (do NOT overclaim, mirrors :mod:`vigil_core.highwater`): the durable floor is a LOCAL 0600 file,
+now GOVERNANCE-SIGNED when a governance key is available (C-S5; falls back to unsigned + a one-time warning
+when no key is present, byte-identical to the pre-C-S5 floor). This local :func:`verify_log` path itself
+checks only floor MONOTONICITY + the head signature — it does NOT verify the floor's own signature (that is
+enforced, in the strict production profile, by the evidence verifier that holds the governance anchor; here
+the floor signature is defense-in-depth). A SAME-HOST attacker with the owner's UID (or root) who rewrites the
+tick log, the head, AND the floor together defeats the LOCAL :func:`verify_log` path (it re-reads the floor
+from that same attacker-controlled disk). The sound anti-rollback guarantee therefore holds against (i) an
+attacker who can overwrite the log/head but NOT the floor, and (ii) an OUT-OF-BAND verifier that retained a
+newer floor. A fully-dishonest producer is closed only by the independent out-of-band witness (VF-1c), not by
+this file.
 """
 from __future__ import annotations
 
