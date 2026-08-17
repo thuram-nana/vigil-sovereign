@@ -68,6 +68,8 @@ import hashlib
 import json
 import logging
 import os
+import shutil
+import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from vigil_core import canonical_json, sha256_hex, sign, verify_one
@@ -126,7 +128,6 @@ def _read_sqlite_consistent(src: Path) -> bytes:
     magic / not-a-db / open error): an opaque non-db file is better preserved verbatim than lost. The snapshot
     is consistent as of the snapshot INSTANT; it is not a guarantee about writers that commit afterwards."""
     import sqlite3
-    import tempfile
 
     try:
         with open(src, "rb") as fh:
@@ -204,6 +205,41 @@ def _safe_target(root: Path, root_resolved: Path, rel: str) -> Path:
     if not target.resolve().is_relative_to(root_resolved):
         raise OffenseBackupError(f"refusing an unsafe backup path {rel!r}")
     return target
+
+
+def _dir_is_nonempty(p: Path) -> bool:
+    """True iff ``p`` exists as a directory that already holds at least one entry (the guard for a
+    restore-would-overlay-stale-state refusal). A missing path or an empty dir is a clean target."""
+    return p.is_dir() and any(p.iterdir())
+
+
+def _new_staging_dir(dest: Path) -> Path:
+    """A private staging dir under ``dest``'s PARENT (guaranteeing the SAME filesystem, so the final
+    ``os.replace`` is an ATOMIC rename, not a cross-device copy). The whole restored tree is built + re-verified
+    HERE and only swapped onto ``dest`` once everything passes — so a mid-restore crash leaves ``dest`` as the
+    complete OLD tree (or absent), never a half-written mix of old and new files."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=".restore-staging-", dir=str(dest.parent)))
+
+
+def _atomic_swap_into_place(staged: Path, dest: Path) -> None:
+    """Move a fully-built, fully-verified ``staged`` tree onto ``dest`` so ``dest`` is only ever the complete
+    OLD tree, absent, or the complete NEW tree — never a partial mix. If ``dest`` already exists it is renamed
+    ASIDE first (atomic), the staged tree renamed in (atomic), then the old tree deleted; a failure between the
+    two renames rolls the move-aside back. Both renames are same-filesystem (``staged`` and the aside name both
+    live under ``dest.parent``), so each is atomic. NOTE: this makes ONE destination atomic; a caller with two
+    destinations swaps them sequentially (see ``restore_offense_backup``)."""
+    if dest.exists():
+        aside = dest.parent / (".restore-old-" + staged.name)
+        os.replace(str(dest), str(aside))                 # atomic: dest → aside (dest now absent)
+        try:
+            os.replace(str(staged), str(dest))            # atomic: staged → dest (the new tree lands whole)
+        except OSError:
+            os.replace(str(aside), str(dest))             # best-effort: restore the old tree on failure
+            raise
+        shutil.rmtree(aside, ignore_errors=True)          # drop the old tree (stale files do NOT survive)
+    else:
+        os.replace(str(staged), str(dest))                # atomic: staged → a fresh dest
 
 
 def _iter_base_files(base: Path):
@@ -352,13 +388,24 @@ def _verify_evidence_bundles(root: Path) -> int:
     return count
 
 
-def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None, expect_pubkey=None) -> dict:
-    """Decrypt + VERIFY an offense backup, then write the base_dir state into ``new_base`` and the CRUCIBLE
-    proof state into ``crucible_root``. Fail-closed: the passphrase must decrypt, the governance signature
-    over the manifest must verify, and every file's sha256 must match BEFORE anything is written. The three
-    identity keys are re-sealed through the NEW vault. AFTER the write it RE-VERIFIES — every restored spine's
-    chain/signatures, the segment view (no FAILED), and every restored evidence bundle — and returns
-    ``{"verified": True, ...}`` ONLY if all pass, else raises OffenseBackupError.
+def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None, expect_pubkey=None,
+                           force: bool = False) -> dict:
+    """Decrypt + VERIFY an offense backup, then STAGE the base_dir state and the CRUCIBLE proof state into
+    private temp dirs, RE-VERIFY the staged trees, and only then ATOMICALLY swap them onto ``new_base`` and
+    ``crucible_root``. Fail-closed: the passphrase must decrypt, the governance signature over the manifest
+    must verify, and every file's sha256 must match BEFORE anything is written. The three identity keys are
+    re-sealed through the NEW vault. The staged tree is RE-VERIFIED — every restored spine's chain/signatures,
+    the segment view (no FAILED), and every restored evidence bundle — and returns ``{"verified": True, ...}``
+    ONLY if all pass, else raises OffenseBackupError with the destinations UNTOUCHED.
+
+    STAGED / ATOMIC restore (no stale-state overlay): the whole restored tree is built + verified in a sibling
+    temp dir under the destination's PARENT, then renamed into place, so a mid-restore crash leaves each
+    destination as the complete OLD tree (or absent), never a half-written mix of old and new files. A
+    NON-EMPTY ``new_base`` (or ``crucible_root``) is REFUSED unless ``force=True`` — restore must not silently
+    overlay whatever already lives there. With ``force`` the existing tree is cleanly REPLACED (stale files do
+    not survive). Honest limit: each destination is swapped atomically, but the two destinations are swapped
+    SEQUENTIALLY (base then crucible) — a crash between the two swaps leaves base=new, crucible=old, each
+    internally consistent (never a torn tree), not a jointly-atomic two-dir transaction.
 
     ``expect_pubkey`` (optional) is the out-of-band AUTHENTICITY pin: the expected offense-GOVERNANCE pubkey
     the recipient obtained through a trusted channel. When supplied, the in-body manifest pubkey MUST equal it
@@ -422,45 +469,72 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
         raise OffenseBackupError("backup carries CRUCIBLE proof files but no crucible_root was given to "
                                  "restore them into — refusing a partial restore")
 
-    # decode + verify EVERY file against the signed manifest BEFORE writing anything (fail-closed). Each rel is
-    # routed to base_dir or crucible_root and resolved to ONE validated target; the SAME target is written.
-    new_base_resolved = new_base.resolve()
-    croot_resolved = croot.resolve() if croot is not None else None
-    decoded: list[tuple[Path, bytes, str]] = []
-    for rel, b64 in files.items():
-        if rel.startswith(_CRUCIBLE_PREFIX):
-            target = _safe_target(croot, croot_resolved, rel[len(_CRUCIBLE_PREFIX):])   # type: ignore[arg-type]
-        else:
-            target = _safe_target(new_base, new_base_resolved, rel)
-        try:
-            data = base64.b64decode(b64)
-        except Exception as e:  # noqa: BLE001
-            raise OffenseBackupError(f"corrupt file blob {rel!r}: {e}") from e
-        if sha256_hex(data) != hashes[rel]:
-            raise OffenseBackupError(f"file {rel!r} does not match its signed hash (tamper)")
-        decoded.append((target, data, rel))
+    # STAGED / ATOMIC restore: refuse to OVERLAY a non-empty destination unless force, then build + re-verify
+    # the WHOLE tree in a sibling temp dir and swap it into place at the very end (no half-written mix on crash).
+    if not force and _dir_is_nonempty(new_base):
+        raise OffenseBackupError(
+            f"refusing to restore into a NON-EMPTY base dir {new_base} (a restore must not overlay stale "
+            f"state) — pass force=True (--force) to REPLACE it, or restore into a fresh/empty dir")
+    if not force and croot is not None and _dir_is_nonempty(croot):
+        raise OffenseBackupError(
+            f"refusing to restore into a NON-EMPTY crucible root {croot} (a restore must not overlay stale "
+            f"state) — pass force=True (--force) to REPLACE it, or restore into a fresh/empty dir")
 
-    new_base.mkdir(parents=True, exist_ok=True)
-    if croot is not None:
-        croot.mkdir(parents=True, exist_ok=True)
-    for target, data, rel in decoded:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-        if _is_sensitive_rel(rel):
-            os.chmod(target, 0o600)
-    # re-seal the three identity keys through the NEW vault (sealed under the new TPM if provisioned, else
-    # plaintext-0600) — each with its own AEAD purpose context.
-    dst_vault = Vault(new_base / "vault")
-    key_ctx = {name: ctx for name, ctx in _REWRAP_KEYS}
-    for name, val in secrets.items():
-        ctx = key_ctx.get(name)
-        if ctx is None:
-            raise OffenseBackupError(f"backup carries an unknown re-wrapped secret {name!r} — refusing")
-        dst_vault.write_text_secret(new_base / name, val, context=ctx)
+    staged_base: Path | None = _new_staging_dir(new_base)
+    staged_croot: Path | None = _new_staging_dir(croot) if croot is not None else None
+    try:
+        # decode + verify EVERY file against the signed manifest BEFORE writing anything (fail-closed). Each rel
+        # is routed to the STAGED base or STAGED crucible tree and resolved to ONE validated target inside it
+        # (the SAME path-escape guard); the SAME target is written.
+        staged_base_resolved = staged_base.resolve()
+        staged_croot_resolved = staged_croot.resolve() if staged_croot is not None else None
+        for rel, b64 in files.items():
+            if rel.startswith(_CRUCIBLE_PREFIX):
+                target = _safe_target(staged_croot, staged_croot_resolved,   # type: ignore[arg-type]
+                                      rel[len(_CRUCIBLE_PREFIX):])
+            else:
+                target = _safe_target(staged_base, staged_base_resolved, rel)
+            try:
+                data = base64.b64decode(b64)
+            except Exception as e:  # noqa: BLE001
+                raise OffenseBackupError(f"corrupt file blob {rel!r}: {e}") from e
+            if sha256_hex(data) != hashes[rel]:
+                raise OffenseBackupError(f"file {rel!r} does not match its signed hash (tamper)")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            if _is_sensitive_rel(rel):
+                os.chmod(target, 0o600)
 
-    verified_bundles = _reverify_restored(new_base, croot, secrets)
+        # re-seal the three identity keys through the NEW vault (sealed under the new TPM if provisioned, else
+        # plaintext-0600) — each with its own AEAD purpose context. The vault dir is built inside the staged
+        # tree and swapped in with it.
+        dst_vault = Vault(staged_base / "vault")
+        key_ctx = {name: ctx for name, ctx in _REWRAP_KEYS}
+        for name, val in secrets.items():
+            ctx = key_ctx.get(name)
+            if ctx is None:
+                raise OffenseBackupError(f"backup carries an unknown re-wrapped secret {name!r} — refusing")
+            dst_vault.write_text_secret(staged_base / name, val, context=ctx)
+
+        # RE-VERIFY the STAGED tree — nothing is swapped into place until this passes, so a failed re-verify
+        # leaves the real destinations UNTOUCHED (still the complete old state, or absent).
+        verified_bundles = _reverify_restored(staged_base, staged_croot, secrets)
+
+        # everything verified: atomically swap the staged trees onto the real destinations (base first, then
+        # crucible). Clearing the ref after each swap keeps the finally from deleting a tree already moved in.
+        _atomic_swap_into_place(staged_base, new_base)
+        staged_base = None
+        if staged_croot is not None:
+            _atomic_swap_into_place(staged_croot, croot)   # type: ignore[arg-type]
+            staged_croot = None
+    finally:
+        if staged_base is not None:
+            shutil.rmtree(staged_base, ignore_errors=True)
+        if staged_croot is not None:
+            shutil.rmtree(staged_croot, ignore_errors=True)
+
     return {"new_base": str(new_base), "crucible_root": (str(croot) if croot else None),
-            "files": len(decoded), "secrets": len(secrets),
+            "files": len(files), "secrets": len(secrets),
             "bundles_verified": verified_bundles, "verified": True}
 
 

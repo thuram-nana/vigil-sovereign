@@ -32,6 +32,8 @@ import base64
 import hashlib
 import json
 import os
+import shutil
+import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -206,12 +208,52 @@ def _safe_target(new_home: Path, new_home_resolved: Path, rel: str) -> Path:
     return target
 
 
-def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, vault: Any) -> dict:
-    """Decrypt + VERIFY a backup, then write the trust root + spine into ``new_home``. Fail-closed: the
-    passphrase must decrypt, the owner signature over the manifest must verify, and every file's sha256
-    must match BEFORE anything is written; the restored spine is then re-verified (`store.verify`). The
-    owner private key + DEK are re-sealed through ``vault`` (under the NEW machine's TPM if provisioned,
-    else plaintext)."""
+def _dir_is_nonempty(p: Path) -> bool:
+    """True iff ``p`` exists as a directory that already holds at least one entry (the guard for a
+    restore-would-overlay-stale-state refusal). A missing path or an empty dir is a clean target."""
+    return p.is_dir() and any(p.iterdir())
+
+
+def _new_staging_dir(dest: Path) -> Path:
+    """A private staging dir under ``dest``'s PARENT (same filesystem → the final ``os.replace`` is an ATOMIC
+    rename). The whole restored home is built + re-verified HERE and only swapped onto ``dest`` once everything
+    passes, so a mid-restore crash leaves ``dest`` as the complete OLD home (or absent), never a mixed home."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=".restore-staging-", dir=str(dest.parent)))
+
+
+def _atomic_swap_into_place(staged: Path, dest: Path) -> None:
+    """Move a fully-built, fully-verified ``staged`` tree onto ``dest`` so ``dest`` is only ever the complete
+    OLD tree, absent, or the complete NEW tree — never a partial mix. If ``dest`` already exists it is renamed
+    ASIDE first (atomic), the staged tree renamed in (atomic), then the old tree deleted; a failure between the
+    two renames rolls the move-aside back."""
+    if dest.exists():
+        aside = dest.parent / (".restore-old-" + staged.name)
+        os.replace(str(dest), str(aside))                 # atomic: dest → aside (dest now absent)
+        try:
+            os.replace(str(staged), str(dest))            # atomic: staged → dest (the new tree lands whole)
+        except OSError:
+            os.replace(str(aside), str(dest))             # best-effort: restore the old tree on failure
+            raise
+        shutil.rmtree(aside, ignore_errors=True)          # drop the old tree (stale files do NOT survive)
+    else:
+        os.replace(str(staged), str(dest))                # atomic: staged → a fresh dest
+
+
+def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, vault: Any,
+                   force: bool = False) -> dict:
+    """Decrypt + VERIFY a backup, then STAGE the trust root + spine into a private temp dir, re-verify it, and
+    only then ATOMICALLY swap it onto ``new_home``. Fail-closed: the passphrase must decrypt, the owner
+    signature over the manifest must verify, and every file's sha256 must match BEFORE anything is written; the
+    staged spine is then re-verified (`store.verify`). The owner private key + DEK are re-sealed through
+    ``vault`` (under the NEW machine's TPM if provisioned, else plaintext).
+
+    STAGED / ATOMIC restore (no stale-state overlay): the whole restored home is built + verified in a sibling
+    temp dir under ``new_home``'s PARENT, then renamed into place — so a mid-restore crash leaves ``new_home``
+    as the complete OLD home (or absent), never a half-written mix. A NON-EMPTY ``new_home`` is REFUSED unless
+    ``force=True`` — restore must not silently overlay whatever already lives there; with ``force`` the existing
+    home is cleanly REPLACED (stale files do not survive). Honest limit: the swap is atomic against a CRASH, not
+    against a concurrent WRITER already mutating ``new_home``."""
     src, new_home = Path(src), Path(new_home)
     salt, sealed = _read_header(src)
     try:
@@ -261,44 +303,58 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
     for _label, _val in (("owner private key", body.get("owner_priv_b64")), ("spine DEK", body.get("spine_dek_b64"))):
         if _val is not None and not isinstance(_val, str):
             raise BackupError(f"backup {_label} is malformed (expected a string)")
-    # decode + verify EVERY file against the signed manifest BEFORE writing anything (fail-closed). Each rel
-    # is resolved to ONE validated target INSIDE new_home, and that SAME target is what we later write — so
-    # the check and the write can never diverge (closing the "validate the normalised path, write the raw
-    # path" class of escape).
-    new_home_resolved = new_home.resolve()
-    decoded: list[tuple[Path, bytes, str]] = []
-    for rel, b64 in files.items():
-        target = _safe_target(new_home, new_home_resolved, rel)
-        try:
-            data = base64.b64decode(b64)
-        except Exception as e:  # noqa: BLE001
-            raise BackupError(f"corrupt file blob {rel!r}: {e}") from e
-        if sha256_hex(data) != hashes[rel]:
-            raise BackupError(f"file {rel!r} does not match its signed hash (tamper)")
-        decoded.append((target, data, rel))
+    # STAGED / ATOMIC restore: refuse to OVERLAY a non-empty destination unless force, then build + re-verify
+    # the WHOLE home in a sibling temp dir and swap it into place at the very end (no half-written mix on crash).
+    if not force and _dir_is_nonempty(new_home):
+        raise BackupError(
+            f"refusing to restore into a NON-EMPTY home {new_home} (a restore must not overlay stale state) — "
+            f"pass force=True (--force) to REPLACE it, or restore into a fresh/empty dir")
 
-    new_home.mkdir(parents=True, exist_ok=True)
-    for target, data, rel in decoded:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-        # key material (the WARDEN kernel key + any *.key) must be 0600, not the process umask — a plain
-        # write_bytes would otherwise leave it world-readable-by-umask (a real perms fix, not cosmetic).
-        if _is_sensitive_rel(rel):
-            os.chmod(target, 0o600)
-    # re-seal the machine-bound secrets through the NEW vault (seals under the new TPM if provisioned).
-    if body.get("owner_priv_b64"):
-        vault.write_text_secret(new_home / "spine" / "keys" / "owner.priv",
-                                body["owner_priv_b64"], context=_OWNER_PRIV_CONTEXT)
-    if body.get("spine_dek_b64"):
-        vault.write_text_secret(new_home / "spine" / "keys" / "spine.dek",
-                                body["spine_dek_b64"], context=_DEK_CONTEXT)
+    staged: Path | None = _new_staging_dir(new_home)
+    try:
+        # decode + verify EVERY file against the signed manifest BEFORE writing anything (fail-closed). Each rel
+        # is resolved to ONE validated target INSIDE the STAGED home, and that SAME target is what we write — so
+        # the check and the write can never diverge (closing the "validate the normalised path, write the raw
+        # path" class of escape).
+        staged_resolved = staged.resolve()
+        for rel, b64 in files.items():
+            target = _safe_target(staged, staged_resolved, rel)
+            try:
+                data = base64.b64decode(b64)
+            except Exception as e:  # noqa: BLE001
+                raise BackupError(f"corrupt file blob {rel!r}: {e}") from e
+            if sha256_hex(data) != hashes[rel]:
+                raise BackupError(f"file {rel!r} does not match its signed hash (tamper)")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            # key material (the WARDEN kernel key + any *.key) must be 0600, not the process umask — a plain
+            # write_bytes would otherwise leave it world-readable-by-umask (a real perms fix, not cosmetic).
+            if _is_sensitive_rel(rel):
+                os.chmod(target, 0o600)
+        # re-seal the machine-bound secrets through the NEW vault (seals under the new TPM if provisioned) — into
+        # the STAGED home, swapped into place with the rest of the tree.
+        if body.get("owner_priv_b64"):
+            vault.write_text_secret(staged / "spine" / "keys" / "owner.priv",
+                                    body["owner_priv_b64"], context=_OWNER_PRIV_CONTEXT)
+        if body.get("spine_dek_b64"):
+            vault.write_text_secret(staged / "spine" / "keys" / "spine.dek",
+                                    body["spine_dek_b64"], context=_DEK_CONTEXT)
 
-    # re-verify the restored spine's internal integrity (keyless binding + chain) — never claim a restore
-    # succeeded on a corrupt ledger.
-    from .spine.store import SpineStore
-    ok, why = SpineStore(new_home / "spine" / "spine.jsonl").verify()
-    if not ok:
-        raise BackupError(f"restored spine failed verification ({why}) — the restore is NOT trustworthy")
-    return {"home": str(new_home), "files": len(decoded), "owner_key": bool(body.get("owner_priv_b64")),
+        # re-verify the STAGED spine's internal integrity (keyless binding + chain) — never claim a restore
+        # succeeded on a corrupt ledger, and never swap an unverified home into place.
+        from .spine.store import SpineStore
+        ok, why = SpineStore(staged / "spine" / "spine.jsonl").verify()
+        if not ok:
+            raise BackupError(f"restored spine failed verification ({why}) — the restore is NOT trustworthy")
+
+        # everything verified: atomically swap the staged home onto new_home (clearing the ref so the finally
+        # does not delete a tree already moved in).
+        _atomic_swap_into_place(staged, new_home)
+        staged = None
+    finally:
+        if staged is not None:
+            shutil.rmtree(staged, ignore_errors=True)
+
+    return {"home": str(new_home), "files": len(files), "owner_key": bool(body.get("owner_priv_b64")),
             "dek": bool(body.get("spine_dek_b64")),
-            "warden": sum(1 for _t, _d, rel in decoded if rel.startswith("warden/")), "verified": True}
+            "warden": sum(1 for rel in files if rel.startswith("warden/")), "verified": True}

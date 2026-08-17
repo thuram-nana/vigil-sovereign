@@ -1870,7 +1870,7 @@ def _cmd_restore(args: argparse.Namespace) -> int:
             expect_pub = getattr(args, "expect_governance_pubkey", "") or None
             try:
                 res = restore_offense_backup(off, args.base_dir, pw, crucible_root=croot,
-                                             expect_pubkey=expect_pub)
+                                             expect_pubkey=expect_pub, force=getattr(args, "force", False))
             except OffenseBackupError as e:
                 print(f"vigil restore: offense leg failed (nothing trusted): {e}", file=sys.stderr)
                 return 1
@@ -1889,7 +1889,10 @@ def _cmd_restore(args: argparse.Namespace) -> int:
                 print("vigil restore: --sigil-home <fresh dir> is required to restore the sovereign plane",
                       file=sys.stderr)
                 return 2
-            rc = _run_sovereign_leg(["restore", str(sov), home], pw)
+            sov_args = ["restore", str(sov), home]
+            if getattr(args, "force", False):
+                sov_args.append("--force")     # forward the non-empty-target override to the sovereign leg
+            rc = _run_sovereign_leg(sov_args, pw)
             if rc != 0:
                 print(f"vigil restore: sovereign leg failed (exit {rc})", file=sys.stderr)
                 return 1
@@ -2447,6 +2450,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="out-of-band AUTHENTICITY pin: the expected offense-governance pubkey (base64). When "
                           "set, the offense backup's manifest MUST be signed by it — else restore refuses. "
                           "Without it, offense restore authenticity is passphrase-possession only.")
+    prs.add_argument("--force", action="store_true",
+                     help="REPLACE a non-empty destination (base-dir / crucible-root / sigil-home). Without it, "
+                          "restore refuses a non-empty target rather than overlay stale state. The replacement "
+                          "is still staged + verified first and swapped in atomically (crash-safe).")
     grp2 = prs.add_mutually_exclusive_group()
     grp2.add_argument("--sovereign-only", dest="sovereign_only", action="store_true",
                       help="restore ONLY the sovereign plane")
