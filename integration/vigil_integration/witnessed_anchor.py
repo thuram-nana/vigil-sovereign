@@ -189,9 +189,14 @@ def emit_witnessed(head, witnesses: "list[Witness]", *, retain_path: os.PathLike
     """Emit-on-advance: summarise ``head`` into the next checkpoint (LINKED to the retained tip so the
     meta-chain survives restarts), gather witness co-signatures, PERSIST the new tip off-box at
     ``retain_path``, and return the :class:`WitnessedCheckpoint`. Mirrors ``witness.emit_checkpoint`` /
-    ``transparency.CheckpointEmitter.emit``: idempotent on an unchanged head position, refuses a
-    non-append-only head (``consistent``), and gathers the willing witnesses ATOMICALLY (decide who signs
-    before any state mutates). ``retain_path`` is a stable path the verifier RETAINS OFF-BOX — a copy kept
+    ``transparency.CheckpointEmitter.emit``: idempotent on an unchanged POSITION *and* prune BOUNDARY — a
+    prune that advances ``base_seq``/``base_count`` at an idle tip IS witness-worthy (since C-S1 the boundary
+    is part of the checkpoint's SIGNED identity), so it re-mints and re-persists the off-box tip; else a
+    prune-then-idle system would keep a stale off-box witness (base_seq=0) and an un-prune back to it would
+    pass the anchor. (``merkle_root`` stays excluded — a schedule-dependent fold, so a same-boundary root-only
+    change still dedups.) Refuses a non-append-only head (``consistent``), and gathers the willing witnesses
+    ATOMICALLY (decide who signs before any state mutates). ``retain_path`` is a stable path the verifier
+    RETAINS OFF-BOX — a copy kept
     only alongside the spine is rolled back with it and adds NOTHING over the local floor (the anti-rollback
     comes from EXTERNAL retention, not a local sidecar)."""
     if not witnesses:
@@ -201,8 +206,9 @@ def emit_witnessed(head, witnesses: "list[Witness]", *, retain_path: os.PathLike
     cp = checkpoint_of(head, prev_checkpoint_hash=prev)
     if tip is not None:
         last = tip.checkpoint
-        if (cp.entry_count, cp.last_seq, cp.head_hash) == (last.entry_count, last.last_seq, last.head_hash):
-            return tip                                     # idempotent: unchanged position, no second mint
+        if (cp.entry_count, cp.last_seq, cp.head_hash, cp.base_seq, cp.base_count) == (
+                last.entry_count, last.last_seq, last.head_hash, last.base_seq, last.base_count):
+            return tip                                     # idempotent: unchanged position AND boundary
         ok, why = consistent(last, cp)
         if not ok:
             raise AnchorError(f"refusing to emit an inconsistent witnessed checkpoint: {why}")
