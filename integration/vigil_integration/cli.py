@@ -103,10 +103,31 @@ def _cmd_engage(args: argparse.Namespace) -> int:
         from .brains.engine_think import BrainThink
         from .brains.hexstrike_brain import HexstrikeBrain
         brain = BrainThink(HexstrikeBrain(), target=args.url, objective=args.objective)
+    # GAP-1 — the per-session model sovereignty pick. --backend (LOCAL) and --model (CLOUD) are mutually
+    # exclusive: a local backend routes think through the loopback-enforced provider with no cloud failover,
+    # so simultaneously naming a cloud model string is contradictory. Fail-closed on the contradiction rather
+    # than silently preferring one (which could be the cloud one — an egress the operator did not intend).
+    pick_model = str(getattr(args, "model", "") or "").strip()
+    pick_backend = str(getattr(args, "backend", "") or "").strip()
+    if pick_model and pick_backend:
+        print("vigil engage: --model (a cloud model) and --backend (a local backend) are mutually "
+              "exclusive — pass exactly one.", file=sys.stderr)
+        return 2
+    if pick_backend:
+        # --backend is LOCAL-intent only. Refuse an unrecognised name rather than let the engine fall to the
+        # tier-gated cloud path (a silent cloud egress the operator did not intend — closes the "backend-name
+        # list drift" hole). A recognised local backend routes through the loopback-enforced provider.
+        from .live.think_claude import is_local_backend  # local import: pure fn, no heavy deps
+        if not is_local_backend(pick_backend):
+            print(f"vigil engage: --backend {pick_backend!r} is not a recognised LOCAL model backend "
+                  f"(ollama / vllm / llama-cpp / tgi / self-hosted). A local pick must never fall back to a "
+                  f"cloud model, so this is refused rather than run on cloud.", file=sys.stderr)
+            return 2
     cfg = EngineConfig(
         slug=args.slug, session_id=str(getattr(args, "session", "") or ""),
         connections=tuple(connect),
         base_dir=args.base_dir, replay=replay, api_key=None, brain=brain,
+        model=(pick_model or None), backend=(pick_backend or None),
         scope=tuple(scope) or ("127.0.0.1",),   # --scope is signed into the authority + enforced end-to-end
         access_log=args.access_log, auth_log=args.auth_log, conn_log=args.conn_log,
         max_iterations=args.max_iterations, owner_approves_offense=args.approve_offense,
@@ -1592,6 +1613,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="comma-separated CONNECTED session ids (F4) whose graph partitions this run may "
                          "UNION as priors (a read-time scope; each prior stays origin-tagged + "
                          "non-authoritative). Pass the ids you connected in the Sessions screen. Empty = isolated.")
+    pe.add_argument("--model", default="",
+                    help="GAP-1 model sovereignty: an EXPLICIT cloud model string for the think step (e.g. "
+                         "claude-sonnet-5). Overrides the ambient default; still sovereignty-tier-gated. "
+                         "Mutually exclusive with --backend (a cloud model vs a local backend).")
+    pe.add_argument("--backend", default="",
+                    help="GAP-1 model sovereignty: a LOCAL think backend (ollama / self-hosted / vllm / "
+                         "llama-cpp / tgi). The think step (and every fireteam member) routes through the "
+                         "loopback-enforced provider with NO cloud failover — the prompt + source never "
+                         "egress to a cloud model; an unreachable local backend REFUSES rather than falling "
+                         "back to cloud. Choosing this is the 'nothing leaves this machine' guarantee.")
     pe.add_argument("--replay", default="", help="a JSON file of scripted decisions (keyless-live)")
     pe.add_argument("--access-log", default="")
     pe.add_argument("--auth-log", default="")

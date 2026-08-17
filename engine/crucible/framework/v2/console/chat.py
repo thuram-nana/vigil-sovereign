@@ -1606,6 +1606,28 @@ def _model_backend(entry: dict) -> str:
     return _sov.direct_anthropic_backend_name()
 
 
+def resolve_session_model(model_id: str) -> tuple[str, str]:
+    """GAP-1 — map a per-session chat model id to what the SPAWNED work (agentic ``vigil engage``, fireteam
+    members, the codebase-edit) needs, as ``(cloud_model_string, local_backend_name)``:
+
+      * a CLOUD pick   → ``(model_string, "")``  — the model string to send to the cloud path;
+      * a LOCAL pick   → ``("", backend_name)``  — the loopback-enforced kernel backend the spawned work MUST
+        route through (or REFUSE), never a cloud model;
+      * blank / unknown→ ``("", "")``            — no explicit pick: the spawned work resolves its OWN default
+        under the sovereignty tier gate (byte-identical to the pre-GAP-1 behaviour).
+
+    This is the seam that carries the per-session sovereignty pick past the chat's OWN turn into the work it
+    launches — the whole point of the picker's "nothing leaves this machine" promise. It is the SAME
+    ``_CHAT_MODELS`` registry the chat's own reasoning path resolves against, so the two can never drift."""
+    mid = str(model_id or "").strip()
+    if not mid:
+        return "", ""                       # no pick → child keeps its ambient default (still tier-gated)
+    entry = _model_entry(mid)
+    if entry.get("kind") == "local":
+        return "", _model_backend(entry)    # the sovereignty backend name (ollama / self-hosted / …)
+    return str(entry.get("model") or entry.get("id") or ""), ""
+
+
 def chat_models() -> dict:
     """The per-session model picker's data (E3): every selectable model with its sovereignty TRUST CLASS,
     whether the current tier PERMITS it (and why not, if refused), and the plain-language CONSEQUENCE of
@@ -1708,9 +1730,17 @@ def _endpoint_host_is_local(backend) -> tuple[bool, str]:
     claimed: only ``localhost`` or a loopback IP LITERAL passes. A non-loopback host — or a hostname whose DNS
     could point anywhere now or later — does NOT (we never assert locality we cannot back). Fail-closed: an
     endpoint we cannot read is NOT local."""
+    return _url_host_is_local(str(getattr(backend, "base", "") or getattr(backend, "host", "") or ""))
+
+
+def _url_host_is_local(url: str) -> tuple[bool, str]:
+    """True IFF ``url``'s host is loopback (``localhost`` or a loopback IP LITERAL). A hostname (DNS can move)
+    or non-loopback IP is NOT local; fail-closed on empty/unparseable. Shared by the post-construction backend
+    check AND the PRE-construction endpoint check (so a remote endpoint is refused before a constructor that
+    probes — Ollama's __init__ does an httpx GET to its host)."""
     import ipaddress
     from urllib.parse import urlsplit
-    url = str(getattr(backend, "base", "") or getattr(backend, "host", "") or "").strip()
+    url = (url or "").strip()
     if not url:
         return False, "(no endpoint resolved)"
     try:
@@ -1727,6 +1757,17 @@ def _endpoint_host_is_local(backend) -> tuple[bool, str]:
         return False, host          # a hostname (not a loopback literal) — refuse; DNS can point anywhere
 
 
+def _configured_local_endpoint(backend_name: str) -> str:
+    """The endpoint a LOCAL backend WILL dial, resolved from env WITHOUT constructing it — so a REMOTE
+    endpoint is refused BEFORE ``OllamaBackend.__init__``'s httpx probe. Ollama → ``CRUCIBLE_OLLAMA_HOST``;
+    the self-hosted family → ``CRUCIBLE_SELFHOSTED_ENDPOINT`` / ``LLM_API_BASE``. Empty ⇒ cannot pre-resolve;
+    the post-construction check still enforces loopback."""
+    name = (backend_name or "").strip().lower()
+    if name == "ollama":
+        return os.environ.get("CRUCIBLE_OLLAMA_HOST", "http://localhost:11434")
+    return (os.environ.get("CRUCIBLE_SELFHOSTED_ENDPOINT") or os.environ.get("LLM_API_BASE") or "").strip()
+
+
 def _reason_local(chat_id: str, question: str, entry: dict, reason_mode: str) -> dict:
     """E3 — reason with a LOCAL model through the kernel provider layer. Sovereignty-correct by construction:
     the backend is built via ``get_backend(force=...)`` which asserts the sovereignty policy FIRST (a local
@@ -1741,17 +1782,26 @@ def _reason_local(chat_id: str, question: str, entry: dict, reason_mode: str) ->
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"the local-model provider layer is unavailable ({type(e).__name__}); "
                                       f"the gated assessment still runs."}
+    # ENFORCE loopback on the CONFIGURED endpoint BEFORE constructing the backend. OllamaBackend.__init__
+    # probes its host (httpx GET) DURING construction, so a REMOTE CRUCIBLE_OLLAMA_HOST would send an
+    # off-host request before any later check. Resolve the endpoint from env and refuse a non-loopback one
+    # FIRST — nothing is sent, not even a reachability probe.
+    _ep = _configured_local_endpoint(backend_name)
+    if _ep:
+        _ep_ok, _ep_host = _url_host_is_local(_ep)
+        if not _ep_ok:
+            return {"ok": False, "error": f"the selected local model is configured to a non-loopback endpoint "
+                    f"({_ep_host}), so choosing it would send your prompt and files off-host — refused, to keep "
+                    f"'nothing leaves this machine' true. Nothing was sent, not even a reachability probe. Point "
+                    f"the local model at localhost / 127.0.0.1, or pick a cloud model; the gated assessment still runs."}
     try:
-        backend = get_backend(force=backend_name)          # asserts_permitted FIRST, then builds (no egress yet)
+        backend = get_backend(force=backend_name)          # sovereignty asserted first; endpoint pre-validated loopback
     except SovereigntyViolation as e:
         return {"ok": False, "error": f"{e} Your files stay on this host; the gated assessment still runs."}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"the local model backend could not be initialised ({type(e).__name__}); "
-                                      f"nothing was sent anywhere. The gated assessment still runs."}
-    # ENFORCE the "nothing leaves this machine" promise before we assert it (red-pen BLOCK-1): a name-classed
-    # "local" backend whose endpoint is REMOTE would egress the prompt + codebase. Check the backend's own
-    # resolved endpoint is loopback FIRST — before is_available() (Ollama's probe would itself reach the host)
-    # and before the call. A remote/hostname endpoint REFUSES; nothing is sent.
+                                      f"nothing was sent off-host. The gated assessment still runs."}
+    # Defense in depth: re-check the CONSTRUCTED backend's actual resolved endpoint is loopback.
     local_ok, ep_host = _endpoint_host_is_local(backend)
     if not local_ok:
         return {"ok": False, "error": f"the selected local model's endpoint ({ep_host}) is not on this "
@@ -2438,6 +2488,19 @@ def chat_send(body: dict) -> dict:
         target = _path_in_message(message)
     model = str(body.get("model") or "").strip()[:64]
     effort = str(body.get("effort") or "").strip().lower()
+
+    # GAP-1 — PIN the per-session model pick on the session so the work this chat later launches (agentic
+    # engage, fireteam members, codebase edits) stays on the operator's chosen sovereignty backend even on a
+    # turn that omits body["model"] (a mid-run steer, a later edit). A blank turn does NOT clear the pin
+    # (only an explicit pick changes it), so "I picked local once" keeps holding. Best-effort: a registry
+    # hiccup never sinks the turn.
+    if model:
+        try:
+            actions._safe_run_id(chat_id)          # only pin on a path-safe id (never a traversal)
+            from . import sessions as _sessions
+            _sessions.set_session_model(chat_id, model)
+        except Exception:  # noqa: BLE001
+            pass
 
     # The user turn is recorded FIRST and records what the operator actually gave. Resolution comes
     # after, because it can unpack an archive — which appends an attachment pointer of its own, and a
