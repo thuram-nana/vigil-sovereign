@@ -248,8 +248,13 @@ def emit_checkpoint(head: Any, witnesses: list[Witness], *, tip_path: Path, scop
     restarts), gather witness co-signatures, persist the new tip, and return the WitnessedCheckpoint.
 
     Mirrors ``CheckpointEmitter.emit`` but with the emitter's in-memory tip made DURABLE: idempotent on an
-    unchanged head position, refuses a non-append-only head (``consistent``), and gathers the willing
-    witnesses atomically (decide who signs before any state mutates)."""
+    unchanged POSITION *and* prune BOUNDARY — a prune that advances base_seq/base_count at an idle tip IS
+    witness-worthy (since C-S1 the boundary is part of the checkpoint's SIGNED identity), so it re-mints and
+    re-persists the durable tip; else a prune-then-idle log keeps a stale base=0 witness and an un-prune back
+    to it passes ``verify_against_external`` (whose ``consistent`` guard is defeated by the stale anchor).
+    ``merkle_root`` stays excluded — a schedule-dependent fold, so a same-boundary root-only change dedups.
+    Refuses a non-append-only head (``consistent``), and gathers the willing witnesses atomically (decide who
+    signs before any state mutates)."""
     if not witnesses:
         raise WitnessError("emit needs at least one witness to co-sign the checkpoint")
     tip = load_tip(tip_path)
@@ -257,8 +262,9 @@ def emit_checkpoint(head: Any, witnesses: list[Witness], *, tip_path: Path, scop
     cp = checkpoint_of(head, prev_checkpoint_hash=prev)
     if tip is not None:
         last = tip.checkpoint
-        if (cp.entry_count, cp.last_seq, cp.head_hash) == (last.entry_count, last.last_seq, last.head_hash):
-            return tip                                  # idempotent: unchanged position, no second mint
+        if (cp.entry_count, cp.last_seq, cp.head_hash, cp.base_seq, cp.base_count) == (
+                last.entry_count, last.last_seq, last.head_hash, last.base_seq, last.base_count):
+            return tip                                  # idempotent: unchanged position AND boundary
         ok, why = consistent(last, cp)
         if not ok:
             raise WitnessError(f"refusing to emit an inconsistent checkpoint: {why}")

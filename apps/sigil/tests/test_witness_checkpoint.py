@@ -158,6 +158,23 @@ def test_emit_refuses_a_regressed_head(tmp_path):
         _emit(h2, tip)                                       # a lower head than the persisted tip
 
 
+def test_emit_re_mints_on_a_prune_boundary_advance(tmp_path):
+    """DEFECT 2 (sovereign I2 emitter): a prune advances base_seq/base_count at an IDLE tip (entry_count /
+    last_seq / head_hash unchanged). emit_checkpoint MUST re-mint AND re-persist the durable tip so the
+    retained anchor tracks the CURRENT boundary — else a stale base=0 witness stays on disk and an un-prune
+    (base → 0) later passes verify_against_external (whose consistent() guard is defeated by the stale anchor)."""
+    tip = tmp_path / "tip"
+    _e10, h = _chain(10)
+    assert _emit(h, tip).checkpoint.base_seq == 0
+    pruned = h.model_copy(update={"base_seq": 5, "base_count": 5})   # prune: boundary advances, tip unchanged
+    assert _emit(pruned, tip).checkpoint.base_seq == 5              # re-minted the boundary
+    assert W.load_tip(tip).checkpoint.base_seq == 5                 # durable tip REWRITTEN (not stale 0)
+    _emit(pruned, tip)                                              # same boundary → dedup
+    assert W.load_tip(tip).checkpoint.base_seq == 5                 # unchanged (no redundant mint)
+    with pytest.raises(W.WitnessError, match="inconsistent"):       # an un-prune (base → 0) is refused
+        _emit(h, tip)
+
+
 def test_tampered_envelope_fails_witness_verify(tmp_path):
     """Flipping the checkpoint's entry_count invalidates the witness signature → not a trusted anchor."""
     e2, h2 = _chain(2)

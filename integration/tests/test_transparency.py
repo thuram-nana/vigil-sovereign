@@ -136,9 +136,10 @@ def _witnesses(n):
 
 class _Head:
     """A duck-typed SignedChainHead: checkpoint_of reads these attrs via getattr."""
-    def __init__(self, last_seq, entry_count, head_hash, merkle):
+    def __init__(self, last_seq, entry_count, head_hash, merkle, base_seq=0, base_count=0):
         self.last_seq, self.entry_count = last_seq, entry_count
         self.head_hash, self.cumulative_merkle_root = head_hash, merkle
+        self.base_seq, self.base_count = base_seq, base_count
 
 
 def test_checkpoint_emitter_produces_a_verifiable_witnessed_chain():
@@ -216,6 +217,26 @@ def test_checkpoint_emitter_prune_advances_merkle_without_a_second_checkpoint():
     wc3 = em.emit(_Head(60, 110, "head-Y", "m-next"), ws)
     assert verify_split_view_resistant(wc3, witness_trust_root=tr) is True
     assert verify_log([wc1.checkpoint, wc3.checkpoint])[0] is True
+
+
+def test_checkpoint_emitter_witnesses_a_prune_only_boundary_advance():
+    # DEFECT 2 fix: a REAL prune advances the BOUNDARY (base_seq/base_count) at an unchanged tip
+    # (same last_seq/entry_count/head_hash). Since C-S1 the boundary is part of the checkpoint's SIGNED
+    # identity, so the emitter MUST mint a fresh witnessed checkpoint attesting the new boundary — a
+    # prune-then-idle system otherwise has NO witness for its current boundary (the tip-only key never
+    # fires because a prune moves records live→base without moving the tip).
+    ws, root = _witnesses(3)
+    tr = root(2)
+    em = CheckpointEmitter()
+    wc1 = em.emit(_Head(50, 100, "head-X", "m0", base_seq=0, base_count=0), ws)
+    wc2 = em.emit(_Head(50, 100, "head-X", "m1", base_seq=5, base_count=5), ws)  # prune: boundary advanced
+    assert wc2 is not wc1                                                    # a NEW checkpoint was minted
+    assert wc2.checkpoint.base_seq == 5 and wc2.checkpoint.base_count == 5   # attests the CURRENT boundary
+    assert verify_split_view_resistant(wc2, witness_trust_root=tr) is True
+    assert verify_log([wc1.checkpoint, wc2.checkpoint])[0] is True           # links consistently, no fork
+    # a SAME-boundary root-only change still dedups (schedule variation, NOT a boundary transition)
+    wc3 = em.emit(_Head(50, 100, "head-X", "m2", base_seq=5, base_count=5), ws)
+    assert wc3 is wc2
 
 
 def test_checkpoint_emitter_dedups_an_aliased_witness():

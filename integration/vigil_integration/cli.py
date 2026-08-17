@@ -1772,11 +1772,16 @@ def _cmd_backup(args: argparse.Namespace) -> int:
 
     if not getattr(args, "sovereign_only", False):
         from .backup import OffenseBackupError, create_offense_backup
-        croot = _resolve_crucible_root()
+        # Honor an EXPLICIT --crucible-root; fall back to auto-discovery ONLY when the flag is unset
+        # (mirrors _cmd_restore — an explicit operator-supplied root must never be silently overridden by
+        # discovery, which would back up a DIFFERENT crucible tree than the one requested).
+        croot = getattr(args, "crucible_root", "") or None
+        if croot is None:
+            cr = _resolve_crucible_root()
+            croot = str(cr) if cr else None
         off_dest = subdir / "offense.vglbk"
         try:
-            res = create_offense_backup(off_dest, pw, base_dir=args.base_dir,
-                                        crucible_root=(str(croot) if croot else None))
+            res = create_offense_backup(off_dest, pw, base_dir=args.base_dir, crucible_root=croot)
         except OffenseBackupError as e:
             print(f"vigil backup: offense leg failed: {e}", file=sys.stderr)
             return 1

@@ -61,6 +61,38 @@ def test_genuine_forward_advance_accepts(tmp_path):
     assert ok, msg
 
 
+def test_emit_re_mints_and_re_persists_on_a_prune_boundary_advance(tmp_path):
+    """DEFECT 2 (PRODUCTION emitter): a prune advances base_seq/base_count at an IDLE tip (entry_count /
+    last_seq / head_hash unchanged). emit_witnessed MUST re-mint AND re-persist the off-box tip so the
+    retained anchor tracks the CURRENT boundary — else a stale base=0 witness stays on disk and an un-prune
+    (base → 0) later passes verify_*_against_witnessed. A same-boundary root-only change still dedups."""
+    from vigil_integration.witnessed_anchor import AnchorError, emit_witnessed, read_tip
+
+    class _H:  # duck-typed head; checkpoint_of reads these via getattr
+        def __init__(self, base, merkle="m"):
+            self.last_seq, self.entry_count, self.head_hash = 4, 100, "tip-X"
+            self.cumulative_merkle_root = merkle
+            self.base_seq = self.base_count = base
+
+    retain = tmp_path / "hw-witnessed.json"
+
+    def _e(h):
+        return emit_witnessed(h, [FW.offense_governance_witness(GOV)], retain_path=retain, scope=SCOPE)
+
+    wc0 = _e(_H(0))
+    assert wc0.checkpoint.base_seq == 0
+    wc1 = _e(_H(50))                                       # prune: boundary advances at an idle tip
+    assert wc1 is not wc0 and wc1.checkpoint.base_seq == 50            # re-minted the boundary
+    assert read_tip(retain).checkpoint.base_seq == 50                 # off-box tip REWRITTEN (not stale 0)
+    wc2 = _e(_H(50, merkle="m-other"))                    # same boundary, root-only variation → dedup
+    # dedup fired: no new mint — the retained tip is unchanged (root-only 'm-other' was IGNORED, not re-minted;
+    # emit_witnessed returns a fresh read_tip() object on dedup, so compare content/behavior, not identity).
+    assert wc2.checkpoint.base_seq == 50 and wc2.checkpoint.merkle_root == "m"
+    assert read_tip(retain).checkpoint.merkle_root == "m"             # off-box tip NOT rewritten for a root-only delta
+    with pytest.raises(AnchorError):                      # an un-prune (base → 0) is refused as a rollback
+        _e(_H(0))
+
+
 def test_co_rewrite_head_and_floor_rollback_refused(tmp_path):
     retain = tmp_path / "hw-witnessed.json"
     _e5, h5 = _chain(5)
