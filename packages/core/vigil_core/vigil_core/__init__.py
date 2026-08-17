@@ -32,6 +32,9 @@ from .highwater import (
     read_highwater_dict, strict_highwater_enabled, verify_highwater_signature,
 )
 from .models import AuthorizerKey, ChainEntry, Signature, SignedChainHead, TrustRoot
+from .rbac import (
+    OFFENSE_ACTION_PERM, PERMISSIONS, ROLES, offense_perm_for, offense_route_key, role_can,
+)
 from .sealing import SealError, is_sealed, new_kek, seal, unseal
 from .vault import Vault, VaultLocked
 
@@ -45,6 +48,7 @@ __all__ = [
     "HardBlockError", "assert_not_hard_blocked", "candidate_hosts", "is_hard_blocked",
     "normalize_domain", "protected_guard_enabled",
     "AuthorizerKey", "ChainEntry", "Signature", "SignedChainHead", "TrustRoot",
+    "ROLES", "PERMISSIONS", "role_can", "OFFENSE_ACTION_PERM", "offense_perm_for", "offense_route_key",
     "seal", "unseal", "new_kek", "is_sealed", "SealError",
     "Vault", "VaultLocked",
     "IdentityAttestation", "Capability", "Attenuation", "EffectiveCapability", "WielderProof",

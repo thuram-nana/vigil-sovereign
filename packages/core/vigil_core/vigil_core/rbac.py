@@ -1,0 +1,167 @@
+"""vigil_core.rbac — the ONE role→permission vocabulary shared by both trust domains.
+
+Claim 6 gave the sovereign plane (`apps/sigil/sigil/governor/accounts.py`) an enforced multi-user RBAC:
+`viewer < analyst < operator < owner`, a cumulative permission set per role, and `role_can()`. That
+vocabulary lived ONLY sovereign-side, so the offense console (`framework.v2.console.server`) could not
+reuse it — the console is offense-side and MUST NEVER import `sigil.*` (FATAL-2 / sovereignty §12). This
+module promotes the vocabulary into `vigil_core`, which BOTH domains may import (the offense console
+already does `from vigil_core import TrustRoot`; the sovereign side reaches vigil_core through
+`sigil/reuse`). The sovereign `accounts.py` now RE-EXPORTS `ROLES`/`PERMISSIONS`/`role_can` from here so
+there is exactly one source of truth; it keeps its own `PERMISSION_BY_ACTION` for the sovereign action
+surface, and this module adds `OFFENSE_ACTION_PERM` for the offense console's POST routes.
+
+PURE STDLIB, namespace-pure: this module imports NOTHING (no crypto, no spine, no framework/strix/sigil).
+It is a table plus one predicate — the load-bearing property is that it can be imported from either side
+without dragging a dependency across the trust boundary.
+
+DEFAULT-DENY is the whole posture: `role_can(role, None)` is False, an unknown role has no permissions,
+and `offense_perm_for()` returns None (⇒ deny) for any route not explicitly mapped.
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+# Roles, ordered by privilege rank (index = rank). "owner" is the trust-root key-holder / the direct
+# console-token holder — it is the ceiling, never a grantable bearer role (single-owner doctrine). This
+# ordering is IDENTICAL to the sovereign `accounts.ROLES`, which now imports it from here.
+ROLES = ("viewer", "analyst", "operator", "owner")
+_ROLE_RANK = {r: i for i, r in enumerate(ROLES)}
+
+# The permission vocabulary. Cumulative: owner ⊇ operator ⊇ analyst ⊇ viewer. These frozensets are the
+# canonical definition the sovereign side re-exports — the exact strings `accounts.PERMISSION_BY_ACTION`
+# and this module's `OFFENSE_ACTION_PERM` map to. Keep them in lockstep with any sovereign action mapping.
+_VIEWER = frozenset({"read"})
+_ANALYST = _VIEWER | {"queue_proposal"}
+_OPERATOR = _ANALYST | {"run_engagement", "approve_a2", "toggle_guard", "config_nonsecret"}
+_OWNER = _OPERATOR | {"approve_a3", "kill_release", "promote", "secrets", "offense_authority",
+                      "manage_users", "toggle_protected_guard"}
+PERMISSIONS: dict[str, frozenset[str]] = {
+    "viewer": _VIEWER, "analyst": _ANALYST, "operator": _OPERATOR, "owner": _OWNER,
+}
+
+
+def role_can(role: Optional[str], perm: Optional[str]) -> bool:
+    """True iff `role` carries `perm`. DEFAULT-DENY: an unmapped permission (None/"") refuses, and an
+    unknown role has no permissions. This is the one predicate the whole gate turns on — the sovereign
+    admission gate and the offense console per-action gate both call THIS."""
+    if not perm:
+        return False
+    return perm in PERMISSIONS.get(role or "", frozenset())
+
+
+# ==================================================================================================
+# OFFENSE CONSOLE per-action permission map (Slice S1).
+#
+# Every state-changing POST route `framework.v2.console.server.do_POST` dispatches is mapped to the
+# permission a caller's role must carry. TWO tiers:
+#   * OPERATOR-tier (`run_engagement`) — ordinary launch / run-control / edit / session / chat / label /
+#     read-recompute (replay/reverify/verify-cert/planner/intel/benchmark) routes. An operator+ may run
+#     engagements; these are the everyday offense actions.
+#   * OWNER-tier (`offense_authority`, an owner-only permission) — the DANGEROUS routes: minting a charter
+#     authority + replaying its usage ledger, tripping the offense kill-switch, executing a local command,
+#     APPLYING an auto-patch, standing up the AEGIS gateway, INSTALLING host packages, and CREATING docker
+#     services. Each of these either executes on the host, changes durable governance/authority state, or
+#     provisions infrastructure — so it is lifted above operator to the owner ceiling.
+#
+# DEFAULT-DENY: a route absent from this map resolves (via `offense_perm_for`) to None ⇒ `role_can` False
+# ⇒ 403. A future POST route refuses under a valid hop assertion until it is explicitly mapped here.
+# ==================================================================================================
+_RUN = "run_engagement"        # operator+ (the coarse proxy floor uses the same permission)
+_OWN = "offense_authority"     # owner-only
+
+OFFENSE_ACTION_PERM: dict[str, str] = {
+    # ---- operator-tier: ordinary run / edit / session / chat / launch / read-recompute --------------
+    "/api/token-budgets": _RUN,
+    "/api/run/*/cancel": _RUN,
+    "/api/run/*/retry": _RUN,
+    "/api/instruct": _RUN,
+    "/api/codebase/edit": _RUN,
+    "/api/codebase/apply": _RUN,
+    "/api/codebase/test": _RUN,
+    "/api/launch/assessment": _RUN,
+    "/api/launch/cloud": _RUN,
+    "/api/replay": _RUN,
+    "/api/reverify/*": _RUN,
+    "/api/proof/export": _RUN,
+    "/api/dossier/*/build": _RUN,
+    "/api/verify-cert": _RUN,
+    "/api/knowledge/gitsync": _RUN,
+    "/api/evolve/*/tick": _RUN,
+    "/api/knowledge/*/deeplearn": _RUN,
+    "/api/feed/*/pull": _RUN,
+    "/api/feed/*/start": _RUN,
+    "/api/feed/*/stop": _RUN,
+    "/api/benchmark/run": _RUN,
+    "/api/planner/run": _RUN,
+    "/api/intel/run": _RUN,
+    "/api/label/engagement": _RUN,
+    "/api/label/run": _RUN,
+    "/api/session/create": _RUN,
+    "/api/session/rename": _RUN,
+    "/api/session/delete": _RUN,
+    "/api/session/connect": _RUN,
+    "/api/session/disconnect": _RUN,
+    "/api/chat/stream": _RUN,
+    "/api/chat/send": _RUN,
+    "/api/chat/attach/begin": _RUN,
+    "/api/chat/attach/chunk": _RUN,
+    "/api/chat/attach/finish": _RUN,
+    "/api/chat/attach/abort": _RUN,
+    "/api/chat/attach/remove": _RUN,
+    "/api/chat/rename": _RUN,
+    "/api/chat/delete": _RUN,
+    "/api/terminal/dryrun": _RUN,
+    "/api/terminal/propose": _RUN,
+    "/api/aegis/stop": _RUN,
+    # ---- owner-tier: host exec / infra provisioning / patch apply / authority / kill-switch ---------
+    "/api/authority/provision": _OWN,
+    "/api/authority/ledger": _OWN,
+    "/api/killswitch/*/trip": _OWN,
+    "/api/terminal/run": _OWN,
+    "/api/remediate/*/apply": _OWN,
+    "/api/aegis/setup": _OWN,
+    "/api/tools/install": _OWN,
+    "/api/services/up": _OWN,
+}
+
+# The exact-match route keys (no wildcard). Membership test is O(1) and case-sensitive.
+_EXACT_KEYS = frozenset(k for k in OFFENSE_ACTION_PERM if "*" not in k)
+
+# The wildcard patterns, as (prefix, suffix, route_key). This ORDER + logic MIRRORS `do_POST`'s dispatch
+# (prefix/suffix `startswith`/`endswith` branches), so the permission a path resolves to here is the
+# permission for the branch that path will actually take. A suffix of "" means prefix-only.
+_PATTERNS = (
+    ("/api/run/", "/cancel", "/api/run/*/cancel"),
+    ("/api/run/", "/retry", "/api/run/*/retry"),
+    ("/api/remediate/", "/apply", "/api/remediate/*/apply"),
+    ("/api/dossier/", "/build", "/api/dossier/*/build"),
+    ("/api/evolve/", "/tick", "/api/evolve/*/tick"),
+    ("/api/knowledge/", "/deeplearn", "/api/knowledge/*/deeplearn"),
+    ("/api/feed/", "/pull", "/api/feed/*/pull"),
+    ("/api/feed/", "/start", "/api/feed/*/start"),
+    ("/api/feed/", "/stop", "/api/feed/*/stop"),
+    ("/api/killswitch/", "/trip", "/api/killswitch/*/trip"),
+    ("/api/reverify/", "", "/api/reverify/*"),          # prefix-only (registered after /api/replay)
+)
+
+
+def offense_route_key(path: str) -> Optional[str]:
+    """Resolve a concrete console-side POST path (e.g. `/api/killswitch/s1/trip`) to its canonical route
+    key in `OFFENSE_ACTION_PERM`, or None if the path matches no mapped route. Exact keys win over
+    wildcard patterns (so `/api/knowledge/gitsync` is not swallowed by the `/api/knowledge/*/deeplearn`
+    pattern), matching `do_POST`'s dispatch precedence."""
+    if path in _EXACT_KEYS:
+        return path
+    for prefix, suffix, key in _PATTERNS:
+        if path.startswith(prefix) and (path.endswith(suffix) if suffix else True):
+            return key
+    return None
+
+
+def offense_perm_for(path: str) -> Optional[str]:
+    """The permission a POST to `path` requires, or None ⇒ DEFAULT-DENY (an unmapped route). The console
+    gate feeds this straight into `role_can`, so an unmapped route (None) refuses every role."""
+    key = offense_route_key(path)
+    if key is None:
+        return None
+    return OFFENSE_ACTION_PERM.get(key)

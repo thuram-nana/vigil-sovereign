@@ -24,6 +24,8 @@ the token is an ADDITIONAL conjunct, never a replacement.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -33,6 +35,12 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+
+# S1 — per-action RBAC vocabulary. `vigil_core` is the ONE module both trust domains may import (the
+# offense console already imports it in `console.api`); it is namespace-pure (no framework/strix/sigil), so
+# this crosses no boundary and FATAL-2 holds. `offense_perm_for` maps a POST route to its required
+# permission (None ⇒ unmapped ⇒ default-deny) and `role_can` is the same predicate the sovereign gate uses.
+from vigil_core.rbac import offense_perm_for, role_can
 
 
 # X6 — a custom request header the same-origin SPA fetch sets and a cross-site HTML form cannot.
@@ -48,6 +56,23 @@ _TOKEN_PLACEHOLDER = "__CONSOLE_TOKEN__"
 # Env carrier: `vigil up` hands the console the SAME token it embeds in the unified UI's index.html,
 # so one credential covers both planes. Blank/unset ⇒ the console MINTS its own (never "no auth").
 _TOKEN_ENV = "VIGIL_CONSOLE_TOKEN"
+
+# S1 — the proxy↔console per-request role assertion. The `vigil up` proxy is the per-user auth boundary:
+# it resolves the caller against the sovereign accounts spine and STAMPS `X-VIGIL-Role` on the offense hop.
+# Because the session TOKEN is SHARED with the proxy, token-presence alone cannot tell a genuine proxy hop
+# from a direct loopback client that also holds the token — so the proxy also binds the stamped identity
+# under a DISTINCT hop secret (`VIGIL_CONSOLE_HOP_KEY`, random per `vigil up`, handed to this console child
+# at spawn, never to the browser). Only a request carrying a VALID, FRESH HMAC over
+# `principal\nrole\nmethod\npath\nts` under that key has its `X-VIGIL-Role` trusted for per-action RBAC. A
+# request with NO role assertion at all is a direct token-holder (owner-equivalent — it holds the shared
+# console credential) and keeps full access (no regression). A blank/unset hop key ⇒ NO stamped role is
+# ever trusted (fail-closed: the RBAC hop is simply absent, the coarse floors still apply).
+_PRINCIPAL_HDR = "X-VIGIL-Principal"
+_ROLE_HDR = "X-VIGIL-Role"
+_ROLE_SIG_HDR = "X-VIGIL-Role-Sig"
+_ROLE_TS_HDR = "X-VIGIL-Role-Ts"
+_HOP_KEY_ENV = "VIGIL_CONSOLE_HOP_KEY"
+_HOP_MAX_SKEW_S = 30.0          # a role assertion older/newer than this is refused (replay window closed)
 # A9: bound the POST body — the console's actions take small JSON; a huge/negative Content-Length must not be
 # read into memory. A body above the cap is refused (treated as empty → the action gets no valid params).
 _MAX_CONSOLE_BODY = 1 << 20   # 1 MiB
@@ -87,6 +112,15 @@ def _resolve_token(explicit: str | None = None) -> str:
         if tok:
             return tok
     return secrets.token_urlsafe(32)
+
+
+def _resolve_hop_key() -> str:
+    """The proxy↔console hop secret from `$VIGIL_CONSOLE_HOP_KEY`, or "" if unset. UNLIKE the session token
+    this is NEVER minted: it must be the SAME value the proxy holds (shared out-of-band via the child's env),
+    so a minted-here value could never verify. Blank ⇒ the console trusts NO stamped role (fail-closed) — a
+    proxy-forwarded per-user request cannot be role-verified and is refused; only the direct token-holder
+    (no role assertion) path stays open."""
+    return (os.environ.get(_HOP_KEY_ENV) or "").strip()
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -607,6 +641,55 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return False, "missing/invalid token"
         return self._host_is_console()
 
+    def _hop_assertion_valid(self, principal: str, role: str, ts: str, sig: str, path: str) -> bool:
+        """Verify the proxy's per-request role assertion: a constant-time HMAC-SHA256, under the shared hop
+        key, over EXACTLY `principal\\nrole\\nmethod\\npath\\nts` — the SAME fields the proxy signed — inside
+        a ±`_HOP_MAX_SKEW_S` freshness window. Fail-closed: no hop key (nothing to verify with), an
+        incomplete assertion, a non-numeric/stale `ts`, or a mismatching MAC all return False. Binding the
+        METHOD and console-side PATH stops a captured header set from being re-aimed at another verb/route;
+        binding `ts` (with the window) stops replay."""
+        hop_key = getattr(self.server, "hop_key", "") or ""
+        if not (hop_key and role and ts and sig):
+            return False
+        try:
+            ts_f = float(ts)
+        except (TypeError, ValueError):
+            return False
+        if abs(time.time() - ts_f) > _HOP_MAX_SKEW_S:
+            return False
+        msg = f"{principal}\n{role}\n{self.command}\n{path}\n{ts}".encode("utf-8")
+        expected = base64.b64encode(
+            hmac.new(hop_key.encode("utf-8"), msg, hashlib.sha256).digest()).decode("ascii")
+        return hmac.compare_digest(expected, sig)
+
+    def _rbac_ok(self, path: str) -> tuple[bool, str]:
+        """S1 per-action RBAC on a same-origin, token-valid POST. Three mutually-exclusive cases:
+
+          * NO role assertion (neither ``X-VIGIL-Role`` nor ``X-VIGIL-Role-Sig`` present) → a DIRECT
+            console-token holder. Holding the shared console credential is owner-equivalent, so this keeps
+            today's FULL access — no regression for the on-host operator / a test / the legacy direct client.
+          * A role assertion that VERIFIES (fresh HMAC under the hop key) → enforce
+            ``role_can(stamped_role, offense_perm_for(path))``. An UNMAPPED route ⇒ ``offense_perm_for`` is
+            None ⇒ ``role_can`` False ⇒ DEFAULT-DENY.
+          * A role assertion that is PRESENT but INVALID (forged/expired/incomplete, or the console has no
+            hop key to verify it) → REFUSE. A forged ``X-VIGIL-Role: owner`` with no valid MAC never lifts
+            the role.
+
+        Returns ``(allowed, reason)``; the caller maps a False to 403."""
+        role = self.headers.get(_ROLE_HDR)
+        sig = self.headers.get(_ROLE_SIG_HDR)
+        if not role and not sig:
+            return True, ""                                   # direct token-holder → owner-equivalent
+        principal = self.headers.get(_PRINCIPAL_HDR) or ""
+        ts = self.headers.get(_ROLE_TS_HDR) or ""
+        if not self._hop_assertion_valid(principal, role or "", ts, sig or "", path):
+            return False, "unverified role assertion (bad/expired hop signature)"
+        required = offense_perm_for(path)                     # None ⇒ unmapped route ⇒ default-deny
+        if not role_can(role, required):
+            need = required or "(unmapped route → default-deny)"
+            return False, f"role {role!r} lacks required permission {need}"
+        return True, ""
+
     def do_POST(self) -> None:  # noqa: N802
         """The SAFE actions — the only mutations the console makes. Each is non-destructive and
         cannot relax scope or bypass a gate: launch (scan / assessment) spawns only the already-gated
@@ -616,6 +699,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._json({"error": f"cross-site POST refused ({why})"}, status=403)
             return
         path = urlsplit(self.path).path
+        # S1: per-action RBAC. Runs on EVERY POST (incl. the chat-attach subset below) once the same-origin +
+        # token conjunction has passed. A proxy-forwarded per-user request carries a hop-signed role, which is
+        # enforced against this route's required permission; a direct token-holder (no role assertion) keeps
+        # full access; a present-but-unverified role assertion is refused.
+        rbac_ok, rbac_why = self._rbac_ok(path)
+        if not rbac_ok:
+            self._json({"error": f"forbidden: {rbac_why}"}, status=403)
+            return
         if path in _CHAT_ATTACH_POST:
             # Chunked attachment upload. Same auth as every other POST (checked above); the only difference
             # is the body reader — an oversize chunk must be an honest error, not an empty dict.
@@ -965,6 +1056,7 @@ def serve(host: str = "127.0.0.1", port: int = 8787,
     srv.allowed_hosts = frozenset(h.strip() for h in allowed_hosts if h and h.strip())
     srv.allowed_origins = frozenset(o.strip().rstrip("/") for o in allowed_origins if o and o.strip())
     srv.token = _resolve_token(token)
+    srv.hop_key = _resolve_hop_key()   # S1: verifies the proxy's per-request role assertion (or "" ⇒ trust none)
     # Reconcile any run left 'running' by a prior console/host whose process is now gone → 'interrupted' +
     # resumable, so a dead run is not shown as a live engagement (conservatively — a same-boot pid reuse or
     # an orphan-alive child can still strand one; see reconcile_orphaned_runs). Total; never blocks startup.
