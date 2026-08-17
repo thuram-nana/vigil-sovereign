@@ -81,6 +81,34 @@ def test_rollback_is_refused(tmp_path: Path):
     assert ok is False and "head" in reason
 
 
+def test_writer_persists_a_governance_signed_floor(tmp_path: Path):
+    """C-S5 — with the offense governance keypair threaded as ``hw_signer``, ``append_posture_tick`` persists a
+    SIGNED floor (``sig``/``pubkey`` under the governance key), and a STRICT verifier holding that anchor
+    ACCEPTS it. The default call (no ``hw_signer``) stays UNSIGNED (back-compat) and a strict verifier rejects
+    it. ``run_posture_reprove`` signs the floor with its ``gov`` key end-to-end."""
+    from vigil_core.highwater import _HW_DOMAIN, read_highwater_dict, verify_highwater_signature
+
+    signed = tmp_path / "signed"
+    append_posture_tick(signed, _cert("a"), engagement_slug="demo", signers=SIGNERS, hw_signer=GOV)
+    floor = read_highwater_dict(signed / "highwater.json")
+    assert floor.get("pubkey") == GOV.public_key_b64 and isinstance(floor.get("sig"), str)
+    assert verify_highwater_signature(floor, [GOV.public_key_b64], domain=_HW_DOMAIN, strict=True)[0] is True
+
+    unsigned = tmp_path / "unsigned"
+    append_posture_tick(unsigned, _cert("a"), engagement_slug="demo", signers=SIGNERS)   # no hw_signer
+    ufloor = read_highwater_dict(unsigned / "highwater.json")
+    assert "sig" not in ufloor and "pubkey" not in ufloor
+    ok_strict, why = verify_highwater_signature(ufloor, [GOV.public_key_b64], domain=_HW_DOMAIN, strict=True)
+    assert ok_strict is False and "STRICT" in why
+
+    # end-to-end: the reprove loop signs the floor with its governance key
+    e2e = tmp_path / "e2e"
+    run_posture_reprove(e2e, cycles=2, owner_key=OWNER, gov_key=GOV, engagement="demo",
+                        sleep=lambda _s: None, build_cert=lambda: _cert("z"))
+    e2e_floor = read_highwater_dict(e2e / "highwater.json")
+    assert verify_highwater_signature(e2e_floor, [GOV.public_key_b64], domain=_HW_DOMAIN, strict=True)[0] is True
+
+
 def test_tampered_tick_breaks_the_series(tmp_path: Path):
     d = tmp_path / "series"
     for tag in ("a", "b"):

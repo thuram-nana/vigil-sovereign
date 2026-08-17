@@ -698,7 +698,8 @@ def _cmd_reprove(args: argparse.Namespace) -> int:
         original_certificate_digest=str(finding.evidence_ref or ""))
     cfg = ReproveConfig(
         log_dir=log_dir, engagement_slug=slug, signers=prov.signers, trust_root=prov.trust_root,
-        signer_pubkeys=signer_pubkeys, corpus=[target], witnesses=[(witness_kp, witness_key_id)])
+        signer_pubkeys=signer_pubkeys, corpus=[target], witnesses=[(witness_kp, witness_key_id)],
+        gov_signer=prov.keypair)   # C-S5: sign the durable attestation-log floor with the governance key
 
     print(f"=== vigil reprove — continuous re-proof of finding {finding.ref!r} [{bug_class}] ===")
     print(f"target            : {target_base_url}   (endpoint={spec['endpoint_path']} param={spec['param']})")

@@ -124,6 +124,23 @@ def test_unsigned_with_anchor_is_warn_accept(tmp_path):
     assert _load_highwater(p, trusted_pubkeys=[kp.public_key_b64]) == 7
 
 
+def test_strict_load_rejects_an_unsigned_floor_with_anchor(tmp_path):
+    """C-S5 — STRICT: an existing UNSIGNED high-water loaded WITH a governance anchor is REJECTED (raises
+    _HighwaterCorrupt, fail-closed); the default (non-strict) warn-accepts the identical floor (back-compat).
+    A genuine signed floor loads in BOTH modes; strict with NO anchor still returns the int (nothing to
+    enforce against)."""
+    p = tmp_path / "hw.json"
+    _save_highwater(p, 7)                                           # unsigned
+    kp = generate_keypair()
+    with pytest.raises(_HighwaterCorrupt):
+        _load_highwater(p, trusted_pubkeys=[kp.public_key_b64], strict=True)
+    assert _load_highwater(p, trusted_pubkeys=[kp.public_key_b64], strict=False) == 7   # back-compat
+    ps = tmp_path / "hws.json"
+    _save_highwater(ps, 9, signer=kp)                              # a genuine signed floor
+    assert _load_highwater(ps, trusted_pubkeys=[kp.public_key_b64], strict=True) == 9
+    assert _load_highwater(p, trusted_pubkeys=None, strict=True) == 7   # no anchor → nothing to enforce
+
+
 # --------------------------------------------------------------------------- end-to-end: CLI verify gating
 
 
@@ -191,3 +208,42 @@ def test_e2e_no_signer_writes_unsigned_and_stays_sound(tmp_path):
     assert set(raw.keys()) == {"last_seq"}                          # unsigned, byte-identical shape
     assert main(["verify", "--report", str(report), "--bundle", str(bundle), "--trust-root", str(trust_root),
                  "--highwater", str(hw)]) == 0                      # idempotent re-verify still SOUND
+
+
+def test_e2e_strict_refuses_an_unsigned_highwater(tmp_path, monkeypatch):
+    """C-S5 — the STRICT PRODUCTION PROFILE at the evidence verifier. A SOUND bundle whose high-water is
+    UNSIGNED verifies exit 0 in the DEFAULT profile (back-compat), but is REFUSED (exit 2) under strict —
+    selectable BOTH via ``--strict-highwater`` and via ``VIGIL_STRICT_HIGHWATER=1`` — because an unsigned floor
+    with the bundle's governance anchor present is treated as tamper (strip-to-unsigned downgrade refused)."""
+    report, bundle, trust_root = _make_sound_bundle(tmp_path)
+    hw = tmp_path / "hw.json"
+    base = ["verify", "--report", str(report), "--bundle", str(bundle), "--trust-root", str(trust_root),
+            "--highwater", str(hw)]
+    monkeypatch.delenv("VIGIL_STRICT_HIGHWATER", raising=False)
+    assert main(base) == 0                                          # first verify writes an UNSIGNED floor, SOUND
+    assert set(json.loads(hw.read_text(encoding="utf-8")).keys()) == {"last_seq"}
+    assert main(base) == 0                                          # default re-verify still SOUND (warn-accept)
+    assert main(base + ["--strict-highwater"]) == 2                 # STRICT via the flag → refuse the unsigned floor
+    monkeypatch.setenv("VIGIL_STRICT_HIGHWATER", "1")
+    assert main(base) == 2                                          # STRICT via the env var → same refusal
+    monkeypatch.setenv("VIGIL_STRICT_HIGHWATER", "0")
+    assert main(base) == 0                                          # env OFF → warn-accept again (fail-safe)
+
+
+def test_e2e_strict_accepts_a_signed_highwater(tmp_path, monkeypatch):
+    """C-S5 — strict is consistent with the SIGNING writer: a GOVERNANCE-SIGNED high-water (written via
+    --highwater-signer-file) verifies exit 0 EVEN under strict. Strict only refuses the ABSENT-signature case,
+    never a genuine signature."""
+    report, bundle, trust_root = _make_sound_bundle(tmp_path)
+    hw = tmp_path / "hw.json"
+    hw_kp = generate_keypair()
+    signer_file = tmp_path / "gov.json"
+    signer_file.write_text(json.dumps(
+        {"public_key_b64": hw_kp.public_key_b64, "private_key_b64": hw_kp.private_key_b64}), encoding="utf-8")
+    monkeypatch.setenv("VIGIL_STRICT_HIGHWATER", "1")               # strict profile ON for the whole test
+    base = ["verify", "--report", str(report), "--bundle", str(bundle), "--trust-root", str(trust_root),
+            "--highwater", str(hw), "--highwater-signer-file", str(signer_file)]
+    assert main(base) == 0                                          # writes a SIGNED floor, SOUND under strict
+    raw = json.loads(hw.read_text(encoding="utf-8"))
+    assert "sig" in raw and raw["pubkey"] == hw_kp.public_key_b64
+    assert main(base) == 0                                          # re-verify over the SIGNED floor: strict accepts
