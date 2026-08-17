@@ -183,10 +183,18 @@ _DECODE_STEP = 1024 * 1024       # inflate 1 MiB of OUTPUT per step → peak all
 # /offense/) relays a backend's index with an OWNER token embedded, which the viewer replays as OWNER.
 # The exact-`self.server.token` redaction below only catches a token the proxy HOLDS — which in
 # --proxy-only is FALSE for the sovereign cockpit (a REMOTE backend that mints its own random token the
-# proxy never captured). So for any relayed HTML body we ALSO blank the token carrier REGARDLESS of value:
-# the `data-token="..."` attribute → `data-token=""`, and any un-substituted `__SIGIL/CONSOLE/VIGIL_TOKEN__`
-# placeholder → empty. This closes the local case, the remote case, and any future independently-tokened
-# backend, with no dependence on the proxy knowing the secret.
+# proxy never captured). So for any relayed HTML body we ALSO blank the token carrier REGARDLESS of value.
+#
+# EXACT SCOPE (do not overclaim): this covers the token carrier the cockpit + console ACTUALLY use today —
+# a QUOTED `data-token="..."` / `data-token='...'` attribute, and the `__SIGIL/CONSOLE/VIGIL_TOKEN__`
+# template placeholders — in a body whose Content-Type is `text/html` / `application/xhtml+xml`. It does
+# NOT cover an UNQUOTED attribute, a `<meta content="<token>">`, a `<script>window.x="<token>"</script>`
+# inline, a token in a NON-HTML body (JSON/text), or a token in a response HEADER / Set-Cookie. Soundness
+# therefore depends on the producer-side invariant that the cockpit/console expose the owner token ONLY via
+# this HTML `data-token` carrier — pinned by the `test_*_never_returns_the_owner_token_*` producer tests
+# (a future backend that starts leaking the token elsewhere fails those, rather than silently slipping past
+# this body-only scrub). Within that scope it closes the local case, the remote case, and any future
+# backend that mints its own token, with no dependence on the proxy knowing the secret.
 _HTML_CTYPES = frozenset({"text/html", "application/xhtml+xml"})
 # `data-token = "<anything>"` / `'<anything>'` (quote-agnostic via the \2 backref; DOTALL so a value can
 # contain any byte). Rewrites to `data-token=""` — group 1 (the `data-token=` lead) + the two quotes.
@@ -1386,13 +1394,18 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _read_bounded_body(self, resp: http.client.HTTPResponse, budget: int) -> "Optional[bytes]":
         """Read a cleartext body fully into memory, bounded by ``budget``. Returns the bytes, or None
-        (FAIL CLOSED) if the body exceeds ``budget`` (never buffer an unbounded body from a backend)."""
-        raw = b""
-        while len(raw) <= budget:
+        (FAIL CLOSED) if the body exceeds ``budget`` (never buffer an unbounded body from a backend).
+        Accumulate into a list + one ``b"".join`` (NOT ``raw += chunk``) so the fail-closed path over an
+        oversize body stays O(n), not O(n²) — a 64 MiB oversize body must not burn ~20 s of CPU before
+        the 502."""
+        chunks: list = []
+        total = 0
+        while total <= budget:
             chunk = resp.read1(65536)
             if not chunk:
-                return raw
-            raw += chunk
+                return b"".join(chunks)
+            chunks.append(chunk)
+            total += len(chunk)
         return None                                       # exceeded the cap → fail closed
 
     def _decode_and_redact(self, resp: http.client.HTTPResponse, enc: str,
