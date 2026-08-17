@@ -698,6 +698,21 @@ def retry_run(run_id: str) -> dict:
     slug = str(meta.get("slug") or "")
     if slug and _slug_has_running_run(slug):
         return {"ok": False, "error": f"a run for '{slug}' is already in progress — wait for it or cancel it"}
+    # GAP-1 (Strix sovereignty) — RE-APPLY the per-session model pin on the RETRY/RESUME path, or a retried
+    # LOCAL codebase run would rebuild env_extra from scratch and inherit the GLOBAL CLOUD STRIX_LLM default,
+    # re-scanning the source against cloud (the exact leak the launch path closes; red-pen BLOCK-1). Re-resolve
+    # pin-or-refuse FRESH from the recorded pick (the turn model + session id carried in the parent meta) BEFORE
+    # any new run dir/meta is created — a local pick that cannot run local NOW (e.g. its endpoint was moved
+    # remote since the original run) REFUSES with no re-spawn, exactly like the launch path. A cloud/no-pick run
+    # resolves to {} and its retry env is byte-identical.
+    _is_strix_run = (str(meta.get("run_kind") or meta.get("mode") or "") in ("strix", "codebase")
+                     or "strix" in [str(a) for a in cmd])
+    strix_env: dict = {}
+    if _is_strix_run:
+        strix_env, _strix_refusal = _strix_session_llm_env(str(meta.get("model") or ""),
+                                                           str(meta.get("session_id") or ""))
+        if _strix_refusal:
+            return {"ok": False, "error": _strix_refusal}
     new_id = _new_run_id()
     rd = run_dir(new_id)
     rd.mkdir(parents=True, exist_ok=True)
@@ -710,17 +725,24 @@ def retry_run(run_id: str) -> dict:
     resume = bool(meta.get("resumable")) and _cmd_supports_resume(new_cmd)
     if resume and "--resume" not in new_cmd:
         new_cmd.append("--resume")
+    # Carry "model" too, so a retry-of-a-retry re-resolves the same per-session pick (the id lives in meta).
     carry = {k: meta[k] for k in ("target", "slug", "mode", "run_kind", "objective", "scope",
-                                  "session_id", "stream") if k in meta}
+                                  "session_id", "stream", "model") if k in meta}
     new_meta = {**carry, "cmd": new_cmd, "parent_run_id": run_id, "started": time.time()}
+    if strix_env:                       # GAP-1: record the re-applied LOCAL pin (audit/UI); never a key/endpoint
+        new_meta["strix_llm"] = strix_env.get("STRIX_LLM", "")
+        new_meta["model_backend"] = "local"
     _write_meta(new_id, **new_meta, status="running")
     # capture_report only for the loopback scan (JSON on stdout); engage/strix report elsewhere.
     capture_report = ("scan" in new_cmd and "--format" in new_cmd)
     # a Strix run needs its Proof Studio env re-pointed at the NEW run dir (else its proofs mis-locate).
     env_extra = None
-    if str(carry.get("run_kind") or carry.get("mode") or "") in ("strix", "codebase") or "strix" in new_cmd:
+    if _is_strix_run:
+        # **strix_env is merged LAST so a re-resolved LOCAL pin OVERRIDES the global cloud default in the child;
+        # for a cloud/no-pick retry it is {} → byte-identical to the pre-GAP-1 Proof-Studio-only env.
         env_extra = {"VIGIL_PROOF_RUN_DIR": new_rd, "VIGIL_ENGAGEMENT": slug,
-                     "VIGIL_BASE_DIR": os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"}
+                     "VIGIL_BASE_DIR": os.environ.get("VIGIL_BASE_DIR") or ".vigil-live",
+                     **strix_env}
     _spawn_background(new_id, rd, new_cmd, new_meta, capture_report=capture_report, env_extra=env_extra)
     return {"ok": True, "run_id": new_id, "resumed": resume, "parent": run_id}
 
@@ -841,37 +863,36 @@ _STRIX_LOCAL_MAP = {
 }
 
 
-def _strix_session_llm_env(model_id: str, session_id: str) -> "tuple[dict, str]":
-    """GAP-1 — the per-session STRIX_LLM/LLM_API_BASE override for a Strix codebase run → ``(env_extra, refusal)``.
+def _session_pick_indicated(model_id: str, session_id: str) -> bool:
+    """True iff a per-session model pick was INDICATED — a turn model id, or a persisted session pin.
 
-    Returns one of:
-      * ``({}, "")``  — NO per-session pick, or a CLOUD pick: keep today's GLOBAL ``STRIX_LLM`` default,
-        byte-identical (no regression). A cloud/global pick is cloud by the operator's own choice.
-      * ``({"STRIX_LLM": ..., "LLM_API_BASE": ...}, "")`` — a LOCAL pick, pinned at its LOOPBACK endpoint. Merged
-        OVER ``os.environ`` for the child, so the global cloud default can never leak into the Strix run.
-      * ``({}, "<why>")`` — a LOCAL pick that CANNOT be pointed at a loopback local endpoint (unmappable backend,
-        no configured endpoint, a NON-loopback endpoint, or no model to express it): REFUSE fail-closed. A
-        nominally-local session NEVER falls back to the cloud default via Strix.
-
-    Contract of ``_resolve_launch_model``: a non-empty backend is returned ONLY for a LOCAL pick (a cloud pick
-    yields ``("", "")`` / a model string with an empty backend), so ``backend != ""`` is exactly the LOCAL case.
-
-    Total: never raises. Any resolution failure on a LOCAL pick is a REFUSAL, never a silent cloud egress.
-
-    HONEST LIMIT: this pins the model ENDPOINT (STRIX_LLM/LLM_API_BASE) only. It does NOT audit Strix's own
-    other network calls (e.g. its optional web-search tool); those remain governed by their own env/keys.
-    """
+    Used to tell a genuinely-EMPTY pick (honest to degrade to the global default — no local pick was made)
+    from an INDICATED pick that FAILED to resolve to a confirmed backend (which must REFUSE, never silently
+    degrade to the CLOUD default — that would re-open the leak for a local-indicating pick). Total: an
+    UNREADABLE session store is treated as INDICATED (fail-closed — we cannot prove no pick was made)."""
+    if str(model_id or "").strip():
+        return True
+    if not str(session_id or "").strip():
+        return False
     try:
-        _, backend = _resolve_launch_model(model_id, session_id)
-    except Exception:  # noqa: BLE001 — a resolver hiccup is treated as "no pick" (global default), never a bad pin
-        backend = ""
-    backend = str(backend or "").strip()
-    if not backend:
-        return {}, ""                       # no pick / cloud pick → global STRIX_LLM default (byte-identical)
-    # ---- a LOCAL per-session pick: pin the loopback endpoint or REFUSE — never the cloud default ----
+        from . import sessions
+        return bool(str(sessions.session_model(session_id) or "").strip())
+    except Exception:  # noqa: BLE001 — cannot prove there is NO pick ⇒ treat as indicated (fail-closed)
+        return True
+
+
+def _strix_local_env_or_refusal(backend: str) -> "tuple[dict, str]":
+    """Build the loopback-pinned Strix env for a LOCAL backend, or REFUSE — the pin-or-refuse core.
+
+    Returns ``({"STRIX_LLM": ..., "LLM_API_BASE": ...}, "")`` for a LOCAL backend whose CONFIGURED endpoint is
+    loopback and whose model is expressible, else ``({}, "<why>")``. It NEVER returns a cloud pin: an unmappable
+    backend, no configured endpoint, a NON-loopback / hostname endpoint, or no model to express the pick all
+    REFUSE fail-closed. The loopback check REUSES ``chat._configured_local_endpoint`` / ``chat._url_host_is_local``
+    (the same rule the console's ``_reason_local`` enforces), so a REMOTE endpoint is refused BEFORE anything
+    spawns and the "nothing leaves this machine" boundary lives in ONE place per plane. Total: never raises."""
     try:
         from . import chat as _chat
-        name = backend.lower()
+        name = str(backend or "").strip().lower()
         spec = _STRIX_LOCAL_MAP.get(name)
         if spec is None:
             return {}, (f"the local model backend {backend!r} cannot be expressed as a Strix (LiteLLM) model, so a "
@@ -896,6 +917,48 @@ def _strix_session_llm_env(model_id: str, session_id: str) -> "tuple[dict, str]"
     except Exception as exc:  # noqa: BLE001 — a LOCAL pick that cannot be resolved REFUSES; it never egresses to cloud
         return {}, (f"the local model pick {backend!r} could not be resolved to a local Strix endpoint "
                     f"({type(exc).__name__}); refused rather than egressing the codebase to the cloud default.")
+
+
+def _strix_session_llm_env(model_id: str, session_id: str) -> "tuple[dict, str]":
+    """GAP-1 — the per-session STRIX_LLM/LLM_API_BASE override for a Strix codebase run → ``(env_extra, refusal)``.
+
+    Returns one of:
+      * ``({}, "")``  — a genuinely EMPTY pick (no turn model, no session pin), or a CONFIRMED CLOUD pick: keep
+        today's GLOBAL ``STRIX_LLM`` default, byte-identical (no regression). A cloud/global pick is cloud by the
+        operator's own choice.
+      * ``({"STRIX_LLM": ..., "LLM_API_BASE": ...}, "")`` — a LOCAL pick, pinned at its LOOPBACK endpoint. Merged
+        OVER ``os.environ`` for the child, so the global cloud default can never leak into the Strix run.
+      * ``({}, "<why>")`` — a LOCAL pick that cannot be pointed at a loopback local endpoint, OR an INDICATED pick
+        that could not be CONFIRMED (cloud or local): REFUSE fail-closed. A nominally-local session NEVER falls
+        back to the cloud default via Strix.
+
+    ADVISORY-1 (no fail-open bias): a pick that is INDICATED (a turn model or a session pin) but resolves to
+    NEITHER a confirmed cloud model NOR a local backend REFUSES — it does NOT silently degrade to the global
+    CLOUD default (which would re-open the leak for a local-indicating pick). Only a genuinely empty pick (no
+    session model at all) degrades — that is honest, because no local pick was made.
+
+    Total: never raises. Any resolution failure on an INDICATED pick is a REFUSAL, never a silent cloud egress.
+
+    HONEST LIMIT: this pins the model ENDPOINT (STRIX_LLM/LLM_API_BASE) only. It does NOT audit Strix's own
+    other network calls (e.g. its optional web-search tool); those remain governed by their own env/keys.
+    """
+    try:
+        cloud_model, backend = _resolve_launch_model(model_id, session_id)
+    except Exception:  # noqa: BLE001 — _resolve_launch_model is itself total; belt-and-suspenders → unconfirmed
+        cloud_model, backend = "", ""
+    backend = str(backend or "").strip()
+    cloud_model = str(cloud_model or "").strip()
+    if backend:
+        return _strix_local_env_or_refusal(backend)      # a LOCAL pick → pin the loopback endpoint or REFUSE
+    if cloud_model:
+        return {}, ""                                    # a CONFIRMED cloud pick → global default (byte-identical)
+    # neither a local backend nor a confirmed cloud model resolved. Degrade to the global default ONLY when the
+    # pick was genuinely EMPTY; an INDICATED pick that failed to resolve REFUSES (never a silent cloud egress).
+    if _session_pick_indicated(model_id, session_id):
+        return {}, ("a per-session model pick was indicated but could not be resolved to a known cloud or local "
+                    "model, so a Strix codebase run cannot confirm it is local — refused rather than risk egressing "
+                    "the source to the cloud default. Re-pick the model, or pick a cloud model explicitly.")
+    return {}, ""                                        # genuinely no pick → global STRIX_LLM default (honest)
 
 
 def engage_instruct(slug: str, text: str) -> dict:
