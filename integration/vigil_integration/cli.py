@@ -1787,8 +1787,10 @@ def _cmd_restore(args: argparse.Namespace) -> int:
             if croot is None:
                 cr = _resolve_crucible_root()
                 croot = str(cr) if cr else None
+            expect_pub = getattr(args, "expect_governance_pubkey", "") or None
             try:
-                res = restore_offense_backup(off, args.base_dir, pw, crucible_root=croot)
+                res = restore_offense_backup(off, args.base_dir, pw, crucible_root=croot,
+                                             expect_pubkey=expect_pub)
             except OffenseBackupError as e:
                 print(f"vigil restore: offense leg failed (nothing trusted): {e}", file=sys.stderr)
                 return 1
@@ -2342,6 +2344,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="CRUCIBLE root to restore .blackboard/.console into (default: $CRUCIBLE_ROOT or in-repo)")
     prs.add_argument("--sigil-home", dest="sigil_home", default="",
                      help="a FRESH SIGIL_HOME dir to restore the sovereign plane into (required for that leg)")
+    prs.add_argument("--expect-governance-pubkey", dest="expect_governance_pubkey", default="",
+                     help="out-of-band AUTHENTICITY pin: the expected offense-governance pubkey (base64). When "
+                          "set, the offense backup's manifest MUST be signed by it — else restore refuses. "
+                          "Without it, offense restore authenticity is passphrase-possession only.")
     grp2 = prs.add_mutually_exclusive_group()
     grp2.add_argument("--sovereign-only", dest="sovereign_only", action="store_true",
                       help="restore ONLY the sovereign plane")

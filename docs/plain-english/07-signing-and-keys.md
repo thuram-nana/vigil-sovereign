@@ -747,10 +747,18 @@ Three honest limits on the backup:
    The sovereign file covers the owner side (owner key, record, floor, integrity manifest, and now
    the permission-kernel dir). The offensive engine's working keys — the engagement-record key, the
    governance key, the operator key — plus its spine and its collected evidence are covered by a
-   **separate** offense backup file, authenticated by the governance key rather than the owner key.
-   They are deliberately never packaged together, because one process holding both planes' secrets
-   at once would breach the two-process trust boundary. Each file needs its own passphrase; the
-   offense file's authenticity is only as strong as the owner's delegation to the governance key.
+   **separate** offense backup file, whose internal manifest is signed by the offensive governance
+   key. They are deliberately never packaged together, because one process holding both planes'
+   secrets at once would breach the two-process trust boundary. Each file needs its own passphrase.
+   Be precise about what that governance signature buys on the offense file: because the signature
+   lives *inside* the passphrase-encrypted body and restore checks it against the key carried in the
+   same body, by default anyone who holds the passphrase could re-sign a substitute manifest — so
+   **by default the offense file's authenticity is passphrase-possession, exactly like the sovereign
+   file** (the passphrase is the real root of trust, next point). To get genuine governance-key
+   authenticity you must **pin** the expected governance public key out of band at restore time
+   (`vigil restore --expect-governance-pubkey <base64>`); with that pin, a passphrase-holder who does
+   not also hold the governance *private* key cannot pass off a forged backup. The governance key's
+   own tie to the owner remains the owner-signed delegation.
 3. **The passphrase becomes the root of trust for that file.** Anyone holding both the backup
    file and its passphrase holds the owner key. It should be treated with the same seriousness
    as the key itself — ideally split between two custodians or held in a safe.

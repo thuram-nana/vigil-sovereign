@@ -11,12 +11,18 @@ manifest, and the byte-for-byte identical path-escape guard) so the two legs sha
 
 Boundary-clean and honest by construction:
 
-  * **Manifest authenticity roots to the offense GOVERNANCE key, NOT the owner key.** The offense side holds
-    no owner private key (the two-env boundary), so the file manifest is signed by the stable offense
-    governance keypair (``live.governance_identity``). Its OWNER tie is the existing owner-signed
-    ``OFFENSE_GOVERNANCE_ROLE`` delegation — a backup made by a compromised offense host is only as
-    trustworthy as that delegation. (The sovereign leg keeps its owner-signed manifest; this is the honest
-    residual of a keyless plane.)
+  * **Restore authenticity: passphrase-possession by default; governance-key-PINNED on request.** The manifest
+    is signed by the stable offense governance keypair (``live.governance_identity``), and that signature lives
+    INSIDE the passphrase-sealed body. But restore verifies the signature against the pubkey carried IN the
+    body — a self-signed pair ANY passphrase-holder can mint — so WITHOUT an out-of-band pin, restore-time
+    authenticity reduces to passphrase-possession (the AEAD passphrase is the real root of trust, exactly as on
+    the sovereign leg, whose docstring states the same residual). Passing ``expect_pubkey`` (the orchestrator's
+    ``--expect-governance-pubkey``) pins the expected governance pubkey out of band and UPGRADES this to real
+    authenticity: a passphrase-holder who does NOT also hold the governance PRIVATE key cannot forge a manifest
+    that verifies under the pinned key. The governance key's OWNER tie is the existing owner-signed
+    ``OFFENSE_GOVERNANCE_ROLE`` delegation. (The offense side holds no owner private key — the two-env boundary
+    — so the manifest cannot be owner-signed as the sovereign leg's is; this is the honest residual of a
+    keyless plane, closed only by the out-of-band pin.)
   * **Two SEPARATE encrypted files, one per plane — NEVER a merged archive.** A single archive covering both
     planes would require ONE process to hold both plane secrets at once = a FATAL-2 violation. The orchestrator
     (`vigil backup`) writes this offense file in-venv and drives the sovereign leg as a SUBPROCESS; the two
@@ -34,7 +40,10 @@ fails to decrypt / fails the manifest signature / fails a per-file hash check BE
 written. AFTER the write, the restore RE-VERIFIES: every restored ``{slug}.spine`` re-checks its chain +
 signatures under the restored spine pubkey, the segment view (`verify_offense_home`) reports no FAILED
 segment, and every restored self-contained evidence bundle re-runs the deterministic evidence verify — the
-restore reports ``verified: True`` ONLY if all pass, else it raises.
+restore reports ``verified: True`` ONLY if all pass, else it raises. Critically, ``verified: True`` is NEVER
+returned for a check that did not RUN: a restored ``{slug}.spine`` with no usable offense-spine public key to
+re-verify it under is a fail-closed refusal, not a silent skip (and ``create`` refuses at the source to
+produce a spine-bearing backup that omits its spine key, so this only bites a hand-crafted/legacy body).
 
 Honest limit on what is re-verified: ``.blackboard/store.sqlite`` and the run dirs are captured as OPAQUE
 bytes. Their internal database consistency is NOT re-checked on restore — only the signed offense spine and
@@ -192,6 +201,15 @@ def create_offense_backup(dest, passphrase: str, *, base_dir, crucible_root=None
         val = vault.read_text_secret(base / name, context=ctx)
         if val is not None:
             secrets[name] = val
+    # A ``*.spine`` exists (guaranteed above). Refuse to produce a backup whose restored spine could NEVER be
+    # re-verified: without the offense-spine key captured here, restore has no pubkey to integrity-check the
+    # spine under, and would otherwise report an UNVERIFIED restore as ``verified: True``. Fail closed at the
+    # source so an honest operator can never mint a spine-bearing backup that silently omits its verifying key.
+    if DEFAULT_SPINE_KEY_FILE not in secrets:
+        raise OffenseBackupError(
+            f"refusing to back up: a *.spine exists under {base} but the offense-spine key "
+            f"({DEFAULT_SPINE_KEY_FILE}) is missing/unreadable, so the restored spine could never be "
+            f"re-verified — provision or restore the offense-spine key first")
 
     manifest = {
         "schema": _SCHEMA, "scope": gov.public_key_b64, "file_sha256": file_hashes,
@@ -260,13 +278,19 @@ def _verify_evidence_bundles(root: Path) -> int:
     return count
 
 
-def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None) -> dict:
+def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None, expect_pubkey=None) -> dict:
     """Decrypt + VERIFY an offense backup, then write the base_dir state into ``new_base`` and the CRUCIBLE
     proof state into ``crucible_root``. Fail-closed: the passphrase must decrypt, the governance signature
     over the manifest must verify, and every file's sha256 must match BEFORE anything is written. The three
     identity keys are re-sealed through the NEW vault. AFTER the write it RE-VERIFIES — every restored spine's
     chain/signatures, the segment view (no FAILED), and every restored evidence bundle — and returns
-    ``{"verified": True, ...}`` ONLY if all pass, else raises OffenseBackupError."""
+    ``{"verified": True, ...}`` ONLY if all pass, else raises OffenseBackupError.
+
+    ``expect_pubkey`` (optional) is the out-of-band AUTHENTICITY pin: the expected offense-GOVERNANCE pubkey
+    the recipient obtained through a trusted channel. When supplied, the in-body manifest pubkey MUST equal it
+    (and the signature is verified under it), so a passphrase-holder who does not also hold the governance
+    private key cannot pass off a self-signed manifest. When omitted, restore-time authenticity reduces to
+    passphrase-possession (the AEAD passphrase is the root of trust — see the module docstring)."""
     src, new_base = Path(src), Path(new_base)
     croot = Path(crucible_root) if crucible_root else None
     salt, sealed = _read_header(src)
@@ -286,6 +310,13 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
     sig = body.get("manifest_sig")
     if not isinstance(manifest, dict) or not isinstance(pub, str) or not isinstance(sig, str):
         raise OffenseBackupError("backup is missing its signed manifest")
+    # Out-of-band authenticity pin (optional): reject a manifest NOT signed by the expected governance key
+    # BEFORE trusting anything in the body. Without the pin, the in-body pubkey is self-asserted (any
+    # passphrase-holder can mint it) — the pin is what turns the governance signature into real authenticity.
+    if expect_pubkey is not None and pub != expect_pubkey:
+        raise OffenseBackupError(
+            "backup manifest is not signed by the pinned --expect-governance-pubkey (authenticity pin "
+            "failed) — refusing to restore a manifest of unverified provenance")
     try:
         if not verify_one(pub, canonical_json(manifest), sig):
             raise OffenseBackupError("backup manifest signature does not verify (tamper)")
@@ -366,20 +397,29 @@ def _reverify_restored(new_base: Path, croot, secrets: dict) -> int:
     OffenseBackupError unless ALL pass. Returns the count of evidence bundles that re-verified."""
     from .live.spine_verify import FAILED, verify_offense_home, verify_offense_spine
 
+    spine_files = sorted(new_base.glob("*.spine"))
     spine_pub = None
     sk = secrets.get(DEFAULT_SPINE_KEY_FILE)
     if sk:
         try:
             spine_pub = json.loads(sk).get("public_key_b64")
-        except Exception:  # noqa: BLE001 — a malformed spine key just drops the pinned integrity check
+        except Exception:  # noqa: BLE001 — a malformed spine key must NOT silently drop the check (fail closed)
             spine_pub = None
-    if spine_pub:
-        for sp in sorted(new_base.glob("*.spine")):
-            v = verify_offense_spine(spine_path=str(sp), spine_pubkey=spine_pub)
-            if v.status == FAILED:
-                raise OffenseBackupError(
-                    f"restored spine {sp.name} FAILED integrity re-verification ({v.detail}) — the restore is "
-                    f"NOT trustworthy")
+    # FAIL CLOSED: a restored spine we cannot integrity-check (no usable spine pubkey) must NEVER be reported
+    # as verified. `create` refuses to mint such a backup at the source; this catches a hand-crafted/legacy
+    # body too. Reporting success for a re-verify that did not RUN is exactly the unearned `verified: True`
+    # the red-pen flagged — the segment view below can't cover it (a keyless spine segment is UNVERIFIABLE,
+    # never FAILED), so it is asserted here.
+    if spine_files and not spine_pub:
+        raise OffenseBackupError(
+            f"cannot re-verify {len(spine_files)} restored spine file(s): the backup carries no usable "
+            f"offense-spine public key — refusing to report an unverified restore as verified")
+    for sp in spine_files:
+        v = verify_offense_spine(spine_path=str(sp), spine_pubkey=spine_pub)
+        if v.status == FAILED:
+            raise OffenseBackupError(
+                f"restored spine {sp.name} FAILED integrity re-verification ({v.detail}) — the restore is "
+                f"NOT trustworthy")
     # the segment view: any PRESENT segment that FAILS integrity (e.g. a corrupt usage ledger) is fatal;
     # ABSENT / UNVERIFIABLE segments are honest non-failures (nothing to attest / no owner tie supplied here).
     for seg in verify_offense_home(str(new_base)):

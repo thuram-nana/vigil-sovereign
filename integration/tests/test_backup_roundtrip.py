@@ -252,3 +252,77 @@ def test_tampered_manifest_signature_refuses(tmp_path):
     dest.write_bytes(_MAGIC + salt + resealed)
     with pytest.raises(OffenseBackupError, match="signature does not verify"):
         restore_offense_backup(dest, str(tmp_path / "nb"), PW)
+
+
+# --- BLOCK-1: `verified: True` is NEVER returned for a spine re-verify that did not RUN --------------------
+
+def test_create_refuses_a_spine_without_its_verifying_key(tmp_path):
+    """Fail closed at the SOURCE: a base_dir that has a *.spine but no offense-spine key cannot be backed up —
+    the restored spine could never be integrity-re-verified, so a `verified: True` restore would be unearned."""
+    base = tmp_path / "b"
+    _seed_offense_home(base)
+    os.remove(base / DEFAULT_SPINE_KEY_FILE)                      # lose/rotate the spine key
+    with pytest.raises(OffenseBackupError, match="offense-spine key .* is missing|could never be re-verified"):
+        create_offense_backup(tmp_path / "o.vglbk", PW, base_dir=str(base))
+
+
+def test_restore_refuses_a_spine_with_no_reverify_key_handcrafted(tmp_path):
+    """The exact hole the red-pen found: a (passphrase-forgeable) body carrying a spine file but NO spine-key
+    secret must NOT restore to `verified: True` — restore has no pubkey to re-verify the spine under, so the
+    integrity check does not run and the restore MUST fail closed rather than rubber-stamp success."""
+    dest = tmp_path / "noverify.vglbk"
+    junk = base64.b64encode(b"THIS IS NOT A VALID SIGNED SPINE - attacker-controlled junk").decode("ascii")
+    _craft_backup(dest, files={f"{SLUG}.spine": junk}, secrets_body={}, secrets_names=[])
+    with pytest.raises(OffenseBackupError, match="no usable offense-spine public key|cannot re-verify"):
+        restore_offense_backup(dest, str(tmp_path / "nb"), PW)
+
+
+def test_restore_refuses_a_corrupt_spine_when_the_key_is_present(tmp_path):
+    """Contrast control (the teeth exist when the key IS present): corrupt a spine byte in the SOURCE before
+    backing up (so the packaged hash matches the corrupted bytes → passes the pre-write hash check), then
+    restore → the post-write signature re-verify under the packaged key FAILS → refuse."""
+    base = tmp_path / "b"
+    _seed_offense_home(base)
+    spine = base / f"{SLUG}.spine"
+    data = bytearray(spine.read_bytes())
+    data[len(data) // 2] ^= 0x01                                  # mid-record flip (not a torn tail)
+    spine.write_bytes(bytes(data))
+    dest = tmp_path / "o.vglbk"
+    create_offense_backup(dest, PW, base_dir=str(base))
+    with pytest.raises(OffenseBackupError, match="FAILED integrity re-verification"):
+        restore_offense_backup(dest, str(tmp_path / "nb"), PW)
+
+
+# --- BLOCK-2: out-of-band governance-pubkey pin upgrades authenticity past passphrase-possession ----------
+
+def test_expect_governance_pubkey_pin_rejects_a_wrong_key_and_accepts_the_right_one(tmp_path):
+    """With `expect_pubkey`, restore refuses a manifest not signed by the pinned governance key (a forged
+    backup any passphrase-holder could mint), and accepts the genuine one. Proves the pin is real authenticity,
+    not decoration."""
+    base, croot = tmp_path / "b", tmp_path / "c"
+    _seed_offense_home(base)
+    _seed_evidence_bundle(croot)
+    dest = tmp_path / "o.vglbk"
+    summary = create_offense_backup(dest, PW, base_dir=str(base), crucible_root=str(croot))
+    real_gov_pub = summary["scope"]                              # the genuine offense-governance pubkey
+
+    # a DIFFERENT key is refused before anything is trusted
+    with pytest.raises(OffenseBackupError, match="authenticity pin failed"):
+        restore_offense_backup(dest, str(tmp_path / "nb1"), PW, crucible_root=str(tmp_path / "nc1"),
+                               expect_pubkey=generate_keypair().public_key_b64)
+    # the genuine pubkey pins cleanly and the restore still fully re-verifies
+    res = restore_offense_backup(dest, str(tmp_path / "nb2"), PW, crucible_root=str(tmp_path / "nc2"),
+                                 expect_pubkey=real_gov_pub)
+    assert res["verified"] is True and res["bundles_verified"] >= 1
+
+
+def test_a_forged_manifest_that_passes_the_passphrase_is_still_caught_by_the_pin(tmp_path):
+    """The threat the pin closes: a passphrase-holder who does NOT hold the governance private key crafts a
+    fully self-consistent, correctly self-signed backup (passes decrypt + sig + hash). Without a pin it would
+    restore; WITH the correct pin it is refused because the forger's pubkey ≠ the pinned governance pubkey."""
+    victim_gov = generate_keypair().public_key_b64               # the real key the recipient pins, out of band
+    dest = tmp_path / "forged.vglbk"
+    good = base64.b64encode(b"data").decode("ascii")
+    _craft_backup(dest, files={"token-budgets.json": good})       # _craft_backup self-signs with a FRESH key
+    with pytest.raises(OffenseBackupError, match="authenticity pin failed"):
+        restore_offense_backup(dest, str(tmp_path / "nb"), PW, expect_pubkey=victim_gov)
