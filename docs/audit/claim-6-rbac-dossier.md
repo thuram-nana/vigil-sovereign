@@ -45,7 +45,10 @@ offense backend never reaches the browser.
 **Explicitly out of scope / deferred** (stated up front so this dossier cannot be read as claiming them —
 see [§9](#9-honest-limitations--residuals)): SSO/OIDC/MFA/password flows; cryptographic per-user identities
 (bearer tokens are the foundation); per-action RBAC *inside* the offense console; comprehensive per-button
-gating on every screen; an HA/cluster failover profile.
+gating on every screen; **synchronous multi-writer high availability of the sovereign spine** (an
+**active-passive** failover profile with a witnessed-floor interlock *is* built — see [§9](#9-honest-limitations--residuals)
+and `docs/architecture/HA-PROFILE.md`; synchronous multi-writer HA of a single-owner signed spine is a
+detectable fork, not a missing feature).
 
 ---
 
@@ -225,8 +228,17 @@ Stated plainly, because an assurance document that hides its edges is worthless:
   (every mutation is re-checked and 403s), but comprehensive per-button gating is not done.
 - **Hard-prune fold.** The accounts fold is a genesis scan; a future cold-archive prune must extend the
   snapshot with an accounts seed + referential-floor assert.
-- **No HA/cluster failover profile.** Single-node compose + systemd; witnesses are independent trust nodes,
-  not application failover.
+- **Active-passive HA only — NOT synchronous multi-writer HA.** An active-passive failover profile *is* built
+  (`docs/architecture/HA-PROFILE.md`, `infra/ha/`): the stateless proxy/otel tier is active-active, and the
+  single-writer sovereign spine gets an **anti-rollback-safe** failover via a **witnessed-floor interlock**
+  (`tools/ha/spine_failover_guard.py` / `sigil floor promote-passive`) that refuses to promote a stale, forged,
+  or forked mirror. Honest limits, by construction: the spine is **single-writer** (a second concurrent writer
+  is a *detectable fork*, not scale — HA-PROFILE.md §2), so there is **no automatic leader-election** —
+  promotion requires the witnessed-floor check *plus* a **manual fence** of the old active; the passive holds an
+  **out-of-band** mirror of `~/.sigil` (a signed-backup seed + `tools/ha/mirror-sync.sh` rsync delta), **not**
+  synchronous replication; and witnesses remain **independent trust nodes, not failover**. Stateful backends
+  (Neo4j community, embedded Qdrant) are **not** clustered — the profile documents the enterprise/server-mode
+  upgrades and ships neither.
 - **SSO / OIDC / MFA / password flows.** Not in scope.
 
 ---

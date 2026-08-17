@@ -1,0 +1,32 @@
+# VIGIL HA passive mirror-sync timer — fires the rsync delta oneshot.
+# =====================================================================
+# Fires vigil-ha-mirror.service on a cadence so the passive standby's mirror of
+# the active's ~/.sigil stays current WITHOUT an operator remembering to run it.
+# A fresher mirror = a shorter failover recovery-point (less to catch up at
+# promotion). It does NOT make the passive a writer — the sync is read-only and
+# promotion is a separate, gated step (docs/architecture/HA-PROFILE.md §3.2).
+#
+# Enable with:
+#   systemctl --user enable --now vigil-ha-mirror.timer
+#   systemctl --user list-timers 'vigil-*'     # confirm next run
+#
+# HONEST RESIDUAL: this is an OUT-OF-BAND mirror, NOT synchronous replication —
+# the mirror is only ever as current as the LAST fire of this timer. Tighten
+# OnCalendar for a shorter recovery-point objective; a torn/stale mirror simply
+# fails the witnessed-floor promotion guard, so it can never activate a bad head.
+
+[Unit]
+Description=Periodic trigger for the VIGIL HA passive mirror sync
+Documentation=file:%h/vigil/docs/architecture/HA-PROFILE.md
+
+[Timer]
+# Every 15 min by default — an HA mirror wants a much shorter recovery-point than the daily backup.
+OnCalendar=*:0/15
+# If the machine was asleep/off at the scheduled time, run once on the next wake.
+Persistent=true
+# Small smear so a passive fleet does not all rsync the active at the same instant.
+RandomizedDelaySec=60
+Unit=vigil-ha-mirror.service
+
+[Install]
+WantedBy=timers.target
