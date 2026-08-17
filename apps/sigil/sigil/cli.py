@@ -884,6 +884,9 @@ def _load_failover_guard():
         sys.exit(2)
     spec = importlib.util.spec_from_file_location("spine_failover_guard", guard_path)
     mod = importlib.util.module_from_spec(spec)
+    # Register BEFORE exec: the module's @dataclass resolves its own annotations via
+    # sys.modules[__module__], which is None for an unregistered spec-loaded module (TypeError at import).
+    sys.modules.setdefault("spine_failover_guard", mod)
     spec.loader.exec_module(mod)
     return mod
 
