@@ -65,11 +65,15 @@ class Checkpoint:
 
     ``entry_count`` is the ABSOLUTE record count (pruned base + live window) and ``merkle_root`` is
     the head's cumulative Merkle root, so a checkpoint fully summarises the log state at its height.
-    ``base_seq``/``base_count`` are the head's PRUNE BOUNDARY (first retained seq, count of pruned
-    records) — committing them makes ``merkle_root`` fork-DECIDABLE: at one absolute ``entry_count`` AND
-    one prune boundary the leaf set is fixed, so a differing cumulative root is a FABRICATED root, not a
-    benign re-prune (see ``is_split``). ``prev_checkpoint_hash`` chains this checkpoint to the previous one
-    in the witness log. base_*=0 (nothing pruned) reproduces the pre-C-S1 verdicts byte-for-byte.
+    ``base_seq``/``base_count`` are the head's PRUNE BOUNDARY (first retained seq, count of pruned records).
+    C-S1 commits them into the checkpoint's SIGNED identity for two SOUND reasons: (1) so a witness quorum
+    attests the prune boundary, not just the head; (2) so a checkpoint CHAIN can reject an UN-prune (a boundary
+    that moves BACKWARDS = an older-snapshot replay), via the monotonic guard in :func:`consistent`. It does
+    NOT make the ``merkle_root`` a fork signal — the cumulative root is a left-fold over the operator-chosen
+    prune SCHEDULE, not a canonical function of the leaf set, so two honest heads at one boundary can carry
+    different roots; ``head_hash`` remains the sole sound fork commitment (see :func:`is_split` / ADR 0006).
+    ``prev_checkpoint_hash`` chains this checkpoint to the previous one in the witness log. base_*=0 (nothing
+    pruned) reproduces the pre-C-S1 verdicts for every realizable head.
     """
 
     last_seq: int
@@ -132,12 +136,14 @@ def consistent(old: Checkpoint, new: Checkpoint) -> tuple[bool, str]:
         return False, "checkpoint chain broken — new does not link to old (fork / split view)"
     if new.entry_count == old.entry_count and new.head_hash != old.head_hash:
         return False, "same height, different head — two forks at one size (split view)"
-    # ROOT FORK: at the SAME absolute count AND the SAME prune boundary the leaf set is identical, so a
-    # differing cumulative merkle_root is a FABRICATED root (a genuine fork), not a benign re-prune (a
-    # re-prune MOVES base_seq/base_count, excluded above). base_*=0 everywhere reproduces the old verdict.
-    if (new.entry_count == old.entry_count and new.base_seq == old.base_seq
-            and new.base_count == old.base_count and new.merkle_root != old.merkle_root):
-        return False, "same height + same prune boundary, different merkle root — fabricated root (fork)"
+    # NOTE: we do NOT adjudicate a same-height/same-boundary ``merkle_root`` difference as a fork. The
+    # cumulative root is a left-FOLD over the (operator-chosen) prune SCHEDULE — ``chain_cumulative`` folds
+    # each prune's delta-root in turn — so two HONEST heads that pruned the same records on different
+    # cadences legitimately carry different cumulative roots at the same boundary. ``head_hash`` already
+    # hash-links the entire ordered entry chain and is schedule-INVARIANT, so it is the sound fork signal;
+    # keying on the root would FALSE-ACCUSE an honest re-prune (see ADR 0006). The boundary is committed
+    # (below/above) for a different reason: to make the prune boundary part of the witnessed identity and to
+    # catch an UN-prune (base going backwards), not to adjudicate the root.
     return True, "consistent append-only extension"
 
 
@@ -324,32 +330,21 @@ def verify_log(checkpoints: "list[Checkpoint]") -> tuple[bool, str]:
 
 
 def is_split(a: Checkpoint, b: Checkpoint) -> bool:
-    """True iff ``a`` and ``b`` are a SPLIT VIEW at the SAME height (``entry_count``): a DIFFERENT HEAD,
-    OR — now that the checkpoint commits the prune boundary — a DIFFERENT cumulative ``merkle_root`` at
-    the SAME prune boundary. A client that obtains two (witnessed) checkpoints compares them with this;
-    a positive is cryptographic proof the log presented two forks, even if each was individually
-    witness-signed.
+    """True iff ``a`` and ``b`` are a SPLIT VIEW: the SAME height (``entry_count``) but a DIFFERENT HEAD.
+    A client that obtains two (witnessed) checkpoints compares them with this — a positive is cryptographic
+    proof the log presented two forks, even if each was individually witness-signed.
 
-    Two decidable fork signals:
-      * HEAD fork — ``head_hash`` differs. ``head_hash`` hash-links the entire ordered entry chain, so
-        two genuinely different logs at one ``entry_count`` MUST differ here. (Unchanged from v1.)
-      * ROOT fork — the merkle_root differs while the prune boundary (``base_seq``/``base_count``) is
-        IDENTICAL. At one absolute ``entry_count`` and one prune boundary the leaf set is fixed, so the
-        cumulative root is a deterministic function of it; a differing root at the same boundary is a
-        FABRICATED root, i.e. a fork. This is the residual the v1 summary could not adjudicate.
-
-    A benign re-prune MOVES the boundary (``base_seq``/``base_count`` grow), so it is EXCLUDED here and
-    never false-accused — exactly the property the old head-only key protected. The ONE case still
-    un-decidable from the summary is a CROSS-boundary root difference (different base_* AND different
-    root): that is a legitimate re-prune, still excluded here, and a genuine cross-boundary equivocation
-    is still caught via ``head_hash`` (the head differs across a real fork). base_*=0 on both sides
-    reproduces the pre-C-S1 verdict for every pre-existing case."""
-    if a.entry_count != b.entry_count:
-        return False
-    if a.head_hash != b.head_hash:
-        return True
-    return (a.base_seq == b.base_seq and a.base_count == b.base_count
-            and a.merkle_root != b.merkle_root)
+    Keyed on ``head_hash`` (the live tip), NOT the cumulative ``merkle_root``. ``head_hash`` hash-links the
+    entire ordered entry chain, so two genuinely different logs at one ``entry_count`` MUST differ here — it
+    is a COMPLETE and SOUND fork commitment. The ``merkle_root`` is deliberately NOT adjudicated: it is a
+    left-FOLD over the (operator-chosen) prune SCHEDULE (``chain_cumulative`` folds each prune's delta-root
+    in turn), NOT a canonical function of the leaf set, so two HONEST heads that pruned the same records on
+    different cadences carry different cumulative roots at the SAME boundary. Keying on the root would
+    FALSE-ACCUSE that honest re-prune as a fork — see ADR 0006 for the schedule-dependence proof. C-S1 added
+    ``base_seq``/``base_count`` to the checkpoint (committing the prune boundary into the witnessed identity
+    and enabling an UN-prune monotonic guard in :func:`consistent`), but it does NOT change what counts as a
+    fork here: ``head_hash`` remains the sole, sound signal, exactly as in v1."""
+    return a.entry_count == b.entry_count and a.head_hash != b.head_hash
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -372,9 +367,10 @@ _MULTI_MARK = "vigil.multi-segment-checkpoint.v2"
 
 def _segment_extends(old: Checkpoint, new: Checkpoint) -> tuple[bool, str]:
     """The append-only monotonicity of one Checkpoint over another — count/seq/base non-rollback + no
-    same-height fork (head OR fabricated root) — WITHOUT the per-checkpoint chain-link check (used
-    per-segment inside a composite, where chaining lives at the composite level). Mirrors
-    :func:`consistent` minus its prev-link clause."""
+    same-height HEAD fork — WITHOUT the per-checkpoint chain-link check (used per-segment inside a composite,
+    where chaining lives at the composite level). Mirrors :func:`consistent` minus its prev-link clause,
+    INCLUDING its deliberate non-adjudication of the schedule-dependent ``merkle_root`` (see :func:`is_split`
+    / ADR 0006): the root is not a fork signal, so it is not checked here either."""
     if new.entry_count < old.entry_count:
         return False, "record count shrank — rewrite/rollback, not an append-only extension"
     if new.last_seq < old.last_seq:
@@ -385,9 +381,6 @@ def _segment_extends(old: Checkpoint, new: Checkpoint) -> tuple[bool, str]:
         return False, "base_count went backwards — un-prune (older-snapshot replay), not an extension"
     if new.entry_count == old.entry_count and new.head_hash != old.head_hash:
         return False, "same height, different head — two forks at one size (split view)"
-    if (new.entry_count == old.entry_count and new.base_seq == old.base_seq
-            and new.base_count == old.base_count and new.merkle_root != old.merkle_root):
-        return False, "same height + same prune boundary, different merkle root — fabricated root (fork)"
     return True, "append-only extension"
 
 

@@ -182,9 +182,10 @@ def test_checkpoint_emitter_is_idempotent_on_a_no_progress_head():
 
 
 def test_is_split_ignores_a_prune_boundary_difference():
-    # C-S1: a benign re-prune MOVES the prune boundary (base_seq/base_count grow) as merkle_root advances,
-    # at the SAME live tip (head_hash, entry_count). A CROSS-boundary root difference stays excluded → NOT
-    # a fork (no false accusation — the property the old head-only key protected).
+    # C-S1: fork detection stays keyed on head_hash (the schedule-invariant entry-chain commitment); the
+    # merkle_root is NOT adjudicated (it is a left-fold over the operator-chosen prune SCHEDULE, not a
+    # canonical function of the leaf set — see is_split / ADR 0006). So a same-tip root/boundary difference
+    # is NEVER a fork (no false accusation of an honest re-prune); only a differing head_hash is.
     a = Checkpoint(last_seq=100, entry_count=100, head_hash="head-X", merkle_root="m-before-prune",
                    base_seq=0, base_count=0)
     b = Checkpoint(last_seq=100, entry_count=100, head_hash="head-X", merkle_root="m-after-prune",
@@ -192,12 +193,13 @@ def test_is_split_ignores_a_prune_boundary_difference():
     assert is_split(a, b) is False
     # a genuine fork (a different head at the same height) is still detected
     assert is_split(a, _cp(100, 100, "head-Y")) is True
-    # NEW decidable case: same height + SAME prune boundary + DIFFERENT merkle_root = a fabricated root → fork
-    c = Checkpoint(last_seq=100, entry_count=100, head_hash="head-X", merkle_root="m-real",
+    # same live tip + SAME prune boundary + DIFFERENT root = two HONEST prune schedules (the root is
+    # schedule-dependent) → NOT a fork. Keying on the root here would false-accuse an honest re-prune.
+    c = Checkpoint(last_seq=100, entry_count=100, head_hash="head-X", merkle_root="m-schedule-A",
                    base_seq=10, base_count=10)
-    c_forged = Checkpoint(last_seq=100, entry_count=100, head_hash="head-X", merkle_root="m-FABRICATED",
-                          base_seq=10, base_count=10)    # same tip, same boundary, impossible second root
-    assert is_split(c, c_forged) is True
+    c_other = Checkpoint(last_seq=100, entry_count=100, head_hash="head-X", merkle_root="m-schedule-B",
+                         base_seq=10, base_count=10)     # same tip+boundary, honest schedule variance
+    assert is_split(c, c_other) is False
 
 
 def test_checkpoint_emitter_prune_advances_merkle_without_a_second_checkpoint():
