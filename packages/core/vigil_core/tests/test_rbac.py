@@ -55,12 +55,21 @@ def test_every_mapped_permission_is_a_real_owner_permission():
 
 def test_dangerous_routes_are_owner_tier():
     for path in ("/api/authority/provision", "/api/authority/ledger",
-                 "/api/killswitch/s1/trip", "/api/terminal/run",
+                 "/api/terminal/run",
                  "/api/remediate/run1/f1/apply", "/api/aegis/setup",
                  "/api/tools/install", "/api/services/up"):
         perm = offense_perm_for(path)
         assert perm == "offense_authority", f"{path} should be owner-tier, got {perm!r}"
         assert role_can("owner", perm) and not role_can("operator", perm)
+
+
+def test_killswitch_trip_is_read_tier_protective():
+    # tripping the kill-switch HALTS (never clears) — a protective emergency-stop must be the LOWEST tier
+    # (mirrors sovereign `kill: read`), never owner. Regression guard against the privilege inversion.
+    perm = offense_perm_for("/api/killswitch/s1/trip")
+    assert perm == "read", f"killswitch trip must be read-tier (protective), got {perm!r}"
+    # every role — down to viewer — may halt.
+    assert role_can("viewer", perm) and role_can("operator", perm) and role_can("owner", perm)
 
 
 def test_ordinary_routes_are_operator_tier():

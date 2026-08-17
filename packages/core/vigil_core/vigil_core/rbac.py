@@ -58,14 +58,18 @@ def role_can(role: Optional[str], perm: Optional[str]) -> bool:
 #     read-recompute (replay/reverify/verify-cert/planner/intel/benchmark) routes. An operator+ may run
 #     engagements; these are the everyday offense actions.
 #   * OWNER-tier (`offense_authority`, an owner-only permission) — the DANGEROUS routes: minting a charter
-#     authority + replaying its usage ledger, tripping the offense kill-switch, executing a local command,
-#     APPLYING an auto-patch, standing up the AEGIS gateway, INSTALLING host packages, and CREATING docker
-#     services. Each of these either executes on the host, changes durable governance/authority state, or
-#     provisions infrastructure — so it is lifted above operator to the owner ceiling.
+#     authority + replaying its usage ledger, executing a local command, APPLYING an auto-patch, standing up
+#     the AEGIS gateway, INSTALLING host packages, and CREATING docker services. Each of these either
+#     executes on the host, changes durable governance/authority state, or provisions infrastructure — so it
+#     is lifted above operator to the owner ceiling.
+#   * PROTECTIVE (read-tier) — tripping the kill-switch only HALTS (never clears), so it is the LOWEST tier
+#     (mirrors sovereign `kill: read`); an emergency-stop must never be gated above the operator watching a
+#     live engagement.
 #
 # DEFAULT-DENY: a route absent from this map resolves (via `offense_perm_for`) to None ⇒ `role_can` False
 # ⇒ 403. A future POST route refuses under a valid hop assertion until it is explicitly mapped here.
 # ==================================================================================================
+_READ = "read"                 # any authenticated principal (viewer+) — the LOWEST tier
 _RUN = "run_engagement"        # operator+ (the coarse proxy floor uses the same permission)
 _OWN = "offense_authority"     # owner-only
 
@@ -113,10 +117,16 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/terminal/dryrun": _RUN,
     "/api/terminal/propose": _RUN,
     "/api/aegis/stop": _RUN,
-    # ---- owner-tier: host exec / infra provisioning / patch apply / authority / kill-switch ---------
+    # ---- protective: tripping the kill-switch HALTS an engagement (idempotent, never CLEARS). An
+    #      emergency-stop must be broadly available, gated to the LOWEST privilege — mirroring the sovereign
+    #      `kill: read` convention (accounts.PERMISSION_BY_ACTION). Any authenticated principal may halt;
+    #      only `release`/un-halt is owner. (The proxy coarse floor still independently gates offense POSTs
+    #      at operator+, so through `vigil up` the practical floor is operator; the map itself is read so the
+    #      vocabulary stays in lockstep with sovereign and an operator is never denied the emergency stop.)
+    "/api/killswitch/*/trip": _READ,
+    # ---- owner-tier: host exec / infra provisioning / patch apply / authority ------------------------
     "/api/authority/provision": _OWN,
     "/api/authority/ledger": _OWN,
-    "/api/killswitch/*/trip": _OWN,
     "/api/terminal/run": _OWN,
     "/api/remediate/*/apply": _OWN,
     "/api/aegis/setup": _OWN,

@@ -36,8 +36,9 @@ from .conftest import CONSOLE_TEST_TOKEN
 HOP_KEY = "hop-key-test-9f8e7d6c5b4a"
 
 # A concrete route from each tier (see vigil_core.rbac.OFFENSE_ACTION_PERM).
-OWNER_ROUTE = "/api/killswitch/testslug/trip"      # offense_authority (owner-only)
+OWNER_ROUTE = "/api/authority/provision"           # offense_authority (owner-only) — genuine owner route
 OPERATOR_ROUTE = "/api/terminal/dryrun"            # run_engagement (operator+), no filesystem setup needed
+KILLSWITCH_ROUTE = "/api/killswitch/testslug/trip" # read-tier — protective emergency-stop (viewer+ may halt)
 UNMAPPED_ROUTE = "/api/launch/scan"                # not in the map → default-deny
 
 
@@ -114,6 +115,16 @@ def test_owner_stamped_post_to_owner_route_reaches_handler():
     with _running() as base:
         st = _post(base, OWNER_ROUTE, extra_headers=_hop_headers("owner", OWNER_ROUTE))
         assert st != 403, f"owner on an owner route must pass RBAC, got {st}"
+
+
+def test_viewer_may_trip_the_killswitch_protective_emergency_stop():
+    # the emergency-stop is read-tier (mirrors sovereign `kill: read`): a viewer's VALID hop assertion must
+    # NOT be refused for tripping the kill-switch — halting is protective and must be broadly available, never
+    # gated above the operator watching a live engagement. (Regression guard for the killswitch privilege
+    # inversion: killswitch-trip must never be owner-tier.)
+    with _running() as base:
+        st = _post(base, KILLSWITCH_ROUTE, extra_headers=_hop_headers("viewer", KILLSWITCH_ROUTE))
+        assert st != 403, f"viewer must be allowed to trip the protective kill-switch, got {st}"
 
 
 def test_forged_owner_role_without_valid_hmac_does_not_lift_the_role():
