@@ -1,0 +1,67 @@
+# VIGIL HA passive MIRROR SYNC — systemd USER service (oneshot, network-enabled)
+# =====================================================================
+# Claim 6 / Piece B (Slice S6). Runs ON THE PASSIVE. It keeps the passive
+# standby's read-only mirror of the active's ~/.sigil current so an active-passive
+# FAILOVER (docs/architecture/HA-PROFILE.md §3) has a fresh, promotable copy.
+# It runs `tools/ha/mirror-sync.sh delta` — an rsync catch-up of the active's
+# ~/.sigil into VIGIL_MIRROR_HOME. The one-time BULK seed is a MANUAL step
+# (`tools/ha/mirror-sync.sh seed`, restoring a signed `sigil backup`).
+#
+# READ-ONLY INVARIANT (enforced by the script, not just documented): the passive
+# NEVER runs `sigil serve`/`sign`/`checkpoint`. mirror-sync.sh REFUSES (exit 2)
+# if a `sigil serve` writer — or a configured VIGIL_WRITER_UNIT — is active on
+# this host, or if VIGIL_MIRROR_HOME resolves to the live SIGIL_HOME. A second
+# live writer is a DETECTABLE FORK, not scale (HA-PROFILE.md §2). Promotion is a
+# separate, GATED step (`sigil floor promote-passive --witnessed …`), never this
+# unit. This mirrors the vigil-backup* units' style; unlike the AIR-GAPPED
+# vigil-backup.service, the rsync delta needs the network (like vigil-backup-push).
+#
+# Config lives in an EnvironmentFile (0600):
+#     ~/.config/vigil/ha-mirror.env
+#       VIGIL_ACTIVE_SIGIL=user@active:~/.sigil/   (rsync source: the active's ~/.sigil, or a local mount)
+#       VIGIL_MIRROR_HOME=%h/.sigil-mirror         (the passive's mirror dir — MUST differ from ~/.sigil)
+#       VIGIL_WRITER_UNIT=                         (optional: a writer unit whose active state means "not a passive")
+#
+# Manual run / logs:
+#     systemctl --user start vigil-ha-mirror.service
+#     journalctl --user -u vigil-ha-mirror -e
+#
+# INSTALL (paired with the timer):
+#   mkdir -p ~/.config/systemd/user ~/.config/vigil
+#   cp infra/systemd/vigil-ha-mirror.{service,timer} ~/.config/systemd/user/
+#   cp infra/systemd/vigil-ha-mirror.env.example      ~/.config/vigil/ha-mirror.env
+#   chmod 600 ~/.config/vigil/ha-mirror.env
+#   $EDITOR ~/.config/vigil/ha-mirror.env             # set VIGIL_ACTIVE_SIGIL + VIGIL_MIRROR_HOME
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-ha-mirror.timer
+
+[Unit]
+Description=VIGIL HA passive mirror sync (rsync delta of the active's ~/.sigil into the read-only standby mirror)
+Documentation=file:%h/vigil/docs/architecture/HA-PROFILE.md
+
+[Service]
+Type=oneshot
+
+EnvironmentFile=%h/.config/vigil/ha-mirror.env
+Environment=PYTHONUNBUFFERED=1
+
+WorkingDirectory=%h/vigil
+# The delta is a pure rsync file copy; the script itself fail-closes if this host is a live writer. The one-time
+# BULK seed (restore of a signed `sigil backup`) is a manual step, not scheduled. Adjust the checkout path if it differs.
+ExecStart=%h/vigil/tools/ha/mirror-sync.sh delta
+
+# --- hardening (mirrors vigil-backup-push.service) -------------------------
+# UNLIKE the AIR-GAPPED vigil-backup.service, the rsync delta reaches the active host, so the NETWORK is REQUIRED
+# (PrivateNetwork is NOT set) — exactly like vigil-backup-push.service. If VIGIL_ACTIVE_SIGIL is a LOCAL mount
+# instead of user@host, you may add PrivateNetwork=yes. The unit opens NO listening port (loopback hygiene: it
+# only makes an OUTBOUND rsync/ssh). Everything else stays locked down; only ciphertext-at-rest is copied plane-wise.
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOT set: PrivateNetwork (the rsync delta needs egress to the active) and ProtectHome (hides the checkout,
+# ~/.sigil, and the mirror dir). If VIGIL_ACTIVE_SIGIL is a mounted remote FS, ensure the mount is visible.

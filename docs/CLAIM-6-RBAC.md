@@ -200,6 +200,15 @@ cleartext and the owner credential is removed — or the relay is refused.**
   the forwarded `X-VIGIL-Role` is the seam for a future offense-side per-action gate.
 - **Revocation lag:** a bearer stays valid for at most the auth-cache TTL (≤30 s) after revocation, and an
   already-open SSE stream is authenticated only at connect.
+- **HA is active-passive, not synchronous multi-writer.** An active-passive failover profile *is* built
+  (`docs/architecture/HA-PROFILE.md`, `infra/ha/`): the stateless `vigil up`/otel tier is active-active, and
+  the single-writer sovereign spine gets an anti-rollback-safe failover gated by the **witnessed-floor
+  interlock** (`tools/ha/spine_failover_guard.py` / `sigil floor promote-passive`). By construction it is
+  **single-writer** (a second concurrent writer is a *detectable fork*, HA-PROFILE.md §2): there is **no
+  automatic leader-election** — promotion needs the witnessed-floor check *plus* a **manual fence** of the old
+  active; the passive holds an **out-of-band** `~/.sigil` mirror (signed-backup seed +
+  `tools/ha/mirror-sync.sh` rsync delta), **not** synchronous replication; and witnesses are **independent
+  trust, not failover**.
 
 ## Deferred (honest scope — flagged, not built)
 
