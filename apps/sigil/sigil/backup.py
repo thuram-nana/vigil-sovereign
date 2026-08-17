@@ -1,4 +1,11 @@
-"""Signed, passphrase-encrypted OFF-BOX backup of the SIGIL trust root + spine (audit G3(a)).
+"""Signed, passphrase-encrypted, PORTABLE backup of the SIGIL trust root + spine (audit G3(a)).
+
+Honest naming: this writes a PORTABLE, passphrase-encrypted LOCAL backup file. It is portable (it restores on
+NEW hardware where this box's TPM is gone) and encrypted at rest — but a plain ``sigil backup`` writes to the
+SAME host's disk, so it is NOT off-HOST replication on its own: a dead host takes the engine AND its local
+backups. TRUE off-HOST replication is a SEPARATE, opt-in step — the orchestrator's ``vigil backup --push
+<remote>`` copies the ENCRYPTED backup file to a configured remote (see tools/backup/transport.py); transport
+moves CIPHERTEXT only, and the remote's own security is the operator's responsibility.
 
 The TPM-sealed vault (G1) binds the owner key + the spine DEK to THIS machine's TPM, so a dead disk is
 unrecoverable from the vault alone — the whole audit ledger + all memory would be lost. This produces a

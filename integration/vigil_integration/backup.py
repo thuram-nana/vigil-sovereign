@@ -1,4 +1,10 @@
-"""Signed, passphrase-encrypted OFF-BOX backup of the OFFENSE plane's durable state (Claim 6 / Piece A).
+"""Signed, passphrase-encrypted, PORTABLE backup of the OFFENSE plane's durable state (Claim 6 / Piece A).
+
+Honest naming: this writes a PORTABLE, passphrase-encrypted LOCAL backup file (portable = it restores on NEW
+hardware where this box's TPM is gone). A plain backup writes to the SAME host's disk — it is NOT off-HOST
+replication on its own. TRUE off-HOST replication is the orchestrator's SEPARATE, opt-in ``vigil backup --push
+<remote>`` step, which copies the ENCRYPTED file to a configured remote (tools/backup/transport.py) — ciphertext
+only, and the remote's own security is the operator's responsibility.
 
 The offense plane had NO disaster-recovery path: its durable state under ``--base-dir`` (default ``.vigil-live``)
 — every ``{slug}.spine``, the persisted blackboard chain, the operator/spine/governance identity keys, the
@@ -465,9 +471,14 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
         raise OffenseBackupError("backup secret set does not match its signed manifest")
 
     # If a crucible-rooted file exists in the table, restore REQUIRES a crucible_root to route it to.
-    if croot is None and any(rel.startswith(_CRUCIBLE_PREFIX) for rel in files):
+    has_crucible = any(rel.startswith(_CRUCIBLE_PREFIX) for rel in files)
+    if has_crucible and croot is None:
         raise OffenseBackupError("backup carries CRUCIBLE proof files but no crucible_root was given to "
                                  "restore them into — refusing a partial restore")
+    # ``crucible_root`` is an ACTIVE destination only when the backup actually carries crucible files. An
+    # offense-only backup must not be blocked (nor swapped) by a crucible_root it will never write into —
+    # e.g. the CLI auto-resolves it to the populated in-repo tree, which is legitimately non-empty.
+    active_croot = croot if (has_crucible and croot is not None) else None
 
     # STAGED / ATOMIC restore: refuse to OVERLAY a non-empty destination unless force, then build + re-verify
     # the WHOLE tree in a sibling temp dir and swap it into place at the very end (no half-written mix on crash).
@@ -475,13 +486,13 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
         raise OffenseBackupError(
             f"refusing to restore into a NON-EMPTY base dir {new_base} (a restore must not overlay stale "
             f"state) — pass force=True (--force) to REPLACE it, or restore into a fresh/empty dir")
-    if not force and croot is not None and _dir_is_nonempty(croot):
+    if not force and active_croot is not None and _dir_is_nonempty(active_croot):
         raise OffenseBackupError(
-            f"refusing to restore into a NON-EMPTY crucible root {croot} (a restore must not overlay stale "
-            f"state) — pass force=True (--force) to REPLACE it, or restore into a fresh/empty dir")
+            f"refusing to restore into a NON-EMPTY crucible root {active_croot} (a restore must not overlay "
+            f"stale state) — pass force=True (--force) to REPLACE it, or restore into a fresh/empty dir")
 
     staged_base: Path | None = _new_staging_dir(new_base)
-    staged_croot: Path | None = _new_staging_dir(croot) if croot is not None else None
+    staged_croot: Path | None = _new_staging_dir(active_croot) if active_croot is not None else None
     try:
         # decode + verify EVERY file against the signed manifest BEFORE writing anything (fail-closed). Each rel
         # is routed to the STAGED base or STAGED crucible tree and resolved to ONE validated target inside it
@@ -525,7 +536,7 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
         _atomic_swap_into_place(staged_base, new_base)
         staged_base = None
         if staged_croot is not None:
-            _atomic_swap_into_place(staged_croot, croot)   # type: ignore[arg-type]
+            _atomic_swap_into_place(staged_croot, active_croot)   # type: ignore[arg-type]
             staged_croot = None
     finally:
         if staged_base is not None:
@@ -533,7 +544,7 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
         if staged_croot is not None:
             shutil.rmtree(staged_croot, ignore_errors=True)
 
-    return {"new_base": str(new_base), "crucible_root": (str(croot) if croot else None),
+    return {"new_base": str(new_base), "crucible_root": (str(active_croot) if active_croot else None),
             "files": len(files), "secrets": len(secrets),
             "bundles_verified": verified_bundles, "verified": True}
 

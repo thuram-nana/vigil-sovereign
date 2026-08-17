@@ -1753,7 +1753,11 @@ def _cmd_backup(args: argparse.Namespace) -> int:
     DISTINCT ``.venv-sovereign/bin/sigil`` SUBPROCESS. There is NEVER a merged single-file archive: a merged
     archive would require ONE process to hold BOTH planes' secrets at once — a FATAL-2 violation. The owner key
     never enters this process; the sovereign leg holds it in its own venv only. The passphrase reaches each leg
-    via env/argument, never argv, and is never stored — lose it and the backups are unrecoverable by design."""
+    via env/argument, never argv, and is never stored — lose it and the backups are unrecoverable by design.
+
+    This writes a PORTABLE, passphrase-encrypted LOCAL backup. With ``--push <dest>`` it ALSO replicates the
+    ENCRYPTED parts + MANIFEST off-HOST to a transport backend (ciphertext only — see tools/backup/transport);
+    without it, the backup lives only on this host's disk."""
     import json
     import socket
     import time
@@ -1809,6 +1813,23 @@ def _cmd_backup(args: argparse.Namespace) -> int:
     (subdir / "MANIFEST.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     print(f"manifest → {subdir / 'MANIFEST.json'}")
     print("KEEP THE PASSPHRASE SAFE — it is the ONLY key to these backups (never stored; lose it → unrecoverable).")
+
+    # TRUE off-HOST transport (opt-in): after a SUCCESSFUL local backup, replicate the ENCRYPTED parts +
+    # MANIFEST to a transport backend so a real second copy lives off the host. The parts are passphrase-
+    # encrypted (scrypt AEAD) BEFORE they were written, so transport moves CIPHERTEXT only — the remote sees
+    # no plaintext (its own security is the operator's responsibility). The local backup above already
+    # succeeded and is untouched; a push failure surfaces without discarding it.
+    push_dest = getattr(args, "push", "") or ""
+    if push_dest:
+        from tools.backup.transport import TransportError, get_transport
+        parts = [subdir / info["file"] for info in planes.values()] + [subdir / "MANIFEST.json"]
+        try:
+            pushed = get_transport(push_dest).push(parts, subdir.name)
+        except TransportError as e:
+            print(f"vigil backup: local backup OK, but --push failed: {e}", file=sys.stderr)
+            return 1
+        print(f"pushed → {pushed['target']} ({len(pushed['files'])} encrypted part(s) + manifest; "
+              f"ciphertext only, no plaintext leaves the host)")
 
     if getattr(args, "prune", False):
         deleted = prune(out_root, keep_days=args.keep_days, keep_last=args.keep_last)
@@ -2426,6 +2447,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="back up ONLY the sovereign plane (sigil subprocess)")
     grp.add_argument("--offense-only", dest="offense_only", action="store_true",
                      help="back up ONLY the offense plane (this venv)")
+    pbk.add_argument("--push", default="",
+                     help="TRUE off-HOST replication (opt-in): after a successful backup, copy the ENCRYPTED "
+                          "parts + MANIFEST to a transport backend. A bare path or local:<path> uses the "
+                          "shipped local-directory backend (a mounted remote FS / removable disk / test dir); "
+                          "unbuilt schemes (rsync://, scp://, s3://) error with the contract to implement. Only "
+                          "ciphertext is transported — no plaintext leaves the host. Needs network (run via "
+                          "vigil-backup-push.service, PrivateNetwork=no), unlike the air-gapped local timer.")
     pbk.add_argument("--prune", action="store_true", help="after the backup, prune old backups per the policy")
     pbk.add_argument("--keep-days", dest="keep_days", type=int, default=None,
                      help="retention: keep backups within N days (with --prune)")

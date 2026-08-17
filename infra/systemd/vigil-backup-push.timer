@@ -1,0 +1,32 @@
+# VIGIL off-HOST backup-push timer — fires the network-enabled push oneshot.
+# =====================================================================
+# The COMPANION to vigil-backup.timer. THIS one triggers vigil-backup-push.service
+# (which takes a two-plane backup AND replicates the ENCRYPTED files off the host).
+# Enable ONLY this timer if you want automated off-host copies; enable ONLY
+# vigil-backup.timer if you want the routine local backup to stay air-gapped.
+# Running both would take two backups a day — prefer ONE: the push unit already
+# takes a full local backup before it replicates, so on a host that wants off-host
+# copies, enable this timer and leave vigil-backup.timer disabled.
+#
+# Enable with:
+#   systemctl --user enable --now vigil-backup-push.timer
+#   systemctl --user list-timers 'vigil-*'     # confirm next run
+#
+# HONEST RESIDUAL: the off-host copy is only ever as current as the LAST fire of
+# this timer; tighten OnCalendar for a shorter recovery-point objective.
+
+[Unit]
+Description=Daily trigger for the VIGIL off-HOST backup push
+Documentation=file:%h/vigil/docs/plain-english/07-signing-and-keys.md
+
+[Timer]
+# Once a day. Tighten (e.g. every 6h) for a shorter recovery-point objective.
+OnCalendar=daily
+# If the machine was asleep/off at the scheduled time, run once on the next wake.
+Persistent=true
+# Smear the start by up to 30 min so many hosts do not fire simultaneously.
+RandomizedDelaySec=1800
+Unit=vigil-backup-push.service
+
+[Install]
+WantedBy=timers.target
