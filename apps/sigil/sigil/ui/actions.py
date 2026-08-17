@@ -22,8 +22,9 @@ _SETTINGS_ACTIONS = frozenset({"set_secret", "set_model", "set_provider", "set_e
 # authority to the owner key once, then sign/deny a queued Strix/engage action in-process. The private
 # key stays sovereign-side; only a public-safe token crosses to the keyless offense broker.
 _OFFENSE_APPROVAL_ACTIONS = frozenset({"offense_bind_authority", "offense_approve", "offense_deny"})
-# Claim 6: owner-only user-management actions (create/assign-role/revoke a per-user bearer account).
-_ACCOUNT_ACTIONS = frozenset({"create_account", "assign_role", "revoke_account"})
+# Claim 6: owner-only user-management actions (create/assign-role/revoke a per-user bearer account, and
+# S3 enroll_pubkey = owner-bind the account's Ed25519 challenge/response login key).
+_ACCOUNT_ACTIONS = frozenset({"create_account", "assign_role", "revoke_account", "enroll_pubkey"})
 ACTIONS = (frozenset({"approve", "deny", "kill", "release", "promote", "revoke",
                       "queue_learn", "start_learn"})
            | _CAP_ACTIONS | _SETTINGS_ACTIONS | _OFFENSE_APPROVAL_ACTIONS | _ACCOUNT_ACTIONS)
@@ -99,6 +100,13 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
             seq = reg.assign_role(username, str(params.get("role", "")), issued_at=_time.time())
             return {"ok": True, "action": "assign_role", "username": username,
                     "role": str(params.get("role", "")), "recorded_seq": seq, "requested_by": requested_by}
+        if action == "enroll_pubkey":
+            # S3 — owner-bind the account's Ed25519 login pubkey (challenge/response PoP). The server stamps
+            # `issued_at` (never from params: a browser-chosen high-water could brick the dangerous
+            # direction). The pubkey is validated fail-closed inside enroll_pubkey.
+            seq = reg.enroll_pubkey(username, str(params.get("user_pubkey", "")), issued_at=_time.time())
+            return {"ok": True, "action": "enroll_pubkey", "username": username, "recorded_seq": seq,
+                    "requested_by": requested_by}
         seq = reg.revoke(username)
         return {"ok": True, "action": "revoke_account", "username": username, "recorded_seq": seq,
                 "requested_by": requested_by}

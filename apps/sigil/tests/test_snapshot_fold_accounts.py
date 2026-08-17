@@ -116,6 +116,33 @@ def test_active_account_survives_a_hard_prune(monkeypatch):
     assert "alice" not in {a.username for a in reg2b.accounts()}
 
 
+# ---- (a2) a KEYED account (bound user_pubkey) survives a prune WITH its key (S2xS3 seed integration) --
+def test_a_keyed_account_survives_a_prune_with_its_user_pubkey(monkeypatch):
+    store = _store()
+    reg = _reg(store)
+    reg.create("carol", "operator", bearer_token="carol-bearer-zzzzzzzzzzzz", issued_at=5.0)   # seq 0
+    upk = generate_keypair().public_key_b64
+    reg.enroll_pubkey("carol", upk, issued_at=6.0)                                              # seq 1 (keyed grant)
+    k = store.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "marker"})  # seq 2
+    prefix = [r for r in store.iter_records() if r.seq < k]
+    snap = build(prefix, trusted_pubkey=OWNER_PUB, base_seq=k, snapshot_seq=k - 1)
+    # the seed's account_cred row carries carol's user_pubkey as the 5th field — a KEYED grant (8-field core)
+    # is verified with the conditional core in build(), not dropped, and its key is preserved.
+    row = next(r for r in snap.account_cred if r[0] == "carol")
+    assert len(row) >= 5 and row[4] == upk, "the snapshot seed must carry the bound user_pubkey"
+
+    pruned = PrunedView(store, k)                    # both grants physically GONE
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
+    reg2 = AccountsRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+    carol = next(a for a in reg2.accounts() if a.username == "carol")
+    assert carol.user_pubkey == upk, "a KEYED account pruned below base_seq must keep its user_pubkey via the seed"
+
+    # NEUTERED control: without the seed, carol vanishes entirely (proving the seed carries the key).
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: SnapshotState.empty()))
+    reg2b = AccountsRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+    assert "carol" not in {a.username for a in reg2b.accounts()}
+
+
 # ---- (b) the per-username high-water SURVIVES the prune (no replay resurrection) ----------------------
 def test_high_water_survives_the_prune_no_replay_resurrection(monkeypatch):
     store = _store()
