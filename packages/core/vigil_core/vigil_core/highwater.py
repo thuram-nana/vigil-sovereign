@@ -68,6 +68,24 @@ _SIG_ENVELOPE = ("sig", "pubkey")
 # ``_warned_unsigned_floor``.
 _warned_unsigned_highwater = False
 
+# STRICT PRODUCTION PROFILE toggle (C-S5). Fail-SAFE polarity, mirroring
+# ``hard_guardrail.protected_guard_enabled``: the DEFAULT (unset / empty / anything not an explicit
+# affirmative) is OFF = today's WARN-ACCEPT of an unsigned floor (back-compat, byte-identical to before);
+# ONLY an explicit affirmative flips it to STRICT, where a verifier holding the governance anchor treats an
+# UNSIGNED floor as tamper (the strip-to-unsigned downgrade is then REFUSED). This closes the strip-to-unsigned
+# gap for a strict verifier that holds the governance anchor; it does NOT close a same-host head+floor
+# co-rewrite (that needs the out-of-band witnessed checkpoint, C-S4) nor the fully-dishonest-producer case.
+_STRICT_HW_ENV = "VIGIL_STRICT_HIGHWATER"
+
+
+def strict_highwater_enabled() -> bool:
+    """The strict-production-profile toggle for the high-water verifier. Reads a single owner-controlled env
+    var (``VIGIL_STRICT_HIGHWATER``). Fail-SAFE default OFF (back-compat): returns ``True`` ONLY for an
+    explicit affirmative (``1``/``true``/``yes``/``on``, case/space-insensitive); every other value (incl.
+    unset/empty) is ``False`` = today's warn-accept. Used as the default ``strict=`` for
+    :func:`verify_highwater_signature` at call sites that don't thread an explicit flag."""
+    return os.environ.get(_STRICT_HW_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
 
 class HighWaterError(ValueError):
     """A PRESENT-but-unreadable / malformed floor. Raised (never silently treated as absent) so a corrupt
@@ -163,11 +181,14 @@ def check_highwater(head, hw: Optional[dict]) -> tuple[bool, str]:
 # twin's ``{last_seq}`` floor (``_HW_EVIDENCE_DOMAIN``, passed by the twin in ``framework/v2/evidence/cli.py``)
 # sign/verify with ONE implementation while staying cryptographically NON-interchangeable. What the signature
 # closes: the tamper-of-a-SIGNED-floor case (any edit to a signed floor's content breaks the signature) for a
-# verifier holding the governance anchor. What it does NOT close: (1) strip-to-unsigned — an unsigned floor is
-# still WARN-ACCEPTED, not rejected (the honest residual, closed only by the retained out-of-band witnessed
-# checkpoint anchor: C-S4 ``vigil_integration.floor_witness`` — DETECTION for a verifier that retained an
+# verifier holding the governance anchor. What it does NOT close: (1) strip-to-unsigned — in the DEFAULT
+# (non-strict) profile an unsigned floor is still WARN-ACCEPTED, not rejected. The STRICT production profile
+# (``VIGIL_STRICT_HIGHWATER`` / an explicit ``strict=True``) closes this for a verifier holding the governance
+# anchor: an unsigned floor with a trusted key present is then REJECTED as tamper. The complementary closure for
+# a same-host head+floor CO-REWRITE (where the attacker re-signs both) is the retained out-of-band witnessed
+# checkpoint anchor (C-S4 ``vigil_integration.floor_witness`` — DETECTION for a verifier that retained an
 # off-box copy); (2) the fully-dishonest-producer-owns-all-keys case (only an INDEPENDENT out-of-band witness
-# closes that).
+# closes that) is irreducible here.
 
 
 def _hw_core_bytes(hw: dict, domain: bytes = _HW_DOMAIN) -> bytes:
@@ -190,27 +211,46 @@ def _sign_highwater(core: dict, signer, domain: bytes = _HW_DOMAIN) -> dict:
     return {**core, "sig": signature, "pubkey": signer.public_key_b64}
 
 
-def verify_highwater_signature(hw: dict, trusted_pubkeys, domain: bytes = _HW_DOMAIN) -> tuple[bool, str]:
+def verify_highwater_signature(hw: dict, trusted_pubkeys, domain: bytes = _HW_DOMAIN,
+                               *, strict: Optional[bool] = None) -> tuple[bool, str]:
     """The offense floor's OWN governance-signature check (mirrors ``floor.verify_floor_signature``). ``domain``
     MUST match the variant the floor was signed under (default this module's attestation-log floor; the evidence
     twin passes ``_HW_EVIDENCE_DOMAIN``) — a floor signed under a different variant's domain fails the verify,
     which is the cross-variant separation. Fail-closed + non-bricking:
 
-      * sig ABSENT (legacy unsigned floor) → ``(True, …)``; warn ONCE if a trusted key exists (the next
-        advance re-signs it). No trusted key at all → silent accept (byte-identical to the pre-signing floor,
-        so an out-of-band verifier that never provisioned a key is not bricked).
-      * sig PRESENT + ``pubkey`` is a trusted governance key + verifies UNDER ``domain`` → ``(True, …)``.
+      * sig ABSENT (legacy unsigned floor):
+          - NON-STRICT (the default) → ``(True, …)``; warn ONCE if a trusted key exists (the next advance
+            re-signs it). No trusted key at all → silent accept (byte-identical to the pre-signing floor, so an
+            out-of-band verifier that never provisioned a key is not bricked).
+          - STRICT + a trusted key present → ``(False, …)``: a production verifier that HOLDS the governance
+            anchor treats an unsigned floor as tamper (the strip-to-unsigned downgrade is REFUSED). STRICT with
+            NO trusted key still silent-accepts (there is no anchor to enforce against — never brick a
+            keyless verifier).
+      * sig PRESENT + ``pubkey`` is a trusted governance key + verifies UNDER ``domain`` → ``(True, …)`` in
+        BOTH modes (a genuine signed floor is unaffected by strict).
       * sig PRESENT + untrusted key / malformed / does not verify (incl. a wrong-variant domain) → ``(False,
         …)`` — a tampered or cross-variant SIGNED floor is TAMPERING, the caller certifies NOTHING.
 
+    ``strict`` selects the profile: ``None`` (the default) reads :func:`strict_highwater_enabled`
+    (``VIGIL_STRICT_HIGHWATER``, fail-safe OFF), so existing callers are byte-identical unless the env is set;
+    an explicit ``True``/``False`` is threaded by a verifier (e.g. the evidence CLI's ``--strict-highwater``).
+
     ``trusted_pubkeys`` is any iterable of base64 governance public keys the caller trusts (out-of-band the
-    owner authenticates them via the ``OFFENSE_GOVERNANCE_ROLE`` delegation). Note: this alone does NOT close
-    the strip-to-unsigned case (an unsigned floor is still WARN-ACCEPTED) — that is closed only by the retained
-    out-of-band witnessed checkpoint (C-S4 ``vigil_integration.floor_witness.verify_highwater_against_witnessed``)."""
+    owner authenticates them via the ``OFFENSE_GOVERNANCE_ROLE`` delegation). HONEST LIMIT: strict closes the
+    strip-to-unsigned case ONLY for a verifier holding the governance anchor in strict mode; a same-host
+    head+floor co-rewrite is closed only by the retained out-of-band witnessed checkpoint (C-S4
+    ``vigil_integration.floor_witness.verify_highwater_against_witnessed``), and the
+    fully-dishonest-producer-owns-all-keys case is irreducible here."""
     global _warned_unsigned_highwater
+    if strict is None:
+        strict = strict_highwater_enabled()
     trusted = set(trusted_pubkeys or ())
     sig, pub = hw.get("sig"), hw.get("pubkey")
     if sig is None and pub is None:
+        if trusted and strict:
+            return (False, "STRICT: durable high-water is UNSIGNED but a trusted governance key is present — "
+                           "an unsigned floor is treated as tamper (strip-to-unsigned downgrade refused in the "
+                           "strict production profile)")
         if trusted and not _warned_unsigned_highwater:
             _warned_unsigned_highwater = True
             _log.warning("durable offense high-water is UNSIGNED — it will be governance-signed on the next "
