@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hmac
 import hashlib
 import http.client
 import http.server
@@ -64,7 +63,7 @@ import time
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Optional
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from . import dispatch
 
@@ -109,6 +108,42 @@ _PLANE_START_GRACE_S = 45.0
 _TOKEN_HEADER = "X-SIGIL-Token"
 _TOKEN_QUERY = "token"
 _CSRF_HEADER = "X-Requested-With"
+
+# ==================================================================================================
+# PER-USER AUTHENTICATION at the proxy boundary (Claim 6). See docs/CLAIM-6-RBAC.md.
+#
+# The proxy is the ONE listener a browser points at, so it is where per-user identity must be established.
+# It is OFFENSE-side (`vigil_integration`) and MUST NOT import the sovereign accounts registry (FATAL-2 —
+# a single interpreter never co-loads the two trust domains). It therefore DELEGATES verification to the
+# sovereign plane's token-optional `/api/whoami`: a loopback GET carrying the request's bearer returns the
+# resolved Principal (owner token → owner; a per-user bearer → that principal; anything else →
+# authenticated:false). The sovereign plane is the AUTHORITY on the owner-signed accounts spine, so trusting
+# its resolution is trusting exactly the right root — and the proxy stays PURE STDLIB (http.client, no
+# cross-domain import). Fail-closed everywhere: any transport/parse error, a non-200, or authenticated:false
+# resolves to None → 401, the request is NEVER forwarded.
+# ==================================================================================================
+_WHOAMI_PATH = "/api/whoami"
+# Bootstrap routes that reach the sovereign plane WITHOUT proxy auth: the login-state probe and the login
+# endpoint (verifying the token you present is their whole purpose). Everything else past these is gated.
+_UNAUTH_FORWARD = frozenset({SOVEREIGN_BASE + "/api/whoami", SOVEREIGN_BASE + "/api/login"})
+# The permission a MUTATING offense request / an offense-plane lifecycle action requires — an operator+
+# capability. Offense reads/SSE need only an authenticated principal (viewer+). This is a COARSE proxy-side
+# floor (read vs. run) over the offense plane, which does not itself do per-action RBAC; the sovereign plane
+# keeps its fine-grained action→permission map, and owner-authority offense actions are sovereign-gated.
+_OFFENSE_RUN_PERM = "run_engagement"
+_READ_METHODS = frozenset({"GET", "HEAD"})
+# Trusted identity headers the proxy STAMPS on an authenticated offense forward (and STRIPS from every
+# inbound request, so a client can never spoof them). The offense side uses them for attribution.
+_PRINCIPAL_HDR = "X-VIGIL-Principal"
+_ROLE_HDR = "X-VIGIL-Role"
+_VIGIL_IDENTITY_HEADERS = frozenset({_PRINCIPAL_HDR.lower(), _ROLE_HDR.lower(), "x-vigil-permissions"})
+# Short-TTL cache of sha256(bearer) → resolved principal (or None). Bounds whoami round-trips under SSE /
+# polling; a revocation is visible after at most _AUTH_TTL_S (documented residual). A rejected bearer is
+# cached briefly too, to blunt a guessing flood without pinning a wrong answer for long.
+_AUTH_TTL_S = 30.0
+_AUTH_NEG_TTL_S = 5.0
+_WHOAMI_MAX = 64 * 1024          # cap the whoami response read (a Principal JSON is tiny)
+_MISS = object()                 # cache sentinel: "not present" — distinct from a cached negative (None)
 
 # the bundle files the proxy serves from the runtime serve dir
 BUNDLE_JS = ("ui.js", "manual.js", "app.js")
@@ -220,6 +255,73 @@ def parse_cockpit_token(line: str) -> Optional[str]:
     """Extract the session token from a line of the cockpit's stdout (the ``?token=`` in its URL)."""
     m = _TOKEN_RE.search(line)
     return m.group(1) if m else None
+
+
+# ==================================================================================================
+# per-user auth: the delegated whoami verifier + its short-TTL cache
+# ==================================================================================================
+class _PrincipalCache:
+    """A tiny thread-safe TTL cache of ``sha256(bearer) → principal|None``. Keyed by the digest so a
+    plaintext bearer never lingers in the map; a cached ``None`` is a (short-lived) negative result."""
+
+    def __init__(self, *, max_entries: int = 4096):
+        self._d: dict[str, tuple[object, float]] = {}
+        self._lock = threading.Lock()
+        self._max = max_entries
+
+    def get(self, key: str):
+        """The cached value, or the ``_MISS`` sentinel if absent/expired. A cached ``None`` (a negative)
+        is returned as ``None``, distinct from ``_MISS``."""
+        with self._lock:
+            v = self._d.get(key)
+            if v is None:
+                return _MISS
+            value, exp = v
+            if time.monotonic() >= exp:
+                self._d.pop(key, None)
+                return _MISS
+            return value
+
+    def put(self, key: str, value, ttl: float) -> None:
+        with self._lock:
+            if len(self._d) >= self._max:
+                now = time.monotonic()
+                self._d = {k: v for k, v in self._d.items() if v[1] > now}  # prune expired
+                if len(self._d) >= self._max:
+                    self._d.clear()                                          # hard cap: never grow unbounded
+            self._d[key] = (value, time.monotonic() + ttl)
+
+
+def _whoami(bearer: str, *, host: str = "127.0.0.1", port: Optional[int] = None,
+            timeout: float = 4.0) -> Optional[dict]:
+    """DELEGATE bearer verification to the sovereign plane's token-optional ``/api/whoami`` (loopback GET,
+    the bearer in ``X-SIGIL-Token``). Returns the resolved principal dict ``{username, role, permissions}``
+    on ``authenticated:true``, else ``None``. PURE STDLIB (imports no sigil). Fail-closed: a blank bearer,
+    any transport/parse error, a non-200, or ``authenticated:false`` all yield ``None``."""
+    if not bearer:
+        return None
+    p = SOVEREIGN_PORT if port is None else port
+    try:
+        conn = http.client.HTTPConnection(host, p, timeout=timeout)
+        try:
+            conn.request("GET", _WHOAMI_PATH,
+                         headers={_TOKEN_HEADER: bearer, "Host": f"{host}:{p}",
+                                  "Accept": "application/json"})
+            resp = conn.getresponse()
+            raw = resp.read(_WHOAMI_MAX)
+            if resp.status != 200:
+                return None
+            data = json.loads(raw.decode("utf-8", "replace"))
+        finally:
+            conn.close()
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    if not isinstance(data, dict) or not data.get("authenticated"):
+        return None
+    perms = data.get("permissions")
+    return {"username": str(data.get("username") or ""),
+            "role": str(data.get("role") or ""),
+            "permissions": [str(x) for x in perms] if isinstance(perms, list) else []}
 
 
 # ==================================================================================================
@@ -549,9 +651,12 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                  allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
                  plane_control: "Optional[PlaneControl]" = None):
         self.serve_dir = serve_dir
-        # The session token `vigil up` captured from the cockpit and embedded in index.html — the SAME
-        # credential the two federated planes take. It gates the proxy-local plane-control routes.
-        # Empty (a proxy built without one) ⇒ those routes FAIL CLOSED (401), never open.
+        # The offense CONSOLE credential (= the owner boot token `vigil up` captured, which it also hands the
+        # console as VIGIL_CONSOLE_TOKEN). Claim 6: it is NO LONGER embedded in index.html and NO LONGER the
+        # gate every request is checked against — per-user auth is delegated to the sovereign whoami. It is
+        # now presented by the proxy on the outbound hop to the offense console AFTER a request has been
+        # authenticated per-user (`_forward_request_headers`), so the browser never holds it. Empty (a proxy
+        # built without one) ⇒ the offense console receives "" and fails closed (401), never open.
         self.token = token or ""
         # The browser-visible authority/origin of THIS proxy (`--domain`, or a tunnel bind) — the same
         # values handed to the backends as --allow-host/--allow-origin. Loopback with the proxy's own
@@ -561,6 +666,9 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         # None ⇒ the proxy can still REPORT plane status (a live port probe needs no configuration) but
         # cannot start anything (503). Only `vigil up`'s boot path supplies one.
         self.plane_control = plane_control
+        # Claim 6: per-user auth is DELEGATED to the sovereign whoami; this caches the resolution briefly so
+        # SSE / polling do not stampede it. Built here so every request handler shares one cache.
+        self.auth_cache = _PrincipalCache()
         family = socket.AF_INET
         try:
             if ipaddress.ip_address(addr[0]).version == 6:
@@ -619,14 +727,89 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if target is None:
                 self._serve_static(split.path)
                 return
-            host, port, upstream_path = target
-            if split.query:
-                upstream_path = f"{upstream_path}?{split.query}"
-            self._proxy(host, port, upstream_path)
+            self._forward_request(split, target)
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception as exc:  # noqa: BLE001 — never 500 the whole proxy on one bad request
             self._fail(502, f"proxy error: {type(exc).__name__}: {exc}")
+
+    # -- per-user auth boundary (Claim 6): every forward past the login bootstrap is authenticated ----
+    def _request_bearer(self, query: str) -> str:
+        """The bearer on THIS request: the ``X-SIGIL-Token`` header, or ``?token=`` (SSE / downloads)."""
+        return self.headers.get(_TOKEN_HEADER) or (parse_qs(query).get(_TOKEN_QUERY) or [""])[0]
+
+    def _authenticate(self, bearer: str) -> Optional[dict]:
+        """Resolve the request's bearer to a principal dict via the sovereign whoami (cached, short TTL),
+        or None (fail-closed). A blank bearer is never resolved."""
+        if not bearer:
+            return None
+        cache = getattr(self.server, "auth_cache", None)
+        key = hashlib.sha256(bearer.encode("utf-8")).hexdigest()
+        if cache is not None:
+            hit = cache.get(key)
+            if hit is not _MISS:
+                return hit                                    # may be a cached negative (None)
+        principal = _whoami(bearer)
+        if cache is not None:
+            cache.put(key, principal, _AUTH_TTL_S if principal is not None else _AUTH_NEG_TTL_S)
+        return principal
+
+    def _auth_fail(self, status: int, msg: str):
+        """A fail-closed JSON refusal that DRAINS the request body and closes the connection — so a refused
+        POST cannot leave an unread body to be re-parsed as a pipelined (smuggled) request, and nothing is
+        forwarded to a backend."""
+        self.close_connection = True
+        self._plane_json({"ok": False, "error": msg}, status=status)   # not drained → reads+discards body
+
+    def _forward_request(self, split, target):
+        """Authenticate (per-user, fail-closed) then forward to a loopback backend.
+
+        * The login BOOTSTRAP (`/sovereign/api/whoami`, `/sovereign/api/login`) is forwarded WITHOUT proxy
+          auth — establishing a session is its whole purpose (the sovereign verifies the presented token).
+        * Every other route requires a bearer the sovereign whoami resolves → else 401, NEVER forwarded.
+        * Sovereign routes forward the user's OWN bearer (native `role_can`).
+        * Offense routes enforce a coarse role floor (read vs. `run_engagement`), substitute the offense
+          console credential (the browser never holds it), and stamp the resolved identity headers."""
+        host, port, upstream_path = target
+        path = split.path
+        is_sovereign = path == SOVEREIGN_BASE or path.startswith(SOVEREIGN_BASE + "/")
+        # 1) login bootstrap — forward verbatim, no proxy auth.
+        if path in _UNAUTH_FORWARD:
+            self._proxy(host, port, self._with_query(upstream_path, split.query))
+            return
+        # 2) authenticate, fail-closed.
+        principal = self._authenticate(self._request_bearer(split.query))
+        if principal is None:
+            self._auth_fail(401, "missing/invalid token")
+            return
+        # 3a) sovereign plane — forward the user's own bearer; the sovereign self-enforces role_can.
+        if is_sovereign:
+            self._proxy(host, port, self._with_query(upstream_path, split.query))
+            return
+        # 3b) offense plane — coarse floor: a mutation needs run_engagement (operator+); reads need viewer+.
+        if self.command not in _READ_METHODS and _OFFENSE_RUN_PERM not in principal["permissions"]:
+            self._auth_fail(403, "offense action requires the run_engagement capability (operator+)")
+            return
+        # substitute the offense console credential in ?token= (SSE/downloads); the header is substituted in
+        # _forward_request_headers. The browser's own bearer never reaches the offense backend.
+        upstream = self._with_query(upstream_path, self._sub_token_query(split.query))
+        self._proxy(host, port, upstream, offense_principal=principal)
+
+    @staticmethod
+    def _with_query(upstream_path: str, query: str) -> str:
+        return f"{upstream_path}?{query}" if query else upstream_path
+
+    def _sub_token_query(self, query: str) -> str:
+        """Replace ``?token=`` (the SSE / download credential carrier) with the offense console credential,
+        preserving every other query parameter. If there is no ``token`` param, the query is returned
+        verbatim (nothing to substitute)."""
+        if not query:
+            return query
+        parsed = parse_qs(query, keep_blank_values=True)
+        if _TOKEN_QUERY not in parsed:
+            return query
+        parsed[_TOKEN_QUERY] = [getattr(self.server, "token", "") or ""]
+        return urlencode(parsed, doseq=True)
 
     # -- static bundle from the runtime serve dir ---------------------------------------------------
     def _serve_static(self, path: str):
@@ -712,8 +895,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._plane_json({"ok": False, "error": f"plane control refused ({why})"},
                              status=403, drained=True)
             return
-        # 4) the session credential — the same token the rest of the UI presents.
-        if not self._plane_token_ok(query):
+        # 4) per-user authentication (Claim 6) — the SAME sovereign-delegated identity the forwarded routes
+        #    use. Fail-closed: an unresolved bearer is 401 before anything is inspected or spawned. Plane
+        #    control talks to the SOVEREIGN plane (which is up even when the offense backends are down), so
+        #    delegated auth is always available here. Reads (status/version) need viewer+; start/stop below
+        #    additionally require run_engagement (operator+).
+        principal = self._authenticate(self._request_bearer(query))
+        if principal is None:
             self._plane_json({"ok": False, "error": "missing/invalid token"}, status=401, drained=True)
             return
         # 5) a mutating POST additionally needs the SPA's custom header (a cross-site HTML <form>
@@ -758,6 +946,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._plane_json({"ok": False, "error": "method not allowed (POST only)"},
                                  status=405, drained=True)
                 return
+            if _OFFENSE_RUN_PERM not in principal["permissions"]:   # operator+ lifecycle floor
+                self._plane_json({"ok": False, "action": "start-offense",
+                                  "error": "starting the offense plane requires the run_engagement "
+                                           "capability (operator+)"}, status=403, drained=True)
+                return
             if pc is None:
                 self._plane_json({"ok": False, "action": "start-offense",
                                   "error": "this proxy has no plane control configured — start the "
@@ -772,6 +965,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if self.command != "POST":
                 self._plane_json({"ok": False, "error": "method not allowed (POST only)"},
                                  status=405, drained=True)
+                return
+            if _OFFENSE_RUN_PERM not in principal["permissions"]:   # operator+ lifecycle floor
+                self._plane_json({"ok": False, "action": "stop-offense",
+                                  "error": "stopping the offense plane requires the run_engagement "
+                                           "capability (operator+)"}, status=403, drained=True)
                 return
             if pc is None:
                 self._plane_json({"ok": False, "action": "stop-offense",
@@ -803,16 +1001,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return False, f"Origin={origin!r}"
         return True, ""
 
-    def _plane_token_ok(self, query: str) -> bool:
-        """The session credential on THIS request: the ``X-SIGIL-Token`` header, or ``?token=``.
-        Constant-time compare. Fail-closed — a missing/blank/wrong token, or a proxy built with no
-        token at all, is False."""
-        expected = getattr(self.server, "token", "") or ""
-        tok = self.headers.get(_TOKEN_HEADER) or (parse_qs(query).get(_TOKEN_QUERY) or [""])[0]
-        if not tok or not expected:
-            return False
-        return hmac.compare_digest(str(tok), str(expected))
-
     def _plane_json(self, payload: dict, status: int = 200, *, drained: bool = False):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         if not drained:
@@ -834,7 +1022,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
 
     # -- faithful forward to a loopback backend, STREAMING the response ------------------------------
-    def _proxy(self, host: str, port: int, upstream_path: str):
+    def _proxy(self, host: str, port: int, upstream_path: str, *,
+               offense_principal: "Optional[dict]" = None):
         try:
             clen = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -844,7 +1033,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._fail(413, "request body too large")
             return
         body = self._read_request_body()
-        req_headers = self._forward_request_headers()
+        req_headers = self._forward_request_headers(offense_principal=offense_principal)
         conn = http.client.HTTPConnection(host, port, timeout=None)  # no read timeout → SSE stays open
         try:
             conn.request(self.command, upstream_path, body=body or None, headers=req_headers)
@@ -863,16 +1052,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         n = min(n, _MAX_BODY)  # bounded read (the connection is closed after, so any excess is dropped)
         return self.rfile.read(n) if n > 0 else b""
 
-    def _forward_request_headers(self) -> dict:
+    def _forward_request_headers(self, *, offense_principal: "Optional[dict]" = None) -> dict:
         # forward the client's headers verbatim (incl. Host + Origin — the upstreams' anti-rebind
         # allowlist is configured with the proxy authority), minus hop-by-hop + Content-Length
-        # (http.client recomputes the latter from the body we pass).
+        # (http.client recomputes the latter from the body we pass). ALWAYS strip any client-supplied
+        # X-VIGIL-* identity header (anti-spoof): identity is set by the proxy, never accepted from a client.
         out: dict[str, str] = {}
         for key in self.headers.keys():
             lk = key.lower()
-            if lk in _HOP_BY_HOP or lk == "content-length":
+            if lk in _HOP_BY_HOP or lk == "content-length" or lk in _VIGIL_IDENTITY_HEADERS:
                 continue
             out[key] = self.headers[key]
+        if offense_principal is not None:
+            # Present the offense CONSOLE's OWN credential (never the user's bearer): the console gates on
+            # VIGIL_CONSOLE_TOKEN, the browser must never hold it, and only an already-authenticated request
+            # reaches here. Stamp the resolved identity so the offense side can attribute the action (and a
+            # future per-action offense gate can read the role). A proxy with no token presents "" → the
+            # console fails closed (401), never open.
+            out[_TOKEN_HEADER] = getattr(self.server, "token", "") or ""
+            out[_PRINCIPAL_HDR] = str(offense_principal.get("username") or "")
+            out[_ROLE_HDR] = str(offense_principal.get("role") or "")
         return out
 
     def _relay_response(self, resp: http.client.HTTPResponse):

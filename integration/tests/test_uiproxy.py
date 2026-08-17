@@ -20,15 +20,35 @@ from __future__ import annotations
 
 import http.client
 import http.server
+import json
 import socket
 import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from vigil_integration import uiproxy
+
+
+# ---- Claim 6 per-user auth: test principals the fake sovereign whoami resolves ---------------------
+# The proxy delegates verification to the sovereign `/api/whoami`; the "cockpit" echo upstream below
+# stands in for it, resolving these bearers to principals (owner token → owner; per-user bearers → their
+# role). An unknown bearer → {authenticated:false} → the proxy 401s.
+OWNER_TOKEN = "owner-boot-tok-AAAAAAAAAAAAAAAA"      # the offense console credential + the owner login
+OP_BEARER = "op-bearer-BBBBBBBBBBBBBBBBBBBB"          # operator (has run_engagement)
+VIEWER_BEARER = "viewer-bearer-CCCCCCCCCCCCCCCC"      # viewer (read only)
+_OWNER_PERMS = ["read", "queue_proposal", "run_engagement", "approve_a2", "toggle_guard",
+                "config_nonsecret", "approve_a3", "kill_release", "promote", "secrets",
+                "offense_authority", "manage_users", "toggle_protected_guard"]
+_OP_PERMS = ["read", "queue_proposal", "run_engagement", "approve_a2", "toggle_guard", "config_nonsecret"]
+_WHOAMI_PRINCIPALS = {
+    OWNER_TOKEN: {"authenticated": True, "username": "owner", "role": "owner", "permissions": _OWNER_PERMS},
+    OP_BEARER: {"authenticated": True, "username": "op", "role": "operator", "permissions": _OP_PERMS},
+    VIEWER_BEARER: {"authenticated": True, "username": "vv", "role": "viewer", "permissions": ["read"]},
+}
 
 
 # ---- a trivial echo/SSE upstream ------------------------------------------------------------------
@@ -39,6 +59,18 @@ class _EchoHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def _echo(self):
+        # The "cockpit" upstream stands in for the sovereign plane's token-optional /api/whoami: resolve the
+        # presented bearer to a principal (the proxy calls this to authenticate every forwarded request).
+        if urlsplit(self.path).path == "/api/whoami" and getattr(self.server, "tag", "") == "cockpit":
+            q = parse_qs(urlsplit(self.path).query)
+            tok = self.headers.get("X-SIGIL-Token") or (q.get("token") or [""])[0]
+            raw = json.dumps(_WHOAMI_PRINCIPALS.get(tok, {"authenticated": False})).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         # /sse streams events with real gaps so a buffering proxy would be caught out.
         if self.path.startswith("/sse"):
             self.send_response(200)
@@ -113,7 +145,9 @@ def proxy(tmp_path, monkeypatch):
     uiproxy.assemble_serve_dir(src, serve, token="TESTTOKEN")
 
     port = _free_port()
-    httpd = uiproxy.make_proxy_server("127.0.0.1", port, serve)
+    # Claim 6: build the proxy WITH the offense console credential (= OWNER_TOKEN) it substitutes on an
+    # authenticated offense forward. Per-user auth is delegated to the cockpit upstream's /api/whoami above.
+    httpd = uiproxy.make_proxy_server("127.0.0.1", port, serve, token=OWNER_TOKEN)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{port}"
     try:
@@ -126,14 +160,19 @@ def proxy(tmp_path, monkeypatch):
             s.server_close()
 
 
-def _get(url: str) -> tuple[int, str]:
-    with urllib.request.urlopen(url, timeout=5) as r:  # noqa: S310 (loopback test)
+def _get(url: str, token: str = OWNER_TOKEN) -> tuple[int, str]:
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("X-SIGIL-Token", token)   # Claim 6: every forwarded route is per-user authenticated
+    with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 (loopback test)
         return r.status, r.read().decode("utf-8", "replace")
 
 
-def _post(url: str, body: bytes) -> str:
+def _post(url: str, body: bytes, token: str = OWNER_TOKEN) -> str:
     req = urllib.request.Request(url, method="POST", data=body)
     req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("X-SIGIL-Token", token)
     with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310
         return r.read().decode("utf-8", "replace")
 
@@ -338,7 +377,7 @@ def test_sse_streams_incrementally(proxy):
     # the console upstream's /sse emits 4 events at 0.25s intervals. Read them one at a time and
     # assert the FIRST event arrives well before the LAST — proof the proxy is not buffering the body.
     conn = http.client.HTTPConnection(base.removeprefix("http://"), timeout=10)
-    conn.request("GET", "/offense/sse")
+    conn.request("GET", "/offense/sse", headers={"X-SIGIL-Token": OWNER_TOKEN})   # per-user authenticated
     resp = conn.getresponse()
     assert resp.getheader("Content-Type", "").startswith("text/event-stream")
 
