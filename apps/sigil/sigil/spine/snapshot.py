@@ -25,6 +25,9 @@ Sub-state ↔ bearer (all identity-empty in Slice C):
   mesh_dev_issued        {device_pubkey: max issued_at}          join-semilattice (max)         authorize anti-replay
   promotion              {(agent,scope): granted|revoked}        LWW (keep revoked!)            auto-approval grants
   promotion_issued       {(agent,scope): max issued_at}          join-semilattice (max)         grant anti-replay
+  account_state          {username: active|revoked}              LWW (keep revoked!)            RBAC account authz
+  account_issued         {username: max issued_at}               join-semilattice (max)         grant anti-replay
+  account_cred           {username: role/cred_hash/cred_salt/pubkey} right-biased LWW           active-account rebuild
   consumed_arm_nonces    {(device_pubkey, nonce)}                set-union                      HID-arm replay ledger
   device_approval_dedup  {(pubkey,sig): min_seq}                 min-seq semilattice            device-approval idempotency
   warden_best            {pubkey: (max_count, head_hash, seq)}   max-count LWW-tie              warden anchor high-water
@@ -94,6 +97,17 @@ class SnapshotState(BaseModel):
     #                                   Missing row ⇒ the -inf bottom. Per key and never global: a global one
     #                                   would let a grant for agent A refuse a legitimate later grant for
     #                                   agent B carrying a smaller issued_at.
+    account_state: list = []          # [[username, "active"|"revoked"], ...] — governor.account LWW
+    #                                   (revoke=any, active=owner-verified + FRESH). Keep revoked.
+    account_issued: list = []         # [[username, issued_at], ...] — PER-USERNAME active-grant high-water.
+    #                                   Missing row ⇒ the -inf bottom. Per username and never global. MUST cross
+    #                                   a prune, or the first hard prune resets it and a captured owner-signed
+    #                                   `active` grant becomes replay-resurrectable again (the LWW replay HIGH).
+    account_cred: list = []           # [[username, role, cred_hash, cred_salt, user_pubkey], ...] — the fields
+    #                                   to REBUILD an active `Account` from the seed (issued_at joins from
+    #                                   account_issued; state="active"; user_pubkey None for bearer-only / legacy
+    #                                   4-field rows). Carried for every honored-active username (incl. ones later
+    #                                   revoked — dropped at read time by account_state, exactly as the scan).
     consumed_arm_nonces: list = []    # [[device_pubkey, nonce], ...]  (nonce int OR str, verbatim)
     device_approval_dedup: list = []  # [[pubkey|None, sig|None, min_seq], ...]
     warden_best: dict[str, list] = {} # {pubkey: [max_count, head_hash, tiebreak_seq]}
@@ -111,6 +125,14 @@ class SnapshotState(BaseModel):
 
     def promotion_issued_map(self) -> dict[tuple[Optional[str], Optional[str]], float]:
         return {(row[0], row[1]): row[2] for row in self.promotion_issued}
+
+    def account_state_map(self) -> dict[Any, str]:
+        return {row[0]: row[1] for row in self.account_state}
+
+    def account_issued_map(self) -> dict[Any, float]:
+        return {row[0]: row[1] for row in self.account_issued}
+    #   account_cred stays a raw list-of-rows: `AccountsRegistry._fold` rebuilds the Account objects from it
+    #   (joining issued_at from account_issued_map), keeping the `Account` import out of this leaf module.
 
     def capability_latch_map(self) -> dict[Optional[str], bool]:
         return {row[0]: row[1] for row in self.capability_latch}
@@ -224,6 +246,11 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     # Import each consumer's REAL signed-core tuple rather than restating it here. A restated tuple is a
     # silent drift hazard: adding a field to a consumer's core (as the anti-replay `issued_at` did) while
     # this copy lagged would make build() honor records the live scan rejects, and vice versa.
+    from ..governor.accounts import SIGNAL as _ACCT_SIGNAL
+    # accounts signs `user_pubkey` CONDITIONALLY (only when a key is bound), so the verified field set is
+    # derived per-grant from the payload — mirror the SAME helper the live scan uses, else a KEYED grant
+    # (signed over 8 fields) would fail a static 7-field verify here and be dropped from the seed.
+    from ..governor.accounts import _core_fields as _acct_core_fields
     from ..governor.capability import SIGNAL as _CAPLATCH_SIGNAL
     from ..governor.capability import _CORE as _CAPLATCH_CORE
     from ..governor.killswitch import SIGNAL as _KS_SIGNAL
@@ -252,6 +279,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     promo: dict[tuple[Optional[str], Optional[str]], str] = dict(s.promotion_map()) if s else {}
     promo_issued: dict[tuple[Optional[str], Optional[str]], float] = (dict(s.promotion_issued_map())
                                                                       if s else {})
+    acct_state: dict[Any, str] = dict(s.account_state_map()) if s else {}
+    acct_issued: dict[Any, float] = dict(s.account_issued_map()) if s else {}
+    acct_cred: dict[Any, list] = {row[0]: [row[1], row[2], row[3], (row[4] if len(row) > 4 else None)]
+                                  for row in s.account_cred} if s else {}   # 5th = user_pubkey (None if legacy row)
     arm: set = set(s.arm_set()) if s else set()
     dedup: dict[tuple[Optional[str], Optional[str]], int] = dict(s.approval_dedup_map()) if s else {}
     warden: dict[str, tuple[int, str, int]] = ({k: (v[0], v[1], v[2]) for k, v in s.warden_best.items()}
@@ -338,6 +369,23 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                     promo_issued[akey] = at
             if fresh:
                 promo[akey] = p["state"]
+        # --- RBAC account grants (revoke=any, active=owner-verified + ANTI-REPLAY FRESH; keep revoked) — no
+        #     isinstance guard (mirror AccountsRegistry._fold, which keys on p.get("username") unconditionally).
+        #     acct_cred is set alongside the honored high-water and NOT cleared on revoke, exactly as the scan
+        #     leaves `accts[u]` in place (it is dropped at read time by the account_state filter). ---
+        if sig == _ACCT_SIGNAL:
+            ustate = p.get("state")
+            if ustate == "revoked":
+                acct_state[p.get("username")] = "revoked"
+            elif ustate == "active" and verify_signed(p, _acct_core_fields(p), tp):
+                ukey = p.get("username")
+                at = as_issued_at(p.get("issued_at"))
+                if at > acct_issued.get(ukey, NO_HIGHWATER):   # mirror _fold: stale/replayed active ⇒ no effect
+                    acct_issued[ukey] = at
+                    acct_state[ukey] = "active"
+                    # carry user_pubkey (None for a bearer-only grant) so a KEYED account survives a prune with
+                    # its bound key — else a pruned+seeded account would silently lose PoP login capability.
+                    acct_cred[ukey] = [p.get("role"), p.get("cred_hash"), p.get("cred_salt"), p.get("user_pubkey")]
         # --- gesture device-arm replay ledger (set-union) ---
         if sig == "gesture.session_armed" and p.get("armed_by") == "device":
             arm.add((p.get("device_pubkey"), p.get("nonce")))
@@ -378,6 +426,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         mesh_dev_issued=[[d, i] for d, i in mesh_dev_issued.items()],
         promotion=[[a, s, v] for (a, s), v in promo.items()],
         promotion_issued=[[a, s, i] for (a, s), i in promo_issued.items()],
+        account_state=[[u, v] for u, v in acct_state.items()],
+        account_issued=[[u, i] for u, i in acct_issued.items()],
+        account_cred=[[u, c[0], c[1], c[2], (c[3] if len(c) > 3 else None)] for u, c in acct_cred.items()],
         consumed_arm_nonces=[[d, n] for (d, n) in arm],
         device_approval_dedup=[[pk, sg, seq] for (pk, sg), seq in dedup.items()],
         warden_best={k: [c, h, s] for k, (c, h, s) in warden.items()},
