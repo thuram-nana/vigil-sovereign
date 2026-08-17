@@ -33,13 +33,17 @@ first terminal for a key wins an O_EXCL single-terminal claim (:class:`_Terminal
 NonceLedger precedent); a later divergent resolver LOSES the atomic race and adopts the durable,
 signature-gated winner instead of persisting its own — the winner is the atomic claim, never file order.
 
-HONEST LIMITS. The signature closes forged / unsigned / cross-escalation-replayed / reject→approve-flipped
-terminals on replay, and divergent concurrent terminals. It does NOT defend a **compromised approver
-private key** (an attacker who holds it can sign a genuine approval) nor a same-outcome duplicate. The
-``_TerminalCas`` marker is an integrity-only write-serialization guard, not itself signed: a planted
-marker can at worst DENY (fail-closed, the loser re-reads the signature-gated ledger), never manufacture
-an allow. The JSONL ledger — not the live-feed spine mirror — is the durable substrate, and it works with
-or without the framework (a hand-run engage records + reads it identically).
+HONEST LIMITS. The signature closes forged / unsigned / cross-ENGAGEMENT-replayed / cross-escalation-
+replayed / reject→approve-flipped terminals on replay, and divergent concurrent terminals. It does NOT
+defend a **compromised approver private key** (an attacker who holds it can sign a genuine approval) nor a
+same-outcome duplicate. Because the pinned trusted approver IS the WARDEN owner key persisted at
+``<base>/approval-authority.json`` (PUBLIC key only), a local attacker who can WRITE that file can pin
+their OWN key and self-approve — the same local-write trust assumption the WARDEN token gate already makes;
+protect it with filesystem permissions (0600, owner-only dir). The ``_TerminalCas`` marker is an
+integrity-only write-serialization guard, not itself signed: a planted marker can at worst DENY
+(fail-closed, the loser re-reads the signature-gated ledger), never manufacture an allow. The JSONL
+ledger — not the live-feed spine mirror — is the durable substrate, and it works with or without the
+framework (a hand-run engage records + reads it identically).
 """
 
 from __future__ import annotations
@@ -62,19 +66,28 @@ from .spine_queue import SingleWriterSpineQueue
 
 # --- signed approval envelope (Tier-B) -----------------------------------------------------------
 # The exact bytes an approver signs / a replay re-verifies: a domain-tagged canonical JSON over the
-# ESCALATION IDENTITY + the terminal it authorizes. Binding to (wave_id, member_id, seq, outcome,
-# approved) means a signature can be replayed onto NEITHER a different escalation NOR a flipped terminal
-# (reject→approve): a different key or a different outcome is different bytes, and only the approver's
-# private key can produce a fresh signature. Never change the domain/schema without a migration — it
-# invalidates every prior approval signature.
-_APPROVAL_DOMAIN = b"vigil-fireteam-escalation-approval-v1\x00"
-_APPROVAL_ENVELOPE_SCHEMA = "vigil.fireteam.escalation-approval.v1"
+# ENGAGEMENT + ESCALATION IDENTITY + the terminal it authorizes. Binding to (engagement, wave_id,
+# member_id, seq, outcome, approved) means a signature can be replayed onto NEITHER a different engagement,
+# NOR a different escalation, NOR a flipped terminal (reject→approve): each is different bytes, and only
+# the approver's private key can produce a fresh signature. The ENGAGEMENT is sourced from the VERIFIER's
+# own registry/ledger context (never from the attacker-controlled record), so isolation is INTRINSIC —
+# it does NOT depend on the ``wave_id`` naming convention. Two engagements with an identical bare wave_id
+# still produce different signed bytes. Never change the domain/schema without a migration — it invalidates
+# every prior approval signature (v2 added the engagement field; resolve() is new/unwired so this rotation
+# strands no live signature).
+_APPROVAL_DOMAIN = b"vigil-fireteam-escalation-approval-v2\x00"
+_APPROVAL_ENVELOPE_SCHEMA = "vigil.fireteam.escalation-approval.v2"
 
 
-def escalation_approval_bytes(key: tuple[str, str, int], outcome: str, approved: bool) -> bytes:
-    """The canonical, domain-tagged bytes signed/verified for an escalation terminal. ``key`` is the
-    escalation's ``(wave_id, member_id, seq)`` identity; ``outcome``/``approved`` pin the exact terminal."""
+def escalation_approval_bytes(key: tuple[str, str, int], outcome: str, approved: bool,
+                              *, engagement: str = "") -> bytes:
+    """The canonical, domain-tagged bytes signed/verified for an escalation terminal. ``engagement`` is the
+    per-engagement identity (the registry's own slug / ledger context — NOT taken from any record), ``key``
+    is the escalation's ``(wave_id, member_id, seq)`` identity, and ``outcome``/``approved`` pin the exact
+    terminal. A change in ANY of these produces different bytes, so no signature can slide across
+    engagements, escalations, or terminals."""
     payload = {
+        "engagement": str(engagement or ""),
         "wave_id": str(key[0]),
         "member_id": str(key[1]),
         "seq": int(key[2]),
@@ -89,19 +102,25 @@ def sign_escalation_approval(
     *,
     key_id: str,
     key: tuple[str, str, int],
+    engagement: str = "",
     outcome: str = "approved",
     approved: bool = True,
 ) -> dict[str, Any]:
     """Mint a signed approval envelope for an escalation terminal (the SOVEREIGN/approver side — the only
-    party holding the approver private key). The offense resolver only ever VERIFIES this envelope against
-    a pinned public key; it is offense-safe to carry (it holds no secret). The envelope's self-declared
-    ``outcome``/``approved`` are advisory only — verification always reconstructs the signed bytes from the
-    ledger RECORD's ``(key, outcome, approved)``, so an envelope can't misdescribe what it authorizes."""
-    signature_b64 = sign(private_key_b64, escalation_approval_bytes(key, outcome, approved))
+    party holding the approver private key). ``engagement`` MUST be the target engagement's slug (the same
+    value the verifying registry is configured with / that names its per-engagement ledger); binding it
+    means the approval is valid ONLY in that engagement. The offense resolver only ever VERIFIES this
+    envelope against a pinned public key; it is offense-safe to carry (it holds no secret). The envelope's
+    self-declared ``outcome``/``approved`` are advisory only — verification always reconstructs the signed
+    bytes from the VERIFIER's ``engagement`` + the ledger RECORD's ``(key, outcome, approved)``, so an
+    envelope can't misdescribe what — or where — it authorizes."""
+    signature_b64 = sign(private_key_b64, escalation_approval_bytes(key, outcome, approved,
+                                                                    engagement=engagement))
     return {
         "schema": _APPROVAL_ENVELOPE_SCHEMA,
         "key_id": str(key_id),
         "alg": "ed25519",
+        "engagement": str(engagement or ""),
         "outcome": str(outcome),
         "approved": bool(approved),
         "signature_b64": signature_b64,
@@ -357,16 +376,23 @@ class ConfirmationRegistry:
 
     def __init__(self, *, spine: Optional[SingleWriterSpineQueue] = None,
                  ledger: Optional[EscalationLedger] = None,
-                 trusted_approvers: Any = None) -> None:
+                 trusted_approvers: Any = None,
+                 engagement: str = "") -> None:
         self._pending: dict[tuple[str, str, int], PendingConfirmation] = {}
         self._resolved: dict[tuple[str, str, int], ConfirmationResolution] = {}
         self._log: list[dict[str, Any]] = []
         self._spine = spine
         self._ledger = ledger
+        # The per-engagement identity (the caller's slug — in production ``config.slug``, threaded by
+        # live.wiring). It is folded into the SIGNED approval bytes and sourced HERE, from the verifier's own
+        # config, never from a record — so an approval signed for engagement A fails closed when a record is
+        # replayed into engagement B's registry/ledger, EVEN with an identical wave_id (intrinsic isolation,
+        # not the transitive ``wave_id = f"{slug}-w{seq}"`` convention).
+        self._engagement: str = str(engagement or "")
         # PINNED trusted approver key(s) {key_id: public_key_b64}. An APPROVED terminal is authorized ONLY by
-        # a signature that verifies against one of these AND binds to the exact escalation+terminal. No trust
-        # root ⇒ no approval can ever verify (fail-closed) — a durable allow degrades to REJECTED on replay.
-        # Set BEFORE _rehydrate so the very first replay re-verifies every persisted approval.
+        # a signature that verifies against one of these AND binds to the exact engagement+escalation+terminal.
+        # No trust root ⇒ no approval can ever verify (fail-closed) — a durable allow degrades to REJECTED on
+        # replay. Set BEFORE _rehydrate so the very first replay re-verifies every persisted approval.
         self._trusted: dict[str, str] = _normalize_trusted(trusted_approvers)
         self._cas = _TerminalCas(ledger.cas_dir if ledger is not None else "")
         if ledger is not None:
@@ -409,9 +435,12 @@ class ConfirmationRegistry:
     def _verify_envelope(self, envelope: Any, key: tuple[str, str, int], outcome: str,
                          approved: bool) -> bool:
         """True IFF ``envelope`` is a signed approval whose Ed25519 signature verifies against a PINNED
-        trusted approver key AND was signed over the exact ``(key, outcome, approved)`` bytes. Fail-closed
-        on a missing trust root / non-envelope / unknown key_id / bad signature / any verify error — a
-        forged, unsigned, cross-escalation-replayed, or reject→approve-flipped approval NEVER verifies."""
+        trusted approver key AND was signed over the exact ``(THIS registry's engagement, key, outcome,
+        approved)`` bytes. The engagement is taken from ``self._engagement`` (the verifier's own config),
+        NOT from the record/envelope — so an approval bound to another engagement fails closed here even with
+        an identical wave_id. Fail-closed on a missing trust root / non-envelope / unknown key_id / bad
+        signature / any verify error — a forged, unsigned, cross-engagement / cross-escalation-replayed, or
+        reject→approve-flipped approval NEVER verifies."""
         if not self._trusted or not isinstance(envelope, Mapping):
             return False
         key_id = str(envelope.get("key_id", ""))
@@ -420,7 +449,8 @@ class ConfirmationRegistry:
         if not pub or not sig:
             return False
         try:
-            return verify_one(pub, escalation_approval_bytes(key, outcome, approved), sig)
+            return verify_one(pub, escalation_approval_bytes(key, outcome, approved,
+                                                             engagement=self._engagement), sig)
         except Exception:  # noqa: BLE001 — malformed key/sig material can never authorize (fail-closed)
             return False
 

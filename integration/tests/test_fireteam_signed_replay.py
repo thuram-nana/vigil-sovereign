@@ -223,6 +223,53 @@ def test_resolve_without_signer_over_ledger_fails_closed(tmp_path):
     assert res.outcome == ConfirmationOutcome.REJECTED and res.approved is False
 
 
+# --- ADVISORY-1: engagement isolation is INTRINSIC, not the wave_id convention ------------------------
+
+
+def test_cross_engagement_replay_with_colliding_wave_id_fails_closed(tmp_path):
+    """A GENUINE owner approval minted for engagement A does NOT reopen as APPROVED when its record is
+    replayed into engagement B's registry/ledger — even with an IDENTICAL bare (wave_id, member_id, seq)
+    and the SAME pinned owner key. The engagement is bound into the signed bytes and sourced from the
+    verifier's own registry config, so isolation does not depend on the ``wave_id = f'{slug}-w{seq}'``
+    convention."""
+    kid, pub, priv = _identity()              # the SAME owner key pins both engagements
+    key = ("w1", "m1", 1)                       # identical bare key across both engagements
+
+    led_a = EscalationLedger(str(tmp_path / "a.escalations.jsonl"))
+    led_b = EscalationLedger(str(tmp_path / "b.escalations.jsonl"))
+
+    # engagement A: register + a genuine owner approval bound to "eng-A" -> APPROVED (positive control)
+    ConfirmationRegistry(ledger=led_a, engagement="eng-A").register(_esc(seq=1))
+    env_a = sign_escalation_approval(priv, key_id=kid, key=key, engagement="eng-A")
+    a_res = ConfirmationRegistry(ledger=led_a, trusted_approvers={kid: pub},
+                                 engagement="eng-A").resolve(key, env_a)
+    assert a_res.outcome == ConfirmationOutcome.APPROVED and a_res.approved is True
+
+    # the attacker copies A's genuine approved record (A's envelope + identical key) into B's ledger, which
+    # already has the same escalation pending
+    ConfirmationRegistry(ledger=led_b, engagement="eng-B").register(_esc(seq=1))
+    (a_approved,) = _terminal_lines(tmp_path / "a.escalations.jsonl")
+    with open(str(tmp_path / "b.escalations.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(a_approved) + "\n")
+
+    # engagement B (SAME pinned owner key) rehydrates the replayed record -> REJECTED, fail-closed
+    b_reader = ConfirmationRegistry(ledger=led_b, trusted_approvers={kid: pub}, engagement="eng-B")
+    assert b_reader.resolution(key).outcome == ConfirmationOutcome.REJECTED
+    assert b_reader.resolution(key).approved is False
+
+    # PROOF the rejection is PURELY the engagement binding: reading the SAME B-ledger bytes with engagement
+    # "eng-A" re-verifies A's signature -> APPROVED (only the engagement string differs across accept/reject)
+    a_over_b = ConfirmationRegistry(ledger=led_b, trusted_approvers={kid: pub}, engagement="eng-A")
+    assert a_over_b.resolution(key).outcome == ConfirmationOutcome.APPROVED
+
+    # and a direct resolve() in B with A's envelope also fails closed (Path V verifies under engagement B)
+    led_c = EscalationLedger(str(tmp_path / "c.escalations.jsonl"))
+    ConfirmationRegistry(ledger=led_c, engagement="eng-B").register(_esc(seq=1))
+    c_res = ConfirmationRegistry(ledger=led_c, trusted_approvers={kid: pub},
+                                 engagement="eng-B").resolve(key, env_a)
+    assert c_res.outcome == ConfirmationOutcome.REJECTED and c_res.approved is False
+
+
 # --- (4) racing resolvers reach exactly one coordinated terminal --------------------------------------
 
 
@@ -383,15 +430,17 @@ def test_append_only_a_signed_approve_after_a_reject_never_reopens(tmp_path):
     assert res.outcome == ConfirmationOutcome.REJECTED and res.approved is False
 
 
-def test_escalation_approval_bytes_bind_key_outcome_and_approved():
-    """Unit: the signed bytes change with EACH of (key, outcome, approved), so a signature cannot slide
-    across escalations or terminals."""
-    base = escalation_approval_bytes(("w", "m", 1), "approved", True)
-    assert base != escalation_approval_bytes(("w", "m", 2), "approved", True)          # different seq
-    assert base != escalation_approval_bytes(("w", "x", 1), "approved", True)          # different member
-    assert base != escalation_approval_bytes(("w", "m", 1), "rejected", True)          # different outcome
-    assert base != escalation_approval_bytes(("w", "m", 1), "approved", False)         # different approved
-    assert base.startswith(b"vigil-fireteam-escalation-approval-v1\x00")               # domain-tagged
+def test_escalation_approval_bytes_bind_engagement_key_outcome_and_approved():
+    """Unit: the signed bytes change with EACH of (engagement, key, outcome, approved), so a signature
+    cannot slide across engagements, escalations, or terminals."""
+    base = escalation_approval_bytes(("w", "m", 1), "approved", True, engagement="eng-A")
+    assert base != escalation_approval_bytes(("w", "m", 1), "approved", True, engagement="eng-B")  # diff eng
+    assert base != escalation_approval_bytes(("w", "m", 1), "approved", True, engagement="")       # diff eng
+    assert base != escalation_approval_bytes(("w", "m", 2), "approved", True, engagement="eng-A")  # diff seq
+    assert base != escalation_approval_bytes(("w", "x", 1), "approved", True, engagement="eng-A")  # diff member
+    assert base != escalation_approval_bytes(("w", "m", 1), "rejected", True, engagement="eng-A")  # diff outcome
+    assert base != escalation_approval_bytes(("w", "m", 1), "approved", False, engagement="eng-A")  # diff approved
+    assert base.startswith(b"vigil-fireteam-escalation-approval-v2\x00")               # domain-tagged (v2)
 
 
 def test_compromised_approver_key_is_the_stated_residual(tmp_path):

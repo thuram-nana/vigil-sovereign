@@ -640,8 +640,12 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         # sovereign-signed approval — it cannot mint one; a resolve() here without a valid signed envelope
         # fail-closes. The sovereign Tier-B resolve loop (which supplies owner-signed envelopes over pending
         # escalations, behind the existing gate/ceiling, never auto) is the remaining wiring step.
+        # Tier-B ADVISORY-1: bind the ENGAGEMENT (config.slug) into the signed approval bytes so isolation is
+        # INTRINSIC, not transitive via the wave_id convention — an owner approval signed for this engagement
+        # fails closed if replayed into another engagement's registry, even with a colliding bare wave_id.
         fireteam_registry = ConfirmationRegistry(spine=fireteam_spine, ledger=escalation_ledger,
-                                                 trusted_approvers=effective_authority)
+                                                 trusted_approvers=effective_authority,
+                                                 engagement=config.slug)
         return asyncio.run(run_fireteam(plan, runner, phase=state.phase, gate=gate, oracle=oracle,
                                         spine=fireteam_spine, registry=fireteam_registry,
                                         seq_start=int(seq), blackboard=bb, engagement=config.slug))
