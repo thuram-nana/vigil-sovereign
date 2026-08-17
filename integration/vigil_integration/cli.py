@@ -2483,10 +2483,12 @@ def build_parser() -> argparse.ArgumentParser:
                           "--force whole-replaces it (only re-creatable transients are dropped). The "
                           "crucible-root and sigil-home are SUBSET captures: --force replaces ONLY the captured "
                           "units (crucible: .blackboard/store.sqlite + .console/runs; sigil: spine/floor/"
-                          "security-manifest/warden) and NEVER deletes un-captured data there (the CRUCIBLE "
-                          "code, sigil vector/config caches). Without --force, restore refuses when a captured "
-                          "unit already exists rather than overwrite it. The replacement is staged + verified "
-                          "first and swapped in atomically per unit (crash-safe).")
+                          "security-manifest/warden) and never touches un-captured data OUTSIDE those units (the "
+                          "CRUCIBLE code, sigil vector/config caches). A captured unit is replaced WHOLESALE, "
+                          "so proof created after the backup that lives inside one (e.g. a new .console/runs "
+                          "engagement) is dropped by a restore (the DR-snapshot semantic). Without --force, "
+                          "restore refuses when a captured unit already exists rather than overwrite it. The "
+                          "replacement is staged + verified first and swapped in atomically per unit (crash-safe).")
     grp2 = prs.add_mutually_exclusive_group()
     grp2.add_argument("--sovereign-only", dest="sovereign_only", action="store_true",
                       help="restore ONLY the sovereign plane")

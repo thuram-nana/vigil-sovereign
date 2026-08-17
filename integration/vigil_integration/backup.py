@@ -315,10 +315,12 @@ def _crucible_units_present(croot: Path) -> list[str]:
 
 def _atomic_swap_crucible_units(staged_croot: Path, dest_croot: Path) -> None:
     """Swap ONLY the captured crucible units (the proof-db file + the runs subtree) from the staged tree onto
-    ``dest_croot``, each atomically, leaving every un-captured file under ``dest_croot`` (the CRUCIBLE code,
-    config, other ``.console``/``.blackboard`` state) UNTOUCHED. This bounds a ``--force`` crucible restore's
-    blast radius to exactly the captured subset. The two units are swapped sequentially (a crash leaves each
-    unit complete-old-or-complete-new, never torn), matching the base-then-crucible sequential-swap limit."""
+    ``dest_croot``, each atomically, leaving every un-captured file OUTSIDE those units (the CRUCIBLE code,
+    config, sibling ``.console``/``.blackboard`` entries) UNTOUCHED. Honest scope: the ``.console/runs`` unit is
+    replaced WHOLESALE — a run created AFTER the backup lives inside that unit and is therefore dropped (the
+    intended DR-snapshot semantic), so this bounds ``--force``'s blast radius to the captured units, not to
+    "no un-captured data anywhere". The two units are swapped sequentially (a crash leaves each unit
+    complete-old-or-complete-new, never torn), matching the base-then-crucible sequential-swap limit."""
     staged_db = staged_croot / _CRUCIBLE_STORE_UNIT
     if staged_db.is_file():
         _atomic_swap_unit(staged_db, dest_croot / _CRUCIBLE_STORE_UNIT)
@@ -494,11 +496,14 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
         ``new_base`` is REFUSED unless ``force=True``; with ``force`` it is whole-replaced (only stale /
         re-creatable state is dropped).
       * ``crucible_root`` is a strict SUBSET capture — ONLY the proof-db (``.blackboard/store.sqlite``) and the
-        runs subtree (``.console/runs``). Restore replaces ONLY those units; every other file under
-        ``crucible_root`` (the CRUCIBLE code, config, other ``.console``/``.blackboard`` state) is LEFT INTACT,
-        even under ``--force``. The force-gate here fires only when a captured proof unit already exists — never
-        merely because the root is non-empty (it always is). This bounds ``--force``'s blast radius to the
-        captured proof state and can NEVER delete live, un-captured data.
+        runs subtree (``.console/runs``). Restore replaces ONLY those units; every file OUTSIDE them under
+        ``crucible_root`` (the CRUCIBLE code, config, sibling ``.console``/``.blackboard`` entries) is LEFT
+        INTACT, even under ``--force``. The force-gate here fires only when a captured proof unit already exists
+        — never merely because the root is non-empty (it always is). This bounds ``--force``'s blast radius to
+        the captured units — it never reaches the CRUCIBLE code or any sibling. Honest scope: the
+        ``.console/runs`` unit is replaced WHOLESALE, so a run created AFTER the backup (which lives inside that
+        unit) is dropped by a restore — the intended DR-snapshot semantic, NOT an "un-captured data is never
+        deleted anywhere" guarantee.
     Honest limit: each destination (and, within crucible, each unit) is swapped atomically, but they are swapped
     SEQUENTIALLY — a crash between swaps leaves some new, some old, each internally consistent (never a torn
     tree), not a jointly-atomic transaction.

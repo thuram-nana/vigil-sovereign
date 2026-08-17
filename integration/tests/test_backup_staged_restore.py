@@ -84,8 +84,9 @@ def test_restore_refused_when_a_captured_crucible_unit_exists_without_force(tmp_
 
 def test_force_crucible_restore_preserves_uncaptured_code(tmp_path):
     """THE make-or-break negative control (red-pen BLOCK-1): the crucible capture is a strict SUBSET, so a
-    --force restore must replace ONLY the captured units (proof-db + runs) and NEVER delete live, un-captured
-    data under the crucible root — in a dev checkout that root is the CRUCIBLE codebase itself."""
+    --force restore must replace ONLY the captured units (proof-db + runs) and never delete live, un-captured
+    data OUTSIDE those units — in a dev checkout the crucible root is the CRUCIBLE codebase itself. (The runs
+    unit itself is replaced wholesale; that is the DR-snapshot semantic and is asserted separately below.)"""
     dest, _base = _make_crucible_backup(tmp_path)
     new_base = tmp_path / "nb"
     new_croot = tmp_path / "nc"
