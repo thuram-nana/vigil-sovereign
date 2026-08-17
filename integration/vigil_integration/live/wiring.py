@@ -343,6 +343,14 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         path=str(base / DEFAULT_SPINE_KEY_FILE), vault=op_vault)
     spine = VigilCoreSpine(spine_kp, str(base / f"{config.slug}.spine"))
 
+    # Gap 2 — the DURABLE, ENGAGEMENT-SCOPED escalation ledger (append-only 0600 JSONL under the console live
+    # dir). ONE ledger per engagement (NOT per-wave): every wave's ConfirmationRegistry is constructed over
+    # this same file and rehydrates from it, so an over-cap fireteam escalation survives a restart and a
+    # separate resolver can read it back (the old in-memory per-wave registry lost both). Construction never
+    # touches the filesystem; a hand-run engage (no $VIGIL_PROOF_RUN_DIR) records + reads it identically.
+    from ..fireteam.confirmation import EscalationLedger
+    escalation_ledger = EscalationLedger(str(base / f"{config.slug}.escalations.jsonl"))
+
     def exec_signer(message: bytes) -> str:
         # the executor's ExecRecord signer: a raw Ed25519 base64 signature over the record bytes.
         return sign(spine_kp.private_key_b64, message)
@@ -586,19 +594,39 @@ def build_engine(config: EngineConfig) -> VigilEngine:
             try:
                 if spine_post is not None:
                     payload = record if isinstance(record, dict) else {"value": str(record)}
-                    spine_post("fireteam", payload)
+                    kind = str(payload.get("kind", "")) if isinstance(payload, dict) else ""
+                    if kind.startswith("confirmation."):
+                        # Gap 2 — also MIRROR each escalation event onto the SIGNED, offline-verifiable
+                        # blackboard chain (not only the live feed): a queued/resolved over-cap escalation IS
+                        # a gate firing, so it rides the standard ``refusal`` evidence kind that
+                        # _persist_blackboard_chain signs at end-of-run. The record is already REDACTED by the
+                        # single-writer queue. Best-effort and framework-gated (no blackboard ⇒ no-op); the
+                        # DURABLE substrate is the JSONL escalation ledger, which does not need the framework.
+                        event = str(payload.get("event", "") or kind.split(".", 1)[-1])
+                        spine_post("refusal", {
+                            "gate": "fireteam.confirmation",
+                            "action_refused": (f"{payload.get('tool_name', '')} escalation "
+                                               f"({payload.get('requested_tier', '')})").strip(),
+                            "reason": (f"{event}: "
+                                       f"{payload.get('reason', '') or 'queued for signed operator approval'}"),
+                            "fatal": False,
+                        })
+                    else:
+                        spine_post("fireteam", payload)
             except Exception:  # noqa: BLE001 — a live-feed write NEVER perturbs the wave
                 pass
             _member_ref_seq["n"] += 1
             return f"ft-{config.slug}-{_member_ref_seq['n']}"
 
         fireteam_spine = SingleWriterSpineQueue(writer=_member_writer)
-        # E1 — register each member's over-cap escalation in an append-only registry whose redacted
-        # `confirmation.register` events are flushed to the spine (run_fireteam registers BEFORE its final
-        # flush), so the escalation ledger is durably written rather than only recorded in the report.
-        # Resolution stays signed-only and fail-closed inside the registry; wiring the operator's
-        # signed-resolve surface is the next step.
-        fireteam_registry = ConfirmationRegistry(spine=fireteam_spine)
+        # Gap 2 — register each member's over-cap escalation in an append-only registry backed by the DURABLE,
+        # engagement-scoped EscalationLedger (the JSONL file built once above). Each event is appended
+        # (redacted) to that ledger AND flushed through the spine, and the registry REHYDRATES its
+        # pending/resolved state from the ledger on construction — so the escalation survives a restart and a
+        # separate resolver reads it back (``pending_keys``/``resolution``), instead of dying with this wave.
+        # Resolution stays signed-only and fail-closed inside the registry; the full signed-approver broker
+        # (Tier-B proper) is the next step — here the durable read-back + fail-closed resolve are the foundation.
+        fireteam_registry = ConfirmationRegistry(spine=fireteam_spine, ledger=escalation_ledger)
         return asyncio.run(run_fireteam(plan, runner, phase=state.phase, gate=gate, oracle=oracle,
                                         spine=fireteam_spine, registry=fireteam_registry,
                                         seq_start=int(seq), blackboard=bb, engagement=config.slug))
