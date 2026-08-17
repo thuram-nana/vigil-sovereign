@@ -595,14 +595,21 @@ def build_engine(config: EngineConfig) -> VigilEngine:
                 if spine_post is not None:
                     payload = record if isinstance(record, dict) else {"value": str(record)}
                     kind = str(payload.get("kind", "")) if isinstance(payload, dict) else ""
-                    if kind.startswith("confirmation."):
-                        # Gap 2 — also MIRROR each escalation event onto the SIGNED, offline-verifiable
-                        # blackboard chain (not only the live feed): a queued/resolved over-cap escalation IS
-                        # a gate firing, so it rides the standard ``refusal`` evidence kind that
-                        # _persist_blackboard_chain signs at end-of-run. The record is already REDACTED by the
-                        # single-writer queue. Best-effort and framework-gated (no blackboard ⇒ no-op); the
-                        # DURABLE substrate is the JSONL escalation ledger, which does not need the framework.
-                        event = str(payload.get("event", "") or kind.split(".", 1)[-1])
+                    event = (str(payload.get("event", "") or kind.split(".", 1)[-1])
+                             if kind.startswith("confirmation.") else "")
+                    if kind.startswith("confirmation.") and event != "approved":
+                        # Gap 2 — MIRROR each NON-APPROVE escalation event onto the SIGNED, offline-verifiable
+                        # blackboard chain (not only the live feed): a queued / rejected / expired / dropped
+                        # over-cap escalation IS a gate firing (nothing ran), so it rides the standard
+                        # ``refusal`` evidence kind that _persist_blackboard_chain signs at end-of-run. The
+                        # record is already REDACTED by the single-writer queue. Best-effort and
+                        # framework-gated (no blackboard ⇒ no-op); the DURABLE substrate is the JSONL ledger.
+                        #
+                        # Tier-B fix: an ``approved`` terminal is EXCLUDED here — an APPROVED escalation is an
+                        # AUTHORIZATION, not a gate refusal, so filing it under ``refusal`` would mis-record it
+                        # in the signed chain (and paint an allow as a deny). It is mirrored as a normal
+                        # ``fireteam`` step below; its cryptographic authority remains the signed envelope in
+                        # the durable escalation ledger, which is what a resolver re-verifies.
                         spine_post("refusal", {
                             "gate": "fireteam.confirmation",
                             "action_refused": (f"{payload.get('tool_name', '')} escalation "
@@ -624,9 +631,21 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         # (redacted) to that ledger AND flushed through the spine, and the registry REHYDRATES its
         # pending/resolved state from the ledger on construction — so the escalation survives a restart and a
         # separate resolver reads it back (``pending_keys``/``resolution``), instead of dying with this wave.
-        # Resolution stays signed-only and fail-closed inside the registry; the full signed-approver broker
-        # (Tier-B proper) is the next step — here the durable read-back + fail-closed resolve are the foundation.
-        fireteam_registry = ConfirmationRegistry(spine=fireteam_spine, ledger=escalation_ledger)
+        # Resolution stays signed-only and fail-closed inside the registry. Tier-B: PIN the trusted approver
+        # to the SAME operator/owner ApprovalAuthority public key already used for the WARDEN human leg
+        # (``effective_authority`` = config.approval_authority or the persisted approval-authority.json, PUBLIC
+        # key only — safe offense-side). With it pinned, an APPROVED terminal in the durable ledger is
+        # RE-VERIFIED against the owner key on every rehydrate (a forged/unsigned/replayed/flipped allow
+        # degrades to REJECTED). The offense engine holds NO private key, so it can only READ BACK a
+        # sovereign-signed approval — it cannot mint one; a resolve() here without a valid signed envelope
+        # fail-closes. The sovereign Tier-B resolve loop (which supplies owner-signed envelopes over pending
+        # escalations, behind the existing gate/ceiling, never auto) is the remaining wiring step.
+        # Tier-B ADVISORY-1: bind the ENGAGEMENT (config.slug) into the signed approval bytes so isolation is
+        # INTRINSIC, not transitive via the wave_id convention — an owner approval signed for this engagement
+        # fails closed if replayed into another engagement's registry, even with a colliding bare wave_id.
+        fireteam_registry = ConfirmationRegistry(spine=fireteam_spine, ledger=escalation_ledger,
+                                                 trusted_approvers=effective_authority,
+                                                 engagement=config.slug)
         return asyncio.run(run_fireteam(plan, runner, phase=state.phase, gate=gate, oracle=oracle,
                                         spine=fireteam_spine, registry=fireteam_registry,
                                         seq_start=int(seq), blackboard=bb, engagement=config.slug))
