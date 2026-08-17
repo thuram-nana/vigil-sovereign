@@ -150,7 +150,60 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         exp = (s.last_seq or 0) + 1
     if exp != K:
         raise PruneUnsafe(f"archive set covers [0..{exp}) but K={K} — must be exactly contiguous to K")
+    # (c) accounts referential floor (Claim 6 / hard-prune Slice S2): an ACTIVE RBAC account whose only
+    # owner-signed grant sits below K must be CARRIED into the snapshot seed, or the prune would silently
+    # vanish it (resolve()->None; accounts() drops it) AND reset its per-username anti-replay high-water.
+    # Mirror the approvals `open_queued_below_base` assert — a referential-floor list expected EMPTY; a
+    # non-empty result fails the prune CLOSED rather than silently orphaning the account.
+    stranded = stranded_active_accounts(store, archived, K)
+    if stranded:
+        raise PruneUnsafe(f"K={K} would strand active account(s) {stranded}: their only owner-signed grant "
+                          f"sits below K and would not be carried into the snapshot seed; lower K or resolve")
     return archived
+
+
+def stranded_active_accounts(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c) — the ACTIVE RBAC accounts (`governor/accounts.py`) whose only owner-signed grant sits in the
+    pruned prefix [0..K) yet would NOT be carried into the snapshot seed: the set a hard prune would silently
+    vanish (and whose per-username anti-replay high-water it would reset). EMPTY in the happy path — the seed
+    carries every VERIFIED-active account exactly as `SnapshotState.build()` folds them — so this is the
+    fail-closed tripwire that keeps the accounts fold's prune-survival honest (mirrors the approvals
+    `open_queued_below_base` floor). Read-only.
+
+    Computed by folding the below-K records UNDER THE OWNER PUBKEY (the same anchor the snapshot commits) for
+    the verified-active set, then diffing against the account set the seed actually persists — reconstructed
+    through `model_dump()`/`model_validate()`, so a seed serialization/emission regression is caught too. The
+    active set is VERIFIED (never merely structural): a forged/unsigned `active` grant an injected agent could
+    append is not counted, so this never lets such a record block prunes (no availability regression)."""
+    from ..governor.accounts import SIGNAL as _ACCT_SIGNAL
+    from ..governor.accounts import _CORE as _ACCT_CORE
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    # the verified-active accounts a genesis fold of [0..K) yields — the set that MUST survive the prune.
+    state: dict[Any, str] = {}
+    issued: dict[Any, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != _ACCT_SIGNAL:
+            continue
+        u, rst = p.get("username"), p.get("state")
+        if rst == "revoked":
+            state[u] = "revoked"
+        elif rst == "active" and verify_signed(p, _ACCT_CORE, tp):
+            at = as_issued_at(p.get("issued_at"))
+            if at > issued.get(u, NO_HIGHWATER):
+                issued[u], state[u] = at, "active"
+    active = {u for u, v in state.items() if v == "active"}
+    # the seed the prune will actually persist, round-tripped through the on-disk (JSON) form.
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1).model_dump())
+    seed_state = seed.account_state_map()
+    carried = {row[0] for row in seed.account_cred if seed_state.get(row[0]) == "active"}
+    return sorted(str(u) for u in (active - carried))
 
 
 # ---- the owner-committed snapshot payload (Merkle accumulator + folded state) ---------------------------
