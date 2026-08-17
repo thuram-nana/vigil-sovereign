@@ -1,14 +1,15 @@
 """
-fireteam.confirmation — the dangerous-tool escalation registry (VIGIL-FUSION F6, C5).
+fireteam.confirmation — the dangerous-tool escalation registry (VIGIL-FUSION F6, C5; Claim-6 Tier-B).
 
 When a member proposes a dangerous / over-cap tool, :mod:`fireteam.member` does NOT run it — it emits
-an :class:`~fireteam.models.EscalationRequest` that is registered here and QUEUED. The single way it
-can ever become APPROVED is :meth:`ConfirmationRegistry.resolve` with a **signed operator approval**
-verified by an INJECTED approver callable. Everything else fails closed:
+an :class:`~fireteam.models.EscalationRequest` that is registered here and QUEUED. The single way it can
+ever become APPROVED is :meth:`ConfirmationRegistry.resolve` with a **cryptographically signed operator
+approval**: an Ed25519 signature — by a PINNED trusted approver key — over the canonical bytes of the
+EXACT ``(wave_id, member_id, seq, outcome="approved", approved=True)``. Everything else fails closed:
 
-  * no approver wired, a ``None`` approval, an approver exception, or a non-approving verdict → REJECTED;
-  * an unknown key → REJECTED; a key already resolved is FINAL (append-only — a later approval can
-    never flip a recorded rejection, so a replay can't launder an escalation past a fail-closed reject);
+  * no valid signed envelope (and no in-memory approver verdict) → REJECTED; a ``None`` approval → REJECTED;
+  * an unknown key → REJECTED; a key already resolved is FINAL (append-only — a later approval can never
+    flip a recorded rejection, so a replay can't launder an escalation past a fail-closed reject);
   * a pending escalation that passes its ``deadline_seq`` auto-REJECTS (inverting redamon's auto-ACCEPT
     on timeout — the sovereign default is deny, never allow).
 
@@ -16,19 +17,34 @@ Deterministic: keyed by ``(wave_id, member_id, seq)`` with no wallclock/RNG. reg
 expire/drop_wave are append-only events; if a single-writer spine is wired they are emitted (redacted)
 through it, so the escalation ledger is itself an offline-verifiable, secret-free record.
 
-DURABILITY (Gap 2). Without a durable backing the registry is in-memory and per-wave: its state dies with
-the process and no separate resolver can read it. Inject an :class:`EscalationLedger` (an append-only,
-0600, secret-redacted JSONL file, one per engagement) and every state change is ALSO appended to it; a
-FRESH registry constructed over the same ledger REHYDRATES ``_pending``/``_resolved`` by replaying the
-file, APPEND-ONLY precedence — a recorded REJECT/EXPIRE/APPROVE is FINAL on disk and no later record can
-reopen or flip it (no cross-restart replay-launder). So an over-cap escalation survives a restart and a
-Tier-B resolver process can read it back (``pending_keys``/``resolution``) and ``resolve`` it fail-closed.
-The JSONL ledger — not the live-feed spine mirror — is the durable substrate, and it works with or without
-the framework (a hand-run engage records + reads it identically).
+DURABILITY (Gap 2) + SIGNED REPLAY (Tier-B). The durable backing is an :class:`EscalationLedger` — an
+append-only, 0600, path-safe, secret-redacted JSONL file, one per engagement. Every state change is
+appended to it; a FRESH registry over the same ledger REHYDRATES ``_pending``/``_resolved`` by replaying
+the file, APPEND-ONLY precedence. **The ledger's path-safety (O_NOFOLLOW + ``S_ISREG`` + ``st_nlink==1``)
+is INTEGRITY, not content-authorization** — it stops a planted symlink/hardlink/FIFO redirecting the
+append, but it does NOT stop a byte-legal line from claiming ``approved``. So an APPROVED terminal is
+authorized ONLY by the embedded Ed25519 envelope, RE-VERIFIED on every replay against a pinned trusted
+approver key and BOUND to this exact ``(wave_id, member_id, seq, "approved", True)``. A record whose
+approval is missing / invalid / unbound / flipped **degrades to REJECTED** on rehydration (never APPROVED)
+— this is the fix for the pre-Tier-B defect where ``_apply_record`` trusted the raw ``rec["approved"]``.
+
+ATOMIC RESOLVE (Tier-B). Two resolver processes over one ledger cannot reach DIVERGENT terminals: the
+first terminal for a key wins an O_EXCL single-terminal claim (:class:`_TerminalCas`, the LAP-3b
+NonceLedger precedent); a later divergent resolver LOSES the atomic race and adopts the durable,
+signature-gated winner instead of persisting its own — the winner is the atomic claim, never file order.
+
+HONEST LIMITS. The signature closes forged / unsigned / cross-escalation-replayed / reject→approve-flipped
+terminals on replay, and divergent concurrent terminals. It does NOT defend a **compromised approver
+private key** (an attacker who holds it can sign a genuine approval) nor a same-outcome duplicate. The
+``_TerminalCas`` marker is an integrity-only write-serialization guard, not itself signed: a planted
+marker can at worst DENY (fail-closed, the loser re-reads the signature-gated ledger), never manufacture
+an allow. The JSONL ledger — not the live-feed spine mirror — is the durable substrate, and it works with
+or without the framework (a hand-run engage records + reads it identically).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -37,9 +53,163 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Optional
 
+from vigil_core import sign, verify_one
+from vigil_core.canonical import canonical_json
+
 from ..tools.governance import redact_tool_args
 from .models import CONFIRMATION_DEADLINE_TICKS, EscalationRequest
 from .spine_queue import SingleWriterSpineQueue
+
+# --- signed approval envelope (Tier-B) -----------------------------------------------------------
+# The exact bytes an approver signs / a replay re-verifies: a domain-tagged canonical JSON over the
+# ESCALATION IDENTITY + the terminal it authorizes. Binding to (wave_id, member_id, seq, outcome,
+# approved) means a signature can be replayed onto NEITHER a different escalation NOR a flipped terminal
+# (reject→approve): a different key or a different outcome is different bytes, and only the approver's
+# private key can produce a fresh signature. Never change the domain/schema without a migration — it
+# invalidates every prior approval signature.
+_APPROVAL_DOMAIN = b"vigil-fireteam-escalation-approval-v1\x00"
+_APPROVAL_ENVELOPE_SCHEMA = "vigil.fireteam.escalation-approval.v1"
+
+
+def escalation_approval_bytes(key: tuple[str, str, int], outcome: str, approved: bool) -> bytes:
+    """The canonical, domain-tagged bytes signed/verified for an escalation terminal. ``key`` is the
+    escalation's ``(wave_id, member_id, seq)`` identity; ``outcome``/``approved`` pin the exact terminal."""
+    payload = {
+        "wave_id": str(key[0]),
+        "member_id": str(key[1]),
+        "seq": int(key[2]),
+        "outcome": str(outcome),
+        "approved": bool(approved),
+    }
+    return _APPROVAL_DOMAIN + canonical_json(payload)
+
+
+def sign_escalation_approval(
+    private_key_b64: str,
+    *,
+    key_id: str,
+    key: tuple[str, str, int],
+    outcome: str = "approved",
+    approved: bool = True,
+) -> dict[str, Any]:
+    """Mint a signed approval envelope for an escalation terminal (the SOVEREIGN/approver side — the only
+    party holding the approver private key). The offense resolver only ever VERIFIES this envelope against
+    a pinned public key; it is offense-safe to carry (it holds no secret). The envelope's self-declared
+    ``outcome``/``approved`` are advisory only — verification always reconstructs the signed bytes from the
+    ledger RECORD's ``(key, outcome, approved)``, so an envelope can't misdescribe what it authorizes."""
+    signature_b64 = sign(private_key_b64, escalation_approval_bytes(key, outcome, approved))
+    return {
+        "schema": _APPROVAL_ENVELOPE_SCHEMA,
+        "key_id": str(key_id),
+        "alg": "ed25519",
+        "outcome": str(outcome),
+        "approved": bool(approved),
+        "signature_b64": signature_b64,
+    }
+
+
+def _envelope_of(approval: Any) -> Optional[dict[str, Any]]:
+    """Extract the minimal, JSON-safe envelope fields to EMBED in a durable record (``key_id`` +
+    ``signature_b64`` + advisory schema/alg). Returns ``None`` if the shape is not an envelope. The
+    embedded envelope is NEVER redacted (a base64 signature carries no secret) so it survives byte-identical
+    for re-verification on replay."""
+    if not isinstance(approval, Mapping):
+        return None
+    key_id = approval.get("key_id")
+    sig = approval.get("signature_b64")
+    if not (isinstance(key_id, str) and key_id and isinstance(sig, str) and sig):
+        return None
+    out: dict[str, Any] = {
+        "schema": str(approval.get("schema", _APPROVAL_ENVELOPE_SCHEMA)),
+        "key_id": key_id,
+        "alg": str(approval.get("alg", "ed25519")),
+        "signature_b64": sig,
+    }
+    return out
+
+
+def _normalize_trusted(trusted: Any) -> dict[str, str]:
+    """Normalize a pinned trusted-approver spec into ``{key_id: public_key_b64}``. Accepts a Mapping, a
+    sequence of ``(key_id, public_key_b64)`` pairs, or an object exposing ``owner_key_id`` +
+    ``owner_public_key_b64`` (the reused :class:`~live.approval_token.ApprovalAuthority`). Anything malformed
+    contributes NOTHING (fail-closed: no trust root ⇒ no approval can verify)."""
+    out: dict[str, str] = {}
+    if trusted is None:
+        return out
+    # the reused ApprovalAuthority (owner_key_id / owner_public_key_b64)
+    kid = getattr(trusted, "owner_key_id", None)
+    pub = getattr(trusted, "owner_public_key_b64", None)
+    if isinstance(kid, str) and kid and isinstance(pub, str) and pub:
+        out[kid] = pub
+        return out
+    if isinstance(trusted, Mapping):
+        items: Any = trusted.items()
+    elif isinstance(trusted, (list, tuple, set)):
+        items = trusted
+    else:
+        return out
+    for item in items:
+        try:
+            k, v = item
+        except (TypeError, ValueError):
+            continue
+        if isinstance(k, str) and k and isinstance(v, str) and v:
+            out[str(k)] = str(v)
+    return out
+
+
+def _key_digest(key: tuple[str, str, int]) -> str:
+    """A fixed ``[0-9a-f]{64}`` marker name for a ``(wave_id, member_id, seq)`` key — no separators / ``..``
+    / newline, so a key can neither escape the marker dir nor collide with another (LAP-3b naming rule)."""
+    body = f"{key[0]}\x00{key[1]}\x00{int(key[2])}".encode("utf-8", "replace")
+    return hashlib.sha256(body).hexdigest()
+
+
+class _TerminalCas:
+    """Cross-process, single-terminal-per-key atomic claim (Tier-B). The FIRST resolver to atomically
+    ``O_EXCL``-create a key's marker WINS the sole right to persist that key's terminal; a later, DIVERGENT
+    resolver LOSES the race and must adopt the durable (signature-gated) winner rather than persist its own.
+    Mirrors :class:`~live.nonce_ledger.NonceLedger` — the exclusive-create IS the serialization point, no
+    lock held. A blank dir ⇒ in-process only (no durable substrate ⇒ no cross-process divergence to guard)."""
+
+    def __init__(self, dir_path: str) -> None:
+        self._dir = dir_path or ""
+
+    def claim(self, key: tuple[str, str, int]) -> bool:
+        """True iff THIS caller atomically won the single terminal for ``key``. False iff a prior/concurrent
+        resolver already claimed it (``FileExistsError``) OR the reservation could not be made durably (any
+        other I/O error) — in both cases the caller must NOT persist a maybe-divergent terminal (fail-closed)."""
+        if not self._dir:
+            return True  # no durable substrate ⇒ single process; the in-memory _resolved dict already serializes
+        try:
+            os.makedirs(self._dir, mode=0o700, exist_ok=True)
+            marker = os.path.join(self._dir, _key_digest(key))
+            try:
+                fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            except FileExistsError:
+                return False  # a concurrent resolver already fixed this key's terminal — we LOST the race
+            try:
+                os.write(fd, _key_digest(key).encode("ascii"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            self._fsync_dir()
+            return True
+        except OSError:
+            # cannot atomically reserve ⇒ deny our write (fail-closed); the caller re-reads the durable ledger.
+            return False
+
+    def _fsync_dir(self) -> None:
+        try:
+            dfd = os.open(self._dir, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dfd)
+        except OSError:
+            pass
+        finally:
+            os.close(dfd)
 
 
 class ConfirmationOutcome(str, Enum):
@@ -107,6 +277,13 @@ class EscalationLedger:
             self._path = os.fspath(path)
         except Exception:  # noqa: BLE001 — a bad path degrades to a disabled (no-op) ledger
             self._path = ""
+
+    @property
+    def cas_dir(self) -> str:
+        """The companion single-terminal-claim directory (``<ledger>.cas``) the atomic resolver uses. Blank
+        when the ledger is disabled — an in-memory registry needs no cross-process terminal coordination.
+        Derived, not created here (construction never touches the filesystem)."""
+        return (self._path + ".cas") if self._path else ""
 
     def append(self, record: Mapping[str, Any]) -> bool:
         """Append ONE record as a JSON line, fail-open. Returns ``True`` iff a whole line was durably
@@ -179,12 +356,19 @@ class ConfirmationRegistry:
                            ConfirmationOutcome.EXPIRED.value})
 
     def __init__(self, *, spine: Optional[SingleWriterSpineQueue] = None,
-                 ledger: Optional[EscalationLedger] = None) -> None:
+                 ledger: Optional[EscalationLedger] = None,
+                 trusted_approvers: Any = None) -> None:
         self._pending: dict[tuple[str, str, int], PendingConfirmation] = {}
         self._resolved: dict[tuple[str, str, int], ConfirmationResolution] = {}
         self._log: list[dict[str, Any]] = []
         self._spine = spine
         self._ledger = ledger
+        # PINNED trusted approver key(s) {key_id: public_key_b64}. An APPROVED terminal is authorized ONLY by
+        # a signature that verifies against one of these AND binds to the exact escalation+terminal. No trust
+        # root ⇒ no approval can ever verify (fail-closed) — a durable allow degrades to REJECTED on replay.
+        # Set BEFORE _rehydrate so the very first replay re-verifies every persisted approval.
+        self._trusted: dict[str, str] = _normalize_trusted(trusted_approvers)
+        self._cas = _TerminalCas(ledger.cas_dir if ledger is not None else "")
         if ledger is not None:
             self._rehydrate()
 
@@ -213,13 +397,60 @@ class ConfirmationRegistry:
             except Exception:  # noqa: BLE001 — one bad record is skipped; the rest still replay
                 continue
 
+    @staticmethod
+    def _record_key(rec: Any) -> Optional[tuple[str, str, int]]:
+        if not isinstance(rec, dict):
+            return None
+        try:
+            return (str(rec["wave_id"]), str(rec["member_id"]), int(rec["seq"]))
+        except Exception:  # noqa: BLE001 — a record with no usable key is not restorable
+            return None
+
+    def _verify_envelope(self, envelope: Any, key: tuple[str, str, int], outcome: str,
+                         approved: bool) -> bool:
+        """True IFF ``envelope`` is a signed approval whose Ed25519 signature verifies against a PINNED
+        trusted approver key AND was signed over the exact ``(key, outcome, approved)`` bytes. Fail-closed
+        on a missing trust root / non-envelope / unknown key_id / bad signature / any verify error — a
+        forged, unsigned, cross-escalation-replayed, or reject→approve-flipped approval NEVER verifies."""
+        if not self._trusted or not isinstance(envelope, Mapping):
+            return False
+        key_id = str(envelope.get("key_id", ""))
+        sig = str(envelope.get("signature_b64", ""))
+        pub = self._trusted.get(key_id)
+        if not pub or not sig:
+            return False
+        try:
+            return verify_one(pub, escalation_approval_bytes(key, outcome, approved), sig)
+        except Exception:  # noqa: BLE001 — malformed key/sig material can never authorize (fail-closed)
+            return False
+
+    def _terminal_resolution(self, key: tuple[str, str, int],
+                             rec: dict[str, Any]) -> Optional[ConfirmationResolution]:
+        """Compute the signature-gated resolution for a TERMINAL record. deny-by-default: an APPROVED
+        terminal is restored as an allow ONLY when its embedded envelope re-verifies against a pinned
+        trusted key and binds to this exact ``(key, "approved", True)``; a missing / invalid / unbound /
+        flipped approval DEGRADES to REJECTED (never APPROVED). reject/expire stay non-approving. Returns
+        ``None`` if ``rec`` is not a terminal event."""
+        event = str(rec.get("event", ""))
+        if event not in self._TERMINAL:
+            return None
+        outcome = ConfirmationOutcome(event)
+        approved = False
+        if outcome == ConfirmationOutcome.APPROVED:
+            if self._verify_envelope(rec.get("approval"), key, ConfirmationOutcome.APPROVED.value, True):
+                approved = True
+            else:
+                # a durable "approved" without a valid bound signature is FORGED/UNSIGNED — fail-closed.
+                outcome = ConfirmationOutcome.REJECTED
+        return ConfirmationResolution(key=key, outcome=outcome, approved=approved,
+                                      reason=str(rec.get("reason", "") or ""))
+
     def _apply_record(self, rec: Any) -> None:
         if not isinstance(rec, dict):
             return
         event = str(rec.get("event", ""))
-        try:
-            key = (str(rec["wave_id"]), str(rec["member_id"]), int(rec["seq"]))
-        except Exception:  # noqa: BLE001 — a record with no usable key is not restorable
+        key = self._record_key(rec)
+        if key is None:
             return
         if key in self._resolved:
             return  # FINAL on disk — no later record reopens or re-flips a resolved escalation
@@ -238,13 +469,10 @@ class ConfirmationRegistry:
                 dl = esc.seq + CONFIRMATION_DEADLINE_TICKS
             self._pending[key] = PendingConfirmation(key=key, escalation=esc, deadline_seq=dl)
         elif event in self._TERMINAL:
-            outcome = ConfirmationOutcome(event)
-            # deny-by-default: only an APPROVED record with approved=True rehydrates as approved; a
-            # reject/expire (or a tampered "rejected with approved=true") can never restore an allow.
-            approved = outcome == ConfirmationOutcome.APPROVED and bool(rec.get("approved", False))
-            self._resolved[key] = ConfirmationResolution(
-                key=key, outcome=outcome, approved=approved, reason=str(rec.get("reason", "") or ""))
-            self._pending.pop(key, None)
+            res = self._terminal_resolution(key, rec)
+            if res is not None:
+                self._resolved[key] = res
+                self._pending.pop(key, None)
 
     # -- mutation (append-only) -----------------------------------------------------------------
     def _emit(self, event: str, key: tuple[str, str, int], detail: dict[str, Any]) -> None:
@@ -291,7 +519,16 @@ class ConfirmationRegistry:
         return key
 
     def _finish(self, key: tuple[str, str, int], outcome: ConfirmationOutcome, approved: bool,
-                reason: str) -> ConfirmationResolution:
+                reason: str, *, envelope: Optional[dict[str, Any]] = None) -> ConfirmationResolution:
+        if key in self._resolved:
+            return self._resolved[key]  # in-process idempotent (defence-in-depth; callers already guard)
+        # ATOMIC single-terminal claim (Tier-B): the FIRST resolver to win this key's O_EXCL marker persists
+        # its terminal; a later resolver reaching a DIVERGENT terminal LOSES the race and must adopt the
+        # durable, signature-gated winner rather than persist its own — so two processes over one ledger can
+        # never durably record two different terminals for one escalation (the winner is the atomic claim,
+        # never file order). Same-outcome retries are naturally idempotent.
+        if not self._cas.claim(key):
+            return self._adopt_durable_terminal(key)
         res = ConfirmationResolution(key=key, outcome=outcome, approved=approved, reason=reason)
         self._resolved[key] = res
         self._pending.pop(key, None)
@@ -299,7 +536,32 @@ class ConfirmationRegistry:
         # the scrubbed reason (an approver-supplied reason string could echo a secret), so nothing sensitive
         # lands at rest. SCRUB with the SAME F3 value-redactor used for the register event.
         safe = redact_tool_args({"reason": reason})
-        self._emit(outcome.value, key, {"approved": approved, "reason": str(safe.get("reason", ""))})
+        detail: dict[str, Any] = {"approved": approved, "reason": str(safe.get("reason", ""))}
+        # An APPROVED terminal embeds the (already-verified) signed envelope so a fresh registry can
+        # re-verify it on replay. The envelope is a base64 signature — no secret — so it is NOT redacted.
+        if outcome == ConfirmationOutcome.APPROVED and envelope is not None:
+            detail["approval"] = envelope
+        self._emit(outcome.value, key, detail)
+        return res
+
+    def _adopt_durable_terminal(self, key: tuple[str, str, int]) -> ConfirmationResolution:
+        """A concurrent resolver already claimed this key's single terminal. REFUSE our (possibly divergent)
+        write and adopt the DURABLE, signature-gated terminal from the ledger — never the CAS marker's word,
+        so a planted marker can at worst DENY (fail-closed), never manufacture an allow. If the winner has
+        claimed the atomic slot but not yet durably appended (a crash window), fail-closed to REJECTED."""
+        self._pending.pop(key, None)
+        if self._ledger is not None:
+            for rec in self._ledger.replay():
+                if self._record_key(rec) != key:
+                    continue
+                res = self._terminal_resolution(key, rec)
+                if res is not None:  # the FIRST durable terminal for this key is the coordinated winner
+                    self._resolved[key] = res
+                    return res
+        res = ConfirmationResolution(
+            key=key, outcome=ConfirmationOutcome.REJECTED, approved=False,
+            reason="coordinated terminal claimed by a concurrent resolver but not yet durable (fail-closed)")
+        self._resolved[key] = res
         return res
 
     def resolve(
@@ -312,12 +574,25 @@ class ConfirmationRegistry:
     ) -> ConfirmationResolution:
         """Resolve a pending escalation ONLY via a signed operator approval. Never auto-approves.
 
-        Fail-closed on every abnormal path: an already-resolved key returns its FINAL recorded
-        resolution (append-only); an unknown key, a missing approver, a ``None`` approval, an approver
-        exception, or a non-approving verdict → REJECTED. If ``seq`` is supplied and the pending
-        escalation is already past its deadline, it EXPIRES (auto-reject) rather than being approved
-        by a late signature. Only an approver verdict whose ``.approved`` (or ``.allowed``) is exactly
-        ``True`` yields APPROVED. Never raises."""
+        Two authorization paths, both fail-closed:
+
+          * **Path V — a signed envelope (the durable, offense-safe authority).** ``signed_approval`` is a
+            :func:`sign_escalation_approval` envelope; it authorizes IFF its Ed25519 signature verifies
+            against a PINNED trusted approver key AND binds to this exact ``(key, "approved", True)``. The
+            verified envelope is EMBEDDED in the durable record so a fresh registry re-verifies it on replay.
+            The resolver holds NO private key — it only verifies — so it is safe to run offense-side.
+          * **Path A — an injected approver callable (the in-memory test/broker seam, backward-compatible).**
+            Used only when Path V does not verify; an approver verdict whose ``.approved`` (or ``.allowed``)
+            is exactly ``True`` authorizes an IN-MEMORY approval. A Path-A approval CANNOT be persisted as a
+            durable allow (it carries no re-verifiable signature): if a ledger is backing this registry, a
+            Path-A-only approval FAILS CLOSED to REJECTED rather than write an unverifiable APPROVED at rest.
+
+        Every other path → REJECTED: an already-resolved key returns its FINAL recorded resolution
+        (append-only); an unknown key, a ``None`` approval with no verifying envelope, an approver
+        exception, or a non-approving verdict. If ``seq`` is supplied and the pending escalation is already
+        past its deadline it EXPIRES (auto-reject) rather than being approved by a late signature. The
+        atomic single-terminal claim in :meth:`_finish` guarantees two resolvers cannot durably record
+        divergent terminals for one key. Never raises."""
         if key in self._resolved:
             return self._resolved[key]
         pending = self._pending.get(key)
@@ -327,20 +602,39 @@ class ConfirmationRegistry:
         if seq is not None and int(seq) > pending.deadline_seq:
             return self._finish(key, ConfirmationOutcome.EXPIRED, False,
                                 "escalation past deadline_seq — auto-reject (fail-closed)")
-        if approver is None or signed_approval is None:
+
+        # Path V — a signed envelope verified against a pinned trusted approver key, bound to this exact
+        # (key, "approved", True). This is the ONLY path that yields a durable, replay-verifiable allow.
+        envelope: Optional[dict[str, Any]] = None
+        if self._verify_envelope(signed_approval, key, ConfirmationOutcome.APPROVED.value, True):
+            envelope = _envelope_of(signed_approval)
+        authorized = envelope is not None
+
+        # Path A — the injected approver callable (backward-compatible in-memory seam), consulted only when
+        # no signed envelope verified. A ``None`` approval never reaches the callable.
+        if not authorized and approver is not None and signed_approval is not None:
+            try:
+                verdict = approver(signed_approval, pending.escalation)
+            except Exception as exc:  # noqa: BLE001 — an approver error confirms nothing (fail-closed)
+                return self._finish(key, ConfirmationOutcome.REJECTED, False,
+                                    f"approver error (fail-closed): {exc}")
+            if getattr(verdict, "approved", getattr(verdict, "allowed", False)) is not True:
+                return self._finish(key, ConfirmationOutcome.REJECTED, False,
+                                    getattr(verdict, "reason", "") or "operator did not approve")
+            authorized = True
+
+        if not authorized:
             return self._finish(key, ConfirmationOutcome.REJECTED, False,
-                                "no signed operator approval / no approver wired (fail-closed)")
-        try:
-            verdict = approver(signed_approval, pending.escalation)
-        except Exception as exc:  # noqa: BLE001 — an approver error confirms nothing (fail-closed)
+                                "no valid signed operator approval (fail-closed)")
+
+        # DURABILITY INVARIANT: a durable APPROVED must carry a re-verifiable signed envelope. A Path-A-only
+        # approval (no envelope) is fine in a pure in-memory registry, but MUST NOT be written to a ledger as
+        # an allow (it could not be re-verified on replay, reopening the very forged-approval hole) → fail closed.
+        if envelope is None and self._ledger is not None:
             return self._finish(key, ConfirmationOutcome.REJECTED, False,
-                                f"approver error (fail-closed): {exc}")
-        approved = getattr(verdict, "approved", getattr(verdict, "allowed", False)) is True
-        if not approved:
-            return self._finish(key, ConfirmationOutcome.REJECTED, False,
-                                getattr(verdict, "reason", "") or "operator did not approve")
-        return self._finish(key, ConfirmationOutcome.APPROVED, True,
-                            getattr(verdict, "reason", "") or "signed operator approval")
+                                "durable approval requires a signed operator envelope (fail-closed)")
+        return self._finish(key, ConfirmationOutcome.APPROVED, True, "signed operator approval",
+                            envelope=envelope)
 
     def reject(self, key: tuple[str, str, int], reason: str = "") -> ConfirmationResolution:
         """Explicitly reject a pending escalation (operator declined). Idempotent/append-only."""

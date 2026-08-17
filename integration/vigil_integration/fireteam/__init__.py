@@ -27,6 +27,8 @@ from .confirmation import (
     ConfirmationResolution,
     EscalationLedger,
     PendingConfirmation,
+    escalation_approval_bytes,
+    sign_escalation_approval,
 )
 from .member import (
     FORBIDDEN_MEMBER_ACTIONS,
@@ -74,7 +76,7 @@ __all__ = [
     "authorize_member_edge", "run_member_step", "parse_member_decision", "FORBIDDEN_MEMBER_ACTIONS",
     # confirmation
     "ConfirmationRegistry", "ConfirmationOutcome", "ConfirmationResolution", "PendingConfirmation",
-    "ApproverFn", "EscalationLedger",
+    "ApproverFn", "EscalationLedger", "sign_escalation_approval", "escalation_approval_bytes",
     # spine queue
     "SingleWriterSpineQueue", "QueuedWrite",
     # wave-resume checkpoint

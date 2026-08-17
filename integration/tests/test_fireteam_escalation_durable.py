@@ -24,11 +24,14 @@ import os
 
 import pytest
 
+from vigil_core import generate_keypair
+
 from vigil_integration.fireteam import (
     ConfirmationOutcome,
     ConfirmationRegistry,
     EscalationLedger,
     EscalationRequest,
+    sign_escalation_approval,
 )
 
 
@@ -49,6 +52,18 @@ def _approver_ok(_sig, _esc):
 
 def _approver_no(_sig, _esc):
     return _Appr(False, "operator declined")
+
+
+# A stable, pinned approver identity for the signed-approval (Path V) tests. In production this is the
+# operator/owner ApprovalAuthority public key (approval_broker.load_authority); the private key lives only
+# with the sovereign approver. Here we mint one keypair per test to prove the signature is the authority.
+def _approver_identity(key_id: str = "owner"):
+    kp = generate_keypair()
+    return key_id, kp.public_key_b64, kp.private_key_b64
+
+
+def _trusted(key_id: str, pub: str) -> dict:
+    return {key_id: pub}
 
 
 def _esc(wave="w1", member="m1", seq=1, *, tool="sqlmap", tier="A3", target="", reason=""):
@@ -208,12 +223,27 @@ def test_tampered_reject_with_approved_true_never_restores_allow(tmp_path):
 
 
 def test_signed_approval_roundtrips_durably(tmp_path):
-    """A genuine signed approval is itself durable: reader B approves, reader C reads back APPROVED."""
+    """A GENUINE signed approval — an Ed25519 envelope over the exact escalation terminal, verified against a
+    PINNED trusted approver key — is durable: reader B approves, reader C (same pinned key) reads back APPROVED.
+    A boolean approver alone (no re-verifiable signature) can NO LONGER mint a durable allow (Tier-B fix)."""
+    kid, pub, priv = _approver_identity()
     led = _ledger(tmp_path)
     key = ConfirmationRegistry(ledger=led).register(_esc(seq=2))
-    approved = ConfirmationRegistry(ledger=led).resolve(key, "sig", approver=_approver_ok)
+
+    envelope = sign_escalation_approval(priv, key_id=kid, key=key)
+    approved = ConfirmationRegistry(ledger=led, trusted_approvers=_trusted(kid, pub)).resolve(key, envelope)
     assert approved.outcome == ConfirmationOutcome.APPROVED and approved.approved is True
-    assert ConfirmationRegistry(ledger=led).resolution(key).approved is True
+
+    # a fresh registry with the SAME pinned key re-verifies the embedded signature on replay → APPROVED
+    assert ConfirmationRegistry(ledger=led, trusted_approvers=_trusted(kid, pub)).resolution(key).approved is True
+    # HONEST BOUND: a reader that does NOT pin the approver key cannot verify the durable allow → it degrades
+    # to REJECTED on replay (fail-safe: an un-trusting reader denies rather than trusts an unverifiable allow).
+    assert ConfirmationRegistry(ledger=led).resolution(key).outcome == ConfirmationOutcome.REJECTED
+
+    # a bare boolean approver over a ledger-backed registry (no signature) fail-closes now
+    key2 = ConfirmationRegistry(ledger=led).register(_esc(seq=3))
+    fake = ConfirmationRegistry(ledger=led).resolve(key2, "sig", approver=_approver_ok)
+    assert fake.outcome == ConfirmationOutcome.REJECTED and fake.approved is False
 
 
 # --- (3) redaction parity -----------------------------------------------------------------------------
