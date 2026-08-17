@@ -25,6 +25,7 @@ Security model (the red-pen keystone):
     keeps the page functional AND locked down."""
 from __future__ import annotations
 
+import base64
 import hmac
 import ipaddress
 import json
@@ -331,6 +332,10 @@ class Handler(BaseHTTPRequestHandler):
           * PoP (S3, stronger): body {username, challenge, signature} and no token → verify the owner-bound
             Ed25519 key against a consumed single-use challenge, then mint a fresh session bearer.
           * bearer (legacy): body {token} → resolve the per-user bearer (or the legacy owner token).
+          * password (S4, OPTIONAL/weaker): body {username, password} and no token → verify the salted
+            scrypt hash, then mint a fresh session bearer. Keypairs (PoP) are the stronger path.
+        A second factor rides on top of any method: if the resolved account has TOTP enrolled, a valid
+        current {totp} code is ALSO required before {ok:true}.
         Fail-closed 401 for any invalid credential."""
         if not self._origin_host_ok():
             return self._deny(403, "denied (origin / host)")
@@ -345,22 +350,34 @@ class Handler(BaseHTTPRequestHandler):
         username = str(body.get("username", "") or "")
         challenge = str(body.get("challenge", "") or "")
         signature = str(body.get("signature", "") or "")
+        password = str(body.get("password", "") or "")
         # PoP branch: a {username, challenge, signature} triple with NO bearer. (A body that also carries a
         # token falls through to the legacy bearer branch — PoP never rides alongside a bearer.)
         if username and challenge and signature and not body.get("token"):
-            return self._login_pop(username, challenge, signature)
+            return self._login_pop(username, challenge, signature, body)
+        # password branch: {username, password} with NO bearer / no PoP triple (S4, the weaker path).
+        if username and password and not body.get("token"):
+            return self._login_password(username, password, body)
         tok = str(body.get("token", "") or "")
         p = self._principal_for_token(tok)
         if p is None:
             return self._json({"ok": False, "authenticated": False, "error": "invalid token"}, 401)
+        # S4 second factor: if this account has TOTP enrolled, a valid current code is required even for a
+        # bearer login. The X-SIGIL-Token carrier and every downstream call site are UNCHANGED — the gate
+        # lives only here at /api/login (fail-closed).
+        terr = self._check_totp(p.username, body)
+        if terr is not None:
+            return self._json({"ok": False, "authenticated": False, "error": terr}, 401)
         self._json({"ok": True, **self._principal_json(p)})
 
-    def _login_pop(self, username: str, challenge: str, signature: str):
+    def _login_pop(self, username: str, challenge: str, signature: str, body: dict):
         """The S3 proof-of-possession login. Fail-closed 401 unless: the account exists AND has an
         owner-bound `user_pubkey`; the challenge is a known, unexpired, not-yet-consumed server nonce (spent
         atomically here so a replay of the same triple is refused); and the signature verifies as this
-        account's key over `DOMAIN_TAG + challenge`. On success mint a fresh owner-signed session bearer
-        (the plaintext bearer is never stored, so PoP hands back a rotated one through the SAME carrier)."""
+        account's key over `DOMAIN_TAG + challenge`. If the account also has TOTP enrolled, a valid current
+        code is required too (S4) BEFORE a bearer is issued. On success mint a fresh owner-signed session
+        bearer (the plaintext bearer is never stored, so PoP hands back a rotated one through the SAME
+        carrier)."""
         from ..governor.accounts import AccountsRegistry, Principal
         from ..governor.identity import ensure_owner_keypair
         store = self.server.store()
@@ -386,12 +403,92 @@ class Handler(BaseHTTPRequestHandler):
         if not sig_ok:
             return self._json({"ok": False, "authenticated": False,
                                "error": "proof-of-possession signature invalid"}, 401)
+        # S4 second factor (if enrolled) — required BEFORE a bearer is minted, so no session token is ever
+        # handed out on the first factor alone.
+        terr = self._check_totp(username, body)
+        if terr is not None:
+            return self._json({"ok": False, "authenticated": False, "error": terr}, 401)
         # Proven. Mint a fresh owner-signed session bearer for this account (owner is the sole signer; the
         # user proved possession, the server re-binds). Returned through the same X-SIGIL-Token carrier.
         reg = AccountsRegistry(store, owner_key=ensure_owner_keypair())
         bearer, _seq = reg.mint_session_bearer(username, issued_at=time.time())
         p = Principal(username=acct.username, role=acct.role)
         self._json({"ok": True, **self._principal_json(p), "bearer": bearer})
+
+    def _login_password(self, username: str, password: str, body: dict):
+        """The S4 OPTIONAL password login (the weaker convenience path — per-user KEYPAIRS via S3 PoP are
+        stronger and preferred). Fail-closed 401 unless the account exists, has a `password_hash`, and the
+        salted-scrypt verify passes (unknown-user and wrong-password return the SAME 401 message). If the
+        account also has TOTP enrolled, a valid current code is required too. On success mint a fresh
+        owner-signed session bearer through the SAME X-SIGIL-Token carrier as PoP."""
+        from ..governor.accounts import (
+            DECOY_PASSWORD_HASH,
+            AccountsRegistry,
+            Principal,
+            verify_password,
+        )
+        from ..governor.identity import ensure_owner_keypair
+        store = self.server.store()
+        try:
+            acct = AccountsRegistry(store).account(username)
+        except Exception:  # noqa: BLE001 — hostile/corrupt spine must never crash auth → fail-closed
+            acct = None
+        # ALWAYS run exactly ONE scrypt of equal cost — against the real hash when present, else a DECOY —
+        # so the endpoint's TIMING never reveals whether the username exists or has a password enrolled (the
+        # user-enumeration oracle a short-circuit would open). The 401 message stays constant; the auth
+        # decision still requires a real account WITH a password AND a matching verify.
+        stored = acct.password_hash if (acct is not None and acct.password_hash) else DECOY_PASSWORD_HASH
+        password_ok = verify_password(password, stored)
+        if acct is None or not acct.password_hash or not password_ok:
+            return self._json({"ok": False, "authenticated": False,
+                               "error": "invalid username or password"}, 401)
+        terr = self._check_totp(username, body)
+        if terr is not None:
+            return self._json({"ok": False, "authenticated": False, "error": terr}, 401)
+        reg = AccountsRegistry(store, owner_key=ensure_owner_keypair())
+        bearer, _seq = reg.mint_session_bearer(username, issued_at=time.time())
+        p = Principal(username=acct.username, role=acct.role)
+        self._json({"ok": True, **self._principal_json(p), "bearer": bearer})
+
+    def _totp_replay_ledger(self):
+        """The per-account TOTP replay ledger, rooted next to the spine file (its own dir per spine, so a
+        test's temp spine gets an isolated ledger)."""
+        from .totp_replay import TotpReplayLedger
+        base = Path(self.server.spine_path)
+        return TotpReplayLedger(base.parent / (base.name + ".totp-replay"))
+
+    def _check_totp(self, username: str, body: dict):
+        """S4 second-factor gate. Returns None when the account has NO TOTP enrolled (nothing to enforce —
+        backward-compat) OR a valid, non-replayed current code is supplied; otherwise returns an error
+        STRING (the caller 401s). Fail-closed: any lookup/unseal fault REFUSES rather than bypasses, and a
+        replayed code (already spent for its step) is refused."""
+        from ..governor.accounts import AccountsRegistry
+        store = self.server.store()
+        try:
+            acct = AccountsRegistry(store).account(username)
+        except Exception:  # noqa: BLE001 — corrupt spine → fail-closed refusal
+            return "second-factor check is unavailable"
+        if acct is None or not acct.totp_secret:
+            return None                                     # no TOTP bound → nothing to enforce
+        code = str(body.get("totp", "") or "")
+        if not code:
+            return "a TOTP second-factor code is required for this account"
+        from ..governor import totp as _totp
+        from ..governor.accounts import TOTP_SEAL_CONTEXT
+        from ..platform.vault import owner_vault
+        try:
+            secret = owner_vault().unseal_secret(base64.b64decode(acct.totp_secret),
+                                                 context=TOTP_SEAL_CONTEXT).decode("utf-8")
+        except Exception:  # noqa: BLE001 — sealed secret unreadable (vault locked / tamper) → fail-closed
+            return "second-factor verification is unavailable (sealed secret could not be opened)"
+        step = _totp.verify(secret, code, at=time.time(), window=1)
+        if step is None:
+            return "invalid or expired TOTP code"
+        # Replay guard: a TOTP code is valid for its whole step, so refuse a code already spent for this
+        # (username, step). Consume AFTER a successful verify so an invalid code never touches the ledger.
+        if not self._totp_replay_ledger().consume(username, step):
+            return "this TOTP code was already used"
+        return None
 
     def _sse(self):
         self.send_response(200)

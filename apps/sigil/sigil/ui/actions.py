@@ -22,9 +22,11 @@ _SETTINGS_ACTIONS = frozenset({"set_secret", "set_model", "set_provider", "set_e
 # authority to the owner key once, then sign/deny a queued Strix/engage action in-process. The private
 # key stays sovereign-side; only a public-safe token crosses to the keyless offense broker.
 _OFFENSE_APPROVAL_ACTIONS = frozenset({"offense_bind_authority", "offense_approve", "offense_deny"})
-# Claim 6: owner-only user-management actions (create/assign-role/revoke a per-user bearer account, and
-# S3 enroll_pubkey = owner-bind the account's Ed25519 challenge/response login key).
-_ACCOUNT_ACTIONS = frozenset({"create_account", "assign_role", "revoke_account", "enroll_pubkey"})
+# Claim 6: owner-only user-management actions (create/assign-role/revoke a per-user bearer account; S3
+# enroll_pubkey = owner-bind the account's Ed25519 challenge/response login key; S4 enroll_totp = owner-bind
+# a SEALED TOTP second factor, set_password = owner-set the optional weaker scrypt password login).
+_ACCOUNT_ACTIONS = frozenset({"create_account", "assign_role", "revoke_account", "enroll_pubkey",
+                              "enroll_totp", "set_password"})
 ACTIONS = (frozenset({"approve", "deny", "kill", "release", "promote", "revoke",
                       "queue_learn", "start_learn"})
            | _CAP_ACTIONS | _SETTINGS_ACTIONS | _OFFENSE_APPROVAL_ACTIONS | _ACCOUNT_ACTIONS)
@@ -107,6 +109,35 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
             seq = reg.enroll_pubkey(username, str(params.get("user_pubkey", "")), issued_at=_time.time())
             return {"ok": True, "action": "enroll_pubkey", "username": username, "recorded_seq": seq,
                     "requested_by": requested_by}
+        if action == "enroll_totp":
+            # S4 — owner-bind a TOTP second factor. The plaintext secret is generated HERE, shown ONCE in
+            # the provisioning URI, and SEALED via the owner vault before it lands on the spine (only the
+            # sealed blob is signed into the grant). Sealing requires a provisioned vault — a clean
+            # ValueError surfaces the one-time setup step if it is not.
+            import base64 as _b64
+
+            from ..governor import totp as _totp
+            from ..governor.accounts import TOTP_SEAL_CONTEXT
+            from ..platform.vault import owner_vault
+            secret = _totp.generate_secret()
+            uri = _totp.provisioning_uri(secret, account_name=username, issuer="VIGIL")
+            try:
+                sealed = owner_vault().seal_secret(secret.encode("utf-8"), context=TOTP_SEAL_CONTEXT)
+            except Exception as e:  # noqa: BLE001 — VaultLocked etc. → a clean, actionable refusal
+                raise ValueError(f"cannot enroll TOTP: the owner vault must be provisioned to seal the "
+                                 f"secret at rest ({e})") from e
+            seq = reg.enroll_totp(username, _b64.b64encode(sealed).decode("ascii"), issued_at=_time.time())
+            return {"ok": True, "action": "enroll_totp", "username": username, "recorded_seq": seq,
+                    "requested_by": requested_by, "provisioning_uri": uri,
+                    "note": "Scan this otpauth URI into your authenticator NOW — it is shown once; the "
+                            "secret is sealed at rest and never recoverable from the spine."}
+        if action == "set_password":
+            # S4 — owner-set the OPTIONAL weaker password login (salted scrypt, hashed inside set_password;
+            # the plaintext never reaches the spine). Keypairs (enroll_pubkey) are the stronger path.
+            seq = reg.set_password(username, str(params.get("password", "")), issued_at=_time.time())
+            return {"ok": True, "action": "set_password", "username": username, "recorded_seq": seq,
+                    "requested_by": requested_by,
+                    "note": "Password set (salted scrypt). Keypair login (enroll_pubkey) is the stronger path."}
         seq = reg.revoke(username)
         return {"ok": True, "action": "revoke_account", "username": username, "recorded_seq": seq,
                 "requested_by": requested_by}
