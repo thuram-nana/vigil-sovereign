@@ -25,7 +25,7 @@ Design of record: ``docs/proof-carrying-finding/WITNESS-TRUST.md`` §2 (independ
 DOMAIN SEPARATION (why a timeless witness sig can NEVER be replayed as a timed one)
 --------------------------------------------------------------------------------------------------------
 :mod:`transparency` signs an UN-timed checkpoint under ``_WITNESS_DOMAIN`` =
-``b"vigil-transparency-checkpoint-v1\\x00"``. This module signs a TIMED checkpoint under a DISTINCT tag,
+``b"vigil-transparency-checkpoint-v2\\x00"``. This module signs a TIMED checkpoint under a DISTINCT tag,
 ``_ATTESTATION_WITNESS_TIME_DOMAIN`` = ``b"vigil-attestation-witness-time-v1\\x00"``, prepended to a
 payload that *also* embeds ``observed_time``. Because Ed25519 binds the whole message, a signature made
 over the transparency (timeless) bytes verifies ONLY against those bytes; presenting it as a

@@ -125,6 +125,11 @@ def load_witnessed(data: str) -> tuple[WitnessedCheckpoint, str]:
             head_hash=str(cp_raw["head_hash"]),
             merkle_root=str(cp_raw["merkle_root"]),
             prev_checkpoint_hash=str(cp_raw["prev_checkpoint_hash"]),
+            # C-S1: the prune boundary is part of the checkpoint's signed identity, so it MUST round-trip
+            # or a witnessed checkpoint over a PRUNED head would fail to re-verify after reload. Optional-
+            # with-default so a v1-persisted envelope (no base_*) reconstructs as base_*=0, byte-identical.
+            base_seq=int(cp_raw.get("base_seq", 0)),
+            base_count=int(cp_raw.get("base_count", 0)),
         )
     except (KeyError, TypeError, ValueError) as e:
         raise WitnessError(f"malformed checkpoint fields: {e}") from e
