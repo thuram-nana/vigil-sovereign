@@ -177,6 +177,11 @@ _CHAT_ATTACH_POST = {
     # keep going to the model on every later turn while the interface said it was gone.
     "/api/chat/attach/abort": chat.attach_abort,
     "/api/chat/attach/remove": chat.attach_remove,
+    # chat management (same same-origin + token conjunction as every other POST). `rename` appends a custom
+    # title (append-only meta record; unknown chat / empty title → ValueError → 404). `delete` removes the
+    # transcript + its staged attachments + the registry entry (idempotent).
+    "/api/chat/rename": chat.rename,
+    "/api/chat/delete": chat.delete,
 }
 
 

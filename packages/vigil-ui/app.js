@@ -5891,18 +5891,48 @@
           const active = s.id === C.id;
           const turns = turnsOf(s.id);
           const links = (s.connections || []).length;
-          rows.push(h("button.btn" + (active ? ".owner" : ""), {
-            style: { width: "100%", textAlign: "left", justifyContent: "flex-start", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+          const main = h("button.btn" + (active ? ".owner" : ""), {
+            style: { flex: "1 1 auto", minWidth: "0", textAlign: "left", justifyContent: "flex-start", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
             title: titleOf(s.id) + (links ? ("\ndraws on " + links + " other chat" + (links === 1 ? "" : "s")) : ""),
             onClick: function () { openSession(s.id); },
           }, [
             h("span", null, titleOf(s.id)),
             h("span.dim", { style: { marginLeft: "6px", fontSize: "var(--fs-xs)" } },
               (turns != null ? "· " + turns : "") + (links ? " · " + links + "⛓" : "")),
-          ]));
+          ]);
+          const rn = h("button.btn", { title: "Rename chat", "aria-label": "Rename chat",
+            style: { flex: "0 0 auto", padding: "0 8px" },
+            onClick: function (e) { if (e) e.stopPropagation(); renameChat(s); } }, V.icon("edit"));
+          const del = h("button.btn", { title: "Delete chat", "aria-label": "Delete chat",
+            style: { flex: "0 0 auto", padding: "0 8px" },
+            onClick: function (e) { if (e) e.stopPropagation(); deleteChat(s); } }, V.icon("trash"));
+          rows.push(h("div", { style: { display: "flex", gap: "4px", alignItems: "stretch" } }, [main, rn, del]));
         });
       }
       V.mount(host, rows);
+    }
+
+    function renameChat(s) {
+      const cur = titleOf(s.id);
+      const name = window.prompt("Rename chat:", cur === "(empty)" ? "" : cur);
+      if (name === null) return;                 // cancelled
+      const t = String(name).trim();
+      if (!t) { V.toast("Title must not be empty.", true); return; }
+      V.postJSON(OFF("/api/chat/rename"), { chat_id: s.id, title: t }).then(function (d) {
+        if (d && d.error) { V.toast(d.error, true); return; }
+        loadChatList().then(function () { drawSessions(); drawMain(); });
+      }).catch(function (e) { V.toast(String(e), true); });
+    }
+
+    function deleteChat(s) {
+      if (!window.confirm("Delete chat ‘" + titleOf(s.id) + "’?\n\nIts transcript and any attachments "
+        + "are removed. Runs it launched and their signed records are kept.")) return;
+      V.postJSON(OFF("/api/chat/delete"), { chat_id: s.id }).then(function (d) {
+        if (d && d.error) { V.toast(d.error, true); return; }
+        V.toast("Chat deleted");
+        if (s.id === C.id) { openSession(""); }    // clears the active chat + reloads via load()
+        else { loadChatList().then(function () { drawSessions(); }); }
+      }).catch(function (e) { V.toast(String(e), true); });
     }
 
     // -- attachments ---------------------------------------------------------

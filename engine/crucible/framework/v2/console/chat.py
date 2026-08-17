@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -87,6 +88,7 @@ _ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tb
 _ARCHIVE_HELP = ".zip, .tar, .tar.gz / .tgz, .tar.bz2 or .tar.xz"
 _MAX_MSG = 4000
 _MAX_SESSIONS = 200
+_MAX_TITLE = 120         # a custom chat rename; capped so the sidebar/title stays a label, not a paragraph.
 _MAX_ID = 128            # a chat id is a single filename component; cap length so an over-long id is a clean
 #                         refusal (ValueError → 404), never an OSError("File name too long") → 500 path leak.
 
@@ -506,25 +508,88 @@ def read_session(chat_id: str) -> list[dict]:
     return out
 
 
+def _title_of(turns: list) -> str:
+    """A chat's display title: the latest custom rename (a ``kind=="meta"`` title record) if any, else the
+    first user line (truncated). Rename is append-only, so the LAST meta title wins over earlier ones."""
+    custom = ""
+    for t in turns:
+        if t.get("kind") == "meta" and t.get("title"):
+            custom = str(t["title"])[:_MAX_TITLE]
+    if custom:
+        return custom
+    for t in turns:
+        if t.get("role") == "user" and t.get("text"):
+            return str(t["text"])[:80]
+    return ""
+
+
 def list_sessions() -> dict:
-    """The saved chats (newest first): id, title (first user line), turn count, updated ts. Never a value."""
+    """The saved chats (newest first): id, title (custom rename if set, else first user line), turn count
+    (role turns only — a rename never inflates it), updated ts. Never a value."""
     d = _chats_dir()
     rows = []
     for f in sorted(d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[:_MAX_SESSIONS]:
         turns = read_session(f.stem)
-        title = ""
-        for t in turns:
-            if t.get("role") == "user" and t.get("text"):
-                title = str(t["text"])[:80]
-                break
-        rows.append({"id": f.stem, "title": title or "(empty)", "turns": len(turns),
+        n_turns = sum(1 for t in turns if t.get("role"))
+        rows.append({"id": f.stem, "title": _title_of(turns) or "(empty)", "turns": n_turns,
                      "updated": f.stat().st_mtime})
     return {"sessions": rows}
 
 
 def get_session(chat_id: str) -> dict:
-    """One transcript for the UI (fail-closed: an unsafe id raises ValueError → the server maps it to 404)."""
-    return {"chat_id": _safe_chat_id(chat_id), "messages": read_session(chat_id)}
+    """One transcript for the UI (fail-closed: an unsafe id raises ValueError → the server maps it to 404).
+    ``meta`` records (a custom rename) are folded into ``title`` and NOT returned as transcript turns."""
+    turns = read_session(chat_id)
+    msgs = [t for t in turns if t.get("kind") != "meta"]
+    return {"chat_id": _safe_chat_id(chat_id), "title": _title_of(turns), "messages": msgs}
+
+
+def rename_session(chat_id: str, title: str) -> dict:
+    """Give a saved chat a custom display title — an append-only ``meta`` record, so a rename never rewrites
+    the transcript and the latest wins. Refuses an unknown chat (no transcript) and an empty title.
+    Fail-closed: an unsafe id raises ValueError → the server maps it to 404."""
+    cid = _safe_chat_id(chat_id)
+    if not _chat_path(cid).exists():
+        raise ValueError(f"no such chat {cid!r}")
+    t = str(title or "").strip()
+    if not t:
+        raise ValueError("title must not be empty")
+    t = t[:_MAX_TITLE]
+    _append(cid, {"kind": "meta", "title": t})
+    return {"ok": True, "id": cid, "title": t}
+
+
+def delete_session(chat_id: str) -> dict:
+    """Delete a saved chat: its transcript, its staged attachments (``<live>/chats/<id>.attachments/``), and
+    its entry in the session registry. Idempotent — deleting an already-absent chat is a clean ok.
+    Fail-closed: an unsafe id raises ValueError → the server maps it to 404."""
+    cid = _safe_chat_id(chat_id)
+    p = _chat_path(cid)
+    existed = p.exists()
+    try:
+        p.unlink()
+    except OSError:
+        pass
+    att = _chats_dir() / (cid + ".attachments")
+    if att.is_dir():
+        shutil.rmtree(att, ignore_errors=True)
+    try:                                   # drop the registry entry too, so the merged sidebar loses it
+        from . import sessions
+        sessions.delete_session(cid, hard=True)
+    except Exception:  # noqa: BLE001 — a registry hiccup must not fail the transcript delete
+        pass
+    return {"ok": True, "id": cid, "deleted": existed}
+
+
+def rename(body: dict) -> dict:
+    """POST body-dispatch wrapper: {chat_id, title}."""
+    b = body or {}
+    return rename_session(str(b.get("chat_id", "")), str(b.get("title", "")))
+
+
+def delete(body: dict) -> dict:
+    """POST body-dispatch wrapper: {chat_id}."""
+    return delete_session(str((body or {}).get("chat_id", "")))
 
 
 # ---------------------------------------------------------------------------
