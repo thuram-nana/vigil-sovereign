@@ -61,7 +61,27 @@
   // -- fetch helpers (federated, same-origin under one proxy) ------------------
   // Base paths are configured once at boot from window.VIGIL_CFG.
   function api() { return (window.VIGIL_CFG && window.VIGIL_CFG.api) || {}; }
-  function token() { return (window.VIGIL_CFG && window.VIGIL_CFG.token) || ""; }
+  // -- per-user session (Claim 6 RBAC) ---------------------------------------------------------------
+  // The SAME X-SIGIL-Token carrier bears EITHER the embedded owner token (VIGIL_CFG.token, injected into
+  // the page for the owner physically at the host) OR a per-user bearer a teammate logged in with, kept in
+  // sessionStorage. A per-user bearer takes PRECEDENCE so a logged-in teammate acts as themselves; logout
+  // clears it and falls back to the owner token if the page carries one. Because token() is the single
+  // source both _headers() and authUrl() read, this reaches every fetch/SSE/download with no other change.
+  var _SESSION_TOKEN_KEY = "vigil.session.token";
+  var _principal = null;   // {authenticated, username, role, permissions} from /api/whoami or /api/login
+  function _sessionToken() { try { return sessionStorage.getItem(_SESSION_TOKEN_KEY) || ""; } catch (e) { return ""; } }
+  function token() { return _sessionToken() || (window.VIGIL_CFG && window.VIGIL_CFG.token) || ""; }
+  function setSessionToken(t) {
+    try { if (t) sessionStorage.setItem(_SESSION_TOKEN_KEY, t); else sessionStorage.removeItem(_SESSION_TOKEN_KEY); }
+    catch (e) { /* storage disabled: the token still holds for this page load via the arg passed to callers */ }
+  }
+  function setPrincipal(p) { _principal = (p && p.authenticated) ? p : null; }
+  function principal() { return _principal; }
+  // can(perm): does the CURRENT principal carry `perm`? Owner carries all. Used for real nav/action gating.
+  // Fail-closed: no principal (not yet loaded) → false, so an owner-only control never flashes before whoami.
+  function can(perm) {
+    return !!(_principal && _principal.permissions && _principal.permissions.indexOf(perm) >= 0);
+  }
   function _headers(extra) {
     const hh = Object.assign({ "X-Requested-With": "vigil-ui" }, extra || {});
     if (token()) hh["X-SIGIL-Token"] = token();
@@ -262,5 +282,6 @@
   window.VUI = { h: h, clear: clear, mount: mount, append: append, $: $, store: store,
     getJSON: getJSON, postJSON: postJSON, uploadChunked: uploadChunked, sse: sse, authUrl: authUrl,
     toast: toast, router: router,
-    pill: pill, statusBadge: statusBadge, tile: tile, card: card, icon: icon, api: api, token: token };
+    pill: pill, statusBadge: statusBadge, tile: tile, card: card, icon: icon, api: api, token: token,
+    setSessionToken: setSessionToken, setPrincipal: setPrincipal, principal: principal, can: can };
 })();

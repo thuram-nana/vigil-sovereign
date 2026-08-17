@@ -5,6 +5,7 @@ as `cli.cmd_warden`/`cmd_approve` do. No new authority path — this only calls 
 owner-signed cores (`ApprovalQueue`, `KillSwitch`, `PromotionPolicy`)."""
 from __future__ import annotations
 
+import secrets
 from typing import Optional
 
 from ..spine.store import SpineStore
@@ -21,16 +22,52 @@ _SETTINGS_ACTIONS = frozenset({"set_secret", "set_model", "set_provider", "set_e
 # authority to the owner key once, then sign/deny a queued Strix/engage action in-process. The private
 # key stays sovereign-side; only a public-safe token crosses to the keyless offense broker.
 _OFFENSE_APPROVAL_ACTIONS = frozenset({"offense_bind_authority", "offense_approve", "offense_deny"})
-ACTIONS = frozenset({"approve", "deny", "kill", "release", "promote", "revoke",
-                     "queue_learn", "start_learn"}) | _CAP_ACTIONS | _SETTINGS_ACTIONS | _OFFENSE_APPROVAL_ACTIONS
+# Claim 6: owner-only user-management actions (create/assign-role/revoke a per-user bearer account).
+_ACCOUNT_ACTIONS = frozenset({"create_account", "assign_role", "revoke_account"})
+ACTIONS = (frozenset({"approve", "deny", "kill", "release", "promote", "revoke",
+                      "queue_learn", "start_learn"})
+           | _CAP_ACTIONS | _SETTINGS_ACTIONS | _OFFENSE_APPROVAL_ACTIONS | _ACCOUNT_ACTIONS)
 
 
-def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) -> dict:
-    """Perform one owner-signed action. Returns {seq, action, ...} or raises ValueError/ApprovalError.
-    The owner key is the persisted identity (auto-created once) — never supplied by the caller."""
+def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
+              principal: "Optional[object]" = None) -> dict:
+    """Perform one owner-signed action. Returns {seq, action, ...} or raises ValueError/ApprovalError/
+    PermissionDenied. The owner key is the persisted identity (auto-created once) — never supplied by the
+    caller.
+
+    RBAC ADMISSION GATE (Claim 6): `principal` is the authenticated requester (an `accounts.Principal`).
+    Its role→permission is checked HERE, BEFORE the owner key signs on its behalf — so a non-owner user
+    never causes an owner signature (the check refuses first). `principal=None` means an internal/CLI
+    caller acting AS the owner (the CLI operator is physically at the host), which maps to OWNER_PRINCIPAL
+    and preserves every existing call site's behaviour byte-for-byte."""
     if action not in ACTIONS:
         raise ValueError(f"unknown action: {action!r}")
     store = store or SpineStore()
+    from ..governor.accounts import (
+        OWNER_PRINCIPAL,
+        PERMISSION_BY_ACTION,
+        PROTECTED_GUARD_ENV,
+        PermissionDenied,
+        role_can,
+    )
+    principal = principal or OWNER_PRINCIPAL
+    # The permission check happens BEFORE any owner-signed mutation. `approve`/`deny` are tier-dynamic —
+    # their check is deferred to ApprovalQueue._decide (which knows the target tier: A3/destructive ⇒
+    # approve_a3, else approve_a2). Everything else is checked here against the static map (DEFAULT-DENY:
+    # an unmapped action refuses). VIGIL_ALLOW_PROTECTED_DOMAINS is special-cased OWNER-ONLY: disabling
+    # the .gov/.mil/.edu safety floor (Claim 5) must not be an operator-level config change.
+    if action not in ("approve", "deny"):
+        if action == "set_config" and str(params.get("env", "")) == PROTECTED_GUARD_ENV:
+            perm = "toggle_protected_guard"
+        else:
+            perm = PERMISSION_BY_ACTION.get(action)
+        if not role_can(getattr(principal, "role", None), perm):
+            extra = (" — disabling the protected-domain safety floor is owner-only"
+                     if perm == "toggle_protected_guard" else "")
+            raise PermissionDenied(
+                f"{getattr(principal, 'username', '?')} ({getattr(principal, 'role', '?')}) may not "
+                f"perform {action!r} (requires {perm or 'an explicit permission mapping'}){extra}")
+    requested_by = str(getattr(principal, "username", "owner"))
     # The SERVER's clock stamps `issued_at` on every dangerous-direction governance mutation (the
     # anti-replay high-water). It is deliberately NOT taken from `params`: the browser is untrusted, and a
     # caller-chosen `issued_at` would let a request pin the high-water arbitrarily high and lock the owner
@@ -44,6 +81,28 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
     owner = ensure_owner_keypair()
     reason = str(params.get("reason", ""))[:200]
 
+    if action in _ACCOUNT_ACTIONS:
+        # Claim 6 user management — owner-only (gated at the funnel above). The bearer token for a new
+        # account is minted HERE (server-side) and returned ONCE; only its salted hash reaches the spine.
+        from ..governor.accounts import AccountsRegistry
+        reg = AccountsRegistry(store, owner_key=owner)
+        username = str(params.get("username", ""))
+        if action == "create_account":
+            bearer = secrets.token_urlsafe(32)
+            seq = reg.create(username, str(params.get("role", "")), bearer_token=bearer,
+                             issued_at=_time.time())
+            return {"ok": True, "action": "create_account", "username": username,
+                    "role": str(params.get("role", "")), "bearer_token": bearer, "recorded_seq": seq,
+                    "requested_by": requested_by,
+                    "note": "Copy this bearer token now — it is shown once and never stored in plaintext."}
+        if action == "assign_role":
+            seq = reg.assign_role(username, str(params.get("role", "")), issued_at=_time.time())
+            return {"ok": True, "action": "assign_role", "username": username,
+                    "role": str(params.get("role", "")), "recorded_seq": seq, "requested_by": requested_by}
+        seq = reg.revoke(username)
+        return {"ok": True, "action": "revoke_account", "username": username, "recorded_seq": seq,
+                "requested_by": requested_by}
+
     if action in _OFFENSE_APPROVAL_ACTIONS:
         # Route-via-sovereign: sign/deny a queued OFFENSE approval in-process with the owner key. The owner
         # key is the persisted sovereign identity (never from params), exactly as every other action here.
@@ -56,9 +115,15 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
 
     if action in ("approve", "deny"):
         seq = int(params["seq"])
-        q = ApprovalQueue(store, owner_key=owner)
-        out = q.approve(seq, reason=reason) if action == "approve" else q.deny(seq, reason=reason)
-        return {"ok": True, "action": action, "target_seq": seq, "recorded_seq": out}
+        # The requesting principal rides into BOTH the tier-based permission check (ApprovalQueue._decide:
+        # A3/destructive ⇒ approve_a3, else approve_a2) AND the SIGNED approval core as `approver`, so the
+        # spine attributes WHO requested the owner-signed decision — proving roles gate admission, not the
+        # key (the signature is still the OWNER's).
+        q = ApprovalQueue(store, owner_key=owner, principal=principal)
+        out = (q.approve(seq, approver=requested_by, reason=reason) if action == "approve"
+               else q.deny(seq, approver=requested_by, reason=reason))
+        return {"ok": True, "action": action, "target_seq": seq, "recorded_seq": out,
+                "requested_by": requested_by}
     if action in ("kill", "release"):
         ks = KillSwitch(store, owner_key=owner)
         out = ks.engage(reason=reason) if action == "kill" else ks.release(issued_at=_time.time(),

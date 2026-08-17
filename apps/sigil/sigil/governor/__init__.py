@@ -23,6 +23,17 @@ from .budget import (  # noqa: E402
     Usage,
     load_prices,
 )
+from .accounts import (  # noqa: E402
+    OWNER_PRINCIPAL,
+    PERMISSION_BY_ACTION,
+    PERMISSIONS,
+    ROLES,
+    Account,
+    AccountsRegistry,
+    PermissionDenied,
+    Principal,
+    role_can,
+)
 from .capability import CAPABILITIES, CapabilityGate  # noqa: E402
 from .core import Decision, Governor, Outcome  # noqa: E402
 from .killswitch import KillSwitch  # noqa: E402
@@ -37,4 +48,6 @@ from .promotion import PromotionPolicy  # noqa: E402
 __all__ = ["Governor", "Decision", "Outcome", "KillSwitch", "BudgetCaps", "BudgetLedger",
            "Spend", "Usage", "load_prices", "DEFAULT_PRICES", "PromotionPolicy",
            "OffenseGate", "OffenseGateClosed", "OffenseGateState", "assert_offense_gated",
-           "CapabilityGate", "CAPABILITIES"]
+           "CapabilityGate", "CAPABILITIES",
+           "AccountsRegistry", "Account", "Principal", "OWNER_PRINCIPAL", "PermissionDenied",
+           "role_can", "ROLES", "PERMISSIONS", "PERMISSION_BY_ACTION"]
