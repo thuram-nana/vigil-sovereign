@@ -535,7 +535,8 @@ jobs:
               apps/sigil/tests/test_learn_grant.py \
               apps/sigil/tests/test_learn_source.py \
               apps/sigil/tests/test_promotion_state_all.py \
-              apps/sigil/tests/test_dashboard_recent_events.py -q
+              apps/sigil/tests/test_dashboard_recent_events.py \
+              apps/sigil/tests/test_ha_overclaim_guard.py -q
           else
             echo "apps/sigil offense-gate tests not present on this ref (pre-merge) — nothing to test"
           fi
