@@ -100,11 +100,22 @@ def test_local_hostname_endpoint_refuses(monkeypatch):
     assert env == {} and refusal and "off-host" in refusal.lower()
 
 
-def test_resolver_is_total_on_a_broken_resolve(monkeypatch):
-    # a resolver hiccup degrades to "no pick" (global default), NEVER a bad/cloud pin.
+def test_resolver_refuses_an_indicated_pick_that_fails_to_resolve(monkeypatch):
+    # ADVISORY-1 (no fail-open bias): a pick that is INDICATED (model_id non-empty) but cannot be resolved to a
+    # confirmed cloud/local backend must REFUSE — it must NOT silently degrade to the global CLOUD default, which
+    # would re-open the leak for a local-indicating pick.
     monkeypatch.setattr(actions_mod, "_resolve_launch_model",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert actions_mod._strix_session_llm_env("ollama", "") == ({}, "")
+    env, refusal = actions_mod._strix_session_llm_env("ollama", "")
+    assert env == {} and refusal and "cloud" in refusal.lower()
+
+
+def test_resolver_degrades_only_a_genuinely_empty_pick(monkeypatch):
+    # the honest carve-out: a GENUINELY empty pick (no turn model, no session pin) still degrades to the global
+    # default even if the resolver would fail — because no local pick was ever made.
+    monkeypatch.setattr(actions_mod, "_resolve_launch_model",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert actions_mod._strix_session_llm_env("", "") == ({}, "")
 
 
 # ══ the full launch_assessment codebase path (env reaches the child; refusals abort the launch) ══════════
@@ -185,3 +196,70 @@ def test_launch_codebase_falls_back_to_session_pin(spawn, monkeypatch, tmp_path)
                                        "session_id": "strix-pin-sess"})
     assert r["status"] == "running"
     assert spawn["env_extra"]["STRIX_LLM"] == "ollama/qwen2.5-coder:32b"
+
+
+# ══ RETRY / RESUME path (red-pen BLOCK-1) — a retried strix run must RE-APPLY the pin, never cloud ════════
+
+def _finish(run_id):
+    """Mark a run finished so retry_run will relaunch it (retry refuses a still-'running' run)."""
+    m = actions_mod._read_run_meta(run_id)
+    actions_mod._write_meta(run_id, **{**m, "status": "done"})
+
+
+def test_retry_local_codebase_reapplies_local_pin_not_cloud(spawn, monkeypatch, tmp_path):
+    # red-pen repro CLOSED: launch a LOCAL codebase run, finish it, RETRY it → the retried child env must carry
+    # the LOCAL STRIX_LLM/LLM_API_BASE, NOT the global cloud default it would otherwise inherit.
+    monkeypatch.setenv("CRUCIBLE_OLLAMA_MODEL", "qwen2.5-coder:32b")
+    monkeypatch.setenv("CRUCIBLE_OLLAMA_HOST", "http://localhost:11434")
+    r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path), "model": "ollama"})
+    _finish(r["run_id"])
+    spawn.clear()
+    r2 = actions_mod.retry_run(r["run_id"])
+    assert r2["ok"] is True
+    env = spawn["env_extra"]
+    assert env["STRIX_LLM"] == "ollama/qwen2.5-coder:32b"           # the LOCAL pin was RE-APPLIED on retry
+    assert env["LLM_API_BASE"] == "http://localhost:11434"
+    assert "anthropic" not in env["STRIX_LLM"]                      # NOT the global cloud default
+    assert env["VIGIL_PROOF_RUN_DIR"] and env["VIGIL_ENGAGEMENT"]   # proof env still re-pointed at the new run
+    assert spawn["meta"]["model_backend"] == "local"
+
+
+def test_retry_local_codebase_via_session_pin_reapplies_pin(spawn, monkeypatch, tmp_path):
+    # a launch that used a SESSION PIN (no turn model) also re-pins on retry (the id is re-resolved via session).
+    sessions_mod.set_session_model("retry-pin-sess", "self-hosted")
+    monkeypatch.setenv("CRUCIBLE_SELFHOSTED_MODEL", "qwen")
+    monkeypatch.setenv("CRUCIBLE_SELFHOSTED_ENDPOINT", "http://127.0.0.1:8000/v1")
+    r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path),
+                                       "session_id": "retry-pin-sess"})
+    _finish(r["run_id"])
+    spawn.clear()
+    r2 = actions_mod.retry_run(r["run_id"])
+    assert r2["ok"] is True
+    assert spawn["env_extra"]["STRIX_LLM"] == "openai/qwen"
+    assert "anthropic" not in spawn["env_extra"]["STRIX_LLM"]
+
+
+def test_retry_local_codebase_refuses_when_local_cannot_run_local(spawn, monkeypatch, tmp_path):
+    # retry re-enforces loopback FRESH: if the local endpoint was moved REMOTE between the run and the retry,
+    # the retry REFUSES (no re-spawn) — it does NOT fall back to the cloud default.
+    monkeypatch.setenv("CRUCIBLE_OLLAMA_MODEL", "qwen2.5-coder:32b")
+    monkeypatch.setenv("CRUCIBLE_OLLAMA_HOST", "http://localhost:11434")
+    r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path), "model": "ollama"})
+    _finish(r["run_id"])
+    monkeypatch.setenv("CRUCIBLE_OLLAMA_HOST", "https://ollama.evil-remote.example.com")   # moved off-host
+    spawn.clear()
+    r2 = actions_mod.retry_run(r["run_id"])
+    assert r2["ok"] is False and "off-host" in r2["error"].lower()
+    assert spawn == {}                                             # nothing re-spawned → no cloud egress
+
+
+def test_retry_cloud_codebase_stays_global_default_no_regression(spawn, tmp_path):
+    # a cloud/no-pick codebase run's retry env is byte-identical (Proof-Studio env only; no STRIX_LLM override).
+    r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path)})
+    _finish(r["run_id"])
+    spawn.clear()
+    r2 = actions_mod.retry_run(r["run_id"])
+    assert r2["ok"] is True
+    env = spawn["env_extra"]
+    assert "STRIX_LLM" not in env and "LLM_API_BASE" not in env
+    assert env["VIGIL_PROOF_RUN_DIR"] and env["VIGIL_ENGAGEMENT"]
