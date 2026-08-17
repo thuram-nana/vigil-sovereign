@@ -954,6 +954,13 @@ def cmd_floor(a) -> None:
         ok, msg, _label = FW.verify_floor_against_witnessed(head, fl, sources, scope=config.SCOPE,
                                                             trust_root=tr)
         print(("floor anti-rollback OK: " if ok else "floor anti-rollback FAIL: ") + msg)
+        if ok:
+            # HONEST NUDGE: this is the LIGHT height/fork-at-height anchor. It proves no rollback below the
+            # witnessed height and no fork AT it, but NOT that the pruned PREFIX is byte-identical — a history
+            # forked below the witnessed height and then RE-GROWN above it passes here. For full prefix
+            # byte-identity, ALSO run the heavy `sigil checkpoint verify --external <path>` (ADR 0007).
+            print("   note: for full pruned-PREFIX byte-identity (catches a fork-then-extend above this "
+                  "height), also run `sigil checkpoint verify --external <path>`.")
         sys.exit(0 if ok else 2)
 
 

@@ -829,6 +829,13 @@ def _cmd_floor_witness(args: argparse.Namespace) -> int:
     ok, msg, _label = FW.verify_highwater_against_witnessed(head, hw, sources, scope=args.scope,
                                                             trust_root=trust_root)
     print(("offense floor anti-rollback OK: " if ok else "offense floor anti-rollback FAIL: ") + msg)
+    if ok:
+        # HONEST NUDGE: this is the LIGHT height/fork-at-height anchor. It proves no rollback below the
+        # witnessed height and no fork AT it, but NOT that the pruned PREFIX is byte-identical — a history
+        # forked below the witnessed height and then RE-GROWN above it passes here. Full pruned-prefix
+        # byte-identity needs the retained checkpoint's entries compared out-of-band (ADR 0007 §Non-goals).
+        print("   note: LIGHT anchor (height + fork-AT-height only) — does NOT prove pruned-PREFIX "
+              "byte-identity; a fork-then-extend above this height is not caught here (see ADR 0007).")
     return 0 if ok else 2
 
 
