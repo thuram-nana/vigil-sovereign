@@ -275,6 +275,8 @@
       info: "M12 8h.01M11 12h1v5h1M12 3a9 9 0 100 18 9 9 0 000-18z",
       clip: "M16 8l-6.5 6.5a2.5 2.5 0 003.5 3.5L20 11a4.5 4.5 0 10-6.4-6.4L6 12.2a6.5 6.5 0 009.2 9.2l4.3-4.3",
       link: "M10.5 13.5a4 4 0 005.7 0l2.8-2.8a4 4 0 10-5.7-5.7L12 6.3M13.5 10.5a4 4 0 00-5.7 0l-2.8 2.8a4 4 0 105.7 5.7L12 17.7",
+      edit: "M4 20h4L19 9a2.1 2.1 0 00-3-3L5 17z M14 6l4 4",
+      trash: "M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13",
     };
     return h("span.glyph", { html: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="' + (P[name] || P.dot) + '"/></svg>' });
   }
