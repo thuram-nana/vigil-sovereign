@@ -81,14 +81,92 @@ RBAC is enforced by the **server** for any client that presents **only** a beare
 (`sigil accounts …`), the sovereign/offense HTTP API directly, and a browser session that has logged in
 with a per-user bearer (no owner token present).
 
-The `vigil up` **command UI (uiproxy) is OWNER-ONLY in this foundation.** It embeds the owner shared token
-into `index.html` (`uiproxy.py`) as an owner-local convenience, so **any browser that can reach it
-authenticates as `owner`** — the login gate / current-user chip / `V.can` gating there is shipped but
-**inert as an isolation boundary** (it never triggers, because the embedded owner token auto-authenticates
-as owner). **Do not hand a teammate the command-UI URL expecting the browser to constrain them** — give
-them a bearer for the CLI/API, or wait for the per-user proxy-auth slice below. This is consistent with the
-design's explicit deferral of per-user proxy auth (RBAC hooks #12/#13); the enforcement core is real, the
-command-UI isolation is not yet.
+**The `vigil up` command UI (uiproxy) is now a per-user boundary too** — see
+[Per-user auth at the command-UI boundary](#per-user-auth-at-the-command-ui-boundary-uiproxy) below. The
+owner token is no longer embedded in `index.html`; the proxy authenticates every forwarded request per-user
+(fail-closed) by delegating to the sovereign `/api/whoami`, and each user acts as their own Principal.
+Owner-only actions stay owner-only via the same `role_can`. The residual is that the proxy is a loopback/VIP
+listener (not a hardened public gateway) and the accounts' trust root remains the owner-signed spine.
+
+## Per-user auth at the command-UI boundary (uiproxy)
+
+The `vigil up` reverse proxy (`integration/vigil_integration/uiproxy.py`) is the single listener a browser
+points at. This slice makes it a **per-user authentication boundary** so the command UI is safely shareable:
+each user acts as **their own** RBAC Principal, and owner-only actions stay owner-only.
+
+### What changed
+
+1. **No embedded owner token.** `assemble_serve_dir` no longer writes the owner token into `index.html`
+   (`__VIGIL_TOKEN__` → empty). The served page carries **no credential**; the SPA's existing login gate
+   (`app.js renderLoginGate` → `POST /sovereign/api/login`) is the real entry, and the per-user bearer lives
+   in `sessionStorage` (`ui.js token()`). The owner signs in with the token `vigil up` prints; a teammate
+   signs in with the bearer the owner issued them (Users & Roles → Create account).
+2. **The proxy verifies every forwarded request per-user, fail-closed.** Past a tiny bootstrap allowlist
+   (`/sovereign/api/whoami`, `/sovereign/api/login`), every `/sovereign/*` and `/offense/*` request must
+   carry a bearer that resolves to a Principal — else **401, never forwarded** (no unauthenticated
+   fall-through to a backend, never acting as owner).
+3. **Per-user identity reaches both planes.** The user's own bearer is forwarded to the sovereign plane
+   (native `role_can`); the offense plane receives the resolved identity + a coarse role floor (below).
+
+### Verification mechanism — DELEGATE to the sovereign whoami (FATAL-2-clean)
+
+The proxy is offense-side and **must not** import the sovereign `AccountsRegistry` (FATAL-2: no
+`sigil`/`apps.sigil`/`framework`-sovereign module in the offense interpreter). It therefore **delegates**
+verification: a loopback `GET 127.0.0.1:8733/api/whoami` carrying the request's bearer as `X-SIGIL-Token`
+returns the resolved Principal (`{authenticated, username, role, permissions}`). This is sound because the
+sovereign plane is the **authority** on the owner-signed accounts spine — trusting its resolution trusts
+exactly the right root — and the proxy stays **pure stdlib** (`http.client`, no cross-domain import).
+`whoami` is token-optional and read-only (no side effect): an owner token resolves to `OWNER_PRINCIPAL`, a
+per-user bearer to its Principal, anything else to `{authenticated:false}` → the proxy 401s. Results are
+cached by `sha256(bearer)` with a short TTL (30 s; 5 s for negatives) so SSE/polling do not stampede whoami.
+
+**Rejected alternative:** exporting an owner-signed accounts *snapshot* to the offense side and folding it
+there — also sound, but it duplicates the fold + per-username anti-replay logic in a second interpreter and
+adds an export/rotation surface. Delegation reuses the one authority with no new trust primitive.
+
+### Enforcement hooks at the proxy {route → requirement}
+
+| route | requirement |
+|---|---|
+| static bundle (`/`, `style.css`, `app.js`, …) | none (carries no secret) |
+| `GET /sovereign/api/whoami`, `POST /sovereign/api/login` | none (login bootstrap) |
+| every other `/sovereign/*` | authenticated (viewer+); user's **own** bearer forwarded → `role_can` |
+| `/offense/*` reads (GET/HEAD/SSE) | authenticated (viewer+) |
+| `/offense/*` mutations (POST/PUT/PATCH/DELETE) | `run_engagement` (operator+) |
+| `/__vigil/plane/status`, `/__vigil/plane/version` | authenticated (viewer+) |
+| `/__vigil/plane/offense/start`, `/stop` | `run_engagement` (operator+) |
+
+### Offense credential handling (the owner token never leaves the proxy)
+
+The offense console (8787) authenticates with the shared `VIGIL_CONSOLE_TOKEN` (= the owner boot token the
+proxy holds as `self.server.token`); the offense gated api (8799) uses loopback + same-origin (+ optional
+`CRUCIBLE_API_KEY`) and ignores the console token. After the proxy has authenticated a request via the
+sovereign whoami, it **substitutes** the offense console credential on the outbound hop (the `X-SIGIL-Token`
+header and any `?token=`), so the browser never holds it and an unauthenticated request never reaches a
+backend. It also **strips** any client-supplied `X-VIGIL-*` header and **stamps** the resolved
+`X-VIGIL-Principal`/`X-VIGIL-Role` for attribution (and future per-action offense RBAC).
+
+### Session hygiene
+
+- **Forged/guessed session token** → the whoami resolution fails → 401, never forwarded.
+- **Privilege escalation** — a viewer/analyst bearer resolves to its role: the sovereign plane refuses
+  operator/owner actions via `role_can`, and the proxy floors offense mutations at `run_engagement`.
+- **Owner-token leak** — the owner token is no longer in any served asset; the offense console credential is
+  presented only on the proxy→backend loopback hop, never to the browser.
+- The bearer is compared server-side against `sha256(salt+bearer)` (accounts store); the proxy never stores
+  a plaintext bearer (its cache is keyed by `sha256(bearer)`).
+
+### Honest limits
+
+- The reverse proxy is **not** a hardened public gateway — it still binds loopback / a private VIP
+  (`bind_ok`); front it with the operator's TLS edge as today.
+- The accounts' **trust root is the owner-signed spine**; a compromised owner key or a locally-writable
+  accounts store is the existing residual (unchanged by this slice).
+- The offense-plane floor is **coarse** (read vs. `run_engagement`); the offense console does not yet do
+  per-action RBAC internally — the fine-grained action→permission map remains on the sovereign plane, and
+  the forwarded `X-VIGIL-Role` is the seam for a future offense-side per-action gate.
+- **Revocation lag:** a bearer stays valid for at most the auth-cache TTL (≤30 s) after revocation, and an
+  already-open SSE stream is authenticated only at connect.
 
 ## Deferred (honest scope — flagged, not built)
 
@@ -96,14 +174,10 @@ command-UI isolation is not yet.
   enforcement at the enumerated load-bearing actions + a demonstrated per-button gate (Safety → Release).
   Comprehensive per-button gating on every screen is not done; the **server is the enforcement of record**
   (every mutation is re-checked and 403s).
-- **Per-user auth for the command UI + offense plane — the command UI is OWNER-ONLY today.** The `vigil up`
-  command UI (uiproxy) embeds the owner shared token, and the offense read plane / gated API (8787/8799) +
-  the uiproxy plane-control (start/stop offense) stay owner-boot-token gated. So the **browser command UI
-  does not enforce per-user roles yet**; per-user RBAC is live only for bearer-only clients (CLI / API /
-  a logged-in cockpit session). Owner-signed offense *mutations* ARE gated (`offense_authority`). **The next
-  slice:** stop embedding the owner token and require a per-user login before the command UI serves a
-  session (embed only on loopback for the owner-local case), which makes the command UI a real isolation
-  boundary. Until then, treat the command-UI URL as an owner credential.
+- **Per-action offense-plane RBAC.** The command-UI proxy now enforces per-user auth + a coarse offense
+  floor (read vs. `run_engagement`), and forwards `X-VIGIL-Role` — but the offense console (8787) does not
+  yet map each of its own POST routes to a permission. Owner-authority offense actions (`offense_approve`/
+  `offense_bind_authority`) remain sovereign-gated (`offense_authority`, owner).
 - **Hard-prune fold.** The accounts fold is a genesis scan (byte-safe under the Slice-C empty snapshot). A
   future cold-archive prune must extend `SnapshotState` with an accounts seed (per-username LWW state +
   high-water) + a referential-floor assert, mirrored in `resolve()` and `accounts()`.
