@@ -26,10 +26,13 @@ BOTH surfaces identically (the memory-noted "mirror the fix in both read paths" 
 FATAL-2: this module is sovereign-side and imports NO `framework`/`strix` (guarded by `assert_no_offense`
 at import); all crypto is the sovereign `reuse`/`vigil_core` primitives.
 
-DEFERRED (honest scope — flagged, not built): the accounts fold is a GENESIS scan (byte-safe under the
-Slice-C empty snapshot, exactly as killswitch/capability note). A future cold-archive hard-prune must
-extend `SnapshotState` with an accounts seed (per-username LWW state + high-water) AND a referential-floor
-assert (no active account below `base_seq` without its grant), mirrored in `resolve()` and `accounts()`.
+HARD-PRUNE (Slice S2 — BUILT): the fold SEEDS from the committed `SnapshotState` (per-username LWW state +
+high-water + the cred fields to rebuild an active `Account`) and then folds forward over the live window,
+exactly like promotion/killswitch/capability — so a hard prune below the first `governor.account` grant
+neither vanishes an active account (`resolve()`→None) nor resets its per-username anti-replay high-water
+(which would re-open the LWW replay-resurrection HIGH). `SnapshotState.build()` carries the account seed, and
+`spine.prune.check_prune_safe` refuses a boundary that would strand an active account's only grant. Under the
+empty Slice-C snapshot the seed is empty and the window is a full genesis scan (BYTE-IDENTICAL to before).
 """
 from __future__ import annotations
 
@@ -43,6 +46,7 @@ from ..reuse import assert_no_offense, sha256_hex
 
 assert_no_offense()
 
+from ..spine.snapshot import SnapshotState  # noqa: E402
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 
@@ -216,20 +220,36 @@ class AccountsRegistry:
         anti-replay high-water is applied IDENTICALLY at both read surfaces (mirror-the-fix discipline).
         Returns {username: Account} for accounts whose latest state is active (revoked ones are dropped).
 
-        GENESIS scan (no snapshot seed): byte-safe under the Slice-C empty snapshot exactly as
-        killswitch/capability; a future hard prune must extend SnapshotState (see the module note)."""
-        state: dict[str, str] = {}       # username -> "active" | "revoked" (last-write-wins; keep revoked)
-        accts: dict[str, Account] = {}   # username -> the latest VERIFIED, FRESH active Account
-        issued: dict[str, float] = {}    # username -> per-username high-water (max honored active issued_at)
-        for r in self.store.iter_records(since_seq=-1):
+        HARD-PRUNE SEED (mirrors PromotionPolicy._fold EXACTLY): seed the per-username state / high-water /
+        active-Account set from the committed `SnapshotState`, then fold forward over the LIVE window only —
+        so an active account whose only grant was pruned SURVIVES and its anti-replay high-water is NOT reset.
+
+        Pubkey-DEPENDENT: the pre-folded prefix (and its high-water) is valid ONLY under the pubkey it was
+        folded with. If our anchor differs (rotated key / the empty Slice-C identity whose tp=="") BYPASS the
+        snapshot and full-scan from genesis. BYTE-IDENTICAL under the empty snapshot: base_seq==0 =>
+        since_seq=-1 => the full genesis scan, and an empty seed either way."""
+        snap = SnapshotState.load(self.store)
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            state, accts, issued, since = {}, {}, {}, -1
+        else:
+            # PER-USERNAME state / high-water / Account, seeded from the SAME snapshot under the SAME pubkey
+            # condition — otherwise the first hard prune would reset them and re-open the replay HIGH.
+            state = dict(snap.account_state_map())        # username -> "active"|"revoked" (LWW; keep revoked)
+            issued = dict(snap.account_issued_map())      # username -> per-username high-water
+            accts = {row[0]: Account(                     # rebuild the honored-active Accounts from the seed
+                        username=str(row[0]), role=str(row[1] or ""), cred_hash=str(row[2] or ""),
+                        cred_salt=str(row[3] or ""), issued_at=issued.get(row[0], 0.0), state="active")
+                     for row in snap.account_cred}
+            since = snap.base_seq - 1
+        for r in self.store.iter_records(since_seq=since):
             p = r.payload
             if not isinstance(p, dict) or p.get("signal") != SIGNAL:
                 continue
             username = p.get("username")
-            st = p.get("state")
-            if st == "revoked":
+            rec_state = p.get("state")
+            if rec_state == "revoked":
                 state[username] = "revoked"          # honor ANY revoke (even unsigned) — the safe direction
-            elif st == "active":
+            elif rec_state == "active":
                 if not verify_signed(p, _CORE, self.trusted_pubkey):
                     continue                          # fail-closed: an unsigned/forged grant is not counted
                 at = as_issued_at(p.get("issued_at"))
