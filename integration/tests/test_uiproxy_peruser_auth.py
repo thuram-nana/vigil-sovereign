@@ -68,9 +68,21 @@ class _AuthHandler(http.server.BaseHTTPRequestHandler):
             "method": self.command,
             "token": self.headers.get("X-SIGIL-Token", ""),
             "vigil_role": self.headers.get("X-VIGIL-Role", ""),
+            "vigil_role_us": self.headers.get("X_VIGIL_Role", ""),   # underscore variant (advisory)
             "vigil_principal": self.headers.get("X-VIGIL-Principal", ""),
             "body": body.decode("utf-8", "replace"),
         })
+        # A backend's OWN static index (console `__CONSOLE_TOKEN__` / cockpit `__SIGIL_TOKEN__`) embeds the
+        # owner token and is served token-free. Model that faithfully so the proxy's hop-only-credential
+        # redaction is exercised: `/` and `/index.html` return HTML carrying the owner token verbatim.
+        if parts.path in ("/", "/index.html"):
+            html = f'<!doctype html><body data-token="{OWNER_TOKEN}">console-index</body>'.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html)))
+            self.end_headers()
+            self.wfile.write(html)
+            return
         if parts.path == "/api/whoami" and getattr(srv, "tag", "") == "cockpit":
             tok = self.headers.get("X-SIGIL-Token") or (parse_qs(parts.query).get("token") or [""])[0]
             payload = _WHOAMI.get(tok, {"authenticated": False})
@@ -280,7 +292,9 @@ def test_a_non_bootstrap_sovereign_route_still_requires_auth(proxy):
 
 
 # ==================================================================================================
-# 6) the served page carries NO owner token
+# 6) the served page carries NO owner token — AND no RELAYED backend body leaks the hop credential
+#    (RED-PEN BLOCK-1: a backend's own token-embedding index.html served token-free at `/`, relayed to a
+#     VIEWER, would otherwise hand the owner token to a non-owner who replays it AS OWNER).
 # ==================================================================================================
 def test_served_index_embeds_no_owner_token(proxy):
     port = proxy["port"]
@@ -288,6 +302,62 @@ def test_served_index_embeds_no_owner_token(proxy):
     assert st == 200
     assert OWNER_TOKEN not in body
     assert 'data-token=""' in body
+
+
+def test_viewer_cannot_read_owner_token_via_offense_index(proxy):
+    """The escalation the red-pen found: the offense console serves its token-embedding index.html at `/`
+    token-free. A VIEWER GET /offense/ (a read, floor allows) must NOT receive the owner token — the proxy
+    redacts the hop credential out of the relayed body. Covers `/offense/` AND `/offense/index.html`."""
+    port = proxy["port"]
+    for path in ("/offense/", "/offense/index.html"):
+        st, body = _req(port, "GET", path, headers=_tok(VIEWER_BEARER))
+        assert st == 200, path
+        assert OWNER_TOKEN not in body, f"{path} relayed the owner token to a viewer (escalation)"
+        # the value is blanked with an equal-length marker (Content-Length preserved), never the secret.
+        assert ("X" * len(OWNER_TOKEN)) in body, f"{path} body should carry the redaction marker"
+
+
+def test_replaying_the_relayed_offense_index_does_not_resolve_as_owner(proxy):
+    """End-to-end closure of the repro: whatever a viewer can scrape off /offense/ must not authenticate as
+    owner. The redacted marker is not a valid bearer → the proxy 401s it (never owner)."""
+    port = proxy["port"]
+    _st, body = _req(port, "GET", "/offense/", headers=_tok(VIEWER_BEARER))
+    scraped = body.split('data-token="', 1)[1].split('"', 1)[0]
+    assert scraped != OWNER_TOKEN
+    # replay whatever was scraped — it must NOT reach any backend (401 at the proxy).
+    st, _ = _req(port, "GET", "/offense/api/status", headers=_tok(scraped))
+    assert st == 401
+
+
+def test_no_relayed_offense_body_contains_the_owner_credential(proxy):
+    """General invariant (any offense read route, any path): no body relayed to the browser contains the
+    hop-only owner credential (self.server.token)."""
+    port = proxy["port"]
+    for path in ("/offense/", "/offense/index.html", "/offense/api/status", "/offense/z"):
+        _st, body = _req(port, "GET", path, headers=_tok(VIEWER_BEARER))
+        assert OWNER_TOKEN not in body, f"{path} leaked the owner credential in a relayed body"
+
+
+def test_cockpit_index_owner_token_is_redacted_on_sovereign_relay(proxy):
+    """The SAME leak vector on the sovereign plane: the cockpit's own index (__SIGIL_TOKEN__) is served
+    token-free at `/`. A viewer GET /sovereign/ must not receive the owner token either."""
+    port = proxy["port"]
+    st, body = _req(port, "GET", "/sovereign/", headers=_tok(VIEWER_BEARER))
+    assert st == 200
+    assert OWNER_TOKEN not in body
+
+
+def test_underscore_identity_header_variant_is_stripped(proxy):
+    """ADVISORY: a client-supplied X-VIGIL-* identity header must be stripped by CLASS — including the
+    underscore variant (X_VIGIL_Role) some stacks fold to the header a future offense gate reads. The
+    proxy must overwrite it with the resolved identity, never forward the spoof."""
+    port, console = proxy["port"], proxy["console"]
+    st, _ = _req(port, "GET", "/offense/api/status",
+                 headers=_tok(VIEWER_BEARER, {"X_VIGIL_Role": "owner", "X-VIGIL-Role": "owner"}))
+    assert st == 200
+    rec = console.records[0]
+    assert rec["vigil_role"] == "viewer", "hyphen spoof must be overwritten with the resolved role"
+    assert rec["vigil_role_us"] == "", "the underscore X_VIGIL_Role variant must be stripped, not forwarded"
 
 
 # ==================================================================================================

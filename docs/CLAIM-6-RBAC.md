@@ -143,8 +143,20 @@ proxy holds as `self.server.token`); the offense gated api (8799) uses loopback 
 `CRUCIBLE_API_KEY`) and ignores the console token. After the proxy has authenticated a request via the
 sovereign whoami, it **substitutes** the offense console credential on the outbound hop (the `X-SIGIL-Token`
 header and any `?token=`), so the browser never holds it and an unauthenticated request never reaches a
-backend. It also **strips** any client-supplied `X-VIGIL-*` header and **stamps** the resolved
+backend. It also **strips** any client-supplied `X-VIGIL-*` header — by **class** (case- and
+hyphen/underscore-normalised, so no `X_VIGIL_Role` variant survives) — and **stamps** the resolved
 `X-VIGIL-Principal`/`X-VIGIL-Role` for attribution (and future per-action offense RBAC).
+
+**Hop-only credential — enforced on the RESPONSE too (RED-PEN BLOCK-1).** Substituting the credential on the
+*request* is not sufficient: a backend serves its **own** static `index.html` at `/` **token-free** with the
+owner token spliced in (the console's `__CONSOLE_TOKEN__`, the cockpit's `__SIGIL_TOKEN__`), and
+`route()` maps `/offense/` · `/offense/index.html` (and `/sovereign/`) to that backend `/`. A plain relay
+would stream `data-token="<owner token>"` to a mere **viewer**, who could scrape it and replay it as owner.
+So the proxy **redacts `self.server.token` out of every relayed NON-SSE response body** (`_relay_response` →
+`_relay_redacting`), replacing any exact occurrence with an equal-length marker (Content-Length preserved;
+a `len-1` carry catches a split across read boundaries). SSE is exempt (its event data never carries the
+session token, and a carry-window would break incremental delivery). Invariant: **no body relayed to the
+browser, on any route/method/path, contains the owner credential.**
 
 ### Session hygiene
 
@@ -152,7 +164,8 @@ backend. It also **strips** any client-supplied `X-VIGIL-*` header and **stamps*
 - **Privilege escalation** — a viewer/analyst bearer resolves to its role: the sovereign plane refuses
   operator/owner actions via `role_can`, and the proxy floors offense mutations at `run_engagement`.
 - **Owner-token leak** — the owner token is no longer in any served asset; the offense console credential is
-  presented only on the proxy→backend loopback hop, never to the browser.
+  presented only on the proxy→backend loopback hop, and is **redacted out of every relayed non-SSE response
+  body** so a backend's own token-embedding index can never hand it to the browser (RED-PEN BLOCK-1).
 - The bearer is compared server-side against `sha256(salt+bearer)` (accounts store); the proxy never stores
   a plaintext bearer (its cache is keyed by `sha256(bearer)`).
 

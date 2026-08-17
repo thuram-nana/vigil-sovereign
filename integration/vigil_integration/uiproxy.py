@@ -136,7 +136,14 @@ _READ_METHODS = frozenset({"GET", "HEAD"})
 # inbound request, so a client can never spoof them). The offense side uses them for attribution.
 _PRINCIPAL_HDR = "X-VIGIL-Principal"
 _ROLE_HDR = "X-VIGIL-Role"
-_VIGIL_IDENTITY_HEADERS = frozenset({_PRINCIPAL_HDR.lower(), _ROLE_HDR.lower(), "x-vigil-permissions"})
+# Anti-spoof: strip the WHOLE `X-VIGIL-*` class from inbound requests, normalising case AND hyphen↔
+# underscore — so no variant (`X_VIGIL_ROLE`, which some upstreams / WSGI stacks fold to the header the
+# offense gate would read) survives to be mistaken for a proxy-set identity header.
+_VIGIL_HDR_PREFIX = "x-vigil-"
+
+
+def _is_vigil_identity_header(name: str) -> bool:
+    return name.lower().replace("_", "-").startswith(_VIGIL_HDR_PREFIX)
 # Short-TTL cache of sha256(bearer) → resolved principal (or None). Bounds whoami round-trips under SSE /
 # polling; a revocation is visible after at most _AUTH_TTL_S (documented residual). A rejected bearer is
 # cached briefly too, to blunt a guessing flood without pinning a wrong answer for long.
@@ -1060,7 +1067,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         out: dict[str, str] = {}
         for key in self.headers.keys():
             lk = key.lower()
-            if lk in _HOP_BY_HOP or lk == "content-length" or lk in _VIGIL_IDENTITY_HEADERS:
+            if lk in _HOP_BY_HOP or lk == "content-length" or _is_vigil_identity_header(key):
                 continue
             out[key] = self.headers[key]
         if offense_principal is not None:
@@ -1092,12 +1099,52 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         if self.command == "HEAD":
             return
+        # HOP-ONLY CREDENTIAL — the owner backend credential the proxy presents on the hop
+        # (`self.server.token`, = the offense console's VIGIL_CONSOLE_TOKEN AND the cockpit's own token)
+        # must NEVER reach the browser. A backend's OWN static index.html embeds it (the console's
+        # __CONSOLE_TOKEN__ / the cockpit's __SIGIL_TOKEN__), and static `/` is NOT token-gated on the
+        # backend — so a plain relay would stream `data-token="<owner token>"` to a mere VIEWER, who could
+        # replay it and be resolved as OWNER. So every relayed NON-SSE body is scanned and any exact
+        # occurrence of the credential is blanked with an EQUAL-LENGTH marker (Content-Length stays valid).
+        # SSE is exempt: its event data provably never carries the session token, and a carry-window would
+        # break incremental delivery — the property that the SSE relay exists to preserve.
+        needle = (getattr(self.server, "token", "") or "").encode("utf-8")
+        if is_sse or not needle:
+            while True:
+                chunk = resp.read1(65536)   # ONE underlying read → forwards each SSE event as it arrives
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()          # push it to the browser live (do NOT buffer the stream)
+            return
+        self._relay_redacting(resp, needle)
+
+    def _relay_redacting(self, resp: http.client.HTTPResponse, needle: bytes):
+        """Stream a NON-SSE body, replacing every exact occurrence of ``needle`` (the hop-only owner
+        credential) with an equal-length marker so it can NEVER reach the browser. Bounded memory: only a
+        ``len(needle)-1`` carry is held back, so a needle split across two read boundaries is still caught.
+        Equal-length replacement keeps the backend's Content-Length valid; only the exact secret is touched,
+        so any other byte (HTML, JSON, a download) passes through unchanged."""
+        mark = b"X" * len(needle)
+        keep = len(needle) - 1
+        carry = b""
         while True:
-            chunk = resp.read1(65536)   # ONE underlying read → forwards each SSE event as it arrives
+            chunk = resp.read1(65536)
             if not chunk:
                 break
-            self.wfile.write(chunk)
-            self.wfile.flush()          # push it to the browser live (do NOT buffer the stream)
+            buf = (carry + chunk).replace(needle, mark)
+            if keep and len(buf) >= keep:
+                emit, carry = buf[:-keep], buf[-keep:]
+            elif keep:
+                emit, carry = b"", buf          # not enough yet — hold it all as carry
+            else:
+                emit, carry = buf, b""
+            if emit:
+                self.wfile.write(emit)
+                self.wfile.flush()
+        if carry:
+            self.wfile.write(carry.replace(needle, mark))   # flush the residual (a full needle cannot fit it)
+            self.wfile.flush()
 
     def _fail(self, status: int, message: str):
         try:
