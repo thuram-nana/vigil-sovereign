@@ -41,8 +41,10 @@ Integrity is layered exactly like the sovereign leg. The whole body is AEAD-seal
 fails to decrypt / fails the manifest signature / fails a per-file hash check BEFORE a single file is
 written. AFTER the write, the restore RE-VERIFIES: EVERY restored ``*.spine`` — enumerated RECURSIVELY over
 both ``base_dir`` and ``crucible_root``, the same way ``create`` packages them — re-checks its chain +
-signatures under the restored spine pubkey AND must carry ≥1 complete record (a content-free spine verifies
-vacuously and is refused), the segment view (`verify_offense_home`) reports no FAILED segment, and every
+signatures under the restored spine pubkey AND must carry ≥1 ATTESTED record — a JSON-object record the binder
+actually chain-verified, NOT a raw newline-terminated chunk (a content-free spine — garbage / a JSON scalar /
+a torn tail — verifies VACUOUSLY under any key and is refused; counting raw newline chunks would be bypassable
+by a single trailing byte), the segment view (`verify_offense_home`) reports no FAILED segment, and every
 restored self-contained evidence bundle re-runs the deterministic evidence verify — the restore reports
 ``verified: True`` ONLY if all pass, else it raises. Critically, ``verified: True`` is NEVER returned for a
 check that did not RUN: a restored spine (wherever it landed — a subdir or the crucible tree included) with
@@ -401,7 +403,13 @@ def _reverify_restored(new_base: Path, croot, secrets: dict) -> int:
     packages them) — under the restored spine pubkey, assert the segment view reports no FAILED segment, and
     re-run the deterministic evidence verify over every restored self-contained bundle. Raises
     OffenseBackupError unless ALL pass. Returns the count of evidence bundles that re-verified."""
-    from .live.spine_verify import FAILED, VERIFIED, _count_records, verify_offense_home, verify_offense_spine
+    from .live.spine_verify import (
+        FAILED,
+        VERIFIED,
+        _count_attested_records,
+        verify_offense_home,
+        verify_offense_spine,
+    )
 
     # Enumerate restored spines the SAME way `create` PACKAGES them — RECURSIVELY, over BOTH the base_dir AND
     # the crucible root (create uses rglob and routes crucible-tree files under ``crucible/``). A non-recursive
@@ -432,13 +440,17 @@ def _reverify_restored(new_base: Path, croot, secrets: dict) -> int:
             raise OffenseBackupError(
                 f"restored spine {sp} did NOT re-verify (status={v.status}: {v.detail}) — the restore is "
                 f"NOT trustworthy")
-        # A spine that "verifies" with ZERO complete records attests nothing and passes VACUOUSLY even under a
-        # NON-matching key (a torn-tail-only / garbage body — the binder's empty-chain verify is trivially
-        # true). Refuse it rather than stamp a content-free file `verified`.
-        if _count_records(str(sp)) < 1:
+        # A spine that "verifies" with ZERO ATTESTED records attests nothing and passes VACUOUSLY even under a
+        # NON-matching key (garbage / JSON-scalar / torn-tail-only body — the binder's empty-chain verify is
+        # trivially true). Count the records `verify()` ACTUALLY consumed — the JSON-OBJECT lines the binder's
+        # `_read_lines` yields (and, given the VERIFIED verdict above, chain-verified) — NOT raw newline chunks:
+        # a raw `_count_records` over-counts a `b"not a valid spine\n"` / `b"[1,2,3]\n"` body as 1 while the
+        # binder attested 0, so the raw count is bypassable by a single trailing byte. Refuse the 0-attested case.
+        if _count_attested_records(str(sp)) < 1:
             raise OffenseBackupError(
-                f"restored spine {sp} re-verified with NO complete records (torn/garbage) — refusing to "
-                f"report a content-free spine as verified")
+                f"restored spine {sp} re-verified but attests NO records (0 JSON-object records the binder "
+                f"chain-verified — a garbage/scalar/torn body verifies vacuously) — refusing to report a "
+                f"content-free spine as verified")
     # the segment view: any PRESENT segment that FAILS integrity (e.g. a corrupt usage ledger) is fatal;
     # ABSENT / UNVERIFIABLE segments are honest non-failures (nothing to attest / no owner tie supplied here).
     for seg in verify_offense_home(str(new_base)):
@@ -446,4 +458,15 @@ def _reverify_restored(new_base: Path, croot, secrets: dict) -> int:
             raise OffenseBackupError(
                 f"restored offense segment {seg.segment} FAILED integrity re-verification ({seg.detail})")
     # every restored self-contained evidence bundle must re-verify SOUND (raises on the first that does not).
-    return _verify_evidence_bundles(croot) if croot is not None else 0
+    bundles_verified = _verify_evidence_bundles(croot) if croot is not None else 0
+    # HONEST FLOOR: a restore that re-verified NOTHING — no `*.spine` re-checked AND no self-contained evidence
+    # bundle re-verified — attests nothing, so it must NOT be reported `verified: True`. A real offense backup
+    # ALWAYS carries a `{slug}.spine` (`create` refuses a spine-free base at the source), so this only bites a
+    # hand-crafted (passphrase-forgeable) body with an empty/spine-free file table — close it fail-closed rather
+    # than stamp an empty restore as verified. (spine_files non-empty ⇒ each was VERIFIED with ≥1 attested
+    # record above; bundles_verified>0 ⇒ a real evidence re-verify ran — either is a real, non-vacuous attest.)
+    if not spine_files and bundles_verified == 0:
+        raise OffenseBackupError(
+            "restore re-verified NOTHING — no *.spine to re-check and no self-contained evidence bundle to "
+            "re-verify — refusing to report an empty/spine-free (hand-crafted) backup as verified")
+    return bundles_verified

@@ -305,10 +305,10 @@ def test_restore_refuses_a_records_free_spine_even_with_a_key(tmp_path):
     kp = generate_keypair()
     sk_json = json.dumps({"public_key_b64": kp.public_key_b64, "private_key_b64": kp.private_key_b64})
     dest = tmp_path / "recfree.vglbk"
-    junk = base64.b64encode(b"not a valid spine").decode("ascii")     # no trailing newline -> 0 complete records
+    junk = base64.b64encode(b"not a valid spine").decode("ascii")     # no trailing newline -> 0 attested records
     _craft_backup(dest, files={f"{SLUG}.spine": junk},
                   secrets_body={DEFAULT_SPINE_KEY_FILE: sk_json}, secrets_names=[DEFAULT_SPINE_KEY_FILE])
-    with pytest.raises(OffenseBackupError, match="complete records|did NOT re-verify"):
+    with pytest.raises(OffenseBackupError, match="attests NO records|did NOT re-verify"):
         restore_offense_backup(dest, str(tmp_path / "nb"), PW)
 
 
@@ -325,6 +325,67 @@ def test_restore_refuses_a_corrupt_spine_when_the_key_is_present(tmp_path):
     dest = tmp_path / "o.vglbk"
     create_offense_backup(dest, PW, base_dir=str(base))
     with pytest.raises(OffenseBackupError, match="did NOT re-verify"):
+        restore_offense_backup(dest, str(tmp_path / "nb"), PW)
+
+
+# --- BLOCK-1c: the ATTESTED-record guard (a single trailing byte must not flip refusal to `verified`) ------
+
+def _spine_key_secret() -> str:
+    """A JSON offense-spine keypair as the re-wrapped ``offense-spine.key`` secret carries it — enough for
+    restore to DERIVE a spine pubkey, so the post-write re-verify reaches the ATTESTED-record guard rather than
+    the earlier no-key refusal."""
+    kp = generate_keypair()
+    return json.dumps({"public_key_b64": kp.public_key_b64, "private_key_b64": kp.private_key_b64})
+
+
+@pytest.mark.parametrize("rel, routed", [
+    (f"{SLUG}.spine", False),                             # base_dir root
+    ("sub/evil.spine", False),                            # a subdir (create packages spines via rglob)
+    ("crucible/.console/runs/eng/evil.spine", True),      # routed under crucible_root
+])
+def test_single_trailing_byte_does_not_flip_a_garbage_spine_to_verified(tmp_path, rel, routed):
+    """BLOCK-1c (the re-red-pen bypass): ``b"not a valid spine\\n"`` — a NON-JSON line WITH a trailing newline —
+    has ``_count_records`` == 1 (one non-empty newline chunk), but the binder's ``_read_lines`` yields ZERO
+    objects, so ``verify()`` chain-verifies an EMPTY entry list and is vacuously True under ANY key. The OLD
+    ``_count_records < 1`` guard was satisfied → an unearned ``verified: True``. The single trailing byte is the
+    whole exploit: ``b"not a valid spine"`` (no newline) is already refused, ``+\\n`` flipped it to verified.
+    The fixed ATTESTED-record guard (JSON-object lines only) refuses it — at root, in a subdir, and under the
+    crucible tree (the three locations ``create`` packages spines from). A spine KEY secret is present so the
+    re-verify reaches the count guard, not the no-key refusal."""
+    junk = base64.b64encode(b"not a valid spine\n").decode("ascii")   # trailing newline = the single-byte bypass
+    dest = tmp_path / "onebyte.vglbk"
+    _craft_backup(dest, files={rel: junk},
+                  secrets_body={DEFAULT_SPINE_KEY_FILE: _spine_key_secret()},
+                  secrets_names=[DEFAULT_SPINE_KEY_FILE])
+    kwargs = {"crucible_root": str(tmp_path / "nc")} if routed else {}
+    with pytest.raises(OffenseBackupError, match="attests NO records"):
+        restore_offense_backup(dest, str(tmp_path / "nb"), PW, **kwargs)
+
+
+@pytest.mark.parametrize("body", [b"[1,2,3]\n", b'"x"\n', b"123\n", b"true\n"])
+def test_json_scalar_or_array_spine_line_attests_nothing_and_is_refused(tmp_path, body):
+    """A line that is VALID JSON but NOT an object (a scalar or an array) is skipped by the binder's
+    ``_read_lines`` (only dicts become ``SpineLine`` candidates), so ``verify()`` chain-verifies an EMPTY entry
+    list = vacuously True. ``_count_records`` counts it (1), but 0 records were ATTESTED → the fixed guard
+    refuses it (the same class as the single-byte bypass, via a well-formed JSON non-object)."""
+    junk = base64.b64encode(body).decode("ascii")
+    dest = tmp_path / "scalar.vglbk"
+    _craft_backup(dest, files={f"{SLUG}.spine": junk},
+                  secrets_body={DEFAULT_SPINE_KEY_FILE: _spine_key_secret()},
+                  secrets_names=[DEFAULT_SPINE_KEY_FILE])
+    with pytest.raises(OffenseBackupError, match="attests NO records"):
+        restore_offense_backup(dest, str(tmp_path / "nb"), PW)
+
+
+def test_spine_free_handcrafted_body_is_not_reported_verified(tmp_path):
+    """The folded-in advisory: a crafted body with NO ``*.spine`` and NO self-contained evidence bundle
+    re-verifies NOTHING, so it must NOT be reported ``verified: True``. A real offense backup ALWAYS carries a
+    ``{slug}.spine`` (``create`` refuses a spine-free base at the source) — this only bites a hand-crafted
+    (passphrase-forgeable) body, and the honest fix fails it closed rather than stamp an empty restore."""
+    good = base64.b64encode(b"budget-data").decode("ascii")
+    dest = tmp_path / "spinefree.vglbk"
+    _craft_backup(dest, files={"token-budgets.json": good})           # no spine, no crucible, no secrets
+    with pytest.raises(OffenseBackupError, match="re-verified NOTHING"):
         restore_offense_backup(dest, str(tmp_path / "nb"), PW)
 
 
