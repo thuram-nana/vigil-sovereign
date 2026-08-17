@@ -116,6 +116,29 @@ class Vault:
         else:
             _atomic_write_bytes(p, value.encode("utf-8"))
 
+    def seal_secret(self, plaintext: bytes, *, context: bytes) -> bytes:
+        """Seal a secret BLOB (not a file) under the vault KEK — for a secret that must ride SEALED inside an
+        owner-signed spine record (e.g. an account's TOTP shared secret, which — unlike a one-way-hashed
+        bearer — must be RECOVERABLE to verify codes, so it is sealed rather than hashed). Unlike
+        :meth:`write_text_secret`, there is NO plaintext fallback: a secret that must be sealed has no
+        business landing in the clear, so this REQUIRES the vault provisioned and raises
+        :class:`VaultLocked` otherwise (fail-closed). ``context`` binds the blob to its purpose (AEAD AAD)."""
+        if not self.enabled():
+            raise VaultLocked("vault is not provisioned — cannot seal a secret at rest "
+                              "(run `sigil vault provision` once on this machine)")
+        return seal(self._kek(), bytes(plaintext), context=context)
+
+    def unseal_secret(self, blob: bytes, *, context: bytes) -> bytes:
+        """Open a blob produced by :meth:`seal_secret` under the SAME ``context``. Requires the vault
+        provisioned; raises :class:`VaultLocked` if it is not, if the TPM cannot unseal the KEK, or if the
+        blob is tampered/wrong-context (fail-closed — never returns an unauthenticated value)."""
+        if not self.enabled():
+            raise VaultLocked("vault is not provisioned — cannot open a sealed secret")
+        try:
+            return unseal(self._kek(), bytes(blob), context=context)
+        except SealError as e:
+            raise VaultLocked(f"sealed secret failed to open: {e}") from e
+
     def _migrate_text(self, path: Path, text: str, context: bytes) -> None:
         """Seal an existing plaintext secret IN PLACE, non-destructively: seal → VERIFY the sealed copy
         round-trips to the exact original → only THEN atomically replace the plaintext. A migration can

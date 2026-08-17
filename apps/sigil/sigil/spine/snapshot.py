@@ -103,11 +103,15 @@ class SnapshotState(BaseModel):
     #                                   Missing row ⇒ the -inf bottom. Per username and never global. MUST cross
     #                                   a prune, or the first hard prune resets it and a captured owner-signed
     #                                   `active` grant becomes replay-resurrectable again (the LWW replay HIGH).
-    account_cred: list = []           # [[username, role, cred_hash, cred_salt, user_pubkey], ...] — the fields
-    #                                   to REBUILD an active `Account` from the seed (issued_at joins from
-    #                                   account_issued; state="active"; user_pubkey None for bearer-only / legacy
-    #                                   4-field rows). Carried for every honored-active username (incl. ones later
-    #                                   revoked — dropped at read time by account_state, exactly as the scan).
+    account_cred: list = []           # [[username, role, cred_hash, cred_salt, user_pubkey, totp_secret,
+    #                                   password_hash], ...] — the fields to REBUILD an active `Account` from the
+    #                                   seed (issued_at joins from account_issued; state="active"). Each optional
+    #                                   trailing field is None for a shorter/legacy row: user_pubkey (S3 PoP key),
+    #                                   totp_secret (S4 SEALED second factor), password_hash (S4 optional login).
+    #                                   Carrying totp_secret/password_hash keeps a hard prune from silently
+    #                                   DOWNGRADING an account's auth (e.g. dropping its enrolled second factor).
+    #                                   Carried for every honored-active username (incl. ones later revoked —
+    #                                   dropped at read time by account_state, exactly as the scan).
     consumed_arm_nonces: list = []    # [[device_pubkey, nonce], ...]  (nonce int OR str, verbatim)
     device_approval_dedup: list = []  # [[pubkey|None, sig|None, min_seq], ...]
     warden_best: dict[str, list] = {} # {pubkey: [max_count, head_hash, tiebreak_seq]}
@@ -281,8 +285,11 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                                                                       if s else {})
     acct_state: dict[Any, str] = dict(s.account_state_map()) if s else {}
     acct_issued: dict[Any, float] = dict(s.account_issued_map()) if s else {}
-    acct_cred: dict[Any, list] = {row[0]: [row[1], row[2], row[3], (row[4] if len(row) > 4 else None)]
-                                  for row in s.account_cred} if s else {}   # 5th = user_pubkey (None if legacy row)
+    acct_cred: dict[Any, list] = {row[0]: [row[1], row[2], row[3], (row[4] if len(row) > 4 else None),
+                                           (row[5] if len(row) > 5 else None),
+                                           (row[6] if len(row) > 6 else None)]
+                                  for row in s.account_cred} if s else {}   # 5/6/7 = user_pubkey / totp_secret /
+    #                                                                         password_hash (None for a legacy row)
     arm: set = set(s.arm_set()) if s else set()
     dedup: dict[tuple[Optional[str], Optional[str]], int] = dict(s.approval_dedup_map()) if s else {}
     warden: dict[str, tuple[int, str, int]] = ({k: (v[0], v[1], v[2]) for k, v in s.warden_best.items()}
@@ -383,9 +390,11 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                 if at > acct_issued.get(ukey, NO_HIGHWATER):   # mirror _fold: stale/replayed active ⇒ no effect
                     acct_issued[ukey] = at
                     acct_state[ukey] = "active"
-                    # carry user_pubkey (None for a bearer-only grant) so a KEYED account survives a prune with
-                    # its bound key — else a pruned+seeded account would silently lose PoP login capability.
-                    acct_cred[ukey] = [p.get("role"), p.get("cred_hash"), p.get("cred_salt"), p.get("user_pubkey")]
+                    # carry user_pubkey / totp_secret / password_hash (None when absent) so a KEYED /
+                    # TOTP-enrolled / password account survives a prune with its full auth — else a
+                    # pruned+seeded account would silently lose its PoP key, its SECOND FACTOR, or its password.
+                    acct_cred[ukey] = [p.get("role"), p.get("cred_hash"), p.get("cred_salt"),
+                                       p.get("user_pubkey"), p.get("totp_secret"), p.get("password_hash")]
         # --- gesture device-arm replay ledger (set-union) ---
         if sig == "gesture.session_armed" and p.get("armed_by") == "device":
             arm.add((p.get("device_pubkey"), p.get("nonce")))
@@ -428,7 +437,8 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         promotion_issued=[[a, s, i] for (a, s), i in promo_issued.items()],
         account_state=[[u, v] for u, v in acct_state.items()],
         account_issued=[[u, i] for u, i in acct_issued.items()],
-        account_cred=[[u, c[0], c[1], c[2], (c[3] if len(c) > 3 else None)] for u, c in acct_cred.items()],
+        account_cred=[[u, c[0], c[1], c[2], (c[3] if len(c) > 3 else None), (c[4] if len(c) > 4 else None),
+                       (c[5] if len(c) > 5 else None)] for u, c in acct_cred.items()],
         consumed_arm_nonces=[[d, n] for (d, n) in arm],
         device_approval_dedup=[[pk, sg, seq] for (pk, sg), seq in dedup.items()],
         warden_best={k: [c, h, s] for k, (c, h, s) in warden.items()},
