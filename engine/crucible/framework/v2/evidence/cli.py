@@ -27,7 +27,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-from vigil_core.highwater import _HW_EVIDENCE_DOMAIN, _sign_highwater, verify_highwater_signature
+from vigil_core.highwater import (
+    _HW_EVIDENCE_DOMAIN, _sign_highwater, strict_highwater_enabled, verify_highwater_signature,
+)
 
 from ..common import paths
 from ..entitlement.crypto import KeyPair, generate_keypair
@@ -99,7 +101,7 @@ class _HighwaterCorrupt(Exception):
     """The anti-rollback state file EXISTS but cannot be trusted — verification must REFUSE (fail-closed)."""
 
 
-def _load_highwater(path: Path, *, trusted_pubkeys=None) -> int | None:
+def _load_highwater(path: Path, *, trusted_pubkeys=None, strict: bool | None = None) -> int | None:
     """None iff the file is ABSENT (a legitimate first verification). If the file EXISTS but is a symlink,
     unreadable, malformed, or carries a non-integer last_seq, raise _HighwaterCorrupt so verification REFUSES
     — anti-rollback state you cannot trust must NEVER silently degrade to 'no previous mark' (that disables
@@ -109,7 +111,13 @@ def _load_highwater(path: Path, *, trusted_pubkeys=None) -> int | None:
     signature must verify against a trusted key — a tampered SIGNED high-water raises _HighwaterCorrupt and
     fails CLOSED down the SAME exit-2 path as any corrupt state. An ABSENT signature is warn-accepted
     (back-compat). With NO anchor (``trusted_pubkeys`` falsy — every pre-C.2 caller) NO signature check runs,
-    so the return value and raises are BYTE-IDENTICAL to before."""
+    so the return value and raises are BYTE-IDENTICAL to before.
+
+    STRICT PROFILE (C-S5): ``strict`` is threaded to :func:`verify_highwater_signature`. When strict AND a
+    trusted key is present, an ABSENT signature is REJECTED (an unsigned floor is treated as tamper) and
+    raises _HighwaterCorrupt down the same fail-closed exit-2 path. ``None`` defers to
+    ``VIGIL_STRICT_HIGHWATER`` (fail-safe OFF); the CLI passes an explicit bool (``--strict-highwater`` OR the
+    env). Non-strict is byte-identical to before."""
     # is_symlink() is True for a DANGLING link too (it checks the link, not the target), so it MUST precede
     # exists() — exists() FOLLOWS the link and returns False for a dangling one, which would wrongly read as
     # "absent / first run" and silently disable anti-rollback (red-pen: a planted dangling symlink bypass).
@@ -127,7 +135,7 @@ def _load_highwater(path: Path, *, trusted_pubkeys=None) -> int | None:
     if trusted_pubkeys and isinstance(raw, dict):
         # Verify under the EVIDENCE variant's domain — an attestation-log floor signed under the default
         # ``_HW_DOMAIN`` (which shares the ``last_seq`` field) MUST NOT verify here as an evidence floor.
-        ok, why = verify_highwater_signature(raw, trusted_pubkeys, domain=_HW_EVIDENCE_DOMAIN)
+        ok, why = verify_highwater_signature(raw, trusted_pubkeys, domain=_HW_EVIDENCE_DOMAIN, strict=strict)
         if not ok:
             raise _HighwaterCorrupt(f"{path} governance signature check failed: {why}")
     return seq
@@ -185,7 +193,9 @@ def _verify(args: argparse.Namespace) -> int:
     # high-water is signed by the offense GOVERNANCE key (owner-tied via the OFFENSE_GOVERNANCE_ROLE delegation),
     # NEVER an owner key. The trusted set is the bundle's governance authorizers (∪ the --highwater-signer-file
     # key when given). A PRESENT-but-tampered signature then fails the verify CLOSED; an UNSIGNED high-water
-    # (every pre-C.2 file) is warn-accepted, so exit codes / SOUND-bundle gating are unchanged for such bundles.
+    # (every pre-C.2 file) is warn-accepted in the DEFAULT profile, so exit codes / SOUND-bundle gating are
+    # unchanged for such bundles — UNLESS the STRICT profile is on (--strict-highwater / VIGIL_STRICT_HIGHWATER),
+    # in which case an unsigned floor with a trusted key present is REFUSED as tamper (see strict_hw below).
     hw_signer = None
     hw_trusted = {a.public_key_b64 for a in trust_root.authorizers}
     signer_file = str(getattr(args, "highwater_signer_file", "") or "").strip()
@@ -240,9 +250,13 @@ def _verify(args: argparse.Namespace) -> int:
 
     # anti-rollback: read the persisted high-water mark so a stale, validly-signed
     # smaller bundle (a suppressed finding) is refused.
+    # STRICT PROFILE (C-S5): the strict production profile is on iff --strict-highwater OR VIGIL_STRICT_HIGHWATER
+    # (fail-safe OFF). In strict mode a PRESENT-but-UNSIGNED high-water with a trusted governance key is REJECTED
+    # as tamper (the strip-to-unsigned downgrade is refused); non-strict warn-accepts it (byte-identical).
+    strict_hw = bool(getattr(args, "strict_highwater", False)) or strict_highwater_enabled()
     hw_path = Path(args.highwater) if args.highwater else None
     try:
-        prev_hw = _load_highwater(hw_path, trusted_pubkeys=hw_trusted) if hw_path else None
+        prev_hw = _load_highwater(hw_path, trusted_pubkeys=hw_trusted, strict=strict_hw) if hw_path else None
     except _HighwaterCorrupt as e:
         print(f"  [BAD] anti-rollback high-water state is corrupt: {e}", file=sys.stderr)
         print("bundle NOT SOUND (untrustworthy rollback state — refusing, fail-closed)")
@@ -381,6 +395,16 @@ def main(argv: list[str]) -> int:
                         "the signed sovereign floor) — NEVER an owner key (owner tie = OFFENSE_GOVERNANCE_ROLE "
                         "delegation). Without it the high-water is written UNSIGNED (byte-identical to before). "
                         "A PRESENT-but-tampered signature fails the verify CLOSED regardless of this flag.")
+    p.add_argument("--strict-highwater", action="store_true", dest="strict_highwater",
+                   help="STRICT production profile: treat a PRESENT-but-UNSIGNED anti-rollback high-water (with "
+                        "a trusted governance key) as tamper and REFUSE the bundle (the strip-to-unsigned "
+                        "downgrade is rejected). Also enabled by VIGIL_STRICT_HIGHWATER=1. Default OFF = "
+                        "warn-accept an unsigned floor (byte-identical to before). A signed floor verifies in "
+                        "both modes; this closes strip-to-unsigned only for THIS verifier holding the anchor — "
+                        "a same-host head+floor co-rewrite still needs the out-of-band witnessed checkpoint. "
+                        "PAIR IT with --highwater-signer-file so this verifier WRITES a signed floor; enabling "
+                        "strict WITHOUT a signer makes the first verify write an unsigned floor and the next "
+                        "strict-verify reject it (exit 2).")
     p.set_defaults(fn=_verify)
 
     p = sub.add_parser("pcf-export", help="project a signed evidence bundle into PCF v0.1 certificates")

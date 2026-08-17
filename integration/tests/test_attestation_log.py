@@ -313,3 +313,31 @@ def test_wrong_trust_root_fails_verify(tmp_path):
         AuthorizerKey(key_id="gov0", name="gov0", public_key_b64=ATTACKER.public_key_b64)])
     ok, reason, series = verify_log(log, trust_root=other, signer_pubkeys=PUBKEYS)
     assert not ok, reason
+
+
+# --------------------------------------------------------------------------- C-S5: writer signs the floor
+
+
+def test_append_tick_persists_a_governance_signed_floor(tmp_path):
+    """C-S5 — with the offense governance keypair threaded as ``hw_signer``, ``append_tick`` persists a SIGNED
+    floor (``sig``/``pubkey`` under the governance key). The default ``_append`` (no ``hw_signer``) stays
+    UNSIGNED — byte-identical to before (back-compat)."""
+    from vigil_core.highwater import _HW_DOMAIN, read_highwater_dict, verify_highwater_signature
+
+    signed_log = tmp_path / "signed"
+    append_tick(signed_log, _tick(State.REMEDIATED, 0), engagement_slug=ENG, signers=SIGNERS,
+                trust_root=TRUST_ROOT, signer_pubkeys=PUBKEYS, hw_signer=OWNER)
+    floor = read_highwater_dict(signed_log / al._HIGHWATER_FILE)
+    assert floor.get("pubkey") == OWNER.public_key_b64 and isinstance(floor.get("sig"), str)
+    # the governance signature verifies under the attestation-log variant domain, in BOTH profiles
+    assert verify_highwater_signature(floor, [OWNER.public_key_b64], domain=_HW_DOMAIN, strict=True)[0] is True
+    assert verify_highwater_signature(floor, [OWNER.public_key_b64], domain=_HW_DOMAIN, strict=False)[0] is True
+
+    # default writer (no hw_signer) → UNSIGNED floor (back-compat), which a STRICT verifier rejects
+    unsigned_log = tmp_path / "unsigned"
+    _append(unsigned_log, _tick(State.REMEDIATED, 0))
+    ufloor = read_highwater_dict(unsigned_log / al._HIGHWATER_FILE)
+    assert "sig" not in ufloor and "pubkey" not in ufloor
+    ok_strict, why = verify_highwater_signature(ufloor, [OWNER.public_key_b64], domain=_HW_DOMAIN, strict=True)
+    assert ok_strict is False and "STRICT" in why
+    assert verify_highwater_signature(ufloor, [OWNER.public_key_b64], domain=_HW_DOMAIN, strict=False)[0] is True

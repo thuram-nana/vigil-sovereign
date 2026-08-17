@@ -142,6 +142,62 @@ def test_unsigned_with_no_trusted_key_is_silent_accept(tmp_path, caplog):
     assert not any("UNSIGNED" in r.message for r in caplog.records)   # no warn without a key present
 
 
+def test_strict_rejects_unsigned_floor_with_a_trusted_key(tmp_path):
+    """C-S5 — the strict production profile: an UNSIGNED floor with a trusted governance key present is
+    REJECTED (fail-closed, the strip-to-unsigned downgrade refused). The SAME floor is warn-accepted in the
+    default (non-strict) profile (back-compat). A genuine signed floor verifies in BOTH modes."""
+    p = tmp_path / "hw.json"
+    advance_highwater(p, _head(2, 1))                                 # unsigned (a legacy floor)
+    raw = read_highwater_dict(p)
+    kp = generate_keypair()                                          # the verifier's governance anchor
+    # strict + a trusted key present → REJECTED
+    ok, why = verify_highwater_signature(raw, [kp.public_key_b64], strict=True)
+    assert not ok and "STRICT" in why and "UNSIGNED" in why
+    # non-strict (explicit) → back-compat WARN-ACCEPT of the identical floor
+    ok2, why2 = verify_highwater_signature(raw, [kp.public_key_b64], strict=False)
+    assert ok2 and "unsigned" in why2
+
+
+def test_strict_still_accepts_a_genuine_signed_floor(tmp_path):
+    """Strict only rejects the ABSENT-signature case; a validly-signed floor under a trusted key verifies in
+    both modes (strict never rejects a genuine signature)."""
+    p = tmp_path / "hw.json"
+    kp = generate_keypair()
+    advance_highwater(p, _head(7, 6), signer=kp)
+    raw = read_highwater_dict(p)
+    assert verify_highwater_signature(raw, [kp.public_key_b64], strict=True)[0] is True
+    assert verify_highwater_signature(raw, [kp.public_key_b64], strict=False)[0] is True
+
+
+def test_strict_with_no_trusted_key_still_silent_accepts(tmp_path):
+    """STRICT with NO anchor still silent-accepts an unsigned floor — there is nothing to enforce against, and
+    a keyless verifier must never be bricked (the rejection is conditioned on a trusted key being present)."""
+    p = tmp_path / "hw.json"
+    advance_highwater(p, _head(2, 1))                                 # unsigned
+    raw = read_highwater_dict(p)
+    ok, _ = verify_highwater_signature(raw, [], strict=True)
+    assert ok
+
+
+def test_strict_defaults_to_the_env_toggle(tmp_path, monkeypatch):
+    """``strict=None`` (the default) reads ``VIGIL_STRICT_HIGHWATER`` with fail-safe polarity: unset/empty →
+    non-strict (warn-accept); an explicit affirmative → strict (reject)."""
+    import vigil_core.highwater as _h
+    p = tmp_path / "hw.json"
+    advance_highwater(p, _head(2, 1))                                 # unsigned
+    raw = read_highwater_dict(p)
+    monkeypatch.delenv("VIGIL_STRICT_HIGHWATER", raising=False)
+    assert _h.strict_highwater_enabled() is False
+    assert verify_highwater_signature(raw, [generate_keypair().public_key_b64])[0] is True   # default OFF
+    monkeypatch.setenv("VIGIL_STRICT_HIGHWATER", "1")
+    assert _h.strict_highwater_enabled() is True
+    assert verify_highwater_signature(raw, [generate_keypair().public_key_b64])[0] is False  # env → strict
+    monkeypatch.setenv("VIGIL_STRICT_HIGHWATER", "  On ")                                     # case/space
+    assert _h.strict_highwater_enabled() is True
+    monkeypatch.setenv("VIGIL_STRICT_HIGHWATER", "0")
+    assert _h.strict_highwater_enabled() is False
+
+
 def test_signature_from_untrusted_key_fails_closed(tmp_path):
     """A validly-signed floor whose pubkey is NOT in the trusted governance set is refused (an attacker who
     re-signs a rolled-back floor under their OWN key must not be accepted)."""
