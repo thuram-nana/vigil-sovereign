@@ -164,9 +164,12 @@ The redactor is a **literal-byte** scan, so it works only on **cleartext** — w
    cleartext. (An nginx *in front* of the proxy that gzips the proxy's **already-redacted** output is safe.)
 2. **Defense-in-depth:** if a relayed non-SSE body nonetheless arrives with a `Content-Encoding` (a backend
    or middleware that ignored the identity request), the proxy **decodes it (gzip/deflate) before scanning**,
-   or — for an encoding it cannot decode (brotli/zstd/unknown), a malformed body, or one over the
-   decompression-bomb caps — **fails closed (502)** rather than relay an un-scannable, possibly token-bearing
-   body (`_decode_and_redact`).
+   or — for an encoding it cannot decode (brotli/zstd/unknown), a malformed/truncated body, or a
+   **decompression bomb** — **fails closed (502)** rather than relay an un-scannable, possibly token-bearing
+   body (`_decode_and_redact`). The bomb bound is enforced **during** streaming inflate — the decoder emits at
+   most one 1 MiB output step at a time and stops the instant the running decoded total would exceed the
+   64 MiB cap (encoded reads are separately capped at 16 MiB), so a body that deflates ~1032:1 can never be
+   fully materialised in memory. It is a real, tested bound, not a post-hoc size check.
 
 **SSE is the one exemption** — streamed as-is (a carry-window would break incremental delivery). That rests
 on a checked property, not an assumption: no viewer-reachable SSE stream (offense `_sse`/`_sse_blackboard`,

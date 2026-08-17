@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import gzip
 import hashlib
 import http.client
 import http.server
@@ -155,10 +154,15 @@ _WHOAMI_MAX = 64 * 1024          # cap the whoami response read (a Principal JSO
 _MISS = object()                 # cache sentinel: "not present" — distinct from a cached negative (None)
 # BLOCK-A defense-in-depth caps: the ONLY time the proxy buffers+decodes a relayed body is the abnormal
 # case where a backend returned a compressed NON-SSE body despite the forced `Accept-Encoding: identity`
-# hop. Bound both the encoded read and the decoded size so a rogue/compromised backend cannot make the
-# proxy a decompression bomb — exceed either → fail closed (never relay an un-scannable body).
+# hop. Bound BOTH the encoded read AND the decoded output so a rogue/compromised backend cannot make the
+# proxy a decompression bomb. The decoded bound is enforced DURING streaming decompression (never a
+# one-shot `decompress()` that materialises the whole body first): inflate in `_DECODE_STEP` output steps
+# and STOP the instant the running total would exceed `_REDACT_MAX_DECODED` → fail closed. A body under the
+# encoded cap can deflate ~1032:1 (≈16 GiB), so a post-hoc size check would OOM the proxy before it fired.
 _REDACT_MAX_ENCODED = 16 * 1024 * 1024
 _REDACT_MAX_DECODED = 64 * 1024 * 1024
+_DECODE_STEP = 1024 * 1024       # inflate 1 MiB of OUTPUT per step → peak allocation stays ~budget, never
+                                 # the full (possibly 1032:1) decompressed body; the bomb is caught mid-stream.
 
 # the bundle files the proxy serves from the runtime serve dir
 BUNDLE_JS = ("ui.js", "manual.js", "app.js")
@@ -337,6 +341,52 @@ def _whoami(bearer: str, *, host: str = "127.0.0.1", port: Optional[int] = None,
     return {"username": str(data.get("username") or ""),
             "role": str(data.get("role") or ""),
             "permissions": [str(x) for x in perms] if isinstance(perms, list) else []}
+
+
+# ==================================================================================================
+# BLOCK-A: streaming, MEMORY-BOUNDED inflate for the hop-credential redactor's defense-in-depth path.
+# A backend that ignored the forced `Accept-Encoding: identity` and compressed anyway would hand the
+# redactor ciphertext, so the proxy DECODES before scanning — but a one-shot `gzip.decompress(raw)` would
+# fully materialise a 1032:1 bomb (≈16 GiB from a <16 MiB body) and OOM the proxy before any size check.
+# So the decode is bounded DURING the stream: never more than ~budget+step decoded bytes are ever held.
+# ==================================================================================================
+def _inflate_wbits(raw: bytes, wbits: int, budget: int) -> "Optional[bytes]":
+    """Streaming inflate of ``raw`` with ``wbits``, producing at most ~``budget`` (+ one step) decoded
+    bytes — the running total is checked after every ``_DECODE_STEP`` output chunk and the moment it would
+    exceed ``budget`` we STOP and return None (a decompression bomb is caught mid-stream, never fully
+    materialised). Returns the decoded bytes (len ≤ budget) for a CLEAN, COMPLETE stream, or None (fail
+    closed) on: over-budget, a truncated/incomplete stream, trailing garbage, or any zlib error (wrong
+    wbits / corruption)."""
+    d = zlib.decompressobj(wbits)
+    out = bytearray()
+    pending = raw
+    try:
+        while True:
+            chunk = d.decompress(pending, _DECODE_STEP)   # ≤ _DECODE_STEP output bytes per call
+            out += chunk
+            if len(out) > budget:
+                return None                               # bomb → stop NOW (≤ budget + one step allocated)
+            pending = d.unconsumed_tail                    # input held back because output hit the step cap
+            if not chunk and not pending:
+                break                                      # no output and no unconsumed input → stream done
+        if not d.eof:
+            return None                                    # truncated / incomplete / wrong wbits
+        if d.unused_data:
+            return None                                    # trailing garbage after the compressed stream
+    except (zlib.error, OSError, ValueError):
+        return None
+    return bytes(out)
+
+
+def _inflate_bounded(raw: bytes, enc: str, budget: int) -> "Optional[bytes]":
+    """Decode a ``gzip``/``deflate`` body under a bounded decoded budget (see ``_inflate_wbits``), or None
+    (fail closed) for an encoding we cannot decode (br/zstd/unknown), a bomb, or a malformed stream."""
+    if enc == "gzip":
+        return _inflate_wbits(raw, 16 + zlib.MAX_WBITS, budget)          # gzip header
+    if enc == "deflate":
+        out = _inflate_wbits(raw, zlib.MAX_WBITS, budget)                # zlib-wrapped DEFLATE
+        return out if out is not None else _inflate_wbits(raw, -zlib.MAX_WBITS, budget)  # raw DEFLATE
+    return None                                                          # br / zstd / unknown → cannot scan
 
 
 # ==================================================================================================
@@ -1166,10 +1216,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _decode_and_redact(self, resp: http.client.HTTPResponse, enc: str,
                            needle: bytes) -> "Optional[bytes]":
-        """Read a compressed NON-SSE body, DECODE it (gzip / deflate) so the hop credential can be scanned
-        in cleartext, then redact it (equal-length marker). Returns the redacted CLEARTEXT bytes, or None
-        (FAIL CLOSED) if the encoding is one we cannot decode, or the body is malformed / oversized — the
-        proxy then refuses to relay it, never forwarding an un-scannable body that might carry the token."""
+        """Read a compressed NON-SSE body (encoded read bounded by ``_REDACT_MAX_ENCODED``), DECODE it with
+        a STREAMING bounded budget so the hop credential can be scanned in cleartext, then redact it
+        (equal-length marker). Returns the redacted CLEARTEXT bytes, or None (FAIL CLOSED) if the encoding
+        is one we cannot decode, the body is malformed / truncated, or it decodes past ``_REDACT_MAX_DECODED``
+        (a decompression bomb — caught mid-stream, never fully materialised). The proxy then refuses to relay
+        it, never forwarding an un-scannable body that might carry the token."""
         raw = b""
         while len(raw) <= _REDACT_MAX_ENCODED:
             chunk = resp.read1(65536)
@@ -1178,20 +1230,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             raw += chunk
         else:
             return None                                   # encoded body exceeded the cap → fail closed
-        try:
-            if enc == "gzip":
-                data = gzip.decompress(raw)
-            elif enc == "deflate":
-                try:
-                    data = zlib.decompress(raw)
-                except zlib.error:
-                    data = zlib.decompress(raw, -zlib.MAX_WBITS)   # raw DEFLATE (no zlib header)
-            else:
-                return None                               # br / zstd / unknown → cannot scan → fail closed
-        except (OSError, zlib.error, EOFError, ValueError):
-            return None                                   # malformed → fail closed
-        if len(data) > _REDACT_MAX_DECODED:
-            return None                                   # decompression bomb → fail closed
+        data = _inflate_bounded(raw, enc, _REDACT_MAX_DECODED)
+        if data is None:
+            return None                                   # undecodable / malformed / bomb → fail closed
         return data.replace(needle, b"X" * len(needle))
 
     def _relay_redacting(self, resp: http.client.HTTPResponse, needle: bytes):

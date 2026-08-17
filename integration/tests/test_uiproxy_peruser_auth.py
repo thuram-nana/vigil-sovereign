@@ -86,7 +86,9 @@ class _AuthHandler(http.server.BaseHTTPRequestHandler):
         #   None     → cleartext (default);
         #   "honor"  → gzip IFF the (hop) Accept-Encoding offers gzip — a totally ordinary web server;
         #   "always" → gzip regardless (a backend that IGNORED our forced identity request);
-        #   "fake-br"→ Content-Encoding: br over an UNDECODABLE body (proxy must fail closed).
+        #   "fake-br"→ Content-Encoding: br over an UNDECODABLE body (proxy must fail closed);
+        #   "bomb"   → gzip that ENCODES under the 16 MiB read cap but DECODES past the 64 MiB cap (a
+        #              ~1000:1 deflate bomb — the proxy must fail closed WITHOUT materialising it).
         if parts.path in ("/", "/index.html"):
             html = f'<!doctype html><body data-token="{OWNER_TOKEN}">console-index</body>'.encode()
             mode = getattr(srv, "compress", None)
@@ -97,6 +99,11 @@ class _AuthHandler(http.server.BaseHTTPRequestHandler):
                 html, enc = gzip.compress(html), "gzip"
             elif mode == "fake-br":
                 enc = "br"       # claim brotli but send bytes the proxy cannot decode → fail closed
+            elif mode == "bomb":
+                # token-bearing HTML + 80 MiB of zeros → gzips to ~80 KiB (well under the 16 MiB encoded
+                # read cap) but inflates to > the 64 MiB decoded cap. A one-shot decompress would OOM the
+                # proxy; the streaming bound must catch it mid-inflate and 502.
+                html, enc = gzip.compress(html + b"\x00" * (80 * 1024 * 1024)), "gzip"
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             if enc:
@@ -443,6 +450,24 @@ def test_undecodable_content_encoding_fails_closed(proxy):
     st, _ce, raw = _req_raw(port, "GET", "/offense/", _tok(VIEWER_BEARER))
     assert st == 502, "an un-scannable encoding must fail closed, not relay the body"
     assert OWNER_TOKEN.encode() not in raw
+
+
+def test_decompression_bomb_fails_closed_without_materialising(proxy):
+    """RED-PEN re-check BLOCK-1: the decoded cap must be enforced DURING streaming inflate, not by a post-hoc
+    `len(decompress(raw)) > cap` check that first materialises the whole body. A body that encodes under the
+    16 MiB read cap but inflates past the 64 MiB decoded cap (a ~1000:1 gzip bomb) must FAIL CLOSED (502) and
+    relay no token bytes. Mutation-sensitive: reverting `_decode_and_redact` to a one-shot
+    `gzip.decompress(raw)` would materialise the full 80 MiB (OOM/observably huge) instead of stopping at the
+    1 MiB-stepped budget. The cap constants are referenced so this path has real coverage."""
+    from vigil_integration import uiproxy
+    assert uiproxy._REDACT_MAX_ENCODED == 16 * 1024 * 1024
+    assert uiproxy._REDACT_MAX_DECODED == 64 * 1024 * 1024
+    port, console = proxy["port"], proxy["console"]
+    console.compress = "bomb"        # < encoded cap, > decoded cap
+    st, _ce, raw = _req_raw(port, "GET", "/offense/", _tok(VIEWER_BEARER))
+    assert st == 502, "a decompression bomb must fail closed mid-inflate, not be relayed (or OOM the proxy)"
+    assert OWNER_TOKEN.encode() not in raw
+    assert len(raw) < 64 * 1024 * 1024, "the 502 body must be the small error string, never the inflated bomb"
 
 
 def test_gzip_bypass_repro_is_closed_end_to_end(proxy):
