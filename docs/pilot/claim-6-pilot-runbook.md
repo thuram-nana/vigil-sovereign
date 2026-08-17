@@ -118,9 +118,9 @@ was gated (an out-of-scope seed refuses *before* traffic and is recorded as a re
 
 ```sh
 # take an encrypted, governance-signed backup (choose a passphrase; it is NEVER stored):
-vigil backup <scratch>/vigil-backup            # writes the offense + sovereign sealed files
-# push a ciphertext-only copy off-host (opt-in):
-vigil backup <scratch>/vigil-backup --push     # the pushed file is byte-identical to the local sealed file
+vigil backup --out <scratch>/vigil-backup                 # writes the offense + sovereign sealed files
+# push a ciphertext-only copy off-host (opt-in; --push takes the destination):
+vigil backup --out <scratch>/vigil-backup --push /mnt/offhost   # the pushed file is byte-identical to the local sealed file
 # automated recovery drill (backup → restore → re-verify, fails on any error):
 tools/backup/recovery_drill.sh
 ```
