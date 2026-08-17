@@ -870,6 +870,24 @@ def cmd_spine(a) -> None:
             print(f"  seg-{s['id']:08d} {s['codec']:4} {where:24} {s['bytes']:>13,} bytes  {s['file']}")
 
 
+def _load_failover_guard():
+    """Load tools/ha/spine_failover_guard.py (sovereign-side) from the repo, so `sigil floor
+    promote-passive` and the standalone guard share ONE implementation and cannot diverge. Loaded by
+    file path (the tools/ dir is not an installed package) — FATAL-2-clean: it imports only sigil +
+    vigil_core/vigil_integration, all already importable here on the sovereign side."""
+    import importlib.util
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[3]           # apps/sigil/sigil/cli.py -> repo root
+    guard_path = repo / "tools" / "ha" / "spine_failover_guard.py"
+    if not guard_path.exists():
+        print(f"!! failover guard not found at {guard_path}", file=sys.stderr)
+        sys.exit(2)
+    spec = importlib.util.spec_from_file_location("spine_failover_guard", guard_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def cmd_floor(a) -> None:
     """The durable external anti-rollback floor (hard-prune C1). `status` prints it (read-only). `reset`
     DELIBERATELY re-seeds it downward to the current spine — the only path that may lower it — for a
@@ -901,6 +919,31 @@ def cmd_floor(a) -> None:
         fl = reset_floor(head, owner_key=owner_keypair())
         print(f"durable floor RE-SEEDED to current head: last_seq={fl.last_seq} base_seq={fl.base_seq} "
               f"base_count={fl.base_count}")
+    elif a.action == "promote-passive":
+        # HA active-passive FAILOVER INTERLOCK (Claim 6 Piece B). Refuse to promote this passive to ACTIVE
+        # if its local synced head is BELOW an off-box witnessed checkpoint — a stale mirror must never roll
+        # the durable floor back. Shares the exact logic of tools/ha/spine_failover_guard.py (loaded from the
+        # repo) so the standalone tool and this verb cannot diverge. See docs/architecture/HA-PROFILE.md §3.
+        from pathlib import Path
+
+        from .spine.checkpoint import _read_head_on_disk
+        if not a.witnessed:
+            print("!! promote-passive needs --witnessed <path|-> (the OFF-BOX retained witnessed checkpoint "
+                  "the passive must not roll back below)", file=sys.stderr)
+            sys.exit(2)
+        guard = _load_failover_guard()
+        W, config, roster_path, tip_path, owner_pub = _witness_ctx()
+        try:
+            _roster, tr = _witness_trust_root(W, config, roster_path, owner_pub)
+        except W.WitnessError as e:
+            print(f"!! promote-passive refused (witness roster error): {e}", file=sys.stderr)
+            sys.exit(2)
+        data = sys.stdin.read() if a.witnessed == "-" else Path(a.witnessed).read_text(encoding="utf-8")
+        head = _read_head_on_disk()
+        verdict = guard.evaluate_promotion(head, data, scope=config.SCOPE, trust_root=tr)
+        for line in verdict.lines():
+            print(line, file=(sys.stdout if verdict.activate else sys.stderr))
+        sys.exit(verdict.exit_code)
 
 
 def cmd_budget(a) -> None:
@@ -1416,9 +1459,11 @@ def main(argv=None) -> None:
     pop = sub.add_parser("owner-pubkey",
                          help="print the base64 owner PUBLIC key (read-only; for pinning the offense learn-drain)")
     pop.set_defaults(fn=cmd_owner_pubkey)
-    pfl = sub.add_parser("floor", help="durable external anti-rollback floor: status; reset (deliberate downward re-seed)")
-    pfl.add_argument("action", choices=["status", "reset"])
+    pfl = sub.add_parser("floor", help="durable external anti-rollback floor: status; reset (deliberate downward re-seed); promote-passive (HA failover interlock)")
+    pfl.add_argument("action", choices=["status", "reset", "promote-passive"])
     pfl.add_argument("--yes", action="store_true", help="confirm `reset` deliberately lowers the floor")
+    pfl.add_argument("--witnessed", "--external", dest="witnessed", default=None,
+                     help="promote-passive: the OFF-BOX retained witnessed checkpoint the passive must not roll back below (- for stdin)")
     pfl.set_defaults(fn=cmd_floor)
     psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact; convert; status; prune-plan; verify-archive")
     psp.add_argument("action", choices=["migrate", "rotate", "compact", "convert", "status",
