@@ -234,12 +234,17 @@ class CheckpointEmitter:
         cp = checkpoint_of(head, prev_checkpoint_hash=prev)
         if self._last is not None:
             # Idempotent no-op: an unchanged POSITION must NOT mint a second checkpoint. Position is
-            # (last_seq, entry_count, head_hash) — the live tip; merkle_root is DELIBERATELY excluded,
-            # because a prune (records move live→base) advances merkle_root at an unchanged position,
-            # and minting a second same-height checkpoint for it would be redundant. Return the cached
-            # one; the prune's merkle_root is captured by the next real advance (the root is monotonic).
+            # (last_seq, entry_count, head_hash, base_seq, base_count) — the live tip AND the prune
+            # BOUNDARY. Since C-S1 the boundary (base_seq/base_count) is part of the checkpoint's SIGNED
+            # identity, so a prune that advances the boundary at an unchanged tip IS a witness-worthy
+            # transition — else a prune-then-idle system has no witness attesting its CURRENT boundary
+            # (the prune moves records live→base without moving the tip, so the tip-only key never fires
+            # a fresh mint). merkle_root stays DELIBERATELY excluded: it is a schedule-dependent fold
+            # (C-S1 / ADR 0006), so two emits at the SAME boundary with a different root still dedup
+            # (no redundant same-boundary mint over a benign re-prune schedule variation).
             if (cp.entry_count == self._last.entry_count and cp.head_hash == self._last.head_hash
-                    and cp.last_seq == self._last.last_seq):
+                    and cp.last_seq == self._last.last_seq
+                    and cp.base_seq == self._last.base_seq and cp.base_count == self._last.base_count):
                 assert self._last_witnessed is not None
                 return self._last_witnessed
             ok, reason = consistent(self._last, cp)
