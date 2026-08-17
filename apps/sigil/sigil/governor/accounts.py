@@ -53,28 +53,25 @@ from ..reuse import assert_no_offense, sha256_hex
 
 assert_no_offense()
 
+# ONE source of truth for the role→permission vocabulary. `viewer < analyst < operator < owner`, the
+# cumulative permission sets, and `role_can` live in `vigil_core.rbac` — a pure, namespace-clean module
+# BOTH trust domains import (the offense console per-action gate calls the SAME `role_can`). We RE-EXPORT
+# them here so every existing sovereign caller (`from ..governor.accounts import role_can/ROLES/PERMISSIONS`)
+# keeps working unchanged; `PERMISSION_BY_ACTION` below stays sovereign-local (it maps the sovereign action
+# surface). vigil_core imports no framework/strix/sigil, so this crosses no offense boundary.
+from vigil_core.rbac import PERMISSIONS, ROLES, role_can  # noqa: E402,F401  (re-exported)
+
 from ..spine.snapshot import SnapshotState  # noqa: E402
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 
 SIGNAL = "governor.account"
 
-# Roles, ordered by privilege rank (index = rank). "owner" is the trust-root key-holder — it is NOT a
-# grantable bearer role: create/assign_role refuse it (single-owner doctrine), so the only "owner"
-# principal is the one holding the legacy embedded shared token (OWNER_PRINCIPAL below).
-ROLES = ("viewer", "analyst", "operator", "owner")
+# "owner" is the trust-root key-holder — it is NOT a grantable bearer role: create/assign_role refuse it
+# (single-owner doctrine), so the only "owner" principal is the one holding the legacy embedded shared
+# token (OWNER_PRINCIPAL below). Rank/assignability derive from the re-exported ROLES ordering.
 _ROLE_RANK = {r: i for i, r in enumerate(ROLES)}
 _ASSIGNABLE_ROLES = frozenset(ROLES[:-1])   # viewer / analyst / operator — never "owner"
-
-# The permission vocabulary the action table maps to. owner ⊇ operator ⊇ analyst ⊇ viewer (cumulative).
-_VIEWER = frozenset({"read"})
-_ANALYST = _VIEWER | {"queue_proposal"}
-_OPERATOR = _ANALYST | {"run_engagement", "approve_a2", "toggle_guard", "config_nonsecret"}
-_OWNER = _OPERATOR | {"approve_a3", "kill_release", "promote", "secrets", "offense_authority",
-                      "manage_users", "toggle_protected_guard"}
-PERMISSIONS: dict[str, frozenset[str]] = {
-    "viewer": _VIEWER, "analyst": _ANALYST, "operator": _OPERATOR, "owner": _OWNER,
-}
 
 # The env whose set_config disables the categorical .gov/.mil/.edu/.int safety floor (Claim 5). Turning
 # that floor OFF is OWNER-ONLY (`toggle_protected_guard`), NOT the operator-level `config_nonsecret` the
@@ -137,14 +134,6 @@ class Principal:
 # The legacy embedded shared owner token maps to this principal — the owner is physically at the host and
 # must never be locked out (fail-open is restricted to that EXACT token in `server._principal_for_token`).
 OWNER_PRINCIPAL = Principal(username="owner", role="owner")
-
-
-def role_can(role: Optional[str], perm: Optional[str]) -> bool:
-    """True iff `role` carries `perm`. DEFAULT-DENY: an unmapped action (perm is None/"") refuses, and an
-    unknown role has no permissions. This is the one predicate the whole gate turns on."""
-    if not perm:
-        return False
-    return perm in PERMISSIONS.get(role or "", frozenset())
 
 
 def _check_username(username: str) -> str:

@@ -47,12 +47,14 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
 import http.client
 import http.server
 import ipaddress
 import json
 import os
 import re
+import secrets
 import signal
 import socket
 import socketserver
@@ -137,6 +139,15 @@ _READ_METHODS = frozenset({"GET", "HEAD"})
 # inbound request, so a client can never spoof them). The offense side uses them for attribution.
 _PRINCIPAL_HDR = "X-VIGIL-Principal"
 _ROLE_HDR = "X-VIGIL-Role"
+# S1 — the UNFORGEABLE hop assertion over the stamped identity. The session token is SHARED with the
+# console (it IS the console credential the proxy presents), so token presence alone cannot distinguish a
+# genuine proxy hop from a direct loopback client that also holds the token. So the proxy binds the stamped
+# `principal|role|method|path|ts` under a DISTINCT proxy↔console secret (`VIGIL_CONSOLE_HOP_KEY`, random per
+# `vigil up`, handed to the console child at spawn and NEVER to the browser). The console verifies this HMAC
+# (constant-time) inside a short freshness window before it will trust `X-VIGIL-Role` for per-action RBAC.
+_ROLE_SIG_HDR = "X-VIGIL-Role-Sig"     # base64(HMAC-SHA256(hop_key, "principal\nrole\nmethod\npath\nts"))
+_ROLE_TS_HDR = "X-VIGIL-Role-Ts"       # the unix seconds `ts` that is inside the signed message
+_CONSOLE_HOP_KEY_ENV = "VIGIL_CONSOLE_HOP_KEY"
 # Anti-spoof: strip the WHOLE `X-VIGIL-*` class from inbound requests, normalising case AND hyphen↔
 # underscore — so no variant (`X_VIGIL_ROLE`, which some upstreams / WSGI stacks fold to the header the
 # offense gate would read) survives to be mistaken for a proxy-set identity header.
@@ -712,7 +723,7 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, addr, handler, *, serve_dir: Path, token: str = "",
+    def __init__(self, addr, handler, *, serve_dir: Path, token: str = "", hop_key: str = "",
                  allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
                  plane_control: "Optional[PlaneControl]" = None):
         self.serve_dir = serve_dir
@@ -723,6 +734,12 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         # authenticated per-user (`_forward_request_headers`), so the browser never holds it. Empty (a proxy
         # built without one) ⇒ the offense console receives "" and fails closed (401), never open.
         self.token = token or ""
+        # S1 — the proxy↔console hop secret (the SAME `VIGIL_CONSOLE_HOP_KEY` handed to the console child).
+        # Distinct from `self.token`: the token is presented AS the console credential (shared), whereas this
+        # is known only to the proxy and the console, so an HMAC under it proves "the proxy stamped this
+        # role", which a direct token-holder cannot forge. Empty ⇒ the proxy stamps NO signature and the
+        # console (also keyless) trusts no stamped role — the RBAC hop is simply absent, not fail-open.
+        self.hop_key = hop_key or ""
         # The browser-visible authority/origin of THIS proxy (`--domain`, or a tunnel bind) — the same
         # values handed to the backends as --allow-host/--allow-origin. Loopback with the proxy's own
         # port is always accepted; everything else must be one of these.
@@ -1098,7 +1115,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._fail(413, "request body too large")
             return
         body = self._read_request_body()
-        req_headers = self._forward_request_headers(offense_principal=offense_principal)
+        # The console-side path (mount prefix already stripped, query dropped) is what the console verifies
+        # the hop HMAC against — it must equal the console's own `urlsplit(self.path).path`.
+        offense_path = upstream_path.split("?", 1)[0]
+        req_headers = self._forward_request_headers(offense_principal=offense_principal,
+                                                    offense_path=offense_path)
         conn = http.client.HTTPConnection(host, port, timeout=None)  # no read timeout → SSE stays open
         try:
             conn.request(self.command, upstream_path, body=body or None, headers=req_headers)
@@ -1117,7 +1138,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         n = min(n, _MAX_BODY)  # bounded read (the connection is closed after, so any excess is dropped)
         return self.rfile.read(n) if n > 0 else b""
 
-    def _forward_request_headers(self, *, offense_principal: "Optional[dict]" = None) -> dict:
+    def _forward_request_headers(self, *, offense_principal: "Optional[dict]" = None,
+                                 offense_path: str = "") -> dict:
         # forward the client's headers verbatim (incl. Host + Origin — the upstreams' anti-rebind
         # allowlist is configured with the proxy authority), minus hop-by-hop + Content-Length
         # (http.client recomputes the latter from the body we pass). ALWAYS strip any client-supplied
@@ -1144,8 +1166,23 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             # future per-action offense gate can read the role). A proxy with no token presents "" → the
             # console fails closed (401), never open.
             out[_TOKEN_HEADER] = getattr(self.server, "token", "") or ""
-            out[_PRINCIPAL_HDR] = str(offense_principal.get("username") or "")
-            out[_ROLE_HDR] = str(offense_principal.get("role") or "")
+            principal = str(offense_principal.get("username") or "")
+            role = str(offense_principal.get("role") or "")
+            out[_PRINCIPAL_HDR] = principal
+            out[_ROLE_HDR] = role
+            # S1 — bind the stamped identity under the hop key so the console can trust `X-VIGIL-Role` for
+            # per-action RBAC. The signed message pins the principal, role, METHOD and console-side PATH (so
+            # a captured header set cannot be re-aimed at another route/verb) and a fresh `ts` (so it cannot
+            # be replayed past the console's freshness window). No hop key ⇒ no signature is stamped, and the
+            # console (also keyless) will refuse any role assertion → the coarse proxy floor still applies.
+            hop_key = getattr(self.server, "hop_key", "") or ""
+            if hop_key:
+                ts = str(int(time.time()))
+                msg = f"{principal}\n{role}\n{self.command}\n{offense_path}\n{ts}".encode("utf-8")
+                sig = base64.b64encode(
+                    hmac.new(hop_key.encode("utf-8"), msg, hashlib.sha256).digest()).decode("ascii")
+                out[_ROLE_SIG_HDR] = sig
+                out[_ROLE_TS_HDR] = ts
         return out
 
     def _relay_response(self, resp: http.client.HTTPResponse):
@@ -1277,7 +1314,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
 
 
-def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
+def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "", hop_key: str = "",
                       allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
                       plane_control: "Optional[PlaneControl]" = None) -> _ProxyServer:
     """Build (do not run) the reverse proxy bound to ``host:port``. Refuses a public/unspecified bind
@@ -1293,7 +1330,7 @@ def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
             f"refusing to bind {host!r}: the vigil up proxy binds loopback or a PRIVATE "
             f"(WireGuard/Tailscale) address only — never 0.0.0.0 / an unspecified / a public address. "
             f"Front a real domain with a TLS reverse proxy (--domain; see deploy/reverse-proxy/).")
-    return _ProxyServer((host, port), ProxyHandler, serve_dir=serve_dir, token=token,
+    return _ProxyServer((host, port), ProxyHandler, serve_dir=serve_dir, token=token, hop_key=hop_key,
                         allowed_hosts=tuple(allowed_hosts), allowed_origins=tuple(allowed_origins),
                         plane_control=plane_control)
 
@@ -1765,6 +1802,11 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
               f"{logs / 'sovereign-cockpit.log'}). Aborting.", file=sys.stderr)
         _cleanup()
         return 1
+    # S1 — mint the proxy↔console hop secret ONCE per `vigil up`. It is handed ONLY to the console child
+    # (env, never argv/log) and held on the proxy server; the browser never sees it. The console verifies
+    # the per-request role HMAC under it, so a role the proxy stamps is UNFORGEABLE by any client that
+    # merely holds the shared session token. Distinct from `token` so token-possession ≠ role authority.
+    hop_key = secrets.token_urlsafe(32)
 
     # 2) offense console (read + SSE plane) and 3) offense gated api.
     # Bridge the LLM key/model the operator set in the UI (sealed on the sovereign side) into the keyless
@@ -1784,7 +1826,7 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     # it the console would mint its own token and every /offense/* call from the UI would 401. The
     # token rides the child's ENV — never argv (argv is world-readable in /proc) and never a log line.
     console_env = {**offense_llm_env, "VIGIL_LIVE_DIR": str(base.resolve()),
-                   "VIGIL_CONSOLE_TOKEN": token}
+                   "VIGIL_CONSOLE_TOKEN": token, _CONSOLE_HOP_KEY_ENV: hop_key}
     # Hand the console child the absolute `vigil` path so its graph-backed engage never SILENTLY falls back
     # to the non-graph engine when `vigil` isn't on the child's inherited PATH (venv not activated).
     vigil_bin = _console_vigil_bin(crucible_bin)
@@ -1929,7 +1971,7 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
         # The plane-control routes take the SAME session token the two federated planes take (the one
         # the cockpit printed and that is embedded in index.html), and the SAME Host/Origin allowlist
         # handed to the backends. One credential, one anti-rebinding rule — not a second, weaker path.
-        httpd = make_proxy_server(host, port, ui_dir, token=token,
+        httpd = make_proxy_server(host, port, ui_dir, token=token, hop_key=hop_key,
                                   allowed_hosts=(authority,), allowed_origins=(origin,),
                                   plane_control=plane_control)
     except (ValueError, OSError) as exc:

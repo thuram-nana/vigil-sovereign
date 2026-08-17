@@ -79,6 +79,8 @@ class _AuthHandler(http.server.BaseHTTPRequestHandler):
             "vigil_role": self.headers.get("X-VIGIL-Role", ""),
             "vigil_role_us": self.headers.get("X_VIGIL_Role", ""),   # underscore variant (advisory)
             "vigil_principal": self.headers.get("X-VIGIL-Principal", ""),
+            "vigil_role_sig": self.headers.get("X-VIGIL-Role-Sig", ""),   # S1 hop assertion
+            "vigil_role_ts": self.headers.get("X-VIGIL-Role-Ts", ""),
             "body": body.decode("utf-8", "replace"),
         })
         # A backend's OWN static index (console `__CONSOLE_TOKEN__` / cockpit `__SIGIL_TOKEN__`) embeds the
@@ -571,3 +573,74 @@ def test_fatal2_auth_path_loads_no_sovereign_module():
     assert r.returncode == 0, (
         f"offense interpreter co-loaded a sovereign/framework module (FATAL-2): "
         f"[{r.stdout.strip()}] stderr=[{r.stderr.strip()}]")
+
+
+# ==================================================================================================
+# S1 — the proxy stamps an UNFORGEABLE hop assertion the console can verify. This pins the proxy→console
+# HMAC CONTRACT: the exact field order/format the proxy signs must be the one the console verifies. The
+# console-side acceptance of this same formula is pinned in
+# framework/v2/console/tests/test_offense_rbac.py; together they close the loop.
+# ==================================================================================================
+_HOP_KEY = "proxy-hop-secret-abcdefghij0123456789"
+
+
+@pytest.fixture()
+def proxy_hop(tmp_path, monkeypatch):
+    """A proxy built WITH a hop key (what `vigil up` does), so it stamps X-VIGIL-Role-Sig/-Ts."""
+    cockpit, sov_port = _start("cockpit")
+    console, con_port = _start("console")
+    api, api_port = _start("api")
+    monkeypatch.setattr(uiproxy, "SOVEREIGN_PORT", sov_port)
+    monkeypatch.setattr(uiproxy, "CONSOLE_PORT", con_port)
+    monkeypatch.setattr(uiproxy, "API_PORT", api_port)
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "tokens.css").write_text(":root{--a:1}", encoding="utf-8")
+    (src / "components.css").write_text(".btn{color:red}", encoding="utf-8")
+    for j in uiproxy.BUNDLE_JS:
+        (src / j).write_text(f"/*{j}*/", encoding="utf-8")
+    (src / "index.html").write_text('<body data-token="__VIGIL_TOKEN__">x</body>', encoding="utf-8")
+    serve = tmp_path / "serve"
+    uiproxy.assemble_serve_dir(src, serve, token=OWNER_TOKEN)
+    port = _free_port()
+    httpd = uiproxy.make_proxy_server("127.0.0.1", port, serve, token=OWNER_TOKEN, hop_key=_HOP_KEY)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        yield {"port": port, "console": console}
+    finally:
+        httpd.shutdown(); httpd.server_close()
+        for s in (cockpit, console, api):
+            s.shutdown(); s.server_close()
+
+
+def test_proxy_stamps_a_verifiable_hop_signature_over_the_documented_fields(proxy_hop):
+    import base64 as _b64
+    import hashlib as _hl
+    import hmac as _hm
+
+    port, console = proxy_hop["port"], proxy_hop["console"]
+    # an authenticated operator POST to an offense route → the proxy forwards it, substitutes the console
+    # credential, and stamps the hop-signed role.
+    st, _ = _req(port, "POST", "/offense/api/launch/assessment",
+                 headers=_tok(OP_BEARER, {"X-Requested-With": "vigil-ui"}), body=b"{}")
+    assert st in (200, 404, 500), f"an authorized operator POST must reach the backend, got {st}"
+    rec = console.records[-1]
+    assert rec["vigil_role"] == "operator" and rec["vigil_principal"] == "op"
+    sig, ts = rec["vigil_role_sig"], rec["vigil_role_ts"]
+    assert sig and ts, "the proxy (given a hop key) must stamp X-VIGIL-Role-Sig and -Ts"
+    # recompute the HMAC over EXACTLY the documented fields (principal\nrole\nmethod\npath\nts). The path is
+    # the CONSOLE-side path (mount prefix stripped) — the same string the console verifies against.
+    msg = f"op\noperator\nPOST\n/api/launch/assessment\n{ts}".encode("utf-8")
+    expected = _b64.b64encode(_hm.new(_HOP_KEY.encode(), msg, _hl.sha256).digest()).decode("ascii")
+    assert _hm.compare_digest(expected, sig), "proxy signed a different field set than documented"
+
+
+def test_proxy_without_hop_key_stamps_no_signature(proxy):
+    # backward-compat / fail-closed: the default fixture builds the proxy with NO hop key → it stamps the
+    # role for attribution but NO signature, so a console with no hop key trusts no stamped role.
+    port, console = proxy["port"], proxy["console"]
+    _req(port, "POST", "/offense/api/launch/assessment",
+         headers=_tok(OP_BEARER, {"X-Requested-With": "vigil-ui"}), body=b"{}")
+    rec = console.records[-1]
+    assert rec["vigil_role"] == "operator"
+    assert rec["vigil_role_sig"] == "" and rec["vigil_role_ts"] == ""
