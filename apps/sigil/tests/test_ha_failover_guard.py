@@ -198,6 +198,20 @@ def test_attack2b_attacker_signed_head_correct_count_refuses(tmp_path):
     assert not v.activate and v.exit_code == 2 and "authentically owner-signed" in v.reason
 
 
+def test_malformed_head_signature_refuses_cleanly(tmp_path):
+    """ADVISORY hardening: a local head whose owner SIGNATURE bytes are malformed (non-base64) makes
+    verify_one raise. The guard must catch it and REFUSE with the documented fail-closed exit code (2), NOT
+    let it crash out as an uncaught traceback (exit 1) — mirroring the anchor-signature handler, so the
+    'fail-closed, exit 2' claim holds for this input subclass too."""
+    e2, h2 = _chain(2)
+    env = _witnessed_env(h2, tmp_path)
+    bad_sig = h2.signatures[0].model_copy(update={"signature_b64": "!!!not-base64!!!"})
+    malformed = h2.model_copy(update={"signatures": [bad_sig]})
+    v = guard.evaluate_promotion(malformed, env, scope=SCOPE, trust_root=_solo_tr(),
+                                 owner_trust_root=_owner_tr(), entries=e2)
+    assert not v.activate and v.exit_code == 2 and "malformed" in v.reason
+
+
 def test_positive_path_is_not_trivially_true(tmp_path):
     """The positive path is NOT always-true: the SAME witnessed anchor + entries + owner root ACTIVATES for a
     genuine owner-signed head, but flipping ONLY the head's signer to an attacker key flips the verdict to

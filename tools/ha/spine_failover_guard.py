@@ -182,7 +182,16 @@ def evaluate_promotion(local_head: Any, witnessed_env: str, *, scope: str, trust
                                 "cannot authenticate the local head without its live spine chain (refuse)",
                                 independent=independent, guarantee=guarantee)
     local_entries = list(entries)
-    ok_auth, auth_msg = classify_head(local_head, local_entries, owner_trust_root, floor=None)
+    try:
+        ok_auth, auth_msg = classify_head(local_head, local_entries, owner_trust_root, floor=None)
+    except Exception as e:  # noqa: BLE001 — malformed sig/key material in the local head -> fail-closed refuse
+        # Mirror the sibling anchor-signature handler above: a head whose signature/key bytes are malformed
+        # (e.g. non-base64) makes verify_one raise; catch it and REFUSE with the documented exit code rather
+        # than let it crash out as an uncaught traceback (exit 1) — so the "fail-closed, exit 2" claim holds
+        # literally for this input subclass too.
+        return PromotionVerdict(False, _EXIT_REFUSE,
+                                f"local head signature/key material is malformed (refuse): {e}",
+                                independent=independent, guarantee=guarantee)
     if not ok_auth:
         return PromotionVerdict(False, _EXIT_REFUSE,
                                 f"local head is NOT authentically owner-signed (refuse): {auth_msg}",

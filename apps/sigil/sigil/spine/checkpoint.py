@@ -192,4 +192,9 @@ def verify_checkpoint(store: SpineStore | None = None) -> tuple[bool, str]:
         floor = load_floor()                                # None if absent -> byte-identical to pre-floor
     except Exception as e:  # noqa: BLE001 — a PRESENT-but-corrupt floor is suspicious; fail CLOSED, never clean
         return False, f"durable anti-rollback floor unreadable — refuse to certify (possible tamper): {e}"
-    return classify_head(head, store.entries(), trust_root(), floor=floor)
+    try:
+        return classify_head(head, store.entries(), trust_root(), floor=floor)
+    except Exception as e:  # noqa: BLE001 — malformed head sig/key material (e.g. non-base64) makes verify_one
+        # raise; a PRESENT head whose signature material is malformed is TAMPER — fail CLOSED with a clean
+        # head-FAIL (so `sigil verify` exits 2), never an uncaught traceback (exit 1).
+        return False, f"head signature/key material is malformed — refuse to certify (possible tamper): {e}"
