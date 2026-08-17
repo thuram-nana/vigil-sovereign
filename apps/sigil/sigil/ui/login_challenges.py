@@ -29,29 +29,76 @@ from pathlib import Path
 # so a couple of minutes is ample and bounds the window in which a leaked (but unused) challenge is live.
 _DEFAULT_TTL_SECONDS = 120.0
 
+# Hard cap on OUTSTANDING (live, unconsumed) challenge markers. The per-mint sweep already removes every
+# EXPIRED marker (the primary bound — a marker older than the TTL is dead), so at steady state the count is
+# tiny; the cap is a secondary defence against a burst that mints faster than the TTL clears, so the dir can
+# never grow without bound (inode/disk exhaustion). `/api/login/challenge` is token-free, so this endpoint
+# is the exhaustion vector the cap closes. Chosen generously so a legitimate mint→consume flow (challenges
+# spent within seconds) never approaches it — only sustained abuse does.
+_DEFAULT_MAX_OUTSTANDING = 8192
+
 
 class ChallengeLedger:
     """A durable, atomic single-use ledger of OUTSTANDING login challenges — one marker file per challenge,
     where the atomic exclusive-create (mint) and atomic unlink (consume) are the serialization points that
-    make single-use hold even under concurrent consumers. `path` is the marker directory."""
+    make single-use hold even under concurrent consumers. `path` is the marker directory. The ledger is
+    BOUNDED: each mint first sweeps expired markers and then refuses if the live count is at the cap."""
 
-    def __init__(self, path: "str | os.PathLike", *, ttl_seconds: float = _DEFAULT_TTL_SECONDS) -> None:
+    def __init__(self, path: "str | os.PathLike", *, ttl_seconds: float = _DEFAULT_TTL_SECONDS,
+                 max_outstanding: int = _DEFAULT_MAX_OUTSTANDING) -> None:
         self.dir = Path(path)
         self.ttl = float(ttl_seconds)
+        self.max_outstanding = int(max_outstanding)
 
     def _marker(self, challenge: str) -> Path:
         digest = hashlib.sha256(challenge.encode("utf-8")).hexdigest()   # fixed [0-9a-f]{64}: no traversal
         return self.dir / digest
 
+    @staticmethod
+    def _unlink(path: str) -> None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass                                             # already gone (concurrent consume/sweep) → fine
+
+    def _sweep(self, now: float) -> int:
+        """Remove every EXPIRED or unreadable/corrupt marker (all dead), returning the count of LIVE
+        (unexpired) markers that remain. This is what bounds the ledger: an unconsumed challenge is reaped
+        once its TTL passes instead of lingering forever. Race-safe: it only ever `os.unlink`s a marker
+        (atomic; a marker a concurrent consumer already removed just raises FileNotFoundError → ignored), so
+        it can never resurrect a spent challenge nor let one be consumed twice — a swept challenge is simply
+        refused at consume (correct: it was expired/dead)."""
+        live = 0
+        try:
+            entries = list(os.scandir(self.dir))
+        except OSError:
+            return 0
+        for entry in entries:
+            try:
+                issued_at = float(Path(entry.path).read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                self._unlink(entry.path)                     # unreadable / corrupt marker → reap it
+                continue
+            if now - issued_at > self.ttl:
+                self._unlink(entry.path)                     # expired → dead, reap it
+            else:
+                live += 1
+        return live
+
     def issue(self, challenge: str, *, now: "float | None" = None) -> None:
-        """Record a freshly-minted challenge as OUTSTANDING (single-use). `O_CREAT | O_EXCL` create: a
-        duplicate challenge (astronomically unlikely for a 32-byte token) refuses rather than silently
-        reissue. Raises on a blank challenge or a real I/O error (the caller then serves no challenge)."""
+        """Record a freshly-minted challenge as OUTSTANDING (single-use). Sweeps expired markers first (the
+        bound), then refuses if the ledger is at capacity, then `O_CREAT | O_EXCL`-creates the marker (a
+        duplicate challenge — astronomically unlikely for a 32-byte token — refuses rather than silently
+        reissue). Raises on a blank challenge, a full ledger, or a real I/O error (the caller then serves no
+        challenge). The sweep + cap keep a legitimate mint→consume flow unaffected while bounding stale
+        accumulation."""
         c = str(challenge or "").strip()
         if not c:
             raise ValueError("refusing to issue an empty login challenge")
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         t = time.time() if now is None else float(now)
+        if self._sweep(t) >= self.max_outstanding:          # reap expired, then hard-cap the live set
+            raise RuntimeError(f"login-challenge ledger at capacity ({self.max_outstanding}); retry shortly")
         marker = self._marker(c)
         fd = os.open(str(marker), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)   # FileExistsError on a dup
         with os.fdopen(fd, "w", encoding="utf-8") as fh:

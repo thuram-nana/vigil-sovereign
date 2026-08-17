@@ -125,6 +125,73 @@ def test_mint_session_bearer_rotates_a_fresh_working_bearer_preserving_identity(
     assert reg.account("erin").user_pubkey == user.public_key_b64
 
 
+# ===================== conditional-core / no-lockout regression (BLOCK-1) =========
+
+def test_a_pre_slice_7field_grant_still_resolves_and_folds():
+    """A grant produced with the OLD 7-field core (signed BEFORE this slice — no user_pubkey key at all)
+    must still verify, fold to an active Account, and resolve its bearer under the new code. An UNCONDITIONAL
+    8-field core would have appended `"user_pubkey":null` to the canonical bytes and broken this signature —
+    locking out every account the already-merged create_account/assign_role flow made."""
+    from sigil.governor import accounts as acc
+    from sigil.governor.authn import signed_payload
+    from sigil.reuse import sha256_hex
+    owner = generate_keypair()
+    s = _store()
+    reg = _reg(s, owner)
+    salt, bearer = "ab" * 16, "PRESLICE-BEARER-" + "z" * 16
+    old_core = {"signal": acc.SIGNAL, "username": "legacy", "role": "operator",
+                "cred_hash": sha256_hex((salt + bearer).encode("utf-8")), "cred_salt": salt,
+                "state": "active", "issued_at": 5.0}                 # exactly the pre-slice 7 fields, no key
+    s.append(kind="event", source="governor", actor="WARDEN",
+             payload={**signed_payload(old_core, owner), "by": "owner"})
+    assert reg.resolve(bearer) == Principal(username="legacy", role="operator")
+    a = reg.account("legacy")
+    assert a is not None and a.state == "active" and a.user_pubkey is None
+
+
+def test_keyless_create_core_is_byte_identical_to_pre_slice_7field():
+    """A new KEYLESS create_account signs a core BYTE-IDENTICAL to the hand-built 7-field canonical form
+    (no `user_pubkey` key present, so canonical_json matches pre-slice exactly)."""
+    from sigil.governor.accounts import _BASE_CORE, _core_fields
+    from sigil.reuse import canonical_json
+    owner = generate_keypair()
+    s = _store()
+    seq = _reg(s, owner).create("kl", "viewer", bearer_token="KL" * 20, issued_at=_issue())
+    pay = s.get(seq).payload
+    assert "user_pubkey" not in pay                                  # the key is OMITTED, not null
+    assert _core_fields(pay) == _BASE_CORE                           # verify derives the 7-field set
+    signed_over = {k: pay.get(k) for k in _core_fields(pay)}
+    hand_built_7 = {k: pay.get(k) for k in _BASE_CORE}
+    assert canonical_json(signed_over) == canonical_json(hand_built_7)   # byte-identical to pre-slice
+
+
+def test_malleability_inverse_strip_and_add_key_both_fail_verify():
+    """The inverse of a bound-key grant must stay closed. Because the verify field set is DERIVED from the
+    payload's actual user_pubkey presence: STRIPPING a bound key verifies over 7 fields → the 8-field sig
+    fails; ADDING a key to an old keyless grant verifies over 8 fields → the 7-field sig fails."""
+    from sigil.governor import accounts as acc
+    from sigil.governor.accounts import _core_fields
+    from sigil.governor.authn import verify_signed
+    owner = generate_keypair()
+    user = generate_keypair()
+    op = owner.public_key_b64
+    s = _store()
+    reg = _reg(s, owner)
+    keyless_seq = reg.create("kl", "viewer", bearer_token="KL" * 20, issued_at=_issue())
+    reg.enroll_pubkey("kl", user.public_key_b64, issued_at=_issue())
+    keyless = s.get(keyless_seq).payload                             # signed over 7 (no key)
+    keyed = [r.payload for r in s.iter_records(since_seq=-1)
+             if r.payload.get("signal") == acc.SIGNAL and r.payload.get("user_pubkey")][-1]  # signed over 8
+    assert verify_signed(keyed, _core_fields(keyed), op) is True     # genuine keyed grant verifies (8)
+    assert verify_signed(keyless, _core_fields(keyless), op) is True  # genuine keyless grant verifies (7)
+    # STRIP the bound key from the keyed grant → now verifies over 7, but the sig was over 8 → FAIL
+    stripped = {k: v for k, v in keyed.items() if k != "user_pubkey"}
+    assert verify_signed(stripped, _core_fields(stripped), op) is False
+    # ADD a key to the keyless grant → now verifies over 8, but the sig was over 7 → FAIL
+    added = {**keyless, "user_pubkey": user.public_key_b64}
+    assert verify_signed(added, _core_fields(added), op) is False
+
+
 # =============================== challenge ledger =================================
 
 def test_challenge_ledger_is_single_use_and_ttl_bounded():
@@ -135,6 +202,34 @@ def test_challenge_ledger_is_single_use_and_ttl_bounded():
     assert led.consume("never-issued") is False               # unknown challenge → refused
     led.issue("chal-B", now=1000.0)
     assert led.consume("chal-B", now=2000.0) is False         # past TTL → refused (and cleaned)
+
+
+def test_challenge_ledger_sweeps_expired_so_it_is_bounded():
+    """Finding-3: each mint sweeps expired markers, so an unconsumed challenge does not linger forever
+    (unbounded inode/disk growth). Reproduce: 3 live markers, then one mint past the TTL reaps all 3."""
+    import os
+    led = ChallengeLedger(tempfile.mktemp(suffix=".chal"), ttl_seconds=10.0, max_outstanding=100)
+    for i in range(3):
+        led.issue(f"c{i}", now=0.0)
+    assert len(os.listdir(led.dir)) == 3                      # all live at t=0
+    led.issue("fresh", now=100.0)                             # t=100 > TTL: the 3 old markers are swept
+    assert len(os.listdir(led.dir)) == 1                      # only the fresh one remains — bounded
+    assert led.consume("c0", now=100.0) is False             # a swept (expired) challenge is refused
+
+
+def test_challenge_ledger_hard_caps_live_mints():
+    """Finding-3: above the cap of LIVE (unexpired) markers the mint is refused, so a burst that outruns the
+    TTL sweep can't grow the ledger without bound. A consume frees a slot; the legit flow is unaffected."""
+    import os
+    led = ChallengeLedger(tempfile.mktemp(suffix=".chal"), ttl_seconds=1000.0, max_outstanding=4)
+    for i in range(4):
+        led.issue(f"k{i}", now=0.0)                           # 4 live, none expired
+    with pytest.raises(RuntimeError):
+        led.issue("overflow", now=1.0)                        # at cap, sweep frees nothing → refuse
+    assert len(os.listdir(led.dir)) == 4                      # never exceeds the cap
+    assert led.consume("k0", now=1.0) is True                 # freeing a slot…
+    led.issue("nowfits", now=1.0)                             # …lets a subsequent legit mint through
+    assert led.consume("nowfits", now=1.0) is True
 
 
 # =============================== HTTP lane ========================================

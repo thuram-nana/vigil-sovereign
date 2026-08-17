@@ -87,6 +87,7 @@ DOMAIN_TAGS: dict[str, bytes] = {
     "capability": b"vigil-capability-v1\x00",                  # VF re-verification capability (base)
     "attenuation": b"vigil-capability-attenuation-v1\x00",     # VF biscuit-style narrow-only attenuation
     "wielder-pop": b"vigil-capability-wielder-pop-v1\x00",     # VF wielder proof-of-possession over a challenge
+    "login-pop": b"vigil-login-pop-v1\x00",                     # S3 per-user login proof-of-possession over a challenge
 }
 
 

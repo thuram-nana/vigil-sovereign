@@ -35,6 +35,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from vigil_core.spine_domains import DOMAIN_TAGS
+
 from ..bridge.daemon import bind_ok
 from ..config import SPINE_PATH
 from ..reuse import verify_one
@@ -48,8 +50,10 @@ _CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors
 
 # S3 proof-of-possession login: the domain-separated message a user signs is DOMAIN_TAG + the raw challenge
 # bytes. The tag (a versioned, NUL-terminated label) namespaces the signature so a login proof can never be
-# a valid signature for any OTHER protocol that reuses the same user key, and vice-versa.
-_LOGIN_POP_DOMAIN_TAG = b"vigil-login-pop-v1\x00"
+# a valid signature for any OTHER protocol that reuses the same user key, and vice-versa. Sourced from the
+# ONE registry of VIGIL's signed spine/log domains (`vigil_core.spine_domains`) rather than a local literal,
+# so the registry stays complete and the two can never drift.
+_LOGIN_POP_DOMAIN_TAG = DOMAIN_TAGS["login-pop"]
 
 
 class UIServer(ThreadingHTTPServer):

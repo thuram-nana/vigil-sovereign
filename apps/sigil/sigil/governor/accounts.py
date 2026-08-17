@@ -99,11 +99,29 @@ PERMISSION_BY_ACTION: dict[str, Optional[str]] = {
 # The owner-signed authenticated CORE. `issued_at` MUST be inside it (outside, an attacker could re-stamp a
 # captured grant's freshness past the high-water without breaking the signature — exactly the replay this
 # guard refuses); `cred_hash`/`cred_salt`/`role`/`username` MUST be inside it so an owner-signed grant for
-# one principal can never be re-aimed at another or have its role/credential rewritten. `user_pubkey` (S3 —
-# the owner-bound Ed25519 login identity) rides inside it too, so a forged/unsigned key binding never
-# verifies in the fold (a user can never mint its own trust — single-owner doctrine). It is ALWAYS present
-# in the signed core (None ⇒ bearer-only), so signing and verification agree on every grant.
-_CORE = ("signal", "username", "role", "cred_hash", "cred_salt", "state", "issued_at", "user_pubkey")
+# one principal can never be re-aimed at another or have its role/credential rewritten.
+_BASE_CORE = ("signal", "username", "role", "cred_hash", "cred_salt", "state", "issued_at")
+
+
+def _core_fields(payload: dict) -> "tuple[str, ...]":
+    """The signed core field set for an accounts grant — CONDITIONAL on the payload itself: the 7 base
+    fields ALWAYS, plus `user_pubkey` (S3 — the owner-bound Ed25519 login identity) IFF the grant actually
+    carries a truthy bound key. Scoped to this module (NOT baked into the shared `authn.verify_signed`), so
+    every other record type is untouched.
+
+    This conditional encoding keeps two properties at once:
+      * a PRE-SLICE grant AND a new KEYLESS `create_account`/`assign_role` grant both canonicalize to the
+        7-field form BYTE-IDENTICALLY to before this slice — so their existing owner signature still verifies
+        and no account is silently locked out on upgrade (an UNCONDITIONAL 8-field core would append
+        `"user_pubkey":null` to the canonical bytes and break every pre-slice signature);
+      * a KEYED `enroll_pubkey` grant signs+verifies over 8 fields, so the binding rides inside the owner
+        signature and a forged/unsigned binding is refused.
+
+    It also keeps the malleability inverse CLOSED, because the field set is DERIVED from the payload's actual
+    `user_pubkey` presence: STRIPPING a bound key (present the grant without it) verifies over 7 fields and
+    the 8-field signature FAILS; ADDING a key to an old grant verifies over 8 fields and the 7-field
+    signature FAILS. Neither tamper survives."""
+    return _BASE_CORE + (("user_pubkey",) if payload.get("user_pubkey") else ())
 
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -271,8 +289,13 @@ class AccountsRegistry:
     def _append_active(self, username: str, role: str, *, cred_hash: str, cred_salt: str,
                        issued_at: float, user_pubkey: Optional[str] = None) -> int:
         core = {"signal": SIGNAL, "username": username, "role": role, "cred_hash": cred_hash,
-                "cred_salt": cred_salt, "state": "active", "issued_at": float(issued_at),
-                "user_pubkey": user_pubkey}
+                "cred_salt": cred_salt, "state": "active", "issued_at": float(issued_at)}
+        if user_pubkey:
+            # CONDITIONALLY signed: included ONLY when a key is bound, so a keyless grant canonicalizes to
+            # the 7-field form byte-identically to the pre-slice encoding (see `_core_fields`). `signed_payload`
+            # signs exactly the dict it is given, and verification re-derives the same field set from the
+            # payload — so sign and verify agree without an unconditional `"user_pubkey":null`.
+            core["user_pubkey"] = user_pubkey
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"account {username} → {role} (owner-signed grant)"}
@@ -298,8 +321,9 @@ class AccountsRegistry:
             if st == "revoked":
                 state[username] = "revoked"          # honor ANY revoke (even unsigned) — the safe direction
             elif st == "active":
-                if not verify_signed(p, _CORE, self.trusted_pubkey):
+                if not verify_signed(p, _core_fields(p), self.trusted_pubkey):
                     continue                          # fail-closed: an unsigned/forged grant is not counted
+                    #                                   (field set derived from the payload — see _core_fields)
                 at = as_issued_at(p.get("issued_at"))
                 if at <= issued.get(username, NO_HIGHWATER):
                     continue                          # REPLAY / stale re-append of an already-honored grant
