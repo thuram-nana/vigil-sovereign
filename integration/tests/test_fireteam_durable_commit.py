@@ -33,6 +33,7 @@ the path writable again for the retry.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 
@@ -175,9 +176,9 @@ def test_mutation_swallowing_the_durable_append_failure_reintroduces_the_defect(
     # report success, so _finish records + returns APPROVED regardless of durability.
     orig_append = ConfirmationRegistry._append_ledger
 
-    def _swallow(self, record):
-        orig_append(self, record)      # attempt the real append (fails, writes nothing at rest)
-        return True                    # ...and swallow the failure, exactly as the old _emit did
+    def _swallow(self, record, *, fsync=False):
+        orig_append(self, record, fsync=fsync)   # attempt the real append (fails, writes nothing at rest)
+        return True                              # ...and swallow the failure, exactly as the old _emit did
 
     monkeypatch.setattr(ConfirmationRegistry, "_append_ledger", _swallow)
 
@@ -256,3 +257,127 @@ def test_in_memory_no_ledger_path_is_unchanged(tmp_path):
     env = sign_escalation_approval(priv, key_id=kid, key=key2)
     res2 = reg2.resolve(key2, env)
     assert res2.outcome == ConfirmationOutcome.APPROVED and res2.approved is True
+
+
+# --- ADVISORY-1: correlated-failure (ENOSPC) liveness — a mid-write claim failure self-cleans ----------
+
+
+def test_correlated_failure_leaves_no_stale_marker_and_a_restart_retry_recovers(tmp_path, monkeypatch):
+    """ADVISORY-1 (correlated failure / disk-full). The CAS marker's O_EXCL create SUCCEEDS (0-byte) but the
+    subsequent write FAILS with ENOSPC — the same correlated condition (disk-full / read-only mount) that
+    fails the ledger append. ``claim()`` self-cleans the marker IT created, so NO stale marker survives to
+    block future claims: the escalation is NOT permanently un-approvable. After recovery a FRESH registry
+    (restart / failover) re-claims the key and durably commits APPROVED.
+
+    Mutation sensitivity: the pre-advisory ``claim()`` (which returned False WITHOUT unlinking) would leave a
+    stale marker here -> the ``not os.path.exists(marker)`` assertion, and the restart-retry APPROVED, both
+    flip to failing."""
+    kid, pub, priv = _identity()
+    led_path = str(tmp_path / "eng.escalations.jsonl")
+    trusted = {kid: pub}
+    reg = ConfirmationRegistry(ledger=EscalationLedger(led_path), trusted_approvers=trusted)
+    key = reg.register(_esc(seq=1))              # durable register, BEFORE the failure is injected
+    env = sign_escalation_approval(priv, key_id=kid, key=key)
+
+    marker = os.path.join(led_path + ".cas", _key_digest(key))
+    target_digest = _key_digest(key).encode("ascii")
+    real_write = os.write
+
+    def _enospc_on_marker(fd, data):
+        # ONLY the marker write for THIS key fails (its O_EXCL create already succeeded) — the correlated
+        # ENOSPC that in reality also fails the ledger append.
+        try:
+            payload = bytes(data)
+        except TypeError:
+            payload = data
+        if payload == target_digest:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", _enospc_on_marker)
+    live = reg.resolve(key, env)
+    assert live.approved is False                                 # not actionable (fail-closed)
+    assert not os.path.exists(marker)                            # SELF-CLEAN: no stale marker left behind
+    assert _approved_terminal_lines(led_path) == []              # nothing durable was written as an allow
+
+    # --- recovery: storage healthy again, a FRESH registry (restart) re-claims and durably commits ---
+    monkeypatch.setattr(os, "write", real_write)
+    fresh = ConfirmationRegistry(ledger=EscalationLedger(led_path), trusted_approvers=trusted)
+    assert fresh.pending_keys() == [key]                          # recovered — NOT permanently un-approvable
+    recovered = fresh.resolve(key, env)
+    assert recovered.outcome == ConfirmationOutcome.APPROVED and recovered.approved is True
+    again = ConfirmationRegistry(ledger=EscalationLedger(led_path), trusted_approvers=trusted)
+    assert again.resolution(key).approved is True
+    assert len(_approved_terminal_lines(led_path)) == 1          # exactly one durable terminal
+
+
+def test_loser_cleanup_never_unlinks_a_concurrent_winners_marker(tmp_path):
+    """ADVISORY-1 safety: self-clean removes ONLY a marker THIS call created via O_EXCL. A LOSER hits
+    ``FileExistsError`` (before any create) and returns without unlinking, so a concurrent legitimate
+    winner's marker is never removed — the loser adopts the coordinated winner, exactly one terminal."""
+    kid, pub, priv = _identity()
+    led_path = str(tmp_path / "eng.escalations.jsonl")
+    trusted = {kid: pub}
+    key = ConfirmationRegistry(ledger=EscalationLedger(led_path),
+                               trusted_approvers=trusted).register(_esc(seq=1))
+
+    reg_win = ConfirmationRegistry(ledger=EscalationLedger(led_path), trusted_approvers=trusted)
+    reg_lose = ConfirmationRegistry(ledger=EscalationLedger(led_path), trusted_approvers=trusted)
+
+    env = sign_escalation_approval(priv, key_id=kid, key=key)
+    assert reg_win.resolve(key, env).outcome == ConfirmationOutcome.APPROVED   # winner claims + commits
+    marker = os.path.join(led_path + ".cas", _key_digest(key))
+    assert os.path.exists(marker)                                             # winner holds its marker
+
+    lose_res = reg_lose.reject(key, "member declined")           # loser: FileExistsError -> adopt winner
+    assert lose_res.outcome == ConfirmationOutcome.APPROVED and lose_res.approved is True
+    assert os.path.exists(marker)                                             # winner's marker UNTOUCHED
+    assert len(_approved_terminal_lines(led_path)) == 1                       # exactly one terminal
+
+
+# --- ADVISORY-2: the authoritative APPROVED terminal is power-loss durable (fsync) --------------------
+
+
+def test_authoritative_approved_terminal_is_fsynced_non_approval_is_not(tmp_path, monkeypatch):
+    """ADVISORY-2: the AUTHORITATIVE APPROVED terminal (the record that authorizes the dangerous action) is
+    appended with ``fsync=True`` (power-loss durable); a non-approval (register / reject) stays best-effort
+    (``fsync=False`` — a lost non-approval merely reappears pending, fail-safe)."""
+    kid, pub, priv = _identity()
+    led_path = str(tmp_path / "eng.escalations.jsonl")
+    trusted = {kid: pub}
+
+    calls: list = []
+    real_append = EscalationLedger.append
+
+    def _spy(self, record, *, fsync=False):
+        calls.append((str(record.get("event")), fsync))
+        return real_append(self, record, fsync=fsync)
+
+    monkeypatch.setattr(EscalationLedger, "append", _spy)
+
+    reg = ConfirmationRegistry(ledger=EscalationLedger(led_path), trusted_approvers=trusted)
+    key = reg.register(_esc(seq=1))
+    env = sign_escalation_approval(priv, key_id=kid, key=key)
+    assert reg.resolve(key, env).outcome == ConfirmationOutcome.APPROVED
+
+    assert ("approved", True) in calls          # the actionable terminal is fsync'd (power-loss durable)
+    assert ("register", False) in calls          # a non-approval stays cheap best-effort
+    assert ("approved", False) not in calls      # the approved terminal is NEVER appended without fsync
+
+
+def test_fsync_failure_on_the_authoritative_append_reports_not_durable(tmp_path, monkeypatch):
+    """ADVISORY-2 contract: an ``fsync`` that itself fails means the record is NOT durable, so ``append``
+    returns False -> the caller fails closed rather than call a non-durable terminal committed. The
+    best-effort (``fsync=False``) path never calls fsync and is unaffected."""
+    led = EscalationLedger(str(tmp_path / "x.escalations.jsonl"))
+    rec = {"event": "approved", "wave_id": "w", "member_id": "m", "seq": 1, "approved": True}
+
+    assert led.append(rec, fsync=True) is True                   # fsync works -> durable
+
+    def _boom(_fd):
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(os, "fsync", _boom)
+    assert led.append(rec, fsync=True) is False                  # fsync failed -> reported NOT durable
+    # a best-effort (non-approval) append never calls fsync, so the fsync failure does not affect it
+    assert led.append({"event": "rejected", "wave_id": "w", "member_id": "m", "seq": 2}, fsync=False) is True

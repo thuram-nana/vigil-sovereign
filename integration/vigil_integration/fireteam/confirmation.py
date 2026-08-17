@@ -28,6 +28,15 @@ approver key and BOUND to this exact ``(wave_id, member_id, seq, "approved", Tru
 approval is missing / invalid / unbound / flipped **degrades to REJECTED** on rehydration (never APPROVED)
 — this is the fix for the pre-Tier-B defect where ``_apply_record`` trusted the raw ``rec["approved"]``.
 
+DURABLE-BEFORE-ACTIONABLE (DEFECT 2). A signed APPROVED authorizes a dangerous action, so it is recorded
+in-memory / returned as an allow ONLY AFTER its terminal is durably committed to the ledger — the append is
+done FIRST and its result CHECKED (:meth:`ConfirmationRegistry._finish`), and for the AUTHORITATIVE APPROVED
+terminal it is ``fsync``'d (POWER-LOSS durable, matching the fsync the coordination marker already gets), so
+a valid-but-not-durable approval can never be actionable while a restart/failover reader sees no terminal.
+If the durable commit fails it FAILS CLOSED (non-actionable, escalation stays PENDING, the atomic claim is
+RELEASED and self-cleans any mid-write marker) so a retry, once storage recovers, can durably commit. A lost
+REJECT/EXPIRE stays best-effort — it merely reappears pending on a fresh reader, which is fail-SAFE.
+
 ATOMIC RESOLVE (Tier-B). Two resolver processes over one ledger cannot reach DIVERGENT terminals: the
 first terminal for a key wins an O_EXCL single-terminal claim (:class:`_TerminalCas`, the LAP-3b
 NonceLedger precedent); a later divergent resolver LOSES the atomic race and adopts the durable,
@@ -197,7 +206,16 @@ class _TerminalCas:
     def claim(self, key: tuple[str, str, int]) -> bool:
         """True iff THIS caller atomically won the single terminal for ``key``. False iff a prior/concurrent
         resolver already claimed it (``FileExistsError``) OR the reservation could not be made durably (any
-        other I/O error) — in both cases the caller must NOT persist a maybe-divergent terminal (fail-closed)."""
+        other I/O error) — in both cases the caller must NOT persist a maybe-divergent terminal (fail-closed).
+
+        SELF-CLEANING (correlated-failure liveness). The O_EXCL create can SUCCEED (a 0-byte marker needs no
+        data block) while the subsequent ``os.write``/``os.fsync`` FAILS under a CORRELATED failure —
+        ENOSPC / a read-only mount over the whole engagement dir, the most likely reason the ledger append
+        also fails. That would leave a STALE marker that blocks EVERY future claim for the key, making the
+        escalation permanently un-approvable even across a restart. So if a write/fsync fails AFTER our own
+        O_EXCL create, we ``unlink`` the marker WE just created before returning False. We only ever remove
+        THIS call's own O_EXCL-created marker (never one a concurrent winner legitimately holds — that path
+        returns at the ``FileExistsError`` above, before any create)."""
         if not self._dir:
             return True  # no durable substrate ⇒ single process; the in-memory _resolved dict already serializes
         try:
@@ -207,11 +225,20 @@ class _TerminalCas:
                 fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             except FileExistsError:
                 return False  # a concurrent resolver already fixed this key's terminal — we LOST the race
+            # From here the marker is unambiguously OURS (O_EXCL guarantees we created it this call). If
+            # finalizing the reservation fails, unlink our own marker so no stale marker survives to block a
+            # post-recovery retry.
             try:
                 os.write(fd, _key_digest(key).encode("ascii"))
                 os.fsync(fd)
-            finally:
+            except OSError:
                 os.close(fd)
+                try:
+                    os.unlink(marker)   # remove ONLY the marker THIS call created (self-clean)
+                except OSError:
+                    pass
+                return False
+            os.close(fd)
             self._fsync_dir()
             return True
         except OSError:
@@ -319,10 +346,17 @@ class EscalationLedger:
         Derived, not created here (construction never touches the filesystem)."""
         return (self._path + ".cas") if self._path else ""
 
-    def append(self, record: Mapping[str, Any]) -> bool:
+    def append(self, record: Mapping[str, Any], *, fsync: bool = False) -> bool:
         """Append ONE record as a JSON line, fail-open. Returns ``True`` iff a whole line was durably
         written; ``False`` — never raising — on any missing-path / non-mapping / encode / oversize / IO
-        failure. Best-effort by contract: a ledger write must never break the registry that produced it."""
+        failure. Best-effort by contract: a ledger write must never break the registry that produced it.
+
+        ``fsync=True`` makes the append POWER-LOSS durable (``os.fsync`` before returning ``True``) — used
+        for the AUTHORITATIVE signed APPROVED terminal, the record that authorizes a dangerous action, so
+        "durably committed" is not merely written-to-page-cache. An fsync that itself fails (ENOSPC/EIO)
+        propagates to the fail-open guard and returns ``False`` — correctly refusing to call a non-durable
+        terminal committed (the caller then fails closed / retries). Non-approval events keep the cheaper
+        best-effort default: a lost reject/expire merely reappears pending on a fresh reader (fail-safe)."""
         if not self._path or not isinstance(record, Mapping):
             return False
         try:
@@ -349,6 +383,11 @@ class EscalationLedger:
                     if n <= 0:
                         return False
                     mv = mv[n:]
+                if fsync:
+                    # POWER-LOSS durability for the authoritative terminal: flush the appended bytes to
+                    # stable storage before we report success. A failing fsync raises -> fail-open -> False,
+                    # so a terminal that is not truly durable is never reported committed.
+                    os.fsync(fd)
             finally:
                 os.close(fd)
             return True
@@ -525,16 +564,17 @@ class ConfirmationRegistry:
         """The single canonical shape of a ledger/spine event line for ``key``."""
         return {"event": event, "wave_id": key[0], "member_id": key[1], "seq": key[2], **detail}
 
-    def _append_ledger(self, record: dict[str, Any]) -> bool:
+    def _append_ledger(self, record: dict[str, Any], *, fsync: bool = False) -> bool:
         """Append ONE record to the durable ledger. Returns ``True`` iff it was durably written OR there is
-        no ledger backing (nothing to persist). :meth:`EscalationLedger.append` is already total (never
-        raises, ``False`` on any failure); the guard is defence-in-depth. Callers that gate an actionable
-        allow on durability (see :meth:`_finish`) MUST check this return — a swallowed ``False`` is the
-        DEFECT 2 durability-ordering bug (a valid-but-not-durable APPROVED becoming actionable)."""
+        no ledger backing (nothing to persist). ``fsync=True`` demands POWER-LOSS durability (used for the
+        authoritative APPROVED terminal). :meth:`EscalationLedger.append` is already total (never raises,
+        ``False`` on any failure); the guard is defence-in-depth. Callers that gate an actionable allow on
+        durability (see :meth:`_finish`) MUST check this return — a swallowed ``False`` is the DEFECT 2
+        durability-ordering bug (a valid-but-not-durable APPROVED becoming actionable)."""
         if self._ledger is None:
             return True
         try:
-            return bool(self._ledger.append(record))
+            return bool(self._ledger.append(record, fsync=fsync))
         except Exception:  # noqa: BLE001 — a ledger write must never break the registry
             return False
 
@@ -618,7 +658,10 @@ class ConfirmationRegistry:
         # registry has no ledger, so this branch is skipped and behaviour is unchanged.)
         if outcome == ConfirmationOutcome.APPROVED and self._ledger is not None:
             record = self._new_record(outcome.value, key, detail)
-            if not self._append_ledger(record):
+            # fsync=True: the authoritative signed terminal must be POWER-LOSS durable before it is actionable
+            # (the coordination marker is already fsync'd — the terminal that authorizes the action must be
+            # too, not merely written to page-cache).
+            if not self._append_ledger(record, fsync=True):
                 # FAIL CLOSED: the approval VERIFIED but is NOT yet durable. Do NOT record it as ``_resolved``
                 # (so a later in-process call does not return it APPROVED), keep the escalation PENDING (we
                 # neither pop ``_pending`` nor persist a terminal — it stays resolvable), and RELEASE the
