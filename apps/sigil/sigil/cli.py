@@ -672,11 +672,19 @@ def cmd_bridge_serve(a) -> None:
 
 
 def cmd_verify(a) -> None:
+    from . import config
     ok, msg = SpineStore().verify()
     print(("chain OK: " if ok else "chain FAIL: ") + msg)
     hok, hmsg = verify_checkpoint()
-    print(("head  OK: " if hok else "head  --: ") + hmsg)
-    sys.exit(0 if ok else 2)
+    # A head that EXISTS but does NOT authenticate (absent/bad owner signature, rewritten, or stale) is a
+    # HARD, fail-closed failure: `sigil verify` is the composition point that ENFORCES head authentication
+    # for the HA failover interlock (docs/architecture/HA-PROFILE.md §3.3) — even if the promotion guard is
+    # bypassed, a passive whose head is not authentically owner-signed fails `sigil verify`. A spine with NO
+    # head yet (never `sigil sign`ed) stays tolerated: only its chain integrity is asserted (byte-identical
+    # to the pre-hardening behavior), so bootstrap/ingest flows are unaffected.
+    head_present = config.HEAD_PATH.exists()
+    print((("head  OK: " if hok else ("head  FAIL: " if head_present else "head  --: ")) + hmsg))
+    sys.exit(0 if (ok and (hok or not head_present)) else 2)
 
 
 def cmd_status(a) -> None:
@@ -870,6 +878,27 @@ def cmd_spine(a) -> None:
             print(f"  seg-{s['id']:08d} {s['codec']:4} {where:24} {s['bytes']:>13,} bytes  {s['file']}")
 
 
+def _load_failover_guard():
+    """Load tools/ha/spine_failover_guard.py (sovereign-side) from the repo, so `sigil floor
+    promote-passive` and the standalone guard share ONE implementation and cannot diverge. Loaded by
+    file path (the tools/ dir is not an installed package) — FATAL-2-clean: it imports only sigil +
+    vigil_core/vigil_integration, all already importable here on the sovereign side."""
+    import importlib.util
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[3]           # apps/sigil/sigil/cli.py -> repo root
+    guard_path = repo / "tools" / "ha" / "spine_failover_guard.py"
+    if not guard_path.exists():
+        print(f"!! failover guard not found at {guard_path}", file=sys.stderr)
+        sys.exit(2)
+    spec = importlib.util.spec_from_file_location("spine_failover_guard", guard_path)
+    mod = importlib.util.module_from_spec(spec)
+    # Register BEFORE exec: the module's @dataclass resolves its own annotations via
+    # sys.modules[__module__], which is None for an unregistered spec-loaded module (TypeError at import).
+    sys.modules.setdefault("spine_failover_guard", mod)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def cmd_floor(a) -> None:
     """The durable external anti-rollback floor (hard-prune C1). `status` prints it (read-only). `reset`
     DELIBERATELY re-seeds it downward to the current spine — the only path that may lower it — for a
@@ -962,6 +991,36 @@ def cmd_floor(a) -> None:
             print("   note: for full pruned-PREFIX byte-identity (catches a fork-then-extend above this "
                   "height), also run `sigil checkpoint verify --external <path>`.")
         sys.exit(0 if ok else 2)
+    elif a.action == "promote-passive":
+        # HA active-passive FAILOVER INTERLOCK (Claim 6 Piece B). Refuse to promote this passive to ACTIVE
+        # if its local synced head is BELOW an off-box witnessed checkpoint — a stale mirror must never roll
+        # the durable floor back. Shares the exact logic of tools/ha/spine_failover_guard.py (loaded from the
+        # repo) so the standalone tool and this verb cannot diverge. See docs/architecture/HA-PROFILE.md §3.
+        from pathlib import Path
+
+        from .spine.checkpoint import _read_head_on_disk
+        if not a.witnessed:
+            print("!! promote-passive needs --witnessed <path|-> (the OFF-BOX retained witnessed checkpoint "
+                  "the passive must not roll back below)", file=sys.stderr)
+            sys.exit(2)
+        guard = _load_failover_guard()
+        W, config, roster_path, tip_path, owner_pub = _witness_ctx()
+        try:
+            _roster, tr = _witness_trust_root(W, config, roster_path, owner_pub)
+        except W.WitnessError as e:
+            print(f"!! promote-passive refused (witness roster error): {e}", file=sys.stderr)
+            sys.exit(2)
+        data = sys.stdin.read() if a.witnessed == "-" else Path(a.witnessed).read_text(encoding="utf-8")
+        head = _read_head_on_disk()
+        # The guard AUTHENTICATES the local head (owner signature) against the owner-only trust root and
+        # binds/extension-proves it against the witnessed checkpoint, so it needs the passive's live chain
+        # AND the owner trust root (distinct from the witness quorum `tr`). See HA-PROFILE.md §3.
+        owner_tr = W.witness_trust_root(None, owner_pub=owner_pub, owner_key_id=config.OWNER_KEY_ID)
+        verdict = guard.evaluate_promotion(head, data, scope=config.SCOPE, trust_root=tr,
+                                           owner_trust_root=owner_tr, entries=SpineStore().entries())
+        for line in verdict.lines():
+            print(line, file=(sys.stdout if verdict.activate else sys.stderr))
+        sys.exit(verdict.exit_code)
 
 
 def cmd_budget(a) -> None:
@@ -1139,8 +1198,11 @@ def _witness_ctx():
     from .spine import witness as W
     pub = owner_pubkey()
     if not pub:
+        # ADVISORY-1: exit 2 (fail-closed), CONSISTENT with the standalone guard's no-owner-key refusal
+        # (tools/ha/spine_failover_guard.py _trust_root_from_config). A missing trust anchor is a refusal,
+        # not a generic error — the promote-passive interlock and every witness verb must fail closed alike.
         print("!! no owner key yet — run `sigil sign` first to establish the trust root", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
     roster_path = config.SIGIL_HOME / "witness.trust.json"
     tip_path = config.HEAD_PATH.parent / "witness-tip.json"
     return W, config, roster_path, tip_path, pub
@@ -1478,14 +1540,18 @@ def main(argv=None) -> None:
                          help="print the base64 owner PUBLIC key (read-only; for pinning the offense learn-drain)")
     pop.set_defaults(fn=cmd_owner_pubkey)
     pfl = sub.add_parser("floor", help="durable external anti-rollback floor: status; reset (deliberate "
-                                       "downward re-seed); witness (emit+retain off-box); verify-witnessed (anchor)")
-    pfl.add_argument("action", choices=["status", "reset", "witness", "verify-witnessed"])
+                                       "downward re-seed); witness (emit+retain off-box); verify-witnessed "
+                                       "(anchor); promote-passive (HA failover interlock)")
+    pfl.add_argument("action", choices=["status", "reset", "witness", "verify-witnessed", "promote-passive"])
     pfl.add_argument("--yes", action="store_true", help="confirm `reset` deliberately lowers the floor")
     pfl.add_argument("--retain", default="",
                      help="(witness) OFF-BOX path to persist the witnessed checkpoint the verifier retains")
     pfl.add_argument("--external", action="append", default=[],
                      help="(verify-witnessed) an OFF-BOX retained witnessed checkpoint (path or '-'); "
                           "repeatable — the HIGHEST valid one anchors")
+    pfl.add_argument("--witnessed", dest="witnessed", default=None,
+                     help="(promote-passive) the OFF-BOX retained witnessed checkpoint the passive must not "
+                          "roll back below (- for stdin)")
     pfl.set_defaults(fn=cmd_floor)
     psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact; convert; status; prune-plan; verify-archive")
     psp.add_argument("action", choices=["migrate", "rotate", "compact", "convert", "status",

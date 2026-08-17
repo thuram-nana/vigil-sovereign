@@ -1,0 +1,119 @@
+# VIGIL HA — the SOVEREIGN SPINE WRITER. SINGLE-WRITER BY DESIGN.
+# =============================================================================
+# ############################################################################
+# #  replicas: 1 IS NOT A SCALING LIMITATION — IT IS A CORRECTNESS INVARIANT. #
+# #                                                                          #
+# #  The sovereign spine is an append-only, owner-signed, hash-chained log   #
+# #  with a durable anti-rollback floor. TWO concurrent writers produce two  #
+# #  owner-signed heads at the same entry_count = a "same height, different  #
+# #  head" FORK, which is exactly what check_floor (floor.py) and is_split   #
+# #  (transparency.py) exist to DETECT and REJECT.                           #
+# #                                                                          #
+# #  Setting replicas > 1 here is a DATA-CORRUPTION BUG, NOT SCALE. It would #
+# #  make the fork the normal state and defeat the whole anti-rollback +     #
+# #  transparency apparatus. Do not raise it. HA of the WRITER is achieved   #
+# #  by active-PASSIVE failover with the witnessed-floor interlock (the      #
+# #  initContainer below), never by adding writer replicas.                  #
+# #  See docs/architecture/HA-PROFILE.md §2. A CI test asserts replicas: 1.  #
+# ############################################################################
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vigil-sovereign
+  labels: { app: vigil-sovereign, tier: spine-writer }
+spec:
+  serviceName: vigil-sovereign        # the headless Service (services.yaml) for stable network identity
+  replicas: 1                         # BY DESIGN — single writer. replicas>1 is a data-corruption bug (see above).
+  selector:
+    matchLabels: { app: vigil-sovereign }
+  template:
+    metadata:
+      labels: { app: vigil-sovereign, tier: spine-writer }
+    spec:
+      # -----------------------------------------------------------------------
+      # ANTI-ROLLBACK READINESS GATE (the failover interlock, tools/ha/spine_failover_guard.py).
+      # This initContainer runs the guard BEFORE the writer container starts. If the
+      # PVC-restored/synced spine head is BELOW the off-box witnessed checkpoint (a
+      # stale mirror), the guard exits 2, the initContainer FAILS, and the pod never
+      # becomes Ready — so the headless Service never routes writes to a rolled-back
+      # spine. This is what makes StatefulSet re-scheduling / passive promotion
+      # anti-rollback-safe rather than a blind cutover. (HA-PROFILE.md §3.)
+      # -----------------------------------------------------------------------
+      initContainers:
+        # (1) HEAD AUTHENTICATION GATE — defense-in-depth (HA-PROFILE.md §3.3). initContainers run in
+        # order, so this runs BEFORE the anti-rollback gate below. `sigil verify` fail-closes (exit 2) if the
+        # PVC-restored/synced head EXISTS but is not authentically OWNER-signed (absent/bad signature,
+        # rewritten, or stale). This enforces head authentication BY COMPOSITION even if the anti-rollback
+        # guard is ever bypassed or removed — a forged/unsigned head can never reach the writer container.
+        - name: spine-head-authenticate
+          image: vigil/runtime:local   # operator-built (sovereign venv + repo at /app); digest-pin before prod
+          command: ["sigil", "verify"]
+          env:
+            - name: SIGIL_HOME
+              value: "/sigil-home"      # config.py resolves HEAD_PATH/FLOOR_PATH under this PVC
+            - name: PYTHONPATH
+              value: "/app/apps/sigil:/app/integration:/app/packages/core/vigil_core:/app/gateway"
+          volumeMounts:
+            - { name: sigil-home, mountPath: /sigil-home }
+        # (2) ANTI-ROLLBACK READINESS GATE (the failover interlock, tools/ha/spine_failover_guard.py). The
+        # guard ITSELF also re-authenticates the head, then binds it to the witnessed head_hash (equal
+        # height) or proves it extends the witnessed checkpoint (grown) before allowing promotion.
+        - name: anti-rollback-gate
+          image: vigil/runtime:local   # operator-built (sovereign venv + repo at /app); digest-pin before prod
+          command: ["python3", "/app/tools/ha/spine_failover_guard.py",
+                    "--witnessed", "/retained/checkpoint.witnessed.json"]
+          env:
+            - name: SIGIL_HOME
+              value: "/sigil-home"      # config.py resolves HEAD_PATH/FLOOR_PATH under this PVC
+            - name: PYTHONPATH
+              value: "/app/apps/sigil:/app/integration:/app/packages/core/vigil_core:/app/gateway"
+          volumeMounts:
+            - { name: sigil-home, mountPath: /sigil-home }
+            - { name: witnessed-checkpoint, mountPath: /retained, readOnly: true }
+      containers:
+        - name: sigil-writer
+          image: vigil/runtime:local
+          # The single ACTIVE writer: the sovereign cockpit + spine signer.
+          command: ["sigil", "serve", "--host", "0.0.0.0", "--port", "8733"]
+          env:
+            - name: SIGIL_HOME
+              value: "/sigil-home"
+            - name: SIGIL_UI_ALLOWED_HOSTS
+              value: "vigil.example.com"
+          ports:
+            - { name: cockpit, containerPort: 8733 }
+          readinessProbe:
+            httpGet: { path: /, port: cockpit }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - { name: sigil-home, mountPath: /sigil-home }
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits:   { cpu: "2",    memory: "2Gi" }
+      volumes:
+        # The off-box witnessed checkpoint the gate anchors against. A Secret so it is
+        # retained INDEPENDENTLY of the spine PVC (a copy rolled back with the PVC is
+        # worthless as an anchor — HA-PROFILE.md §3.1). Refresh it after each promotion.
+        - name: witnessed-checkpoint
+          secret:
+            secretName: vigil-witnessed-checkpoint
+            items: [ { key: checkpoint.witnessed.json, path: checkpoint.witnessed.json } ]
+  volumeClaimTemplates:
+    - metadata: { name: sigil-home }   # the durable ~/.sigil (spine, floor, keys) — one writer owns it
+      spec:
+        accessModes: [ "ReadWriteOnce" ]   # RWO: exactly one pod mounts it — reinforces single-writer at the storage layer
+        resources: { requests: { storage: 10Gi } }
+---
+# PodDisruptionBudget: keep the single writer scheduled through voluntary disruptions
+# (node drains, upgrades). minAvailable:1 with replicas:1 means "do not voluntarily
+# evict the writer without a replacement" — it does NOT permit a second writer.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vigil-sovereign
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: vigil-sovereign }
