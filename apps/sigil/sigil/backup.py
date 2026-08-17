@@ -215,12 +215,6 @@ def _safe_target(new_home: Path, new_home_resolved: Path, rel: str) -> Path:
     return target
 
 
-def _dir_is_nonempty(p: Path) -> bool:
-    """True iff ``p`` exists as a directory that already holds at least one entry (the guard for a
-    restore-would-overlay-stale-state refusal). A missing path or an empty dir is a clean target."""
-    return p.is_dir() and any(p.iterdir())
-
-
 def _new_staging_dir(dest: Path) -> Path:
     """A private staging dir under ``dest``'s PARENT (same filesystem → the final ``os.replace`` is an ATOMIC
     rename). The whole restored home is built + re-verified HERE and only swapped onto ``dest`` once everything
@@ -229,22 +223,47 @@ def _new_staging_dir(dest: Path) -> Path:
     return Path(tempfile.mkdtemp(prefix=".restore-staging-", dir=str(dest.parent)))
 
 
-def _atomic_swap_into_place(staged: Path, dest: Path) -> None:
-    """Move a fully-built, fully-verified ``staged`` tree onto ``dest`` so ``dest`` is only ever the complete
-    OLD tree, absent, or the complete NEW tree — never a partial mix. If ``dest`` already exists it is renamed
-    ASIDE first (atomic), the staged tree renamed in (atomic), then the old tree deleted; a failure between the
-    two renames rolls the move-aside back."""
-    if dest.exists():
-        aside = dest.parent / (".restore-old-" + staged.name)
-        os.replace(str(dest), str(aside))                 # atomic: dest → aside (dest now absent)
+def _drop_path(p: Path) -> None:
+    """Best-effort remove ``p`` whether it is a dir, a file, or a (possibly broken) symlink."""
+    if p.is_dir() and not p.is_symlink():
+        shutil.rmtree(p, ignore_errors=True)
+    elif p.exists() or p.is_symlink():
         try:
-            os.replace(str(staged), str(dest))            # atomic: staged → dest (the new tree lands whole)
+            p.unlink()
         except OSError:
-            os.replace(str(aside), str(dest))             # best-effort: restore the old tree on failure
+            pass
+
+
+def _atomic_swap_unit(staged_unit: Path, dest_unit: Path) -> None:
+    """Atomically replace ONE captured unit (a FILE or a whole SUBTREE) at ``dest_unit`` with ``staged_unit``,
+    leaving every SIBLING under ``dest_unit.parent`` UNTOUCHED. Move-aside → rename-in → drop-old (each rename
+    atomic, same filesystem), so a crash leaves ``dest_unit`` as the complete OLD unit, absent, or the complete
+    NEW unit — never torn."""
+    dest_unit.parent.mkdir(parents=True, exist_ok=True)
+    if dest_unit.exists() or dest_unit.is_symlink():
+        aside = dest_unit.parent / (".restore-old-" + dest_unit.name)
+        _drop_path(aside)                                 # clear any stale aside from a prior crashed restore
+        os.replace(str(dest_unit), str(aside))            # atomic: dest_unit → aside
+        try:
+            os.replace(str(staged_unit), str(dest_unit))  # atomic: staged unit → dest_unit
+        except OSError:
+            os.replace(str(aside), str(dest_unit))        # best-effort rollback
             raise
-        shutil.rmtree(aside, ignore_errors=True)          # drop the old tree (stale files do NOT survive)
+        _drop_path(aside)                                 # drop the old unit
     else:
-        os.replace(str(staged), str(dest))                # atomic: staged → a fresh dest
+        os.replace(str(staged_unit), str(dest_unit))      # atomic into a fresh slot
+
+
+def _atomic_swap_captured_units(staged: Path, dest: Path) -> None:
+    """Swap each TOP-LEVEL entry of the staged home onto ``dest`` as its own atomic unit, leaving every
+    top-level entry ALREADY under ``dest`` that the backup did NOT capture (vector/cursor/config caches, other
+    SIGIL_HOME state) UNTOUCHED. The staged home holds EXACTLY the captured SUBSET (``spine``, ``floor.json``,
+    ``security.manifest.json``, ``warden`` — see ``_spine_files``), so this replaces exactly those units and
+    nothing else: a ``--force`` restore can NEVER delete live, un-captured home content. Units are swapped
+    sequentially — each atomic; the set is not jointly atomic (a crash leaves some new, some old, none torn)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    for staged_unit in sorted(staged.iterdir()):
+        _atomic_swap_unit(staged_unit, dest / staged_unit.name)
 
 
 def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, vault: Any,
@@ -255,12 +274,15 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
     staged spine is then re-verified (`store.verify`). The owner private key + DEK are re-sealed through
     ``vault`` (under the NEW machine's TPM if provisioned, else plaintext).
 
-    STAGED / ATOMIC restore (no stale-state overlay): the whole restored home is built + verified in a sibling
-    temp dir under ``new_home``'s PARENT, then renamed into place — so a mid-restore crash leaves ``new_home``
-    as the complete OLD home (or absent), never a half-written mix. A NON-EMPTY ``new_home`` is REFUSED unless
-    ``force=True`` — restore must not silently overlay whatever already lives there; with ``force`` the existing
-    home is cleanly REPLACED (stale files do not survive). Honest limit: the swap is atomic against a CRASH, not
-    against a concurrent WRITER already mutating ``new_home``."""
+    STAGED / ATOMIC restore, UNIT-SCOPED (no stale-state overlay, no destruction of un-captured data): the
+    restored state is built + verified in a sibling temp dir under ``new_home``'s PARENT, then the CAPTURED
+    UNITS (top-level of the backup — ``spine``, ``floor.json``, ``security.manifest.json``, ``warden``) are
+    renamed into place, each atomically. The backup is a strict SUBSET of ``SIGIL_HOME``, so restore replaces
+    ONLY those units; every un-captured top-level entry already under ``new_home`` (vector/cursor/config caches,
+    other home state) is LEFT INTACT — even under ``--force``. The force-gate fires only when a captured unit
+    already exists, never merely because the home is non-empty. Honest limits: a mid-restore crash leaves each
+    unit complete-old-or-complete-new (never torn) but the set of units is not jointly atomic; and the swap is
+    atomic against a CRASH, not against a concurrent WRITER already mutating ``new_home``."""
     src, new_home = Path(src), Path(new_home)
     salt, sealed = _read_header(src)
     try:
@@ -310,12 +332,18 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
     for _label, _val in (("owner private key", body.get("owner_priv_b64")), ("spine DEK", body.get("spine_dek_b64"))):
         if _val is not None and not isinstance(_val, str):
             raise BackupError(f"backup {_label} is malformed (expected a string)")
-    # STAGED / ATOMIC restore: refuse to OVERLAY a non-empty destination unless force, then build + re-verify
-    # the WHOLE home in a sibling temp dir and swap it into place at the very end (no half-written mix on crash).
-    if not force and _dir_is_nonempty(new_home):
+    # STAGED / ATOMIC restore, UNIT-SCOPED: restore replaces ONLY the captured units (top-level of the backup:
+    # ``spine``, ``floor.json``, ``security.manifest.json``, ``warden``), so it refuses (without force) ONLY
+    # when one of THOSE already exists at ``new_home`` — never merely because the home is non-empty. This keeps
+    # un-captured home content (vector/cursor/config caches) both un-blocking AND un-destroyed on a --force
+    # restore (the subset-capture-vs-replace-whole fix — "stale files do not survive" must not mean live data).
+    captured_units = sorted({rel.split("/", 1)[0] for rel in files})
+    present_units = [u for u in captured_units if (new_home / u).exists()]
+    if not force and present_units:
         raise BackupError(
-            f"refusing to restore into a NON-EMPTY home {new_home} (a restore must not overlay stale state) — "
-            f"pass force=True (--force) to REPLACE it, or restore into a fresh/empty dir")
+            f"refusing to overwrite existing SIGIL state {present_units} under {new_home} (a restore must not "
+            f"silently overlay stale state) — pass force=True (--force) to REPLACE those units, or restore into "
+            f"a fresh home. Un-captured home content (vector/cursor/config caches) is left intact regardless.")
 
     staged: Path | None = _new_staging_dir(new_home)
     try:
@@ -354,9 +382,10 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
         if not ok:
             raise BackupError(f"restored spine failed verification ({why}) — the restore is NOT trustworthy")
 
-        # everything verified: atomically swap the staged home onto new_home (clearing the ref so the finally
-        # does not delete a tree already moved in).
-        _atomic_swap_into_place(staged, new_home)
+        # everything verified: swap ONLY the captured units into new_home (subset capture → leave un-captured
+        # home content intact), then drop the drained staging shell (its units were moved out).
+        _atomic_swap_captured_units(staged, new_home)
+        shutil.rmtree(staged, ignore_errors=True)
         staged = None
     finally:
         if staged is not None:

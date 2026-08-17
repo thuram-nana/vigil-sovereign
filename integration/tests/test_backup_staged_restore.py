@@ -1,11 +1,14 @@
 """SUB-PART 2 — staged / atomic restore for the OFFENSE plane (no stale-state overlay).
 
-``restore_offense_backup`` now builds + re-verifies the whole restored tree in a sibling temp dir and only
-then ATOMICALLY swaps it into place, and REFUSES a non-empty destination unless ``force=True``:
-  * restore into a NON-EMPTY base dir (or crucible root) → refused without force;
+``restore_offense_backup`` builds + re-verifies the restored state in a sibling temp dir and only then swaps
+it into place, refusing to overwrite existing state unless ``force=True``:
+  * base_dir is a WHOLE-tree capture → a non-empty base is refused without force; with force it whole-replaces;
+  * crucible_root is a strict SUBSET capture → the force-gate fires only when a captured proof unit already
+    exists, and restore replaces ONLY those units (proof-db + runs), NEVER deleting un-captured data there (the
+    CRUCIBLE code) — even under ``--force`` (the red-pen BLOCK-1 fix, exercised by
+    ``test_force_crucible_restore_preserves_uncaptured_code``);
   * a simulated mid-restore failure (re-verify raises) → the destination is UNTOUCHED (old state intact),
-    never left half-written, and no staging litter survives;
-  * ``force=True`` cleanly REPLACES an existing tree — stale files do NOT survive the restore.
+    never left half-written, and no staging litter survives.
 
 Run in the offense leg:
     PYTHONPATH=integration:engine/crucible:gateway:packages/core/vigil_core .venv-offense/bin/python \
@@ -50,23 +53,67 @@ def test_restore_into_nonempty_base_is_refused_without_force(tmp_path):
     assert not (new_base / f"{SLUG}.spine").exists()
 
 
-def test_restore_into_nonempty_crucible_root_is_refused_without_force(tmp_path):
+def _make_crucible_backup(tmp_path):
+    """A backup carrying BOTH crucible units: the proof-db (``.blackboard/store.sqlite``) and a runs file
+    (``.console/runs/r1/report.json``). Returns (dest, base)."""
     base = tmp_path / "src-base"
     croot = tmp_path / "src-crucible"
     _seed_offense_home(base)
     (croot / ".blackboard").mkdir(parents=True)
-    (croot / ".blackboard" / "store.sqlite").write_bytes(b"SQLite format 3\x00stub")
+    (croot / ".blackboard" / "store.sqlite").write_bytes(b"SQLite format 3\x00NEW-DB")
+    (croot / ".console" / "runs" / "r1").mkdir(parents=True)
+    (croot / ".console" / "runs" / "r1" / "report.json").write_text('{"run":"NEW"}')
     dest = tmp_path / "o.vglbk"
     create_offense_backup(dest, PW, base_dir=str(base), crucible_root=str(croot))
+    return dest, base
 
+
+def test_restore_refused_when_a_captured_crucible_unit_exists_without_force(tmp_path):
+    """The crucible force-gate is UNIT-SCOPED: a restore is refused (without force) ONLY when a CAPTURED proof
+    unit already exists at the destination — not merely because the crucible root is non-empty."""
+    dest, _base = _make_crucible_backup(tmp_path)
     new_base = tmp_path / "nb"
     new_croot = tmp_path / "nc"
-    new_croot.mkdir()
-    (new_croot / "stale").write_text("x")
-    with pytest.raises(OffenseBackupError, match="NON-EMPTY crucible root"):
+    (new_croot / ".blackboard").mkdir(parents=True)
+    (new_croot / ".blackboard" / "store.sqlite").write_bytes(b"SQLite format 3\x00OLD-DB")   # a captured unit
+    with pytest.raises(OffenseBackupError, match="live CRUCIBLE proof state"):
         restore_offense_backup(dest, str(new_base), PW, crucible_root=str(new_croot))
-    assert (new_croot / "stale").read_text() == "x"      # untouched
-    assert not (new_base / f"{SLUG}.spine").exists()     # base never written
+    assert (new_croot / ".blackboard" / "store.sqlite").read_bytes().endswith(b"OLD-DB")   # untouched
+    assert not (new_base / f"{SLUG}.spine").exists()      # base never written
+
+
+def test_force_crucible_restore_preserves_uncaptured_code(tmp_path):
+    """THE make-or-break negative control (red-pen BLOCK-1): the crucible capture is a strict SUBSET, so a
+    --force restore must replace ONLY the captured units (proof-db + runs) and NEVER delete live, un-captured
+    data under the crucible root — in a dev checkout that root is the CRUCIBLE codebase itself."""
+    dest, _base = _make_crucible_backup(tmp_path)
+    new_base = tmp_path / "nb"
+    new_croot = tmp_path / "nc"
+    # the destination crucible root holds LIVE, never-backed-up data (framework code + config) alongside OLD
+    # captured units that SHOULD be replaced.
+    (new_croot / ".blackboard").mkdir(parents=True)
+    (new_croot / ".blackboard" / "store.sqlite").write_bytes(b"SQLite format 3\x00OLD-DB")
+    (new_croot / ".blackboard" / "store.sqlite-wal").write_bytes(b"stale-wal-of-old-db")   # orphaned sidecar
+    (new_croot / ".console").mkdir(parents=True)
+    (new_croot / ".console" / "config.json").write_text('{"live":"config"}')               # un-captured
+    (new_croot / ".console" / "runs" / "oldrun").mkdir(parents=True)
+    (new_croot / ".console" / "runs" / "oldrun" / "x").write_text("old run")
+    (new_croot / "framework_code.py").write_text("# the CRUCIBLE engine — must NOT be deleted")
+    (new_croot / "pkg").mkdir()
+    (new_croot / "pkg" / "keep.txt").write_text("live source tree")
+
+    res = restore_offense_backup(dest, str(new_base), PW, crucible_root=str(new_croot), force=True)
+    assert res["verified"] is True
+    # captured units REPLACED with the backed-up versions:
+    assert (new_croot / ".blackboard" / "store.sqlite").read_bytes().endswith(b"NEW-DB")
+    assert (new_croot / ".console" / "runs" / "r1" / "report.json").read_text() == '{"run":"NEW"}'
+    assert not (new_croot / ".console" / "runs" / "oldrun").exists()   # runs subtree wholly replaced (DR snapshot)
+    assert not (new_croot / ".blackboard" / "store.sqlite-wal").exists()   # orphaned sidecar of the old db dropped
+    # un-captured LIVE data SURVIVES — the whole point of the fix:
+    assert (new_croot / "framework_code.py").read_text().startswith("# the CRUCIBLE engine")
+    assert (new_croot / "pkg" / "keep.txt").read_text() == "live source tree"
+    assert (new_croot / ".console" / "config.json").read_text() == '{"live":"config"}'
+    assert _staging_litter(tmp_path) == []
 
 
 def _staging_litter(parent: Path) -> list[Path]:

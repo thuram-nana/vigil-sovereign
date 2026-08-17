@@ -2479,9 +2479,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "set, the offense backup's manifest MUST be signed by it — else restore refuses. "
                           "Without it, offense restore authenticity is passphrase-possession only.")
     prs.add_argument("--force", action="store_true",
-                     help="REPLACE a non-empty destination (base-dir / crucible-root / sigil-home). Without it, "
-                          "restore refuses a non-empty target rather than overlay stale state. The replacement "
-                          "is still staged + verified first and swapped in atomically (crash-safe).")
+                     help="REPLACE existing state at the destination. The base-dir is a WHOLE-tree capture, so "
+                          "--force whole-replaces it (only re-creatable transients are dropped). The "
+                          "crucible-root and sigil-home are SUBSET captures: --force replaces ONLY the captured "
+                          "units (crucible: .blackboard/store.sqlite + .console/runs; sigil: spine/floor/"
+                          "security-manifest/warden) and NEVER deletes un-captured data there (the CRUCIBLE "
+                          "code, sigil vector/config caches). Without --force, restore refuses when a captured "
+                          "unit already exists rather than overwrite it. The replacement is staged + verified "
+                          "first and swapped in atomically per unit (crash-safe).")
     grp2 = prs.add_mutually_exclusive_group()
     grp2.add_argument("--sovereign-only", dest="sovereign_only", action="store_true",
                       help="restore ONLY the sovereign plane")
