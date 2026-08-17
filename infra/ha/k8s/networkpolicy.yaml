@@ -1,0 +1,42 @@
+# VIGIL HA — NetworkPolicy: the sovereign cockpit is reachable ONLY via the authenticating proxy.
+# =============================================================================
+# WHY THIS IS REQUIRED, NOT OPTIONAL. The sovereign cockpit (`sigil serve`) serves its OWN
+# owner-token-embedding index at `GET /` TOKEN-FREE (`<body data-token="<owner token>">` — it is a
+# single-operator, on-host surface by design), and the headless `vigil-sovereign` Service has no auth of
+# its own. The reverse proxy is the authenticating boundary: it establishes per-user identity (delegated
+# whoami) AND scrubs the backend's embedded owner token out of any relayed HTML before it can reach a
+# browser. So ANY in-cluster workload that reaches `vigil-sovereign:8733` DIRECTLY — bypassing the proxy —
+# can scrape the owner token off `GET /` and act as OWNER. This policy makes the proxy tier the ONLY thing
+# that can connect to the cockpit, closing that network vector. See docs/architecture/HA-PROFILE.md §1.1.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vigil-sovereign-proxy-only
+  labels: { app: vigil-sovereign, tier: spine-writer }
+spec:
+  podSelector:
+    matchLabels: { app: vigil-sovereign }   # this policy governs ingress to the writer pod(s)
+  policyTypes: [ Ingress ]
+  ingress:
+    # ONLY the stateless proxy tier may reach the cockpit port. Everything else in the cluster is denied
+    # (selecting Ingress with a single from-rule is default-deny for every other source).
+    - from:
+        - podSelector:
+            matchLabels: { app: vigil-proxy }
+      ports:
+        - { protocol: TCP, port: 8733 }
+    # NOTE — kubelet health probes: the readiness probe (httpGet :8733) originates from the NODE, not a
+    # pod. Most CNIs exempt kubelet health-check traffic from NetworkPolicy; a CNI that does NOT will fail
+    # the probe under this default-deny. If your CNI enforces policy on probe traffic, ALSO allow the node
+    # source (an `ipBlock` for your node CIDR, cluster-specific) or switch to an exec/tcpSocket probe.
+    # This is left out here because the node CIDR is deployment-specific — do not paste a wrong one.
+---
+# The proxy tier + the Ingress boundary: the proxy is INTENDED to be fronted by your Ingress/TLS edge and
+# is the only human-facing listener, so its ingress is deliberately NOT locked to in-cluster sources here.
+# What matters for the owner-token leak is that the SOVEREIGN cockpit above is proxy-only — enforced.
+#
+# The MEDIUM residual, stated honestly (see HA-PROFILE.md §1.1 + §4): the proxy→cockpit hop carries the
+# per-user bearer and the substituted owner console credential over CLEARTEXT HTTP inside the pod network.
+# This NetworkPolicy bounds WHO may connect (the proxy only); it does NOT encrypt the hop. A cluster whose
+# pod network an attacker can sniff still needs transport isolation — a service-mesh mTLS (Istio/Linkerd)
+# or an encrypted CNI (WireGuard/IPsec overlay). Do not assume the pod network is confidential by default.
