@@ -502,6 +502,19 @@ jobs:
             # test_snapshot_fold_* family, test_login_pop) were never named, so they never ran in CI at all.
             # Running the directory means a NEW test file is AUTO-INCLUDED — it can only fail LOUDLY, never
             # silently skip. test_ci_sigil_tests_all_run.py guards this invariant + the --ignore honesty.
+            #
+            # --ignore list: EMPTY. Grep-triage of every apps/sigil/tests/test_*.py (NOT "it passed on Kali")
+            # found NO file that needs a resource ubuntu-latest lacks: all network is loopback(127.0.0.1) or
+            # monkeypatched (urlopen/_do_open/httpx/FakeEngine/Dict*Source/injected fetch); heavy deps
+            # (numpy/cv2/qdrant/fastembed/boto3/kuzu/onnxruntime) are lazy or importorskip-guarded — the only
+            # unindented heavy import in the source, numpy in voice/backends, is reached by no test at import
+            # time; every third-party import in the suite (cryptography/httpx/pydantic/PyYAML) is installed
+            # above; external CLIs are base git (identity set in-test) / python (sys.executable) or
+            # shutil.which-guarded (node). Per doctrine "prefer running; a loud CI failure beats a silent
+            # skip", nothing is excluded. If a future test truly needs an absent resource, add
+            # `--ignore=apps/sigil/tests/<f>` AND a KNOWN_EXCLUDED reason in the guard — it fails on any
+            # mismatch, so an undocumented ignore can never re-introduce a silent skip.
+            #
             # integration on the path for the P10 finding-receiver (it uses vigil_integration.inert_finding,
             # which is sovereign-safe = vigil_core only, so no offense engine is pulled).
             PYTHONPATH=apps/sigil:integration python -m pytest apps/sigil/tests/ -q
