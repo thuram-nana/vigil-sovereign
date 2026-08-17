@@ -1,4 +1,11 @@
-"""Signed, passphrase-encrypted OFF-BOX backup of the SIGIL trust root + spine (audit G3(a)).
+"""Signed, passphrase-encrypted, PORTABLE backup of the SIGIL trust root + spine (audit G3(a)).
+
+Honest naming: this writes a PORTABLE, passphrase-encrypted LOCAL backup file. It is portable (it restores on
+NEW hardware where this box's TPM is gone) and encrypted at rest — but a plain ``sigil backup`` writes to the
+SAME host's disk, so it is NOT off-HOST replication on its own: a dead host takes the engine AND its local
+backups. TRUE off-HOST replication is a SEPARATE, opt-in step — the orchestrator's ``vigil backup --push
+<remote>`` copies the ENCRYPTED backup file to a configured remote (see tools/backup/transport.py); transport
+moves CIPHERTEXT only, and the remote's own security is the operator's responsibility.
 
 The TPM-sealed vault (G1) binds the owner key + the spine DEK to THIS machine's TPM, so a dead disk is
 unrecoverable from the vault alone — the whole audit ledger + all memory would be lost. This produces a
@@ -32,6 +39,8 @@ import base64
 import hashlib
 import json
 import os
+import shutil
+import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -206,12 +215,74 @@ def _safe_target(new_home: Path, new_home_resolved: Path, rel: str) -> Path:
     return target
 
 
-def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, vault: Any) -> dict:
-    """Decrypt + VERIFY a backup, then write the trust root + spine into ``new_home``. Fail-closed: the
-    passphrase must decrypt, the owner signature over the manifest must verify, and every file's sha256
-    must match BEFORE anything is written; the restored spine is then re-verified (`store.verify`). The
-    owner private key + DEK are re-sealed through ``vault`` (under the NEW machine's TPM if provisioned,
-    else plaintext)."""
+def _new_staging_dir(dest: Path) -> Path:
+    """A private staging dir under ``dest``'s PARENT (same filesystem → the final ``os.replace`` is an ATOMIC
+    rename). The whole restored home is built + re-verified HERE and only swapped onto ``dest`` once everything
+    passes, so a mid-restore crash leaves ``dest`` as the complete OLD home (or absent), never a mixed home."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=".restore-staging-", dir=str(dest.parent)))
+
+
+def _drop_path(p: Path) -> None:
+    """Best-effort remove ``p`` whether it is a dir, a file, or a (possibly broken) symlink."""
+    if p.is_dir() and not p.is_symlink():
+        shutil.rmtree(p, ignore_errors=True)
+    elif p.exists() or p.is_symlink():
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def _atomic_swap_unit(staged_unit: Path, dest_unit: Path) -> None:
+    """Atomically replace ONE captured unit (a FILE or a whole SUBTREE) at ``dest_unit`` with ``staged_unit``,
+    leaving every SIBLING under ``dest_unit.parent`` UNTOUCHED. Move-aside → rename-in → drop-old (each rename
+    atomic, same filesystem), so a crash leaves ``dest_unit`` as the complete OLD unit, absent, or the complete
+    NEW unit — never torn."""
+    dest_unit.parent.mkdir(parents=True, exist_ok=True)
+    if dest_unit.exists() or dest_unit.is_symlink():
+        aside = dest_unit.parent / (".restore-old-" + dest_unit.name)
+        _drop_path(aside)                                 # clear any stale aside from a prior crashed restore
+        os.replace(str(dest_unit), str(aside))            # atomic: dest_unit → aside
+        try:
+            os.replace(str(staged_unit), str(dest_unit))  # atomic: staged unit → dest_unit
+        except OSError:
+            os.replace(str(aside), str(dest_unit))        # best-effort rollback
+            raise
+        _drop_path(aside)                                 # drop the old unit
+    else:
+        os.replace(str(staged_unit), str(dest_unit))      # atomic into a fresh slot
+
+
+def _atomic_swap_captured_units(staged: Path, dest: Path) -> None:
+    """Swap each TOP-LEVEL entry of the staged home onto ``dest`` as its own atomic unit, leaving every
+    top-level entry ALREADY under ``dest`` that the backup did NOT capture (vector/cursor/config caches, other
+    SIGIL_HOME state) UNTOUCHED. The staged home holds EXACTLY the captured SUBSET (``spine``, ``floor.json``,
+    ``security.manifest.json``, ``warden`` — see ``_spine_files``), so this replaces exactly those units and
+    nothing else: a ``--force`` restore can NEVER delete live, un-captured home content. Units are swapped
+    sequentially — each atomic; the set is not jointly atomic (a crash leaves some new, some old, none torn)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    for staged_unit in sorted(staged.iterdir()):
+        _atomic_swap_unit(staged_unit, dest / staged_unit.name)
+
+
+def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, vault: Any,
+                   force: bool = False) -> dict:
+    """Decrypt + VERIFY a backup, then STAGE the trust root + spine into a private temp dir, re-verify it, and
+    only then ATOMICALLY swap it onto ``new_home``. Fail-closed: the passphrase must decrypt, the owner
+    signature over the manifest must verify, and every file's sha256 must match BEFORE anything is written; the
+    staged spine is then re-verified (`store.verify`). The owner private key + DEK are re-sealed through
+    ``vault`` (under the NEW machine's TPM if provisioned, else plaintext).
+
+    STAGED / ATOMIC restore, UNIT-SCOPED (no stale-state overlay, no destruction of un-captured data): the
+    restored state is built + verified in a sibling temp dir under ``new_home``'s PARENT, then the CAPTURED
+    UNITS (top-level of the backup — ``spine``, ``floor.json``, ``security.manifest.json``, ``warden``) are
+    renamed into place, each atomically. The backup is a strict SUBSET of ``SIGIL_HOME``, so restore replaces
+    ONLY those units; every un-captured top-level entry already under ``new_home`` (vector/cursor/config caches,
+    other home state) is LEFT INTACT — even under ``--force``. The force-gate fires only when a captured unit
+    already exists, never merely because the home is non-empty. Honest limits: a mid-restore crash leaves each
+    unit complete-old-or-complete-new (never torn) but the set of units is not jointly atomic; and the swap is
+    atomic against a CRASH, not against a concurrent WRITER already mutating ``new_home``."""
     src, new_home = Path(src), Path(new_home)
     salt, sealed = _read_header(src)
     try:
@@ -261,44 +332,65 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
     for _label, _val in (("owner private key", body.get("owner_priv_b64")), ("spine DEK", body.get("spine_dek_b64"))):
         if _val is not None and not isinstance(_val, str):
             raise BackupError(f"backup {_label} is malformed (expected a string)")
-    # decode + verify EVERY file against the signed manifest BEFORE writing anything (fail-closed). Each rel
-    # is resolved to ONE validated target INSIDE new_home, and that SAME target is what we later write — so
-    # the check and the write can never diverge (closing the "validate the normalised path, write the raw
-    # path" class of escape).
-    new_home_resolved = new_home.resolve()
-    decoded: list[tuple[Path, bytes, str]] = []
-    for rel, b64 in files.items():
-        target = _safe_target(new_home, new_home_resolved, rel)
-        try:
-            data = base64.b64decode(b64)
-        except Exception as e:  # noqa: BLE001
-            raise BackupError(f"corrupt file blob {rel!r}: {e}") from e
-        if sha256_hex(data) != hashes[rel]:
-            raise BackupError(f"file {rel!r} does not match its signed hash (tamper)")
-        decoded.append((target, data, rel))
+    # STAGED / ATOMIC restore, UNIT-SCOPED: restore replaces ONLY the captured units (top-level of the backup:
+    # ``spine``, ``floor.json``, ``security.manifest.json``, ``warden``), so it refuses (without force) ONLY
+    # when one of THOSE already exists at ``new_home`` — never merely because the home is non-empty. This keeps
+    # un-captured home content (vector/cursor/config caches) both un-blocking AND un-destroyed on a --force
+    # restore (the subset-capture-vs-replace-whole fix — "stale files do not survive" must not mean live data).
+    captured_units = sorted({rel.split("/", 1)[0] for rel in files})
+    present_units = [u for u in captured_units if (new_home / u).exists()]
+    if not force and present_units:
+        raise BackupError(
+            f"refusing to overwrite existing SIGIL state {present_units} under {new_home} (a restore must not "
+            f"silently overlay stale state) — pass force=True (--force) to REPLACE those units, or restore into "
+            f"a fresh home. Un-captured home content (vector/cursor/config caches) is left intact regardless.")
 
-    new_home.mkdir(parents=True, exist_ok=True)
-    for target, data, rel in decoded:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-        # key material (the WARDEN kernel key + any *.key) must be 0600, not the process umask — a plain
-        # write_bytes would otherwise leave it world-readable-by-umask (a real perms fix, not cosmetic).
-        if _is_sensitive_rel(rel):
-            os.chmod(target, 0o600)
-    # re-seal the machine-bound secrets through the NEW vault (seals under the new TPM if provisioned).
-    if body.get("owner_priv_b64"):
-        vault.write_text_secret(new_home / "spine" / "keys" / "owner.priv",
-                                body["owner_priv_b64"], context=_OWNER_PRIV_CONTEXT)
-    if body.get("spine_dek_b64"):
-        vault.write_text_secret(new_home / "spine" / "keys" / "spine.dek",
-                                body["spine_dek_b64"], context=_DEK_CONTEXT)
+    staged: Path | None = _new_staging_dir(new_home)
+    try:
+        # decode + verify EVERY file against the signed manifest BEFORE writing anything (fail-closed). Each rel
+        # is resolved to ONE validated target INSIDE the STAGED home, and that SAME target is what we write — so
+        # the check and the write can never diverge (closing the "validate the normalised path, write the raw
+        # path" class of escape).
+        staged_resolved = staged.resolve()
+        for rel, b64 in files.items():
+            target = _safe_target(staged, staged_resolved, rel)
+            try:
+                data = base64.b64decode(b64)
+            except Exception as e:  # noqa: BLE001
+                raise BackupError(f"corrupt file blob {rel!r}: {e}") from e
+            if sha256_hex(data) != hashes[rel]:
+                raise BackupError(f"file {rel!r} does not match its signed hash (tamper)")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            # key material (the WARDEN kernel key + any *.key) must be 0600, not the process umask — a plain
+            # write_bytes would otherwise leave it world-readable-by-umask (a real perms fix, not cosmetic).
+            if _is_sensitive_rel(rel):
+                os.chmod(target, 0o600)
+        # re-seal the machine-bound secrets through the NEW vault (seals under the new TPM if provisioned) — into
+        # the STAGED home, swapped into place with the rest of the tree.
+        if body.get("owner_priv_b64"):
+            vault.write_text_secret(staged / "spine" / "keys" / "owner.priv",
+                                    body["owner_priv_b64"], context=_OWNER_PRIV_CONTEXT)
+        if body.get("spine_dek_b64"):
+            vault.write_text_secret(staged / "spine" / "keys" / "spine.dek",
+                                    body["spine_dek_b64"], context=_DEK_CONTEXT)
 
-    # re-verify the restored spine's internal integrity (keyless binding + chain) — never claim a restore
-    # succeeded on a corrupt ledger.
-    from .spine.store import SpineStore
-    ok, why = SpineStore(new_home / "spine" / "spine.jsonl").verify()
-    if not ok:
-        raise BackupError(f"restored spine failed verification ({why}) — the restore is NOT trustworthy")
-    return {"home": str(new_home), "files": len(decoded), "owner_key": bool(body.get("owner_priv_b64")),
+        # re-verify the STAGED spine's internal integrity (keyless binding + chain) — never claim a restore
+        # succeeded on a corrupt ledger, and never swap an unverified home into place.
+        from .spine.store import SpineStore
+        ok, why = SpineStore(staged / "spine" / "spine.jsonl").verify()
+        if not ok:
+            raise BackupError(f"restored spine failed verification ({why}) — the restore is NOT trustworthy")
+
+        # everything verified: swap ONLY the captured units into new_home (subset capture → leave un-captured
+        # home content intact), then drop the drained staging shell (its units were moved out).
+        _atomic_swap_captured_units(staged, new_home)
+        shutil.rmtree(staged, ignore_errors=True)
+        staged = None
+    finally:
+        if staged is not None:
+            shutil.rmtree(staged, ignore_errors=True)
+
+    return {"home": str(new_home), "files": len(files), "owner_key": bool(body.get("owner_priv_b64")),
             "dek": bool(body.get("spine_dek_b64")),
-            "warden": sum(1 for _t, _d, rel in decoded if rel.startswith("warden/")), "verified": True}
+            "warden": sum(1 for rel in files if rel.startswith("warden/")), "verified": True}

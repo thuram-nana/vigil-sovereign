@@ -703,10 +703,14 @@ ask to see it.
 or in any recovery service. That is a deliberate property: a copy held by someone else is a
 copy that can be compelled or stolen.
 
-**There is a portable, encrypted, off-machine backup**, and it exists precisely because the
+**There is a portable, passphrase-encrypted backup**, and it exists precisely because the
 hardware sealing of section 5 binds secrets to one physical machine. The code's own opening
 line names the problem: sealing to a machine's chip means "a dead disk is unrecoverable from
-the vault alone — the whole audit ledger and all memory would be lost".
+the vault alone — the whole audit ledger and all memory would be lost". Be precise about the
+word *off-machine*: by default the backup is written to the **same host's disk** (`~/vigil-backups`),
+and the scheduled timer runs it **air-gapped** (no network). That file is *portable* (it restores
+on new hardware) and *encrypted*, but it is not genuinely off-**host** until it is copied to
+another machine. That copy is a **separate, opt-in step** — see honest limit 4.
 
 The backup command packages, into one encrypted file:
 
@@ -733,10 +737,10 @@ Two properties make it safe to keep off the machine:
 Restoring onto new hardware re-seals the recovered secrets under the **new** machine's chip if
 one is present, so the recovered system is protected again rather than left in the open.
 
-Three honest limits on the backup:
+Four honest limits on the backup:
 
 1. **It can now be scheduled.** The standalone `sigil backup` is still a manual command, but the
-   unified `vigil backup` verb takes an off-box backup of **both** planes, and a shipped systemd
+   unified `vigil backup` verb takes a passphrase-encrypted local backup of **both** planes, and a shipped systemd
    user timer (`infra/systemd/vigil-backup.timer`) fires it on a daily cadence with retention
    (keep the last N, and anything within N days). Freshness is only ever as current as the last
    fire of that timer, and the timer carries the passphrase in a `0600` environment file — which
@@ -762,6 +766,17 @@ Three honest limits on the backup:
 3. **The passphrase becomes the root of trust for that file.** Anyone holding both the backup
    file and its passphrase holds the owner key. It should be treated with the same seriousness
    as the key itself — ideally split between two custodians or held in a safe.
+4. **Off-*host* replication is a separate, opt-in step — the scheduled backup is local and
+   air-gapped.** The daily timer writes to the same host's disk with no network, so on its own it
+   does not survive that host being destroyed. To get a genuine second copy on another machine,
+   run `vigil backup --push <dest>` (or the shipped, network-enabled `vigil-backup-push.service` /
+   `.timer`, kept separate from the air-gapped local unit). Push copies **only the already-encrypted
+   files** (ciphertext) plus the fingerprint manifest — no plaintext and no passphrase ever leave
+   the host — and the pushed copy is itself a valid restore source. Only a local-directory transport
+   ships today (a mounted remote filesystem, an sshfs mount, or a removable disk); rsync/scp/object-
+   store backends are structured to slot in behind the same contract. The **remote's** own security
+   (who can read that directory) is the operator's responsibility, and an assessor should confirm a
+   test restore has been done *from the pushed copy*, not only the local one.
 
 ### 6.3 What to do when a specific key is lost
 

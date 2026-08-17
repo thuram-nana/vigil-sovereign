@@ -1,0 +1,53 @@
+# VIGIL automated backup RECOVERY DRILL — systemd USER service (oneshot)
+# =====================================================================
+# Claim 6 / Piece A (SUB-PART 4). A backup you have never restored is a hope, not a
+# backup. This unit periodically PROVES the round-trip: tools/backup/recovery_drill.sh
+# takes a real `vigil backup`, restores it into FRESH throwaway dirs, and leans on the
+# EXISTING restore re-verification (offense spine chain/signatures + segment view +
+# evidence bundles; sovereign spine chain). A non-zero restore exit fails the unit, so
+# a broken backup pipeline shows up in `systemctl --user status` / journald BEFORE a
+# real disaster — not after. It restores into a mktemp dir and deletes it on exit, so
+# it changes NOTHING real.
+#
+# Reuses the local-backup env file for the passphrase + base dir:
+#     ~/.config/vigil/backup.env   (VIGIL_BACKUP_PASSPHRASE=…, VIGIL_BASE_DIR=…)
+#
+# Manual run / logs:
+#     systemctl --user start vigil-backup-drill.service
+#     journalctl --user -u vigil-backup-drill -e
+#
+# INSTALL (paired with its timer):
+#   cp infra/systemd/vigil-backup-drill.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-backup-drill.timer
+
+[Unit]
+Description=VIGIL backup recovery drill (backup → restore into fresh dirs → re-verify → assert clean round-trip)
+Documentation=file:%h/vigil/docs/plain-english/07-signing-and-keys.md
+
+[Service]
+Type=oneshot
+
+EnvironmentFile=%h/.config/vigil/backup.env
+Environment=PYTHONUNBUFFERED=1
+# Drive the offense CLI in its own venv; the drill script defaults the crucible root to the CLI's auto-resolve
+# and runs offense-only here (the sovereign leg needs a fresh SIGIL_HOME + the sovereign venv — extend if wanted).
+Environment=VIGIL_CMD=%h/vigil/.venv-offense/bin/vigil
+Environment=VIGIL_DRILL_SCOPE=--offense-only
+
+WorkingDirectory=%h/vigil
+ExecStart=%h/vigil/tools/backup/recovery_drill.sh
+
+# --- hardening -------------------------------------------------------------
+# The drill is PURELY LOCAL (backup + restore into a PrivateTmp dir; no egress), so the network is removed.
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOT set: ProtectHome (hides the checkout + the offense base dir the drill backs up). The restore target is a
+# mktemp dir under PrivateTmp, discarded on exit.
