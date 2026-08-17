@@ -31,7 +31,7 @@ on purpose.
 
 | Component | HA posture | Mechanism / limit |
 |---|---|---|
-| `vigil up` reverse proxy / `uiproxy.py` | **Active-active** (read/proxy) | Stateless except the per-instance session token. N replicas behind an LB; needs a shared token store **or** sticky sessions (documented below). |
+| `vigil up --proxy-only` reverse proxy / `uiproxy.py` | **Active-active** (read/proxy) | Stateless. N replicas behind an LB, **each in `--proxy-only` mode** so it spawns NO backends and federates `/sovereign/*` to the one central writer (§1.1). A plain `vigil up` would spawn a per-pod cockpit = a second writer (a fork); `--proxy-only` is what makes replication correct. Needs a shared token store **or** sticky sessions (documented below). |
 | otel-collector | **Active-active** | Stateless OTLP→stdout receiver; run N replicas. |
 | Qdrant (vector store) | **HA ONLY in server + distributed mode** | SIGIL defaults to an **embedded/local** store (`config.py` `QDRANT_PATH`) which is NOT HA. HA requires switching to `QDRANT_URL` server mode with Qdrant's own replication — you must run and pay for that; this profile documents the switch, it does not make embedded Qdrant magically clustered. |
 | Neo4j (knowledge graph) | **NOT HA in community** | `docker-compose.yml` pins `neo4j:5-community` — a **single instance**. A causal cluster is a Neo4j **Enterprise** feature. This profile does NOT ship a cluster and does not imply one. |
@@ -43,6 +43,55 @@ The stateless tier (proxy, otel) scales horizontally with no correctness cost.
 The stateful backends (Qdrant, Neo4j) are HA only if you deploy their own
 server/enterprise HA — this profile documents that boundary and refuses to fake
 it. The spine is single-writer, full stop.
+
+### 1.1 `--proxy-only`: why the read tier does not spawn its own backends
+
+`vigil up` is **not a stateless proxy by default.** A plain `vigil up` LAUNCHES
+three children — the sovereign cockpit (`sigil serve`, 8733) and both offense
+backends (`crucible console` 8787, `crucible api` 8799) — as processes it owns on
+fixed loopback ports, and only *then* reverse-proxies to them. Running that in N
+replicas is a **correctness bug, not scale**: each replica would spawn its **own**
+sovereign cockpit, i.e. an Nth signed-spine **writer** — the exact "same height,
+different head" fork the floor + witnesses exist to reject (§2). (It would also
+collide on the fixed backend ports.)
+
+`vigil up --proxy-only` is the fix and the mode the HA proxy Deployment runs. In
+this mode the process **spawns nothing** and federates to **remote** backends given
+by flags/env (all fail-closed-parsed `host:port`, empty ⇒ the loopback default so
+the non-HA path is byte-identical):
+
+| Flag | Env | Federation target | k8s value |
+|---|---|---|---|
+| `--sovereign-addr` | `VIGIL_SOVEREIGN_ADDR` | `/sovereign/*` → the cockpit | `vigil-sovereign:8733` (the headless writer Service) |
+| `--offense-console-addr` | `VIGIL_OFFENSE_CONSOLE_ADDR` | `/offense/*` read+SSE | `127.0.0.1:8787` (co-located; see below) |
+| `--offense-api-addr` | `VIGIL_OFFENSE_API_ADDR` | `/offense/api/v1/*` | `127.0.0.1:8799` (co-located; see below) |
+
+Per-user auth is likewise delegated to the **remote** sovereign whoami
+(`--sovereign-addr`), and the proxy still refuses a public/`0.0.0.0` bind — the pods
+bind their **own RFC1918 pod IP** (`--host $(POD_IP)` via the k8s downward API,
+which `bind_ok` accepts) and advertise `--domain` for the Ingress/TLS edge.
+
+**Honest scope — what this profile actually clusters:** the **sovereign spine
+writer** (single-writer StatefulSet) and the **stateless proxy tier**. The
+**offense plane is NOT a clustered, cross-pod workload here**, for two independent
+reasons that are *by design*, not oversight:
+
+1. **The offense console/api bind loopback ONLY.** `serve()`
+   (`engine/crucible/framework/v2/console/server.py`) *raises* on any non-loopback
+   host — "the console is a single-operator, on-host surface by design (sovereignty);
+   the unified reverse proxy is the only public listener." They cannot bind a pod IP,
+   so they are unreachable from another pod.
+2. **The offense plane stays native.** It drives the host Docker daemon for
+   sandboxed scans; containerizing it would mean handing it the host docker socket,
+   weakening the two-process boundary — so the `vigil/runtime:local` image carries the
+   **sovereign** venv only, deliberately not the offense venv.
+
+Consequently `/sovereign/*` is fully clustered and functional (federated to the one
+central writer), while `/offense/*` works only against an offense plane **co-located
+with the proxy on loopback** (a sidecar the operator adds, holding the docker socket
+per the two-process boundary). Left at the loopback default with no such sidecar,
+`/offense/*` returns 502 while `/sovereign/*` serves normally. This profile does not
+ship the offense sidecar and does not pretend `/offense/*` is horizontally scalable.
 
 ---
 
@@ -224,10 +273,16 @@ single writer scheduled); a comment block in that file states plainly that
 - `infra/ha/docker-compose.ha.yml` — active-active proxy + otel, server-mode
   Qdrant (2-node note), one active sovereign backend + a labeled passive under
   `--profile passive` that does NOT auto-write. All host ports loopback/VIP-only.
-- `infra/ha/k8s/` — `proxy-deployment.yaml` (replicas 3, readiness probe),
+- `infra/ha/k8s/` — `proxy-deployment.yaml` (replicas 3, `vigil up --proxy-only`
+  federating to `vigil-sovereign:8733`, `--host $(POD_IP)` bind, readiness probe),
   `sovereign-statefulset.yaml` (replicas 1 by design, PDB, anti-rollback readiness
-  gate), `qdrant-statefulset.yaml`, `neo4j-statefulset.yaml` (community caveat),
-  `otel-deployment.yaml`, `services.yaml` (headless for the StatefulSet), and a
-  `README.md`.
+  gate, `sigil serve --host $(POD_IP)`), `qdrant-statefulset.yaml`,
+  `neo4j-statefulset.yaml` (community caveat), `otel-deployment.yaml`, `services.yaml`
+  (headless for the StatefulSet), and a `README.md`. Both tiers bind the pod's own
+  RFC1918 IP via the downward API — never `0.0.0.0` (which `bind_ok` refuses).
+- `vigil up --proxy-only` (+ `--sovereign-addr` / `--offense-console-addr` /
+  `--offense-api-addr`, or the `VIGIL_*_ADDR` env equivalents) — the spawn-nothing
+  read/proxy mode that federates to remote backends (§1.1). Default (no `--proxy-only`)
+  is byte-identical to the historical spawn-local `vigil up`.
 - `tools/ha/spine_failover_guard.py` + `sigil floor promote-passive` — the
   witnessed-floor failover interlock (§3).

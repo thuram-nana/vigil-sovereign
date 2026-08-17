@@ -33,9 +33,15 @@ services:
   # host at 127.0.0.1:8770 and :8771). See infra/ha/lb.nginx.conf. Sticky sessions
   # (ip_hash) because each replica holds its own per-instance session token.
   #
-  # Launch the two NATIVE replicas the LB points at:
-  #   CRUCIBLE_API_KEY=... vigil up --domain vigil.example.com --host 127.0.0.1 --port 8770 --no-browser
-  #   CRUCIBLE_API_KEY=... vigil up --domain vigil.example.com --host 127.0.0.1 --port 8771 --no-browser
+  # Launch the two NATIVE replicas the LB points at. --proxy-only is REQUIRED: a plain `vigil up`
+  # would spawn its OWN sovereign cockpit on 8733, so the second replica would collide on 8733 AND
+  # become a second signed-spine writer (a fork, HA-PROFILE.md §2). --proxy-only spawns nothing and
+  # federates to the ONE native sovereign writer + the native offense plane on loopback:
+  #   CRUCIBLE_API_KEY=... vigil up --proxy-only --domain vigil.example.com --host 127.0.0.1 --port 8770 --no-browser \
+  #       --sovereign-addr 127.0.0.1:8733 --offense-console-addr 127.0.0.1:8787 --offense-api-addr 127.0.0.1:8799
+  #   CRUCIBLE_API_KEY=... vigil up --proxy-only --domain vigil.example.com --host 127.0.0.1 --port 8771 --no-browser \
+  #       --sovereign-addr 127.0.0.1:8733 --offense-console-addr 127.0.0.1:8787 --offense-api-addr 127.0.0.1:8799
+  # (The single native sovereign writer + native offense backends are launched separately — see below.)
   # ---------------------------------------------------------------------------
   vigil-lb:
     # Digest-pinned per the root compose's supply-chain policy (A14 — every container base image is
@@ -111,7 +117,8 @@ services:
   #
   # The ACTIVE sovereign writer is a NATIVE host process (the two-process boundary):
   #   SIGIL_UI_ALLOWED_HOSTS=vigil.example.com sigil serve --host 127.0.0.1 --port 8733
-  # It is the SINGLE writer; the two `vigil up` replicas federate to it over loopback.
+  # It is the SINGLE writer; the two `vigil up --proxy-only` replicas federate to it over loopback
+  # (--sovereign-addr 127.0.0.1:8733) rather than each spawning its own cockpit.
   #
   # This `sovereign-passive` service is the labeled standby under `--profile passive`.
   # It holds a synced MIRROR of ~/.sigil (mounted READ-ONLY here) and DOES NOT WRITE:

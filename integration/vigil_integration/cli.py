@@ -1364,7 +1364,11 @@ def _cmd_up(args: argparse.Namespace) -> int:
                   with_voice=getattr(args, "with_voice", False),
                   with_gesture=getattr(args, "with_gesture", False),
                   with_telemetry=getattr(args, "with_telemetry", False),
-                  telemetry_interval=getattr(args, "telemetry_interval", 15))
+                  telemetry_interval=getattr(args, "telemetry_interval", 15),
+                  proxy_only=getattr(args, "proxy_only", False),
+                  sovereign_addr=getattr(args, "sovereign_addr", ""),
+                  offense_console_addr=getattr(args, "offense_console_addr", ""),
+                  offense_api_addr=getattr(args, "offense_api_addr", ""))
 
 
 def _cmd_services(args: argparse.Namespace) -> int:
@@ -2331,6 +2335,23 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("--services", action="store_true",
                     help="also bring up the docker egress-gateway topology (create the networks + gateway "
                          "container if none exist; idempotent). Best-effort — a docker issue never blocks the UI.")
+    # ---- HA / clustering: a PROXY-ONLY read tier that federates to REMOTE backends -----------------
+    pu.add_argument("--proxy-only", action="store_true",
+                    help="run ONLY the reverse proxy — do NOT spawn the sovereign cockpit or the offense "
+                         "backends. Federate to the REMOTE backends named by --sovereign-addr / "
+                         "--offense-console-addr / --offense-api-addr. This is the HA read/proxy tier: N "
+                         "stateless replicas in front of ONE central sovereign writer (a second cockpit "
+                         "would be a second signed-spine writer = a fork). See docs/architecture/HA-PROFILE.md.")
+    pu.add_argument("--sovereign-addr", default=os.environ.get("VIGIL_SOVEREIGN_ADDR", ""),
+                    help="with --proxy-only: the sovereign cockpit host:port to federate /sovereign/* to "
+                         "(default 127.0.0.1:8733; env VIGIL_SOVEREIGN_ADDR). A k8s Service name is fine, "
+                         "e.g. vigil-sovereign:8733.")
+    pu.add_argument("--offense-console-addr", default=os.environ.get("VIGIL_OFFENSE_CONSOLE_ADDR", ""),
+                    help="with --proxy-only: the offense console host:port for the /offense/* read+SSE "
+                         "plane (default 127.0.0.1:8787; env VIGIL_OFFENSE_CONSOLE_ADDR).")
+    pu.add_argument("--offense-api-addr", default=os.environ.get("VIGIL_OFFENSE_API_ADDR", ""),
+                    help="with --proxy-only: the offense gated-api host:port for /offense/api/v1/* "
+                         "(default 127.0.0.1:8799; env VIGIL_OFFENSE_API_ADDR).")
     pu.set_defaults(func=_cmd_up)
 
     psvc = sub.add_parser("services",

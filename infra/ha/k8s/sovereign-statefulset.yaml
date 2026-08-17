@@ -74,8 +74,17 @@ spec:
         - name: sigil-writer
           image: vigil/runtime:local
           # The single ACTIVE writer: the sovereign cockpit + spine signer.
-          command: ["sigil", "serve", "--host", "0.0.0.0", "--port", "8733"]
+          # Bind the POD's OWN IP, never 0.0.0.0: `sigil serve` routes --host through `bind_ok`
+          # (apps/sigil/sigil/bridge/daemon.py), which REFUSES 0.0.0.0 / a public address (exit 2) and
+          # ACCEPTS loopback + RFC1918 — and a k8s pod IP is RFC1918. POD_IP is injected from the downward
+          # API below; the kubelet substitutes `$(POD_IP)` because POD_IP is defined in THIS container's
+          # env. The headless `vigil-sovereign` Service (services.yaml) resolves to this pod IP, so the
+          # proxy tier reaches the cockpit at vigil-sovereign:8733 → this pod's :8733.
+          command: ["sigil", "serve", "--host", "$(POD_IP)", "--port", "8733"]
           env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef: { fieldPath: status.podIP }
             - name: SIGIL_HOME
               value: "/sigil-home"
             - name: SIGIL_UI_ALLOWED_HOSTS

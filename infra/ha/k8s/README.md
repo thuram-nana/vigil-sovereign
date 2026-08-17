@@ -10,12 +10,38 @@ availability of the sovereign spine.**
 
 | Manifest | Kind | Replicas | HA posture |
 |---|---|---|---|
-| `proxy-deployment.yaml` | Deployment (+HPA) | 3 (→10) | **Active-active** stateless read/proxy tier. Genuinely scalable. |
+| `proxy-deployment.yaml` | Deployment (+HPA) | 3 (→10) | **Active-active** stateless read/proxy tier. Genuinely scalable. Runs `vigil up --proxy-only` — spawns NO backends, federates `/sovereign/*` to the central writer (`vigil-sovereign:8733`). See "proxy-only" below. |
 | `sovereign-statefulset.yaml` | StatefulSet (+PDB) | **1 by design** | **Single writer.** Anti-rollback readiness-gate initContainer; active-passive failover only. `replicas>1` is a data-corruption bug, not scale. |
 | `qdrant-statefulset.yaml` | StatefulSet | 1 | Durable single node. HA needs distributed mode (≥2 nodes + replication_factor≥2) — documented, not shipped. |
 | `neo4j-statefulset.yaml` | StatefulSet | 1 | **Community = no clustering.** Durable single instance only; HA needs Neo4j Enterprise. |
 | `otel-deployment.yaml` | Deployment | 2 | Active-active stateless. |
 | `services.yaml` | Services | — | ClusterIP + a **headless** Service for the StatefulSet. Sticky sessions on the proxy Service. |
+
+## Why the proxy runs `--proxy-only` (and binds the pod IP)
+
+`vigil up` is **not** a stateless proxy by default: it LAUNCHES the sovereign
+cockpit (8733) and both offense backends (8787/8799) as children on fixed loopback
+ports, then proxies to them. In N replicas that means N sovereign cockpits — N
+signed-spine **writers** = a fork the floor + witnesses reject (HA-PROFILE.md §2).
+
+So the Deployment runs **`vigil up --proxy-only`**: it spawns nothing and federates
+`/sovereign/*` to the **one** central writer via `--sovereign-addr
+vigil-sovereign:8733` (the headless writer Service). Both tiers bind their **own pod
+IP** (`--host $(POD_IP)`, from the downward API) — never `0.0.0.0`, which `bind_ok`
+refuses (the process would exit 2); a pod IP is RFC1918, which `bind_ok` accepts.
+`--domain vigil.example.com` is the advertised authority for your Ingress/TLS edge,
+not a bind.
+
+**The offense plane is NOT clustered by this profile — on purpose.** The offense
+console/api bind **loopback only** (`serve()` raises on any non-loopback host — a
+single-operator, on-host surface by design) and stay **native** (they drive the host
+Docker daemon; the two-process boundary keeps them out of the sovereign-only
+`vigil/runtime:local` image). They are therefore unreachable cross-pod. `/offense/*`
+works only against an offense plane **co-located** with the proxy on loopback (a
+sidecar the operator adds, holding the docker socket); left at the loopback default
+with no such sidecar it returns 502, while `/sovereign/*` serves normally. This
+profile clusters the **sovereign writer + the stateless proxy tier**, and does not
+pretend `/offense/*` is horizontally scalable. See HA-PROFILE.md §1.1.
 
 ## The single-writer invariant (do not "fix" it)
 
