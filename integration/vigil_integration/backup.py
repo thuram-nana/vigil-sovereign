@@ -1,4 +1,10 @@
-"""Signed, passphrase-encrypted OFF-BOX backup of the OFFENSE plane's durable state (Claim 6 / Piece A).
+"""Signed, passphrase-encrypted, PORTABLE backup of the OFFENSE plane's durable state (Claim 6 / Piece A).
+
+Honest naming: this writes a PORTABLE, passphrase-encrypted LOCAL backup file (portable = it restores on NEW
+hardware where this box's TPM is gone). A plain backup writes to the SAME host's disk — it is NOT off-HOST
+replication on its own. TRUE off-HOST replication is the orchestrator's SEPARATE, opt-in ``vigil backup --push
+<remote>`` step, which copies the ENCRYPTED file to a configured remote (tools/backup/transport.py) — ciphertext
+only, and the remote's own security is the operator's responsibility.
 
 The offense plane had NO disaster-recovery path: its durable state under ``--base-dir`` (default ``.vigil-live``)
 — every ``{slug}.spine``, the persisted blackboard chain, the operator/spine/governance identity keys, the
@@ -52,17 +58,24 @@ no usable offense-spine public key to re-verify it under is a fail-closed refusa
 ``create`` refuses at the source to produce a spine-bearing backup that omits its spine key, so a
 key-present spine is always re-verified and a key-absent one is always refused).
 
-Honest limit on what is re-verified: ``.blackboard/store.sqlite`` and the run dirs are captured as OPAQUE
-bytes. Their internal database consistency is NOT re-checked on restore — only the signed offense spine and
-the signed evidence chain are. The passphrase is the recovery secret; it is NEVER stored — lose it and the
-backup is unrecoverable BY DESIGN (the off-box confidentiality guarantee, unchanged from the sovereign leg).
+Honest limit on what is re-verified: ``.blackboard/store.sqlite`` is captured as a CONSISTENT point-in-time
+snapshot (the stdlib sqlite3 online backup API — so a live writer mid-transaction is captured as a coherent
+db, not a torn page mix; a non-SQLite file falls back to a raw byte copy with a logged note). That snapshot
+is consistent as of the snapshot INSTANT — NOT against writers that commit afterwards. The run dirs are
+still captured as OPAQUE bytes. Neither the store db's internal consistency nor the run dirs are re-checked
+on restore — only the signed offense spine and the signed evidence chain are. The passphrase is the recovery
+secret; it is NEVER stored — lose it and the backup is unrecoverable BY DESIGN (the off-box confidentiality
+guarantee, unchanged from the sovereign leg).
 """
 from __future__ import annotations
 
 import base64
 import hashlib
 import json
+import logging
 import os
+import shutil
+import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from vigil_core import canonical_json, sha256_hex, sign, verify_one
@@ -98,6 +111,64 @@ _REWRAP_KEYS: tuple[tuple[str, bytes], ...] = (
 )
 # Crucible-side files travel under this rel prefix so restore routes them to ``crucible_root`` (not base_dir).
 _CRUCIBLE_PREFIX = "crucible/"
+# The CRUCIBLE blackboard db — captured as a CONSISTENT point-in-time snapshot (not a torn raw byte copy) via
+# the stdlib sqlite3 online backup API. Its packaged rel; matched in the create read loop to route it through
+# ``_read_sqlite_consistent``.
+_STORE_SQLITE_REL = _CRUCIBLE_PREFIX + ".blackboard/store.sqlite"
+# A real SQLite database file begins with this fixed 16-byte header; a file that does not is copied raw.
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+_log = logging.getLogger(__name__)
+
+
+def _read_sqlite_consistent(src: Path) -> bytes:
+    """Return the bytes of ``.blackboard/store.sqlite`` as a CONSISTENT point-in-time snapshot.
+
+    A live CRUCIBLE writer may be mid-transaction when the backup runs; a naive ``read_bytes`` of the db file
+    can capture a TORN mix of pages (half of an in-flight write) that fails ``PRAGMA integrity_check`` on
+    restore. This uses the stdlib ``sqlite3`` ONLINE BACKUP API (``sqlite3.Connection.backup``) into a temp
+    file, which copies a coherent snapshot even while another connection writes (WAL or rollback journal),
+    and packages THOSE bytes.
+
+    Falls back to a raw byte copy — with a logged note — ONLY if ``src`` is not a valid SQLite database (bad
+    magic / not-a-db / open error): an opaque non-db file is better preserved verbatim than lost. The snapshot
+    is consistent as of the snapshot INSTANT; it is not a guarantee about writers that commit afterwards."""
+    import sqlite3
+
+    try:
+        with open(src, "rb") as fh:
+            magic = fh.read(len(_SQLITE_MAGIC))
+    except OSError as e:
+        _log.warning("store.sqlite at %s could not be read for a snapshot (%s) — raw byte copy", src, e)
+        return src.read_bytes()
+    if magic != _SQLITE_MAGIC:
+        _log.warning("store.sqlite at %s is not a SQLite database (bad header) — raw byte copy", src)
+        return src.read_bytes()
+
+    fd, tmpname = tempfile.mkstemp(prefix="vigil-sqlite-snap-", suffix=".sqlite")
+    os.close(fd)
+    tmp = Path(tmpname)
+    try:
+        s = d = None
+        try:
+            s = sqlite3.connect(str(src), timeout=30.0)   # read-write open handles a WAL db's checkpoint state
+            d = sqlite3.connect(str(tmp))
+            s.backup(d)                                   # online backup: a coherent snapshot of committed pages
+        except sqlite3.Error as e:
+            _log.warning("store.sqlite at %s failed a consistent snapshot (%s) — raw byte copy", src, e)
+            return src.read_bytes()
+        finally:
+            if d is not None:
+                d.close()
+            if s is not None:
+                s.close()
+        return tmp.read_bytes()                           # connections closed → tmp is a complete, flushed db
+    finally:
+        for p in (tmp, Path(str(tmp) + "-wal"), Path(str(tmp) + "-shm"), Path(str(tmp) + "-journal")):
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
 
 class OffenseBackupError(Exception):
@@ -140,6 +211,124 @@ def _safe_target(root: Path, root_resolved: Path, rel: str) -> Path:
     if not target.resolve().is_relative_to(root_resolved):
         raise OffenseBackupError(f"refusing an unsafe backup path {rel!r}")
     return target
+
+
+def _dir_is_nonempty(p: Path) -> bool:
+    """True iff ``p`` exists as a directory that already holds at least one entry (the guard for a
+    restore-would-overlay-stale-state refusal). A missing path or an empty dir is a clean target."""
+    return p.is_dir() and any(p.iterdir())
+
+
+def _new_staging_dir(dest: Path) -> Path:
+    """A private staging dir under ``dest``'s PARENT (guaranteeing the SAME filesystem, so the final
+    ``os.replace`` is an ATOMIC rename, not a cross-device copy). The whole restored tree is built + re-verified
+    HERE and only swapped onto ``dest`` once everything passes — so a mid-restore crash leaves ``dest`` as the
+    complete OLD tree (or absent), never a half-written mix of old and new files."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=".restore-staging-", dir=str(dest.parent)))
+
+
+def _atomic_swap_into_place(staged: Path, dest: Path) -> None:
+    """Move a fully-built, fully-verified ``staged`` tree onto ``dest`` so ``dest`` is only ever the complete
+    OLD tree, absent, or the complete NEW tree — never a partial mix. If ``dest`` already exists it is renamed
+    ASIDE first (atomic), the staged tree renamed in (atomic), then the old tree deleted; a failure between the
+    two renames rolls the move-aside back. Both renames are same-filesystem (``staged`` and the aside name both
+    live under ``dest.parent``), so each is atomic. NOTE: this makes ONE destination atomic; a caller with two
+    destinations swaps them sequentially (see ``restore_offense_backup``).
+
+    WHOLE-TREE REPLACE — correct ONLY for a destination whose backup captures the WHOLE tree (the offense
+    base_dir: its capture is the whole dir minus re-creatable transients, so deleting the old tree drops only
+    stale/re-creatable state). A destination captured as a strict SUBSET (``crucible_root``: only the proof-db
+    file + the runs subtree) must NOT be whole-replaced — that would delete live, un-captured data (the CRUCIBLE
+    code itself). Those use ``_atomic_swap_crucible_units`` instead."""
+    if dest.exists():
+        aside = dest.parent / (".restore-old-" + staged.name)
+        os.replace(str(dest), str(aside))                 # atomic: dest → aside (dest now absent)
+        try:
+            os.replace(str(staged), str(dest))            # atomic: staged → dest (the new tree lands whole)
+        except OSError:
+            os.replace(str(aside), str(dest))             # best-effort: restore the old tree on failure
+            raise
+        shutil.rmtree(aside, ignore_errors=True)          # drop the old tree (whole-capture: no live data lost)
+    else:
+        os.replace(str(staged), str(dest))                # atomic: staged → a fresh dest
+
+
+# The CRUCIBLE-side backup captures a strict SUBSET of ``crucible_root`` (NOT the whole tree — see
+# ``_iter_crucible_files``): the proof-db FILE and the whole runs SUBTREE. Restore must replace ONLY these
+# captured units so live, un-captured data under ``crucible_root`` (the CRUCIBLE code, config, other
+# ``.console``/``.blackboard`` state) is NEVER destroyed — even under ``--force``. KEEP IN SYNC with
+# ``_iter_crucible_files``: each unit is the minimal path that contains exactly its captured file(s) and no
+# un-captured sibling (so the swap can never reach a sibling).
+_CRUCIBLE_STORE_UNIT = ".blackboard/store.sqlite"     # a FILE unit
+_CRUCIBLE_RUNS_UNIT = ".console/runs"                 # a whole SUBTREE unit
+# sqlite sidecars of the proof-db: swapping in a fresh, self-contained ``store.sqlite`` snapshot MUST drop the
+# OLD db's WAL/SHM/journal at the destination — an orphaned sidecar from the replaced db, applied to the new db
+# on next open, would corrupt it. They are never captured (the snapshot is already consistent + self-contained).
+_STORE_SQLITE_SIDECARS = ("store.sqlite-wal", "store.sqlite-shm", "store.sqlite-journal")
+
+
+def _drop_path(p: Path) -> None:
+    """Best-effort remove ``p`` whether it is a dir, a file, or a (possibly broken) symlink."""
+    if p.is_dir() and not p.is_symlink():
+        shutil.rmtree(p, ignore_errors=True)
+    elif p.exists() or p.is_symlink():
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def _atomic_swap_unit(staged_unit: Path, dest_unit: Path) -> None:
+    """Atomically replace ONE captured unit (a FILE or a whole SUBTREE) at ``dest_unit`` with ``staged_unit``,
+    leaving every SIBLING under ``dest_unit.parent`` UNTOUCHED. Same move-aside → rename-in → drop-old as
+    ``_atomic_swap_into_place`` (each rename atomic, same filesystem), so a crash leaves ``dest_unit`` as the
+    complete OLD unit, absent, or the complete NEW unit — never torn. Scoping the swap to the unit (not the
+    whole root) is what stops a ``--force`` restore of a SUBSET capture from deleting live, un-captured data."""
+    dest_unit.parent.mkdir(parents=True, exist_ok=True)
+    if dest_unit.exists() or dest_unit.is_symlink():
+        aside = dest_unit.parent / (".restore-old-" + dest_unit.name)
+        _drop_path(aside)                                 # clear any stale aside from a prior crashed restore
+        os.replace(str(dest_unit), str(aside))            # atomic: dest_unit → aside
+        try:
+            os.replace(str(staged_unit), str(dest_unit))  # atomic: staged unit → dest_unit
+        except OSError:
+            os.replace(str(aside), str(dest_unit))        # best-effort rollback
+            raise
+        _drop_path(aside)                                 # drop the old unit
+    else:
+        os.replace(str(staged_unit), str(dest_unit))      # atomic into a fresh slot
+
+
+def _crucible_units_present(croot: Path) -> list[str]:
+    """The captured crucible units that ALREADY exist under ``croot`` (the proof state a restore would
+    overwrite). The force-gate keys off THIS, not off the whole root being non-empty — ``crucible_root`` is
+    ALWAYS non-empty (it holds the CRUCIBLE code), so a whole-dir non-empty check would force ``--force`` for
+    every restore and then silently destroy that code. Only these units are ever touched."""
+    present: list[str] = []
+    if (croot / _CRUCIBLE_STORE_UNIT).exists():
+        present.append(_CRUCIBLE_STORE_UNIT)
+    if _dir_is_nonempty(croot / _CRUCIBLE_RUNS_UNIT):
+        present.append(_CRUCIBLE_RUNS_UNIT)
+    return present
+
+
+def _atomic_swap_crucible_units(staged_croot: Path, dest_croot: Path) -> None:
+    """Swap ONLY the captured crucible units (the proof-db file + the runs subtree) from the staged tree onto
+    ``dest_croot``, each atomically, leaving every un-captured file OUTSIDE those units (the CRUCIBLE code,
+    config, sibling ``.console``/``.blackboard`` entries) UNTOUCHED. Honest scope: the ``.console/runs`` unit is
+    replaced WHOLESALE — a run created AFTER the backup lives inside that unit and is therefore dropped (the
+    intended DR-snapshot semantic), so this bounds ``--force``'s blast radius to the captured units, not to
+    "no un-captured data anywhere". The two units are swapped sequentially (a crash leaves each unit
+    complete-old-or-complete-new, never torn), matching the base-then-crucible sequential-swap limit."""
+    staged_db = staged_croot / _CRUCIBLE_STORE_UNIT
+    if staged_db.is_file():
+        _atomic_swap_unit(staged_db, dest_croot / _CRUCIBLE_STORE_UNIT)
+        for side in _STORE_SQLITE_SIDECARS:               # drop the replaced db's orphaned sidecars
+            _drop_path(dest_croot / ".blackboard" / side)
+    staged_runs = staged_croot / _CRUCIBLE_RUNS_UNIT
+    if staged_runs.is_dir():
+        _atomic_swap_unit(staged_runs, dest_croot / _CRUCIBLE_RUNS_UNIT)
 
 
 def _iter_base_files(base: Path):
@@ -197,7 +386,10 @@ def create_offense_backup(dest, passphrase: str, *, base_dir, crucible_root=None
     if crucible_root:
         sources += list(_iter_crucible_files(Path(crucible_root)))
     for f, rel in sources:
-        raw = f.read_bytes()
+        # ``.blackboard/store.sqlite`` is captured as a CONSISTENT snapshot (online backup API); every other
+        # file is an opaque raw byte copy. The snapshot bytes are what gets hashed + packaged, so the pre-write
+        # hash check and the restored file agree.
+        raw = _read_sqlite_consistent(f) if rel == _STORE_SQLITE_REL else f.read_bytes()
         file_blobs[rel] = base64.b64encode(raw).decode("ascii")
         file_hashes[rel] = sha256_hex(raw)
 
@@ -285,13 +477,36 @@ def _verify_evidence_bundles(root: Path) -> int:
     return count
 
 
-def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None, expect_pubkey=None) -> dict:
-    """Decrypt + VERIFY an offense backup, then write the base_dir state into ``new_base`` and the CRUCIBLE
-    proof state into ``crucible_root``. Fail-closed: the passphrase must decrypt, the governance signature
-    over the manifest must verify, and every file's sha256 must match BEFORE anything is written. The three
-    identity keys are re-sealed through the NEW vault. AFTER the write it RE-VERIFIES — every restored spine's
-    chain/signatures, the segment view (no FAILED), and every restored evidence bundle — and returns
-    ``{"verified": True, ...}`` ONLY if all pass, else raises OffenseBackupError.
+def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None, expect_pubkey=None,
+                           force: bool = False) -> dict:
+    """Decrypt + VERIFY an offense backup, then STAGE the base_dir state and the CRUCIBLE proof state into
+    private temp dirs, RE-VERIFY the staged trees, and only then ATOMICALLY swap them onto ``new_base`` and
+    ``crucible_root``. Fail-closed: the passphrase must decrypt, the governance signature over the manifest
+    must verify, and every file's sha256 must match BEFORE anything is written. The three identity keys are
+    re-sealed through the NEW vault. The staged tree is RE-VERIFIED — every restored spine's chain/signatures,
+    the segment view (no FAILED), and every restored evidence bundle — and returns ``{"verified": True, ...}``
+    ONLY if all pass, else raises OffenseBackupError with the destinations UNTOUCHED.
+
+    STAGED / ATOMIC restore (no stale-state overlay): the restored state is built + verified in a sibling temp
+    dir under the destination's PARENT, then renamed into place, so a mid-restore crash leaves each destination
+    as the complete OLD state (or absent), never a half-written mix.
+
+    Two destinations with DIFFERENT capture scopes, so DIFFERENT replace semantics:
+      * ``new_base`` is a WHOLE-tree capture (the whole base_dir minus re-creatable transients). A non-empty
+        ``new_base`` is REFUSED unless ``force=True``; with ``force`` it is whole-replaced (only stale /
+        re-creatable state is dropped).
+      * ``crucible_root`` is a strict SUBSET capture — ONLY the proof-db (``.blackboard/store.sqlite``) and the
+        runs subtree (``.console/runs``). Restore replaces ONLY those units; every file OUTSIDE them under
+        ``crucible_root`` (the CRUCIBLE code, config, sibling ``.console``/``.blackboard`` entries) is LEFT
+        INTACT, even under ``--force``. The force-gate here fires only when a captured proof unit already exists
+        — never merely because the root is non-empty (it always is). This bounds ``--force``'s blast radius to
+        the captured units — it never reaches the CRUCIBLE code or any sibling. Honest scope: the
+        ``.console/runs`` unit is replaced WHOLESALE, so a run created AFTER the backup (which lives inside that
+        unit) is dropped by a restore — the intended DR-snapshot semantic, NOT an "un-captured data is never
+        deleted anywhere" guarantee.
+    Honest limit: each destination (and, within crucible, each unit) is swapped atomically, but they are swapped
+    SEQUENTIALLY — a crash between swaps leaves some new, some old, each internally consistent (never a torn
+    tree), not a jointly-atomic transaction.
 
     ``expect_pubkey`` (optional) is the out-of-band AUTHENTICITY pin: the expected offense-GOVERNANCE pubkey
     the recipient obtained through a trusted channel. When supplied, the in-body manifest pubkey MUST equal it
@@ -351,49 +566,92 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
         raise OffenseBackupError("backup secret set does not match its signed manifest")
 
     # If a crucible-rooted file exists in the table, restore REQUIRES a crucible_root to route it to.
-    if croot is None and any(rel.startswith(_CRUCIBLE_PREFIX) for rel in files):
+    has_crucible = any(rel.startswith(_CRUCIBLE_PREFIX) for rel in files)
+    if has_crucible and croot is None:
         raise OffenseBackupError("backup carries CRUCIBLE proof files but no crucible_root was given to "
                                  "restore them into — refusing a partial restore")
+    # ``crucible_root`` is an ACTIVE destination only when the backup actually carries crucible files. An
+    # offense-only backup must not be blocked (nor swapped) by a crucible_root it will never write into —
+    # e.g. the CLI auto-resolves it to the populated in-repo tree, which is legitimately non-empty.
+    active_croot = croot if (has_crucible and croot is not None) else None
 
-    # decode + verify EVERY file against the signed manifest BEFORE writing anything (fail-closed). Each rel is
-    # routed to base_dir or crucible_root and resolved to ONE validated target; the SAME target is written.
-    new_base_resolved = new_base.resolve()
-    croot_resolved = croot.resolve() if croot is not None else None
-    decoded: list[tuple[Path, bytes, str]] = []
-    for rel, b64 in files.items():
-        if rel.startswith(_CRUCIBLE_PREFIX):
-            target = _safe_target(croot, croot_resolved, rel[len(_CRUCIBLE_PREFIX):])   # type: ignore[arg-type]
-        else:
-            target = _safe_target(new_base, new_base_resolved, rel)
-        try:
-            data = base64.b64decode(b64)
-        except Exception as e:  # noqa: BLE001
-            raise OffenseBackupError(f"corrupt file blob {rel!r}: {e}") from e
-        if sha256_hex(data) != hashes[rel]:
-            raise OffenseBackupError(f"file {rel!r} does not match its signed hash (tamper)")
-        decoded.append((target, data, rel))
+    # STAGED / ATOMIC restore: refuse to OVERLAY a non-empty destination unless force, then build + re-verify
+    # the WHOLE tree in a sibling temp dir and swap it into place at the very end (no half-written mix on crash).
+    if not force and _dir_is_nonempty(new_base):
+        raise OffenseBackupError(
+            f"refusing to restore into a NON-EMPTY base dir {new_base} (a restore must not overlay stale "
+            f"state) — pass force=True (--force) to REPLACE it, or restore into a fresh/empty dir")
+    # The crucible force-gate is UNIT-SCOPED, not whole-dir: restore replaces ONLY the captured proof units
+    # (``.blackboard/store.sqlite`` + ``.console/runs``), so it must refuse (without force) ONLY when one of
+    # THOSE already exists — never merely because ``crucible_root`` is non-empty (it always is: it holds the
+    # CRUCIBLE code, which the restore never touches). This is the fix for the destructive-blast-radius defect.
+    present_units = _crucible_units_present(active_croot) if active_croot is not None else []
+    if not force and present_units:
+        raise OffenseBackupError(
+            f"refusing to overwrite live CRUCIBLE proof state {present_units} under {active_croot} (a restore "
+            f"must not silently overlay stale proof state) — pass force=True (--force) to REPLACE those units, "
+            f"or restore into a fresh crucible root. The rest of the crucible root (the CRUCIBLE code, config) "
+            f"is left intact regardless.")
 
-    new_base.mkdir(parents=True, exist_ok=True)
-    if croot is not None:
-        croot.mkdir(parents=True, exist_ok=True)
-    for target, data, rel in decoded:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-        if _is_sensitive_rel(rel):
-            os.chmod(target, 0o600)
-    # re-seal the three identity keys through the NEW vault (sealed under the new TPM if provisioned, else
-    # plaintext-0600) — each with its own AEAD purpose context.
-    dst_vault = Vault(new_base / "vault")
-    key_ctx = {name: ctx for name, ctx in _REWRAP_KEYS}
-    for name, val in secrets.items():
-        ctx = key_ctx.get(name)
-        if ctx is None:
-            raise OffenseBackupError(f"backup carries an unknown re-wrapped secret {name!r} — refusing")
-        dst_vault.write_text_secret(new_base / name, val, context=ctx)
+    staged_base: Path | None = _new_staging_dir(new_base)
+    staged_croot: Path | None = _new_staging_dir(active_croot) if active_croot is not None else None
+    try:
+        # decode + verify EVERY file against the signed manifest BEFORE writing anything (fail-closed). Each rel
+        # is routed to the STAGED base or STAGED crucible tree and resolved to ONE validated target inside it
+        # (the SAME path-escape guard); the SAME target is written.
+        staged_base_resolved = staged_base.resolve()
+        staged_croot_resolved = staged_croot.resolve() if staged_croot is not None else None
+        for rel, b64 in files.items():
+            if rel.startswith(_CRUCIBLE_PREFIX):
+                target = _safe_target(staged_croot, staged_croot_resolved,   # type: ignore[arg-type]
+                                      rel[len(_CRUCIBLE_PREFIX):])
+            else:
+                target = _safe_target(staged_base, staged_base_resolved, rel)
+            try:
+                data = base64.b64decode(b64)
+            except Exception as e:  # noqa: BLE001
+                raise OffenseBackupError(f"corrupt file blob {rel!r}: {e}") from e
+            if sha256_hex(data) != hashes[rel]:
+                raise OffenseBackupError(f"file {rel!r} does not match its signed hash (tamper)")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            if _is_sensitive_rel(rel):
+                os.chmod(target, 0o600)
 
-    verified_bundles = _reverify_restored(new_base, croot, secrets)
-    return {"new_base": str(new_base), "crucible_root": (str(croot) if croot else None),
-            "files": len(decoded), "secrets": len(secrets),
+        # re-seal the three identity keys through the NEW vault (sealed under the new TPM if provisioned, else
+        # plaintext-0600) — each with its own AEAD purpose context. The vault dir is built inside the staged
+        # tree and swapped in with it.
+        dst_vault = Vault(staged_base / "vault")
+        key_ctx = {name: ctx for name, ctx in _REWRAP_KEYS}
+        for name, val in secrets.items():
+            ctx = key_ctx.get(name)
+            if ctx is None:
+                raise OffenseBackupError(f"backup carries an unknown re-wrapped secret {name!r} — refusing")
+            dst_vault.write_text_secret(staged_base / name, val, context=ctx)
+
+        # RE-VERIFY the STAGED tree — nothing is swapped into place until this passes, so a failed re-verify
+        # leaves the real destinations UNTOUCHED (still the complete old state, or absent).
+        verified_bundles = _reverify_restored(staged_base, staged_croot, secrets)
+
+        # everything verified: atomically swap the staged trees onto the real destinations (base first, then
+        # crucible). Clearing the ref after each swap keeps the finally from deleting a tree already moved in.
+        _atomic_swap_into_place(staged_base, new_base)            # base_dir: WHOLE capture → whole-tree swap
+        staged_base = None
+        if staged_croot is not None:
+            # crucible_root: SUBSET capture → swap ONLY the captured units (proof-db + runs), leaving the
+            # CRUCIBLE code and any other un-captured file under the root intact. Then drop the drained staging
+            # shell (its units were moved out; only empty ``.blackboard``/``.console`` parents remain).
+            _atomic_swap_crucible_units(staged_croot, active_croot)   # type: ignore[arg-type]
+            shutil.rmtree(staged_croot, ignore_errors=True)
+            staged_croot = None
+    finally:
+        if staged_base is not None:
+            shutil.rmtree(staged_base, ignore_errors=True)
+        if staged_croot is not None:
+            shutil.rmtree(staged_croot, ignore_errors=True)
+
+    return {"new_base": str(new_base), "crucible_root": (str(active_croot) if active_croot else None),
+            "files": len(files), "secrets": len(secrets),
             "bundles_verified": verified_bundles, "verified": True}
 
 

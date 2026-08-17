@@ -1754,7 +1754,11 @@ def _cmd_backup(args: argparse.Namespace) -> int:
     DISTINCT ``.venv-sovereign/bin/sigil`` SUBPROCESS. There is NEVER a merged single-file archive: a merged
     archive would require ONE process to hold BOTH planes' secrets at once — a FATAL-2 violation. The owner key
     never enters this process; the sovereign leg holds it in its own venv only. The passphrase reaches each leg
-    via env/argument, never argv, and is never stored — lose it and the backups are unrecoverable by design."""
+    via env/argument, never argv, and is never stored — lose it and the backups are unrecoverable by design.
+
+    This writes a PORTABLE, passphrase-encrypted LOCAL backup. With ``--push <dest>`` it ALSO replicates the
+    ENCRYPTED parts + MANIFEST off-HOST to a transport backend (ciphertext only — see tools/backup/transport);
+    without it, the backup lives only on this host's disk."""
     import json
     import socket
     import time
@@ -1810,6 +1814,23 @@ def _cmd_backup(args: argparse.Namespace) -> int:
     (subdir / "MANIFEST.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     print(f"manifest → {subdir / 'MANIFEST.json'}")
     print("KEEP THE PASSPHRASE SAFE — it is the ONLY key to these backups (never stored; lose it → unrecoverable).")
+
+    # TRUE off-HOST transport (opt-in): after a SUCCESSFUL local backup, replicate the ENCRYPTED parts +
+    # MANIFEST to a transport backend so a real second copy lives off the host. The parts are passphrase-
+    # encrypted (scrypt AEAD) BEFORE they were written, so transport moves CIPHERTEXT only — the remote sees
+    # no plaintext (its own security is the operator's responsibility). The local backup above already
+    # succeeded and is untouched; a push failure surfaces without discarding it.
+    push_dest = getattr(args, "push", "") or ""
+    if push_dest:
+        from tools.backup.transport import TransportError, get_transport
+        parts = [subdir / info["file"] for info in planes.values()] + [subdir / "MANIFEST.json"]
+        try:
+            pushed = get_transport(push_dest).push(parts, subdir.name)
+        except TransportError as e:
+            print(f"vigil backup: local backup OK, but --push failed: {e}", file=sys.stderr)
+            return 1
+        print(f"pushed → {pushed['target']} ({len(pushed['files'])} encrypted part(s) + manifest; "
+              f"ciphertext only, no plaintext leaves the host)")
 
     if getattr(args, "prune", False):
         deleted = prune(out_root, keep_days=args.keep_days, keep_last=args.keep_last)
@@ -1871,7 +1892,7 @@ def _cmd_restore(args: argparse.Namespace) -> int:
             expect_pub = getattr(args, "expect_governance_pubkey", "") or None
             try:
                 res = restore_offense_backup(off, args.base_dir, pw, crucible_root=croot,
-                                             expect_pubkey=expect_pub)
+                                             expect_pubkey=expect_pub, force=getattr(args, "force", False))
             except OffenseBackupError as e:
                 print(f"vigil restore: offense leg failed (nothing trusted): {e}", file=sys.stderr)
                 return 1
@@ -1890,7 +1911,10 @@ def _cmd_restore(args: argparse.Namespace) -> int:
                 print("vigil restore: --sigil-home <fresh dir> is required to restore the sovereign plane",
                       file=sys.stderr)
                 return 2
-            rc = _run_sovereign_leg(["restore", str(sov), home], pw)
+            sov_args = ["restore", str(sov), home]
+            if getattr(args, "force", False):
+                sov_args.append("--force")     # forward the non-empty-target override to the sovereign leg
+            rc = _run_sovereign_leg(sov_args, pw)
             if rc != 0:
                 print(f"vigil restore: sovereign leg failed (exit {rc})", file=sys.stderr)
                 return 1
@@ -2424,6 +2448,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="back up ONLY the sovereign plane (sigil subprocess)")
     grp.add_argument("--offense-only", dest="offense_only", action="store_true",
                      help="back up ONLY the offense plane (this venv)")
+    pbk.add_argument("--push", default="",
+                     help="TRUE off-HOST replication (opt-in): after a successful backup, copy the ENCRYPTED "
+                          "parts + MANIFEST to a transport backend. A bare path or local:<path> uses the "
+                          "shipped local-directory backend (a mounted remote FS / removable disk / test dir); "
+                          "unbuilt schemes (rsync://, scp://, s3://) error with the contract to implement. Only "
+                          "ciphertext is transported — no plaintext leaves the host. Needs network (run via "
+                          "vigil-backup-push.service, PrivateNetwork=no), unlike the air-gapped local timer.")
     pbk.add_argument("--prune", action="store_true", help="after the backup, prune old backups per the policy")
     pbk.add_argument("--keep-days", dest="keep_days", type=int, default=None,
                      help="retention: keep backups within N days (with --prune)")
@@ -2448,6 +2479,17 @@ def build_parser() -> argparse.ArgumentParser:
                      help="out-of-band AUTHENTICITY pin: the expected offense-governance pubkey (base64). When "
                           "set, the offense backup's manifest MUST be signed by it — else restore refuses. "
                           "Without it, offense restore authenticity is passphrase-possession only.")
+    prs.add_argument("--force", action="store_true",
+                     help="REPLACE existing state at the destination. The base-dir is a WHOLE-tree capture, so "
+                          "--force whole-replaces it (only re-creatable transients are dropped). The "
+                          "crucible-root and sigil-home are SUBSET captures: --force replaces ONLY the captured "
+                          "units (crucible: .blackboard/store.sqlite + .console/runs; sigil: spine/floor/"
+                          "security-manifest/warden) and never touches un-captured data OUTSIDE those units (the "
+                          "CRUCIBLE code, sigil vector/config caches). A captured unit is replaced WHOLESALE, "
+                          "so proof created after the backup that lives inside one (e.g. a new .console/runs "
+                          "engagement) is dropped by a restore (the DR-snapshot semantic). Without --force, "
+                          "restore refuses when a captured unit already exists rather than overwrite it. The "
+                          "replacement is staged + verified first and swapped in atomically per unit (crash-safe).")
     grp2 = prs.add_mutually_exclusive_group()
     grp2.add_argument("--sovereign-only", dest="sovereign_only", action="store_true",
                       help="restore ONLY the sovereign plane")

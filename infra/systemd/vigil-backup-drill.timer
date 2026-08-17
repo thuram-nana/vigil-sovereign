@@ -1,0 +1,28 @@
+# VIGIL backup recovery-drill timer — fires the drill oneshot on a cadence.
+# =====================================================================
+# Proves the backup→restore round-trip on a schedule, so a silently-broken backup
+# pipeline surfaces in journald BEFORE a real disaster. Weekly by default (a drill is
+# heavier than a backup and need not run as often); tighten if you want more assurance.
+#
+# Enable with:
+#   systemctl --user enable --now vigil-backup-drill.timer
+#   systemctl --user list-timers 'vigil-*'
+#
+# HONEST RESIDUAL: the drill only proves the round-trip for the CURRENT state at the
+# moment it runs; it does not prove every past backup restores, and (as configured) it
+# drills the offense plane only — extend VIGIL_DRILL_SCOPE for both planes.
+
+[Unit]
+Description=Weekly trigger for the VIGIL backup recovery drill
+Documentation=file:%h/vigil/docs/plain-english/07-signing-and-keys.md
+
+[Timer]
+# Weekly. Tighten (e.g. daily) for more frequent assurance.
+OnCalendar=weekly
+# If the machine was asleep/off at the scheduled time, run once on the next wake.
+Persistent=true
+RandomizedDelaySec=1800
+Unit=vigil-backup-drill.service
+
+[Install]
+WantedBy=timers.target

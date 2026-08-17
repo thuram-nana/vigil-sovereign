@@ -1181,7 +1181,8 @@ def cmd_restore(a) -> None:
     from .backup import BackupError, restore_backup
     home = Path(a.home)
     try:
-        res = restore_backup(a.src, home, _backup_passphrase(), vault=Vault(home / "vault"))
+        res = restore_backup(a.src, home, _backup_passphrase(), vault=Vault(home / "vault"),
+                             force=getattr(a, "force", False))
     except BackupError as e:
         print(f"!! restore failed (nothing trusted): {e}", file=sys.stderr)
         sys.exit(1)
@@ -1383,6 +1384,10 @@ def main(argv=None) -> None:
     pres = sub.add_parser("restore", help="restore a `sigil backup` onto a fresh SIGIL_HOME (verifies before writing)")
     pres.add_argument("src", help="the encrypted backup file")
     pres.add_argument("home", help="a FRESH SIGIL_HOME dir to restore into")
+    pres.add_argument("--force", action="store_true",
+                      help="REPLACE a non-empty SIGIL_HOME. Without it, restore refuses a non-empty target "
+                           "rather than overlay stale state. The replacement is staged + verified first and "
+                           "swapped in atomically (crash-safe).")
     pres.set_defaults(fn=cmd_restore)
     pi = sub.add_parser("ingest")
     pi.add_argument("--reset", action="store_true", help="clear spine+cursor+vectors and rebuild")

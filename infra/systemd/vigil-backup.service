@@ -1,13 +1,21 @@
-# VIGIL automated off-box backup — systemd USER service (oneshot)
+# VIGIL automated PORTABLE LOCAL backup — systemd USER service (oneshot)
 # =====================================================================
-# Claim 6 / Piece A. Runs `vigil backup`: ONE off-box backup of BOTH trust
-# planes. It writes TWO SEPARATE passphrase-encrypted files under a timestamped
-# dir — the OFFENSE plane (offense.vglbk, in this venv) and the SOVEREIGN plane
-# (sovereign.sglbk, via a `.venv-sovereign/bin/sigil` SUBPROCESS) — plus a
-# MANIFEST.json. It is NEVER a merged single-file archive: a merged archive
-# would require one process to hold BOTH planes' secrets at once, a FATAL-2
-# boundary breach. The timer (vigil-backup.timer) fires this on a daily cadence
-# so "backed up" is an OPERATING property, not just a capability the code has.
+# Claim 6 / Piece A. Runs `vigil backup`: ONE portable, passphrase-encrypted
+# LOCAL backup of BOTH trust planes. It writes TWO SEPARATE encrypted files under
+# a timestamped dir — the OFFENSE plane (offense.vglbk, in this venv) and the
+# SOVEREIGN plane (sovereign.sglbk, via a `.venv-sovereign/bin/sigil` SUBPROCESS)
+# — plus a MANIFEST.json. It is NEVER a merged single-file archive: a merged
+# archive would require one process to hold BOTH planes' secrets at once, a
+# FATAL-2 boundary breach. The timer (vigil-backup.timer) fires this on a daily
+# cadence so "backed up" is an OPERATING property, not just a capability.
+#
+# HONEST SCOPE: this unit writes to ~/vigil-backups on the SAME host and runs
+# AIR-GAPPED (PrivateNetwork=yes) — the backup is portable + encrypted, but this
+# is NOT off-HOST replication: a destroyed host takes the engine AND these local
+# backups. For a genuine second copy on ANOTHER machine, enable the SEPARATE,
+# network-enabled vigil-backup-push.{service,timer} (PrivateNetwork=no), which
+# copies ONLY the already-encrypted files off the host. The two units are kept
+# separate ON PURPOSE so the routine backup never needs the network.
 #
 # Config (which base dir, and the PASSPHRASE) lives in an EnvironmentFile so the
 # unit is reusable and no secret is baked into the unit:
@@ -28,7 +36,7 @@
 #   systemctl --user enable --now vigil-backup.timer
 
 [Unit]
-Description=VIGIL two-plane off-box backup (offense + sovereign — two encrypted files, never a merged archive)
+Description=VIGIL two-plane portable LOCAL backup (offense + sovereign — two encrypted files, never a merged archive)
 Documentation=file:%h/vigil/docs/plain-english/07-signing-and-keys.md
 
 [Service]
