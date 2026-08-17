@@ -56,6 +56,7 @@ def _bootstrap_sys_path() -> None:
 
 _bootstrap_sys_path()
 
+from sigil.spine.checkpoint import classify_head                 # noqa: E402
 from sigil.spine.floor import Floor, check_floor, head_sig_hash  # noqa: E402
 from sigil.spine import witness as W                             # noqa: E402
 from vigil_integration.transparency import (                     # noqa: E402
@@ -103,10 +104,22 @@ class PromotionVerdict:
         }, sort_keys=True)
 
 
-def evaluate_promotion(local_head: Any, witnessed_env: str, *, scope: str, trust_root) -> PromotionVerdict:
-    """Pure decision function (no IO) — the testable core. ``local_head`` is the passive's restored/synced
-    ``SignedChainHead`` (or None); ``witnessed_env`` is the off-box witnessed-checkpoint envelope JSON;
-    ``trust_root`` is the witness ``TrustRoot`` the envelope's signatures are verified against."""
+def evaluate_promotion(local_head: Any, witnessed_env: str, *, scope: str, trust_root,
+                       owner_trust_root, entries) -> PromotionVerdict:
+    """Pure decision function (no IO) — the testable core.
+
+    ``local_head`` is the passive's restored/synced ``SignedChainHead`` (or None); ``entries`` is that
+    passive's local live chain (``SpineStore.entries()``); ``witnessed_env`` is the off-box
+    witnessed-checkpoint envelope JSON; ``trust_root`` is the WITNESS ``TrustRoot`` the envelope's
+    signatures are verified against; ``owner_trust_root`` is the OWNER ``TrustRoot`` (owner-only,
+    threshold 1 — the SAME anchor ``verify_checkpoint`` uses) the LOCAL head's signature is authenticated
+    against.
+
+    The local head is NEVER trusted on its self-declared scalar fields until it has been AUTHENTICATED:
+    the guard runs the same owner-signature authentication the live spine runs before ``check_floor``
+    (``classify_head`` -> ``verify_head``), then BINDS the head to the witnessed history (head_hash at
+    equal height, a proven append-only extension when grown). This is what closes the untrusted-mirror
+    forged/forked-head attacks — a stale/forged/forked mirror head is refused, not silently promoted."""
     if local_head is None:
         return PromotionVerdict(False, _EXIT_REFUSE,
                                 "no local spine head on this passive — run `sigil sign` on the synced mirror first")
@@ -137,17 +150,37 @@ def evaluate_promotion(local_head: Any, witnessed_env: str, *, scope: str, trust
                                 "(forged/tampered anchor, or its witnesses are not in this store's roster)",
                                 independent=independent, guarantee=guarantee)
 
+    # (3) AUTHENTICATE THE LOCAL HEAD before trusting ANY of its self-declared scalar fields. This runs the
+    # SAME owner-signature authentication the live spine runs before check_floor (checkpoint.classify_head ->
+    # reuse.verify_head): it re-derives the head's signing bytes and checks the OWNER Ed25519 signature at
+    # the owner threshold, AND binds head.head_hash / last_seq / entry_count to the passive's ACTUAL live
+    # chain (`floor=None` — the WITNESSED-anchor comparison is done separately in (4)/(5), not here). An
+    # unsigned head, an attacker-key-signed head, or one whose entry_count is inflated past the live chain
+    # fails here -> REFUSE. Without this the guard applied the floor/scalar checks to an UNAUTHENTICATED
+    # head, so a forged head (any self-declared count) sailed through — the forged-head attack.
+    if entries is None:
+        return PromotionVerdict(False, _EXIT_REFUSE,
+                                "cannot authenticate the local head without its live spine chain (refuse)",
+                                independent=independent, guarantee=guarantee)
+    local_entries = list(entries)
+    ok_auth, auth_msg = classify_head(local_head, local_entries, owner_trust_root, floor=None)
+    if not ok_auth:
+        return PromotionVerdict(False, _EXIT_REFUSE,
+                                f"local head is NOT authentically owner-signed (refuse): {auth_msg}",
+                                independent=independent, guarantee=guarantee)
+
     cp = wc.checkpoint
     lc, ls = int(local_head.entry_count), int(local_head.last_seq)
 
-    # (3) reuse the AUDITED monotonic anti-rollback logic. Synthesize a Floor from the witnessed
-    # checkpoint's committed height. A compact checkpoint does NOT carry base_seq/base_count or the
-    # meta-chain head_sig_hash (pre-Piece-C), so we neutralize those guards by construction:
+    # (4) reuse the AUDITED monotonic anti-rollback logic to catch a head BELOW the witnessed height.
+    # Synthesize a Floor from the witnessed checkpoint's committed height. A compact checkpoint does NOT
+    # carry base_seq/base_count or the meta-chain head_sig_hash (pre-Piece-C), so we neutralize those guards
+    # by construction:
     #   - base_seq/base_count = 0  -> head.base_* (>=0) always satisfies them (no false UN-PRUNE);
     #   - head_sig_hash = the LOCAL head's own -> the v2 meta-chain identity check is a no-op pass
     #     (we cannot derive meta-chain linkage from a checkpoint; the checkpoint commits HEIGHT, not linkage).
     # check_floor then reduces to exactly the sound quantities a checkpoint DOES commit: the ABSOLUTE,
-    # prune-invariant entry_count and last_seq.
+    # prune-invariant entry_count and last_seq. NOTE: these fields are now AUTHENTICATED (owner-signed, (3)).
     witnessed_floor = Floor(scope=scope, entry_count=int(cp.entry_count), last_seq=int(cp.last_seq),
                             base_seq=0, base_count=0, head_sig_hash=head_sig_hash(local_head), updated_ts="")
     ok, msg = check_floor(local_head, witnessed_floor)
@@ -157,8 +190,6 @@ def evaluate_promotion(local_head: Any, witnessed_env: str, *, scope: str, trust
                                 independent=independent, guarantee=guarantee,
                                 local_count=lc, local_last_seq=ls,
                                 witnessed_count=int(cp.entry_count), witnessed_last_seq=int(cp.last_seq))
-
-    # (4) belt-and-braces explicit gate on the exact witnessed height.
     if lc < int(cp.entry_count) or ls < int(cp.last_seq):
         return PromotionVerdict(False, _EXIT_REFUSE,
                                 f"ROLLBACK — local head (count {lc}, last_seq {ls}) is below the witnessed "
@@ -167,10 +198,52 @@ def evaluate_promotion(local_head: Any, witnessed_env: str, *, scope: str, trust
                                 local_count=lc, local_last_seq=ls,
                                 witnessed_count=int(cp.entry_count), witnessed_last_seq=int(cp.last_seq))
 
+    # (5) At or above the witnessed height, a higher/equal COUNT alone is NOT enough — the authenticated head
+    # must be TIED to the witnessed HISTORY, or a same-height fork / a divergent longer history would pass.
+    if lc == int(cp.entry_count):
+        # (5a) EQUAL HEIGHT: bind to the witnessed head_hash. (3) already tied the head's head_hash to the
+        # passive's REAL chain tip; requiring it EQUAL the witnessed checkpoint's head_hash proves the local
+        # history at this height IS the witnessed one (head_hash hash-chains the whole prefix). A different
+        # head_hash at the same count is an owner-key EQUIVOCATION / same-height fork -> REFUSE.
+        if str(local_head.head_hash) != str(cp.head_hash):
+            return PromotionVerdict(False, _EXIT_REFUSE,
+                                    f"SAME-HEIGHT FORK — local head at the witnessed height (count {lc}) carries "
+                                    f"head_hash {str(local_head.head_hash)[:16]}… but the off-box witnessed "
+                                    f"checkpoint commits {str(cp.head_hash)[:16]}… (owner-key equivocation / "
+                                    f"divergent history) — refuse to promote a fork",
+                                    independent=independent, guarantee=guarantee,
+                                    local_count=lc, local_last_seq=ls,
+                                    witnessed_count=int(cp.entry_count), witnessed_last_seq=int(cp.last_seq))
+        bind_note = "equals and is head_hash-bound to"
+    else:
+        # (5b) GROWN: the passive claims to be ABOVE the witnessed height. Prove it is a genuine append-only
+        # EXTENSION of the witnessed checkpoint via the AUDITED verify_against_external: the current record at
+        # the retained last_seq must carry the retained head_hash (records 0..retained are byte-identical), so
+        # the passive is a real SUPERSET of the witnessed history, not a divergent longer one. Unprovable (or a
+        # retained point below the live prune base, which needs the archive) -> REFUSE, never a silent pass.
+        try:
+            ok_ext, ext_msg = W.verify_against_external(witnessed_env, head=local_head, entries=local_entries,
+                                                        scope=scope, trust_root=trust_root)
+        except W.WitnessError as e:
+            return PromotionVerdict(False, _EXIT_REFUSE,
+                                    f"EXTENSION UNPROVEN — local head above the witnessed height could not be "
+                                    f"verified as its append-only extension (refuse): {e}",
+                                    independent=independent, guarantee=guarantee,
+                                    local_count=lc, local_last_seq=ls,
+                                    witnessed_count=int(cp.entry_count), witnessed_last_seq=int(cp.last_seq))
+        if not ok_ext:
+            return PromotionVerdict(False, _EXIT_REFUSE,
+                                    f"EXTENSION UNPROVEN — local head (count {lc}) does not provably extend the "
+                                    f"off-box witnessed checkpoint (count {cp.entry_count}): {ext_msg}",
+                                    independent=independent, guarantee=guarantee,
+                                    local_count=lc, local_last_seq=ls,
+                                    witnessed_count=int(cp.entry_count), witnessed_last_seq=int(cp.last_seq))
+        bind_note = "provably extends (append-only)"
+
     return PromotionVerdict(True, _EXIT_ACTIVATE,
-                            f"local head (count {lc}, last_seq {ls}) is at/above the off-box witnessed "
-                            f"checkpoint (count {cp.entry_count}, last_seq {cp.last_seq}); no rollback — "
-                            f"safe to promote this passive to ACTIVE",
+                            f"local head (count {lc}, last_seq {ls}) is OWNER-AUTHENTICATED and {bind_note} the "
+                            f"off-box witnessed checkpoint (count {cp.entry_count}, last_seq {cp.last_seq}); no "
+                            f"rollback, no same-height fork — safe to promote this passive to ACTIVE",
                             independent=independent, guarantee=guarantee,
                             local_count=lc, local_last_seq=ls,
                             witnessed_count=int(cp.entry_count), witnessed_last_seq=int(cp.last_seq))
@@ -192,9 +265,23 @@ def load_local_head(head_path: Optional[Path] = None):
         return None
 
 
+def load_local_entries():
+    """The passive's local live chain (``SpineStore.entries()``) — needed to AUTHENTICATE the local head
+    (``classify_head`` binds the head to it) and to prove an append-only EXTENSION over the witnessed
+    checkpoint. Returns [] on any read error: an unreadable store cannot authenticate a head, so the guard
+    then fails head authentication and REFUSES (fail-closed)."""
+    from sigil.spine.store import SpineStore
+    try:
+        return SpineStore().entries()
+    except Exception:  # noqa: BLE001 — a corrupt/unreadable store is not a promotable passive -> refuse downstream
+        return []
+
+
 def _trust_root_from_config():
-    """Build the witness ``TrustRoot`` from the owner-signed roster (or the default owner-only set).
-    Returns (scope, trust_root). Raises SystemExit(2) if no owner key exists (no trust anchor -> refuse)."""
+    """Build the WITNESS ``TrustRoot`` (from the owner-signed roster, or the default owner-only set) AND the
+    OWNER ``TrustRoot`` the local head is authenticated against (owner-only, threshold 1 — the SAME anchor
+    ``verify_checkpoint`` uses). Returns (scope, witness_trust_root, owner_trust_root). Raises SystemExit(2)
+    if no owner key exists (no trust anchor -> refuse)."""
     from sigil import config
     from sigil.governor.identity import owner_pubkey
     pub = owner_pubkey()
@@ -206,7 +293,10 @@ def _trust_root_from_config():
     roster_path = config.SIGIL_HOME / "witness.trust.json"
     roster = W.load_roster(roster_path, owner_pub=pub, scope=config.SCOPE)
     tr = W.witness_trust_root(roster, owner_pub=pub, owner_key_id=config.OWNER_KEY_ID)
-    return config.SCOPE, tr
+    # The OWNER trust root — owner-only at threshold 1 — the LOCAL head's Ed25519 signature is authenticated
+    # against. Distinct from the witness quorum ``tr`` (which may include independent witnesses like a phone).
+    owner_tr = W.witness_trust_root(None, owner_pub=pub, owner_key_id=config.OWNER_KEY_ID)
+    return config.SCOPE, tr, owner_tr
 
 
 def run(argv: Optional[list[str]] = None) -> int:
@@ -222,7 +312,7 @@ def run(argv: Optional[list[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     try:
-        scope, tr = _trust_root_from_config()
+        scope, tr, owner_tr = _trust_root_from_config()
     except W.WitnessError as e:
         print(f"REFUSE (fail-closed): witness roster error: {e}", file=sys.stderr)
         return _EXIT_REFUSE
@@ -231,7 +321,9 @@ def run(argv: Optional[list[str]] = None) -> int:
 
     data = sys.stdin.read() if args.witnessed == "-" else Path(args.witnessed).read_text(encoding="utf-8")
     local_head = load_local_head(Path(args.head) if args.head else None)
-    verdict = evaluate_promotion(local_head, data, scope=scope, trust_root=tr)
+    local_entries = load_local_entries()
+    verdict = evaluate_promotion(local_head, data, scope=scope, trust_root=tr,
+                                 owner_trust_root=owner_tr, entries=local_entries)
 
     if args.json:
         print(verdict.to_json())

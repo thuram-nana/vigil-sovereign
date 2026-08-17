@@ -40,6 +40,24 @@ spec:
       # anti-rollback-safe rather than a blind cutover. (HA-PROFILE.md §3.)
       # -----------------------------------------------------------------------
       initContainers:
+        # (1) HEAD AUTHENTICATION GATE — defense-in-depth (HA-PROFILE.md §3.3). initContainers run in
+        # order, so this runs BEFORE the anti-rollback gate below. `sigil verify` fail-closes (exit 2) if the
+        # PVC-restored/synced head EXISTS but is not authentically OWNER-signed (absent/bad signature,
+        # rewritten, or stale). This enforces head authentication BY COMPOSITION even if the anti-rollback
+        # guard is ever bypassed or removed — a forged/unsigned head can never reach the writer container.
+        - name: spine-head-authenticate
+          image: vigil/runtime:local   # operator-built (sovereign venv + repo at /app); digest-pin before prod
+          command: ["sigil", "verify"]
+          env:
+            - name: SIGIL_HOME
+              value: "/sigil-home"      # config.py resolves HEAD_PATH/FLOOR_PATH under this PVC
+            - name: PYTHONPATH
+              value: "/app/apps/sigil:/app/integration:/app/packages/core/vigil_core:/app/gateway"
+          volumeMounts:
+            - { name: sigil-home, mountPath: /sigil-home }
+        # (2) ANTI-ROLLBACK READINESS GATE (the failover interlock, tools/ha/spine_failover_guard.py). The
+        # guard ITSELF also re-authenticates the head, then binds it to the witnessed head_hash (equal
+        # height) or proves it extends the witnessed checkpoint (grown) before allowing promotion.
         - name: anti-rollback-gate
           image: vigil/runtime:local   # operator-built (sovereign venv + repo at /app); digest-pin before prod
           command: ["python3", "/app/tools/ha/spine_failover_guard.py",

@@ -672,11 +672,19 @@ def cmd_bridge_serve(a) -> None:
 
 
 def cmd_verify(a) -> None:
+    from . import config
     ok, msg = SpineStore().verify()
     print(("chain OK: " if ok else "chain FAIL: ") + msg)
     hok, hmsg = verify_checkpoint()
-    print(("head  OK: " if hok else "head  --: ") + hmsg)
-    sys.exit(0 if ok else 2)
+    # A head that EXISTS but does NOT authenticate (absent/bad owner signature, rewritten, or stale) is a
+    # HARD, fail-closed failure: `sigil verify` is the composition point that ENFORCES head authentication
+    # for the HA failover interlock (docs/architecture/HA-PROFILE.md §3.3) — even if the promotion guard is
+    # bypassed, a passive whose head is not authentically owner-signed fails `sigil verify`. A spine with NO
+    # head yet (never `sigil sign`ed) stays tolerated: only its chain integrity is asserted (byte-identical
+    # to the pre-hardening behavior), so bootstrap/ingest flows are unaffected.
+    head_present = config.HEAD_PATH.exists()
+    print((("head  OK: " if hok else ("head  FAIL: " if head_present else "head  --: ")) + hmsg))
+    sys.exit(0 if (ok and (hok or not head_present)) else 2)
 
 
 def cmd_status(a) -> None:
@@ -943,7 +951,12 @@ def cmd_floor(a) -> None:
             sys.exit(2)
         data = sys.stdin.read() if a.witnessed == "-" else Path(a.witnessed).read_text(encoding="utf-8")
         head = _read_head_on_disk()
-        verdict = guard.evaluate_promotion(head, data, scope=config.SCOPE, trust_root=tr)
+        # The guard AUTHENTICATES the local head (owner signature) against the owner-only trust root and
+        # binds/extension-proves it against the witnessed checkpoint, so it needs the passive's live chain
+        # AND the owner trust root (distinct from the witness quorum `tr`). See HA-PROFILE.md §3.
+        owner_tr = W.witness_trust_root(None, owner_pub=owner_pub, owner_key_id=config.OWNER_KEY_ID)
+        verdict = guard.evaluate_promotion(head, data, scope=config.SCOPE, trust_root=tr,
+                                           owner_trust_root=owner_tr, entries=SpineStore().entries())
         for line in verdict.lines():
             print(line, file=(sys.stdout if verdict.activate else sys.stderr))
         sys.exit(verdict.exit_code)
@@ -1124,8 +1137,11 @@ def _witness_ctx():
     from .spine import witness as W
     pub = owner_pubkey()
     if not pub:
+        # ADVISORY-1: exit 2 (fail-closed), CONSISTENT with the standalone guard's no-owner-key refusal
+        # (tools/ha/spine_failover_guard.py _trust_root_from_config). A missing trust anchor is a refusal,
+        # not a generic error — the promote-passive interlock and every witness verb must fail closed alike.
         print("!! no owner key yet — run `sigil sign` first to establish the trust root", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
     roster_path = config.SIGIL_HOME / "witness.trust.json"
     tip_path = config.HEAD_PATH.parent / "witness-tip.json"
     return W, config, roster_path, tip_path, pub
