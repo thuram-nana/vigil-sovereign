@@ -141,6 +141,51 @@ GRAPH_DIR = SIGIL_HOME / "graph"                          # base; holds current/
 SCOPE = os.environ.get("SIGIL_SCOPE", "sigil")          # the owner's single scope
 OWNER_KEY_ID = os.environ.get("SIGIL_OWNER_KEY_ID", "owner")
 
+
+# --- OIDC Relying Party (Slice S5 — SHIPPED OFF BY DEFAULT) ----------------------------
+# The OIDC RP is DISABLED unless SIGIL_OIDC_ENABLED is affirmative. This MIRRORS the
+# VIGIL_EGRESS_GUARD precedent: opt-in by env, byte-identical (no new route, no egress, no surface)
+# unless explicitly asked. When enabled it targets an OPERATOR-RUN IdP reachable over the private
+# tunnel (loopback / RFC1918 / Tailscale-CGNAT / IPv6-ULA — the ranges `bridge.daemon.bind_ok` allows);
+# a PUBLIC cloud IdP is NOT the default and breaks the air-gap posture (see docs/OIDC-RP.md).
+# CRITICAL invariant: OIDC authenticates *who you are*; the *role* is NEVER taken from an OIDC claim —
+# it comes only from an owner-signed `governor.account` grant (single-owner-key / nothing-self-
+# authorizes doctrine). An OIDC identity with no matching owner-signed account is REFUSED.
+_OIDC_AFFIRMATIVE = frozenset({"1", "true", "yes", "on", "enabled"})
+
+
+def oidc_enabled() -> bool:
+    """True iff the OIDC Relying Party is turned ON (SIGIL_OIDC_ENABLED ∈ {1,true,yes,on,enabled},
+    case-insensitive). Absent / empty / anything else ⇒ OFF. When OFF the OIDC routes are NOT registered
+    at all — the cockpit is byte-identical to a build without OIDC (no /api/oidc/* route, no egress)."""
+    return (os.environ.get("SIGIL_OIDC_ENABLED") or "").strip().lower() in _OIDC_AFFIRMATIVE
+
+
+def oidc_settings() -> dict:
+    """The resolved SIGIL_OIDC_* configuration (env → sigil.env → default), read at call time so an
+    override applied after import is honoured. Consulted ONLY when `oidc_enabled()`. The client secret is
+    included here for the token exchange; callers that DISPLAY config must redact it (`effective_config`
+    surfaces only a redacted view). `username_claim` selects which verified id_token claim maps to a
+    `governor.account` username; `signing_algs` is the ASYMMETRIC-only allowlist (a symmetric/`none` alg is
+    refused — algorithm-confusion defence)."""
+    g = os.environ.get
+    return {
+        "issuer": (g("SIGIL_OIDC_ISSUER") or "").strip(),
+        "client_id": (g("SIGIL_OIDC_CLIENT_ID") or "").strip(),
+        "client_secret": (g("SIGIL_OIDC_CLIENT_SECRET") or ""),
+        "redirect_uri": (g("SIGIL_OIDC_REDIRECT_URI") or "").strip(),
+        "authorize_endpoint": (g("SIGIL_OIDC_AUTHORIZE_ENDPOINT") or "").strip(),
+        "token_endpoint": (g("SIGIL_OIDC_TOKEN_ENDPOINT") or "").strip(),
+        "jwks_uri": (g("SIGIL_OIDC_JWKS_URI") or "").strip(),
+        "scopes": (g("SIGIL_OIDC_SCOPES") or "openid profile email").strip(),
+        # which verified id_token claim carries the username that must match an owner-signed account
+        "username_claim": (g("SIGIL_OIDC_USERNAME_CLAIM") or "preferred_username").strip(),
+        # asymmetric-only signing-alg allowlist for the id_token (RS256 default; ES256 also supported)
+        "signing_algs": [a.strip().upper() for a in (g("SIGIL_OIDC_SIGNING_ALGS") or "RS256").split(",")
+                         if a.strip()],
+        "clock_skew_seconds": _int_env("SIGIL_OIDC_CLOCK_SKEW_SECONDS", 60),
+    }
+
 # --- external binaries (resolved; never an operator-specific absolute path) -----------
 _CLAUDE_FALLBACK = Path.home() / ".local" / "bin" / "claude"
 _REPO_ROOT = Path(__file__).resolve().parents[1]         # <repo>/sigil/config.py → <repo>
@@ -237,6 +282,12 @@ def effective_config() -> dict:
         "INGEST_REPOS": _resolve_ingest_repos(),
         "LOG_LEVEL": os.environ.get("SIGIL_LOG_LEVEL", "INFO"),
         "ANTHROPIC_API_KEY": api_key,
+        # OIDC RP: OFF by default (byte-identical / no egress). When ON, surface the issuer + endpoints so
+        # the operator can confirm the IdP is a PRIVATE/tunnel address; the client secret is redacted by the
+        # SECRET name-hint below (and is not placed here at all).
+        "SIGIL_OIDC_ENABLED": oidc_enabled(),
+        "SIGIL_OIDC_ISSUER": (os.environ.get("SIGIL_OIDC_ISSUER", "") if oidc_enabled() else ""),
+        "SIGIL_OIDC_CLIENT_ID": (os.environ.get("SIGIL_OIDC_CLIENT_ID", "") if oidc_enabled() else ""),
     }
     return {k: _redact(k, v) for k, v in cfg.items()}
 
