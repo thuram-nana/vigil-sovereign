@@ -176,7 +176,7 @@ def stranded_active_accounts(store, archived: list[Segment], K: int) -> list[str
     active set is VERIFIED (never merely structural): a forged/unsigned `active` grant an injected agent could
     append is not counted, so this never lets such a record block prunes (no availability regression)."""
     from ..governor.accounts import SIGNAL as _ACCT_SIGNAL
-    from ..governor.accounts import _CORE as _ACCT_CORE
+    from ..governor.accounts import _core_fields as _acct_core_fields  # conditional user_pubkey core (S3)
     from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
     from ..governor.identity import owner_pubkey
     tp = owner_pubkey() or ""
@@ -193,7 +193,7 @@ def stranded_active_accounts(store, archived: list[Segment], K: int) -> list[str
         u, rst = p.get("username"), p.get("state")
         if rst == "revoked":
             state[u] = "revoked"
-        elif rst == "active" and verify_signed(p, _ACCT_CORE, tp):
+        elif rst == "active" and verify_signed(p, _acct_core_fields(p), tp):
             at = as_issued_at(p.get("issued_at"))
             if at > issued.get(u, NO_HIGHWATER):
                 issued[u], state[u] = at, "active"
