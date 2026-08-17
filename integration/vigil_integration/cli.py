@@ -27,6 +27,12 @@ One entry point over the whole fused system. NATIVE verbs (handled in-process, o
                                     reverse proxy (federating the two trust planes), and stop it. EXEC-
                                     ONLY: spawns the three backends in their own venvs; imports no
                                     framework/strix/sigil (the two trust domains never co-load here).
+  * ``vigil backup`` / ``vigil restore`` — off-box backup/restore of BOTH planes. Writes TWO SEPARATE
+                                    passphrase-encrypted files (offense in-venv + sovereign via a
+                                    ``.venv-sovereign/bin/sigil`` SUBPROCESS) — NEVER a merged archive, which
+                                    would make one process hold both plane secrets (a FATAL-2 breach). Restore
+                                    verifies each part's MANIFEST sha256 before invoking either leg and
+                                    re-verifies the restored offense spine + evidence chain.
 
 SUBSYSTEM verbs (S1 control plane — forwarded to the subsystem's own console-script, EXEC'd in its OWN
 environment so the two trust domains are never co-loaded in one interpreter):
@@ -46,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -1586,6 +1593,228 @@ def _cmd_sandbox(args: argparse.Namespace) -> int:
     return 0 if res.ran else 2
 
 
+def _ensure_tools_on_path() -> None:
+    """Put the repo root on sys.path so ``tools.backup.retention`` (a standalone stdlib helper, not part of
+    either trust-plane package) imports. Idempotent."""
+    root = str(Path(__file__).resolve().parents[2])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+
+def _resolve_crucible_root() -> Optional[Path]:
+    """The CRUCIBLE root that holds ``.blackboard`` / ``.console/runs`` — from ``$CRUCIBLE_ROOT`` if it points
+    at a real dir, else the in-repo ``engine/crucible/framework/v2``, else None (no CRUCIBLE proof state to
+    capture). Framework-free (no import of ``framework.v2.common.paths``) so the backup verb stays light."""
+    env = os.environ.get("CRUCIBLE_ROOT")
+    if env:
+        p = Path(env).expanduser()
+        if p.is_dir():
+            return p
+    here = Path(__file__).resolve()
+    for d in (here, *here.parents):
+        cand = d / "engine" / "crucible" / "framework" / "v2"
+        if cand.is_dir():
+            return cand
+    return None
+
+
+def _orchestrator_passphrase(args: argparse.Namespace) -> str:
+    """The two-plane backup passphrase: from ``$<passphrase_env>`` (unattended, default
+    ``VIGIL_BACKUP_PASSPHRASE``) or an interactive prompt. NEVER read from argv (a passphrase on the command
+    line leaks to ``ps``/history) and NEVER stored."""
+    env_name = getattr(args, "passphrase_env", "") or "VIGIL_BACKUP_PASSPHRASE"
+    pw = os.environ.get(env_name)
+    if pw:
+        return pw
+    if sys.stdin is not None and sys.stdin.isatty():
+        import getpass
+        return getpass.getpass("backup passphrase: ")
+    raise SystemExit(f"vigil: no backup passphrase — set ${env_name} (never passed on argv) or run interactively")
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _plane_manifest(path: Path) -> dict:
+    return {"file": path.name, "sha256": _sha256_file(path), "bytes": path.stat().st_size}
+
+
+def _run_sovereign_leg(subcmd_args: list[str], pw: str) -> int:
+    """EXEC the SOVEREIGN ``sigil`` console-script in its OWN venv (never imported here — the owner key never
+    enters this offense process; FATAL-2). The child env is SCRUBBED exactly as ``dispatch.dispatch`` does
+    (strip cross-domain PYTHONPATH/PYTHONHOME + the owner signing key ``VIGIL_DESTRUCTION_OWNER_KEY``), and the
+    passphrase is injected via ``SIGIL_BACKUP_PASSPHRASE`` — NEVER on argv."""
+    from . import dispatch
+    try:
+        sigil = dispatch.resolve("sigil")
+    except dispatch.DispatchError as e:
+        print(f"vigil: sovereign leg: {e}", file=sys.stderr)
+        return 127
+    if not sigil.exists():
+        print(f"vigil: sovereign leg: the sovereign environment is not built ({sigil} missing) — "
+              f"run envs/build_envs.sh, or use --offense-only.", file=sys.stderr)
+        return 127
+    child_env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
+    child_env.pop("VIGIL_DESTRUCTION_OWNER_KEY", None)      # a sovereign secret an offense child must not carry
+    child_env["SIGIL_BACKUP_PASSPHRASE"] = pw               # passphrase via env, never argv
+    import subprocess
+    try:
+        return subprocess.run([str(sigil), *subcmd_args], env=child_env).returncode
+    except OSError as e:
+        print(f"vigil: sovereign leg: cannot execute {sigil} ({e})", file=sys.stderr)
+        return 127
+
+
+def _cmd_backup(args: argparse.Namespace) -> int:
+    """Two-plane off-box backup → TWO SEPARATE encrypted files under a timestamped dir, plus a MANIFEST.json.
+
+    The offense leg (``offense.vglbk``) runs IN THIS venv; the sovereign leg (``sovereign.sglbk``) is a
+    DISTINCT ``.venv-sovereign/bin/sigil`` SUBPROCESS. There is NEVER a merged single-file archive: a merged
+    archive would require ONE process to hold BOTH planes' secrets at once — a FATAL-2 violation. The owner key
+    never enters this process; the sovereign leg holds it in its own venv only. The passphrase reaches each leg
+    via env/argument, never argv, and is never stored — lose it and the backups are unrecoverable by design."""
+    import json
+    import socket
+    import time
+
+    if getattr(args, "sovereign_only", False) and getattr(args, "offense_only", False):
+        print("vigil backup: --sovereign-only and --offense-only are mutually exclusive", file=sys.stderr)
+        return 2
+    out_root = Path(getattr(args, "out", "") or (Path.home() / "vigil-backups"))
+    pw = _orchestrator_passphrase(args)
+    _ensure_tools_on_path()
+    from tools.backup.retention import prune, timestamp_name
+
+    subdir = out_root / timestamp_name()
+    subdir.mkdir(parents=True, exist_ok=True)
+    planes: dict = {}
+
+    if not getattr(args, "sovereign_only", False):
+        from .backup import OffenseBackupError, create_offense_backup
+        croot = _resolve_crucible_root()
+        off_dest = subdir / "offense.vglbk"
+        try:
+            res = create_offense_backup(off_dest, pw, base_dir=args.base_dir,
+                                        crucible_root=(str(croot) if croot else None))
+        except OffenseBackupError as e:
+            print(f"vigil backup: offense leg failed: {e}", file=sys.stderr)
+            return 1
+        planes["offense"] = _plane_manifest(off_dest)
+        print(f"offense  → {off_dest}  ({res['files']} files, {res['secrets']} keys"
+              + (f", crucible={croot}" if croot else "") + ")")
+
+    if not getattr(args, "offense_only", False):
+        sov_dest = subdir / "sovereign.sglbk"
+        rc = _run_sovereign_leg(["backup", str(sov_dest)], pw)
+        if rc != 0:
+            print(f"vigil backup: sovereign leg failed (exit {rc})", file=sys.stderr)
+            return 1
+        planes["sovereign"] = _plane_manifest(sov_dest)
+        print(f"sovereign → {sov_dest}")
+
+    manifest = {
+        "schema": 1, "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "host": socket.gethostname(), "planes": planes,
+        "retention_hint": {"keep_days": args.keep_days, "keep_last": args.keep_last},
+        "note": ("TWO SEPARATE encrypted files, one per plane — never a merged archive (a merged archive = "
+                 "one process holding both plane secrets = FATAL-2). One passphrase per file; lose it → "
+                 "unrecoverable by design."),
+    }
+    (subdir / "MANIFEST.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"manifest → {subdir / 'MANIFEST.json'}")
+    print("KEEP THE PASSPHRASE SAFE — it is the ONLY key to these backups (never stored; lose it → unrecoverable).")
+
+    if getattr(args, "prune", False):
+        deleted = prune(out_root, keep_days=args.keep_days, keep_last=args.keep_last)
+        print(f"pruned {len(deleted)} old backup(s)"
+              + (": " + ", ".join(p.name for p in deleted) if deleted else " (none outside the policy)"))
+    return 0
+
+
+def _cmd_restore(args: argparse.Namespace) -> int:
+    """Inverse of ``vigil backup``: verify the MANIFEST.json sha256 of each plane part BEFORE invoking any leg,
+    then restore the offense leg IN THIS venv and the sovereign leg as a ``sigil restore`` SUBPROCESS. Two
+    encrypted files, never a merged archive — the same FATAL-2 boundary as backup. Fail-closed: a plane whose
+    part is missing or sha256-mismatched refuses that plane with a non-zero exit."""
+    import json
+
+    if getattr(args, "sovereign_only", False) and getattr(args, "offense_only", False):
+        print("vigil restore: --sovereign-only and --offense-only are mutually exclusive", file=sys.stderr)
+        return 2
+    src = Path(args.src)
+    if not src.is_dir():
+        print(f"vigil restore: {src} is not a backup dir (expected a timestamped dir with MANIFEST.json)",
+              file=sys.stderr)
+        return 2
+    try:
+        manifest = json.loads((src / "MANIFEST.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"vigil restore: cannot read {src / 'MANIFEST.json'}: {e}", file=sys.stderr)
+        return 2
+    planes = manifest.get("planes", {}) if isinstance(manifest, dict) else {}
+    pw = _orchestrator_passphrase(args)
+
+    def _verified_part(name: str):
+        """(path or None, error-code). None path + 0 = plane absent from this backup; None + non-0 = a
+        fail-closed refusal (missing/mismatched part)."""
+        info = planes.get(name)
+        if not isinstance(info, dict):
+            return None, 0
+        f = src / str(info.get("file", ""))
+        if not f.is_file():
+            print(f"vigil restore: {name} part {f} is missing — refusing", file=sys.stderr)
+            return None, 2
+        if _sha256_file(f) != info.get("sha256"):
+            print(f"vigil restore: {name} part {f} sha256 mismatch (tamper) — refusing", file=sys.stderr)
+            return None, 2
+        return f, 0
+
+    if not getattr(args, "sovereign_only", False):
+        off, err = _verified_part("offense")
+        if err:
+            return err
+        if off is None:
+            print("vigil restore: no offense plane in this backup — skipping", file=sys.stderr)
+        else:
+            from .backup import OffenseBackupError, restore_offense_backup
+            croot = getattr(args, "crucible_root", "") or None
+            if croot is None:
+                cr = _resolve_crucible_root()
+                croot = str(cr) if cr else None
+            try:
+                res = restore_offense_backup(off, args.base_dir, pw, crucible_root=croot)
+            except OffenseBackupError as e:
+                print(f"vigil restore: offense leg failed (nothing trusted): {e}", file=sys.stderr)
+                return 1
+            print(f"offense restored → base={res['new_base']} ({res['files']} files, {res['secrets']} keys, "
+                  f"{res['bundles_verified']} evidence bundle(s) re-verified)")
+
+    if not getattr(args, "offense_only", False):
+        sov, err = _verified_part("sovereign")
+        if err:
+            return err
+        if sov is None:
+            print("vigil restore: no sovereign plane in this backup — skipping", file=sys.stderr)
+        else:
+            home = getattr(args, "sigil_home", "") or ""
+            if not home:
+                print("vigil restore: --sigil-home <fresh dir> is required to restore the sovereign plane",
+                      file=sys.stderr)
+                return 2
+            rc = _run_sovereign_leg(["restore", str(sov), home], pw)
+            if rc != 0:
+                print(f"vigil restore: sovereign leg failed (exit {rc})", file=sys.stderr)
+                return 1
+            print(f"sovereign restored → home={home}  (next: SIGIL_HOME={home} vigil sigil verify)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vigil", description="the VIGIL sovereign engine — one control plane over two isolated processes",
@@ -2078,6 +2307,49 @@ def build_parser() -> argparse.ArgumentParser:
                           "<base-dir>/sandbox-workspace — still the ONLY writable path inside the no-net box "
                           "(D3: run a repo's tests). Must be an existing directory.")
     psb.set_defaults(func=_cmd_sandbox)
+
+    pbk = sub.add_parser(
+        "backup",
+        help="off-box backup of BOTH planes → two SEPARATE encrypted files (offense in-venv + sovereign via a "
+             "sigil subprocess; NEVER a merged archive — that would be a FATAL-2 boundary breach) + a MANIFEST")
+    pbk.add_argument("--out", default="",
+                     help="destination root for the timestamped backup dir (default: ~/vigil-backups)")
+    pbk.add_argument("--base-dir", default=".vigil-live", help="offense engine home to back up")
+    pbk.add_argument("--crucible-root", dest="crucible_root", default="",
+                     help="CRUCIBLE root holding .blackboard/.console (default: $CRUCIBLE_ROOT or the in-repo v2)")
+    grp = pbk.add_mutually_exclusive_group()
+    grp.add_argument("--sovereign-only", dest="sovereign_only", action="store_true",
+                     help="back up ONLY the sovereign plane (sigil subprocess)")
+    grp.add_argument("--offense-only", dest="offense_only", action="store_true",
+                     help="back up ONLY the offense plane (this venv)")
+    pbk.add_argument("--prune", action="store_true", help="after the backup, prune old backups per the policy")
+    pbk.add_argument("--keep-days", dest="keep_days", type=int, default=None,
+                     help="retention: keep backups within N days (with --prune)")
+    pbk.add_argument("--keep-last", dest="keep_last", type=int, default=None,
+                     help="retention: keep the last N backups (with --prune)")
+    pbk.add_argument("--passphrase-env", dest="passphrase_env", default="VIGIL_BACKUP_PASSPHRASE",
+                     help="env var holding the backup passphrase (never passed on argv; default "
+                          "VIGIL_BACKUP_PASSPHRASE)")
+    pbk.set_defaults(func=_cmd_backup)
+
+    prs = sub.add_parser(
+        "restore",
+        help="restore a two-plane `vigil backup` dir — verifies each plane part's MANIFEST sha256 BEFORE "
+             "invoking either leg; the sovereign leg is a sigil subprocess (fail-closed, two-file boundary)")
+    prs.add_argument("src", help="the timestamped backup dir (holding MANIFEST.json + the encrypted parts)")
+    prs.add_argument("--base-dir", default=".vigil-live", help="offense base_dir to restore INTO (fresh)")
+    prs.add_argument("--crucible-root", dest="crucible_root", default="",
+                     help="CRUCIBLE root to restore .blackboard/.console into (default: $CRUCIBLE_ROOT or in-repo)")
+    prs.add_argument("--sigil-home", dest="sigil_home", default="",
+                     help="a FRESH SIGIL_HOME dir to restore the sovereign plane into (required for that leg)")
+    grp2 = prs.add_mutually_exclusive_group()
+    grp2.add_argument("--sovereign-only", dest="sovereign_only", action="store_true",
+                      help="restore ONLY the sovereign plane")
+    grp2.add_argument("--offense-only", dest="offense_only", action="store_true",
+                      help="restore ONLY the offense plane")
+    prs.add_argument("--passphrase-env", dest="passphrase_env", default="VIGIL_BACKUP_PASSPHRASE",
+                     help="env var holding the backup passphrase (never passed on argv)")
+    prs.set_defaults(func=_cmd_restore)
 
     return p
 

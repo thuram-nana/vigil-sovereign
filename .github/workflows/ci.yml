@@ -446,6 +446,7 @@ jobs:
               integration/tests/test_k8s_posture.py \
               integration/tests/test_live_executor.py \
               integration/tests/test_think_model_sovereignty.py \
+              integration/tests/test_backup_roundtrip.py \
               integration/tests/test_mesh_cicd_posture.py -q
           else
             echo "integration/ not present on this ref (pre-merge) — nothing to test"
@@ -509,6 +510,7 @@ jobs:
               apps/sigil/tests/test_spine_envelope.py \
               apps/sigil/tests/test_spine_sealed.py \
               apps/sigil/tests/test_backup.py \
+              apps/sigil/tests/test_backup_warden.py \
               apps/sigil/tests/test_witness_checkpoint.py \
               apps/sigil/tests/test_capability_latch.py \
               apps/sigil/tests/test_capability_gesture.py \

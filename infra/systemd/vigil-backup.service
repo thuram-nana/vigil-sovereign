@@ -1,0 +1,61 @@
+# VIGIL automated off-box backup — systemd USER service (oneshot)
+# =====================================================================
+# Claim 6 / Piece A. Runs `vigil backup`: ONE off-box backup of BOTH trust
+# planes. It writes TWO SEPARATE passphrase-encrypted files under a timestamped
+# dir — the OFFENSE plane (offense.vglbk, in this venv) and the SOVEREIGN plane
+# (sovereign.sglbk, via a `.venv-sovereign/bin/sigil` SUBPROCESS) — plus a
+# MANIFEST.json. It is NEVER a merged single-file archive: a merged archive
+# would require one process to hold BOTH planes' secrets at once, a FATAL-2
+# boundary breach. The timer (vigil-backup.timer) fires this on a daily cadence
+# so "backed up" is an OPERATING property, not just a capability the code has.
+#
+# Config (which base dir, and the PASSPHRASE) lives in an EnvironmentFile so the
+# unit is reusable and no secret is baked into the unit:
+#
+#     ~/.config/vigil/backup.env      (VIGIL_BACKUP_PASSPHRASE=…, VIGIL_BASE_DIR=… — see the example)
+#
+# Manual run / logs:
+#     systemctl --user start vigil-backup.service
+#     journalctl --user -u vigil-backup -e
+#
+# INSTALL (paired with the timer):
+#   mkdir -p ~/.config/systemd/user ~/.config/vigil
+#   cp infra/systemd/vigil-backup.{service,timer} ~/.config/systemd/user/
+#   cp infra/systemd/vigil-backup.env.example      ~/.config/vigil/backup.env
+#   chmod 600 ~/.config/vigil/backup.env
+#   $EDITOR ~/.config/vigil/backup.env             # set VIGIL_BACKUP_PASSPHRASE + VIGIL_BASE_DIR
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-backup.timer
+
+[Unit]
+Description=VIGIL two-plane off-box backup (offense + sovereign — two encrypted files, never a merged archive)
+Documentation=file:%h/vigil/docs/plain-english/07-signing-and-keys.md
+
+[Service]
+Type=oneshot
+
+# The backup passphrase (VIGIL_BACKUP_PASSPHRASE) and the offense engine home (VIGIL_BASE_DIR). The passphrase
+# is read from the ENVIRONMENT by both legs — never passed on argv. Keep this file 0600.
+EnvironmentFile=%h/.config/vigil/backup.env
+Environment=PYTHONUNBUFFERED=1
+
+WorkingDirectory=%h/vigil
+# The offense `vigil` console script drives BOTH legs: the offense backup in-venv, and the sovereign backup as
+# a distinct `.venv-sovereign/bin/sigil` SUBPROCESS (the owner key never enters this process). --prune keeps
+# the last 8 backups and anything within 30 days; adjust to taste. Adjust the checkout/venv path if it differs.
+ExecStart=%h/vigil/.venv-offense/bin/vigil backup --out %h/vigil-backups --base-dir ${VIGIL_BASE_DIR} --prune --keep-days 30 --keep-last 8
+
+# --- hardening -------------------------------------------------------------
+# The backup is PURELY LOCAL (filesystem reads + AEAD crypto; no target egress), so the network is removed
+# entirely. It reads the two engine homes + writes ~/vigil-backups, all under $HOME, so ProtectHome is NOT set.
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOT set (would break it): ProtectHome (hides the checkout, the offense base dir, ~/.sigil, and the backup
+# output dir), PrivateNetwork is fine HERE precisely because a backup — unlike vigil-reprove — needs no egress.

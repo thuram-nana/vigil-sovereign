@@ -3,9 +3,11 @@
 The TPM-sealed vault (G1) binds the owner key + the spine DEK to THIS machine's TPM, so a dead disk is
 unrecoverable from the vault alone — the whole audit ledger + all memory would be lost. This produces a
 PORTABLE disaster-recovery backup: the spine (segments + manifest + signed head + floor + the G2 security
-manifest + the owner PUBLIC key) plus the OWNER PRIVATE key and the spine DEK are packaged and encrypted
-under a key derived from an OWNER PASSPHRASE (scrypt), so the backup restores on NEW hardware where this
-machine's TPM is gone.
+manifest + the owner PUBLIC key), the WARDEN permission-kernel dir (its signed action ledger + kernel
+keypair + tool registry), plus the OWNER PRIVATE key and the spine DEK are packaged and encrypted under a
+key derived from an OWNER PASSPHRASE (scrypt), so the backup restores on NEW hardware where this machine's
+TPM is gone. The WARDEN kernel key (`warden/warden.key`) rides inside the AEAD-sealed body and is re-created
+0600 on restore.
 
 Integrity is layered, and it is important to be precise about WHICH layer runs WHEN. The whole body is
 AEAD-sealed and, inside it, a backup MANIFEST (sha256 of every packaged file) is OWNER-signed — so a wrong
@@ -38,7 +40,9 @@ from vigil_core.sealing import SealError, seal, unseal
 from .reuse import KeyPair, canonical_json, sha256_hex, sign, verify_one
 
 _MAGIC = b"SGLBK1\x00"
-_SCHEMA = 1
+# schema 2 additionally records the WARDEN permission-kernel set ("warden": [rels…]); schema 1 (no warden
+# block) is still read on restore (back-compat) — the file table is authenticated the same way either way.
+_SCHEMA = 2
 # scrypt work factors — n=2^16 (64 MiB) is a strong interactive KDF; salt is per-backup, stored in the header.
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2 ** 16, 8, 1
 _SCRYPT_MAXMEM = 132 * _SCRYPT_N * _SCRYPT_R          # headroom over scrypt's 128*n*r working set
@@ -65,12 +69,35 @@ def _derive_key(passphrase: str, salt: bytes) -> bytes:
                           maxmem=_SCRYPT_MAXMEM, dklen=32)
 
 
-def _spine_files(home: Path) -> list[Path]:
-    """Every trust-root/spine file to package, as absolute paths. Includes the spine dir (segments,
-    manifest, signed head, the owner PUBLIC key), the anti-rollback floor, and the G2 security manifest.
-    EXCLUDES the machine-bound secrets (they are re-wrapped separately): the sealed owner PRIVATE key, the
-    sealed DEK, the TPM-sealed KEK vault dir, and transient lockfiles."""
-    out: list[Path] = []
+def _warden_home(home: Path) -> Path:
+    """The WARDEN permission-kernel dir (kernel/src/main.rs ``warden_dir()``): ``$SIGIL_WARDEN_HOME`` or
+    ``<home>/warden``. Holds ``actionlog.jsonl`` (the signed action ledger), ``warden.pub``/``warden.key``
+    (crypto.rs kernel keypair), and ``tools.json`` (the tool registry)."""
+    return Path(os.environ.get("SIGIL_WARDEN_HOME") or (home / "warden"))
+
+
+def _is_sensitive_rel(rel: str) -> bool:
+    """True iff a restored file at ``rel`` must be ``chmod 0600`` — private key material that would otherwise
+    land at the process umask (potentially world-readable). Covers the WARDEN kernel key
+    (``warden/warden.key`` — a plaintext-0600 Rust-kernel file that rides inside the passphrase-sealed body)
+    and ANY packaged ``*.key`` file. The whole backup body is AEAD-sealed at rest regardless; this closes the
+    post-restore on-disk perms of the key material itself."""
+    return rel.endswith(".key")
+
+
+def _spine_files(home: Path) -> list[tuple[Path, str]]:
+    """Every trust-root/spine/kernel file to package, as ``(absolute_path, home-relative posix rel)`` pairs.
+    Includes the spine dir (segments, manifest, signed head, the owner PUBLIC key), the anti-rollback floor,
+    the G2 security manifest, AND the WARDEN permission-kernel dir. EXCLUDES the machine-bound secrets (they
+    are re-wrapped separately): the sealed owner PRIVATE key, the sealed DEK, the TPM-sealed KEK vault dir,
+    and transient lockfiles.
+
+    The WARDEN files are packaged under a NORMALIZED ``warden/`` rel (relative to the warden dir, not
+    ``home``) so a ``SIGIL_WARDEN_HOME`` pointed OUTSIDE ``SIGIL_HOME`` still restores to ``<home>/warden``;
+    transient ``*.lock`` is skipped. ``warden.key`` is a plaintext-0600 kernel key — it rides inside the
+    AEAD-sealed body like any packaged file (safe: the whole body is passphrase-sealed) and restore re-creates
+    it 0600 (see :func:`_is_sensitive_rel`)."""
+    out: list[tuple[Path, str]] = []
     spine = home / "spine"
     if spine.is_dir():
         for p in sorted(spine.rglob("*")):
@@ -79,11 +106,16 @@ def _spine_files(home: Path) -> list[Path]:
             rel = p.relative_to(home).as_posix()
             if rel.endswith((".lock",)) or rel in ("spine/keys/owner.priv", "spine/keys/spine.dek"):
                 continue
-            out.append(p)
+            out.append((p, rel))
     for extra in ("floor.json", "security.manifest.json"):
         f = home / extra
         if f.is_file():
-            out.append(f)
+            out.append((f, f.relative_to(home).as_posix()))
+    warden = _warden_home(home)
+    if warden.is_dir():
+        for p in sorted(warden.rglob("*")):
+            if p.is_file() and not p.name.endswith(".lock"):
+                out.append((p, "warden/" + p.relative_to(warden).as_posix()))
     return out
 
 
@@ -94,15 +126,17 @@ def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, 
     into the encrypted backup; ``owner_key`` signs the file manifest. Returns a summary."""
     home = Path(home)
     files = _spine_files(home)
-    if not any(f.name == "head.json" for f in files):
+    if not any(rel == "spine/head.json" for _f, rel in files):
         raise BackupError(f"no signed spine head under {home} — nothing to back up (run `sigil sign` first)")
     file_blobs: dict[str, str] = {}
     file_hashes: dict[str, str] = {}
-    for f in files:
+    warden_rels: list[str] = []
+    for f, rel in files:
         raw = f.read_bytes()
-        rel = f.relative_to(home).as_posix()
         file_blobs[rel] = base64.b64encode(raw).decode("ascii")
         file_hashes[rel] = sha256_hex(raw)
+        if rel.startswith("warden/"):
+            warden_rels.append(rel)
 
     # the machine-bound secrets, read as plaintext through the vault (unseals if sealed) — re-wrapped
     # portably by living INSIDE the passphrase-encrypted body.
@@ -112,6 +146,9 @@ def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, 
     manifest = {
         "schema": _SCHEMA, "scope": owner_key.public_key_b64, "file_sha256": file_hashes,
         "has_owner_priv": owner_priv is not None, "has_dek": dek is not None,
+        # the WARDEN permission-kernel set (schema 2) — restore asserts every listed rel is present in the
+        # signed file table (fail-closed on a partial warden capture); an empty list means no warden dir existed.
+        "warden": sorted(warden_rels),
     }
     manifest_sig = sign(owner_key.private_key_b64, canonical_json(manifest))
 
@@ -133,7 +170,7 @@ def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, 
         os.close(fd)
     os.replace(str(tmp), str(dest))
     return {"dest": str(dest), "files": len(file_blobs), "owner_key": owner_priv is not None,
-            "dek": dek is not None, "bytes": len(sealed)}
+            "dek": dek is not None, "warden": len(warden_rels), "bytes": len(sealed)}
 
 
 def _read_header(src: Path) -> tuple[bytes, bytes]:
@@ -207,6 +244,17 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
         raise BackupError("backup is missing its file table")
     if set(files) != set(hashes):
         raise BackupError("backup file set does not match its signed manifest")
+    # schema-2 WARDEN set: every listed warden rel MUST be present in the signed file table (fail-closed on a
+    # partial warden capture — a manifest that names a warden file the body omits). Schema-1 backups carry no
+    # "warden" block; absent is fine (back-compat). set(files)==set(hashes) already binds these, so this is a
+    # defensive assertion that the warden set specifically is whole, plus a type guard on a hostile field.
+    warden_listed = manifest.get("warden", [])
+    if warden_listed is not None:
+        if not isinstance(warden_listed, list) or any(not isinstance(r, str) for r in warden_listed):
+            raise BackupError("backup manifest 'warden' set is malformed (expected a list of strings)")
+        missing = [r for r in warden_listed if r not in files]
+        if missing:
+            raise BackupError(f"backup is missing WARDEN file(s) named in its signed manifest: {missing}")
     # the two re-wrapped secrets must be strings (or absent) — validated BEFORE any write, so a malformed
     # signed body fails closed with a clean BackupError instead of a bare AttributeError at the vault
     # boundary (`.encode()` on a non-str). Mirrors the manifest/pub/sig/files/hashes type guards above.
@@ -218,7 +266,7 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
     # the check and the write can never diverge (closing the "validate the normalised path, write the raw
     # path" class of escape).
     new_home_resolved = new_home.resolve()
-    decoded: list[tuple[Path, bytes]] = []
+    decoded: list[tuple[Path, bytes, str]] = []
     for rel, b64 in files.items():
         target = _safe_target(new_home, new_home_resolved, rel)
         try:
@@ -227,12 +275,16 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
             raise BackupError(f"corrupt file blob {rel!r}: {e}") from e
         if sha256_hex(data) != hashes[rel]:
             raise BackupError(f"file {rel!r} does not match its signed hash (tamper)")
-        decoded.append((target, data))
+        decoded.append((target, data, rel))
 
     new_home.mkdir(parents=True, exist_ok=True)
-    for target, data in decoded:
+    for target, data, rel in decoded:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+        # key material (the WARDEN kernel key + any *.key) must be 0600, not the process umask — a plain
+        # write_bytes would otherwise leave it world-readable-by-umask (a real perms fix, not cosmetic).
+        if _is_sensitive_rel(rel):
+            os.chmod(target, 0o600)
     # re-seal the machine-bound secrets through the NEW vault (seals under the new TPM if provisioned).
     if body.get("owner_priv_b64"):
         vault.write_text_secret(new_home / "spine" / "keys" / "owner.priv",
@@ -248,4 +300,5 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
     if not ok:
         raise BackupError(f"restored spine failed verification ({why}) — the restore is NOT trustworthy")
     return {"home": str(new_home), "files": len(decoded), "owner_key": bool(body.get("owner_priv_b64")),
-            "dek": bool(body.get("spine_dek_b64")), "verified": True}
+            "dek": bool(body.get("spine_dek_b64")),
+            "warden": sum(1 for _t, _d, rel in decoded if rel.startswith("warden/")), "verified": True}
