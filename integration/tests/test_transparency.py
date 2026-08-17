@@ -182,12 +182,22 @@ def test_checkpoint_emitter_is_idempotent_on_a_no_progress_head():
 
 
 def test_is_split_ignores_a_prune_boundary_difference():
-    # same height + same head, different merkle_root = an honest prune boundary, NOT a fork
-    a = _cp(100, 100, "head-X", merkle="m-before-prune")
-    b = _cp(100, 100, "head-X", merkle="m-after-prune")  # same head, more history pruned to base
+    # C-S1: a benign re-prune MOVES the prune boundary (base_seq/base_count grow) as merkle_root advances,
+    # at the SAME live tip (head_hash, entry_count). A CROSS-boundary root difference stays excluded → NOT
+    # a fork (no false accusation — the property the old head-only key protected).
+    a = Checkpoint(last_seq=100, entry_count=100, head_hash="head-X", merkle_root="m-before-prune",
+                   base_seq=0, base_count=0)
+    b = Checkpoint(last_seq=100, entry_count=100, head_hash="head-X", merkle_root="m-after-prune",
+                   base_seq=40, base_count=40)          # more history pruned to base → boundary MOVED
     assert is_split(a, b) is False
     # a genuine fork (a different head at the same height) is still detected
     assert is_split(a, _cp(100, 100, "head-Y")) is True
+    # NEW decidable case: same height + SAME prune boundary + DIFFERENT merkle_root = a fabricated root → fork
+    c = Checkpoint(last_seq=100, entry_count=100, head_hash="head-X", merkle_root="m-real",
+                   base_seq=10, base_count=10)
+    c_forged = Checkpoint(last_seq=100, entry_count=100, head_hash="head-X", merkle_root="m-FABRICATED",
+                          base_seq=10, base_count=10)    # same tip, same boundary, impossible second root
+    assert is_split(c, c_forged) is True
 
 
 def test_checkpoint_emitter_prune_advances_merkle_without_a_second_checkpoint():
