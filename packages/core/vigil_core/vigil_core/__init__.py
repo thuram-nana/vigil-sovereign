@@ -29,6 +29,7 @@ from .hard_guardrail import (
 )
 from .highwater import (
     HighWaterDowngrade, HighWaterError, advance_highwater, check_highwater, highwater_lock, load_highwater,
+    read_highwater_dict, verify_highwater_signature,
 )
 from .models import AuthorizerKey, ChainEntry, Signature, SignedChainHead, TrustRoot
 from .sealing import SealError, is_sealed, new_kek, seal, unseal
@@ -38,6 +39,7 @@ __all__ = [
     "canonical_json", "digest_payload", "evidence_signing_bytes", "sha256_hex",
     "append_entry", "build_chain", "sign_head", "verify_chain", "verify_head",
     "load_highwater", "check_highwater", "advance_highwater", "highwater_lock",
+    "read_highwater_dict", "verify_highwater_signature",
     "HighWaterError", "HighWaterDowngrade",
     "generate_keypair", "sign", "verify_one", "verify_threshold", "KeyPair", "IntegrityError",
     "HardBlockError", "assert_not_hard_blocked", "candidate_hosts", "is_hard_blocked",
