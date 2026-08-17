@@ -192,7 +192,10 @@ def test_root_serves_the_assembled_index_with_substituted_placeholders(proxy):
     base, _serve = proxy
     st, body = _get(base + "/")
     assert st == 200
-    assert 'data-token="TESTTOKEN"' in body
+    # Claim 6: the owner token is NOT embedded — the served page carries no credential. The placeholder is
+    # emptied (data-token=""), so the SPA's login gate is the entry and each user carries their own bearer.
+    assert 'data-token=""' in body
+    assert "TESTTOKEN" not in body
     assert 'data-sovereign="/sovereign"' in body
     assert 'data-offense="/offense"' in body
     assert "__VIGIL_TOKEN__" not in body
@@ -379,12 +382,15 @@ def test_assemble_serve_dir_contents(tmp_path):
     for j in uiproxy.BUNDLE_JS:
         assert (out / j).read_text(encoding="utf-8") == j
     assert (out / "manifest.json").exists()
-    assert (out / "index.html").read_text(encoding="utf-8") == "TK|/sovereign|/offense"
+    # Claim 6: __VIGIL_TOKEN__ is emptied (no credential in the page); the mount bases still substitute.
+    assert (out / "index.html").read_text(encoding="utf-8") == "|/sovereign|/offense"
+    assert "TK" not in (out / "index.html").read_text(encoding="utf-8")
 
 
-def test_serve_dir_and_token_index_are_owner_only(tmp_path):
-    # BLOCK-2 fix: index.html embeds the sovereign session TOKEN, so the runtime serve dir must be 0700
-    # and the token-bearing index.html 0600 — never world-readable on a multi-user host.
+def test_serve_dir_index_are_owner_only_and_carry_no_token(tmp_path):
+    # BLOCK-2 posture kept as defense-in-depth: the runtime serve dir is 0700 and index.html 0600 (runtime
+    # state, owner-only). Claim 6 additionally requires the owner token is NOT embedded — the served page
+    # carries no credential, so a teammate given the URL still cannot read the owner token off the page.
     import stat
     src = tmp_path / "s"
     src.mkdir()
@@ -392,13 +398,15 @@ def test_serve_dir_and_token_index_are_owner_only(tmp_path):
     (src / "components.css").write_text("C", encoding="utf-8")
     for j in uiproxy.BUNDLE_JS:
         (src / j).write_text(j, encoding="utf-8")
-    (src / "index.html").write_text("__VIGIL_TOKEN__", encoding="utf-8")
+    (src / "index.html").write_text('data-token="__VIGIL_TOKEN__"', encoding="utf-8")
     out = tmp_path / "o"
     uiproxy.assemble_serve_dir(src, out, token="SECRET-TK")
     assert stat.S_IMODE(out.stat().st_mode) == 0o700, "serve dir must be owner-only"
-    assert stat.S_IMODE((out / "index.html").stat().st_mode) == 0o600, "token index must be owner-only"
-    # the token must NOT be world/group readable anywhere in the tree
+    assert stat.S_IMODE((out / "index.html").stat().st_mode) == 0o600, "index must be owner-only"
     assert not (out / "index.html").stat().st_mode & (stat.S_IRGRP | stat.S_IROTH)
+    # the owner token must never appear in the served page (Claim 6)
+    assert "SECRET-TK" not in (out / "index.html").read_text(encoding="utf-8")
+    assert 'data-token=""' in (out / "index.html").read_text(encoding="utf-8")
 
 
 def test_static_response_closes_the_connection(proxy):

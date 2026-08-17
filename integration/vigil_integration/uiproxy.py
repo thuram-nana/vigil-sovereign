@@ -231,10 +231,20 @@ def assemble_serve_dir(src_dir: Path, serve_dir: Path, *, token: str,
 
     * ``style.css`` = ``tokens.css`` + ``components.css`` concatenated,
     * ``ui.js`` / ``manual.js`` / ``app.js`` copied verbatim (+ ``manifest.json`` if present),
-    * ``index.html`` written with the three placeholders substituted (token + federated mount bases).
+    * ``index.html`` written with the mount-base + build placeholders substituted — and the
+      ``__VIGIL_TOKEN__`` placeholder emptied (Claim 6): the served page carries NO credential.
+
+    PER-USER AUTH (Claim 6): the owner shared token is deliberately NOT embedded. If it were, every browser
+    that reached the proxy would carry the owner's token and the sovereign plane would resolve everyone to
+    ``OWNER_PRINCIPAL`` — the whole multi-user gate would be inert. Instead the SPA's login gate is the entry
+    (``app.js renderLoginGate`` → ``POST /sovereign/api/login``) and each user carries THEIR OWN bearer in
+    ``sessionStorage``. The ``token`` argument is retained for signature stability (``run_up`` passes the
+    offense CONSOLE credential the PROXY presents to the offense backend after per-user auth — see
+    ``ProxyHandler._forward_request``); it is never written into any served asset.
     """
-    # 0700 dir: index.html embeds the sovereign session TOKEN (a live bearer credential), so the runtime
-    # serve dir and its files must never be world-readable on a multi-user host.
+    # 0700 dir / 0600 index: the serve dir is runtime state assembled per `vigil up`. It no longer embeds a
+    # credential (Claim 6), but keeping it owner-only is defense-in-depth — a build id / mount config is not
+    # something to expose to every local user, and the perms cost nothing.
     serve_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(serve_dir, 0o700)
     tokens_css = (src_dir / "tokens.css").read_text(encoding="utf-8")
@@ -267,13 +277,16 @@ def assemble_serve_dir(src_dir: Path, serve_dir: Path, *, token: str,
     if system_map.exists():
         (serve_dir / "system-map.json").write_text(system_map.read_text(encoding="utf-8"), encoding="utf-8")
     html = (src_dir / "index.html").read_text(encoding="utf-8")
-    html = (html.replace("__VIGIL_TOKEN__", token)
+    # __VIGIL_TOKEN__ → "" : NO credential in the served page (Claim 6 per-user auth). `ui.js` treats an
+    # empty/placeholder data-token as "no owner token", so `token()` returns only the per-user session
+    # bearer and the SPA renders its login gate until a user signs in.
+    html = (html.replace("__VIGIL_TOKEN__", "")
                 .replace("__VIGIL_SOVEREIGN__", sovereign_base)
                 .replace("__VIGIL_OFFENSE__", offense_base)
                 .replace("__VIGIL_BUILD__", build_id))
     index = serve_dir / "index.html"
     index.write_text(html, encoding="utf-8")
-    os.chmod(index, 0o600)   # token-bearing → owner-only
+    os.chmod(index, 0o600)   # runtime state → owner-only (defense-in-depth; no secret embedded)
     return serve_dir
 
 
