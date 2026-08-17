@@ -74,6 +74,39 @@ def _count_records(spine_path: str) -> int:
     return 0 if not content else sum(1 for chunk in content.split("\n")[:-1] if chunk)
 
 
+def _count_attested_records(spine_path: str) -> int:
+    """Count the records the binder's verify path ACTUALLY consumes — the JSON-**object** lines that
+    :meth:`VigilCoreSpine._read_lines` yields (and that :meth:`VigilCoreSpine.verify`, when it returns VERIFIED,
+    chain-verified). Mirrors that reader's filter EXACTLY: split on ``"\\n"``, drop the final (empty-or-torn)
+    element, and count only chunks that ``json.loads`` to a ``dict``.
+
+    This is DELIBERATELY DISTINCT from :func:`_count_records` (which counts ANY non-empty newline-terminated
+    chunk, feeding the human-readable "N record(s)" detail). ``_count_records`` over-counts what ``verify``
+    attests: a spine whose only content is a NON-JSON line (``b"not a valid spine\\n"``) or a JSON SCALAR/ARRAY
+    line (``b"[1,2,3]\\n"``) yields ``_count_records == 1`` yet ``_read_lines`` yields ZERO objects, so the
+    binder chain-verifies an EMPTY entry list and ``verify`` returns True VACUOUSLY under ANY key. This helper
+    returns 0 for exactly those bodies, so a VERIFIED-but-0-attested spine is refused rather than stamped.
+    Total: an unreadable file → 0."""
+    try:
+        with open(spine_path, encoding="utf-8") as fh:
+            content = fh.read()
+    except OSError:
+        return 0
+    if not content:
+        return 0
+    count = 0
+    for chunk in content.split("\n")[:-1]:   # drop the final (empty-clean or torn) element, like _read_lines
+        if not chunk:
+            continue
+        try:
+            obj = json.loads(chunk)
+        except (ValueError, TypeError):
+            continue                          # a non-JSON line attests nothing (the binder skips it)
+        if isinstance(obj, dict):             # only JSON OBJECTS become SpineLine candidates
+            count += 1
+    return count
+
+
 def _verify_spine_file(spine_path: str, spine_pubkey: str) -> tuple[bool, int]:
     """Read-only chain+signature audit of a spine file under ``spine_pubkey``. Never mutates the file (the
     ``readonly`` binder skips torn-tail repair). Returns ``(verified, record_count)``. Total — an unreadable

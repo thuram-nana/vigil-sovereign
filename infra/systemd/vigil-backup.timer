@@ -1,0 +1,29 @@
+# VIGIL automated backup timer — fires the oneshot on a daily cadence.
+# =====================================================================
+# THIS is what closes the "the backup exists but nothing schedules it" gap:
+# it fires vigil-backup.service once a day, so a fresh two-plane off-box backup
+# is written (and old ones pruned) without an operator remembering to run it.
+#
+# Enable with:
+#   systemctl --user enable --now vigil-backup.timer
+#   systemctl --user list-timers 'vigil-*'     # confirm next run
+#
+# HONEST RESIDUAL: a backup is only ever as current as the LAST fire of this
+# timer. Tighten OnCalendar for a shorter RPO (recovery point objective).
+
+[Unit]
+Description=Daily trigger for the VIGIL two-plane off-box backup
+Documentation=file:%h/vigil/docs/plain-english/07-signing-and-keys.md
+
+[Timer]
+# Once a day. Tighten (e.g. every 6h) for a shorter recovery-point objective.
+OnCalendar=daily
+# If the machine was asleep/off at the scheduled time, run once on the next
+# wake instead of skipping the window entirely.
+Persistent=true
+# Smear the start by up to 30 min so many hosts do not fire simultaneously.
+RandomizedDelaySec=1800
+Unit=vigil-backup.service
+
+[Install]
+WantedBy=timers.target
