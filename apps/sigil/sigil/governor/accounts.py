@@ -117,6 +117,17 @@ TOTP_SEAL_CONTEXT = b"sigil/account.totp"
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2 ** 15, 8, 1
 _SCRYPT_MAXMEM = 132 * _SCRYPT_N * _SCRYPT_R           # headroom over scrypt's 128*n*r working set
 
+# A DECOY password hash with the SAME scrypt params (a fixed all-zero salt/dk) — no scrypt runs to BUILD it
+# (just base64 of zeros), but `verify_password(pw, DECOY_PASSWORD_HASH)` pays exactly ONE scrypt of the real
+# cost and always returns False. The login path verifies against this when the account is unknown / has no
+# password, so the endpoint's timing is INDEPENDENT of whether the username exists or has a password enrolled
+# — closing the ~59× user-enumeration timing oracle a short-circuit would open (a real verify is ~125 ms; a
+# short-circuit ~2 ms). The auth decision still requires a real, matching password.
+DECOY_PASSWORD_HASH = "scrypt${}${}${}${}${}".format(
+    _SCRYPT_N, _SCRYPT_R, _SCRYPT_P,
+    base64.b64encode(b"\x00" * 16).decode("ascii"),
+    base64.b64encode(b"\x00" * 32).decode("ascii"))
+
 
 def hash_password(password: str) -> str:
     """Salted-scrypt hash of a password, as a self-describing ``scrypt$n$r$p$salt_b64$dk_b64`` string. The

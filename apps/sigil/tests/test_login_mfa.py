@@ -86,18 +86,21 @@ def make_fake_tpm():
     return run
 
 
-# ONE provisioned fake-TPM vault for the whole module. The spine DEK + owner key are sealed under its KEK,
-# so every test (registry + HTTP) shares a STABLE KEK — a per-test vault would seal the process-shared
-# spine.dek under one KEK and leave a later test's vault unable to open it. Provisioned once at
-# SIGIL_HOME/vault (the real owner_vault dir), then injected by the autouse fixture below.
+# ISOLATION (do NOT touch the process-shared SIGIL_HOME): this suite needs a PROVISIONED vault so TOTP
+# secrets seal, but provisioning at the shared home would seal the shared spine DEK + owner key under a fake
+# KEK and PERSIST that on disk — breaking a sibling suite (e.g. test_login_pop) that shares SIGIL_HOME and
+# expects the unprovisioned/plaintext default. So we confine EVERY at-rest write to a per-MODULE tmp home and
+# redirect the vault + the DEK path + the owner-key paths there (mirroring the safe isolation in
+# test_secrets_sealed). The autouse fixture re-applies the redirects per test (monkeypatch reverts them
+# after), and — crucially — the on-disk artifacts live under _MODULE_HOME, never the shared SIGIL_HOME.
+_MODULE_HOME = Path(tempfile.mkdtemp(prefix="sigil-s4-mfa-home-"))   # isolated; never the shared SIGIL_HOME
 _MODULE_VAULT = None
 
 
 def _module_vault() -> Vault:
     global _MODULE_VAULT
     if _MODULE_VAULT is None:
-        from sigil.config import SIGIL_HOME
-        v = Vault(Path(SIGIL_HOME) / "vault", make_fake_tpm())
+        v = Vault(_MODULE_HOME / "vault", make_fake_tpm())
         if not v.enabled():
             v.provision()
         _MODULE_VAULT = v
@@ -105,11 +108,20 @@ def _module_vault() -> Vault:
 
 
 @pytest.fixture(autouse=True)
-def _inject_shared_vault(monkeypatch):
-    """Make `owner_vault()` the one provisioned fake-TPM vault for every test in this module (so at-rest
-    sealing round-trips consistently: TOTP secrets, the spine DEK, and the owner key)."""
+def _isolated_vault_and_trust_root_paths(monkeypatch):
+    """Redirect the vault + spine-DEK path + owner-key paths to a per-MODULE tmp home, so this suite's
+    provisioning/sealing NEVER lands in the process-shared SIGIL_HOME. `envelope.load_or_create_dek` reads
+    `config.SPINE_DEK_PATH` via a function-local import, so patching it on the config module takes effect;
+    `identity._PRIV/_PUB` are the owner-key files. Result: TOTP secrets, the spine DEK, and the owner key all
+    seal/unseal under one stable fake KEK inside _MODULE_HOME — and a sibling suite sharing SIGIL_HOME finds
+    it pristine (unprovisioned, plaintext)."""
+    from sigil import config as cfg
+    from sigil.governor import identity as idmod
     from sigil.platform import vault as vaultmod
     monkeypatch.setattr(vaultmod, "_owner_vault", _module_vault())
+    monkeypatch.setattr(cfg, "SPINE_DEK_PATH", _MODULE_HOME / "keys" / "spine.dek")
+    monkeypatch.setattr(idmod, "_PRIV", _MODULE_HOME / "keys" / "owner.priv")
+    monkeypatch.setattr(idmod, "_PUB", _MODULE_HOME / "keys" / "owner.pub")
     yield
 
 
@@ -428,6 +440,44 @@ def test_optional_password_login_works_and_wrong_password_is_refused():
         assert st2 == 401 and d2["authenticated"] is False
         # unknown username → same 401 (no user-enumeration signal)
         assert _login(port, {"username": "ghost", "password": "whatever-xx"})[0] == 401
+    finally:
+        s.shutdown()
+
+
+def test_password_login_runs_one_scrypt_on_every_branch_no_user_enumeration_timing(monkeypatch):
+    """BLOCK-1 (user-enumeration TIMING oracle): the password endpoint must run ONE scrypt of equal cost
+    regardless of whether the username exists / has a password — else a ~59× timing gap reveals "this account
+    has password login". A short-circuit `acct is None or not acct.password_hash or not verify(...)` would skip
+    scrypt entirely for the unknown / password-less branches.
+
+    Structural proof (robust in CI vs a flaky wall-clock assertion): spy on `verify_password` and assert a
+    scrypt verify runs on EVERY branch — against the DECOY hash for the unknown / password-less cases (equal
+    cost), against the real hash for a real account."""
+    s, port = _serve()
+    try:
+        from sigil.governor import accounts as accmod
+        assert _post(port, "/api/action", {"action": "create_account", "username": "nopw",
+                                           "role": "viewer"})[0] == 200          # exists, NO password
+        assert _post(port, "/api/action", {"action": "create_account", "username": "haspw",
+                                           "role": "viewer"})[0] == 200
+        assert _post(port, "/api/action", {"action": "set_password", "username": "haspw",
+                                           "password": "realpw-realpw"})[0] == 200
+
+        seen: list = []
+        real_vp = accmod.verify_password
+
+        def _spy(pw, stored):
+            seen.append(stored)
+            return real_vp(pw, stored)
+
+        monkeypatch.setattr(accmod, "verify_password", _spy)                     # picked up by the func-local import
+        assert _login(port, {"username": "ghost-user", "password": "whatever-xx"})[0] == 401   # unknown user
+        assert _login(port, {"username": "nopw", "password": "whatever-xx"})[0] == 401          # password-less
+        assert _login(port, {"username": "haspw", "password": "wrong-wrong-1"})[0] == 401       # wrong password
+        # a scrypt verify ran on ALL THREE branches (no short-circuit) — unknown/password-less used the DECOY
+        assert len(seen) == 3, f"a scrypt verify must run on every password branch, got {seen}"
+        assert seen[0] == accmod.DECOY_PASSWORD_HASH and seen[1] == accmod.DECOY_PASSWORD_HASH
+        assert seen[2] != accmod.DECOY_PASSWORD_HASH                             # the real account used its hash
     finally:
         s.shutdown()
 

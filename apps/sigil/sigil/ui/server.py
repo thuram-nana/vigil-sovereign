@@ -421,14 +421,25 @@ class Handler(BaseHTTPRequestHandler):
         salted-scrypt verify passes (unknown-user and wrong-password return the SAME 401 message). If the
         account also has TOTP enrolled, a valid current code is required too. On success mint a fresh
         owner-signed session bearer through the SAME X-SIGIL-Token carrier as PoP."""
-        from ..governor.accounts import AccountsRegistry, Principal, verify_password
+        from ..governor.accounts import (
+            DECOY_PASSWORD_HASH,
+            AccountsRegistry,
+            Principal,
+            verify_password,
+        )
         from ..governor.identity import ensure_owner_keypair
         store = self.server.store()
         try:
             acct = AccountsRegistry(store).account(username)
         except Exception:  # noqa: BLE001 — hostile/corrupt spine must never crash auth → fail-closed
             acct = None
-        if acct is None or not acct.password_hash or not verify_password(password, acct.password_hash):
+        # ALWAYS run exactly ONE scrypt of equal cost — against the real hash when present, else a DECOY —
+        # so the endpoint's TIMING never reveals whether the username exists or has a password enrolled (the
+        # user-enumeration oracle a short-circuit would open). The 401 message stays constant; the auth
+        # decision still requires a real account WITH a password AND a matching verify.
+        stored = acct.password_hash if (acct is not None and acct.password_hash) else DECOY_PASSWORD_HASH
+        password_ok = verify_password(password, stored)
+        if acct is None or not acct.password_hash or not password_ok:
             return self._json({"ok": False, "authenticated": False,
                                "error": "invalid username or password"}, 401)
         terr = self._check_totp(username, body)
