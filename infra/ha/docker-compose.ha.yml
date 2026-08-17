@@ -38,10 +38,10 @@ services:
   #   CRUCIBLE_API_KEY=... vigil up --domain vigil.example.com --host 127.0.0.1 --port 8771 --no-browser
   # ---------------------------------------------------------------------------
   vigil-lb:
-    # DIGEST-PIN before production (mirror the root compose's supply-chain policy —
-    # infra/supply-chain/resolve-image-digests.sh, docs/SUPPLY-CHAIN.md). A pinned
-    # tag is used here rather than a fabricated sha256 that would fail the pull.
-    image: nginx:1.27-alpine
+    # Digest-pinned per the root compose's supply-chain policy (A14 — every container base image is
+    # image:tag@sha256:<digest>). Re-resolve drift with infra/supply-chain/resolve-image-digests.sh; see
+    # docs/SUPPLY-CHAIN.md. (nginx:1.27-alpine as of resolution.)
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     container_name: vigil-lb
     restart: unless-stopped
     volumes:
@@ -128,7 +128,7 @@ services:
   # out-of-band; this sidecar only proves the standby is present and NON-writing.
   # ---------------------------------------------------------------------------
   sovereign-passive:
-    image: nginx:1.27-alpine          # a benign base; this sidecar never runs the writer (digest-pin before prod)
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10   # benign base; this sidecar never runs the writer
     profiles: ["passive"]
     restart: unless-stopped
     labels:
