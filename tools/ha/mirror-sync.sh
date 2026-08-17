@@ -59,8 +59,14 @@ SENTINEL="MIRROR-READONLY"
 log() { echo "mirror-sync: $*"; }
 die() { echo "mirror-sync: $*" >&2; exit 2; }
 
-# realpath that tolerates a not-yet-existing target (compare intended paths, not just literals).
-_abs() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null || echo "$1"; }
+# python3 is REQUIRED for the same-home path-safety check (_abs). Fail closed if it is absent, so the
+# guard can never silently degrade to a literal string compare that a symlink / trailing slash / `..`
+# alias would slip past (red-pen S6 advisory 2).
+command -v python3 >/dev/null 2>&1 || die "python3 is required (used to realpath-resolve the mirror vs live SIGIL_HOME safety check)."
+
+# realpath that tolerates a not-yet-existing target (compare intended paths, not just literals). python3
+# is guaranteed present (guarded above), so this never falls back to the literal.
+_abs() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 
 # The read-only INVARIANT gate. Runs before ANY sync; fails closed.
 assert_passive_readonly() {
