@@ -496,47 +496,15 @@ jobs:
         run: |
           mkdir -p /tmp/sigil-ci
           if [ -f apps/sigil/tests/test_offense_gate.py ]; then
+            # DEFECT-5 STRUCTURAL FIX: run the WHOLE apps/sigil/tests/ directory, not a hand-maintained
+            # explicit file list. That list silently DRIFTED — 56 of ~94 sovereign test files (e.g.
+            # test_floor_witness, test_ha_failover_guard, test_governance_replay_guard, the
+            # test_snapshot_fold_* family, test_login_pop) were never named, so they never ran in CI at all.
+            # Running the directory means a NEW test file is AUTO-INCLUDED — it can only fail LOUDLY, never
+            # silently skip. test_ci_sigil_tests_all_run.py guards this invariant + the --ignore honesty.
             # integration on the path for the P10 finding-receiver (it uses vigil_integration.inert_finding,
             # which is sovereign-safe = vigil_core only, so no offense engine is pulled).
-            PYTHONPATH=apps/sigil:integration python -m pytest \
-              apps/sigil/tests/test_offense_gate.py \
-              apps/sigil/tests/test_hardening.py \
-              apps/sigil/tests/test_finding_receiver.py \
-              apps/sigil/tests/test_finding_receiver_delegation.py \
-              apps/sigil/tests/test_offense_spine_delegation.py \
-              apps/sigil/tests/test_detection_receiver.py \
-              apps/sigil/tests/test_spool_watcher.py \
-              apps/sigil/tests/test_vault.py \
-              apps/sigil/tests/test_secrets_sealed.py \
-              apps/sigil/tests/test_kernel_pin.py \
-              apps/sigil/tests/test_floor_signing.py \
-              apps/sigil/tests/test_gesture_arm.py \
-              apps/sigil/tests/test_spine_envelope.py \
-              apps/sigil/tests/test_spine_sealed.py \
-              apps/sigil/tests/test_backup.py \
-              apps/sigil/tests/test_backup_warden.py \
-              apps/sigil/tests/test_witness_checkpoint.py \
-              apps/sigil/tests/test_capability_latch.py \
-              apps/sigil/tests/test_capability_gesture.py \
-              apps/sigil/tests/test_capability_voice.py \
-              apps/sigil/tests/test_capability_ui.py \
-              apps/sigil/tests/test_ui.py \
-              apps/sigil/tests/test_ui_remote.py \
-              apps/sigil/tests/test_ui_settings.py \
-              apps/sigil/tests/test_accounts.py \
-              apps/sigil/tests/test_rbac_actions.py \
-              apps/sigil/tests/test_rbac_server.py \
-              apps/sigil/tests/test_system_map_sync.py \
-              apps/sigil/tests/test_voice_nav.py \
-              apps/sigil/tests/test_gesture_nav.py \
-              apps/sigil/tests/test_hud_status.py \
-              apps/sigil/tests/test_capability_autolearn.py \
-              apps/sigil/tests/test_knowledge_proposals.py \
-              apps/sigil/tests/test_learn_grant.py \
-              apps/sigil/tests/test_learn_source.py \
-              apps/sigil/tests/test_promotion_state_all.py \
-              apps/sigil/tests/test_dashboard_recent_events.py \
-              apps/sigil/tests/test_ha_overclaim_guard.py -q
+            PYTHONPATH=apps/sigil:integration python -m pytest apps/sigil/tests/ -q
           else
             echo "apps/sigil offense-gate tests not present on this ref (pre-merge) — nothing to test"
           fi
