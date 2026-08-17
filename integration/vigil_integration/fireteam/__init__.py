@@ -25,6 +25,7 @@ from .confirmation import (
     ConfirmationOutcome,
     ConfirmationRegistry,
     ConfirmationResolution,
+    EscalationLedger,
     PendingConfirmation,
 )
 from .member import (
@@ -73,7 +74,7 @@ __all__ = [
     "authorize_member_edge", "run_member_step", "parse_member_decision", "FORBIDDEN_MEMBER_ACTIONS",
     # confirmation
     "ConfirmationRegistry", "ConfirmationOutcome", "ConfirmationResolution", "PendingConfirmation",
-    "ApproverFn",
+    "ApproverFn", "EscalationLedger",
     # spine queue
     "SingleWriterSpineQueue", "QueuedWrite",
     # wave-resume checkpoint
