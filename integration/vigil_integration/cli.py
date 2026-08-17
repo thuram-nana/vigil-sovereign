@@ -764,6 +764,74 @@ def _cmd_witness(args: argparse.Namespace) -> int:
     return int(parsed.func(parsed))
 
 
+def _cmd_floor_witness(args: argparse.Namespace) -> int:
+    """C-S4 offense parity — anchor the offense anti-rollback HIGH-WATER floor to a RETAINED, off-box
+    witnessed checkpoint. `witness` emits + persists it off-box; `verify-witnessed` REQUIRES the local
+    head+floor to be consistent with the HIGHEST retained one (catches a same-host head+floor co-rewrite /
+    a floor stripped below a witnessed height — the residual the LOCAL floor cannot catch).
+
+    FATAL-2: signs with the offense GOVERNANCE key (never an owner key); imports NO framework/sigil."""
+    from pathlib import Path
+
+    from vigil_core import SignedChainHead
+    from vigil_core.highwater import HighWaterError, load_highwater
+    from vigil_core.vault import Vault
+
+    from . import floor_witness as FW
+    from . import witnessed_anchor as WA
+    from .live.governance_identity import (
+        DEFAULT_GOVERNANCE_KEY_FILE, load_or_create_governance_keypair)
+
+    log_dir = Path(args.log_dir)
+    head_p = log_dir / "head.json"
+    hw_p = log_dir / "highwater.json"
+    if not head_p.exists():
+        print(f"vigil floor: no offense head at {head_p} (nothing to anchor)", file=sys.stderr)
+        return 2
+    try:
+        head = SignedChainHead.model_validate_json(head_p.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 — a corrupt head is surfaced, never treated as clean
+        print(f"vigil floor: offense head unreadable (possible tamper): {e}", file=sys.stderr)
+        return 2
+    try:
+        hw = load_highwater(hw_p)                      # normalised {entry_count,last_seq} or None
+    except HighWaterError as e:
+        print(f"vigil floor: high-water floor unreadable (possible tamper): {e}", file=sys.stderr)
+        return 2
+
+    base = Path(args.base_dir)
+    vault = Vault(base / "vault")
+    gov = load_or_create_governance_keypair(path=str(base / DEFAULT_GOVERNANCE_KEY_FILE), vault=vault)
+    trust_root = FW.offense_witness_trust_root(gov.public_key_b64)
+
+    if args.action == "witness":
+        if not args.retain:
+            print("!! `vigil floor witness` needs --retain <path> (the OFF-BOX path a verifier keeps)",
+                  file=sys.stderr)
+            return 2
+        try:
+            wc = FW.emit_highwater_witness(head, hw, [FW.offense_governance_witness(gov)],
+                                           retain_path=Path(args.retain), scope=args.scope)
+        except (FW.OffenseFloorWitnessError, WA.AnchorError) as e:
+            print(f"!! offense floor witness failed: {e}", file=sys.stderr)
+            return 1
+        print(f"offense high-water witnessed + retained: {args.retain} (count {wc.checkpoint.entry_count}, "
+              f"last_seq {wc.checkpoint.last_seq}, {len(wc.witness_signatures)} governance sig(s))")
+        print("RETAIN THIS OFF-BOX — a copy kept only under --base-dir is rolled back WITH the spine.")
+        print(f"guarantee: {FW.offense_guarantee_label(trust_root)}")
+        return 0
+    # verify-witnessed
+    if not args.external:
+        print("!! `vigil floor verify-witnessed` needs --external <path> (repeatable) — the OFF-BOX "
+              "retained witnessed checkpoint(s)", file=sys.stderr)
+        return 2
+    sources = [sys.stdin.read() if x == "-" else Path(x).read_text() for x in args.external]
+    ok, msg, _label = FW.verify_highwater_against_witnessed(head, hw, sources, scope=args.scope,
+                                                            trust_root=trust_root)
+    print(("offense floor anti-rollback OK: " if ok else "offense floor anti-rollback FAIL: ") + msg)
+    return 0 if ok else 2
+
+
 def _cmd_provision_destruction(args: argparse.Namespace) -> int:
     """Mint the m-of-n destruction quorum keys for `vigil patch --open-pr`. Prints each signer's PRIVATE key
     ONCE (paste the owner key into Settings; distribute co-signer keys to their holders) and writes the PUBLIC
@@ -2063,6 +2131,25 @@ def build_parser() -> argparse.ArgumentParser:
              "standalone. Sovereign-safe; NOT witnessed-by-independent-parties (a capability, not production).")
     pw.add_argument("witness_argv", nargs=argparse.REMAINDER,
                     help="serve --host --port --key [--key-id] | submit --endpoints --checkpoint [--out]")
+
+    pfw = sub.add_parser(
+        "floor",
+        help="C-S4 offense anti-rollback floor <-> witnessed checkpoint anchor: `floor witness --log-dir D "
+             "--retain P` emits+retains a GOVERNANCE-signed witnessed checkpoint OFF-BOX; `floor "
+             "verify-witnessed --log-dir D --external P …` REQUIRES the local head+high-water floor to be "
+             "at/above the HIGHEST retained one (catches a same-host head+floor co-rewrite / stripped floor).")
+    pfw.add_argument("action", choices=["witness", "verify-witnessed"])
+    pfw.add_argument("--log-dir", required=True,
+                     help="offense attestation-log dir holding head.json + highwater.json")
+    pfw.add_argument("--base-dir", default=".vigil-live",
+                     help="offense engine home (holds the sealed offense GOVERNANCE key that co-signs)")
+    pfw.add_argument("--scope", required=True, help="engagement slug the witnessed checkpoint is bound to")
+    pfw.add_argument("--retain", default="",
+                     help="(witness) OFF-BOX path to persist the witnessed checkpoint the verifier retains")
+    pfw.add_argument("--external", action="append", default=[],
+                     help="(verify-witnessed) an OFF-BOX retained witnessed checkpoint (path or '-'); "
+                          "repeatable — the HIGHEST valid one anchors")
+    pfw.set_defaults(func=_cmd_floor_witness)
     pw.set_defaults(func=_cmd_witness)
 
     pprov = sub.add_parser(
