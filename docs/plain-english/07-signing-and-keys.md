@@ -505,7 +505,7 @@ account that created it open, and which is encrypted at rest once the hardware v
 |---|---|---|---|---|
 | **Owner key** (the root of everything) | Owner-only file under the owner's home directory on the sovereign side (`~/.sigil/spine/keys/`) | The owner's own account on that one machine | Approvals, delegations to every other key, the owner-side record's summary and its anti-rollback floor, governance decisions | The most serious loss. Nothing already signed becomes invalid, but no new delegation or approval can be signed until a new owner key is created — and every party who pinned the old owner key must be given the new one. Recoverable only from the encrypted off-box backup (section 6). |
 | **Record data key** | Owner-only file beside the owner key | The owner's account | Nothing — it is an encryption key, not a signing key. It scrambles the contents of the owner-side record. | The stored record cannot be read back. Included in the off-box backup. |
-| **Permission-kernel key** | A file beside the permission kernel's own action log, under the owner's home directory (`~/.sigil/warden/keys`). Created automatically the first time the kernel opens | The account the kernel runs as | Every action record the permission kernel writes — one per tool invocation — and the signed summary that fixes the log's length | The existing action log can no longer be verified. It is **not** in the off-box backup, so treat the action log as a local audit trail rather than as recoverable evidence. Nothing already published elsewhere is affected. |
+| **Permission-kernel key** | A file beside the permission kernel's own action log, under the owner's home directory (`~/.sigil/warden/`). Created automatically the first time the kernel opens | The account the kernel runs as | Every action record the permission kernel writes — one per tool invocation — and the signed summary that fixes the log's length | The existing action log can no longer be verified under a freshly-created key. The permission-kernel dir (its action log, this key, and the tool registry) **is now included in the off-box backup** and its key is restored owner-only (0600), so a machine loss no longer costs the action log — but a key *rotation* still means records signed under the old key verify only under the old public key. Nothing already published elsewhere is affected. |
 | **Device keys** (the owner's phone, and any other approving device) | On the device itself. The device generates its own key and **never holds the owner key** | Each device separately | Each request that device makes to the desktop, and each approval it gives to a queued action | That device can no longer request or approve anything. The owner revokes it and pairs a replacement. Nothing else is affected. A revocation must itself be owner-signed, but once signed it carries no freshness requirement of any kind, so a lost phone can always be disarmed (section 11). |
 | **Engagement-record key** (called the "spine" key in code) | Owner-only file in the working directory of the offensive engine (`offense-spine.key`) | The account running the offensive engine | The running log of an engagement, the record of every command executed, and defensive detection certificates | The existing engagement log cannot be continued: a new key does not verify the earlier lines of the same log file. Start a fresh engagement and re-issue the owner delegation (section 6). |
 | **Governance key** | Owner-only file in the same working directory (`offense-governance.key`) | The account running the offensive engine | Evidence certificates for confirmed weaknesses, and the engagement's authority record | Already-issued certificates still verify (they are checked against the public half, which travels with the evidence). New certificates need a new key plus a new owner delegation. |
@@ -530,10 +530,11 @@ Two observations worth drawing out of that table:
 - **Only two keys have no recovery path other than the off-box backup**: the owner key and the
   master key that seals things to one machine. Everything else can be regenerated and
   re-blessed by the owner.
-- **The backup does not cover everything, and the table shows which.** The permission kernel's
-  own key — the one signing the log of every tool invocation — is not in it, and neither are the
-  three offensive working keys. Losing any of those costs the continuity of a local log, not any
-  published evidence. Section 6.2 states the boundary in full.
+- **The backup now covers both the trust root and the permission kernel.** The permission
+  kernel's own key — the one signing the log of every tool invocation — is included, restored
+  owner-only. The three offensive working keys are covered by a **separate** offense backup file
+  (the two planes are never packaged into one archive — see 6.2). Section 6.2 states the boundary
+  in full.
 
 ### Every stored secret is sealed under its own purpose
 
@@ -711,6 +712,8 @@ The backup command packages, into one encrypted file:
 
 - the owner-side record itself (all of it, with its signed summary),
 - the anti-rollback floor and the software-integrity manifest,
+- the **permission-kernel directory** — its signed action log, its own signing key, and the tool
+  registry — with the kernel key restored owner-only (0600),
 - the **owner private key**, and the key that encrypts the record's contents.
 
 Two properties make it safe to keep off the machine:
@@ -732,16 +735,30 @@ one is present, so the recovered system is protected again rather than left in t
 
 Three honest limits on the backup:
 
-1. **It is a manual command.** Nothing schedules it. There is no automatic backup timer in the
-   shipped service definitions. If the operator does not run it, there is no backup. An
-   assessor should ask how often it is run and where the file is kept.
-2. **It covers the sovereign (owner) side only.** The offensive engine's working keys — the
-   engagement-record key, the governance key, the operator key — are not in it, and neither is
-   an engagement's collected evidence. That is survivable: those keys can be regenerated and
-   re-blessed by the owner (6.3), whereas the owner key cannot be re-blessed by anyone; and a
-   finished evidence package is an ordinary set of files that the operator should archive the
-   way they archive any other case record. But it does mean the backup command is not a
-   whole-system backup, and should not be described to anyone as one.
+1. **It can now be scheduled.** The standalone `sigil backup` is still a manual command, but the
+   unified `vigil backup` verb takes an off-box backup of **both** planes, and a shipped systemd
+   user timer (`infra/systemd/vigil-backup.timer`) fires it on a daily cadence with retention
+   (keep the last N, and anything within N days). Freshness is only ever as current as the last
+   fire of that timer, and the timer carries the passphrase in a `0600` environment file — which
+   is weaker than typing it interactively, so the example file spells out the trade-off and the
+   systemd-credentials alternative. An assessor should still ask where the backup file is kept
+   and confirm a test restore has been done.
+2. **The two planes are backed up as two SEPARATE encrypted files — never one merged archive.**
+   The sovereign file covers the owner side (owner key, record, floor, integrity manifest, and now
+   the permission-kernel dir). The offensive engine's working keys — the engagement-record key, the
+   governance key, the operator key — plus its spine and its collected evidence are covered by a
+   **separate** offense backup file, whose internal manifest is signed by the offensive governance
+   key. They are deliberately never packaged together, because one process holding both planes'
+   secrets at once would breach the two-process trust boundary. Each file needs its own passphrase.
+   Be precise about what that governance signature buys on the offense file: because the signature
+   lives *inside* the passphrase-encrypted body and restore checks it against the key carried in the
+   same body, by default anyone who holds the passphrase could re-sign a substitute manifest — so
+   **by default the offense file's authenticity is passphrase-possession, exactly like the sovereign
+   file** (the passphrase is the real root of trust, next point). To get genuine governance-key
+   authenticity you must **pin** the expected governance public key out of band at restore time
+   (`vigil restore --expect-governance-pubkey <base64>`); with that pin, a passphrase-holder who does
+   not also hold the governance *private* key cannot pass off a forged backup. The governance key's
+   own tie to the owner remains the owner-signed delegation.
 3. **The passphrase becomes the root of trust for that file.** Anyone holding both the backup
    file and its passphrase holds the owner key. It should be treated with the same seriousness
    as the key itself — ideally split between two custodians or held in a safe.
@@ -753,7 +770,7 @@ Three honest limits on the backup:
 | **The owner key**, with a backup available | Everything already signed still verifies | Restore the backup onto the replacement machine, then run the verification command against the restored copy to confirm the recovered owner signature. |
 | **The owner key**, with no backup | Everything already signed still verifies, forever, against the old public key | There is no recovery path. A new owner identity must be created; every party who pinned the old owner key must be given the new one out of band; and every delegation must be re-issued. Be aware of one sharp edge: the software does not treat a missing owner key as an error — the next owner-signing command simply creates a new one. Nothing announces "the owner key is gone", so an operator can rotate their own trust root by accident. Keeping the backup is the guard against this. |
 | **The machine, or the TPM chip in it** | Everything already published still verifies | The sealed copies on that disk are permanently unreadable, by design. Restore the off-box backup onto the new machine. Without a backup, the record and the owner key are gone; published evidence is unaffected. |
-| **The permission kernel's own key** | Everything already published elsewhere still verifies | The kernel creates a fresh one automatically the next time it opens. The existing action log cannot be verified under it, and there is no backup — that log is a local audit trail. If it matters to you as evidence, archive it before this can happen, and note the log's length and last fingerprint somewhere outside the machine. |
+| **The permission kernel's own key** | Everything already published elsewhere still verifies | If the whole machine is lost, restore the off-box backup — the permission-kernel dir (its key, action log, and tool registry) is now packaged in it, restored owner-only, so the log is recoverable. If instead the key alone is *rotated*, the kernel creates a fresh one the next time it opens, and records signed under the old key verify only under the old public key. Still note the log's length and last fingerprint somewhere outside the machine as a cross-check. |
 | **A device key** (a lost or stolen phone) | Everything else is unaffected | Revoke the device on the owner's side, then pair a replacement. The revocation is honoured from the moment it is written; the desktop bridge recomputes the authorised set on every single request rather than caching it, so a revoke bites immediately rather than at the next restart. |
 | **A witness key** | Every counter-signature that witness already gave still verifies | Enrol a replacement witness and re-publish the roster. If losses take the set below the required number, no new summary can be witnessed until that is fixed — which is the intended behaviour of a several-must-sign scheme. |
 | **The engagement-record key** | Everything already signed still verifies | Generate a fresh one (it is created automatically when absent), export its public half, and have the owner re-issue the delegation. Do not try to continue the old engagement's log with a new key — the earlier lines of that file will not verify under it. Start a new engagement. |
@@ -850,8 +867,10 @@ grants; it can never create one.
   key, or the governance key. Rotation of those is an operator action, following the procedure
   in 6.4, not a scheduled process. An assessor should treat key-rotation cadence as an
   operational policy question to put to the operator, not as something the software enforces.
-- **There is no automated backup schedule either**, and no rotation command for the owner key
-  itself. Both are procedures an operator runs, not features the software drives.
+- **A daily backup timer now ships** (`vigil-backup.timer`, driving `vigil backup` over both
+  planes with retention), so unattended off-box backup is a feature the software drives — though
+  there is still no automatic *rotation* command for the owner key itself; rotation remains a
+  procedure an operator runs. The timer's freshness is only as current as its last fire.
 - **Withdrawing a capability grant is not instantaneous, and nothing distributes it for you.**
   Two limits, both stated rather than smoothed over. The new revocation list has to reach the
   deployment: the software reads it from the deployment's own files and never fetches it from
@@ -1404,7 +1423,7 @@ governance root plus witnesses, which the project describes in-repo as stronger.
 | Rejection of weak and non-standard public keys | **Fully working**, with a documented adversarial-review origin. |
 | Purpose labels preventing a signature being reused across contexts | **Working** for twenty-four distinct signing purposes, ten of them held in a shared registry and the rest declared beside the code that uses them (Appendix A lists all of them). Explicitly **not applied** to three surfaces — the offensive engagement record, the usage ledger and the owner-side governance events — which the registry names as the next hardening, plus the evidence-package manifest, which it does not name. On all four, separation rests on the shape of what is signed rather than on a label. |
 | Anti-replay guard on the owner's signed decisions | **Working**, delivered in this release. Five kinds of decision record gained an issue time inside the signed part and a per-item high-water mark; a sixth already had one. Only the dangerous direction is guarded, deliberately. Covered by its own test suite, which I ran: 67 tests, all passing. It defends against an attacker who can append to the owner's record, not against one holding the owner's private key. |
-| Permission-kernel action log: every tool invocation individually signed and chained | **Working.** Present and populated on the machine this was written on. Its key is **not** included in the off-box backup, so treat the action log as a local audit trail rather than as recoverable evidence. |
+| Permission-kernel action log: every tool invocation individually signed and chained | **Working.** Present and populated on the machine this was written on. Its key and log are **now included** in the off-box backup (the key restored owner-only), so the action log is recoverable evidence after a machine loss — a key rotation still leaves old records verifiable only under the old public key. |
 | Evidence certificates: authenticity, binding, file integrity, reproduction, claim grounding, known shape | **Fully working.** |
 | Chained record with signed head; detection of deletion, reorder, alteration, truncation, suppression, injection | **Fully working as a mechanism.** Not exercised on the owner's own record here: on the machine this was written on the chain links cleanly over sixteen entries, but nothing has signed a head, so on that host growth and truncation are not yet distinguishable. Signing one is a single operator command. |
 | Standalone offline checkers with no dependency on this system | **Fully working**, with the honest exception that they cannot re-run the original test. |
@@ -1417,7 +1436,7 @@ governance root plus witnesses, which the project describes in-repo as stronger.
 | Binding a capability grant to particular machines, and optionally to a named operator | **Working.** A gated function is refused when the running machine cannot present an identifier the grant was bound to. The software does not itself measure the hardware: it consumes an attested identity the deployment supplies, and falls back to the machine's installation identifier or, weakest, its hostname. How strong that binding really is depends on which of the three a deployment relies on. |
 | Withdrawing a capability grant before it expires | **Working** — a signed revocation list, protected against an older list being replayed over a newer one, and a grant may be issued so that a missing list denies it outright. Two honest limits: the issuing institution must deliver the new list to the deployment (nothing fetches it), and the decision is re-evaluated when the software next starts, not mid-run. |
 | Build and release safeguards: exact-version and fingerprint locking of every third-party package, content-pinned base images, a generated parts list checked back against the lock, and a gate that blocks on critical published flaws | **Working and part of the released software**, enforced automatically on every proposed change, with a deliberately planted failing case run first to prove the gate can still refuse. Honestly bounded: it blocks on **critical** findings only. High findings are reported and tracked rather than suppressed — including one in this chapter's own signature library, whose fix **has now been delivered** across every first-party declaration. Two residuals, both stated rather than smoothed over: the vendored copy of the third-party agent still names an older release, and on the machine this was written on the sovereign virtual environment had not yet been rebuilt onto the fixed one. |
-| Encrypted, signed, off-machine backup of the owner key and the owner-side record | **Working**, verified before anything is written on restore. It is a manual command — **nothing schedules it**. |
+| Encrypted, signed, off-machine backup of the owner key and the owner-side record (and now the permission-kernel dir) | **Working**, verified before anything is written on restore. A shipped systemd user timer (`vigil-backup.timer`) now schedules `vigil backup` daily across both planes with retention; the standalone `sigil backup` remains available manually. |
 | Key escrow or a vendor-held recovery copy | **Does not exist, by design.** The backup and its passphrase are the only recovery path. |
 | Documented replacement procedure for each key | **Supported by the commands described in section 6.4**; the owner key has no rotation command and is replaced by re-issuing every delegation from a new identity. |
 | Anti-rollback floor | **Working**, with a clearly stated limit against a same-host attacker holding owner privileges. |
@@ -1490,9 +1509,9 @@ a deployment rather than about code:
     fail-safe direction — a refusal, not a false approval — but an operator should know it can
     happen, and should not be surprised into thinking the system is broken.
 18. **Is your permission-kernel action log part of your backup and retention plan?** It is
-    individually signed and chained, and it is the record of every tool invocation. It is
-    deliberately *not* in the encrypted off-box backup, so if it matters to you as evidence, you
-    have to archive it yourself.
+    individually signed and chained, and it is the record of every tool invocation. It **is now**
+    included in the encrypted off-box backup (its key restored owner-only), so a machine loss no
+    longer costs it — confirm the daily backup timer is enabled and that you have tested a restore.
 19. **Where does the evidence for a completed engagement live once the engagement is over?** The
     off-box backup covers the owner's side. Finished evidence packages are ordinary files and are
     the operator's to archive, the way any other case record would be. Ask to see where they go

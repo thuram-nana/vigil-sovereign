@@ -140,8 +140,10 @@ _PROVE_CERT_DOMAIN = b"vigil-remediation-prove-cert-v1\x00"
 _REM_CERT_DOMAIN = b"vigil-remediation-cert-v2\x00"
 _WITNESS_TIME_DOMAIN = b"vigil-attestation-witness-time-v1\x00"
 # The timeless transparency checkpoint domain — used to recompute checkpoint_hash (what the RFC3161
-# external time anchor binds). Byte-identical to transparency._WITNESS_DOMAIN.
-_TRANSPARENCY_CHECKPOINT_DOMAIN = b"vigil-transparency-checkpoint-v1\x00"
+# external time anchor binds). Byte-identical to transparency._WITNESS_DOMAIN. v2 (C-S1): the checkpoint
+# now commits the prune boundary (base_seq/base_count) in to_dict; the domain suffix is bumped v1->v2 in
+# lockstep so this standalone verifier recomputes the SAME checkpoint_hash the in-tree code signs.
+_TRANSPARENCY_CHECKPOINT_DOMAIN = b"vigil-transparency-checkpoint-v2\x00"
 # The Z1 channel-binding notary-cosign domain — byte-identical to channel_binding._CHANNEL_BINDING_DOMAIN.
 _CHANNEL_BINDING_DOMAIN = b"vigil-zktls-channel-binding-v1\x00"
 _CHANNEL_BINDING_SCHEMA = "vigil-zktls-channel-binding-v1"

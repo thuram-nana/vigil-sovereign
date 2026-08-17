@@ -160,4 +160,4 @@ def test_multi_signature_does_not_replay_as_single_segment():
     assert verify_witnessed(WitnessedCheckpoint(single, (sig,)), witness_trust_root=solo) is False
     # but it DOES verify as the multi checkpoint it actually signed
     assert verify_witnessed_multi(MultiWitnessedCheckpoint(mc, (sig,)), witness_trust_root=solo) is True
-    assert _multi_signing_bytes(mc).startswith(b"vigil-transparency-checkpoint-v1\x00")
+    assert _multi_signing_bytes(mc).startswith(b"vigil-transparency-checkpoint-v2\x00")

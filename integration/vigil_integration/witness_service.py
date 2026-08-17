@@ -136,7 +136,7 @@ _MAX_BODY = 256 * 1024
 _DEFAULT_READ_TIMEOUT = 8.0
 
 # The producer's submission signature is domain-separated from BOTH transparency's timeless witness domain
-# (``b"vigil-transparency-checkpoint-v1\x00"``) and attestation_witness's timed domain, so a producer
+# (``b"vigil-transparency-checkpoint-v2\x00"``) and attestation_witness's timed domain, so a producer
 # submission signature can never be replayed as (nor confused with) a witness co-signature, and vice-versa.
 _PRODUCER_DOMAIN = b"vigil-witness-producer-submit-v1\x00"
 
@@ -381,6 +381,10 @@ def _checkpoint_from_obj(obj: object) -> Checkpoint:
             head_hash=str(obj["head_hash"]),
             merkle_root=str(obj["merkle_root"]),
             prev_checkpoint_hash=str(obj.get("prev_checkpoint_hash", "")),
+            # C-S1: the prune boundary is part of the checkpoint's signed identity. Optional-with-default so
+            # a v1-persisted tip (no base_*) reconstructs as base_*=0 (an unpruned head), byte-identical.
+            base_seq=int(obj.get("base_seq", 0)),
+            base_count=int(obj.get("base_count", 0)),
         )
     except (KeyError, TypeError, ValueError) as e:
         raise ValueError(f"malformed checkpoint fields: {e}") from e
