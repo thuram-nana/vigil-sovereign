@@ -543,3 +543,17 @@ def test_cloud_file_secret_carries_the_sealed_truth(env):
                      "token_uri": "https://oauth2.googleapis.com/token"})
     out = smod.set_cloud_file_secret("GOOGLE_APPLICATION_CREDENTIALS_JSON", sa, store=store, owner_key=owner)
     assert out["sealed"] is False and out["backend"] == "envfile"
+
+
+def test_app_js_has_no_unconditional_sealed_claim():
+    # W0-9: the UI must never tell the operator a secret is "sealed on this machine" unconditionally — a
+    # secret can fall through to plaintext ~/.sigil/sigil.env, so every such phrase must carry the honest
+    # fallback qualifier. Pins the residual static-text fix (app.js screen blurbs) so the false assurance
+    # cannot silently return alongside the now-honest toast/server bool.
+    from pathlib import Path
+    app_js = (Path(__file__).resolve().parents[3] / "packages" / "vigil-ui" / "app.js").read_text()
+    assert "sealed on this machine, never shown back to the browser" not in app_js, \
+        "API-keys screen subtitle still asserts unconditional sealing"
+    assert "sealed on this machine and never shown back to the" not in app_js, \
+        "cloud/graph credential hint still asserts unconditional sealing"
+    assert "not sealed" in app_js, "the honest plaintext-fallback qualifier must be present"

@@ -4254,7 +4254,7 @@
   function renderApiKeys(screen) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "API Keys"),
-        h("span.sub", null, "Every key the system uses — sealed on this machine, never shown back to the browser. Press Test to check a key is live; a failing key always shows here.")]),
+        h("span.sub", null, "Every key the system uses — sealed to your OS keyring or a TPM vault when available (otherwise stored 0600 in ~/.sigil/sigil.env, which is not sealed), and never shown back to the browser. Press Test to check a key is live; a failing key always shows here.")]),
       ownerBanner("Owner plane — every change is signed with your key on the server. The browser never holds or receives key material."),
       h("div.acts", { style: { marginTop: "12px" } },
         h("button.btn#test-all", { onClick: function () {
@@ -4290,9 +4290,11 @@
       if (provs.length) {
         var hint = cat.id === "cloud"
           ? "Enter each cloud provider's credentials for the read-only pentest collectors. Everything is sealed "
-            + "on this machine and never shown back to the browser; a tenant/subscription id is shown, access "
+            + "to a keyring or TPM vault when available (otherwise stored 0600 in ~/.sigil/sigil.env, not sealed), "
+            + "and never shown back to the browser; a tenant/subscription id is shown, access "
             + "keys and secrets are masked. Press Test connection to verify a credential is live."
-          : "Enter the connection details. The password is sealed on this machine and never shown back to the "
+          : "Enter the connection details. The password is sealed to a keyring or TPM vault when available "
+            + "(otherwise stored 0600 in ~/.sigil/sigil.env, not sealed), and never shown back to the "
             + "browser; the URI and username are shown. Press Test connection to verify it is live.";
         return h("div", { style: { marginTop: "18px" } }, [
           h("div.screen-head", { style: { marginBottom: "6px" } }, h("h2", null, cat.label)),
