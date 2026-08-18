@@ -44,10 +44,15 @@ env:
   TRIVY_VERSION: "0.73.0"
   TRIVY_SHA256: "2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   supply-chain:
     name: A14 supply-chain gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       # Actions are themselves third-party code executing with this workflow's token, so they
       # are pinned to full commit SHAs, not to mutable tags. A test asserts this stays true.
