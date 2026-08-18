@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 # The guard's exit code when --fail-on-egress is set and at least one send was blocked.
@@ -155,13 +156,41 @@ def guard_binary() -> str | None:
     return shutil.which("egress_guard")
 
 
+# A missing binary in plain enabled mode degrades to argv-unchanged (the documented, byte-identical
+# fallback). That degradation was SILENT — an operator who set VIGIL_EGRESS_GUARD=1 believing spawns were
+# syscall-supervised got no signal that the binary was never built, so every tool ran UNGUARDED with the
+# same output as a guarded run. Emit ONE loud line to stderr the first time this happens in a process:
+# louder than silence, quieter than a line per spawn (a scan spawns dozens of tools). `require` mode is
+# unaffected — it still raises. Reset-once so the notice fires again in a fresh process (and is testable).
+_warned_unavailable = False
+
+
+def _warn_unavailable_once() -> None:
+    """Warn ONCE per process that the guard was requested (VIGIL_EGRESS_GUARD=1) but its binary is absent,
+    so spawns proceed UNGUARDED at the syscall level. Not an error — the argv allowlist and loopback pin
+    stay in force and the run continues; this only makes the degradation visible instead of silent."""
+    global _warned_unavailable
+    if _warned_unavailable:
+        return
+    _warned_unavailable = True
+    print(
+        "[egress-guard] WARNING: VIGIL_EGRESS_GUARD is set but the guard binary was not found — tool "
+        "spawns proceed UNGUARDED at the syscall level (the argv allowlist and loopback pin still apply, "
+        "but the connect(2)/sendto(2)/sendmsg(2) supervisor does NOT). Build it with "
+        "`make -C tools/egress-guard`, set VIGIL_EGRESS_GUARD_BIN=<path>, or use VIGIL_EGRESS_GUARD=require "
+        "to fail closed.",
+        file=sys.stderr,
+    )
+
+
 def wrap_argv(argv: list) -> list:
     """Return ``argv`` prefixed with the guard when it is enabled, else ``argv`` unchanged.
 
     Fail-closed only in ``require`` mode: there, an unavailable guard raises rather than silently
     spawning an unguarded tool — a guard you believe is on but is not is worse than no guard. In plain
-    enabled mode an unavailable binary degrades to the previous behaviour (argv unchanged), because the
-    guard is an ADDITIONAL control layered over the argv allowlist that is still in force.
+    enabled mode an unavailable binary degrades to the previous behaviour (argv unchanged) but now emits
+    ONE loud stderr warning (see :func:`_warn_unavailable_once`), because the guard is an ADDITIONAL
+    control layered over the argv allowlist that is still in force.
     """
     if not enabled():
         return list(argv)
@@ -177,6 +206,7 @@ def wrap_argv(argv: list) -> list:
             raise EgressGuardUnavailable(
                 "VIGIL_EGRESS_GUARD=require but the guard binary was not found — build it with "
                 "`make -C tools/egress-guard` or set VIGIL_EGRESS_GUARD_BIN")
+        _warn_unavailable_once()
         return list(argv)
     pre: list = [binary]
     log = (os.environ.get("VIGIL_EGRESS_GUARD_LOG") or "").strip()
