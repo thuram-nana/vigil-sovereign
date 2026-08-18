@@ -495,3 +495,65 @@ def test_protected_domains_toggle_status_carries_the_warn_banner(env):
     fields = [f for g in st["config_groups"] for f in g["fields"] if f["env"] == _ALLOW]
     assert fields, "the toggle must appear in the config groups"
     assert "DANGER" in fields[0]["warn"] and "safety floor" in fields[0]["warn"]
+
+
+# --- W0-9: the seal-honesty seam — the server reports whether a secret was ACTUALLY sealed --------
+# The UI printed "<label> sealed on this machine." unconditionally, so a secret that fell through to
+# the 0600 plaintext ~/.sigil/sigil.env still showed "sealed" — a FALSE security assurance. The fix
+# makes set_secret return the REAL backend + a `sealed` bool (true ONLY for keyring/TPM-vault), from
+# which the UI renders the honest toast. These tests pin that seam.
+
+def test_set_secret_reports_not_sealed_on_plaintext_fallback(env):
+    # The `env` fixture forces no OS keyring and no provisioned vault, so SecretStore falls back to the
+    # 0600 plaintext envfile — which is NOT sealed. The server must report the truth.
+    store, owner, _ = env
+    out = smod.set_secret("ANTHROPIC_API_KEY", SECRET, store=store, owner_key=owner)
+    assert out["backend"] == "envfile"           # the plaintext fallback tier was used
+    assert out["sealed"] is False                # ← load-bearing: a false "sealed" assurance would be True here
+    # the recorded (non-secret) governance event also carries the real backend
+    rec = store.get(out["recorded_seq"])
+    assert rec.payload.get("backend") == "envfile"
+
+
+def test_set_secret_reports_sealed_for_os_keyring(env, monkeypatch):
+    # A backend that actually seals the secret at rest (OS keyring) must report sealed=true.
+    store, owner, _ = env
+    from sigil.platform import secrets as secmod
+    monkeypatch.setattr(secmod.SecretStore, "set", lambda self, k, v: "keyring")
+    out = smod.set_secret("ANTHROPIC_API_KEY", SECRET, store=store, owner_key=owner)
+    assert out["backend"] == "keyring"
+    assert out["sealed"] is True
+
+
+def test_set_secret_reports_sealed_for_tpm_vault(env, monkeypatch):
+    # The TPM-sealed vault tier ("sealed") also rests as ciphertext → sealed=true.
+    store, owner, _ = env
+    from sigil.platform import secrets as secmod
+    monkeypatch.setattr(secmod.SecretStore, "set", lambda self, k, v: "sealed")
+    out = smod.set_secret("ANTHROPIC_API_KEY", SECRET, store=store, owner_key=owner)
+    assert out["backend"] == "sealed"
+    assert out["sealed"] is True
+
+
+def test_cloud_file_secret_carries_the_sealed_truth(env):
+    # set_cloud_file_secret delegates to set_secret, so the same honest `sealed` bool must ride back — a
+    # pasted GCP/kubeconfig credential that fell to plaintext must not render as "sealed" either.
+    store, owner, _ = env
+    sa = json.dumps({"type": "service_account", "project_id": "p",
+                     "token_uri": "https://oauth2.googleapis.com/token"})
+    out = smod.set_cloud_file_secret("GOOGLE_APPLICATION_CREDENTIALS_JSON", sa, store=store, owner_key=owner)
+    assert out["sealed"] is False and out["backend"] == "envfile"
+
+
+def test_app_js_has_no_unconditional_sealed_claim():
+    # W0-9: the UI must never tell the operator a secret is "sealed on this machine" unconditionally — a
+    # secret can fall through to plaintext ~/.sigil/sigil.env, so every such phrase must carry the honest
+    # fallback qualifier. Pins the residual static-text fix (app.js screen blurbs) so the false assurance
+    # cannot silently return alongside the now-honest toast/server bool.
+    from pathlib import Path
+    app_js = (Path(__file__).resolve().parents[3] / "packages" / "vigil-ui" / "app.js").read_text()
+    assert "sealed on this machine, never shown back to the browser" not in app_js, \
+        "API-keys screen subtitle still asserts unconditional sealing"
+    assert "sealed on this machine and never shown back to the" not in app_js, \
+        "cloud/graph credential hint still asserts unconditional sealing"
+    assert "not sealed" in app_js, "the honest plaintext-fallback qualifier must be present"

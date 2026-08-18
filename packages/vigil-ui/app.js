@@ -3819,9 +3819,24 @@
     return V.postJSON(SOV("/api/action"), body)
       .then(function (r) {
         if (r && r.error) { V.toast(r.error, true); return; }
-        V.toast(okMsg); if (then) then(r);
+        // okMsg may be a function of the response so the toast can tell the TRUTH the server reported
+        // (e.g. whether a secret was actually sealed or fell back to plaintext) instead of a fixed claim.
+        V.toast(typeof okMsg === "function" ? okMsg(r) : okMsg); if (then) then(r);
       })
       .catch(function (e) { V.toast((e && e.message) || "Action failed — check you are on the owner plane", true); });
+  }
+
+  // The HONEST post-seal toast: report what the server said actually happened. `r.sealed` is true only when
+  // the secret rests as ciphertext (OS keyring / TPM-backed vault); false means it fell through to the 0600
+  // plaintext ~/.sigil/sigil.env, which is NOT sealed — so we say so instead of falsely claiming "sealed".
+  function sealResultMsg(r, label) {
+    var name = label || "The secret";
+    if (r && r.sealed) {
+      return r.backend === "sealed"
+        ? name + " sealed to the TPM-backed vault."
+        : name + " sealed to your OS keyring.";
+    }
+    return name + " stored in ~/.sigil/sigil.env — NOT sealed (install a keyring backend or provision the vault to seal).";
   }
 
   function renderSettings(screen) {
@@ -4038,7 +4053,8 @@
         if (!v) { V.toast("Paste a value first.", true); return; }
         save.disabled = true;
         settingsAct({ action: "set_secret", name: sec.name, value: v, reason: "set " + sec.name + " from API Keys" },
-          (sec.label || sec.name) + " sealed on this machine.", function () { input.value = ""; reload(); refreshKeysBadge(); })
+          function (r) { return sealResultMsg(r, sec.label || sec.name); },
+          function () { input.value = ""; reload(); refreshKeysBadge(); })
           .then(function () { save.disabled = false; });
       } }, [V.icon("key"), "Seal"]);
     // Test = a live probe. Only offered for a SET, probeable secret; a non-probeable secret has no service to check.
@@ -4085,7 +4101,7 @@
           var payload = isFile
             ? { action: "set_cloud_file_secret", name: f.env, content: v, reason: "set " + f.env + " (cloud creds)" }
             : { action: "set_secret", name: f.env, value: v, reason: "set " + f.env + " (cloud creds)" };
-          settingsAct(payload, (f.label || f.env) + " sealed on this machine.",
+          settingsAct(payload, function (r) { return sealResultMsg(r, f.label || f.env); },
             function () { input.value = ""; reload(); refreshKeysBadge(); })
             .then(function () { save.disabled = false; });
         } }, [V.icon("key"), "Seal"]);
@@ -4238,7 +4254,7 @@
   function renderApiKeys(screen) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "API Keys"),
-        h("span.sub", null, "Every key the system uses — sealed on this machine, never shown back to the browser. Press Test to check a key is live; a failing key always shows here.")]),
+        h("span.sub", null, "Every key the system uses — sealed to your OS keyring or a TPM vault when available (otherwise stored 0600 in ~/.sigil/sigil.env, which is not sealed), and never shown back to the browser. Press Test to check a key is live; a failing key always shows here.")]),
       ownerBanner("Owner plane — every change is signed with your key on the server. The browser never holds or receives key material."),
       h("div.acts", { style: { marginTop: "12px" } },
         h("button.btn#test-all", { onClick: function () {
@@ -4274,9 +4290,11 @@
       if (provs.length) {
         var hint = cat.id === "cloud"
           ? "Enter each cloud provider's credentials for the read-only pentest collectors. Everything is sealed "
-            + "on this machine and never shown back to the browser; a tenant/subscription id is shown, access "
+            + "to a keyring or TPM vault when available (otherwise stored 0600 in ~/.sigil/sigil.env, not sealed), "
+            + "and never shown back to the browser; a tenant/subscription id is shown, access "
             + "keys and secrets are masked. Press Test connection to verify a credential is live."
-          : "Enter the connection details. The password is sealed on this machine and never shown back to the "
+          : "Enter the connection details. The password is sealed to a keyring or TPM vault when available "
+            + "(otherwise stored 0600 in ~/.sigil/sigil.env, not sealed), and never shown back to the "
             + "browser; the URI and username are shown. Press Test connection to verify it is live.";
         return h("div", { style: { marginTop: "18px" } }, [
           h("div.screen-head", { style: { marginBottom: "6px" } }, h("h2", null, cat.label)),

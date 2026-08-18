@@ -108,6 +108,11 @@ _SECRET_CATEGORY_LABEL = {"llm": "AI model providers", "cloud": "Cloud credentia
                           "graph": "Knowledge graph", "integration": "Integrations",
                           "destruction": "Auto-patch signing"}
 _MAX_SECRET_LEN = 8192
+# Which SecretStore.set() backends actually SEAL the secret at rest. The keyring (OS keychain / libsecret)
+# and the TPM-sealed vault ("sealed") rest as ciphertext; the legacy "envfile" tier is 0600 plaintext —
+# NOT sealed. The UI must tell the owner the truth, so `sealed` is derived from the REAL backend returned by
+# SecretStore().set(), never assumed. Any future/unknown backend is treated as NOT sealed (fail-honest).
+_SEALED_BACKENDS = frozenset({"keyring", "sealed"})
 
 # --- Cloud-provider CREDENTIAL plane (Phase C) -----------------------------------------------------
 # Per cloud provider a credential is a mix of SEALED secrets (in SECRET_META, category "cloud") and
@@ -684,11 +689,15 @@ def set_secret(name: str, value: str, *, store, owner_key, reason: str = "") -> 
     assert_env_value_safe(value, "secret value", maxlen=_MAX_SECRET_LEN)
     fp = _fingerprint(value)
     backend = SecretStore().set(name, value)          # keyring → sealed → 0600 env file; never the spine
+    # `sealed` is the load-bearing truth for the UI: true ONLY when the backend actually sealed the secret at
+    # rest (keyring/TPM vault), false for the 0600 plaintext envfile fallback. Derived from the REAL backend
+    # so a plaintext fallback can never render as "sealed".
+    sealed = backend in _SEALED_BACKENDS
     seq = _record_signed_event(
         store, owner_key,
         {"signal": "governor.secret_set", "name": name, "fp": fp, "backend": backend}, reason)
     return {"ok": True, "action": "set_secret", "name": name, "fingerprint": fp,
-            "backend": backend, "recorded_seq": seq}
+            "backend": backend, "sealed": sealed, "recorded_seq": seq}
 
 
 def set_cloud_config(env: str, value: str, *, store, owner_key, reason: str = "") -> dict:
