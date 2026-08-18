@@ -20,8 +20,22 @@ from typing import Any
 
 _M = 1_000_000.0
 
-# (input, output, cache_read, cache_write) — USD per MILLION tokens.
+# Flagship (Opus-tier) per-MILLION-token rate: (input, output, cache_read, cache_write). Used both as
+# the price of the top-tier codename models (fable / mythos) and as the SAFE catch-all for any Claude
+# model that matches no family below — over-estimating a spend cap trips it EARLY (safe), while the bug
+# this guards against is UNDER-estimating to $0 and never tripping.
+_FLAGSHIP_PER_M: tuple[float, float, float, float] = (15.0, 75.0, 1.50, 18.75)
+
+# (input, output, cache_read, cache_write) — USD per MILLION tokens. Data-driven and easy to update:
+# add a row when Anthropic ships/renames a model, or revises a rate. Substring-matched (see
+# ``_match_prices``), so a dated/suffixed id (``claude-opus-4-8``, ``claude-sonnet-4-6``) resolves to
+# its family here without needing its own row.
 _PRICES_PER_M: dict[str, tuple[float, float, float, float]] = {
+    # Top-tier codename models (no opus/sonnet/haiku token in the name, so they need explicit rows or
+    # they fall through to $0 and DISARM the budget governor). Priced at the flagship (Opus) tier as a
+    # best-effort estimate until a published rate is known.
+    "claude-fable-5": _FLAGSHIP_PER_M,
+    "claude-mythos-5": _FLAGSHIP_PER_M,
     "claude-opus-4": (15.0, 75.0, 1.50, 18.75),
     "claude-opus-3": (15.0, 75.0, 1.50, 18.75),
     "claude-3-opus": (15.0, 75.0, 1.50, 18.75),
@@ -56,7 +70,12 @@ def _match_prices(model: str) -> tuple[float, float, float, float] | None:
         return _PRICES_PER_M["claude-sonnet-5"]
     if "haiku" in name:
         return _PRICES_PER_M["claude-haiku-4"]
-    return None
+    # SAFE catch-all: a Claude model matching no family (a new/renamed flagship codename) must still
+    # accrue a NONZERO cost, or the budget governor silently disarms and the scan spends unbounded.
+    # Callers only reach here for an Anthropic model (``estimate_anthropic_cost`` gates on
+    # ``is_anthropic_model``), and a real provider-reported cost always takes precedence upstream, so
+    # the worst case of over-pricing an unknown model is that the operator's budget trips a little early.
+    return _FLAGSHIP_PER_M
 
 
 def _int(value: Any) -> int:
@@ -88,10 +107,12 @@ def _cache_write_tokens(usage: dict[str, Any]) -> int:
 def estimate_anthropic_cost(model: str | None, usage_payload: dict[str, Any]) -> float | None:
     """Best-effort USD cost for an Anthropic model from token counts.
 
-    Returns None if the model is not Anthropic, has no price entry, or carries no token counts.
-    Cache-read/write tokens (from ``*_tokens_details`` or the Anthropic-native fields) are priced
-    at their own rates, and cached tokens are subtracted from the fresh-input count so they are
-    not double-charged.
+    Returns None only if the model is not Anthropic or carries no token counts. Every Anthropic model
+    resolves to a price — a known family's rate, or the flagship catch-all for an unrecognized
+    codename — so a Claude model with real token usage never estimates to $0 (which would disarm the
+    budget governor). Cache-read/write tokens (from ``*_tokens_details`` or the Anthropic-native
+    fields) are priced at their own rates, and cached tokens are subtracted from the fresh-input count
+    so they are not double-charged.
     """
     if not is_anthropic_model(model):
         return None
