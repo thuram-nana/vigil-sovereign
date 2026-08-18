@@ -339,8 +339,12 @@ actually reach:
 
 - Against a **remote** target with **no relay configured**, the callback base is
   the loopback receiver, which a remote host cannot reach. These four checks are
-  therefore **inert**: the engine **skips them and records that it skipped
-  them** — it never guesses a result in their place.
+  therefore **inert against a remote target** — but *inert* here does **not** mean
+  skipped: the engine still **exercises** them and **injects the blind payloads
+  into the target** (which matters for OPSEC and target impact). The loopback
+  callback simply can never return from a remote host, so the oracle never fires,
+  **no finding of those classes is produced and none is fabricated**. The result
+  is an exercised-but-unconfirmed probe, not a tested-and-clean verdict.
 - The trap this creates: an operator who does not know this runs an `engage`
   against a remote target, sees **no** SSRF / XXE / RCE / deserialization
   findings, and wrongly concludes the target is clean of those classes. It was
