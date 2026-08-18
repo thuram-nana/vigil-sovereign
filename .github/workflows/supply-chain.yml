@@ -154,6 +154,18 @@ jobs:
             --report-upgrades \
             --sbom-out=../../_a14_sbom/sbom-offense.cdx.json
 
+      # verify-supply-chain.sh above cross-checks a per-run TEMP SBOM against the lock; it never
+      # reads the committed framework/v2/sbom.json. That committed SBOM was a hand-written
+      # scaffold (a "0000-00-00T00:00:00Z" timestamp, a "scaffold (operator regenerates...)"
+      # tool name, dependency RANGES instead of resolved pins) for the repo's whole history,
+      # while SECURITY.md claimed it was drift-checked. gen_sbom.py regenerates it from the lock
+      # (stdlib only — no cyclonedx-bom needed on the runner); --check re-derives it and fails if
+      # the committed file drifts from the lock or still carries the scaffold sentinel/zero
+      # timestamp, so it can never silently rot back into a placeholder.
+      - name: committed OFFENSE sbom.json matches the lock (no scaffold regression)
+        working-directory: engine/crucible
+        run: python3 -m framework.v2.tools.gen_sbom --check
+
       # Same implementation, different pair. env-sovereign and env-offense must never share an
       # interpreter (FATAL-2), so they cannot share a resolution either — hence two locks.
       - name: verify SOVEREIGN lock (vigil_core + apps/sigil) + SBOM cross-check

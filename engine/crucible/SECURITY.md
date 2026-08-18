@@ -54,8 +54,9 @@ See [`framework/v2/SOVEREIGNTY-EGRESS-AUDIT.md`](framework/v2/SOVEREIGNTY-EGRESS
 |---|---|
 | `framework/v2/requirements.in` | Source spec — direct runtime + test dependencies, version-bounded. |
 | `framework/v2/requirements.lock.txt` | Hash-pinned, fully-resolved lock. Operator generates with `pip-compile --generate-hashes` (see § 2.2). |
-| `framework/v2/sbom.json` | CycloneDX 1.5 SBOM listing every direct + transitive dependency with versions. Operator regenerates with `cyclonedx-py requirements`. |
-| `bin/verify-supply-chain.sh` | CI verification — re-resolves the lock, re-generates the SBOM, exits non-zero on any drift. |
+| `framework/v2/sbom.json` | CycloneDX 1.5 SBOM listing every direct + transitive dependency at its *resolved, hash-pinned* version. Regenerated from the lock by `framework/v2/tools/gen_sbom.py` (stdlib-only, no build-time tooling needed; `cyclonedx-py requirements` yields an equivalent component set). |
+| `framework/v2/tools/gen_sbom.py` | The SBOM generator — parses the lock and emits the CycloneDX document above, with per-component SHA-256 digests, purls, direct/transitive provenance and required/optional scope all derived from the lock's own `# via` annotations. `--check` gates the committed SBOM against the lock. |
+| `bin/verify-supply-chain.sh` | CI verification — re-resolves `requirements.in`, re-generates the lock and diffs it, and cross-checks a lock-derived SBOM against the lock. Exits non-zero on any drift. |
 
 ### 2.2 First-time supply-chain setup (operator runs once)
 
@@ -70,11 +71,11 @@ pip-compile --generate-hashes \
     --output-file=framework/v2/requirements.lock.txt \
     framework/v2/requirements.in
 
-# 3. Regenerate the SBOM from the lock so they describe the same set.
-cyclonedx-py requirements \
-    --output-format json \
-    -o framework/v2/sbom.json \
-    framework/v2/requirements.lock.txt
+# 3. Regenerate the committed SBOM from the lock so they describe the same set.
+#    gen_sbom.py is stdlib-only, so this step needs neither pip-tools nor
+#    cyclonedx-bom installed; `cyclonedx-py requirements -o framework/v2/sbom.json
+#    framework/v2/requirements.lock.txt` produces an equivalent component set.
+python3 -m framework.v2.tools.gen_sbom
 
 # 4. Verify everything matches.
 bash bin/verify-supply-chain.sh
@@ -90,7 +91,16 @@ git commit -m "supply-chain: regenerate lock + SBOM for deployment cut <date>"
 
 1. Re-resolves `requirements.in` (dry-run; ensures no version conflict).
 2. Re-generates the lock and `diff`s it against the committed lock — drift fails the build.
-3. Re-generates the SBOM and compares the component set to `sbom.json` — drift fails the build.
+3. Re-generates a CycloneDX SBOM *from the lock* into a temporary file and checks that its
+   component set matches the lock — drift fails the build.
+
+Check (3) gates the **lock** — it proves the lock and an SBOM derived from it agree — and does
+*not* read the committed `framework/v2/sbom.json`; the script treats that per-run temp SBOM as
+a derived artifact. The committed `framework/v2/sbom.json` is regenerated from the lock by
+`framework/v2/tools/gen_sbom.py`, and the A14 workflow additionally runs
+`python3 -m framework.v2.tools.gen_sbom --check`, which fails the build if the committed
+`sbom.json` still carries the old scaffold sentinel / zero timestamp or if its component set
+drifts from the lock. So the committed SBOM cannot silently rot back into a placeholder.
 
 A PR that touches dependencies must include the regenerated lock + SBOM. The
 verification script exits non-zero otherwise. There is no "force merge" override
