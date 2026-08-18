@@ -194,22 +194,50 @@ def verify_offense_spine(
 def verify_offense_ledger(base_dir: str) -> SegmentVerdict:
     """Verify the usage-attestation ledger (segment #4) via its operator key. Offline-verifiable (the
     operator pubkey is recoverable), but the operator key is NOT owner-delegated today, so
-    ``owner_rooted=False`` — the same honest treatment the registry gives it (S7 closes the tie)."""
+    ``owner_rooted=False`` — the same honest treatment the registry gives it (S7 closes the tie).
+
+    W10-4 #476 sibling sweep: this byte-reader used the same ``read_ledger → verify_ledger(no pin)`` pattern
+    as the CLI, so a present-but-TRUNCATED ledger verified clean here too — a weaker back door than
+    ``vigil verify-ledger``. It now consults the durable OUT-OF-BASE head/count pin (host-level, survives
+    ``rm -rf <base>``):
+
+      * ledger ABSENT + a pin EXISTS ⇒ FAILED — the ledger was written (pinned) and is now GONE; a wipe,
+        not a legitimate never-ran state.
+      * ledger ABSENT + NO pin ⇒ ABSENT — the honest never-ran state ``vigil verify`` legitimately reports
+        for a base dir that never wrote a ledger (unchanged).
+      * ledger PRESENT + a pin ⇒ ``expected_head``/``expected_count`` pinned, so a dropped tail FAILS closed.
+      * ledger PRESENT + NO pin ⇒ verified on internal consistency only, and REPORTED as unpinned (no false
+        truncation-protection claim)."""
     ledger_path = os.path.join(base_dir, "usage-ledger.jsonl")
+    try:
+        from ..attestation import head_pin as _head_pin
+        pin = _head_pin.read_head_pin(ledger_path)
+    except Exception:  # noqa: BLE001 — the pin store is advisory; an unreadable pin degrades to unpinned
+        pin = None
     if not os.path.exists(ledger_path):
+        if pin is not None:
+            return SegmentVerdict("offense-usage-ledger", FAILED, False,
+                                  f"ledger ABSENT at {ledger_path} but a durable head pin persists "
+                                  f"(expected {pin.count} record(s)) — the ledger was written and is now "
+                                  "GONE (wipe detected), not a legitimate never-ran state")
         return SegmentVerdict("offense-usage-ledger", ABSENT, False, f"no ledger at {ledger_path}")
     try:
         from ..attestation.identity import operator_key_resolver
         from ..attestation.ledger import read_ledger, verify_ledger
         records = read_ledger(ledger_path)
         resolver = operator_key_resolver(keypair_path=os.path.join(base_dir, "operator.key"))
-        v = verify_ledger(records, resolve_key=resolver)
+        if pin is not None:
+            v = verify_ledger(records, resolve_key=resolver, expected_head=pin.head, expected_count=pin.count)
+        else:
+            v = verify_ledger(records, resolve_key=resolver)
     except Exception as exc:  # noqa: BLE001 — an audit that cannot complete cannot attest → FAILED
         return SegmentVerdict("offense-usage-ledger", FAILED, False, f"ledger audit error: {exc}")
     ok = bool(getattr(v, "ok", False))
+    pin_note = "pinned head+count" if pin is not None else "UNPINNED (no durable head anchor — truncation " \
+                                                           "of the tail is not detectable here)"
     return SegmentVerdict("offense-usage-ledger", VERIFIED if ok else FAILED, False,
                           f"{len(records)} records, operator-key chain "
-                          f"{'verified (not owner-delegated — S7)' if ok else 'FAILED: ' + str(getattr(v, 'reason', ''))}")
+                          f"{'verified (not owner-delegated — S7; ' + pin_note + ')' if ok else 'FAILED: ' + str(getattr(v, 'reason', ''))}")
 
 
 def verify_blackboard_chain(
