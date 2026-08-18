@@ -842,9 +842,10 @@ judge. This is that something — and it is built so it can never emit a finding
   predicate, or a duplicate id is a **load‑time error**, never a silent no‑op). Distribution by class:
   boolean_sqli 21, exposure 20, xss 18, command_injection 17, deserialization 14, ssrf 13,
   ssti 11, time_based_sqli 11, blind_xxe 10, error_based_sqli 8, path_traversal 7, and more. Built‑in and
-  library checks are adjudicated by the *same* oracles, so precision is identical. `[The library is
-  exercised under the eval/benchmark harness (use_library=True); the default interactive scan/engage
-  arsenal is the 11 + 5 built‑in checks above.]`
+  library checks are adjudicated by the *same* oracles, so precision is identical. `[The library runs under
+  `--library` (the eval/benchmark harness sets `use_library=True`); the default scan/engage arsenal is
+  the 11 + 5 built‑in checks above — and a default run now DISCLOSES this coverage gap in its
+  summary line + machine report, pointing to `--library` for the full corpus.]`
 - **Self‑learning order** (`scanner/learning.py`) — a Thompson‑sampling **contextual bandit** keeps a
   Beta posterior per (archetype, check) and samples an order each run; it is persistable/warm‑startable
   (`--bandit-file`). It **orders effort; it never gates** — a low‑posterior check is tried last, not
