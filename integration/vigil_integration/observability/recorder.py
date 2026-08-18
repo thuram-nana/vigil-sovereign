@@ -285,3 +285,34 @@ class CollectingExporter:
 
     def observations(self) -> list[Observation]:
         return [r for r in self.records if isinstance(r, Observation)]
+
+
+# ---------------------------------------------------------------------------------------------------
+# sink registration — pick the recorder's export sink from config (OFF by default)
+# ---------------------------------------------------------------------------------------------------
+
+
+def make_sink(*, otlp_endpoint: Any = None, exporter: Any = None,
+              fallback: Optional[Sink] = None) -> Optional[Sink]:
+    """Select (register) the recorder's export sink from config. OFF BY DEFAULT: with no
+    ``otlp_endpoint`` this returns ``fallback`` (``None`` ⇒ the recorder emits to nothing — byte-identical
+    to before this seam existed). When an OTLP endpoint IS configured, register the live, loopback-pinned
+    :class:`live.otel_export.OTLPSink` (EMIT-ONLY, secret-free, deterministic) as the ``SpineTracer`` sink,
+    so a recorded span actually flows to the collector — closing the gap where ``OTLPSink`` had ZERO
+    callers. ``exporter`` is injectable (tests pass a fake spy; a real loopback exporter is lazily built
+    otherwise).
+
+    The ``OTLPSink`` keeps its OWN egress pin: a NON-loopback ``otlp_endpoint`` yields a sink that REFUSES
+    every record (never egresses), so registering a sink can never widen the destination past loopback.
+    Total + inert: ``opentelemetry`` / ``otel_export`` absent, or any construction error, degrades to
+    ``fallback`` — this never raises, never gates, and authorizes nothing (the sink is emit-only).
+
+    ``otel_export`` is imported LAZILY here so this module stays import-clean (stdlib + pydantic + the F3
+    redactor); the live OTLP path only touches ``opentelemetry`` when an endpoint is actually configured."""
+    if not otlp_endpoint:
+        return fallback
+    try:
+        from ..live.otel_export import OTLPSink  # lazy: keep this module import-clean; otel is optional
+        return OTLPSink(otlp_endpoint, exporter=exporter)
+    except Exception:  # noqa: BLE001 — no live sink available ⇒ fall back (never raises, never gates)
+        return fallback

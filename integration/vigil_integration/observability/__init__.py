@@ -51,6 +51,7 @@ from .recorder import (
     evaluator_observation,
     guardrail_observation,
     is_warden_block,
+    make_sink,
     new_observation,
     new_span,
     warden_outcome,
@@ -63,7 +64,7 @@ __all__ = [
     "Span", "Observation", "SpanKind", "SpanStatus", "ObservationType", "ObservationLevel",
     "coerce_str", "coerce_int", "coerce_enum", "redact_attributes",
     # recorder
-    "Sink", "SpineTracer", "CollectingExporter",
+    "Sink", "SpineTracer", "CollectingExporter", "make_sink",
     "new_span", "complete_span", "new_observation",
     "guardrail_observation", "evaluator_observation", "warden_outcome", "is_warden_block",
 ]
