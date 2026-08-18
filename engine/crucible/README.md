@@ -842,9 +842,10 @@ judge. This is that something — and it is built so it can never emit a finding
   predicate, or a duplicate id is a **load‑time error**, never a silent no‑op). Distribution by class:
   boolean_sqli 21, exposure 20, xss 18, command_injection 17, deserialization 14, ssrf 13,
   ssti 11, time_based_sqli 11, blind_xxe 10, error_based_sqli 8, path_traversal 7, and more. Built‑in and
-  library checks are adjudicated by the *same* oracles, so precision is identical. `[The library is
-  exercised under the eval/benchmark harness (use_library=True); the default interactive scan/engage
-  arsenal is the 11 + 5 built‑in checks above.]`
+  library checks are adjudicated by the *same* oracles, so precision is identical. `[The library runs under
+  `--library` (the eval/benchmark harness sets `use_library=True`); the default scan/engage arsenal is
+  the 11 + 5 built‑in checks above — and a default run now DISCLOSES this coverage gap in its
+  summary line + machine report, pointing to `--library` for the full corpus.]`
 - **Self‑learning order** (`scanner/learning.py`) — a Thompson‑sampling **contextual bandit** keeps a
   Beta posterior per (archetype, check) and samples an order each run; it is persistable/warm‑startable
   (`--bandit-file`). It **orders effort; it never gates** — a low‑posterior check is tried last, not
@@ -1607,7 +1608,8 @@ what ships versus what is experimental or dormant:
 
 **Shipped, but opt‑in / off the default loop (powerful — and honestly gated):**
 - The **172‑entry check library** is exercised under the eval/benchmark harness; the *default interactive*
-  scan/engage uses the 11 + 5 built‑in checks (enable the library per‑campaign via `use_library`).
+  scan/engage uses the 11 + 5 built‑in checks (enable the full library with the `--library` flag; a default
+  run now self‑discloses this coverage in its output and reports).
 - The **`engage --autonomous` OODA loop**, its **sensor fusion**, and the advisory **kernel reasoning** hook
   (§9.16–9.17). This is the one place the **ACP goal‑tree planner** (budget/pruner/watchdog/resume) actually
   runs — the *default* `engage` loop drives the scanner campaign + orchestrator, **not** the planner. Off =

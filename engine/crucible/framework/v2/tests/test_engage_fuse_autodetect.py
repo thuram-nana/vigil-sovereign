@@ -95,7 +95,10 @@ def _fake_result() -> SimpleNamespace:
     report = SimpleNamespace(
         target="http://127.0.0.1/", pages_crawled=0, requests_audited=0, audit_requests_sent=0,
         active_findings=[], passive_findings=[], dom_xss_candidates=[], discovered_paths=[],
-        js_secrets=[], arsenal_leads=[])
+        js_secrets=[], arsenal_leads=[],
+        # main() now prints coverage_line(report) (W16-4), which calls report.coverage(); model that.
+        coverage=lambda: {"built_in_run": 0, "library_available": 0, "library_run": 0,
+                          "full_coverage": False})
     return SimpleNamespace(
         report=report, finding_confidence=[], grounding=[], attack_paths=[], chained_conclusions=[],
         entities=[], predictions=[], defense=None, fused_leads=0, fused_facts=0)

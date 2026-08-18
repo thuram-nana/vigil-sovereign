@@ -210,6 +210,8 @@ def main(argv: list[str]) -> int:
     print(f"  confirmed findings: {len(report.active_findings)}")
     for f in report.active_findings:
         print(f"    [{f.confirmed_by}] {f.bug_class} @ {f.insertion_point} (conf {f.confidence:.2f})")
+    from .report import coverage_line
+    print(f"  {coverage_line(report)}")
     if report.passive_findings:
         print(f"  passive findings  : {len(report.passive_findings)}")
     if report.dom_xss_candidates:
