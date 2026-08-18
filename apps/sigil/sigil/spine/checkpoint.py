@@ -152,10 +152,11 @@ def classify_head(head: SignedChainHead, entries: list, tr: TrustRoot,
     # which the in-band signature cannot catch on its own. HONEST SCOPE (do not overclaim): this catches a
     # stale head ONLY when `floor` is a NEWER value the attacker did NOT roll back — i.e. an OUT-OF-BAND
     # verifier holding a retained floor (a paired device over WireGuard), or the routine `--reset` path
-    # (the floor survives the spine-dir rmtree). It does NOT stop a same-host attacker who can also rewrite
-    # the UNSIGNED floor.json: the local verify reads the floor fresh from that same attacker-controlled
-    # disk, rolling head.json and floor.json back together (see floor.py HONEST LIMIT). No floor -> pass
-    # (byte-identical to pre-floor).
+    # (the floor survives the spine-dir rmtree). Because floor.json is now owner-SIGNED (checked just below),
+    # a keyless same-host attacker can no longer roll it DOWN under a valid signature — but can still STRIP
+    # it to unsigned or DELETE it, reverting to a "no floor" state this purely-local verify cannot tell from
+    # never-flooded (see floor.py HONEST LIMIT + floor_witness.py for the out-of-band anchor that catches
+    # it). No floor -> pass (byte-identical to pre-floor).
     # G2: the floor's OWN owner-signature, verified against the SAME trust anchor (`tr`) that just verified
     # the head — a tampered SIGNED floor (content rewritten under a stale sig, or signed by a non-owner key)
     # is TAMPERING; an UNSIGNED legacy floor is accepted (warned once) so pre-signing spines still verify.

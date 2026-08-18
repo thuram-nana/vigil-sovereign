@@ -12,16 +12,24 @@ the `prev_head_hash` meta-chain catch that replay for any verifier that has ever
 The floor only ever ADDS rejections (it is checked AFTER the in-band signature check), so with no floor
 present, or values it satisfies, behavior is byte-identical to the pre-floor spine.
 
-HONEST LIMIT (accepted, §1.3) — do NOT overclaim: the owner key is FS-resident AND `floor.json` is an
-UNSIGNED file at 0600, so a SAME-HOST attacker with the owner's UID (or root) — even WITHOUT the Ed25519
-key — defeats the LOCAL verify path by rewriting head.json AND floor.json together (the local verify reads
-the floor fresh from that same attacker-controlled disk). The floor's real anti-rollback guarantee holds
-only for (i) the routine `--reset` path (the floor lives OUTSIDE spine/, so a spine-dir rmtree can't lower
-it), (ii) an OUT-OF-BAND verifier that retained a newer floor (a paired device over WireGuard), and
-(iii) an attacker who can overwrite only head.json, not the floor. A COLD verifier bootstrapping off an
-untrusted mirror that never authenticates the floor even once is unprotected — class-identical to today's
-single-file rollback, NOT widened by pruning. Bounded (not eliminated) by seeding the initial floor over
-the authenticated WireGuard pairing channel, never the mirror.
+HONEST LIMIT (accepted, §1.3) — do NOT overclaim: `floor.json` IS owner-Ed25519-signed (see the `Floor`
+class + `_sign_floor`/`verify_floor_signature` below) and its signature is VERIFIED on the enforcing path
+(`checkpoint.classify_head`, reached by `sigil verify` AND the live tail). So a same-host attacker with the
+owner's UID (or root) but WITHOUT the Ed25519 key can no longer roll the floor DOWN to a lower watermark
+under a valid signature — a content rewrite breaks `sig` and is reported as TAMPERING. What such a keyless
+attacker CAN still do on a PURELY-LOCAL verify is revert the floor to a "no-floor" state: (a) STRIP the
+signature back to unsigned (accepted as a legacy floor — non-bricking) with lowered values, or (b) DELETE
+floor.json outright — either way the local verify then reads that same attacker-controlled disk and has no
+LOCAL witness that a higher signed floor ever existed. The floor's real anti-rollback guarantee therefore
+holds for (i) the routine `--reset` path (the floor lives OUTSIDE spine/, so a spine-dir rmtree can't lower
+it), (ii) an OUT-OF-BAND verifier that RETAINED a newer signed floor (a paired device over WireGuard — see
+`floor_witness.py`, which REFUSES a strip-to-unsigned or a co-rewritten/deleted floor below a witnessed
+height), and (iii) an attacker who can overwrite only head.json, not the floor (now genuinely blocked
+locally by the floor signature). A COLD verifier bootstrapping off an untrusted mirror that never
+authenticates the floor even once is unprotected — class-identical to a single-file rollback, NOT widened
+by pruning. Bounded (not eliminated) by seeding the initial SIGNED floor over the authenticated WireGuard
+pairing channel, never the mirror. (Residual: a same-UID attacker who ALSO holds the FS-resident owner key
+can re-sign a rolled-back floor — out of scope here, pairs with key-at-rest hardening.)
 """
 from __future__ import annotations
 
