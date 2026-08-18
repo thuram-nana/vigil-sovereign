@@ -90,6 +90,36 @@ def _write_floor(path: Path, value: int) -> None:
         pass
 
 
+def default_counter_path() -> Path:
+    """The host-level software-counter path — ``DEFAULT_STATE_DIR / monotonic.counter``. Read at CALL time
+    (never captured at import) so a test that redirects :data:`DEFAULT_STATE_DIR` also redirects this. This
+    is the intended HOST-WIDE home for the anchor (W10-3 #475): OUTSIDE any engagement base dir, so
+    ``rm -rf <base>`` cannot erase the monotonic counter alongside the ledger."""
+    return DEFAULT_STATE_DIR / _COUNTER_FILE
+
+
+def migrate_floor(old_path: Path, new_path: Path) -> bool:
+    """W10-3 #475 — additively adopt an OLD (in-base) counter into the NEW (host-level) location without
+    EVER lowering the new floor. Returns True iff the new floor was raised.
+
+    Why never-lower: the anchor is a host-wide monotonic counter whose only invariant is that it never
+    decreases (a lower value would let a rollback re-attest under a smaller counter — a NEW hole). So this
+    seeds the new location to ``max(new_floor, old_value)`` only. Multi-engagement safe: each engagement's
+    migration raises the shared host floor to its own old value only when that is higher; a later
+    engagement carrying a LOWER legacy counter can never regress it. A missing old file is a no-op (a fresh
+    install has nothing to adopt). Total / best-effort: any read/write failure leaves the new floor
+    unchanged (it never regresses)."""
+    old_p, new_p = Path(old_path), Path(new_path)
+    if not old_p.exists():
+        return False
+    old_v = _read_floor(old_p)          # >= 0; an unreadable/torn old counter reads as 0 (adopt nothing)
+    cur_v = _read_floor(new_p)          # 0 when the new host counter does not yet exist
+    if old_v > cur_v:
+        _write_floor(new_p, old_v)      # raise the host floor to the legacy value; NEVER lower it
+        return True
+    return False
+
+
 def read_monotonic_anchor(
     *,
     state_path: Optional[str] = None,

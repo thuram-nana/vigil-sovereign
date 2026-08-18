@@ -38,6 +38,7 @@ from vigil_core import KeyPair, generate_keypair
 from vigil_core.crypto import sign
 
 from ..agent.state import AgentState, Phase
+from ..attestation import anchor as _anchor
 from ..attestation.identity import load_or_create_operator_keypair, operator_signer, resolve_operator
 from ..attestation.ledger import make_ledger_writer, read_ledger, require_attestation
 from ..detection.registry import run_all_detections
@@ -304,7 +305,14 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     op_signer = operator_signer(keypair=op_kp)
     ledger_path = str(base / "usage-ledger.jsonl")
     ledger_writer = make_ledger_writer(ledger_path)
-    anchor_path = str(base / "attest-anchor.json")
+    # W10-3 #475: the MONOTONIC anchor lives HOST-LEVEL (~/.vigil/attestation/), NOT co-located in the
+    # engagement base dir. Co-locating it (the old `base/attest-anchor.json`) meant a single `rm -rf <base>`
+    # erased the ledger AND its monotonic counter together, so deletion stopped being detectable and a
+    # rollback could re-attest under a reset counter. The counter is host-WIDE by design (anchor.py), so a
+    # shared host location is correct. MIGRATION (additive, non-bricking): adopt an existing install's
+    # in-base counter into the host location without EVER lowering it, so an upgrade never resets to 0.
+    anchor_path = str(_anchor.default_counter_path())
+    _anchor.migrate_floor(base / "attest-anchor.json", Path(anchor_path))
 
     def attest(*, action: str, target: str, phase: str, seq: int, prev_hash: str) -> Any:
         # The usage ledger is its OWN append-only hash-chain: continue it from its current head so
