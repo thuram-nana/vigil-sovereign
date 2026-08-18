@@ -256,3 +256,11 @@ screens:
     plane: unified
     description: The knowledge engine — an auto-updating vulnerability-intelligence feed (leads, never facts) and the defensive knowledge catalog.
     synonyms: [knowledge, knowledge engine, vulnerabilities, vuln feed, cve, vulnerability intelligence]
+
+  - id: legal
+    label: Legal
+    group: LEARN
+    owner: false
+    plane: unified
+    description: The in-product legal pages — acceptable use (authorized testing only), privacy (what this machine stores, the PERMISSIVE model-egress default and how to change it, and the append-only-audit vs erasure tension), licenses & attribution (PolyForm Noncommercial 1.0.0 OR commercial, third-party components, export-control note), and how to report a vulnerability in VIGIL itself. Static content; the repository documents govern.
+    synonyms: [legal, acceptable use, authorized testing, privacy, privacy policy, data retention, what leaves this machine, model egress, sovereignty default, licence, license, licensing, attribution, third party licenses, export control, security disclosure, report a vulnerability, responsible disclosure, terms]

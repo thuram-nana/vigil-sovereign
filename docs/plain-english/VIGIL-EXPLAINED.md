@@ -14743,15 +14743,20 @@ file-creation setting at start-up, so every file it and its children create is
 readable only by the operator's own account, with explicit owner-only permissions
 on sensitive files and directories on top of that.
 
-**There is a leave-no-trace mode.** The offensive engine supports an `--ephemeral`
-run. Normally the engine writes its working files to the machine's hard disk,
-where they survive a restart. In this mode every path it would write to is
-redirected into a scratch area that exists only in the computer's memory — a
-notepad rather than a filing cabinet — and that area is thrown away when the
-session ends. Nothing is left on the disk. Reads are deliberately *not*
-redirected: an ephemeral run still reads its real charter from the disk and stays
-in scope. So the mode reduces what is left behind without reducing what is
-enforced.
+**There is a leave-no-trace mode, on one route only.** The offensive engine
+supports an `--ephemeral` run. Normally the engine writes its working files to the
+machine's hard disk, where they survive a restart. In this mode every path it
+would write to is redirected into a scratch area that exists only in the
+computer's memory — a notepad rather than a filing cabinet — and that area is
+thrown away when the session ends. Nothing is left on the disk. Reads are
+deliberately *not* redirected: an ephemeral run still reads its real charter from
+the disk and stays in scope. So the mode reduces what is left behind without
+reducing what is enforced. **Note where you can ask for it.** It is an option of
+the offensive engine's own `engage` command, started from the engine's own
+directory. It is *not* an option of the `vigil engage` command, and there is no
+switch for it in the control panel — so a run you start from either of those
+writes to disk in the ordinary way. If a job must leave nothing behind, that
+decides which command you launch it with, before the run rather than after.
 
 **Exported packages are scrubbed.** The single-file evidence package the system
 produces for a client includes the engagement log in a **secret-scrubbed** form.

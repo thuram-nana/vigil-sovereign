@@ -1,9 +1,11 @@
 # vigil-ui — VIGIL COMMAND, the canonical web UI
 
 The single, committed, **no-build, strict-CSP** single-page app that fronts the *whole* system.
-`packages/vigil-ui/` is the one source of truth (`app.js`, `ui.js`, `manual.js`, `tokens.css` +
+`packages/vigil-ui/` is the one source of truth (`app.js`, `ui.js`, `manual.js`, `legal.js`, `tokens.css` +
 `components.css` → `style.css`, `index.html`, `manifest.json`); `sync.sh` vendors it **byte-identically**
-into both plane servers' static dirs. It is a hash-router over **21 screens** that federates the two
+into both plane servers' static dirs. It is a hash-router over **every screen declared in
+[`knowledge/system-map/screens.yaml`](../../knowledge/system-map/screens.yaml)** — that file is the SSOT
+and `python3 tools/system-map/generate.py --check` prints the current count — federating the two
 isolated trust planes behind one browser origin — the keyless **offense** plane (CRUCIBLE console + gated
 api) via `OFF()`, and the owner-key **sovereign** plane (SIGIL cockpit) via `SOV()` — building all DOM
 with `VUI.h` (no framework, no inline handlers, no `eval`). The UI is a *driver*, not an authority: it
@@ -15,50 +17,50 @@ the two-plane model) see [`../../knowledge/kb/console-and-ui.md`](../../knowledg
 
 ### `ui.js` — the `window.VUI` micro-kit (CSP-native, shared by both planes)
 
-Exported on `window.VUI` at `ui.js:151–153`. This is the entire framework:
+Exported on `window.VUI` at `ui.js:284–288`. This is the entire framework:
 
 - `h(tag, props, children)` (`ui.js:10`) — hyperscript. `h('div.card#x', {onClick, dataset,…}, [kids])`.
   Handlers are passed as `onClick`/`onKeydown` **props** (wired via `addEventListener`), never inline
   attributes. `mount` (`:48`), `clear` (`:47`), `store()` observable (`:52`).
 - **Federated fetch helpers** — read config once at boot from `window.VIGIL_CFG`:
-  - `getJSON(url)` (`ui.js:70`) — GET, throws on non-2xx.
-  - `postJSON(url, body)` (`ui.js:75`) — POST JSON, parses error envelopes.
-  - `_headers()` (`ui.js:65`) sets **`X-Requested-With: vigil-ui`** and the `X-SIGIL-Token` header on
+  - `getJSON(url)` (`ui.js:90`) — GET, throws on non-2xx.
+  - `postJSON(url, body)` (`ui.js:95`) — POST JSON, parses error envelopes.
+  - `_headers()` (`ui.js:85–87`) sets **`X-Requested-With: vigil-ui`** and the `X-SIGIL-Token` header on
     every request. That custom header is the console's anti-CSRF requirement — a `fetch` that omits it is
     refused. Always go through `getJSON`/`postJSON`; never call `fetch` directly.
-  - `sse(url, onEvent, onError)` (`ui.js:87`) — `EventSource` with query-param token auth (SSE can't set
+  - `sse(url, onEvent, onError)` (`ui.js:218`) — `EventSource` with query-param token auth (SSE can't set
     headers).
-- Builders that return DOM nodes: `pill` (`:117`), `statusBadge` (`:121`), `tile` (`:125`), `card`
-  (`:129`), `icon` (`:134`, a fixed inline-SVG glyph set — the only place `html:` innerHTML is used, and
-  only for static markup), `toast` (`:97`), `router` (`:105`).
+- Builders that return DOM nodes: `pill` (`:246`), `statusBadge` (`:250`), `tile` (`:254`), `card`
+  (`:258`), `icon` (`:263`, a fixed inline-SVG glyph set — the only place `html:` innerHTML is used, and
+  only for static markup), `toast` (`:226`), `router` (`:234`).
 
-### `app.js` — the shell + all 21 screens
+### `app.js` — the shell + every screen
 
 - **Config / plane prefixes** (`app.js:12–14`): `CFG = window.VIGIL_CFG`, then
   `SOV(p) = CFG.api.sovereign + p` and `OFF(p) = CFG.api.offense + p`. **Every** fetch prepends one of
   these — `OFF(...)` for offense (CRUCIBLE console/gated api), `SOV(...)` for the owner cockpit (SIGIL).
-- **`const NAV`** (`app.js:19–47`) — the navigation model: three groups (`DO` / `MANAGE` / `LEARN`),
-  each item `{ id, label, icon, ready, owner? }`. `owner: true` marks a sovereign-owner-plane screen
-  (`safety`, `charter`, `apikeys`, `settings`). This array is one of the three sides of the system-map
+- **`const NAV`** (`app.js:107–146`) — the navigation model: three groups (`DO` / `MANAGE` / `LEARN`),
+  each item `{ id, label, icon, ready, owner?, perm? }`. `owner: true` marks a sovereign-owner-plane screen
+  (`safety`, `charter`, `apikeys`, `settings`, `users`). This array is one of the three sides of the system-map
   contract (below).
-- **Shell**: `shell()` (`app.js:119–129`) builds `#topbar`, `#nav`, `#main > #screen`, and the detail
-  drawer. `topbar()` (`:50`) has the plane segmented toggle (`all`/`offense`/`defense`), the live/
-  kill-switch pill, counts, and the safety pill. `renderNav()` + its `visible()` filter (`:91–104`),
-  `navItem()` (`:105–116`), `current()` (`:117`, derives the active screen id from `location.hash`).
-- **`route()`** (`app.js:3989–4018`) — the hash router. `current()` → an `if (id === "…") {
-  render…(screen); return; }` branch per screen (21 branches); an unready/unknown id falls to
-  `renderStub` (`:3135`). It calls `teardownLive()` (`:853`) first so any SSE stream / interval from the
+- **Shell**: `shell()` (`app.js:681–691`) builds `#topbar`, `#nav`, `#main > #screen`, and the detail
+  drawer. `topbar()` (`:149`) has the plane segmented toggle (`all`/`offense`/`defense`), the live/
+  kill-switch pill, counts, and the safety pill. `renderNav()` + its `visible()` filter (`:644–666`),
+  `navItem()` (`:667–678`), `current()` (`:679`, derives the active screen id from `location.hash`).
+- **`route()`** (`app.js:8854–8894`) — the hash router. `current()` → an `if (id === "…") {
+  render…(screen); return; }` branch per screen (one branch per `screens.yaml` id); an unready/unknown id falls to
+  `renderStub` (`:7166`). It calls `teardownLive()` (`:2557`) first so any SSE stream / interval from the
   previous screen is closed. Each `render*(screen)` fetches read-only JSON (or fires a gated action) and
   mounts DOM with `V.h`.
-- **`boot()`** (`app.js:4020–4034`) — reads the server-injected `data-token` / `data-sovereign` /
+- **`boot()`** (`app.js:8896–8928`) — reads the server-injected `data-token` / `data-sovereign` /
   `data-offense` body attributes into `CFG`, restores the theme, mounts `shell()`, wires
   `hashchange → route`, defaults to `#/home`, then starts the persistent SIGIL HUD channel.
-- **Provenance rendering**: `isFact(p) = !!(p && p.verified_by_oracle)` (`app.js:500`). The FACT badge is
+- **Provenance rendering**: `isFact(p) = !!(p && p.verified_by_oracle)` (`app.js:1923`). The FACT badge is
   shown **only** when the oracle verified it; everything else renders as a `span.shield.lead` "LEAD"
-  (e.g. `:1039–1041`, `:1458`, `:1627`). This is the pixel-level expression of oracle authority.
-- **SIGIL HUD / voice-nav** (`startSigilHud()`, `app.js:3544–3572`): a persistent SSE from
+  (e.g. `:2842`, `:3469`, `:3711`). This is the pixel-level expression of oracle authority.
+- **SIGIL HUD / voice-nav** (`startSigilHud()`, `app.js:7960–7988`): a persistent SSE from
   `SOV("/api/sigil/hud")` that fans `sigil.nav` signals to a hash navigation — but **only** to a known
-  NAV screen id. `navIds` is an `Object.create(null)` map (`:3549`) so a payload of `constructor` /
+  NAV screen id. `navIds` is an `Object.create(null)` map (`:7965`) so a payload of `constructor` /
   `__proto__` can never read truthy off the prototype chain; a spoofed id navigates to nothing.
 
 ### `index.html` — the CSP-native entry
@@ -69,29 +71,55 @@ Exported on `window.VUI` at `ui.js:151–153`. This is the entire framework:
 
 The serving layer rewrites these placeholders per deployment: **standalone** (a single server serving its
 own `/api`) → `""`; **behind `vigil up`'s reverse proxy** → `data-sovereign="/sovereign"`
-`data-offense="/offense"`. Scripts load same-origin in order: `ui.js`, `manual.js`, `app.js`. No inline
+`data-offense="/offense"`. Scripts load same-origin in order: `ui.js`, `manual.js`, `legal.js`, `app.js`. No inline
 script, no CDN — the only stylesheet is same-origin `style.css`.
 
 ### `manifest.json` + `sync.sh` — the no-build vendoring contract
 
-`manifest.json` declares `static_allowlist` (`style.css`, `ui.js`, `manual.js`, `app.js`), the
+`manifest.json` records `static_allowlist` (`style.css`, `ui.js`, `manual.js`, `legal.js`, `app.js`), the
 `build` map (`style.css = tokens.css + components.css`), and the two `targets`
 (`apps/sigil/sigil/ui/static`, `engine/crucible/framework/v2/console/static`). `sync.sh` is **author-time,
 no tooling, no network**: it concatenates the CSS and copies the JS + index into both plane static dirs,
 then `cmp`-asserts the two trees are **byte-identical** (`sync.sh:40–45`). Run it after editing any
-`packages/vigil-ui/*` source — until you do, the servers serve the old bundle.
+`packages/vigil-ui/*` source — a plane server run **standalone** serves from its own static dir, so
+until you sync it serves the old bundle. `vigil up` does not depend on the sync: its proxy assembles
+the serve dir straight from `packages/vigil-ui` on every start (`assemble_serve_dir`,
+`uiproxy.py:446–490`, source path resolved at `:1899`/`:2030`), so it always serves the sources.
+
+**`static_allowlist` is a hand-maintained inventory, not a source of truth.** No code reads that field.
+The sets actually in force are `sync.sh`'s `COPY` array (`sync.sh:17`) and `uiproxy.BUNDLE_JS`
+(`integration/vigil_integration/uiproxy.py:219`), which together with `assemble_serve_dir`
+(`uiproxy.py:446–490`) decide what is copied and served. Adding or removing a bundle file means editing
+all three by hand and keeping them in step; nothing derives one from another.
 
 ### `manual.js` — in-app documentation (not runtime data)
 
 `window.VIGIL_MANUAL` (`manual.js:8`) is a static array of doc sections; `app.js`'s `renderManual`
-(`app.js:211`) renders it for the `manual` screen. No target/runtime data lives here.
+(`app.js:914`) renders it for the `manual` screen. No target/runtime data lives here.
 
-## The 21-screen NAV / route / system-map contract
+### `legal.js` — the in-product legal pages (not runtime data)
+
+`window.VIGIL_LEGAL` is a static `{ preamble, sections[] }` object — Acceptable Use, Privacy, Licenses &
+Attribution, Security & Disclosure — rendered by `app.js`'s `renderLegal` / `legalBlock` for the `legal`
+screen (`renderLegal`, `app.js:957–988`; `legalBlock`, `:993–1023`), wired exactly like `manual.js` (same `<script>` slot, same `manifest.json` inventory entry, same
+`sync.sh` `COPY` list, same `uiproxy.BUNDLE_JS` tuple). It **fetches nothing**: the pages must render with no
+network and no backend, because "what leaves this machine" is one of the questions they answer. Its
+block vocabulary is the Manual's (`h` / `p` / `note` / `list`) plus `rule` (an `.owner-banner` — the gold
+"this one is on YOU" treatment), `code`, `table` (`table.tbl`), and `docs` (the governing repository
+files). Every class it uses already exists in `components.css`, so both themes are inherited.
+
+**Truth constraint:** these pages *summarise*; the repository documents (`ACCEPTABLE-USE.md`,
+`PRIVACY.md`, `TERMS.md`, `EXPORT.md`, `SECURITY.md`, `LICENSE`, `NOTICE`) *govern*. Every behavioural
+statement in `legal.js` must be true of the code on this branch and name the file it comes from — in
+particular the **PERMISSIVE model-egress default** and the fact that the spine hard-prune's destructive
+cutover is **not shipped**. If you change one of those behaviours, change this file in the same commit.
+
+## The NAV / route / system-map contract
 
 Three lists must stay set-equal, and CI enforces it:
 
-1. `const NAV` ids in `app.js` (`:19–47`).
-2. `route()` `id === "…"` branch ids in `app.js` (`:3989–4018`).
+1. `const NAV` ids in `app.js` (`:107–146`).
+2. `route()` `id === "…"` branch ids in `app.js` (`:8854–8894`).
 3. `knowledge/system-map/screens.yaml` ids (the human SSOT SIGIL reads via the generated
    `knowledge/system-map/system-map.json`).
 
@@ -99,13 +127,20 @@ Three lists must stay set-equal, and CI enforces it:
 route() ids**, a cardinality guard (a duplicate or unparseable id can't vanish — raw token count must
 equal distinct-id count), and **≥1 synonym per screen** (voice nav). Extraction is *scoped* to the
 `const NAV = [...]` block (`_nav_block`, `:42`) and the `function route()` body (`_route_block`, `:49`)
-so unrelated ids (scan modes, wizard targets, providers) are never picked up. The 21 screens:
+so unrelated ids (scan modes, wizard targets, providers) are never picked up.
 
-| Group | ids |
-|-------|-----|
-| DO | `home` `assess` `chat` `live` `findings` `proof` `report` `fixes` `defense` |
-| MANAGE | `sessions` `activity` `safety` `charter` `apikeys` `tools` `brain` `compliance` `assurance` `settings` |
-| LEARN | `manual` `knowledge` |
+**The screen list is deliberately not restated here.** It lives in
+[`knowledge/system-map/screens.yaml`](../../knowledge/system-map/screens.yaml) (id, label, group,
+owner, plane, description, synonyms), and CI fails the moment that file, `NAV` and `route()` disagree.
+To read the current set and its count:
+
+```sh
+python3 tools/system-map/generate.py --check     # prints e.g. "system map OK — N screens, ids match NAV == route()"
+grep -n 'id:' knowledge/system-map/screens.yaml  # the ids themselves, in group order
+```
+
+A hard-coded count in this file would be a fourth copy with nothing enforcing it, which is how the
+previous one drifted.
 
 ## Invariants this package must preserve (and why)
 

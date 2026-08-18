@@ -8,7 +8,9 @@ the *whole* system. It is a single committed bundle — `packages/vigil-ui/` (`a
 isolated trust planes** behind one browser origin: the **offense** plane (the CRUCIBLE console + gated
 api) and the **sovereign** plane (the SIGIL owner cockpit). The browser talks to *one* listener — the
 `vigil up` reverse proxy — which forwards `/offense/*` and `/sovereign/*` to three separate loopback
-backend processes, each in its own venv. `app.js` is a hash-router over **21 screens**; each screen is
+backend processes, each in its own venv. `app.js` is a hash-router over **every screen declared in
+`knowledge/system-map/screens.yaml`** (the SSOT — `python3 tools/system-map/generate.py --check` prints
+the current count; no number is restated here, because a restated one drifts); each screen is
 a `render*(screen)` function that fetches read-only JSON (or fires a safe action) against the right
 plane and builds DOM with `VUI.h` (no inline handlers, no `eval` — CSP-native). The offense console
 (`engine/crucible/framework/v2/console/`) serves the read plane (`api.py` GET providers) and the only
@@ -22,10 +24,10 @@ See [`architecture.md`](./architecture.md) for the two-plane model, oracle autho
 
 ### Frontend — `packages/vigil-ui/`
 
-- **`app.js`** — the shell + all 21 screens.
-  - `const NAV` (lines 19–47) — the navigation model: three groups (`DO` / `MANAGE` / `LEARN`), each
-    item `{ id, label, icon, ready, owner? }`. `owner: true` marks a sovereign-owner-plane screen
-    (`safety`, `charter`, `apikeys`, `settings`).
+- **`app.js`** — the shell + every screen.
+  - `const NAV` (lines 107–146) — the navigation model: three groups (`DO` / `MANAGE` / `LEARN`), each
+    item `{ id, label, icon, ready, owner?, perm? }`. `owner: true` marks a sovereign-owner-plane screen
+    (`safety`, `charter`, `apikeys`, `settings`, `users`).
   - `CFG` / `SOV` / `OFF` (lines 12–14) — `SOV(p) = CFG.api.sovereign + p`, `OFF(p) = CFG.api.offense
     + p`. These are the plane prefixes every fetch prepends.
   - `renderNav()` + `visible()` (lines 91–104), `navItem()` (105–116), `current()` (117) — render the
@@ -208,7 +210,7 @@ fresh tree and that the action spawns the gated CLI (and refuses without a chart
 - **Forgetting to regenerate/commit `system-map.json`** fails CI with "STALE — run generate.py --write".
 - **Missing a synonym** fails CI (voice nav needs ≥1). Keep them lowercase and distinctive.
 - **Right plane.** Offense data/actions → `OFF(…)` (console 8787 / gated api 8799). Owner/cockpit data
-  → `SOV(…)` (sigil 8733). `owner: true` screens (`settings`, `apikeys`, `charter`, `safety`) live on
+  → `SOV(…)` (sigil 8733). `owner: true` screens (`settings`, `apikeys`, `charter`, `safety`, `users`) live on
   the sovereign plane. `renderNav`'s `visible()` also hides `assess`/`live`/`findings`/`fixes` unless
   the plane toggle is `offense` — check your screen shows where you expect.
 - **CSP is strict `'self'`.** No inline `onclick`, no `<script>`, no `eval`, no external fonts/CDN —

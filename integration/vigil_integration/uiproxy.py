@@ -8,7 +8,7 @@ at ONE origin, then federates the two isolated trust planes behind it:
                  ├─ /offense/api/v1/*   ▶ 127.0.0.1:8799   (crucible api — the gated action plane)
                  ├─ /offense/*          ▶ 127.0.0.1:8787   (crucible console — read + SSE plane)
                  └─ /__vigil/plane/*    ▶ answered BY THE PROXY (plane status + start the offense plane)
-    /  and the bundle files (style.css, ui.js, manual.js, app.js, index.html) are served by the
+    /  and the bundle files (style.css, ui.js, manual.js, legal.js, app.js, index.html) are served by the
     proxy itself from a runtime serve dir assembled by `vigil up`.
 
 PLANE CONTROL (why it lives here): because the proxy serves the interface itself, the page still loads
@@ -216,7 +216,7 @@ def _scrub_html_tokens(data: bytes, needle: bytes) -> bytes:
 
 
 # the bundle files the proxy serves from the runtime serve dir
-BUNDLE_JS = ("ui.js", "manual.js", "app.js")
+BUNDLE_JS = ("ui.js", "manual.js", "legal.js", "app.js")
 _STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -448,7 +448,7 @@ def assemble_serve_dir(src_dir: Path, serve_dir: Path, *, token: str,
     """Build the runtime serve dir from the ``packages/vigil-ui`` bundle:
 
     * ``style.css`` = ``tokens.css`` + ``components.css`` concatenated,
-    * ``ui.js`` / ``manual.js`` / ``app.js`` copied verbatim (+ ``manifest.json`` if present),
+    * ``ui.js`` / ``manual.js`` / ``legal.js`` / ``app.js`` copied verbatim (+ ``manifest.json`` if present),
     * ``index.html`` written with the mount-base + build placeholders substituted — and the
       ``__VIGIL_TOKEN__`` placeholder emptied (Claim 6): the served page carries NO credential.
 

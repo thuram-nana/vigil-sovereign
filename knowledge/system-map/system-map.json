@@ -266,6 +266,35 @@
       ]
     },
     {
+      "description": "The in-product legal pages — acceptable use (authorized testing only), privacy (what this machine stores, the PERMISSIVE model-egress default and how to change it, and the append-only-audit vs erasure tension), licenses & attribution (PolyForm Noncommercial 1.0.0 OR commercial, third-party components, export-control note), and how to report a vulnerability in VIGIL itself. Static content; the repository documents govern.",
+      "group": "LEARN",
+      "id": "legal",
+      "label": "Legal",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "legal",
+        "acceptable use",
+        "authorized testing",
+        "privacy",
+        "privacy policy",
+        "data retention",
+        "what leaves this machine",
+        "model egress",
+        "sovereignty default",
+        "licence",
+        "license",
+        "licensing",
+        "attribution",
+        "third party licenses",
+        "export control",
+        "security disclosure",
+        "report a vulnerability",
+        "responsible disclosure",
+        "terms"
+      ]
+    },
+    {
       "description": "Every past job you can come back to months later — newest worked first, with real dates and times, the kind of operation, the subject, and its run and finding counts; rename a job or a run (presentation only, nothing signed changes) and click through to its runs, findings, evidence and dossier.",
       "group": "MANAGE",
       "id": "library",
@@ -559,5 +588,5 @@
       ]
     }
   ],
-  "source_sha": "15f3ad14a7a79977e165a856f6e8d52827550c7c29e2e664b146bfa894910646"
+  "source_sha": "1bae8c1230889f61b8a9e792a1471eb06adc996cf3c2de58dc7ed30a8f862c4e"
 }

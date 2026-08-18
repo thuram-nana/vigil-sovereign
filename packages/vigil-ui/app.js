@@ -141,6 +141,7 @@
       { id: "posture", label: "Proof of Posture", icon: "check", ready: true },
       { id: "manual", label: "Manual", icon: "book", ready: true },
       { id: "knowledge", label: "Knowledge Engine", icon: "brain", ready: true },
+      { id: "legal", label: "Legal", icon: "info", ready: true },
     ]},
   ];
 
@@ -730,6 +731,16 @@
                    }, 60);
                  } });
     });
+    ((window.VIGIL_LEGAL || {}).sections || []).forEach(function (s) {
+      out.push({ kind: "LEGAL", label: s.title, icon: "info", hint: "legal page",
+                 run: function () {
+                   location.hash = "#/legal";
+                   setTimeout(function () {
+                     var t = document.getElementById("legal-" + s.id);
+                     if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
+                   }, 60);
+                 } });
+    });
     out.push({ kind: "DO", label: "New Assessment", icon: "bolt", hint: "start a run",
                run: function () { location.hash = "#/assess"; } });
     out.push({ kind: "DO", label: "Toggle theme (light / dark)", icon: "dot", hint: "appearance",
@@ -935,6 +946,79 @@
       return h("div", { style: { display: "grid", gridTemplateColumns: "180px 1fr", gap: "14px" } },
         [h("b", null, row[0]), h("span.muted", null, row[1])]);
     }));
+    return null;
+  }
+
+  // ---- Legal (in-product legal pages; static content, no runtime data) -----
+  // Same shape as the Manual: a data module (legal.js) rendered as a sticky table of contents plus one
+  // card per section. It fetches NOTHING — the pages must render on a machine with no network and no
+  // backend, because "what leaves this machine" is one of the things they answer. The pages SUMMARISE;
+  // the repository documents each section names are what govern.
+  function renderLegal(screen) {
+    const doc = window.VIGIL_LEGAL || {};
+    const sections = doc.sections || [];
+    const index = h("div.card", { style: { position: "sticky", top: "0", alignSelf: "start" } },
+      [h("span.label", null, "SECTIONS"),
+       // .man-toc so a long section title WRAPS inside the 260px card (the nav rail's nowrap would
+       // overflow it) — the same reasoning as the Manual's contents list.
+       h("div.stack.man-toc", { style: { gap: "2px", marginTop: "8px" } }, sections.map(function (s) {
+         return h("a.nav-item", { href: "#/legal", onClick: function (e) {
+           e.preventDefault(); const t = document.getElementById("legal-" + s.id);
+           if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
+         } }, [h("span.txt", null, s.title)]);
+       }))]);
+    const content = h("div.stack", null, [
+      doc.preamble ? h("div.legend", null, [V.icon("info"), h("span", null, doc.preamble)]) : null,
+    ].concat(sections.map(function (s) {
+      return h("div.card", { id: "legal-" + s.id }, [
+        h("h3", { style: { fontSize: "var(--fs-xl)", marginBottom: s.lede ? "4px" : "12px" } }, s.title),
+        // .muted + an explicit size rather than a bare `.hint`: components.css only styles `.hint`
+        // when it is nested (`.field .hint`, `.chat-toolrow .hint`), so a top-level one renders as
+        // plain body text.
+        s.lede ? h("div.muted", { style: { fontSize: "var(--fs-sm)", marginBottom: "12px" } }, s.lede) : null,
+        (s.blocks || []).map(function (b) { return legalBlock(b); }),
+      ]);
+    })));
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Legal"),
+        h("span.sub", null, "Acceptable use, privacy, licensing, and how to report a vulnerability.")]),
+      h("div", { style: { display: "grid", gridTemplateColumns: "260px 1fr", gap: "24px", alignItems: "start" } },
+        [index, content]),
+    ]);
+  }
+  // The Legal block vocabulary. It is the Manual's (h / p / note / list) plus three: `rule` for the
+  // statement the operator must not miss (rendered in the owner colour, which everywhere in this UI
+  // means "this one is on YOU"), `table` for an inventory, and `docs` for the governing files.
+  // Every class used here already exists in components.css, so both themes are inherited, not re-declared.
+  function legalBlock(b) {
+    if (b.h) return h("h4", { style: { marginTop: "16px", marginBottom: "6px", fontSize: "var(--fs-lg)" } }, b.h);
+    if (b.p) return h("p", { class: "muted", style: { margin: "8px 0", maxWidth: "72ch", lineHeight: "1.6" } }, b.p);
+    if (b.rule) return h("div.owner-banner", { style: { margin: "12px 0", alignItems: "flex-start" } },
+      [V.icon("shield"), h("span", { style: { lineHeight: "1.6" } }, b.rule)]);
+    if (b.note) return h("div.legend", { style: { margin: "12px 0" } }, [V.icon("info"),
+      h("span", { style: { lineHeight: "1.6" } }, b.note)]);
+    if (b.code) return h("pre.code", { style: { margin: "10px 0" } }, b.code);
+    if (b.list) return h("div.stack", { style: { gap: "10px", margin: "10px 0" } }, b.list.map(function (row) {
+      return h("div", { style: { display: "grid", gridTemplateColumns: "200px 1fr", gap: "14px" } },
+        [h("b", null, row[0]), h("span.muted", null, row[1])]);
+    }));
+    if (b.table) return h("div.scroll-x", { style: { margin: "12px 0" } },
+      h("table.tbl", null, [
+        h("thead", null, h("tr", null, (b.table.cols || []).map(function (c) { return h("th", null, c); }))),
+        h("tbody", null, (b.table.rows || []).map(function (r) {
+          return h("tr", null, r.map(function (cell, i) {
+            return h("td", { style: { verticalAlign: "top", lineHeight: "1.55" } },
+              i === 0 ? h("b", null, cell) : h("span.muted", null, cell));
+          }));
+        })),
+      ]));
+    if (b.docs) return h("div", { style: { marginTop: "16px" } }, [
+      h("span.label", null, "GOVERNING DOCUMENTS IN THE SOURCE TREE"),
+      h("div.stack", { style: { gap: "8px", marginTop: "8px" } }, b.docs.map(function (row) {
+        return h("div", { style: { display: "grid", gridTemplateColumns: "minmax(160px, 260px) 1fr", gap: "14px" } },
+          [h("span.mono", null, row[0]), h("span.muted", null, row[1])]);
+      })),
+    ]);
     return null;
   }
 
@@ -8774,6 +8858,7 @@
     const screen = V.$("#screen"); if (!screen) return;
     if (id === "home") { renderHome(screen); return; }
     if (id === "manual") { renderManual(screen); return; }
+    if (id === "legal") { renderLegal(screen); return; }
     if (id === "knowledge") { renderKnowledge(screen); return; }
     if (id === "tools") { renderTools(screen); return; }
     if (id === "trust") { renderTrust(screen); return; }
