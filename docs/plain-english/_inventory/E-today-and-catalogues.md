@@ -858,6 +858,12 @@ loosen (`sovereignty.py:383-416`).
 
 ### 6.1 Branch protection — read from the live API
 
+> **[SUPERSEDED SNAPSHOT]** This records the config as read during the session that produced this
+> inventory (nine required checks, and at the time protection was later found to be OFF — see the
+> W0-1 correction). The LIVE config is now **13** required checks with protection enabled; the
+> authoritative source is `.github/required-status-checks.txt`, pinned by
+> `docs/tests/test_required_checks_canonical.py` and `.github/workflows/branch-protection-verify.yml`.
+
 `GET /repos/thuram-nana/vigil-sovereign/branches/main/protection`, checked twice during this session
 with identical results:
 
