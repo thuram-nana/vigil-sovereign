@@ -36,8 +36,10 @@ _OWNER = generate_keypair()
 
 
 def _norm(s: str | None) -> str:
-    """Collapse whitespace, drop backticks, lowercase — so a claim is matched regardless of line wrapping."""
-    return re.sub(r"\s+", " ", (s or "")).replace("`", "").strip().lower()
+    """Collapse whitespace AND '#' comment-line prefixes, drop backticks, lowercase — so a claim is matched
+    regardless of line wrapping OR being split across '#'-prefixed source-comment lines (else a false comment
+    wrapped as `# …\n    # …` slips the guard because the '#' breaks the substring)."""
+    return re.sub(r"[\s#]+", " ", (s or "").replace("`", " ")).strip().lower()
 
 
 def _tmp_floor() -> Path:

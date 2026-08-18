@@ -15,12 +15,17 @@ present, or values it satisfies, behavior is byte-identical to the pre-floor spi
 HONEST LIMIT (accepted, §1.3) — do NOT overclaim: `floor.json` IS owner-Ed25519-signed (see the `Floor`
 class + `_sign_floor`/`verify_floor_signature` below) and its signature is VERIFIED on the enforcing path
 (`checkpoint.classify_head`, reached by `sigil verify` AND the live tail). So a same-host attacker with the
-owner's UID (or root) but WITHOUT the Ed25519 key can no longer roll the floor DOWN to a lower watermark
-under a valid signature — a content rewrite breaks `sig` and is reported as TAMPERING. What such a keyless
-attacker CAN still do on a PURELY-LOCAL verify is revert the floor to a "no-floor" state: (a) STRIP the
-signature back to unsigned (accepted as a legacy floor — non-bricking) with lowered values, or (b) DELETE
-floor.json outright — either way the local verify then reads that same attacker-controlled disk and has no
-LOCAL witness that a higher signed floor ever existed. The floor's real anti-rollback guarantee therefore
+owner's UID (or root) but WITHOUT the Ed25519 key cannot MINT A NEW lower-watermark floor that carries a
+valid signature — forging `sig` over rewritten content is infeasible, and a content rewrite of a signed
+floor breaks `sig` and is reported as TAMPERING. What such a keyless attacker CAN still do on a PURELY-LOCAL
+verify is revert the floor to a lower / no-floor state the local verifier cannot distinguish from
+legitimate: (a) STRIP the signature back to unsigned (accepted as a legacy floor — non-bricking) with
+lowered values, (b) DELETE floor.json outright, or (c) REPLAY an OLDER, genuinely-owner-signed floor it
+retained — the floor carries NO anti-replay epoch, so a present valid signature does NOT prove the floor is
+the latest, and a lower old-but-genuinely-signed floor still verifies (a signed-floor analogue of the
+head-replay this whole mechanism exists to catch). In every case the local verify then reads that same
+attacker-controlled disk and has no LOCAL witness that a higher signed floor ever existed. The floor's real
+anti-rollback guarantee therefore
 holds for (i) the routine `--reset` path (the floor lives OUTSIDE spine/, so a spine-dir rmtree can't lower
 it), (ii) an OUT-OF-BAND verifier that RETAINED a newer signed floor (a paired device over WireGuard — see
 `floor_witness.py`, which REFUSES a strip-to-unsigned or a co-rewritten/deleted floor below a witnessed
