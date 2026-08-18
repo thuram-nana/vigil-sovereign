@@ -111,7 +111,9 @@ The Recipient may disclose Confidential Information:
    authorization letter before work begins, **and exported in the environment of every process that
    runs the engagement** — a tier recorded only on paper, or stored only in the Operator's settings
    file, does not constrain a process launched outside the `vigil up` bridge, which falls back to the
-   permissive default without warning (`/PRIVACY.md` § 5.1a).
+   permissive default without warning; and even inside the bridge a tier changed *after* `vigil up`
+   started takes effect only on the next `vigil up`, not on a run already launched from the UI
+   (`/PRIVACY.md` § 5.1a).
 5. **To the Client's own auditors or insurers**, where the Client is the Recipient.
 
 ## 7. How the Operator holds engagement material

@@ -156,7 +156,10 @@ that the tier does not cover the sovereign plane's own model calls (see
 inherits. The engine reads that variable from the process environment and from nowhere
 else (`engine/crucible/framework/v2/kernel/sovereignty.py:183-195`): a tier stored only in
 `~/.sigil/sigil.env` or on the UI Settings screen reaches an offense process only when
-`vigil up` launched it, and an offense process started any other way falls back to
+`vigil up` launched it — and only as of that start, since the runtime env is resolved once
+at bring-up (`integration/vigil_integration/uiproxy.py:2104`), so a tier changed in Settings
+while the UI is already running takes effect only on the next `vigil up`, not on a run already
+launched from the UI. An offense process started any other way falls back to
 `PERMISSIVE` **silently — fail-open**. `/PRIVACY.md` § 5.1a states each mechanism's scope
 and where to read the tier actually in force.
 

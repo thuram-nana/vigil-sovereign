@@ -199,7 +199,12 @@ How the tier is applied, verified in source: the offense engine reads `CRUCIBLE_
 from the **process environment and from nowhere else**
 (`engine/crucible/framework/v2/kernel/sovereignty.py:183-195`). A value stored in the Operator's
 `~/.sigil/sigil.env` or on the UI Settings screen reaches an offense process only when that process
-was launched through the sovereign bridge (`vigil up`); an offense process started any other way
+was launched through the sovereign bridge (`vigil up`) — and only as of that start, because the bridge
+resolves the runtime environment **once**, at bring-up (`integration/vigil_integration/uiproxy.py:2104`),
+so a tier changed in the Settings screen while the UI is already running reaches only the offense
+children of a *subsequent* `vigil up`, and a run launched from the UI in the meantime keeps the earlier
+tier (restart `vigil up`, or the `vigil-command` service, for the change to take effect). An offense
+process started any other way
 falls back to `PERMISSIVE` **silently — this failure mode is fail-open**. The tier ticked above is
 therefore a commitment to export it in the environment of every process that runs this engagement,
 not merely to store it (`/PRIVACY.md` § 5.1a). An unrecognised value fails closed to `AIR_GAPPED`

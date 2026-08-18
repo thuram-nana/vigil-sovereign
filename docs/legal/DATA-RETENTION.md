@@ -55,7 +55,7 @@ pruned record's hash stays committed in the owner-signed head (`apps/sigil/sigil
 | **Contains** | one append-only hash-chained record per attested action, each embedding the operator's OS login, git name, git email, hostname and key fingerprint (`integration/vigil_integration/attestation/models.py:24-45, 60-82`) |
 | **Default retention** | **Indefinite.** Always on; no rotation. |
 | **Deletion mechanism** | Filesystem deletion only. |
-| **Survives deletion** | The monotonic anti-back-dating counter at `~/.vigil/attestation/` (`integration/vigil_integration/attestation/anchor.py:37`). Deleting the ledger while the counter stands is detectable, which is the point — treat this file as evidence, not as a log to tidy. |
+| **Survives deletion** | **Nothing, if the base directory is removed.** The monotonic anti-back-dating floor is persisted to `<base_dir>/attest-anchor.json` — the **same** directory as the ledger (`integration/vigil_integration/live/wiring.py:305-307`), not an external one — so `rm -rf .vigil-live` deletes ledger and anchor together and the deletion is not detectable afterward. What the anchor *does* catch is a **truncation of a ledger that is still present**: its floor stands above the surviving records. `~/.vigil/attestation/` (`attestation/anchor.py:37`) is only the module default for a caller that injects no path; the live wiring always injects the base-dir path (`anchor.py:105`). To use the anchor as evidence, preserve it **off-host alongside the ledger**. |
 
 ### 2.3 Per-engagement offense spine
 
@@ -139,7 +139,7 @@ rest in plaintext behind `0600` permissions** (`packages/core/vigil_core/vigil_c
 | Record hashes and chain links | the spine is hash-chained; a Merkle commitment over pruned records would be committed in the owner-signed head (`apps/sigil/sigil/spine/merkle.py:1-8`) |
 | Folded account state | a completed prune deliberately carries username, role, credential hash and salt, and public key forward (`apps/sigil/sigil/spine/snapshot.py:32-35`) |
 | Anti-rollback floor | `~/.sigil/floor.json`, deliberately outside `spine/` and not cleared by a reset |
-| Monotonic attestation counter | `~/.vigil/attestation/` |
+| Monotonic attestation floor (usage ledger) | `<base_dir>/attest-anchor.json` — **inside** the base dir (`integration/vigil_integration/live/wiring.py:305-307`), so it detects a *truncation* of a still-present ledger but does **not** survive removal of the base dir: `rm -rf .vigil-live` takes it too (see §2.2). |
 | Tombstones | session soft delete records a tombstone and removes nothing (`engine/crucible/framework/v2/console/sessions.py:279-305`) |
 | Backups | a copy of everything as of the backup time, until pruned |
 | Delivered exports | proof bundles and dossiers already in a client's hands |

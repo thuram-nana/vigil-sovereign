@@ -92,8 +92,10 @@ documented behaviour, not defects:
   engagement terms, your client contract, or the law that reaches you does not permit that,
   set a tier before the first run — by **exporting** `CRUCIBLE_SOVEREIGNTY_TIER` in the
   environment the process inherits. A tier stored only in `~/.sigil/sigil.env` or on the UI
-  Settings screen reaches an offense process only when `vigil up` launched it; started any
-  other way, the process falls back to `PERMISSIVE` **silently — fail-open**
+  Settings screen reaches an offense process only when `vigil up` launched it — and only as of that
+  start, since the runtime env is resolved once at bring-up, so a tier changed in Settings after the UI
+  is running takes effect only on the next `vigil up`. Started any other way, the process falls back to
+  `PERMISSIVE` **silently — fail-open**
   (`engine/crucible/framework/v2/kernel/sovereignty.py:183-195`; scope of each mechanism in
   `/PRIVACY.md` § 5.1a). Note the tier's stated limits, including that it does not govern the
   sovereign plane's own model calls (`engine/crucible/SECURITY.md` § 3.5).

@@ -138,7 +138,11 @@ Not vulnerabilities. Reporting a *bypass* of any of these still is.
   environment and from nowhere else
   (`engine/crucible/framework/v2/kernel/sovereignty.py:183-195`); the sovereign settings
   bridge is what carries the stored value into the children `vigil up` spawns
-  (`integration/vigil_integration/uiproxy.py:1631, 1712-1739`). Anything else falls back to
+  (`integration/vigil_integration/uiproxy.py:1631, 1712-1739`) — and it carries it **only at `vigil up`
+  start**: the runtime env is resolved once at bring-up (`uiproxy.py:2104`), so a tier changed in
+  Settings while the UI is already running reaches only the offense children of a *subsequent*
+  `vigil up`. A run launched from the UI after the change keeps the tier the UI started with; restart
+  `vigil up` (or the `vigil-command` service) for it to take effect. Anything else falls back to
   `PERMISSIVE` silently — **fail-open**. That gap is documented here and in `/PRIVACY.md`
   § 5.1a, so "the tier was set" above means *present in that process's environment*.
 - **An unprovisioned vault leaves keys plaintext at rest.** Documented above and in

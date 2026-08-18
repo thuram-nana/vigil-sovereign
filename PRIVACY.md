@@ -186,7 +186,7 @@ own"). The phone bridge binds loopback or a private WireGuard/Tailscale address 
 | **Model / LLM calls** (engagement reasoning step, chat, dev-edit, codefix) | `api.anthropic.com` | **ON — see §5.1** | `CRUCIBLE_SOVEREIGNTY_TIER` |
 | Sovereign-cloud model backends | Bedrock / Vertex / Mistral | only if selected | same ladder |
 | Local model backends | loopback | n/a | same ladder |
-| Target traffic | charter-listed hosts | ON for an authorized engagement | signed charter scope + categorical protected-domain floor + runtime egress allowlist |
+| Target traffic | charter-listed hosts | ON for an authorized engagement | signed charter scope + categorical protected-domain floor (both apply on every run) + a runtime host allowlist that refuses **only** under a sovereign tier and is unwired by default — see §5.2 |
 | Intel / OSINT collectors | `dns.google`, `crt.sh`, `rdap.org`, `stat.ripe.net` | **OFF** | `--live` flag (`engine/crucible/framework/v2/intel/cli.py:458-460`) |
 | Vulnerability-advisory feed | `services.nvd.nist.gov`, `api.osv.dev`, `www.cisa.gov` | **OFF** (offline file ingest is the default) | opt-in gated transport; queries a CVE id, never client data (`engine/crucible/framework/v2/intel/vulnfeed.py:1-15, 36-38`) |
 | GitHub (auto-patch PR, knowledge sync) | `github.com` / `api.github.com` | **OFF** | `pr_enabled` + m-of-n quorum + `GITHUB_TOKEN` (`integration/vigil_integration/live/codefix_runner.py:74, 255-257`) |
@@ -240,6 +240,19 @@ into the offense children it spawns (`:1712-1739`). So a tier written to `sigil.
 offense engine **when, and only when, the offense process was started by `vigil up`** (or otherwise
 inherits an environment the sovereign side built).
 
+**And only at the moment `vigil up` starts.** That runtime environment is resolved **once**, at
+bring-up — `_resolve_offense_llm_env` is called a single time as the offense children are spawned
+(`integration/vigil_integration/uiproxy.py:2104`, applied via `_spawn`'s `env.update` at `:1582-1584`);
+nothing re-reads `sigil.env` afterward, and even the in-UI "restart backends" control replays the
+environment captured at bring-up rather than re-resolving it (`:2130`). So a tier changed on the
+Settings screen **while the UI is already running reaches only the offense children of a *subsequent*
+`vigil up`**. The natural workflow — open the UI (which *is* a `vigil up`), change Settings →
+Sovereignty tier, then launch an engagement from the UI — leaves that run on the tier that was in force
+when the UI started, with no warning. **Restart `vigil up` (or the `vigil-command` service) after
+changing the tier** for it to take effect. The product carries the same caveat on the Settings card:
+"Changes are signed on the server and take effect on the next `vigil up` (or service restart)"
+(`packages/vigil-ui/app.js:3959`).
+
 **(c) Anything else — the tier is not applied, and this failure is fail-OPEN and silent.** An
 offense process started any other way sees only its own environment: `vigil engage` from a shell,
 `python3 -m framework.v2 …` run in `engine/crucible/`, a systemd unit or container that does not
@@ -258,7 +271,11 @@ value wins where they differ.
 (`packages/vigil-ui/app.js:1803-1809`). It is read from `sovereignty.current()` **in the offense
 process that serves the UI** (`engine/crucible/framework/v2/console/api.py:986-989`), so it is the
 authoritative answer for that process — and only for that process. It says nothing about a separate
-offense process launched from a shell, which is governed by its own environment.
+offense process launched from a shell, which is governed by its own environment. And because that
+process took its environment at `vigil up` start, the pill will **disagree with the Settings screen**
+after you change the tier there: it keeps reporting the tier the UI started with until you restart
+`vigil up` (or the `vigil-command` service). The pill, not the value shown on the Settings screen, is
+what is in force.
 
 What is true and worth stating alongside it:
 
@@ -282,13 +299,29 @@ What is true and worth stating alongside it:
 
 ### 5.2 Target traffic
 
-Three independent gates: a **signed charter** whose in-scope table bounds every host
-(`engine/crucible/framework/v2/common/ethics.py:104-136, 283-303`); a **categorical protected-domain
-floor** covering government, military, educational and intergovernmental domains, evaluated before any
-other gate with Unicode-homoglyph folding, default ON and owner-only to disable
-(`packages/core/vigil_core/vigil_core/hard_guardrail.py:1-31, 239-246`); and a **runtime egress
-allowlist** that keeps collector hosts disjoint from target hosts by construction
-(`engine/crucible/framework/v2/agents/egress_guard.py:71-90`).
+Two gates bound target traffic **on every run**, and a third engages **only under a sovereign tier**.
+
+The two that always apply. A **signed charter** whose in-scope table bounds every host — five ordered
+checks run inside `HttpExecutor` before any request reaches the wire
+(`engine/crucible/framework/v2/common/ethics.py:104-136, 283-303`;
+`engine/crucible/framework/v2/agents/scope_gate.py`); and a **categorical protected-domain floor**
+covering government, military, educational and intergovernmental domains, evaluated before any other
+gate with Unicode-homoglyph folding, default ON and owner-only to disable
+(`packages/core/vigil_core/vigil_core/hard_guardrail.py:1-31, 239-246`). Inside the in-process egress
+guard this same protected-domain floor also runs **unconditionally** — including under the default
+`PERMISSIVE` tier (`engine/crucible/framework/v2/agents/egress_guard.py:254-281`).
+
+The third is **not** independent of the sovereignty tier and does **not** fire on the default path: a
+**runtime host allowlist** on the offense httpx transport. Under a sovereign tier it refuses any host
+outside the charter scope, LLM hosts, provisioned collector hosts (held disjoint from target hosts by
+construction, `egress_guard.py:80-93`) or explicit extras. But under the default `PERMISSIVE` tier it
+**logs and passes everything through** (`egress_guard.py:265-266`, where `strict = tier != Tier.PERMISSIVE`,
+`engine/crucible/framework/v2/kernel/sovereignty.py:260-262`); and for target traffic it is wired only
+when `HttpExecutor.egress_allowlist` is set, which **defaults to `None`**
+(`engine/crucible/framework/v2/agents/http_executor.py:257`), the transport being installed only in
+that case (`:658-663`). So on a default deployment the charter/scope gate and the protected-domain floor
+are the operative controls; the host allowlist is defence in depth that engages once a sovereign tier is
+selected. `ACCEPTABLE-USE.md` § 4 and `docs/legal/DATA-GROUND-TRUTH.md` § 2.2 state this the same way.
 
 ### 5.3 Parties the operator should treat as sub-processors (or their local equivalent)
 

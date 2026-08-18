@@ -302,7 +302,11 @@ sub-processor for the purposes of the data-processing terms. See `dpa.md` § 8.
 (`engine/crucible/framework/v2/kernel/sovereignty.py:183-195`). A value stored in the Operator's
 `~/.sigil/sigil.env` or on the UI Settings screen governs an offense process only when that process
 was launched through the sovereign bridge, i.e. `vigil up`, which injects the allowlisted variables
-into the offense children it spawns (`integration/vigil_integration/uiproxy.py:1631, 1712-1739`). An
+into the offense children it spawns (`integration/vigil_integration/uiproxy.py:1631, 1712-1739`) —
+resolved **once**, at `vigil up` start (`:2104`). A tier changed on the Settings screen while the UI is
+already running therefore reaches only the offense children of a *subsequent* `vigil up`; a run launched
+from the UI in the meantime keeps the tier the UI started with, and `vigil up` (or the `vigil-command`
+service) must be restarted for the change to take effect. An
 offense process started any other way — `vigil engage` from a shell, the engine CLI, a systemd unit
 or container that does not export the variable — does not see it and falls back to `PERMISSIVE`
 **silently. This failure mode is fail-open.** The read-only tier pill on the UI's Governance & Gate

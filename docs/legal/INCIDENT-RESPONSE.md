@@ -46,22 +46,42 @@ the ledger cannot un-halt it, and a replayed old release is refused
 where `--reason` is recorded on the ledger).
 Perception and memory-read stay alive by design; this is not a global process kill.
 
-**2. Take the interfaces down.**
+**2. Take the interfaces down.** **If the command UI is installed as a systemd unit, `vigil down` alone
+will not hold — stop and disable the unit.** The shipped `infra/systemd/vigil-command.service` runs
+`vigil up` under `Restart=always` / `RestartSec=5` (lines 51, 60-61), and its own install steps
+`systemctl --user enable --now` it, so a bare `vigil down` is undone by systemd within ~5 seconds: the
+proxy and both plane backends return before you reach step 3. It is a **user** unit, so:
 
 ```
+# If installed as a service — do this FIRST; it runs the unit's own `vigil down` and stops the restart loop:
+systemctl --user disable --now vigil-command.service   # stop + prevent restart at boot and login
+# The by-hand case (a `vigil up` you started in a terminal, no unit):
 vigil down                 # stops a running `vigil up` — backends and proxy
 vigil services down        # stops the gateway container and root services
 ```
 
-(`integration/vigil_integration/cli.py:1458-1462, 2392-2395`; services at `:1417-1420, 2369`.)
+`systemctl --user disable --now` runs the unit's `ExecStop=vigil down` and removes it from
+`default.target` in one step, so it does not come back on the next login or reboot. Use the plain
+`vigil down` only for a `vigil up` you launched by hand. If you enabled linger for boot-without-login
+(`loginctl enable-linger`, per the unit's install notes), also run `loginctl disable-linger "$USER"`.
+(`integration/vigil_integration/cli.py:1458-1462, 2392-2395`; services at `:1417-1420, 2369`;
+`infra/systemd/vigil-command.service:51, 60-61`.)
 
-**3. Close the remote paths.** Stop the units you deployed — the command UI
-(`infra/systemd/vigil-command.service`), the cockpit (`apps/sigil/deploy/systemd/sigil-cockpit.service`)
-and the phone bridge (`apps/sigil/deploy/systemd/sigil-bridge@.service`) — and bring down the tunnel
-itself (WireGuard/Tailscale) and any reverse proxy in front of it. VIGIL never binds a public
-interface; remote reach exists only through a tunnel plus reverse proxy you configured
-(`docs/DEPLOY.md`, "Hosting on a server you own"), so shutting the tunnel closes the path even if a
-service is still running.
+**3. Close the remote paths.** The command UI unit was handled in step 2. Stop the remaining units you
+deployed — the cockpit (`apps/sigil/deploy/systemd/sigil-cockpit.service`) and the phone bridge
+(`apps/sigil/deploy/systemd/sigil-bridge@.service`), both **user** units on `Restart=on-failure` (a
+clean stop holds — on-failure does not restart a clean stop — but `disable` keeps them down across a
+reboot):
+
+```
+systemctl --user disable --now sigil-cockpit.service
+systemctl --user disable --now sigil-bridge@<instance>.service   # each instance you enabled, e.g. sigil-bridge@10.13.13.1.service
+```
+
+Then bring down the tunnel itself (WireGuard/Tailscale) and any reverse proxy in front of it. VIGIL
+never binds a public interface; remote reach exists only through a tunnel plus reverse proxy you
+configured (`docs/DEPLOY.md`, "Hosting on a server you own"), so shutting the tunnel closes the path
+even if a service is still running.
 
 **4. Revoke every credential you can revoke locally.**
 
@@ -107,7 +127,9 @@ export CRUCIBLE_SOVEREIGNTY_SEALED=1
 from the process environment and from nowhere else
 (`engine/crucible/framework/v2/kernel/sovereignty.py:183-195`); a value stored in that file reaches an
 offense process only when `vigil up` launched it and injected the allowlisted variables
-(`integration/vigil_integration/uiproxy.py:1631, 1712-1739`). Anything else — `vigil engage` from a
+(`integration/vigil_integration/uiproxy.py:1631, 1712-1739`) — and only as of that start: the runtime
+environment is resolved once at bring-up (`:2104`), so changing the tier in Settings after `vigil up`
+started does not reach an already-running offense child. Anything else — `vigil engage` from a
 shell, the engine CLI, a unit that does not export the variable — falls back to `PERMISSIVE`
 **silently. This failure mode is fail-open**, which is exactly the wrong failure during containment.
 Restart the running processes after exporting it, and confirm the result on the read-only tier pill on
@@ -156,14 +178,28 @@ the spine DEK sealed under a passphrase (`apps/sigil/sigil/backup.py:1-33`) — 
 matters, and the passphrase is never stored: lose it and the backup is unrecoverable by design
 (`:31-33`).
 
+**Preserve the usage ledger's anti-back-dating anchor together with the ledger.** The monotonic floor
+is persisted to `<base_dir>/attest-anchor.json` — **inside the same base directory as the ledger**
+(`integration/vigil_integration/live/wiring.py:305-307`), not to a separate external location. A copy
+of the ledger taken without the anchor loses the reference that makes a later truncation detectable, and
+a `rm -rf .vigil-live` destroys both at once. Copy `<base_dir>/usage-ledger.jsonl` **and**
+`<base_dir>/attest-anchor.json` off-host together, before any cleanup, if they are to serve as evidence.
+
 Two properties help an investigator, and are worth stating in the incident record:
 
 - A **failed** `sigil verify` or a `ROLLBACK` report is itself a finding: the chain and the external
   floor are what make tampering visible (`apps/sigil/sigil/config.py:98-101`).
-- The **usage-attestation ledger** is append-only and hash-chained with a monotonic anti-back-dating
-  counter outside it at `~/.vigil/attestation/`
-  (`integration/vigil_integration/attestation/anchor.py:37`), so a deleted or truncated ledger is
-  detectable rather than silent.
+- The **usage-attestation ledger** is append-only and hash-chained, and its records carry a monotonic
+  anti-back-dating counter whose floor is persisted to `<base_dir>/attest-anchor.json` — the **same**
+  directory as the ledger itself (`integration/vigil_integration/live/wiring.py:305-307, 319`;
+  `integration/vigil_integration/attestation/ledger.py:176`), **not** an external location. So a
+  *truncation* of a ledger that is still present is detectable (the floor stands above the surviving
+  records), but a *deletion of the base directory* is **not**: `rm -rf .vigil-live` removes the anchor
+  and the ledger together, leaving nothing to detect the loss against. The module default
+  `~/.vigil/attestation/` (`integration/vigil_integration/attestation/anchor.py:37`) applies only to a
+  caller that injects no state path (`anchor.py:105`); the live wiring always injects the base-dir path,
+  so that external location is not used here. Preserve `<base_dir>/attest-anchor.json` off-host
+  **alongside** the ledger (see §2.2) before any cleanup.
 
 ### 2.3 Assess what was exposed
 

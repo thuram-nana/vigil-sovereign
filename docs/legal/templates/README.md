@@ -40,7 +40,10 @@ Do not delete the header. Do not send one to a client without a lawyer having re
    `CRUCIBLE_SOVEREIGNTY_TIER` from the process environment and from nowhere else
    (`engine/crucible/framework/v2/kernel/sovereignty.py:183-195`); a value stored only in
    `~/.sigil/sigil.env` or on the UI Settings screen reaches an offense process only when `vigil up`
-   launched it, and any other process falls back to `PERMISSIVE` **silently — fail-open**. Export it
+   launched it — and only as of that start, since the runtime env is resolved once at bring-up
+   (`integration/vigil_integration/uiproxy.py:2104`), so a tier changed in Settings while the UI is
+   already running takes effect only on the next `vigil up`, not on a run already launched from the UI.
+   Any other process falls back to `PERMISSIVE` **silently — fail-open**. Export it
    in the environment of every process that runs the engagement, then confirm it on the read-only
    tier pill on the UI's Governance & Gate Audit screen (`#/governance`). See `/PRIVACY.md` § 5.1a.
 4. **Charter written** at `targets/<slug>/charter.md`, matching the authorization letter field for

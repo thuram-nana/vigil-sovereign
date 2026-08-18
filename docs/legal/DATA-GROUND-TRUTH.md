@@ -104,8 +104,15 @@ whose identity has no signing fingerprint *and* no human handle
 (`integration/vigil_integration/attestation/models.py:40-45`) — i.e. the personal handle is
 structurally required, not incidental.
 
-A monotonic anti-back-dating counter lives at `~/.vigil/attestation/`
-(`integration/vigil_integration/attestation/anchor.py:37`).
+A monotonic anti-back-dating counter accompanies the ledger. Its floor is persisted to
+`<base_dir>/attest-anchor.json` — the **same** directory as the ledger above
+(`integration/vigil_integration/live/wiring.py:305-307, 319`;
+`integration/vigil_integration/attestation/ledger.py:176`) — so it detects a *truncation* of a ledger
+that is still present, but it does **not** survive removal of the base directory: `rm -rf .vigil-live`
+deletes anchor and ledger together. `~/.vigil/attestation/`
+(`integration/vigil_integration/attestation/anchor.py:37`) is only the module default for a caller that
+injects no state path (`anchor.py:105`); the live wiring always injects the base-dir path, so the
+external location is not used here.
 
 ### 1.4 Cryptographic key material
 
@@ -285,13 +292,21 @@ distinct cases:
 | Mechanism | Reaches | Evidence |
 |---|---|---|
 | Exported in the shell / systemd unit / container that launches the process | **Every** process launched from it. Highest precedence — `_load_env_file` merges with `setdefault`, so the real environment wins | `sovereignty.py:183-195`; `apps/sigil/sigil/config.py:64-88` |
-| Written to `~/.sigil/sigil.env`, or set on the UI Settings screen (which writes that file) | Offense processes launched **through the sovereign settings bridge** — in practice `vigil up`, which calls `sigil settings export-runtime-env` in the sovereign venv and injects the allowlisted vars into its offense children | `apps/sigil/sigil/ui/settings.py:339-348, 630-659, 849-872`; `integration/vigil_integration/uiproxy.py:1631, 1712-1739` |
+| Written to `~/.sigil/sigil.env`, or set on the UI Settings screen (which writes that file) | Offense processes launched **through the sovereign settings bridge** — in practice `vigil up`, which calls `sigil settings export-runtime-env` in the sovereign venv and injects the allowlisted vars into its offense children — resolved **once**, at that `vigil up`'s bring-up (`integration/vigil_integration/uiproxy.py:2104`), so a change made on the Settings screen while the UI is running reaches only the offense children of a *subsequent* `vigil up`, not a run already launched from the UI | `apps/sigil/sigil/ui/settings.py:339-348, 630-659, 849-872`; `integration/vigil_integration/uiproxy.py:1631, 1712-1739, 2104` |
 | Neither — e.g. `vigil engage` from a shell, `python3 -m framework.v2 …`, a unit that does not export it | **Nothing.** The process falls through to `PERMISSIVE` | `sovereignty.py:183-195` |
 
 **The third row is fail-OPEN and silent.** Nothing warns that a tier stored in `sigil.env` was not
 applied; the run simply proceeds with cloud model egress permitted. A tier that must hold for every
 run on the host has to be exported in the environment those processes inherit, not only stored in
 `sigil.env`.
+
+**The second row also has a timing edge.** Because the sovereign bridge captures that runtime
+environment **once**, at `vigil up` start (`integration/vigil_integration/uiproxy.py:2104`; nothing
+re-reads `sigil.env` afterward, and the in-UI restart control replays the captured env at `:2130`), a
+tier changed on the Settings screen **while the UI is already running** does not reach the offense
+children already spawned. It applies only to a *subsequent* `vigil up`; a run launched from the UI in
+between keeps the tier the UI started with, and the Governance pill below will disagree with the
+Settings screen until `vigil up` (or the `vigil-command` service) is restarted.
 
 **The authoritative read-only check** is the tier pill on the UI's Governance screen
 (`#/governance`, `packages/vigil-ui/app.js:1803-1809`), fed by `sovereignty.current()` evaluated
@@ -300,7 +315,7 @@ run on the host has to be exported in the environment those processes inherit, n
 
 ### 2.2 Target traffic
 
-Gated by three independent things:
+Gated by two controls that apply on every run, plus a third that engages **only under a sovereign tier**:
 
 1. **A signed charter.** `require_charter_signed` refuses an unsigned charter
    (`engine/crucible/framework/v2/common/ethics.py:104-136`); `require_in_scope` refuses any host not
@@ -312,9 +327,16 @@ Gated by three independent things:
    the only OFF state is an explicit affirmative in `VIGIL_ALLOW_PROTECTED_DOMAINS`
    (`:239-246`), and turning it off is an owner-only action
    (`apps/sigil/sigil/governor/accounts.py:83; apps/sigil/sigil/ui/actions.py:60-69`).
-3. **A runtime egress allowlist** for httpx clients under any sovereign tier
-   (`engine/crucible/framework/v2/agents/egress_guard.py:1-44, 71-90`), with collector hosts held
-   disjoint from target hosts by construction (`:80-89`).
+3. **A runtime host allowlist** on the offense httpx transport — effective **only under a sovereign
+   tier**. Under the default `PERMISSIVE` tier it logs but does **not** refuse: the transport passes
+   every request through (`engine/crucible/framework/v2/agents/egress_guard.py:254-281`, the passthrough
+   at `:265-266`, where `strict = tier != Tier.PERMISSIVE`,
+   `engine/crucible/framework/v2/kernel/sovereignty.py:260-262`), and for target traffic it is wired
+   only when `HttpExecutor.egress_allowlist` is set, which **defaults to `None`**
+   (`engine/crucible/framework/v2/agents/http_executor.py:257, 658-663`). When it does enforce,
+   collector hosts are held disjoint from target hosts by construction (`egress_guard.py:80-93`). Unlike
+   (1) and (2), this is **not** operative on the default path — it is defence in depth once a sovereign
+   tier is chosen.
 
 Additionally, an opt-in **seccomp egress supervisor** can confine spawned scanner binaries to
 loopback (`integration/vigil_integration/live/egress_guard.py:1-31`). It is **default OFF**
