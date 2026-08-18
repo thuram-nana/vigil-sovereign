@@ -21,7 +21,11 @@ THREE invariants this holds:
      that will re-authorize its probe. This narrowing is DEFENSE-IN-DEPTH, not the authority: every
      probe on a promoted endpoint is STILL re-gated fail-closed at ``agents.tools.invoker._gate``
      (kill-switch → entitlement → charter-scope → destructive → egress). An out-of-scope node that
-     somehow slipped in would be refused there anyway.
+     somehow slipped in would be refused there anyway. The categorical protected-domain floor
+     (gov/mil/edu/IGO — :func:`vigil_core.hard_guardrail.is_hard_blocked`, default-ON, owner-
+     disableable via ``VIGIL_ALLOW_PROTECTED_DOMAINS``) is ALSO applied here, so a protected host
+     is removed from consideration even when it matches scope — the class is fenced at the
+     discovery→action keystone, mirroring the per-request gate.
   2. **A LEAD, never a fact.** Promotion writes a candidate ENDPOINT with an ``intel:promote:``
      provenance (GROUNDING_INTEL) — the oracle seam remains the SOLE fact authority; nothing here
      self-certifies. The endpoint is a place to LOOK, not a finding.
@@ -133,6 +137,7 @@ def promote_to_endpoints(world: "WorldModel | None", slug: str, *, seq: int | No
         return []
     try:
         from ..common.ethics import CharterMissing, extract_hostname, host_matches_scope, parse_scope
+        from vigil_core.hard_guardrail import is_hard_blocked, protected_guard_enabled
         from ..worldmodel.models import Node, NodeKind
     except Exception:
         return []
@@ -158,6 +163,17 @@ def promote_to_endpoints(world: "WorldModel | None", slug: str, *, seq: int | No
     def _consider(src_id: str, host: str, scheme: str, port: int | None) -> None:
         h = (host or "").strip().rstrip(".").lower()
         if not h or not host_matches_scope(h, scope):
+            return
+        # Categorical protected-domain floor (gov/mil/edu/IGO), the SAME default-ON,
+        # owner-disableable (``VIGIL_ALLOW_PROTECTED_DOMAINS``) predicate every live
+        # per-request gate runs (``scope_gate.validate_action`` step 0, ``ethics``,
+        # ``egress_guard``, ``intake.http``). Even an IN-SCOPE host is removed from
+        # consideration here so a roaming-discovered / asset-inferred protected host is
+        # never MINTED as an actionable ENDPOINT — the class is fenced at the discovery→
+        # action keystone, not merely refused later at probe time. The per-request gate
+        # still re-refuses it (invariant 1), so turning the guard OFF only relaxes this
+        # pre-filter, never the signed scope.
+        if protected_guard_enabled() and is_hard_blocked(h)[0]:
             return
         url = _url_for(h, scheme, port)
         if url is None:

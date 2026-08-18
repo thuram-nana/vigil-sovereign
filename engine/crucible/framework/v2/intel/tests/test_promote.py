@@ -284,3 +284,43 @@ def test_empty_scope_returns_empty(charter):
     w = _world()
     _domain(w, "api.example.com")
     assert promote_to_endpoints(w, "t") == []
+
+
+# ---------------------------------------------------------------------------
+# categorical protected-domain floor (gov/mil/edu/IGO) is enforced AT PROMOTION
+#   — the discovery→action keystone removes the protected class from consideration,
+#     the same default-ON, owner-disableable floor every live per-request gate runs.
+# ---------------------------------------------------------------------------
+
+
+def test_categorical_floor_fences_protected_hosts_at_promotion(charter, monkeypatch):
+    """A recon-discovered ``.gov`` / ``.mil`` host that MATCHES the signed charter scope is still NOT
+    promoted to an actionable endpoint: the categorical floor removes the whole protected class from
+    consideration at the discovery→action keystone (defense-in-depth, mirroring the per-request gate).
+    A normal in-scope host beside it IS promoted (negative control — the floor must not over-block)."""
+    monkeypatch.delenv("VIGIL_ALLOW_PROTECTED_DOMAINS", raising=False)   # guard default-ON
+    # All three are explicitly IN scope, so host_matches_scope accepts each — only the categorical
+    # floor separates the protected pair from the legitimate host.
+    charter("g", ["www.agency.gov", "army.mil", "shop.example.com"])
+    w = _world()
+    _domain(w, "www.agency.gov")     # protected — must be fenced even though in scope
+    _domain(w, "army.mil")           # protected — must be fenced even though in scope
+    _domain(w, "shop.example.com")   # legitimate in-scope — must still promote
+    urls = {u for _, u in promote_to_endpoints(w, "g")}
+    assert "https://shop.example.com/" in urls               # negative control: not over-blocked
+    assert not any("agency.gov" in u for u in urls), urls    # .gov fenced at promotion
+    assert not any("army.mil" in u for u in urls), urls      # .mil fenced at promotion
+
+
+def test_categorical_floor_at_promotion_is_owner_disableable(charter, monkeypatch):
+    """The floor is DEFAULT-ON but owner-disableable, never a hardcoded policy: with the owner toggle
+    explicitly affirmative (``VIGIL_ALLOW_PROTECTED_DOMAINS=1``) the same in-scope protected host
+    promotes again — proving the fence reads the same owner switch as every other gate."""
+    monkeypatch.setenv("VIGIL_ALLOW_PROTECTED_DOMAINS", "1")
+    charter("g2", ["www.agency.gov", "shop.example.com"])
+    w = _world()
+    _domain(w, "www.agency.gov")
+    _domain(w, "shop.example.com")
+    urls = {u for _, u in promote_to_endpoints(w, "g2")}
+    assert "https://www.agency.gov/" in urls                 # guard off → protected host promotes
+    assert "https://shop.example.com/" in urls
