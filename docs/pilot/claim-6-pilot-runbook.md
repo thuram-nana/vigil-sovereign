@@ -50,6 +50,47 @@ sigil accounts revoke alice             # alice's bearer no longer authenticates
 
 ---
 
+## Phase 1b — Strong per-user identity (keypair PoP · MFA/TOTP · optional password)
+
+**Goal:** move a user beyond bearer-only by binding a cryptographic identity and a second factor. These are
+**owner-only** enrollment **actions** (`manage_users`) on the sovereign action plane — `POST /api/action`
+with `{action, username, …}` (the Users & Roles screen drives the same actions). There is **no**
+`sigil accounts enroll-*` CLI verb; enrollment is owner-signed into the account grant, so it needs the owner
+key present. Do **not** confuse these with the create/assign/revoke CLI verbs in Phase 1.
+
+**1b.1 — Per-user keypair + challenge/response PoP login (`enroll_pubkey`):**
+
+- As the **owner**, enroll alice's Ed25519 public key: `POST /api/action` `{action:"enroll_pubkey",
+  username:"alice", user_pubkey:"<base64 raw ed25519 public key>"}`. It is owner-signed into her grant; an
+  account is bearer-only until enrolled.
+- As **alice**, log in by proof-of-possession (no bearer needed): `POST /api/login/challenge` → a single-use
+  server nonce; sign `DOMAIN_TAG + challenge` with her private key; `POST /api/login`
+  `{username:"alice", challenge, signature}` → a fresh session bearer is minted.
+
+**Expected pass:** the PoP login succeeds and returns a bearer. **Replaying** the same
+`{username, challenge, signature}` a second time is **refused (401)** — the challenge is consumed exactly
+once (reproduces audit row 10).
+
+**1b.2 — MFA / TOTP second factor (`enroll_totp`):**
+
+- As the **owner**, enroll TOTP for alice: `POST /api/action` `{action:"enroll_totp", username:"alice"}`.
+  The response carries an `otpauth://` **provisioning URI shown ONCE** — scan it into an authenticator now;
+  the secret is **sealed** at rest (owner vault) and is never recoverable from the spine. (Enrollment needs a
+  provisioned owner vault; if it is not, the action returns a clean "provision the vault" error.)
+- As **alice**, log in: `POST /api/login` now requires a valid current `totp` code **in addition** to her
+  method (bearer or PoP).
+
+**Expected pass:** a login **without** the code, or with a **stale** code, is **refused (401)**; the current
+code succeeds (reproduces audit row 11). The second factor is enforced only at `/api/login`, fail-closed.
+
+**1b.3 — Optional password login (`set_password`), if you want the weaker fallback:**
+
+- As the **owner**, `POST /api/action` `{action:"set_password", username:"alice", password:"…"}` — stored as
+  salted **scrypt** (`scrypt$…`); the plaintext never reaches the spine. Keypair PoP (1b.1) is the **stronger**
+  path; use a password only where a keypair is impractical.
+
+---
+
 ## Phase 2 — Bring up the shareable command UI, log in per-user
 
 **Goal:** confirm the command UI is a per-user boundary — no embedded owner credential, each user logs in
@@ -84,12 +125,40 @@ pass condition is a refusal.
 | **3.3 Owner token never reaches the browser** | As **alice**, request `/offense/` through the proxy; inspect the raw response body | the owner token is **absent** (redacted); alice cannot scrape and replay it |
 | **3.4 Revoked bearer stops working** | `sigil accounts revoke bob`; within the auth-cache TTL (≤30 s) bob's next request | **401** once the cache expires (note the ≤30 s revocation lag — this is expected, documented behavior) |
 | **3.5 Protected-domain guard is owner-only** | As **bob (operator)**, attempt to set `VIGIL_ALLOW_PROTECTED_DOMAINS` on | **refused** — only the owner (`toggle_protected_guard`) may change it |
+| **3.6 Per-action offense RBAC (console gate)** | As **bob (operator)** through `vigil up` — bob clears the coarse proxy floor because he holds `run_engagement` — POST an **owner-tier** offense action (e.g. `/offense/api/authority/provision`) | **403 / refused** — the proxy stamps a signed hop-assertion, the console verifies it, and `role_can("operator", "offense_authority")` is **false**. (A **viewer** is refused one step earlier at the proxy floor, which requires `run_engagement` for any mutation — that 403 is the coarse floor, not the S1 console gate.) |
+
+> **3.6 detail — the honest bound.** The per-action offense gate protects the **proxy-forwarded per-user
+> path**: a request that carries the offense **console token directly** (no hop-signed role) is
+> owner-equivalent by construction. That is the offense trust root, not a bypass — the pilot exercises the
+> path a shared-UI teammate actually takes (through `vigil up`), where the gate applies.
 
 > **3.5 detail — the guard is a global toggle, fail-safe ON.** With `VIGIL_ALLOW_PROTECTED_DOMAINS` unset
 > (or any non-affirmative value), the categorical `.gov/.mil/.edu/.int`(+IGO) pre-filter is **active**. Only
 > an explicit owner-signed affirmative turns it off, and doing so lifts the pre-filter for **all** protected
 > classes at once — it is not a per-host exception. Even off, the signed charter scope and the egress floor
 > remain in force. Do **not** turn it off for a pilot unless you are deliberately testing that path.
+
+---
+
+## Phase 3b — OIDC Relying Party (OPTIONAL — ships OFF by default)
+
+**Goal:** if the pilot includes SSO, confirm the OIDC RP is inert until enabled and that it never lets an
+external identity mint a role. **Skip this phase entirely for a default pilot** — with OIDC off there is
+nothing to test and the build is byte-identical to one without OIDC.
+
+- **Off (default):** `GET /api/oidc/login` returns **404** — the route is not registered, no egress.
+- **On (against an operator-run IdP on the private tunnel):** set `SIGIL_OIDC_ENABLED` (+ issuer / client-id
+  / JWKS / signing-algs) and restart the cockpit. Then confirm the two soundness properties:
+  - A **verified** OIDC identity that has **no owner-signed `governor.account`** → **refused**. The role is
+    taken from the owner-signed grant, **never** from an OIDC claim.
+  - A tampered `id_token` — `alg:none`, a bad signature, or a bad/replayed `nonce` — is **refused** (JWKS
+    asymmetric-only verification; single-use `state`↔`nonce`). (Reproduces audit row 12.)
+
+> **Honest bounds.** OIDC targets an **operator-run IdP reachable on the private tunnel** — pointing it at a
+> public cloud IdP breaks the air-gap. And the RP stops at returning the verified bearer as JSON: a browser
+> landing page that **auto-adopts** that bearer into a session **still needs `state`-browser-binding + PKCE**
+> (`docs/OIDC-RP.md`, "Required follow-on") — that step is **not** built, so treat OIDC here as an API-level
+> identity proof, not a wired browser SSO landing.
 
 ---
 
@@ -157,8 +226,13 @@ carries no plaintext secret; un-captured data survives `--force`.
 The pilot is a **pass** when all of the following hold, with evidence captured:
 
 - [ ] Phase 1: accounts created as owner-signed grants; bearers issued once.
+- [ ] Phase 1b (if exercised): keypair PoP login works and a replay is refused; a TOTP-enrolled account needs
+      its current code and a stale code is refused.
 - [ ] Phase 2: the served UI embeds no owner credential; each user logs in as themselves.
-- [ ] Phase 3: every negative control refuses (3.1–3.5), including the owner-token-never-in-browser check.
+- [ ] Phase 3: every negative control refuses (3.1–3.6), including the owner-token-never-in-browser check and
+      the viewer→owner-tier offense-action 403.
+- [ ] Phase 3b (only if OIDC enabled): off → routes 404; on → a verified identity with no owner-signed account
+      is refused and a forged/replayed `id_token` is refused.
 - [ ] Phase 4: a finding is oracle-confirmed and re-verifies offline; a tampered bundle is rejected.
 - [ ] Phase 5: backup + off-host push + recovery drill succeed; `--force` restore preserves un-captured data.
 - [ ] Phase 6: revocation and kill-switch behave as specified.
@@ -175,9 +249,14 @@ each of these back to the claim it verifies.
   authenticated only at connect. Plan the pilot's revocation test around that window.
 - **The command-UI proxy is a loopback / private-VIP listener**, not a hardened public gateway. Run the
   pilot behind the operator's own TLS edge; do not expose the proxy raw to the internet.
-- **Offense-plane authorization is coarse** (read vs. `run_engagement`). Per-action offense RBAC is not yet
-  built; owner-authority offense actions stay owner-gated on the sovereign plane.
+- **Per-action offense RBAC rides the proxy hop-assertion.** The offense console now maps each POST to a
+  permission (owner-tier `offense_authority` / operator-tier `run_engagement` / read-tier kill-switch trip),
+  enforced against a proxy-stamped HMAC hop-assertion — but a client holding the offense **console token
+  directly** (no hop-signed role) is **owner-equivalent** by construction. The gate protects the
+  proxy-forwarded per-user path (what a shared-UI teammate takes), not a direct console-token holder.
 - **The trust root is the owner key + the local accounts store.** The pilot proves the *access model*; it
-  does not remove those residual trust roots.
-- **Bearer tokens, not per-user keypairs.** The stronger cryptographic-identity replacement is named in the
-  dossier but not part of this foundation.
+  does not remove those residual trust roots. Keypair PoP (Phase 1b) proves possession of an **owner-bound**
+  key and OIDC (Phase 3b) maps to an **owner-signed** grant — both keep the owner at the root.
+- **Keypairs, MFA/TOTP, and OIDC (off-by-default) are built, but bearers remain the session carrier.** After
+  a PoP or OIDC login a bearer is minted and carries the session; and the OIDC **browser** landing
+  (`state`-binding + PKCE) is a **required follow-on that is not built** (`docs/OIDC-RP.md`).
