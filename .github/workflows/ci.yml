@@ -48,47 +48,6 @@ jobs:
     name: CRUCIBLE core on vigil_core
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      # Suites that existed, passed, and were NEVER RUN IN CI — the job hand-listed
-      # its paths and simply omitted these. `veracity` is the anti-fabrication layer:
-      # the product's central claim (no finding becomes a FACT without a re-executed
-      # deterministic proof) had ZERO CI coverage, so a regression in it could merge
-      # green. `planner` carries the flagship UTI -> ACP -> MAO -> report end-to-end
-      # test, which was RED on main precisely because nothing ran it.
-      #
-      # Cost of adding them here: ~9s of the job's ~8m. `framework/v2/eval` is the
-      # one expensive suite (~2.5 min: benchmark corpus + recall baselines + soak),
-      # so it is SPLIT into its own parallel `crucible-eval` job rather than dropped
-      # — crucible-core is the workflow's critical path and must not grow by 30%.
-      #
-      # Single source of truth: the guard step below and the pytest invocation both
-      # expand THIS variable, so a path can never be guarded-but-not-run (or run
-      # but not guarded). A NEW test file under an otherwise-uncovered directory
-      # belongs HERE for exactly that reason — hand-listing it in the pytest step
-      # alone would run it unguarded, so a path typo that collects ZERO tests would
-      # merge green (`framework/v2/agents` is not covered wholesale; only named
-      # files under it run).
-      #
-      # THE ACCURACY GATE IS HERE ON PURPOSE (test_recall_baseline / test_gate, ~50s of
-      # this job's ~8m). They also run in `crucible-eval`, which is now ALSO a required
-      # check — but keeping the decisive assertions here matters anyway: the product's
-      # accuracy claim (recall 1.0, precision 1.0, fp 0, fn 0, the committed core
-      # byte-identically reproduced, its Ed25519 signature verified against a source-pinned
-      # trust root) is enforced in CODE by this already-required job, independently of any
-      # branch-protection setting, which is a setting somebody can change. The expensive
-      # corpus/soak stays in crucible-eval so this job's critical path barely moves.
-      CRUCIBLE_UNCOVERED_SUITES: >-
-        framework/v2/veracity
-        framework/v2/kernel
-        framework/v2/planner
-        framework/v2/sensors
-        framework/v2/defender
-        framework/v2/memory
-        framework/v2/analysis
-        framework/v2/tools
-        framework/v2/agents/tests/test_engagement_library.py
-        framework/v2/eval/tests/test_recall_baseline.py
-        framework/v2/eval/tests/test_gate.py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -99,63 +58,38 @@ jobs:
           pip install -e packages/core/vigil_core \
             "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
             "cryptography>=42" packaging pytest pytest-httpserver pytest-asyncio
-      - name: coverage guard — every newly-listed suite must actually collect tests
+      - name: the whole engine v2 test tree (eval split to crucible-eval; every tests dir covered by construction)
         working-directory: engine/crucible
         env:
           PYTHONPATH: .
         run: |
-          # A test path that silently matches NOTHING is worse than not adding it: the
-          # job stays green and the log looks like coverage. pytest exits 5
-          # (EXIT_NOTESTSCOLLECTED) for a path that collects nothing and 4 for a path
-          # that does not exist, so this is a version-independent hard gate, and it
-          # prints the per-suite counts so the live run shows the coverage it bought.
-          set -uo pipefail
-          fail=0
-          total=0
-          for suite in $CRUCIBLE_UNCOVERED_SUITES; do
-            out="$(pytest "$suite" --collect-only -q 2>&1)"; rc=$?
-            n="$(printf '%s\n' "$out" | awk '
-              /^[^ ].*: [0-9]+$/ { s += $NF; seen = 1 }
-              /::/               { ids++ }
-              END                { if (seen) print s; else print ids + 0 }')"
-            if [ "$rc" -eq 5 ]; then
-              echo "::error::$suite collected ZERO tests — this path buys no coverage"
-              fail=1
-            elif [ "$rc" -ne 0 ]; then
-              echo "::error::$suite failed collection (pytest rc=$rc)"
-              printf '%s\n' "$out" | tail -n 40
-              fail=1
-            else
-              echo "  $suite -> $n test(s)"
-              total=$((total + n))
-            fi
-          done
-          echo "newly-covered suites collect $total test(s)"
-          [ "$fail" -eq 0 ]
-      - name: evidence + entitlement + verify + worldmodel + confidence + authority + console/api (UI federation) + AEGIS gate-invariants + deferred-infra scaffolds (G1/X1-X3) + veracity/kernel/planner/sensors/defender/memory/analysis
-        working-directory: engine/crucible
-        env:
-          PYTHONPATH: .
-        run: |
-          # framework/v2/scanner carries the probe + oracle-predicate suites (open-redirect / CORS /
-          # host-header / SSO co-location, the inert-markup content models, the parse-time bounds and the
-          # tokenizer differential). They were absent from CI, so a soundness regression in a shipped
-          # predicate could merge green — exactly the class this wave had to fix.
+          # Run the WHOLE framework/v2 tree, NOT a hand-maintained path list. A hand list silently DRIFTED:
+          # of the 40 test directories under framework/v2 only a subset were named, so ~13 suites
+          # (agents/tools, imports, improve, intake, intruder, knowledge, mcp, plugins, repeater,
+          # socialdefense, the top-level framework/v2/tests, plus most of agents/ and intel/) never ran in CI
+          # at all. "A skipped proof and a passing proof are the same colour on a dashboard." Wholesale means
+          # a NEW suite is AUTO-INCLUDED and can only fail loudly, never silently skip; a path that collects
+          # nothing makes pytest exit 5 and fails the job — coverage by construction.
           #
-          # $CRUCIBLE_UNCOVERED_SUITES appends the directories that were omitted from this
-          # hand-maintained list entirely (see the job env above for why each matters).
-          pytest framework/v2/evidence framework/v2/entitlement framework/v2/common \
-                 framework/v2/scanner \
-                 framework/v2/verify framework/v2/confidence framework/v2/worldmodel \
-                 framework/v2/calibration framework/v2/authority \
-                 framework/v2/console framework/v2/api framework/v2/report \
-                 framework/v2/graph framework/v2/attest \
-                 framework/v2/remediation_binary framework/v2/agent_body \
-                 framework/v2/aegis \
-                 framework/v2/agents/tests/test_agent_message.py \
-                 framework/v2/intel/tests/test_vulnfeed.py \
-                 framework/v2/knowledge_engine \
-                 $CRUCIBLE_UNCOVERED_SUITES -q
+          # framework/v2/tests/test_ci_crucible_core_covers_all_suites.py is the coverage guard: it runs
+          # inside THIS very pytest invocation and asserts every framework/v2/**/tests dir is covered here or
+          # is one of the two documented --ignore exclusions below (its KNOWN_EXCLUDED set must EQUAL them, so
+          # an undocumented ignore — a silent dark dir — fails the run).
+          #
+          # Two documented exclusions (see that guard's KNOWN_EXCLUDED for the full reasons):
+          #   * eval — the one expensive suite (~2.5 min: corpus + committed recall/precision baselines +
+          #     determinism re-run + soak). It runs WHOLESALE in the separate, also-required `crucible-eval`
+          #     job; --ignore'd here to avoid double-running it (the accuracy gate stays required, via that
+          #     job).
+          #   * console/.../test_chat_inject.py — imports the vigil_integration (integration/) package at RUN
+          #     time (unlike its console siblings, which module-level importorskip it and skip cleanly).
+          #     crucible-core deliberately does not install the integration package (two-env boundary), so
+          #     these 4 tests only pass when scanner's test_claim_discipline happens to run first and inserts
+          #     integration/ onto sys.path — a fragile cross-suite ordering the wholesale (filesystem-order)
+          #     run does not provide. Excluded so this job stays order-independent.
+          pytest framework/v2 \
+                 --ignore=framework/v2/eval \
+                 --ignore=framework/v2/console/tests/test_chat_inject.py -q
 
   crucible-eval:
     name: CRUCIBLE eval + benchmark corpus
@@ -230,7 +164,8 @@ jobs:
         with:
           python-version: "3.13"
       - name: install nftables
-        run: sudo apt-get update && sudo apt-get install -y nftables
+        # bounded retry-with-backoff so a transient apt mirror blip self-heals within the timeout (#556)
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/apt-retry.sh" nftables
       - name: install deps (vigil_core + framework scope reuse)
         run: |
           pip install -e packages/core/vigil_core \
@@ -241,7 +176,9 @@ jobs:
           if [ -d gateway/tests ]; then
             PYTHONPATH=gateway python -m pytest gateway/tests -q
           else
-            echo "gateway/ not present on this ref (pre-merge) — nothing to test"
+            # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
+            # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
+            echo "::error::gateway/tests missing from the checkout"; exit 1
           fi
 
   integration:
@@ -273,7 +210,8 @@ jobs:
         # install a package, the tests would skip exactly as before, and the "fixed" claim would be
         # believed. That is the same failure this step exists to end.
         run: |
-          sudo apt-get update && sudo apt-get install -y bubblewrap
+          # bounded retry-with-backoff so a transient apt mirror blip self-heals within the timeout (#556)
+          bash "${GITHUB_WORKSPACE}/.github/scripts/apt-retry.sh" bubblewrap
           # UBUNTU 24.04 BLOCKS THE THING BWRAP NEEDS, and this is not theoretical: the first CI run of
           # this step failed with "bwrap cannot construct namespaces here". Noble ships
           # kernel.apparmor_restrict_unprivileged_userns=1, which denies unprivileged user namespaces —
@@ -469,7 +407,9 @@ jobs:
               integration/tests/test_backup_recovery_drill.py \
               integration/tests/test_mesh_cicd_posture.py -q
           else
-            echo "integration/ not present on this ref (pre-merge) — nothing to test"
+            # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
+            # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
+            echo "::error::integration/tests missing from the checkout"; exit 1
           fi
 
   strix-vigil:
@@ -492,7 +432,9 @@ jobs:
           if [ -d vendor/strix/tests_vigil ]; then
             PYTHONPATH=vendor/strix python -m pytest vendor/strix/tests_vigil -q
           else
-            echo "vendor/strix/tests_vigil not present on this ref (pre-merge) — nothing to test"
+            # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
+            # vendored monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
+            echo "::error::vendor/strix/tests_vigil missing from the checkout"; exit 1
           fi
 
   sigil-governor:
@@ -539,7 +481,9 @@ jobs:
               --ignore=apps/sigil/tests/test_robustness.py \
               --ignore=apps/sigil/tests/test_graph.py -q
           else
-            echo "apps/sigil offense-gate tests not present on this ref (pre-merge) — nothing to test"
+            # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
+            # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
+            echo "::error::apps/sigil/tests/test_offense_gate.py missing from the checkout"; exit 1
           fi
 
   sigil-lint:
@@ -595,7 +539,9 @@ jobs:
             # model-checks each faithful spec (must hold) AND each mutant (must be caught).
             bash formal/check.sh
           else
-            echo "formal/ not present on this ref (pre-merge) — nothing to check"
+            # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
+            # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
+            echo "::error::formal/check.sh missing from the checkout"; exit 1
           fi
 
   warden-kernel:
@@ -616,5 +562,7 @@ jobs:
             cargo test
             cargo build --release
           else
-            echo "apps/sigil/kernel not present on this ref (pre-merge) — nothing to test"
+            # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
+            # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
+            echo "::error::apps/sigil/kernel/Cargo.toml missing from the checkout"; exit 1
           fi
