@@ -20,9 +20,12 @@ proof material, against a GENUINE stdlib loopback HTTP target (the same pattern 
   * the OFF path is unchanged — no flag ⇒ ``verify_oracle`` is None (byte-identical behaviour);
   * a PATCHED, challenge-echoing deployment earns a SIGNED remediation and exit 0;
   * a STILL-FIRING deployment is never remediated;
-  * **an ANSWERED response that does NOT establish reachability of the vulnerable endpoint** (a 403 WAF block
-    page / 404 that never echoes this run's freshness challenge) is ``unverified`` and exits non-zero — never
-    a signed remediation. This is the hole an offline-only positive control leaves open;
+  * **an ANSWERED but NON-ECHOING response** (a 403 WAF block page / a 404 that reflects nothing) is
+    ``unverified`` and exits non-zero — never a signed remediation. This is the ONE hole the freshness floor
+    closes; the ECHOING case is a KNOWN RESIDUAL, pinned below by a test that demonstrates it minting, so the
+    documented limit and the behaviour cannot drift apart;
+  * a finding whose injectable param IS the freshness-challenge param (``rc``) REFUSES before anything is
+    patched — a collision would silently drop the exploit payload and guarantee the oracle's silence;
   * a dead target is ``unverified``;
   * ``--verify-base-url`` without ``--open-pr`` WARNS on stdout and exits non-zero (it does not refuse);
   * ``--finding-ref`` can never redirect the verification at ANOTHER finding's retained positive control;
@@ -89,6 +92,19 @@ class _Handler(BaseHTTPRequestHandler):
         q = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
         exploit_present = any(v for v in q.get("q", []))
         nonce = (q.get("rc") or [""])[0]
+        if srv.mode == "echoing-404":
+            # ANSWERED, ECHOING, and NOT the application: a 404 page that reflects the request URI (so this
+            # run's nonce comes back) while nothing ever reaches the injectable sink. It satisfies the
+            # F1_TARGET_ECHOES floor without establishing that the app or the vulnerable endpoint was
+            # reached. This is the DOCUMENTED RESIDUAL, not a closed case.
+            raw = (f"<html><h1>404 Not Found</h1><p>No handler for "
+                   f"{self.path}</p></html>").encode("utf-8")
+            self.send_response(404)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         if srv.mode == "blocked":
             # ANSWERED, but by something that is NOT the vulnerable endpoint: a WAF/blocklist page. It never
             # reflects the run challenge, so this run establishes NO reachability of the injectable sink.
@@ -119,7 +135,8 @@ class _Server(ThreadingHTTPServer):
 
 
 def _start(mode: str) -> _Server:
-    """mode: 'patched' (benign + echo) · 'vulnerable' (datastore error + echo) · 'blocked' (403, NO echo)."""
+    """mode: 'patched' (benign + echo) · 'vulnerable' (datastore error + echo) · 'blocked' (403, NO echo) ·
+    'echoing-404' (404 that reflects the request URI — answered AND echoing, but NOT the app)."""
     srv = _Server(("127.0.0.1", 0), _Handler)
     srv.mode = mode  # type: ignore[attr-defined]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -594,6 +611,65 @@ def test_a_malformed_verify_url_refuses(gated_home, recorder, capsys):
 
 
 # ============================ no user-facing overclaim about the retained material ============================
+def _flat(text: str) -> str:
+    """Whitespace-normalised text, so an assertion on a sentence is not defeated by line wrapping (docstrings
+    wrap at 110 cols; argparse re-wraps help to the terminal width)."""
+    return " ".join(str(text or "").split())
+
+
+def _verb_refusal_with_no_retained_material(argv, capsys, tmp_path, home):
+    """Drive ONE verb with its retained-material lookup pointed at an EMPTY run dir, and return (rc, err).
+    Every verb refuses on that lookup BEFORE it validates the live target, so no traffic is sent."""
+    empty = tmp_path / f"empty-{abs(hash(tuple(argv))) % 10 ** 8}"
+    empty.mkdir(exist_ok=True)
+    args = build_parser().parse_args([*argv, "--base-dir", str(home), *_RUNDIR_FLAG[argv[0]], str(empty)])
+    rc = args.func(args)
+    cap = capsys.readouterr()
+    return rc, cap.err
+
+
+# every verb in cli.py that reads proofs/reverifiable.json, with the flag that names its lookup root.
+_RUNDIR_FLAG = {"patch": ("--verify-run-dir",), "remediate": ("--run-dir",), "reprove": ("--run-dir",)}
+_EVERY_REVERIFIABLE_VERB = {
+    "patch": ["patch", "--from-spine", SLUG, "--verify-base-url", "http://127.0.0.1:9/"],
+    "remediate": ["remediate", "--prove", "--from-spine", SLUG, "--target-base-url", "http://127.0.0.1:9/"],
+    "reprove": ["reprove", "--once", "--from-spine", SLUG, "--target-base-url", "http://127.0.0.1:9/"],
+}
+
+
+def test_the_reverifiable_reader_list_is_complete():
+    """The claim above is "EVERY verb that reads proofs/reverifiable.json" — so the list must not be a
+    hand-maintained one that silently goes stale. Derive the readers from cli.py's own AST: if a FOURTH
+    reader appears, this fails and forces it into the parametrised coverage below."""
+    import ast
+
+    import vigil_integration.cli as _cli
+
+    src = Path(_cli.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    readers = {n.name for n in tree.body
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and "read_reverifiable" in ast.get_source_segment(src, n)}
+    # _build_patch_fix_oracle is the `patch` verb's reader; the other two read it inline.
+    assert readers == {"_build_patch_fix_oracle", "_cmd_remediate", "_cmd_reprove"}, readers
+    assert set(_EVERY_REVERIFIABLE_VERB) == {"patch", "remediate", "reprove"}
+
+
+@pytest.mark.parametrize("verb", sorted(_EVERY_REVERIFIABLE_VERB))
+def test_no_verb_claims_the_positive_control_cannot_be_fabricated(verb, gated_home, tmp_path, capsys):
+    """proofs/reverifiable.json is UNSIGNED local run output for EVERY verb that reads it — not just
+    `vigil patch`. None of them may tell the operator the positive control 'cannot be fabricated' (it can:
+    it is an unsigned local file), and each must carry the honest TRUST NOTE wording instead."""
+    argv = list(_EVERY_REVERIFIABLE_VERB[verb])
+    if verb == "patch":
+        argv += ["--target-repo", str(gated_home / "repo")]
+    rc, err = _verb_refusal_with_no_retained_material(argv, capsys, tmp_path, gated_home)
+    assert rc == 2, (verb, rc, err)
+    assert "no retained re-verifiable proof material" in err, (verb, err)
+    assert "cannot be fabricated" not in _flat(err), (verb, err)
+    assert "UNSIGNED local run output" in _flat(err), (verb, err)
+
+
 def test_no_unfabricable_positive_control_claim_and_the_trust_note_is_carried(gated_home, recorder, capsys):
     """proofs/reverifiable.json is UNSIGNED local run output. The refusal text must not claim the positive
     control 'cannot be fabricated', and the sibling verb's TRUST NOTE must be carried onto this path."""
@@ -616,3 +692,162 @@ def test_no_unfabricable_positive_control_claim_and_the_trust_note_is_carried(ga
         build_parser().parse_args(["patch", "--help"])
     txt = buf.getvalue()
     assert "OVERWRITING" in txt and "UNSIGNED LOCAL RUN OUTPUT" in txt
+
+
+# ================= the nonce-param collision: a finding whose injectable param IS `rc` =================
+def test_a_finding_whose_param_is_the_nonce_param_refuses_before_anything_is_patched(
+        gated_home, recorder, capsys):
+    """BLOCK regression (a concrete FALSE-REMEDIATED path). The re-drive carries the per-run freshness
+    challenge on a SEPARATE query param, hard-coded `rc`, while the exploit rides the finding's own
+    injectable param. If the finding's param IS literally `rc` the two collide in the re-drive URL and the
+    challenge OVERWRITES the exploit payload: the exploit is never sent, so oracle silence says nothing about
+    a fix — yet that silence WAS minted as a SIGNED remediation (state REMEDIATED, exit 0) over a
+    still-vulnerable target on the pre-fix code. It must REFUSE before anything is proposed, cloned, applied
+    or opened."""
+    octx = _error_context(_ORIG_SQL_ERROR)
+    octx["payload_param"] = "rc"                     # the collision
+    octx["request_payload"] = "x' OR '1'='1"
+    _write_reverifiable(gated_home, oracle_context=octx)
+    rc, out, err = _patch(["--verify-base-url", "http://127.0.0.1:9/"], capsys, gated_home)
+    assert rc == 2, (rc, out, err)
+    assert "freshness challenge" in err and "OVERWRITE the exploit payload" in _flat(err), err
+    assert recorder == [], "the ladder ran: something was proposed/cloned/applied before the refusal"
+    assert _cert_state(gated_home) == "(no certificate)"
+    assert "remediated" not in out
+
+
+def test_the_sibling_verbs_refuse_the_same_collision(gated_home, tmp_path, capsys):
+    """`vigil remediate` and `vigil reprove` build the SAME adapter with the SAME hard-coded `rc` nonce
+    param, so they carry the identical defect. Both must refuse it as a pre-flight, before target traffic."""
+    octx = _error_context(_ORIG_SQL_ERROR)
+    octx["payload_param"] = "rc"
+    octx["request_payload"] = "x' OR '1'='1"
+    _write_reverifiable(gated_home, oracle_context=octx)
+    for verb, argv in (("remediate", ["remediate", "--prove", "--from-spine", SLUG]),
+                       ("reprove", ["reprove", "--once", "--from-spine", SLUG])):
+        args = build_parser().parse_args(
+            [*argv, "--base-dir", str(gated_home), "--target-base-url", "http://127.0.0.1:9/"])
+        rc = args.func(args)
+        cap = capsys.readouterr()
+        assert rc == 2, (verb, rc, cap.out, cap.err)
+        assert "OVERWRITE the exploit payload" in _flat(cap.err), (verb, cap.err)
+
+
+def test_both_live_adapters_refuse_a_param_nonce_collision_at_construction(monkeypatch):
+    """Defence in depth: the guard lives in the ADAPTERS too, so every caller inherits it — not only the
+    three CLI verbs. `LiveHttpAdapter` drops the exploit payload on a collision; `DifferentialHttpAdapter`
+    drops the baseline/true/false value from EVERY round, which would make the rounds identical and the SPRT
+    refute trivially — both are false-'remediated' paths."""
+    from vigil_integration.remediation.differential_adapter import DifferentialHttpAdapter
+    from vigil_integration.remediation.live_adapter import LiveHttpAdapter
+
+    with pytest.raises(ValueError, match="MUST differ"):
+        LiveHttpAdapter(executor=None, base_url="http://127.0.0.1/", endpoint_path="/search", param="rc",
+                        payload="x' OR '1'='1", nonce_param="rc", original_firing_context={"bug_class": BUG})
+    with pytest.raises(ValueError, match="MUST differ"):
+        DifferentialHttpAdapter(
+            executor=None, base_url="http://127.0.0.1/", endpoint_path="/search", param="rc",
+            nonce_param="rc", base_value="1", true_payload_template="1 AND 1=1 -- {challenge}",
+            false_payload_template="1 AND 1=2 -- {challenge}")
+    # ...and the legitimate, non-colliding construction is untouched.
+    ok = LiveHttpAdapter(executor=None, base_url="http://127.0.0.1/", endpoint_path="/search", param="q",
+                         payload="x' OR '1'='1", nonce_param="rc",
+                         original_firing_context={"bug_class": BUG})
+    assert ok.param == "q" and ok.nonce_param == "rc"
+
+
+# ============ what F1 actually buys: the honest claim, and the residual it does NOT close ============
+def test_the_echoing_unrelated_responder_residual_is_real_and_is_documented_as_such(
+        gated_home, verifying_ladder, pr_provisioned, capsys):
+    """THE HONEST LIMIT, DEMONSTRATED — not merely asserted in prose.
+
+    The F1_TARGET_ECHOES floor establishes RESPONSIVENESS/FRESHNESS only: SOME responder returned this run's
+    nonce in the judged bytes. It does NOT establish that the responder was the application or that the
+    request reached the vulnerable endpoint. A 404 page that reflects the request URI therefore satisfies the
+    floor while nothing reaches the sink — and the run DOES mint a signed 'remediated' + exit 0.
+
+    This test pins that behaviour together with the docstrings that disclose it, so the code and the claim
+    cannot drift apart: if someone later closes this residual, this test fails and forces the doc to be
+    updated (rather than the doc quietly over-claiming again, which is what the last two rounds did)."""
+    from vigil_integration.cli import _build_patch_fix_oracle, _cmd_patch
+
+    srv = _start("echoing-404")
+    try:
+        rc, out, err = _patch(["--verify-base-url", _url(srv)], capsys, gated_home, extra=pr_provisioned)
+    finally:
+        srv.shutdown(); srv.server_close()
+    # The residual is REAL: an answered, echoing, unrelated responder mints a signed remediation.
+    assert rc == 0, (rc, out, err)
+    assert verifying_ladder[0]["verification"].remediated is True
+    assert _cert_state(gated_home) == "REMEDIATED"
+    # ...so BOTH docstrings must disclose it, in those words, prominently.
+    for doc in (_flat(_cmd_patch.__doc__), _flat(_build_patch_fix_oracle.__doc__)):
+        assert "KNOWN RESIDUAL" in doc, doc[:400]
+        assert "echoing 404" in doc.lower()
+        assert "did NOT fire over freshly captured bytes from the host the operator nominated" in doc
+
+
+def test_the_f1_guarantee_is_stated_honestly_and_the_old_overclaim_is_gone():
+    """Pin the WORDING of the headline claim in both docstrings. The previous round claimed the delegation
+    establishes that 'the ORIGINAL exploit no longer fires against THIS deployment' — which F1 does not
+    support (it does not attribute the echo to the application). The narrower true statement must stand."""
+    from vigil_integration.cli import _build_patch_fix_oracle, _cmd_patch
+
+    pdoc, odoc = _flat(_cmd_patch.__doc__), _flat(_build_patch_fix_oracle.__doc__)
+    for doc in (pdoc, odoc):
+        # the true, narrow statement
+        assert "RESPONSIVENESS" in doc and "FRESHNESS ONLY" in doc
+        assert "does NOT establish that the responder was the application" in doc \
+            or "does NOT prove the responder was the application" in doc
+        # and the false, broad one is gone
+        assert "the ORIGINAL exploit no longer fires against" not in doc
+        assert "the original exploit no longer fires against" not in doc
+    # the NON-echoing case IS closed, and the docs still say so (do not weaken the capability).
+    assert "unverified" in odoc and "freshness_echo_missing" in odoc
+    # the operator-facing flag help carries the same honesty, not just the source.
+    import contextlib
+    import io as _io
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
+        build_parser().parse_args(["patch", "--help"])
+    h = _flat(buf.getvalue())
+    assert "RESPONSIVENESS/FRESHNESS ONLY" in h
+    assert "NOT that it was your application" in h
+    assert "KNOWN RESIDUAL" in h
+
+
+def test_the_load_bearing_gates_are_named_and_the_self_minted_ones_are_disclosed():
+    """The soundness argument must not LEAD with gates that cannot fail here. The owner key, wielder keypair,
+    identity attestation and capability are minted and verified inside the same closure, so on THIS path they
+    carry no independent assurance; they matter to a third party verifying the emitted certificate."""
+    from vigil_integration.cli import _build_patch_fix_oracle
+
+    doc = _flat(_build_patch_fix_oracle.__doc__)
+    assert "WHICH GATES ARE LOAD-BEARING ON THIS PATH" in doc
+    for gate in ("CLASS CERTIFIABILITY", "BUDGET", "LIVE CONTROL", "FRESHNESS ECHO", "SILENT trials",
+                 "verify_prove_certificate"):
+        assert gate in doc, gate
+    assert "NOT load-bearing here" in doc
+    assert "MINTED INSIDE this same closure" in doc
+    assert "carry no independent assurance of anything HERE" in doc
+    # and the identity link is split honestly: continuity is real only for HTTPS.
+    assert "VACUOUS for a plain-HTTP one" in doc
+
+
+# ==================== --finding-ref: what it selects, on every verb that takes it ====================
+@pytest.mark.parametrize("verb", ["patch", "remediate", "reprove"])
+def test_finding_ref_help_never_claims_to_select_the_retained_entry(verb):
+    """`--finding-ref` selects the FACT FROM THE SPINE only. It can never redirect which retained
+    re-verifiable entry drives the proof, and a value disagreeing with the trusted finding's own ref is
+    REFUSED. `vigil remediate`'s help claimed the opposite ('also selects the matching re-verifiable
+    entry') after the guard made it false."""
+    import contextlib
+    import io as _io
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
+        build_parser().parse_args([verb, "--help"])
+    h = _flat(buf.getvalue())
+    assert "also selects the matching re-verifiable entry" not in h
+    assert "can NEVER redirect which retained re-verifiable entry drives" in h
+    assert "REFUSED" in h
+

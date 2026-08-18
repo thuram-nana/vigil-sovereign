@@ -91,6 +91,8 @@ class DifferentialHttpAdapter:
       * ``base_url`` — the target's scheme+host(:port); the target identity is derived from it.
       * ``endpoint_path`` / ``param`` — the injectable request.
       * ``nonce_param`` — a query param that ALWAYS also carries the run challenge (freshness / liveness).
+        MUST DIFFER from ``param`` (a collision silently overwrites the probe value — refused in
+        ``__post_init__``).
       * ``base_value`` — the benign value the parameter normally carries (the baseline probe; NO metachars).
       * ``true_payload_template`` / ``false_payload_template`` — the data-dependent TRUE / FALSE predicate
         payloads, each carrying the literal ``{challenge}`` inert-marker slot; metacharacter-identical in class.
@@ -163,6 +165,16 @@ class DifferentialHttpAdapter:
             raise ValueError("true/false payload templates differ ONLY in the {challenge} marker — the inert "
                              "freshness nonce must NOT be the discriminating predicate (spec §3/§6); the "
                              "data-dependent predicate difference must be independent of the challenge")
+        # Same collision guard as ``live_adapter``: ``_probe_url`` builds ``{param: value, nonce_param:
+        # challenge}``, so a collision drops the BASELINE/TRUE/FALSE value and every probe in a round becomes
+        # the SAME request — the run-level challenge is one value for all trials. That is exactly the
+        # degenerate round the identical-template guard above rejects (a round that cannot separate true from
+        # false, spec §3/§8.5). Fail-closed at construction for the same reason, not left to the SPRT.
+        if self.param and self.param == self.nonce_param:
+            raise ValueError(
+                f"param and nonce_param are both {self.param!r} — the freshness challenge would OVERWRITE the "
+                "probe value, making every probe in a round the SAME request; such a round cannot separate "
+                "true from false (spec §3/§8.5). They MUST differ.")
         if not self.original_probe_recipe_digest:
             self.original_probe_recipe_digest = digest_payload({
                 "endpoint_path": self.endpoint_path, "param": self.param, "nonce_param": self.nonce_param,

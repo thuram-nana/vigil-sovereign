@@ -97,7 +97,8 @@ class LiveHttpAdapter:
         gate chain). The adapter never bypasses it: every send is a ``gated_fetch``.
       * ``base_url`` — the target's scheme+host(:port); the target identity is derived from it.
       * ``endpoint_path`` / ``param`` / ``payload`` — the original exploit request.
-      * ``nonce_param`` — the query param the target echoes (freshness).
+      * ``nonce_param`` — the query param the target echoes (freshness). MUST DIFFER from ``param``
+        (a collision silently overwrites the exploit payload — refused in ``__post_init__``).
       * ``original_firing_context`` — the RETAINED original firing ``oracle_context`` (the positive control).
 
     Oracle/finding metadata (``bug_class`` / ``oracle_*`` / digests / ``destructive``) rides on the cert.
@@ -144,6 +145,16 @@ class LiveHttpAdapter:
         if self.payload_template and "{challenge}" not in self.payload_template:
             raise ValueError("payload_template must contain the literal '{challenge}' slot (F2 requires the "
                              "run nonce to ride the exploit payload); leave it empty for F1 behaviour")
+        # The freshness challenge rides a SEPARATE query param. If it COLLIDES with the injectable ``param``,
+        # ``_exploit_url``'s dict literal silently drops the exploit payload (last key wins => the challenge):
+        # the exploit is NEVER SENT, so oracle silence says nothing about a fix — yet the driver would mint
+        # that silence as a REMEDIATION over a still-vulnerable target. Fail-closed at construction so EVERY
+        # caller inherits the guard (mirrors the payload_template check above).
+        if self.param and self.param == self.nonce_param:
+            raise ValueError(
+                f"param and nonce_param are both {self.param!r} — the freshness challenge would OVERWRITE the "
+                "exploit payload in the re-drive URL, so the exploit would never be sent and oracle silence "
+                "would say nothing about a fix (a false 'remediated'). They MUST differ.")
         # Bind the ACTUALLY re-driven probe into the cert (N4): if the caller did not supply a probe digest,
         # derive one over the concrete re-drive spec (endpoint/param/payload/nonce_param/bug_class) so the
         # signed "fixed" verdict attests WHICH exploit request was re-driven. Honest-producer tier: this binds
