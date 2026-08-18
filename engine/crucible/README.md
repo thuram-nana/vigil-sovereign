@@ -1608,7 +1608,8 @@ what ships versus what is experimental or dormant:
 
 **Shipped, but opt‑in / off the default loop (powerful — and honestly gated):**
 - The **172‑entry check library** is exercised under the eval/benchmark harness; the *default interactive*
-  scan/engage uses the 11 + 5 built‑in checks (enable the library per‑campaign via `use_library`).
+  scan/engage uses the 11 + 5 built‑in checks (enable the full library with the `--library` flag; a default
+  run now self‑discloses this coverage in its output and reports).
 - The **`engage --autonomous` OODA loop**, its **sensor fusion**, and the advisory **kernel reasoning** hook
   (§9.16–9.17). This is the one place the **ACP goal‑tree planner** (budget/pruner/watchdog/resume) actually
   runs — the *default* `engage` loop drives the scanner campaign + orchestrator, **not** the planner. Off =

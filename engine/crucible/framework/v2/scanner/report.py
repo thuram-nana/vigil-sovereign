@@ -355,7 +355,7 @@ def to_html(report: ScanReport, *, grounding: list | None = None,
     s = doc["summary"]
     _cov = doc["coverage"]
     _cov_note = (
-        f"checks: ran {_cov['built_in_run']} built-in"
+        f"checks: configured {_cov['built_in_run']} built-in (DEFAULT_CHECKS)"
         + (f" + {_cov['library_run']} library (scanner.library) — full corpus"
            if _cov["full_coverage"]
            else f"; scanner.library ({_cov['library_available']} checks) NOT run — "
@@ -448,9 +448,9 @@ def coverage_line(report: ScanReport) -> str:
     cov = report.coverage()
     available, classes = library_stats()
     if cov["full_coverage"]:
-        return (f"checks: ran {cov['built_in_run']} built-in (DEFAULT_CHECKS) + "
+        return (f"checks: configured {cov['built_in_run']} built-in (DEFAULT_CHECKS) + "
                 f"{cov['library_run']} library (scanner.library / {classes} bug classes) "
                 f"— full corpus")
-    return (f"checks: ran {cov['built_in_run']} built-in (DEFAULT_CHECKS); scanner.library "
+    return (f"checks: configured {cov['built_in_run']} built-in (DEFAULT_CHECKS); scanner.library "
             f"({available} checks / {classes} classes) NOT run — re-run with --library "
             f"for full coverage; the TIMING oracle fires only with --library")
