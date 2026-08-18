@@ -783,13 +783,20 @@ def _cmd_remediate(args: argparse.Namespace) -> int:
               "re-verifiable proof material by check_id (refusing rather than risk substituting another "
               "finding's positive control; fail-closed).", file=sys.stderr)
         return 2
+    # ...and a --finding-ref that DISAGREES with that ref is refused, never honoured: on the envelope path the
+    # trusted ref comes from the SIGNED certificate and the flag is not consulted, so letting it choose the
+    # retained entry would drive finding B's positive control + exploit under finding A's name.
+    ref_why = _finding_ref_override_refusal(finding, getattr(args, "finding_ref", ""))
+    if ref_why:
+        print(f"vigil remediate: REFUSED (fail-closed): {ref_why}", file=sys.stderr)
+        return 2
 
     # (2) The RETAINED re-verifiable proof material for THIS finding: the positive control (original firing
     #     oracle_context) + the confirmed channel + the insertion point the exploit rode.
     from .proof.run import read_reverifiable
     run_dir = str(getattr(args, "run_dir", "") or "") or args.base_dir
     entries = read_reverifiable(run_dir).get("active_findings", [])
-    entry = _match_reverifiable_entry(entries, finding.ref, args.finding_ref)
+    entry = _match_reverifiable_entry(entries, finding.ref, "")
     if entry is None:
         print(f"vigil remediate: no retained re-verifiable proof material for finding {finding.ref!r} under "
               f"{run_dir}/proofs/reverifiable.json (found {len(entries)} entr(y/ies)). The engagement persists "
@@ -955,12 +962,16 @@ def _cmd_reprove(args: argparse.Namespace) -> int:
         print("vigil reprove: the trusted finding has no addressable ref — cannot match its retained "
               "re-verifiable proof material by check_id (fail-closed).", file=sys.stderr)
         return 2
+    ref_why = _finding_ref_override_refusal(finding, getattr(args, "finding_ref", ""))
+    if ref_why:
+        print(f"vigil reprove: REFUSED (fail-closed): {ref_why}", file=sys.stderr)
+        return 2
 
     # (2) The RETAINED re-verifiable proof material (positive control + channel + insertion point).
     from .proof.run import read_reverifiable
     run_dir = str(getattr(args, "run_dir", "") or "") or args.base_dir
     entries = read_reverifiable(run_dir).get("active_findings", [])
-    entry = _match_reverifiable_entry(entries, finding.ref, args.finding_ref)
+    entry = _match_reverifiable_entry(entries, finding.ref, "")
     if entry is None:
         print(f"vigil reprove: no retained re-verifiable proof material for finding {finding.ref!r} under "
               f"{run_dir}/proofs/reverifiable.json — run the engagement first (the positive control cannot be "
