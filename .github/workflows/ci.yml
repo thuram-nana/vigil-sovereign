@@ -190,14 +190,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: install vigil_core + CRUCIBLE deps (for the oracle-adapter test) (+ best-effort sigil)
+      - name: install vigil_core + CRUCIBLE deps (for the oracle-adapter test)
         run: |
           pip install -e packages/core/vigil_core \
             "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
             "cryptography>=42" packaging pytest pytest-httpserver pytest-asyncio
-          # apps/sigil builds the Rust WARDEN kernel; best-effort so the structural boundary
-          # proof runs when it succeeds and skips (not fails) when the toolchain is unavailable.
-          pip install -e apps/sigil || echo "apps/sigil build skipped — boundary test will skip"
+          # NO best-effort `pip install -e apps/sigil` here, and that is the whole point of this slice.
+          # That build (the Rust WARDEN kernel + the sovereign heavy stack — onnxruntime/kuzu/fastembed/
+          # qdrant) is unreliable on a runner, and it used to be swallowed with
+          #   pip install -e apps/sigil || echo "apps/sigil build skipped — boundary test will skip"
+          # so a build failure let this REQUIRED job go GREEN with the two-env boundary proof unproven
+          # (a skipped proof and a passing proof are the same colour on a dashboard). The proof does NOT
+          # need the installed package: test_two_env_boundary builds its OWN sovereign venv, and the
+          # keyless-actor governance-forge proof puts apps/sigil on sys.path itself — both run from SOURCE
+          # against vigil_core + cryptography (installed above). The proof's EXECUTION is now enforced by
+          # the "boundary proof MUST have actually executed" step below, which fails this job on a skip.
       - name: install bubblewrap — WITHOUT it the strongest egress proofs SKIP
         # test_sandbox_exec.py's real-isolation tests (a connect() from inside the sandbox must fail;
         # host daemon sockets must be unreachable) are gated on a working `bwrap`. bwrap was never
@@ -305,7 +312,8 @@ jobs:
               --ignore=integration/tests/test_dossier_case_file.py \
               --ignore=integration/tests/test_brain_engine.py \
               --ignore=integration/tests/test_sovereignty_governs_llm_egress.py \
-              --ignore=integration/tests/test_live_executor_report_builders.py -q
+              --ignore=integration/tests/test_live_executor_report_builders.py \
+              --junit-xml="${RUNNER_TEMP:-/tmp}/sovereign-junit.xml" -q
             # The offense-process suite: framework-dependent tests run in their OWN process. The
             # scoped-executor test (WS-A) exercises the signed-scope egress guard, which resolves scope via
             # vigil_gateway.scope_source → CRUCIBLE host_matches_scope, so it belongs here (it would load
@@ -415,6 +423,17 @@ jobs:
             # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
             echo "::error::integration/tests missing from the checkout"; exit 1
           fi
+      - name: the two-env boundary proof MUST have actually executed (a skipped proof fails this required job)
+        # THE POINT OF SLICE W0-13. The two-env boundary is what makes this a REQUIRED check; before this
+        # step the job could go GREEN with that proof never having run. The sovereign pytest leg above wrote
+        # a JUnit report; this reads it and FAILS the job unless every named boundary proof — the
+        # dependency-graph guarantee, the assert_no_offense / sys.modules scan (test_two_env_boundary), and
+        # the keyless-actor governance-forge proof — is present AND not skipped. A `pytest.importorskip`
+        # skip (e.g. if apps/sigil ever stopped importing from source) leaves a <skipped> testcase and
+        # exits 0, which is exactly the "skipped proof == passing proof" hole this closes: here it is a hard
+        # failure. --strict-markers/-p no:cacheprovider hygiene lives on the pytest run that produced the
+        # report; this step is the assertion that it actually executed.
+        run: python .github/scripts/assert_boundary_proof_ran.py "${RUNNER_TEMP:-/tmp}/sovereign-junit.xml"
 
   strix-vigil:
     name: strix Claude-runtime (P8)
