@@ -98,6 +98,28 @@ def test_edits_off_by_default_reject_the_patch(repo_and_diff, tmp_path):
     assert res.patched_paths == []
 
 
+def test_unattended_run_cannot_even_clone__the_approval_leg_is_load_bearing(repo_and_diff, tmp_path):
+    """``operator_present=False`` — an UNATTENDED run, i.e. ``vigil patch`` WITHOUT ``--approve`` — leaves the
+    WARDEN gate queueing every non-destructive stage (each classifies A2, above the A1 auto-ceiling — see
+    ``test_fix_ladder_matches_the_gate.py``), so the ladder refuses at CLONE and nothing lands in a clone.
+
+    This is exactly why the console's Fixes button shells the verb WITH ``--approve``: the operator's click IS
+    that human-approval leg, and without it the button would be guaranteed to refuse. Pinning both directions
+    here keeps that justification honest — if the gate ever stops needing the leg, this test says so."""
+    repo, diff = repo_and_diff
+    unattended = autopatch_live(_fact(repo), config=_cfg(repo, tmp_path, apply_edits=True),
+                                client=_FakeClient(diff), operator_present=False)
+    assert unattended.status == "clone-denied", unattended.status
+    assert unattended.patched_paths == [] and unattended.opened_pr is False
+    assert any(s.stage == "clone" and s.outcome == "queue" for s in unattended.steps), unattended.steps
+    # the SAME run, with the approval leg present, gets past the clone gate and applies into the clone.
+    attended = autopatch_live(_fact(repo), config=_cfg(repo, tmp_path, apply_edits=True),
+                              client=_FakeClient(diff), operator_present=True)
+    assert attended.status == "pr-denied" and attended.patched_paths == ["app.py"]
+    # and the SOURCE repo is untouched either way (everything happened in a disposable clone).
+    assert open(os.path.join(repo, "app.py"), encoding="utf-8").read() == _VULN
+
+
 def test_a_lead_is_refused(repo_and_diff, tmp_path):
     repo, diff = repo_and_diff
     res = autopatch_live(_lead(repo), config=_cfg(repo, tmp_path, apply_edits=True), client=_FakeClient(diff))

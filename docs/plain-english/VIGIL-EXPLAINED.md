@@ -5787,9 +5787,10 @@ Its stated constraints:
   auto-fixed.
 - The action on that screen is **non-destructive and never raises a proposed code change**
   for review.
-- Live application of a fix — taking a copy of the source, building it, raising a proposed
-  code change — is a separate capability that must be provisioned and authorised. Nothing is
-  copied, built or raised from the screen.
+- Loading the screen copies, builds and raises nothing. The gated ladder runs only on the
+  operator's explicit Apply click, and even then only into a **throwaway copy** of the source —
+  the original tree is never touched. Raising a proposed code change is never done from the
+  screen at all: that stays a separately provisioned and authorised command-line act.
 
 The one destructive path that is wired is raising a proposed code change for a human to
 review, and it is off by default. Turning it on requires all of: a signed authorisation, an
@@ -16526,16 +16527,21 @@ rendered from what the server reports rather than hard-coded into the page. Then
 **fixable, confirmed** finding. Then **highest-impact fix points**: the choke-points in the attack
 graph, each labelled with what it connects and how many attack paths fixing it would sever.
 
-**What the operator can do.** Per finding, an **Apply fix (gated)** button. The hint next to it is
-exact: it runs the gated patch ladder when the run has a signed record behind it; otherwise it shows
-precisely what is missing. And in bold: **non-destructive — never opens a pull request** (that is,
-it never raises a proposed code change for a human to review and approve). The result
-panel prints the command that ran, a note, and the ladder's raw output.
+**What the operator can do.** Per finding, an **Apply fix (gated)** button — but only when the server
+says this run can actually run the ladder. When it cannot, there is no button: the screen prints the
+server's own reason and the command line that does work, so the page never offers an action the back
+end is guaranteed to refuse. Where the button is shown, the hint is exact: the click is the operator
+approval every gated stage of the ladder waits for, and at the same time a single up-front approval of
+every proposed edit — there is no per-file prompt. The edits land in a throwaway copy, so the original
+tree is untouched, and in bold: **never opens a pull request** (that is, it never raises a proposed code
+change for a human to review and approve). The result panel prints the command that ran, a note, and the
+ladder's raw output.
 
 **The honesty that matters here.** The screen states that only oracle-confirmed findings are eligible
-— unproven leads are never auto-fixed. And live auto-application — cloning the repository, building
-it, and opening a real code-change request — is a **separate capability that must be provisioned and
-authorised**, and it does not happen from this screen. In the command line, opening a code-change
+— unproven leads are never auto-fixed. Nothing runs by itself: every gated stage of the ladder sits
+above the automatic-approval ceiling, so each one waits for the owner, and the Apply click is what
+releases them. Opening a real code-change request is a **separate capability that must be provisioned
+and authorised**, and it does not happen from this screen at all. In the command line, opening a code-change
 request is off by default and requires a signed authorisation from multiple independent key-holders
 plus a single-use record so the same authorisation cannot be replayed.
 

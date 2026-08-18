@@ -103,6 +103,17 @@ class ReportFinding:
     # "unclassified" for passive/dom leads that carry no oracle proof. Honest by default —
     # the export states what actually re-executes, not merely that a certificate exists.
     grounding: str = "unclassified"
+    # The STABLE id of the check that produced this finding — the finding reference the gated
+    # remediation ladder keys on (`vigil patch --finding-ref`, and the same id the reverifiable
+    # export / oracle adapter use as ``finding_ref``). Non-empty ONLY when ``grounding == "fact"``,
+    # i.e. this finding's own oracle RE-FIRED at render time. Everything else carries "": a
+    # passive-hygiene finding, a DOM-XSS candidate, and an ACTIVE finding whose proof no longer
+    # re-grounds (ungrounded / contradicted / hypothesis) are all LEADS, none is fixable, and a
+    # lead must never acquire a reference that makes it look apply-able. The invariant the export
+    # guarantees, and the tests pin, is one-directional and total:
+    #     check_id != ""  ==>  grounding == "fact".
+    # Appended LAST so the rest of the rendered finding shape (and its key order) is unchanged.
+    check_id: str = ""
 
 
 def _grounding_label(admitted) -> str:
@@ -218,6 +229,13 @@ def build_report(report: ScanReport, *, attack_paths: list | None = None,
             remediation=rem, references=refs,
             re_verifiable=f.oracle_context is not None,
             grounding=label,
+            # the confirmed finding's own stable check id — what makes it addressable by the gated
+            # `vigil patch --finding-ref` ladder (and by the Fixes screen that drives it). Gated on
+            # the RENDER-TIME grounding label, not on the finding's mere existence: an active whose
+            # oracle no longer re-fires is a LEAD here (`remediate_plan` counts it as one), so it
+            # must not carry the reference that makes a finding look apply-able. This keeps the
+            # documented invariant total — a non-empty check_id implies grounding == "fact".
+            check_id=(f.check_id if label == "fact" else ""),
         ))
     for p in report.passive_findings:
         _, rem, refs = _meta_for("", getattr(p, "bug_class", ""), lib)
@@ -226,6 +244,8 @@ def build_report(report: ScanReport, *, attack_paths: list | None = None,
             title=p.title, severity=p.severity, confidence=p.confidence,
             location=p.url, confirmed_by="passive", evidence=p.evidence,
             remediation=rem, references=refs,
+            # LEAD: no oracle proved it, so it carries NO fixable reference (explicit, not defaulted).
+            check_id="",
         ))
     for c in report.dom_xss_candidates:
         findings.append(ReportFinding(
@@ -234,6 +254,8 @@ def build_report(report: ScanReport, *, attack_paths: list | None = None,
             severity="Info", confidence=c.confidence, location=report.target,
             confirmed_by="static-lead", evidence=c.evidence,
             remediation=_CLASS_META["dom_xss"][1], references=_CLASS_META["dom_xss"][2],
+            # LEAD: a static source->sink flow, never oracle-confirmed → NO fixable reference.
+            check_id="",
         ))
 
     findings.sort(key=lambda x: (-_SEVERITY_RANK.get(x.severity, 0), x.kind, x.bug_class))

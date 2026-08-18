@@ -8,8 +8,13 @@ proposes and the oracle + gate dispose:
     at zero LLM cost, then dedup + severity-prioritize into a ``RemediationDraft``. A ``TriageFinding``
     may spawn a remediation ONLY if it is an oracle-confirmed FACT (a graph CONFIRMED node with a signed
     evidence ref) — a LEAD can never trigger a codefix (``may_remediate`` is the boundary).
-  * ``codefix`` — the gated, DESTRUCTIVE pipeline. Stages map to WARDEN tiers (clone/branch A1, edit A2,
-    build A3, PR A3+m-of-n), the per-block approval TIMEOUT auto-REJECTS (fail-closed, the inverse of
+  * ``codefix`` — the gated, DESTRUCTIVE pipeline. Each stage records a tier LABEL on its step
+    (``TIER_CLONE`` A1, ``TIER_EDIT`` A2, ``TIER_BUILD``/``TIER_PR`` A3) and the PR leg additionally needs
+    m-of-n. Those labels are recorded, NOT decided here: the gate is injected, and under the live wiring
+    (``live.codefix_runner.CodefixSession.gate`` → ``decide_tool(floor="A2", ceiling="A1")``) every one of
+    ``git_clone``/``code_edit``/``sandbox_build``/``github_pr`` decides A2 and QUEUES for owner approval —
+    see ``integration/tests/test_fix_ladder_matches_the_gate.py``. The per-block approval TIMEOUT
+    auto-REJECTS (fail-closed, the inverse of
     redamon), only explicit path-validated files are staged (never ``git add -A``), and 'remediated' is
     signed ONLY after the original exploit oracle goes silent on the patched build. The gate, oracle,
     executors, quorum, and approval are injected callables — the pipeline is testable without a live

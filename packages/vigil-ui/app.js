@@ -4879,7 +4879,7 @@
       nodes.push(h("div.empty", null, "No oracle-confirmed findings to fix in this run. Only proven FACTs are eligible — unproven leads are never auto-fixed."));
     } else {
       nodes.push(V.card("Fixable findings", "CONFIRMED", h("div.stack", null,
-        fixable.map(function (f, i) { return fixFindingCard(f, plan.run_id, i); })), false));
+        fixable.map(function (f, i) { return fixFindingCard(f, plan.run_id, i, plan.runnable, plan.why_not); })), false));
     }
     nodes.push(V.card("Highest-impact fix points", "IMPACT", h("div#fx-chokes", null, h("div.empty", null, "Loading…")), false));
     V.mount(view, nodes);
@@ -4901,8 +4901,32 @@
     if (s === "medium" || s === "moderate") return "warn";
     return "";
   }
-  function fixFindingCard(f, runId, idx) {
+  // The "Apply fix (gated)" button renders ONLY when the backend says this run can actually run the gated
+  // ladder (`plan.runnable` — the SAME precondition `actions.apply_fix` enforces, served by the one shared
+  // helper). Otherwise we show the backend's own `why_not` verbatim and point at the CLI. The UI must never
+  // offer an action the backend is guaranteed to refuse.
+  function fixFindingCard(f, runId, idx, runnable, whyNot) {
     var outId = "fx-out-" + idx, btnId = "fx-btn-" + idx;
+    var applyBlock;
+    if (!f.ref) {
+      applyBlock = h("div.hint", { style: { marginTop: "10px" } },
+        "No stable finding reference on record — apply from the CLI with `vigil patch`.");
+    } else if (!runnable) {
+      applyBlock = h("div.hint", { style: { marginTop: "10px" } },
+        "In-console apply is unavailable for this run: " + (whyNot || "its precondition is not met.")
+        + " You can still apply from the CLI with `vigil patch`.");
+    } else {
+      applyBlock = h("div", { style: { marginTop: "10px" } }, [
+        h("button.btn.sm#" + btnId, { onClick: function () { applyFix(runId, f.ref, btnId, outId); } },
+          [V.icon("bolt"), "Apply fix (gated)"]),
+        h("span.hint", { style: { marginLeft: "8px" } },
+          "Runs the gated `vigil patch` ladder for this finding. Your click is the operator approval for the "
+          + "non-destructive stages AND a blanket up-front approval of every proposed edit — there is no "
+          + "per-file prompt on this path. The edits land in a disposable clone: your source is never touched "
+          + "and no PR is opened."),
+        h("div#" + outId, { style: { marginTop: "8px" } }),
+      ]);
+    }
     return h("div.fix-card", null, [
       h("div.fix-h", null, [
         h("span.vbadge." + (sevClass(f.severity) || "muted"), null, (f.severity || "?").toUpperCase()),
@@ -4912,16 +4936,7 @@
       f.location ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", margin: "4px 0" } }, f.location) : null,
       h("div.fix-rem", null, [h("span.label", null, "Remediation"), h("p", null, f.remediation)]),
       f.confirmed_by ? h("div.dim", { style: { fontSize: "var(--fs-xs)", marginTop: "6px" } }, "confirmed by " + f.confirmed_by) : null,
-      f.ref
-        ? h("div", { style: { marginTop: "10px" } }, [
-            h("button.btn.sm#" + btnId, { onClick: function () { applyFix(runId, f.ref, btnId, outId); } },
-              [V.icon("bolt"), "Apply fix (gated)"]),
-            h("span.hint", { style: { marginLeft: "8px" } },
-              "Runs the gated `vigil patch` ladder when this run has a signed offense spine; otherwise it shows exactly what's needed. Non-destructive — never opens a PR."),
-            h("div#" + outId, { style: { marginTop: "8px" } }),
-          ])
-        : h("div.hint", { style: { marginTop: "10px" } },
-            "No stable finding reference on record — apply from the CLI with `vigil patch`."),
+      applyBlock,
     ]);
   }
   function applyFix(runId, ref, btnId, outId) {
