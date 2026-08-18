@@ -1452,7 +1452,20 @@ def _cmd_approve_sign(args: argparse.Namespace) -> int:
 
 def _load_and_verify_ledger(path: str, *, base_dir: str) -> tuple[list, object]:
     from .attestation.identity import operator_key_resolver
-    from .attestation.ledger import read_ledger, verify_ledger
+    from .attestation.ledger import LedgerVerification, read_ledger, verify_ledger
+    # Fail-closed on an ABSENT ledger FILE. ``read_ledger`` returns ``[]`` for a MISSING file exactly as it
+    # does for a present-but-empty one, and ``verify_ledger([])`` is vacuously ``ok`` — so a DELETED (or
+    # never-written) ledger would otherwise report "0 records — VERIFIED", i.e. a wiped audit trail would
+    # certify clean. A missing file is NOT a verified-clean state; it is an evidence-integrity failure. Only
+    # the ABSENT case fails here: a present-but-empty ledger is a distinct, legitimate fresh state (the file
+    # is created on the first durable append) and still verifies vacuously.
+    if not Path(path).is_file():
+        return [], LedgerVerification(
+            False,
+            f"usage-attestation ledger file is ABSENT ({path}) — the always-on ledger was never written "
+            "or was deleted; refusing to report VERIFIED (fail-closed). A present-but-empty ledger is a "
+            "distinct, legitimate fresh state.",
+        )
     records = read_ledger(path)
     resolver = operator_key_resolver(keypair_path=str(Path(base_dir) / "operator.key"))
     verification = verify_ledger(records, resolve_key=resolver)
