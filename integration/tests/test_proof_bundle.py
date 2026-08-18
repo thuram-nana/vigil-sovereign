@@ -42,6 +42,34 @@ def _mint_a_fact(run_dir: Path) -> object:
     return res
 
 
+def _natural_ref(f: dict) -> str:
+    """The ref certify + verify derive from a finding (check_id > finding_slug > bug_class > 'finding')."""
+    return str(f.get("check_id") or f.get("finding_slug") or f.get("bug_class") or "finding")
+
+
+def _mint_two_same_class_facts(run_dir: Path) -> None:
+    """Mint TWO oracle-confirmed FACTs of the SAME bug_class (differing only by insertion point), then strip
+    each retained finding's explicit ref so both fall back to ``bug_class`` — the exact shape a plain
+    ``--reverifiable-out`` scan writes (bug_class + oracle_context, no check_id/finding_slug). The two then
+    share ONE natural finding_ref: the collision the producer must resolve for the bundle to be usable."""
+    mint = build_report_mint(run_dir=run_dir, signers=SIGNERS, engagement_slug="acme")
+    for i, param in enumerate(("id", "name")):
+        res = mint({
+            "id": f"errsqli-00{i}", "bug_class": "error_based_sqli", "param": param,
+            "poc_script_code": "print('benign repro')",
+            CAPTURE_KEY: {"exchanges": [{"channel": "error_signature", "role": "mutated",
+                                         "response_bytes_ref": "resp", "bug_class": "error_based_sqli"}],
+                          "blobs": {"resp": _SQL_ERROR}},
+        })
+        assert res is not None and res.is_fact, "each SQL-error response must mint a FACT"
+    rp = run_dir / "proofs" / "reverifiable.json"
+    doc = json.loads(rp.read_text(encoding="utf-8"))
+    for f in doc["active_findings"]:
+        for k in ("check_id", "finding_slug", "id"):
+            f.pop(k, None)
+    rp.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
+
+
 def _verify(bundle: Path, *, fingerprint: str = "") -> subprocess.CompletedProcess:
     """Run the third-party offline verify exactly as the README prescribes (optionally with a pinned root)."""
     env = dict(os.environ)
@@ -160,3 +188,75 @@ def test_hostile_action_id_does_not_traverse_outside_the_evidence_tree(tmp_path)
     assert arts == [], "a hostile action_id must yield NO artifact manifest (no traversal)"
     # and it still verifies on reproduction alone (no evidence tree needed for an artifact-less cert)
     assert _verify(out, fingerprint=res["trust_root_fingerprint"]).returncode == 0
+
+
+def test_a_two_same_bug_class_finding_bundle_builds_and_verifies(tmp_path):
+    """W16-14: a legitimate 2-finding bundle whose findings share a bug_class (and fall back to it for their
+    ref) must BUILD and VERIFY offline. Before the producer assigned unique refs, the two collided on ONE
+    finding_ref and ``verify_bundle``'s ``refs_unique`` refused the WHOLE bundle CLOSED — a live availability
+    bug in the evidence layer (fail-before: this bundle was refused)."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _mint_two_same_class_facts(run_dir)
+
+    doc = read_reverifiable(run_dir)
+    assert len(doc["active_findings"]) == 2, "two distinct same-class findings must survive de-dup"
+    # both currently derive the SAME natural ref — this is the collision under test.
+    assert {_natural_ref(f) for f in doc["active_findings"]} == {"error_based_sqli"}
+
+    out = tmp_path / "bundle"
+    res = export_bundle(run_dir=run_dir, out_dir=out, engagement_slug="acme")
+    assert res["ok"] and res["certificates"] == 2
+
+    # the producer assigned DISTINCT, stable refs (bug_class + a per-finding discriminator).
+    bundle = json.loads((out / "evidence-bundle.json").read_text(encoding="utf-8"))
+    refs = [c["certificate"]["finding_ref"] for c in bundle["certificates"]]
+    assert len(set(refs)) == 2, f"the two same-class findings must get DISTINCT refs, got {refs}"
+    assert all(r.startswith("error_based_sqli") for r in refs), refs
+    # the bundle's reverifiable report keys the same distinct refs, so verify's per-ref lookup can't collide.
+    rev = json.loads((out / "reverifiable.json").read_text(encoding="utf-8"))
+    assert len({_natural_ref(f) for f in rev["active_findings"]}) == 2
+
+    proc = _verify(out, fingerprint=res["trust_root_fingerprint"])
+    assert proc.returncode == 0, (
+        f"a legitimate same-class 2-finding bundle must verify (rc={proc.returncode}):\n{proc.stdout}\n{proc.stderr}")
+    assert "bundle SOUND" in proc.stdout
+
+
+def test_same_class_bundle_refs_are_deterministic_across_runs(tmp_path):
+    """The disambiguated refs are a pure function of finding content — exporting the SAME run twice yields the
+    SAME refs (reproducible/stable, never wallclock- or rng-derived)."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _mint_two_same_class_facts(run_dir)
+
+    def _refs(out: Path) -> list:
+        assert export_bundle(run_dir=run_dir, out_dir=out, engagement_slug="acme")["ok"]
+        b = json.loads((out / "evidence-bundle.json").read_text(encoding="utf-8"))
+        return sorted(c["certificate"]["finding_ref"] for c in b["certificates"])
+
+    assert _refs(tmp_path / "b1") == _refs(tmp_path / "b2")
+
+
+def test_refs_unique_check_still_refuses_a_forced_ref_collision():
+    """NEGATIVE CONTROL: the producer no longer EMITS a colliding set, but the bundle-side ``refs_unique``
+    CHECK must stay intact — two certificates FORCED to the same finding_ref still fail ``verify_bundle``
+    CLOSED (the defense-in-depth check is not weakened by the producer-side fix)."""
+    from framework.v2.entitlement.crypto import generate_keypair as _gk
+    from framework.v2.entitlement.models import AuthorizerKey, TrustRoot
+    from framework.v2.evidence.certify import build_certificate, sign_certificate, verify_bundle
+    from framework.v2.evidence.chain import build_chain, sign_head
+
+    k = _gk()
+    tr = TrustRoot(schema_version=1, threshold=1,
+                   authorizers=[AuthorizerKey(key_id="gov-0", name="Gov 0", public_key_b64=k.public_key_b64)])
+    signers = [("gov-0", k.private_key_b64)]
+    f = {"check_id": "dup", "bug_class": "error_based_sqli", "oracle_context": {}}
+    certs = [sign_certificate(build_certificate(f, engagement_slug="acme", seq=i), signers) for i in (0, 1)]
+    chain = build_chain([c.certificate.cert_digest for c in certs])
+    head = sign_head(chain, engagement_slug="acme", signers=signers)
+
+    v = verify_bundle(certs, chain, head, contexts={"dup": {}}, trust_root=tr)
+    assert not v.refs_unique, "the refs_unique check must still fire on a duplicate finding_ref"
+    assert not v.ok, "a duplicate-ref bundle must NOT be sound"
+    assert "DUPLICATE finding_ref" in v.chain_note

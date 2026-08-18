@@ -36,9 +36,11 @@ Determinism: no wallclock / rng — cert order is the reverifiable-finding order
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
+from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -128,6 +130,64 @@ def _howto_md(signed_certs: list) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _natural_ref(f: dict) -> str:
+    """The finding_ref that ``certify.build_certificate`` and the ``evidence verify`` CLI BOTH derive from a
+    finding (check_id > finding_slug > bug_class > 'finding'). Mirrored here so the producer can predict —
+    and, on collision, disambiguate — exactly the ref the certificate will carry and the verifier will key
+    each finding's oracle_context by."""
+    return str(f.get("check_id") or f.get("finding_slug") or f.get("bug_class") or "finding")
+
+
+def _identity_discriminator(f: dict) -> str:
+    """A short, STABLE hash of a finding's identity — a pure function of the finding's own content, so it is
+    deterministic across runs and independent of sibling findings or list position. Used only to disambiguate
+    a ref collision, so two DISTINCT same-bug_class findings get DISTINCT refs (not to weaken any check)."""
+    payload = json.dumps(f, sort_keys=True, default=str, ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _assign_unique_refs(findings: list[dict]) -> list[dict]:
+    """Guarantee every finding in a bundle carries a UNIQUE, stable finding_ref.
+
+    Without this the producer has no uniqueness guarantee: a finding with no ``check_id``/``finding_slug``
+    falls back to ``bug_class`` (see :func:`_natural_ref`), so two same-class findings in one bundle collide
+    on the same ref. ``verify_bundle``'s ``refs_unique`` (and the CLI's duplicate-ref refusal) then fail the
+    WHOLE bundle CLOSED — a legitimate 2-finding bundle is refused. That is a real availability bug in the
+    evidence layer, and the fix belongs on the PRODUCER: never emit a colliding set in the first place.
+
+    A finding whose natural ref is already unique across the set is returned UNTOUCHED (so an existing,
+    already-unique bundle stays byte-identical, and the ref stays human-meaningful). A finding whose natural
+    ref collides is disambiguated by appending a deterministic per-finding discriminator — a short hash of
+    its identity, with an index tiebreak only for the pathological case of two byte-identical findings —
+    written into the highest-priority ``check_id`` field so BOTH the minted certificate's finding_ref AND the
+    verifier's per-ref oracle_context lookup derive the SAME unique ref. Pure/deterministic: the same finding
+    set yields the same refs on every run.
+
+    The bundle-side uniqueness CHECK (``verify_bundle.refs_unique`` + the CLI refusal) is retained unchanged
+    as defense in depth — this stops the producer from EMITTING a colliding set, it does not relax the check
+    that catches one."""
+    base = [_natural_ref(f) for f in findings]
+    counts = Counter(base)
+    seen: set[str] = set()
+    out: list[dict] = []
+    for f, b in zip(findings, base):
+        if counts[b] == 1:
+            out.append(f)                         # unique on its own — keep it (byte-identical bundle)
+            seen.add(b)
+            continue
+        disc = _identity_discriminator(f)
+        ref = f"{b}#{disc}"
+        n = 1
+        while ref in seen:                        # two byte-identical findings share a hash → index tiebreak
+            ref = f"{b}#{disc}-{n}"
+            n += 1
+        g = dict(f)
+        g["check_id"] = ref                       # highest-priority field → certify + verify both key by it
+        out.append(g)
+        seen.add(ref)
+    return out
+
+
 def export_bundle(
     *,
     run_dir: str | os.PathLike,
@@ -149,6 +209,11 @@ def export_bundle(
     if not findings:
         return {"ok": False, "error": "no proven findings to export (a bundle carries only oracle-confirmed "
                                       "FACTs — run a scan that reproduces one first)"}
+
+    # Guarantee unique, stable finding_refs BEFORE minting certs OR writing reverifiable.json. Two
+    # same-bug_class findings with no check_id/finding_slug would otherwise both fall back to bug_class and
+    # collide, and the bundle-side refs_unique check would refuse the whole (legitimate) bundle CLOSED.
+    findings = _assign_unique_refs(findings)
 
     prov = provision_authority(slug=engagement_slug, scope=["127.0.0.1"],
                                base_dir=(base_dir or str(run_dir)), vault=vault)
