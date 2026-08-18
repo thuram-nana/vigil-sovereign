@@ -105,4 +105,25 @@ PY
 import framework, vigil_integration   # sanity: the members import (lock completeness is enforced by pip check above)
 print("env-offense OK (members import; completeness checked)")
 PY
+
+# --- egress guard (loopback-only connect(2)/sendto(2)/sendmsg(2) supervisor) --------------------------
+# Another native artifact this build produces, alongside the Rust WARDEN kernel: the syscall-level
+# no-egress supervisor the live executor wraps a tool spawn in when VIGIL_EGRESS_GUARD is set. It is
+# in-repo C (raw seccomp BPF against the kernel uapi headers — NO external dependency, NO network) and was
+# previously built ONLY in CI, so a normal `bootstrap.sh` / `make envs` install produced no binary and
+# VIGIL_EGRESS_GUARD=1 fell open SILENTLY. Build it here so building the system also builds the guard.
+# Linux-only (seccomp); FAIL-SOFT (a warning, never an abort) so a non-Linux host or a missing compiler
+# degrades gracefully — the argv allowlist stays in force and VIGIL_EGRESS_GUARD=require still fails closed.
+if [ "$(uname -s 2>/dev/null)" = "Linux" ] && command -v make >/dev/null 2>&1 \
+   && { command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; }; then
+  if make -C tools/egress-guard >/dev/null 2>&1 && [ -x tools/egress-guard/egress_guard ]; then
+    echo ">>> egress guard built (tools/egress-guard/egress_guard)"
+  else
+    echo ">>> [warn] egress guard build FAILED — run 'make -C tools/egress-guard' to see the error;" \
+         "VIGIL_EGRESS_GUARD=1 would then proceed UNGUARDED at the syscall level (=require fails closed)" >&2
+  fi
+else
+  echo ">>> [warn] egress guard not built (needs Linux + make + cc/gcc) —" \
+       "VIGIL_EGRESS_GUARD=1 has no binary on this host (=require fails closed)" >&2
+fi
 echo ">>> done"

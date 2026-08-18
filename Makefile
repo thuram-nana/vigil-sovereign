@@ -3,7 +3,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help all setup up down services services-down logs smoke strix systemd envs clean-services bench benchmark
+.PHONY: help all setup up down services services-down logs smoke strix systemd envs egress-guard clean-services bench benchmark
 
 # extra flags for `make up`, e.g.  make up ARGS="--domain vigil.example.com --no-browser"
 ARGS ?=
@@ -71,8 +71,11 @@ strix: ## build the local Kali strix sandbox image (large; needs Docker)
 systemd: ## install the user systemd units (cockpit + consolidate)
 	./bootstrap.sh --systemd
 
-envs: ## (re)build only the two isolated venvs + the Rust kernel
+envs: ## (re)build only the two isolated venvs + the Rust kernel (also builds the egress guard)
 	bash envs/build_envs.sh
+
+egress-guard: ## build the loopback-only egress guard (seccomp connect(2) supervisor; Linux-only)
+	$(MAKE) -C tools/egress-guard
 
 smoke: ## run the boundary + core smoke checks (no pytest needed)
 	.venv-sovereign/bin/python -c "import importlib.util as u, sys, sigil, vigil_integration, sigil.reuse; sigil.reuse.assert_no_offense(); [sys.exit('VIOLATION: '+m+' resolvable') for m in ('framework','strix') if u.find_spec(m)]; print('boundary ok')"

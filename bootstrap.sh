@@ -256,6 +256,26 @@ PYTHON="$PY" bash envs/build_envs.sh || die "the environment build (envs/build_e
 ok "both venvs built (with console scripts + framework); the offense-free boundary held"
 
 # =============================================================================
+step "2c egress guard (loopback-only connect(2) supervisor)"
+# =============================================================================
+# The syscall-level no-egress supervisor live/executor.py wraps a tool spawn in when VIGIL_EGRESS_GUARD is
+# set — in-repo C, raw seccomp BPF against the kernel uapi headers (NO external dependency, NO network).
+# envs/build_envs.sh above builds it alongside the venvs; confirm the binary here and, if it is somehow
+# absent, build it — because with VIGIL_EGRESS_GUARD=1 and NO binary, spawns proceed UNGUARDED at the
+# syscall level (a silent fail-open). Linux-only (seccomp); a non-Linux host or a missing toolchain WARNs
+# and continues — the argv allowlist stays in force, and VIGIL_EGRESS_GUARD=require still refuses to spawn.
+if [ -x tools/egress-guard/egress_guard ]; then
+  ok "egress guard present (tools/egress-guard/egress_guard)"
+elif [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
+  warn "egress guard is Linux-only (seccomp) — not built on this host; VIGIL_EGRESS_GUARD has no binary here."
+elif have make && { have cc || have gcc; } && make -C tools/egress-guard >/dev/null 2>&1 && [ -x tools/egress-guard/egress_guard ]; then
+  ok "egress guard built (tools/egress-guard/egress_guard)"
+else
+  warn "egress guard NOT built — install 'make' + a C compiler (build-essential), then run 'make -C tools/egress-guard'."
+  warn "until then VIGIL_EGRESS_GUARD=1 proceeds UNGUARDED at the syscall level (argv allowlist stays in force); =require refuses to spawn."
+fi
+
+# =============================================================================
 step "2b offense host tools (nmap/nuclei/httpx/ffuf/sqlmap/hydra + analysis/sensors)"
 # =============================================================================
 # Install every external CLI the offense engine spawns. Detects the OS, probes each (command -v),
