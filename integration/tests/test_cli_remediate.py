@@ -336,3 +336,91 @@ def test_cross_finding_control_is_refused_end_to_end(gated_home, capsys):
     assert "no retained re-verifiable proof material" in err
     assert "REMEDIATED" not in out
     assert not (gated_home / "proofs" / f"remediation-prove-{FACT_REF}.json").is_file()
+
+
+# ====== SIBLING of the `vigil patch` BLOCK: --finding-ref must never OVERRIDE the trusted finding's ref ======
+# On the --from-spine path the two always agree (the spine load selects BY the ref). On the
+# --finding-envelope path the trusted ref comes from the SIGNED certificate and --finding-ref is NOT
+# consulted — so honouring it when picking the retained re-verifiable entry would drive finding B's positive
+# control + exploit under finding A's name. Both verbs now REFUSE the disagreement outright.
+def _envelope_source(tmp_path, *, slug: str, finding_ref: str):
+    """A signed inert finding envelope + the owner-signed delegation anchoring it (mirrors
+    test_trusted_finding's helpers)."""
+    import time as _t
+
+    from vigil_core import AuthorizerKey, evidence_signing_bytes, generate_keypair, sign
+    from vigil_core.delegation import OFFENSE_GOVERNANCE_ROLE, sign_delegation
+
+    from vigil_integration.inert_finding import build_envelope
+
+    owner = generate_keypair()
+    keys = [generate_keypair(), generate_keypair()]
+    auths = [AuthorizerKey(key_id=f"gov{i}", name=f"gov{i}", public_key_b64=k.public_key_b64)
+             for i, k in enumerate(keys)]
+    cert = {"schema_version": 1, "engagement_slug": slug, "finding_ref": finding_ref, "bug_class": BUG,
+            "title": "error-based SQLi", "severity": "high", "target": "/search",
+            "oracle_context_digest": "a" * 64, "confidence": 0.9}
+    msg = evidence_signing_bytes(cert)
+    sigs = [{"key_id": a.key_id, "signature_b64": sign(k.private_key_b64, msg)}
+            for a, k in zip(auths, keys)]
+    ep = tmp_path / "env.json"
+    ep.write_text(build_envelope(cert, sigs), encoding="utf-8")
+    dp = tmp_path / "deleg.json"
+    dp.write_text(sign_delegation(owner, role=OFFENSE_GOVERNANCE_ROLE, scope=slug, authorizers=auths,
+                                  threshold=2, not_after=int(_t.time() + 3600)).model_dump_json(),
+                  encoding="utf-8")
+    return owner.public_key_b64, str(ep), str(dp)
+
+
+def _second_retained_entry(base: Path, check_id: str) -> None:
+    """Append a SECOND, complete retained entry belonging to a DIFFERENT finding — the material an overriding
+    --finding-ref would otherwise select."""
+    rev = base / "proofs" / "reverifiable.json"
+    doc = json.loads(rev.read_text(encoding="utf-8"))
+    other = json.loads(json.dumps(doc["active_findings"][0]))
+    other["check_id"] = check_id
+    other["insertion_point"] = "/other"
+    doc["active_findings"].append(other)
+    rev.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
+
+
+def test_remediate_refuses_a_finding_ref_that_overrides_the_trusted_ref(gated_home, capsys, tmp_path):
+    _second_retained_entry(gated_home, "f-OTHER-FINDING")
+    pub, ep, dp = _envelope_source(tmp_path, slug=SLUG, finding_ref=FACT_REF)
+    rc, out, err = _remediate(
+        ["--prove", "--finding-envelope", ep, "--owner-pubkey", pub, "--delegation", dp, "--scope", SLUG,
+         "--base-dir", str(gated_home), "--finding-ref", "f-OTHER-FINDING",
+         "--target-base-url", "http://127.0.0.1:1/"], capsys)
+    assert rc == 2, (rc, out, err)
+    assert "does not match the trusted finding's own ref" in err
+    assert "REMEDIATED" not in out
+    # nothing was minted for either finding
+    assert not (gated_home / "proofs" / f"remediation-prove-{FACT_REF}.json").is_file()
+    assert not (gated_home / "proofs" / "remediation-prove-f-OTHER-FINDING.json").is_file()
+
+
+def test_remediate_still_accepts_a_finding_ref_that_names_this_finding(gated_home, capsys, tmp_path):
+    """The guard refuses a MISMATCH only — the legitimate disambiguating use is untouched (this run gets as
+    far as the live re-drive against a dead port, i.e. an honest non-REMEDIATED state, not a pre-flight
+    refusal about the ref)."""
+    pub, ep, dp = _envelope_source(tmp_path, slug=SLUG, finding_ref=FACT_REF)
+    rc, out, err = _remediate(
+        ["--prove", "--finding-envelope", ep, "--owner-pubkey", pub, "--delegation", dp, "--scope", SLUG,
+         "--base-dir", str(gated_home), "--finding-ref", FACT_REF,
+         "--target-base-url", "http://127.0.0.1:1/"], capsys)
+    assert rc != 0
+    assert "does not match the trusted finding's own ref" not in err
+    assert "STATE             :" in out       # the four-state protocol ran; it was not a ref pre-flight refusal
+
+
+def test_reprove_refuses_a_finding_ref_that_overrides_the_trusted_ref(gated_home, capsys, tmp_path):
+    _second_retained_entry(gated_home, "f-OTHER-FINDING")
+    pub, ep, dp = _envelope_source(tmp_path, slug=SLUG, finding_ref=FACT_REF)
+    args = build_parser().parse_args(
+        ["reprove", "--finding-envelope", ep, "--owner-pubkey", pub, "--delegation", dp, "--scope", SLUG,
+         "--base-dir", str(gated_home), "--finding-ref", "f-OTHER-FINDING",
+         "--target-base-url", "http://127.0.0.1:1/", "--once"])
+    rc = args.func(args)
+    cap = capsys.readouterr()
+    assert rc == 2, (rc, cap.out, cap.err)
+    assert "does not match the trusted finding's own ref" in cap.err

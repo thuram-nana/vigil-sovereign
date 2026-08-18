@@ -18,7 +18,11 @@ One entry point over the whole fused system. NATIVE verbs (handled in-process, o
                                     GROUNDED confirmed finding (signed envelope OR the engagement's signed
                                     spine — never raw JSON). Default is a non-destructive propose-only dry
                                     run; ``--apply-edits`` applies into a disposable clone; ``--open-pr`` (off
-                                    by default) opens a gated PR under a provisioned m-of-n destruction quorum.
+                                    by default) opens a gated PR under a provisioned m-of-n destruction quorum;
+                                    ``--verify-base-url`` (off by default) DELEGATES fix-verification to the
+                                    same four-state prove machinery ``vigil remediate --prove`` drives, against
+                                    the operator's PATCHED redeployment, so a signed ``remediated`` can be
+                                    earned instead of an unverified proposal.
   * ``vigil provision-destruction`` — mint the m-of-n destruction quorum keys for ``vigil patch --open-pr``
                                     (prints the signing keys ONCE; writes the public trust root).
   * ``vigil authorize-destruction`` — sign ONE destructive action (from a ``vigil patch`` dry run) → the
@@ -171,6 +175,55 @@ def _cmd_patch(args: argparse.Namespace) -> int:
     dry run: propose (Claude) → clone → sandbox-build in a DISPOSABLE clone; the source is never touched and no
     PR is opened. ``--apply-edits`` applies the fix into the clone; ``--open-pr`` (off by default) opens a gated
     PR and needs a provisioned m-of-n destruction authorization + a ``GITHUB_TOKEN`` in the environment.
+
+    LIVE FIX-VERIFICATION (GAP B, opt-in). Without ``--verify-base-url`` no fix-verification oracle is wired,
+    so ``remediated`` stays False and the PR opens as an unverified PROPOSAL (byte-identical to before). With
+    it, verification is DELEGATED to the SAME machinery ``vigil remediate --prove`` drives — there is
+    deliberately NO second, weaker verification path: ``prove_remediation`` over a ``LiveHttpAdapter``, with
+    its LIVE positive control through the injectable param, its per-run freshness challenge that MUST be
+    echoed in the judged bytes (the ``F1_TARGET_ECHOES`` floor), the protocol-required silent trials and a
+    SIGNED four-state certificate. ``REMEDIATED`` (and only a certificate that independently re-verifies)
+    becomes a silent ``FixVerdict`` → ``remediated``; ``STILL_VULNERABLE`` becomes a firing one;
+    ``INCONCLUSIVE`` / ``REFUSED`` RAISE, so ``verify_patch`` yields ``unverified``. Every case the oracle
+    cannot even be BUILT for REFUSES before anything is patched (see ``_build_patch_fix_oracle``).
+
+    WHAT A ``remediated`` FROM THIS PATH MEANS — EXACTLY, AND NO MORE. The ``F1_TARGET_ECHOES`` floor
+    establishes RESPONSIVENESS / FRESHNESS ONLY: SOME HTTP responder at ``--verify-base-url`` returned THIS
+    run's nonce in the bytes the oracle judged. It does NOT establish that the responder was the application,
+    and it does NOT establish that the request reached the vulnerable endpoint. The claim earned here is
+    therefore exactly: "the ORIGINAL oracle did NOT fire over freshly captured bytes from the host the
+    operator nominated" — nothing about which component produced those bytes. What the floor DOES rule out is
+    the NON-echoing answered response (a static 403 block page, a 404 that reflects nothing): that is
+    INCONCLUSIVE → ``unverified``, never a fix. KNOWN RESIDUAL, not closed: an ECHOING but unrelated responder
+    — an echoing 404, a block page that reflects the request URI/query, or a different service on that host —
+    satisfies F1 while the exploit never reaches the app, and its silence IS minted as ``remediated``. The
+    operator excludes it by pointing ``--verify-base-url`` at the REAL application.
+
+    WITHOUT ``--open-pr``, NOTHING IS VERIFIED — and the run says so instead of refusing. The ladder verifies
+    at step (6), strictly AFTER the PR leg, so a run without ``--open-pr`` stops at the PR gate and the oracle
+    is never consulted. What actually happens: the oracle is still BUILT and validated up front (so channel /
+    positive-control / scope diagnostics are reachable without provisioning the PR quorum), a
+    ``verify_status : WILL NOT RUN`` notice is printed on stdout beside the ``verify_target`` line (and as a
+    warning on stderr), the run PROCEEDS through the ladder to the PR gate, and the strict exit code below
+    makes the run a FAILURE rather than a silent success. It is NOT refused up front.
+
+    EXIT CODE: when verification is requested, only a signed ``remediated`` exits 0 —
+    ``opened-pr-still-vulnerable`` / ``opened-pr-unverified`` / a run that never reached verification exit
+    non-zero, so a script cannot read "did not refuse" as "fixed".
+
+    ``--finding-ref`` never redirects the verification lookup: with ``--verify-base-url``, a non-empty
+    ``--finding-ref`` that differs from the trusted finding's OWN ref is REFUSED (another finding's retained
+    positive control must never mint a remediation attributed to this one).
+
+    HONEST LIMIT: the re-drive proves only that the ORIGINAL oracle did not fire over fresh,
+    challenge-echoing bytes captured from ``--verify-base-url`` (see above for what that does and does not
+    establish about WHO answered). That this deployment actually carries THIS run's patch is the operator's
+    assertion — the disposable sandbox clone is not cryptographically bound to the running service, and the
+    signed certificate binds the silent oracle context, not the applied diff. The silent case's other
+    residuals (a payload-discriminating WAF, a param-stripping edge in front of an echoing gateway) are
+    ``LiveHttpAdapter``'s, inherited unchanged — see ``_build_patch_fix_oracle``.
+    SIDE EFFECT: a run that actually reaches verification (re)provisions — OVERWRITING — the engagement's
+    signed CRUCIBLE authority for the slug, scoped to the verification host (as ``vigil remediate`` does).
     """
     from .autopatch.loop import _derive_remediation_id
     from .live.codefix_runner import CodefixConfig, autopatch_live, file_backed_quorum
@@ -253,25 +306,75 @@ def _cmd_patch(args: argparse.Namespace) -> int:
             return 2
         quorum = file_backed_quorum(authority=authority, signed=signed, slug=slug, ledger_path=ledger)
 
-    # (3) config + run the gated ladder. client=None ⇒ the coder is built from ANTHROPIC_API_KEY (env, never
+    # (3) OPT-IN LIVE FIX-VERIFICATION (GAP B). Without --verify-base-url this stays None and the run is
+    #     BYTE-IDENTICAL to before: `remediated` stays False and a PR (if any) opens as an unverified PROPOSAL.
+    #     With it, verification is DELEGATED to the four-state `vigil remediate --prove` machinery (live
+    #     positive control + freshness echo + signed certificate); there is no second, weaker path. Every
+    #     case the oracle cannot even be BUILT for REFUSES here (nothing is patched).
+    verify_oracle = None
+    if str(getattr(args, "verify_base_url", "") or "").strip():
+        # --finding-ref must NEVER redirect which retained positive control drives the verification: the
+        # oracle is built for the TRUSTED finding, so an operator-supplied ref that disagrees with that
+        # finding's own ref is a REFUSAL, not an override (else finding B's retained control + exploit could
+        # mint a signed remediation attributed to finding A).
+        ref_why = _finding_ref_override_refusal(finding, getattr(args, "finding_ref", ""))
+        if ref_why:
+            print(f"vigil patch: fix-verification REFUSED (fail-closed): {ref_why}", file=sys.stderr)
+            return 2
+        verify_oracle, vwhy = _build_patch_fix_oracle(
+            finding=finding, slug=slug, base_dir=args.base_dir,
+            run_dir=(str(getattr(args, "verify_run_dir", "") or "") or args.base_dir),
+            verify_base_url=args.verify_base_url)
+        if verify_oracle is None:
+            print(f"vigil patch: fix-verification REFUSED (fail-closed): {vwhy}", file=sys.stderr)
+            return 2
+        print(f"verify_target  : {args.verify_base_url}   (delegated to the four-state `remediate --prove` "
+              f"machinery; 'remediated' only on a REMEDIATED certificate that re-verifies)")
+        # The oracle is BUILT and sound (channel, positive control, reconstructed exploit and charter scope
+        # all check out — validated FIRST so those diagnostics are reachable without provisioning the PR
+        # quorum). But the ladder VERIFIES AT STEP (6), strictly AFTER the PR leg (autopatch/loop.py): without
+        # --open-pr the run stops at the PR gate ("pr-denied") and the oracle is NEVER consulted. The run
+        # PROCEEDS anyway (so the dry run keeps its normal value) and says so HERE, on stdout, immediately
+        # under verify_target — the two lines cannot be read apart — and the strict exit code below makes it
+        # a failure rather than a silent success.
+        if not bool(getattr(args, "open_pr", False)):
+            _no_verify = ("verify_status  : WILL NOT RUN — the gated ladder verifies at step (6), AFTER the "
+                          "PR leg, so without --open-pr this run stops at the PR gate and NOTHING is "
+                          "verified. The run continues, but its exit code will be NON-ZERO because a "
+                          "verified result was requested and none was produced. Re-run with --open-pr "
+                          "(provisioned m-of-n destruction authorization + a GITHUB_TOKEN) to earn a signed "
+                          "`remediated`.")
+            print(_no_verify)
+            print(f"vigil patch: WARNING — {_no_verify}", file=sys.stderr)
+
+    # (4) config + run the gated ladder. client=None ⇒ the coder is built from ANTHROPIC_API_KEY (env, never
     #     argv); apply_edits/pr_enabled are explicit opt-ins; the GitHub token is read from the child env only.
     cfg = CodefixConfig(
         target_repo=finding.target_repo, base_dir=args.repo_base_dir, target_branch=args.target_branch,
         apply_edits=bool(args.apply_edits), model=resolve_model(args.model),  # --model > Settings choice > default
         pr_enabled=bool(args.open_pr), pr_base=args.pr_base)
-    result = autopatch_live(finding, config=cfg, client=None,
-                            operator_present=bool(args.approve), quorum=quorum)
+    result = autopatch_live(finding, config=cfg, client=None, operator_present=bool(args.approve),
+                            quorum=quorum, verify_oracle=verify_oracle)
 
     print("--- result ---")
     print(f"status         : {result.status}")
     print(f"applied_paths  : {list(result.patched_paths) or '-'}")
     print(f"opened_pr      : {result.opened_pr}   pr_ref={result.pr_ref or '-'}")
     print(f"remediated     : {result.remediated}")
+    if verify_oracle is not None:
+        print(f"verification   : {getattr(result.verification, 'status', '(none)')}")
     if result.reason:
         print(f"reason         : {result.reason}")
-    # Honest exit: non-zero only on an outright refusal (not-confirmed / gate deny). A propose-only or
-    # applied-in-clone or opened-PR run is a success; a "no proposal" (e.g. no API key) is reported, not crashed.
-    return 1 if str(result.status).startswith("refused") else 0
+    # Honest exit. Without verification requested: non-zero only on an outright refusal (not-confirmed / gate
+    # deny) — a propose-only or applied-in-clone or opened-PR run is a success and a "no proposal" (e.g. no API
+    # key) is reported, not crashed. WITH --verify-base-url the caller asked "is it actually fixed?", so ONLY a
+    # signed `remediated` is success: `opened-pr-still-vulnerable` and `opened-pr-unverified` MUST exit non-zero,
+    # or `vigil patch --verify-base-url ... && echo fixed` would print "fixed" for a STILL-VULNERABLE target.
+    if str(result.status).startswith("refused"):
+        return 1
+    if verify_oracle is not None and not bool(result.remediated):
+        return 1
+    return 0
 
 
 def _remediate_safe_ref(ref: str) -> str:
@@ -300,6 +403,50 @@ def _match_reverifiable_entry(entries: "list[dict]", ref: str, finding_ref: str)
     if len(entries) == 1 and isinstance(entries[0], dict):
         return entries[0]
     return None
+
+
+def _finding_ref_override_refusal(finding: Any, finding_ref: str) -> str:
+    """Refuse a ``--finding-ref`` that OVERRIDES the trusted finding's own ref. Returns a refusal reason, or
+    ``""`` when there is no conflict (an empty ref, or one naming this same finding).
+
+    ``--finding-ref`` exists to DISAMBIGUATE which confirmed fact to drive, and on the ``--from-spine`` path
+    it does exactly that (the spine load selects by it, so the two always agree). On the
+    ``--finding-envelope`` path the trusted finding's ref comes from the SIGNED certificate and the flag is
+    not consulted — so passing it on to select the RETAINED re-verifiable material would let finding B's
+    positive control + exploit drive a result attributed to finding A. Fail-closed: refuse the disagreement
+    outright rather than silently pick either side."""
+    want = str(finding_ref or "").strip()
+    own = str(getattr(finding, "ref", "") or "").strip()
+    if want and want != own:
+        return (f"--finding-ref {want!r} does not match the trusted finding's own ref {own!r}. The retained "
+                f"positive control is selected by the TRUSTED finding's ref ONLY — another finding's retained "
+                f"control + exploit must never drive a result attributed to this one (fail-closed).")
+    return ""
+
+
+# The query param the live re-drive carries the per-run freshness challenge on (all three re-drive verbs).
+# It MUST NOT collide with the finding's own injectable param — see `_nonce_param_collision_refusal`.
+_REDRIVE_NONCE_PARAM = "rc"
+
+
+def _nonce_param_collision_refusal(param: str, nonce_param: str = _REDRIVE_NONCE_PARAM) -> str:
+    """Refuse a finding whose INJECTABLE param IS the freshness-challenge param. Returns a reason, or ``""``.
+
+    The live re-drive puts the exploit on ``param`` and the per-run challenge on a SEPARATE ``nonce_param``
+    (``rc``). If a finding's own injectable param is literally ``rc``, the two COLLIDE when the adapter builds
+    the re-drive URL and the challenge OVERWRITES the exploit payload: the exploit is never sent, so oracle
+    silence says nothing about a fix — yet that silence would be minted as a signed remediation over a
+    STILL-VULNERABLE target. ``LiveHttpAdapter`` / ``DifferentialHttpAdapter`` also refuse this at
+    construction (so every caller inherits the guard); this pre-flight makes the CLI refuse EARLIER still —
+    before the ladder runs and before any request is sent to the target — with a message that says why."""
+    p = str(param or "").strip()
+    if p and p == str(nonce_param or "").strip():
+        return (f"the finding's injectable param is {p!r}, which is also the param the live re-drive carries "
+                f"the per-run freshness challenge on. They would collide: the challenge would OVERWRITE the "
+                f"exploit payload, so the exploit would never be sent and a silent oracle would say nothing "
+                f"about the fix — yet that silence would be minted as a remediation over a still-vulnerable "
+                f"target. Refusing (fail-closed).")
+    return ""
 
 
 def _reconstruct_exploit_request(finding: Any, entry: dict) -> "tuple[Optional[dict], str]":
@@ -356,6 +503,286 @@ def _reconstruct_exploit_request(finding: Any, entry: dict) -> "tuple[Optional[d
             f"(oracle_context.request_payload), the insertion point (payload_param / insertion_point), and a "
             f"reconstructable endpoint — refusing to fabricate one (fail-closed).")
     return {"endpoint_path": endpoint, "param": param, "payload": payload}, ""
+
+
+# The ONE oracle family the live fix-verification re-drive genuinely supports (GAP B). It is the same family
+# `vigil remediate --prove` re-drives: a response-side error signature. Any other channel is REFUSED rather
+# than mis-driven — see `_build_patch_fix_oracle`.
+_PATCH_VERIFY_CHANNEL = "error_signature"
+
+
+def _build_patch_fix_oracle(*, finding: Any, slug: str, base_dir: str, run_dir: str,
+                            verify_base_url: str) -> "tuple[Optional[Any], str]":
+    """GAP B — build the LIVE fix-verification oracle ``vigil patch`` threads into ``autopatch_live``.
+
+    Returns ``(oracle, "")`` or ``(None, why)``. It is the ONLY way ``vigil patch`` can mint ``remediated``,
+    and every gate is fail-closed: a wrong 'remediated' is worse than no verification at all, so each check
+    REFUSES (the caller exits non-zero, patching nothing) rather than degrade into a weaker claim.
+
+    THERE IS NO SECOND, WEAKER VERIFICATION PATH. The returned callable does not adjudicate anything itself:
+    it DELEGATES to the SAME rigorous machinery ``vigil remediate --prove`` drives — ``LiveHttpAdapter``
+    (whose ``run_positive_control`` issues a LIVE benign, challenge-bearing probe through the SAME injectable
+    param this run) + ``prove_remediation`` (the four-state protocol: authorization / proof-of-possession →
+    identity policy match → a positive control that must be BOTH live (the target ANSWERED that probe this
+    run) AND capable (the retained firing bytes still FIRE the same oracle here) → per-trial ``nonce_echoed``
+    freshness at or above the ``F1_TARGET_ECHOES`` floor → the protocol-required silent trials → identity
+    continuity → a SIGNED four-state certificate). Its verdict is then ADAPTED to the ``FixVerdict``
+    ``verify_patch`` reads:
+
+      * ``REMEDIATED``       → ``FixVerdict(fired=False, cert=<the signed prove-certificate ref>)`` — and only
+                               after that certificate INDEPENDENTLY re-verifies (``verify_prove_certificate``);
+      * ``STILL_VULNERABLE`` → ``FixVerdict(fired=True)``;
+      * ``INCONCLUSIVE`` / ``REFUSED`` → RAISE, which ``verify_patch`` maps to ``unverified``.
+
+    WHAT THE FRESHNESS FLOOR ACTUALLY BUYS — stated narrowly, because it is the single most over-claimable
+    link on this path. ``F1_TARGET_ECHOES`` proves RESPONSIVENESS / FRESHNESS ONLY: SOME HTTP responder at
+    ``--verify-base-url`` returned THIS run's nonce in the bytes the oracle judged. It does NOT prove the
+    responder was the application, and it does NOT prove the request reached the vulnerable endpoint. It
+    closes exactly ONE hole a locally-re-executed positive control leaves open — the NON-ECHOING answered
+    response (a static 404, a WAF block page, a login redirect, the wrong path, an unrelated silent service):
+    that yields INCONCLUSIVE/``freshness_echo_missing``, this oracle RAISES, and the run is ``unverified``,
+    never a signed remediation. It does NOT close the ECHOING case. A responder that reflects the request URI
+    or query — an echoing 404, a block page that prints what it blocked, a different service on that host —
+    satisfies F1 while the exploit never reaches the app, and its silence IS minted as ``remediated``. That is
+    a KNOWN RESIDUAL, not a closed case; the operator excludes it by pointing ``--verify-base-url`` at the
+    REAL application. Accordingly the claim a certificate from this path earns is: "the ORIGINAL oracle did
+    NOT fire over freshly captured bytes from the host the operator nominated" — NOT "the vulnerable endpoint
+    was exercised and is fixed".
+
+    WHICH GATES ARE LOAD-BEARING ON THIS PATH (and which only look like they are — do not lead with those).
+    LOAD-BEARING here, in the order they can stop a wrong ``remediated``: (1) CLASS CERTIFIABILITY — a
+    bug_class whose oracle family silence is not a SOUND negative never reaches REMEDIATED (``prove_driver``'s
+    fail-closed ``certifiable_by_silence`` allowlist); (2) the request BUDGET / rate limit, which bounds the
+    trials and turns an interrupted run INCONCLUSIVE; (3) the LIVE CONTROL — the host ANSWERED a benign,
+    challenge-bearing probe through the same injectable param THIS run — together with its harness-capability
+    twin (the retained firing bytes still fire the same oracle in this build); (4) the FRESHNESS ECHO floor
+    (responsiveness only — see above); (5) the protocol-required count of SILENT trials; (6) the MINT plus the
+    INDEPENDENT ``verify_prove_certificate`` re-check before this oracle reports a fix at all. NOT
+    load-bearing here, despite being part of the protocol: the AUTHORIZATION / PROOF-OF-POSSESSION /
+    IDENTITY-POLICY links. The owner key, the wielder keypair, the identity attestation and the capability are
+    all MINTED INSIDE this same closure and then verified against themselves, so on this path they are
+    checked against this run's own inputs and carry no independent assurance of anything HERE; their value is
+    realised when SOMEONE ELSE verifies the emitted certificate against an independently pinned owner key.
+    Identity CONTINUITY is real for an HTTPS target (the observed leaf-key SPKI must not change mid-run) and
+    VACUOUS for a plain-HTTP one, whose identity sample is the configured host string — though each re-sample
+    still issues a gated request, so a mid-run GATE refusal is surfaced either way.
+
+    The pre-flight chain below runs BEFORE the ladder (so a diagnosis costs no model call, clone or apply):
+
+      1. the finding must have an addressable ``ref`` — else its retained material cannot be matched by
+         ``check_id`` and another finding's positive control could be substituted;
+      2. ``--verify-base-url`` must be an http(s) URL with a host;
+      3. the RETAINED re-verifiable entry for THIS finding — matched STRICTLY on the trusted finding's OWN
+         ``ref`` (``_match_reverifiable_entry``; exact ``check_id``, never a sole-entry substitution, and
+         never an operator-supplied ``--finding-ref`` override — the caller refuses a mismatch outright);
+      4. CHANNEL GUARD — only ``error_signature`` is re-drivable today. Refusing is better than mis-driving a
+         different oracle family over bytes that family never reads (a vacuous non-fire looks like silence);
+      5. the retained firing ``oracle_context`` (the positive control) must be PRESENT and must still make the
+         ORIGINAL oracle fire when re-executed HERE. This is an OFFLINE harness pre-check only: it proves the
+         retained bytes still fire the oracle in this build, and it establishes NOTHING about the live target.
+         The LIVE control + the freshness echo (both inside ``prove_remediation``) are what establish that the
+         probe reached the deployment; this check just refuses an obviously-broken harness early;
+      6. the exploit request is RECONSTRUCTED from the retained material (``_reconstruct_exploit_request``),
+         never fabricated;
+      6b. NONCE-PARAM COLLISION — the reconstructed injectable ``param`` must NOT be the param the re-drive
+         carries the freshness challenge on (``_REDRIVE_NONCE_PARAM``). On a collision the challenge
+         OVERWRITES the exploit payload in the re-drive URL: the exploit is never sent, so oracle silence
+         would say nothing about a fix — and would be minted as a remediation over a still-vulnerable target.
+         (``LiveHttpAdapter`` refuses the same collision at construction; this refuses it earlier and says
+         why.);
+      7. SCOPE — the verification target is validated by CRUCIBLE's own ``validate_action`` charter/scope gate
+         (a pure pre-flight, no I/O) before any executor exists, and every re-drive request then goes through
+         the gated ``HttpExecutor`` for ``slug`` (authority / kill-switch / scope / budget / rate-limit). No
+         new ungated egress path is opened.
+
+    TRUST NOTE (honest, mirroring ``_cmd_remediate``): the driving FINDING is provenance-grounded (signed
+    spine / owner-delegated envelope), but the retained re-verifiable material read here
+    (``<run_dir>/proofs/reverifiable.json`` — the original firing ``oracle_context`` used as the positive
+    control, plus the channel / insertion point) is UNSIGNED LOCAL RUN OUTPUT, trusted AS SUCH. In the
+    owner-operated model it is the operator's own run output; do not point ``--verify-run-dir`` at another
+    engagement's ``proofs/``. It is matched to the finding by ``check_id`` (exact, fail-closed).
+
+    SIDE EFFECT (disclosed, not silent): when the returned oracle is actually CONSULTED (only on a run that
+    reaches the ladder's step (6)), it calls ``provision_authority`` for ``slug`` scoped to the verification
+    host — persisting a freshly signed CRUCIBLE authority via ``save_signed_authority`` and thereby
+    OVERWRITING any existing signed authority for that slug, exactly as ``vigil remediate --prove`` does.
+    Building the oracle, and every refusal above, writes nothing.
+
+    HONEST LIMITS (stated where they are created, not hidden). (a) The re-drive exercises the LIVE DEPLOYMENT
+    the operator points ``--verify-base-url`` at. That the deployment actually carries the patch this run
+    proposed is the OPERATOR's assertion — the sandbox ``patched_build`` ref is not cryptographically bound to
+    the running service (the ladder's ``patched_build`` argument is deliberately unused here). (b) The
+    silent-case residuals are exactly ``LiveHttpAdapter``'s, inherited unchanged and not re-argued here: an F1
+    remediation does not distinguish a payload-discriminating WAF (one that blocks the exploit's
+    metacharacters while still answering and echoing) or a param-stripping edge in front of an echoing
+    gateway from a real fix; ruling those out needs a matched-decoy differential or the OOB Tier-2, both
+    deferred. (c) The ECHOING-responder residual stated above: F1 does not attribute the echo to the
+    application. The oracle proves only that the ORIGINAL oracle did not fire over fresh, challenge-echoing
+    bytes captured from the nominated host, and nothing more.
+    """
+    from urllib.parse import urlsplit
+
+    ref = str(getattr(finding, "ref", "") or "").strip()
+    if not ref:
+        return None, ("the trusted finding has no addressable ref — its retained re-verifiable proof material "
+                      "cannot be matched by check_id (refusing rather than risk verifying against another "
+                      "finding's positive control; fail-closed).")
+
+    target = str(verify_base_url or "").strip()
+    host = urlsplit(target).hostname or ""
+    if not (target.startswith(("http://", "https://")) and host):
+        return None, ("--verify-base-url must be an http(s) URL with a host, e.g. http://127.0.0.1:8080 — the "
+                      "PATCHED, REDEPLOYED service to re-drive the original exploit against (and it MUST be "
+                      "authorized in the engagement charter scope).")
+
+    # (3) the RETAINED re-verifiable proof material for THIS finding. Matched on the TRUSTED finding's own ref
+    #     ONLY — an operator-supplied --finding-ref can never redirect this lookup at another finding's entry.
+    from .proof.run import read_reverifiable
+    entries = read_reverifiable(run_dir).get("active_findings", [])
+    entry = _match_reverifiable_entry(entries, ref, "")
+    if entry is None:
+        return None, (f"no retained re-verifiable proof material for finding {ref!r} under "
+                      f"{run_dir}/proofs/reverifiable.json (found {len(entries)} entr(y/ies)). The engagement "
+                      f"persists the original firing oracle_context there — run it first, or point "
+                      f"--verify-run-dir at the run that produced this finding. That retained material is "
+                      f"UNSIGNED local run output, trusted as such (see the TRUST NOTE).")
+
+    # (4) CHANNEL GUARD — the live re-drive genuinely supports ONE oracle family. Never mis-drive another.
+    channel = str(entry.get("channel") or "")
+    if channel != _PATCH_VERIFY_CHANNEL:
+        return None, (f"finding {ref!r} was confirmed on the {channel or '?'!r} channel; the live fix-"
+                      f"verification re-drive currently supports ONLY the {_PATCH_VERIFY_CHANNEL} channel "
+                      f"(error_based_sqli). Refusing rather than mis-driving a different oracle family "
+                      f"(fail-closed).")
+    bug_class = str(entry.get("bug_class") or "error_based_sqli")
+
+    # (5) the POSITIVE CONTROL, offline harness pre-check: present, and it still fires the original oracle in
+    #     THIS build. It says nothing about the live target — the LIVE control + the freshness echo inside
+    #     `prove_remediation` do that. This only refuses an obviously broken harness before the ladder starts.
+    original_firing_context = entry.get("oracle_context")
+    if not (isinstance(original_firing_context, dict) and original_firing_context):
+        return None, (f"finding {ref!r} has no retained firing oracle_context (the positive control) — the "
+                      f"live prove-run could not confirm the harness re-fires it, so silence on the patched "
+                      f"deployment could not be distinguished from a broken probe. Refusing.")
+    from framework.v2.verify.reverify import reverify_context      # lazy — FATAL-2
+    try:
+        control = reverify_context(dict(original_firing_context), bug_class=bug_class, ref=ref)
+    except Exception as exc:  # noqa: BLE001 — a control we cannot re-execute proves nothing (fail-closed)
+        return None, (f"the retained positive control for {ref!r} could not be re-executed ({exc}) — a silent "
+                      f"re-drive could not be distinguished from a broken probe. Refusing.")
+    if not getattr(control, "reproduced", False):
+        return None, (f"the retained positive control for {ref!r} does NOT re-fire the {bug_class} oracle, so a "
+                      f"SILENT re-drive would prove nothing (a broken probe looks exactly the same). Refusing.")
+
+    # (6) the ORIGINAL exploit request, reconstructed from retained data — never fabricated.
+    spec, why = _reconstruct_exploit_request(finding, entry)
+    if spec is None:
+        return None, why
+
+    # (6b) NONCE-PARAM COLLISION — refuse a finding whose injectable param IS the challenge param, BEFORE the
+    #      ladder runs. A collision silently drops the exploit payload, so oracle silence would say nothing.
+    collision = _nonce_param_collision_refusal(spec["param"])
+    if collision:
+        return None, collision
+
+    # (7) SCOPE — CRUCIBLE's own charter/scope gate, pure pre-flight (no I/O), before an executor exists. The
+    #     gated executor re-runs this same chain per request with its resolved posture; it stays the authority.
+    from framework.v2.agents.scope_gate import validate_action     # lazy — FATAL-2
+    decision = validate_action(slug=slug, method="GET", target_url=target)
+    if not getattr(decision, "allowed", False):
+        return None, (f"the verification target {target!r} is NOT authorized under the engagement charter for "
+                      f"{slug!r} ({getattr(decision, 'refusal_kind', '?')}): {getattr(decision, 'reason', '')} "
+                      f"— refusing (fail-closed; `vigil patch` opens no ungated egress path).")
+
+    evidence_ref = str(getattr(finding, "evidence_ref", "") or "")
+
+    def verify_oracle(_request: Any, _patched_build: Any) -> Any:
+        """The ``Callable[[request, patched_build], FixVerdict]`` the ladder consults at step (6). It runs the
+        FULL ``vigil remediate --prove`` protocol against ``--verify-base-url`` and ADAPTS the four-state
+        verdict; it makes no independent judgement of its own. ``_request`` / ``_patched_build`` are
+        deliberately unused: the exploit re-driven is the ORIGINAL one reconstructed from the retained,
+        provenance-grounded material, and the sandbox build ref is not bound to the running deployment."""
+        import hashlib
+        import secrets
+        import time as _time
+
+        from vigil_core import (
+            generate_keypair, identity_digest, prove_wielder, sign_capability, sign_identity_attestation)
+        from vigil_core.vault import Vault
+        from framework.v2.agents import HttpExecutor                 # lazy — FATAL-2
+
+        from .live.wiring import provision_authority
+        from .remediation.fix_oracle import FixVerdict
+        from .remediation.live_adapter import LiveHttpAdapter
+        from .remediation.prove_driver import ProvePolicy, State, prove_remediation, verify_prove_certificate
+
+        # The STABLE governance key under --base-dir signs the prove-certificate (same composition as the
+        # prove verb); provisioning the signed authority first means the executor's authority gate has it.
+        # DISCLOSED SIDE EFFECT: this OVERWRITES the engagement's signed CRUCIBLE authority for `slug`.
+        prov = provision_authority(slug=slug, scope=[host], base_dir=base_dir,
+                                   vault=Vault(Path(base_dir) / "vault"))
+        owner = prov.keypair
+        wielder = generate_keypair()
+        now = int(_time.time())
+        not_after = now + 3600
+        ident = sign_identity_attestation(owner, engagement=slug, policy={"host": [host]},
+                                          not_after=not_after)
+        cap = sign_capability(owner, engagement=slug, identity_digest=identity_digest(ident),
+                              class_allowlist=[bug_class], not_before=0, not_after=not_after,
+                              rate_limit=16, revocation_id=f"rev-{ref}", audience=wielder.public_key_b64)
+        # FRESH per-run inputs (the signed math forbids a wallclock/rng read; these are INPUTS the caller
+        # mints). Minted HERE, at verification time, not when the oracle was built.
+        pop_challenge = secrets.token_hex(16)
+        freshness_nonce = secrets.token_hex(16)
+        run_id = "patch-verify-" + secrets.token_hex(8)
+        wproof = prove_wielder(wielder, challenge=pop_challenge, capability=cap)
+
+        executor = HttpExecutor(engagement_slug=slug, base_url=target, prompt_callback=lambda *_a: False)
+        adapter = LiveHttpAdapter(
+            executor=executor, base_url=target, endpoint_path=spec["endpoint_path"], param=spec["param"],
+            payload=spec["payload"], nonce_param=_REDRIVE_NONCE_PARAM,
+            original_firing_context=dict(original_firing_context), bug_class=bug_class)
+
+        out = prove_remediation(
+            adapter=adapter, identity=ident, capability=cap, wielder_proof=wproof,
+            trusted_owner_pubkey=owner.public_key_b64, engagement=slug, finding_id=ref,
+            original_certificate_digest=evidence_ref, signers=prov.signers, now=now, run_id=run_id,
+            pop_challenge=pop_challenge, freshness_nonce=freshness_nonce, policy=ProvePolicy())
+
+        # Persist the SIGNED certificate for EVERY state (an INCONCLUSIVE/REFUSED reason cannot be stripped
+        # and re-read as success), then report the four-state verdict honestly on stdout.
+        proofs_dir = Path(base_dir) / "proofs"
+        proofs_dir.mkdir(parents=True, exist_ok=True)
+        cert_path = proofs_dir / f"patch-verify-prove-{_remediate_safe_ref(ref)}.json"
+        cert_body = json.dumps(out.certificate, indent=2, sort_keys=True)
+        cert_path.write_text(cert_body, encoding="utf-8")
+        print(f"verify_state   : {out.state}   reason={out.reason_code}  "
+              f"trials(attempted={out.trials_attempted} valid={out.trials_valid}) F{out.achieved_freshness}")
+        print(f"verify_cert    : {cert_path}")
+        print(f"verify_detail  : {out.detail}")
+
+        if out.state == State.STILL_VULNERABLE:
+            return FixVerdict(fired=True,
+                              reason=f"the ORIGINAL exploit oracle FIRED over fresh evidence: {out.detail}")
+        if out.state != State.REMEDIATED:
+            # INCONCLUSIVE (testing occurred, the negative claim was NOT earned — e.g. the target answered but
+            # never echoed this run's freshness challenge, so reachability of the vulnerable endpoint was
+            # never established) or REFUSED (testing must not begin). `verify_patch` maps a raise to
+            # 'unverified'. Never a fix (fail-closed).
+            raise ValueError(f"live fix-verification did not earn a remediation: {out.state}/"
+                             f"{out.reason_code} — {out.detail} (certificate: {cert_path})")
+        ok, vwhy = verify_prove_certificate(
+            out.certificate, signer_pubkeys={prov.signers[0][0]: owner.public_key_b64})
+        if not ok:
+            raise ValueError(f"the REMEDIATED prove-certificate did NOT independently re-verify ({vwhy}) — "
+                             f"refusing to report a fix (fail-closed; certificate: {cert_path})")
+        digest = "sha256:" + hashlib.sha256(cert_body.encode("utf-8")).hexdigest()
+        return FixVerdict(
+            fired=False, cert=f"prove-cert:{digest[7:31]}:{cert_path}", context_digest=digest,
+            reason=("the ORIGINAL exploit oracle went SILENT across the protocol-required fresh trials; the "
+                    "signed four-state prove-certificate independently re-verifies"))
+
+    return verify_oracle, ""
 
 
 def _cmd_remediate(args: argparse.Namespace) -> int:
@@ -433,18 +860,27 @@ def _cmd_remediate(args: argparse.Namespace) -> int:
               "re-verifiable proof material by check_id (refusing rather than risk substituting another "
               "finding's positive control; fail-closed).", file=sys.stderr)
         return 2
+    # ...and a --finding-ref that DISAGREES with that ref is refused, never honoured: on the envelope path the
+    # trusted ref comes from the SIGNED certificate and the flag is not consulted, so letting it choose the
+    # retained entry would drive finding B's positive control + exploit under finding A's name.
+    ref_why = _finding_ref_override_refusal(finding, getattr(args, "finding_ref", ""))
+    if ref_why:
+        print(f"vigil remediate: REFUSED (fail-closed): {ref_why}", file=sys.stderr)
+        return 2
 
     # (2) The RETAINED re-verifiable proof material for THIS finding: the positive control (original firing
     #     oracle_context) + the confirmed channel + the insertion point the exploit rode.
     from .proof.run import read_reverifiable
     run_dir = str(getattr(args, "run_dir", "") or "") or args.base_dir
     entries = read_reverifiable(run_dir).get("active_findings", [])
-    entry = _match_reverifiable_entry(entries, finding.ref, args.finding_ref)
+    entry = _match_reverifiable_entry(entries, finding.ref, "")
     if entry is None:
         print(f"vigil remediate: no retained re-verifiable proof material for finding {finding.ref!r} under "
               f"{run_dir}/proofs/reverifiable.json (found {len(entries)} entr(y/ies)). The engagement persists "
-              f"the original firing oracle_context there — run it first; the positive control cannot be "
-              f"fabricated. Pass --finding-ref to disambiguate.", file=sys.stderr)
+              f"the original firing oracle_context there — run it first, or point --run-dir at the run that "
+              f"produced this finding. That retained material is UNSIGNED local run output, trusted as such "
+              f"(see the TRUST NOTE). --finding-ref only picks WHICH FACT to load from the spine; it can "
+              f"never redirect this lookup.", file=sys.stderr)
         return 2
 
     channel = str(entry.get("channel") or "")
@@ -465,6 +901,10 @@ def _cmd_remediate(args: argparse.Namespace) -> int:
     spec, why = _reconstruct_exploit_request(finding, entry)
     if spec is None:
         print(f"vigil remediate: {why}", file=sys.stderr)
+        return 2
+    collision = _nonce_param_collision_refusal(spec["param"])
+    if collision:
+        print(f"vigil remediate: REFUSED (fail-closed): {collision}", file=sys.stderr)
         return 2
 
     target_base_url = str(args.target_base_url or "").strip()
@@ -489,7 +929,7 @@ def _cmd_remediate(args: argparse.Namespace) -> int:
                             prompt_callback=lambda *_a: False)
     adapter = LiveHttpAdapter(
         executor=executor, base_url=target_base_url, endpoint_path=spec["endpoint_path"],
-        param=spec["param"], payload=spec["payload"], nonce_param="rc",
+        param=spec["param"], payload=spec["payload"], nonce_param=_REDRIVE_NONCE_PARAM,
         original_firing_context=dict(original_firing_context), bug_class=bug_class)
 
     # (5) Provision identity + capability + wielder proof — the SAME composition the merged live adapter uses.
@@ -605,16 +1045,22 @@ def _cmd_reprove(args: argparse.Namespace) -> int:
         print("vigil reprove: the trusted finding has no addressable ref — cannot match its retained "
               "re-verifiable proof material by check_id (fail-closed).", file=sys.stderr)
         return 2
+    ref_why = _finding_ref_override_refusal(finding, getattr(args, "finding_ref", ""))
+    if ref_why:
+        print(f"vigil reprove: REFUSED (fail-closed): {ref_why}", file=sys.stderr)
+        return 2
 
     # (2) The RETAINED re-verifiable proof material (positive control + channel + insertion point).
     from .proof.run import read_reverifiable
     run_dir = str(getattr(args, "run_dir", "") or "") or args.base_dir
     entries = read_reverifiable(run_dir).get("active_findings", [])
-    entry = _match_reverifiable_entry(entries, finding.ref, args.finding_ref)
+    entry = _match_reverifiable_entry(entries, finding.ref, "")
     if entry is None:
         print(f"vigil reprove: no retained re-verifiable proof material for finding {finding.ref!r} under "
-              f"{run_dir}/proofs/reverifiable.json — run the engagement first (the positive control cannot be "
-              f"fabricated).", file=sys.stderr)
+              f"{run_dir}/proofs/reverifiable.json — run the engagement first, or point --run-dir at the run "
+              f"that produced this finding. That retained material is UNSIGNED local run output, trusted as "
+              f"such (see the TRUST NOTE). --finding-ref only picks WHICH FACT to load from the spine; it "
+              f"can never redirect this lookup.", file=sys.stderr)
         return 2
     channel = str(entry.get("channel") or "")
     if channel != "error_signature":
@@ -633,6 +1079,10 @@ def _cmd_reprove(args: argparse.Namespace) -> int:
     spec, why = _reconstruct_exploit_request(finding, entry)
     if spec is None:
         print(f"vigil reprove: {why}", file=sys.stderr)
+        return 2
+    collision = _nonce_param_collision_refusal(spec["param"])
+    if collision:
+        print(f"vigil reprove: REFUSED (fail-closed): {collision}", file=sys.stderr)
         return 2
     target_base_url = str(args.target_base_url or "").strip()
     host = urlsplit(target_base_url).hostname or ""
@@ -689,7 +1139,7 @@ def _cmd_reprove(args: argparse.Namespace) -> int:
                                 prompt_callback=lambda *_a: False)
         return LiveHttpAdapter(
             executor=executor, base_url=target_base_url, endpoint_path=spec["endpoint_path"],
-            param=spec["param"], payload=spec["payload"], nonce_param="rc",
+            param=spec["param"], payload=spec["payload"], nonce_param=_REDRIVE_NONCE_PARAM,
             original_firing_context=dict(original_firing_context), bug_class=bug_class)
 
     target = build_live_prove_target(
@@ -2048,7 +2498,11 @@ def build_parser() -> argparse.ArgumentParser:
     ppatch.add_argument("--scope", default="",
                         help="the engagement slug the envelope + delegation must cover")
     ppatch.add_argument("--finding-ref", default="",
-                        help="pick this fact by ref (--from-spine, when the spine has >1 confirmed fact)")
+                        help="pick the FACT FROM THE SPINE by ref (--from-spine, when the spine has >1 "
+                             "confirmed fact). It can NEVER redirect which retained re-verifiable entry "
+                             "drives fix-verification (that is selected by the TRUSTED finding's OWN ref), "
+                             "and a value that disagrees with the trusted finding's own ref is REFUSED "
+                             "(fail-closed).")
     ppatch.add_argument("--base-dir", default=".vigil-live",
                         help="engagement home holding {slug}.spine + vault (--from-spine)")
     # target + workdir + coder
@@ -2082,6 +2536,46 @@ def build_parser() -> argparse.ArgumentParser:
     ppatch.add_argument("--ledger", default="",
                         help="the durable single-use nonce ledger DIRECTORY (--open-pr; one authorization → one PR)")
     ppatch.add_argument("--pr-base", default="", help="the PR base branch (default: the repo's default branch)")
+    # LIVE FIX-VERIFICATION (GAP B) — OFF by default. Absent --verify-base-url the run is byte-identical to
+    # before (no oracle ⇒ `remediated` stays False and the PR is an unverified PROPOSAL). BOTH flags are named
+    # `--verify-*` deliberately, so no PRE-EXISTING argparse abbreviation changes meaning on the OFF path:
+    # `--target-base-url` (the prove verb's name) would make the existing `--target-b…` prefix ambiguous, and
+    # a bare `--run-dir` would make the existing `--r` prefix (--repo-base-dir) ambiguous. Semantics are
+    # otherwise identical to `vigil remediate --prove` — the verification is literally delegated to it.
+    ppatch.add_argument("--verify-base-url", default="",
+                        help="OFF by default. The LIVE, PATCHED, REDEPLOYED service to re-drive the ORIGINAL "
+                             "exploit against, e.g. http://127.0.0.1:8080 — it MUST be authorized in the "
+                             "engagement charter scope (else REFUSED). Supplying it DELEGATES verification to "
+                             "the same four-state `vigil remediate --prove` machinery (live positive control, "
+                             "a freshness challenge that must be ECHOED in the judged bytes, the required "
+                             "silent trials, a signed certificate): 'remediated' is minted ONLY on a "
+                             "REMEDIATED certificate that independently re-verifies; STILL_VULNERABLE is a "
+                             "firing verdict; INCONCLUSIVE/REFUSED yield 'unverified', never a fix. Supported "
+                             "channel: error_signature (error_based_sqli) — any other confirmed channel "
+                             "REFUSES rather than mis-drive another oracle family. NOTE: the ladder verifies "
+                             "AFTER the PR leg, so without --open-pr nothing is verified (the run says so and "
+                             "exits non-zero). SIDE EFFECT: a run that actually verifies (re)provisions — "
+                             "OVERWRITING — this engagement's signed CRUCIBLE authority, scoped to the "
+                             "verification host, exactly as `vigil remediate --prove` does. WHAT THE ECHO "
+                             "ESTABLISHES: RESPONSIVENESS/FRESHNESS ONLY — that SOME responder on this host "
+                             "returned this run's nonce in the judged bytes. NOT that it was your "
+                             "application, NOT that the request reached the vulnerable endpoint. So a "
+                             "'remediated' here means: the original oracle did not fire over freshly captured "
+                             "bytes from the host you nominated. KNOWN RESIDUAL: an ECHOING but unrelated "
+                             "responder (an echoing 404 or block page that reflects the query, another "
+                             "service on this host) satisfies that floor while the exploit never reaches the "
+                             "app — YOU exclude it by pointing this at the REAL application; a NON-echoing "
+                             "responder is already 'unverified'. HONEST LIMITS: that the deployment carries "
+                             "THIS run's patch is the operator's assertion, and a silent verdict inherits the "
+                             "prove path's residuals (it does not distinguish a payload-discriminating WAF or "
+                             "a param-stripping echoing edge from a real fix).")
+    ppatch.add_argument("--verify-run-dir", default="",
+                        help="the run dir holding proofs/reverifiable.json (the retained ORIGINAL firing "
+                             "oracle_context = the positive control) for --verify-base-url; default = "
+                             "--base-dir. TRUST NOTE (honest): that retained material is UNSIGNED LOCAL RUN "
+                             "OUTPUT — the operator's own run output in the owner-operated model — and is "
+                             "trusted as such; it is matched to the trusted finding by check_id (exact, "
+                             "fail-closed). Do NOT point this at another engagement's proofs/.")
     ppatch.set_defaults(func=_cmd_patch)
 
     prem = sub.add_parser(
@@ -2109,8 +2603,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="the engagement slug the envelope + delegation must cover (--finding-envelope); it is "
                            "also the charter the live target must be authorized under")
     prem.add_argument("--finding-ref", default="",
-                      help="pick the fact by ref (--from-spine when the spine has >1 fact; also selects the "
-                           "matching re-verifiable entry)")
+                      help="pick the FACT FROM THE SPINE by ref (--from-spine when the spine has >1 fact). "
+                           "That is ALL it does: it can NEVER redirect which retained re-verifiable entry "
+                           "drives the proof — that entry is selected by the TRUSTED finding's OWN ref — and "
+                           "a value that disagrees with the trusted finding's own ref is REFUSED "
+                           "(fail-closed), never honoured.")
     prem.add_argument("--base-dir", default=".vigil-live",
                       help="engagement home: holds {slug}.spine + vault + the STABLE governance key, and where "
                            "the prove-certificate is written (proofs/remediation-prove-<ref>.json)")
@@ -2151,7 +2648,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="the engagement slug the envelope + delegation must cover, and the charter the live "
                           "target must be authorized under (--finding-envelope)")
     prr.add_argument("--finding-ref", default="",
-                     help="pick the fact by ref (--from-spine when the spine has >1 fact)")
+                     help="pick the FACT FROM THE SPINE by ref (--from-spine when the spine has >1 fact). It "
+                          "can NEVER redirect which retained re-verifiable entry drives the proof (that is "
+                          "selected by the TRUSTED finding's OWN ref), and a value that disagrees with the "
+                          "trusted finding's own ref is REFUSED (fail-closed).")
     prr.add_argument("--base-dir", default=".vigil-live",
                      help="engagement home: holds {slug}.spine + vault + the STABLE governance key + the "
                           "self-witness key, and (by default) the attestation-log/ directory")
