@@ -30,8 +30,15 @@ full-lifecycle-Claude}; fusing all five is unclaimed ground.
    builders + adversarial verifiers + synthesis). Never trust an LLM for a security verdict — the oracle
    decides (see FRONTIER.md).
 6. **Never merge on GitHub unless all checks pass** (CI: `.github/workflows/ci.yml`). Use branches + PRs.
-7. **The two FATAL flaws must be fixed before any *fused offense run*:** the sandbox egress gate (P6) and
-   the offense-free process boundary (P5/P7). Do not run the fused offensive agent until both exist.
+7. **The two FATAL gates are SHIPPED and default-ON** (verified in-tree 2026-08-18): the host-side egress
+   gate (P6 — `gateway/vigil_gateway/{nftables,proxy,denylist,docker}.py`: deny-default L3/L4 + a
+   charter-scoped L7 forward proxy) and the offense-free process boundary (P5 two envs
+   `envs/{sovereign,offense}.txt`; P7 `apps/sigil/sigil/governor/offense_gate.py` — a fail-closed,
+   owner-signed, charter-bound gate — plus `integration/vigil_integration/warden_gate.py` `WardenGateHooks`,
+   ON BY DEFAULT). `NET_ADMIN` is now DROPPED from the sandbox by default
+   (`vendor/strix/strix/runtime/docker_client.py`). A *live* fused-offense run still requires DEPLOYING the
+   P6 gateway (host nftables + an `internal: true` sandbox docker network per `gateway/README.md`) — the gate
+   exists and is tested; standing it up is a deploy step, not a build gap.
 
 ## STATE — what is DONE (all green, on `main`)
 | Phase | Commit | What | Verified |
@@ -105,8 +112,21 @@ confidential-computing silicon; software attestation + auto-detect are built), b
 auto-patch *synthesis* (research), next-gen agent body (research). The `execute_sandbox`/`vigil sandbox`
 wiring (#170) and the G2 telemetry sidecar (#171) — previously listed as follow-ons — are now DONE.
 
-## STATE — what is NEXT (build in this order; each independently green)
-See `docs/PLAN.md` §5–§10 + §I for full specs. Summary + gates:
+## STATE — the P5–P10 / I1–I5 roadmap (SHIPPED — cite paths; bullets kept as the as-built spec)
+**These phases are BUILT and in-tree** (verified 2026-08-18), NOT "next to build": P5 two-env boundary
+(`envs/`), P6 host egress gate (`gateway/`), P7 boundary + WARDEN tool gate
+(`apps/sigil/sigil/governor/offense_gate.py`, `integration/vigil_integration/warden_gate.py`), P8 Claude
+runtime hardening (`vendor/strix/strix/report/anthropic_pricing.py` price table + the reasoning/cache/dedupe
+seams), P9 oracle-confirmation adapter (`integration/vigil_integration/oracle_adapter.py`), P10 inert-data
+spine-sign (`integration/vigil_integration/inert_finding.py` → `apps/sigil/sigil/inbound/finding_receiver.py`),
+I1 per-run challenge oracles (`integration/vigil_integration/challenge_oracle.py`), I2 witnessed transparency
+log + SCITT/OpenVEX (`integration/vigil_integration/{transparency,scitt,witnessed_anchor}.py`), I4
+threshold-gated destruction (`integration/vigil_integration/destruction_gate.py`). **Still honestly out of
+reach** (labelled, never faked): I3 the Claude-Agent-SDK-native agent body (Strix remains welded to
+`openai-agents`), the deeper I5 binary auto-patch *synthesis* (a partial tier exists in
+`engine/crucible/framework/v2/remediation_binary/` + `analysis/smt.py`; full synthesis is research), and a
+real TEE *hardware* backend (software attestation is built). The per-phase bullets below are retained as the
+as-built spec (full specs in `docs/PLAN.md` §5–§10 + §I):
 - **P5 — Two-environment build boundary + inert-data channel.** `uv` workspace (or two venvs): **env-sovereign**
   (`vigil_core` + `apps/sigil`, NEITHER `framework` NOR `strix` installed → `assert_no_offense` holds
   structurally) and **env-offense** (`vigil_core` + `engine/crucible` + `vendor/strix`). Two locks. The offense
@@ -197,6 +217,10 @@ I1–I5 after the P-core. Fan out with Workflows; keep tightly-coupled reasoning
 - Strix's model layer is already provider-agnostic (`StrixProvider→LiteLLM`); `anthropic/claude-opus-4-8` is
   the default. The agent framework is `openai-agents` (its SandboxAgent/Shell/Filesystem drive the Kali
   container) — the Claude-Agent-SDK port (I3) is a real sandbox rewrite, not a config swap.
-- Strix scope is prompt-level only + the container holds `NET_ADMIN`/`NET_RAW` — the P6 host-side egress gate
-  is what makes it safe; do not run fused offense before it.
+- Strix's own scope is prompt-level only, but the P6 host-side egress gate (`gateway/`, SHIPPED) is what makes
+  fused offense safe and it exists: from inside the sandbox, `169.254.169.254` / the operator LAN / any
+  off-scope host are DROPPED at the host gateway (deny-default nftables + a charter-scoped L7 proxy).
+  `NET_ADMIN` is DROPPED from the sandbox by default (`vendor/strix/strix/runtime/docker_client.py`), so the
+  box cannot rewrite its own firewall; only `NET_RAW` is retained (for SYN scans). A live run still needs the
+  gateway DEPLOYED (host nftables + `internal: true` docker net per `gateway/README.md`).
 - `gh` on this machine authenticates as `thuram-nana` (mislabeled "Water-Hacker" in `gh auth status`).

@@ -151,15 +151,26 @@ CLI dispatch is `python3 -m framework.v2 <subcommand>` (`__main__.py`).
 
 ## 5. Known gaps / open seams (current)
 
-- **Producers don't populate `oracle_context` yet.** Grep confirms: outside
-  `agents/models.py` and `critique_agent.py`, *nothing* writes
-  `oracle_context`. `exploit_agent` / `http_executor` / `realistic_executor`
-  collect observations but do not yet build a `FindingContext` and attach its
-  `model_dump()` to the emitted `FindingPayload`. Until they do, live findings
-  fall through to the legacy LLM-advisory path and the oracle authority only
-  fires in tests + `confirm_against_local_target`. **This is the top open
-  seam** — the wiring exists end-to-end; the last mile (producer → oracle
-  evidence) is unbuilt.
+- **Producers DO populate `oracle_context` — this seam is CLOSED (verified 2026-08-18).**
+  The live producers build a `FindingContext` and attach its `model_dump()` to
+  the emitted finding: `agents/http_executor.py` builds
+  `FindingContext.from_http_responses(baseline, mutated, …)` and returns it as
+  `oracle_context=context.model_dump()` on the `ExecutionOutcome`
+  (`http_executor.py:557`), and `agents/exploit_agent.py` carries it onto the
+  posted `FindingPayload` via `model_copy(update={"oracle_context": …})`
+  (`exploit_agent.py:165`). The scanner does the same on every confirmed
+  finding — the `AuditEngine` emits `oracle_context=_context_dump(ctx)` after
+  `adjudicate_finding` / `confirmed_from_result` fire (`scanner/engine.py:320,413`),
+  and `scanner/campaign.py` attaches `r.context.model_dump(mode="json")` on
+  confirmed browser-XSS and raw-socket-arsenal findings. So the oracle authority
+  (`verify.verifier.OracleVerifier` / `verify.confirmation.confirm_finding`)
+  **fires in the real `engage` → `WebScanCampaign` path** (`engage.py:833`), not
+  only in tests. Honest residual: `agents/realistic_executor.py` is a *test
+  harness* (synthetic evidence for the critique-agent tests) and by design does
+  not attach `oracle_context`; a finding that arrives WITHOUT one still falls
+  through to the legacy LLM-advisory path, and `confirm_against_local_target`
+  (`verify/confirmation.py:314`) is a test-only E2E helper used only in
+  `verify/tests/test_confirmation_e2e.py`.
 - **The four new modules are outside `pyproject.toml` `testpaths`.** A bare
   `pytest` (what a naive CI gate runs) silently skips 182 tests. Either add
   `verify/tests`, `worldmodel/tests`, `calibration/tests`, `knowledge/tests`
