@@ -43,6 +43,16 @@ _log = logging.getLogger(__name__)
 
 _UNSET = object()   # sentinel: the spine-payload DEK has not been loaded yet (distinct from a cached None)
 
+# C-1 reader grace: how many times a lock-free read re-resolves the segment set when a concurrent
+# compaction/rotation supersedes the manifest under it. Each swap advances the generation exactly once and
+# a reader only ever loses a race to a swap that already COMMITTED, so a handful of attempts absorbs real
+# churn; the bound is what keeps a pathological writer from livelocking a reader into a hang (it surfaces
+# as a loud SpineError instead). Genuine loss is ALWAYS fail-closed: a segment missing at a STABLE (non-
+# forward) generation raises at once ("references a missing segment"); under a writer that is concurrently
+# advancing the generation, real loss instead surfaces as the bounded "kept changing" SpineError — still a
+# loud raise, never a short chain (invariant 15).
+_SEG_RESOLVE_ATTEMPTS = 6
+
 
 class SpineError(Exception):
     """A structural spine fault — a corrupt/degenerate manifest or a manifest-referenced segment that
@@ -279,23 +289,72 @@ class SpineStore:
                 return seg0
         return a
 
-    def _segments_in_order(self) -> list[Path]:
-        """The segment files to read, in seq order (sealed by first_seq, then the active tail). With no
-        manifest this is the single legacy/active file. Resolved fresh each call so a rotation/migration by
-        another process is seen. RAISES SpineError on a manifest-referenced segment file that is MISSING —
-        a read must never silently yield a short chain (invariant 15: no state-scanner fail-open)."""
+    def _manifest_generation(self) -> int:
+        """The manifest generation ON DISK RIGHT NOW (-1 when there is no manifest). Every manifest swap —
+        migrate, seal/rotate, compaction's codec flip — publishes atomically with `generation + 1`, so this
+        single monotonic token is what lets the read path tell a BENIGN SUPERSESSION (someone committed a
+        new segment set under us) apart from REAL CORRUPTION (a segment the current set still names is
+        gone). Cheap: one small atomic-written JSON read."""
         m = read_manifest(self._layout)
-        if m is None:
-            t = self._read_target()
-            return [t] if t.exists() else []
-        out: list[Path] = []
-        for seg in m.ordered():
-            p = self._layout.seg_path(seg)
-            if not p.exists():
-                raise SpineError(
-                    f"spine manifest (generation {m.generation}) references a missing segment: {seg.file}")
-            out.append(p)
-        return out
+        return m.generation if m is not None else -1
+
+    def _segments_in_order(self) -> list[Path]:
+        """`_resolve_segments()` without the generation — for callers that only need the paths."""
+        return self._resolve_segments()[1]
+
+    def _resolve_segments(self) -> tuple[int, list[Path]]:
+        """(manifest generation, the segment files to read in seq order — sealed by first_seq, then the
+        active tail). With no manifest this is the single legacy/active file at generation -1 (FIRST attempt
+        only — see below). Resolved fresh each call so a rotation/migration by another process is seen.
+
+        C-1 (reader vs. compaction TOCTOU). Resolution is inherently two steps — read the manifest, then
+        touch the files it names — and compaction's ordering is already the safe one: `_compress_one_sealed`
+        COMMITS the new-generation manifest (codec flipped to gzip, `file` -> seg-N.jsonl.gz) BEFORE
+        `_remove_superseded_plaintext` unlinks the plaintext it superseded. So a reader can only ever find a
+        file missing because its OWN SNAPSHOT is stale — the current manifest no longer references that
+        file. That is distinguishable from real loss, and the discriminator is a STRICTLY-FORWARD generation
+        move (each swap does exactly `generation + 1`; nothing ever moves it backward). RE-READ the manifest:
+          * generation moved STRICTLY FORWARD (`> gen`) -> our snapshot was superseded; re-resolve against
+            the new manifest (bounded attempts, so churn can never livelock us into a hang);
+          * generation NOT strictly forward (unchanged, regressed, or the manifest VANISHED to -1) -> this is
+            NOT a benign supersession; the live segment set genuinely references a file that is gone. RAISE —
+            a read must never silently yield a short chain (invariant 15: no state-scanner fail-open).
+        The no-manifest branch is therefore FIRST-ATTEMPT-ONLY: a legacy (pre-migrate) spine legitimately has
+        no manifest, but a manifest that DISAPPEARS mid-resolve (reset()/an in-flight migrate that has not yet
+        republished) went from `gen >= 0` to -1 — not a forward move — so falling back to the legacy single
+        file there would be exactly the silent short chain invariant 15 forbids.
+        This keeps the fail-closed guarantee exactly as strict as before for every real integrity failure
+        while making the benign compaction window a retry instead of an error."""
+        missing, gen = "", -1
+        for attempt in range(_SEG_RESOLVE_ATTEMPTS):
+            m = read_manifest(self._layout)
+            if m is None:
+                if attempt == 0:
+                    t = self._read_target()              # legacy (pre-manifest) spine: the single file
+                    return (-1, [t] if t.exists() else [])
+                # We STARTED this resolve holding a manifest (gen >= 0) and it has since VANISHED: the
+                # generation went to -1, which is NOT a strictly-forward move. Falling back to the legacy
+                # single file here would yield a SHORT chain (invariant 15). RAISE.
+                raise SpineError("spine manifest disappeared while resolving segments")
+            gen, missing = m.generation, ""
+            out: list[Path] = []
+            for seg in m.ordered():
+                p = self._layout.seg_path(seg)
+                if not p.exists():
+                    missing = seg.file
+                    break
+                out.append(p)
+            if not missing:
+                return (gen, out)
+            if self._manifest_generation() > gen:        # STRICTLY FORWARD -> superseded; re-resolve
+                _log.debug("spine: manifest superseded while resolving segments (was generation %d); "
+                           "re-resolving", gen)
+                continue
+            raise SpineError(                            # not a forward move -> a genuine integrity failure
+                f"spine manifest (generation {gen}) references a missing segment: {missing}")
+        raise SpineError(
+            f"spine manifest kept changing while resolving segments (compaction churn) — giving up; last "
+            f"unresolved segment {missing!r} at generation {gen}")
 
     def _seam_tip_for_active(self) -> "ChainEntry | None":
         """When the ACTIVE segment is empty, the chain tip its first append must extend so the seam stays
@@ -786,12 +845,12 @@ class SpineStore:
         manifest references a segment that cannot be read — a read must NEVER silently yield a short chain
         (invariant 15: no state-scanner fail-open)."""
         yielded_upto = since_seq
-        for _attempt in range(6):                        # D2 reader-grace: tolerate a few compaction moves
+        for _attempt in range(_SEG_RESOLVE_ATTEMPTS):    # D2 reader-grace: tolerate a few compaction moves
             segs = self._segments_in_order()             # RAISES on a genuinely missing referenced segment
             if not segs:
                 return
-            start_i, start_off = self._start_locus(yielded_upto, segs)
             try:
+                start_i, start_off = self._start_locus(yielded_upto, segs)   # its index build opens segments
                 for i in range(start_i, len(segs)):
                     p = segs[i]
                     with self._open_segment(p) as f:
@@ -810,9 +869,13 @@ class SpineStore:
                                 yielded_upto = rec.seq
                 return                                    # completed cleanly
             except FileNotFoundError:
-                # a concurrent compaction moved a plaintext segment to trash AFTER we resolved it — re-read
-                # the manifest (now pointing at the .gz) and continue from where we left off. Retain-all
-                # means the same seqs are still covered, so no record is skipped or repeated.
+                # A concurrent compaction unlinked a plaintext segment AFTER we resolved it — either in the
+                # read loop above OR inside _start_locus's index build (_ensure_index -> _scan_segment, the
+                # open the C-1 fix originally left outside this try). Re-read the manifest (now pointing at
+                # the .gz) and continue from where we left off; retain-all means the same seqs are still
+                # covered, so no record is skipped or repeated. If the segment is GENUINELY gone (not a
+                # compaction), the next _segments_in_order() re-resolve RAISES a loud missing-segment
+                # SpineError at an unchanged generation, so this retry can never mask real loss as churn.
                 _log.debug("spine: a segment moved during read (compaction); re-resolving from seq %d", yielded_upto)
                 continue
         raise SpineError("spine segments kept moving during read (compaction churn) — giving up")
@@ -825,9 +888,20 @@ class SpineStore:
         indexed (beyond the tip, or a corrupt line was skipped)."""
         if seq < 0:
             return None
-        self._ensure_index()
-        with self._index_lock:
-            loc = self._offsets.get(seq)
+        loc = None
+        for _attempt in range(_SEG_RESOLVE_ATTEMPTS):    # D2 reader-grace: a concurrent compaction may unlink
+            try:                                         # a plaintext between the index resolve and its scan
+                self._ensure_index()                     # RAISES a loud SpineError on a GENUINELY missing
+                with self._index_lock:                   # segment (unchanged generation); re-resolves a mere
+                    loc = self._offsets.get(seq)         # supersession internally via _segments_in_order()
+                break
+            except FileNotFoundError:
+                # _scan_segment opened a plaintext a compaction unlinked after the resolve — re-resolve
+                # (the manifest now names the .gz). Genuine loss re-raises loudly on the next resolve.
+                _log.debug("spine: a segment moved during get() index build (compaction); re-resolving")
+                continue
+        else:
+            raise SpineError("spine segments kept moving during get() (compaction churn) — giving up")
         if loc is not None:
             path_str, off = loc
             try:
@@ -854,15 +928,19 @@ class SpineStore:
         bound AGGREGATE replay bloat — pair `tail()`-based dedup with a record-time freshness gate."""
         if n <= 0:
             return []
-        for _attempt in range(6):                        # D2 reader-grace: a concurrent compaction may
-            try:                                         # unlink a plaintext between resolve and read
+        for _attempt in range(_SEG_RESOLVE_ATTEMPTS):    # D2 reader-grace: a concurrent compaction may
+            segs = self._segments_in_order()             # unlink a plaintext between resolve and read
+            try:
                 recs: list[SpineRecord] = []
-                for p in reversed(self._segments_in_order()):
+                for p in reversed(segs):
                     recs = self._read_segment_tail(p, n - len(recs)) + recs
                     if len(recs) >= n:
                         break
                 return recs[-n:]
             except FileNotFoundError:
+                # A superseded plaintext moved under us -> re-resolve (the manifest now names the .gz). A
+                # GENUINELY missing segment is caught by the next _segments_in_order() re-resolve, which
+                # RAISES a loud missing-segment SpineError at an unchanged generation, not "churn".
                 _log.debug("spine: a segment moved during tail() (compaction); re-resolving")
                 continue
         raise SpineError("spine segments kept moving during tail() (compaction churn) — giving up")
