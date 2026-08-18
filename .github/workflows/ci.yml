@@ -418,6 +418,7 @@ jobs:
               integration/tests/test_live_adapter_f2.py \
               integration/tests/test_spine_verify.py \
               integration/tests/test_cli_remediate.py \
+              integration/tests/test_cli_patch_verify.py \
               integration/tests/test_posture_certificate.py \
               integration/tests/test_posture_vf_differential.py \
               integration/tests/test_posture_live.py \

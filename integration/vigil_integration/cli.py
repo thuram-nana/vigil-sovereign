@@ -18,7 +18,10 @@ One entry point over the whole fused system. NATIVE verbs (handled in-process, o
                                     GROUNDED confirmed finding (signed envelope OR the engagement's signed
                                     spine — never raw JSON). Default is a non-destructive propose-only dry
                                     run; ``--apply-edits`` applies into a disposable clone; ``--open-pr`` (off
-                                    by default) opens a gated PR under a provisioned m-of-n destruction quorum.
+                                    by default) opens a gated PR under a provisioned m-of-n destruction quorum;
+                                    ``--verify-base-url`` (off by default) re-drives the ORIGINAL exploit against
+                                    the operator's PATCHED redeployment through the gated executor so a signed
+                                    ``remediated`` can be earned instead of an unverified proposal.
   * ``vigil provision-destruction`` — mint the m-of-n destruction quorum keys for ``vigil patch --open-pr``
                                     (prints the signing keys ONCE; writes the public trust root).
   * ``vigil authorize-destruction`` — sign ONE destructive action (from a ``vigil patch`` dry run) → the
@@ -171,6 +174,24 @@ def _cmd_patch(args: argparse.Namespace) -> int:
     dry run: propose (Claude) → clone → sandbox-build in a DISPOSABLE clone; the source is never touched and no
     PR is opened. ``--apply-edits`` applies the fix into the clone; ``--open-pr`` (off by default) opens a gated
     PR and needs a provisioned m-of-n destruction authorization + a ``GITHUB_TOKEN`` in the environment.
+
+    LIVE FIX-VERIFICATION (GAP B, opt-in). Without ``--verify-base-url`` no fix-verification oracle is wired,
+    so ``remediated`` stays False and the PR opens as an unverified PROPOSAL (byte-identical to before). With
+    it, the ORIGINAL exploit is re-driven against the operator's PATCHED, REDEPLOYED service through the same
+    gated executor + charter scope gate ``vigil remediate --prove`` uses, and ``remediated`` is minted ONLY
+    when that oracle goes SILENT over the freshly captured bytes and a signed remediation attestation is
+    produced. Every case the re-drive cannot soundly adjudicate REFUSES before anything is patched (see
+    ``_build_patch_fix_oracle``). NOTE: the ladder verifies AFTER the PR leg, so ``remediated`` is reachable
+    ONLY on a fully provisioned ``--open-pr`` run; ``--verify-base-url`` therefore REQUIRES ``--open-pr`` and
+    refuses UP FRONT otherwise (a flag that could never take effect must not silently buy a model call, a
+    clone and an apply). EXIT CODE: when verification is requested, only a signed ``remediated`` exits 0 —
+    ``opened-pr-still-vulnerable`` / ``opened-pr-unverified`` exit non-zero, so a script cannot read
+    "did not refuse" as "fixed".
+
+    HONEST LIMIT: the re-drive proves the ORIGINAL exploit no longer fires against the deployment at
+    ``--verify-base-url``. That this deployment actually carries THIS run's patch is the operator's
+    assertion — the disposable sandbox clone is not cryptographically bound to the running service, and the
+    signed attestation binds the silent oracle context, not the applied diff.
     """
     from .autopatch.loop import _derive_remediation_id
     from .live.codefix_runner import CodefixConfig, autopatch_live, file_backed_quorum
@@ -253,25 +274,64 @@ def _cmd_patch(args: argparse.Namespace) -> int:
             return 2
         quorum = file_backed_quorum(authority=authority, signed=signed, slug=slug, ledger_path=ledger)
 
-    # (3) config + run the gated ladder. client=None ⇒ the coder is built from ANTHROPIC_API_KEY (env, never
+    # (3) OPT-IN LIVE FIX-VERIFICATION (GAP B). Without --verify-base-url this stays None and the run is
+    #     BYTE-IDENTICAL to before: `remediated` stays False and a PR (if any) opens as an unverified PROPOSAL.
+    #     With it, the ORIGINAL exploit is re-driven against the operator's PATCHED, REDEPLOYED service through
+    #     the gated executor and `remediated` is minted ONLY if that oracle goes SILENT. Every unsupported /
+    #     unprovable case REFUSES here (nothing is patched) rather than degrade to a weaker claim.
+    verify_oracle = None
+    if str(getattr(args, "verify_base_url", "") or "").strip():
+        verify_oracle, vwhy = _build_patch_fix_oracle(
+            finding=finding, slug=slug, base_dir=args.base_dir,
+            run_dir=(str(getattr(args, "run_dir", "") or "") or args.base_dir),
+            finding_ref=args.finding_ref, verify_base_url=args.verify_base_url)
+        if verify_oracle is None:
+            print(f"vigil patch: fix-verification REFUSED (fail-closed): {vwhy}", file=sys.stderr)
+            return 2
+        # The oracle is SOUND (channel, positive control, reconstructed exploit and charter scope all check
+        # out — validated FIRST so those diagnostics are reachable without provisioning the PR quorum). But
+        # the ladder VERIFIES AT STEP (6), strictly AFTER the PR leg (autopatch/loop.py): without --open-pr
+        # the run stops at the PR gate ("pr-denied") and the oracle is NEVER consulted. Refuse rather than
+        # accept a flag that cannot take effect — silently buying a model call, a clone and an apply and then
+        # dying before verifying would read as "verification ran and found nothing".
+        if not bool(getattr(args, "open_pr", False)):
+            print("vigil patch: WARNING — the fix-verification oracle is wired and sound, but this run will "
+                  "NOT reach it: the gated ladder verifies at step (6), AFTER the PR leg, so without "
+                  "--open-pr the run stops at the PR gate and NOTHING is verified. The exit code will be "
+                  "non-zero because you asked for a verified result and none was produced. Re-run with "
+                  "--open-pr (provisioned m-of-n destruction authorization + a GITHUB_TOKEN) to earn a "
+                  "signed `remediated`.", file=sys.stderr)
+        print(f"verify_target  : {args.verify_base_url}   (live re-drive of the ORIGINAL exploit; "
+              f"'remediated' only if that oracle goes SILENT)")
+
+    # (4) config + run the gated ladder. client=None ⇒ the coder is built from ANTHROPIC_API_KEY (env, never
     #     argv); apply_edits/pr_enabled are explicit opt-ins; the GitHub token is read from the child env only.
     cfg = CodefixConfig(
         target_repo=finding.target_repo, base_dir=args.repo_base_dir, target_branch=args.target_branch,
         apply_edits=bool(args.apply_edits), model=resolve_model(args.model),  # --model > Settings choice > default
         pr_enabled=bool(args.open_pr), pr_base=args.pr_base)
-    result = autopatch_live(finding, config=cfg, client=None,
-                            operator_present=bool(args.approve), quorum=quorum)
+    result = autopatch_live(finding, config=cfg, client=None, operator_present=bool(args.approve),
+                            quorum=quorum, verify_oracle=verify_oracle)
 
     print("--- result ---")
     print(f"status         : {result.status}")
     print(f"applied_paths  : {list(result.patched_paths) or '-'}")
     print(f"opened_pr      : {result.opened_pr}   pr_ref={result.pr_ref or '-'}")
     print(f"remediated     : {result.remediated}")
+    if verify_oracle is not None:
+        print(f"verification   : {getattr(result.verification, 'status', '(none)')}")
     if result.reason:
         print(f"reason         : {result.reason}")
-    # Honest exit: non-zero only on an outright refusal (not-confirmed / gate deny). A propose-only or
-    # applied-in-clone or opened-PR run is a success; a "no proposal" (e.g. no API key) is reported, not crashed.
-    return 1 if str(result.status).startswith("refused") else 0
+    # Honest exit. Without verification requested: non-zero only on an outright refusal (not-confirmed / gate
+    # deny) — a propose-only or applied-in-clone or opened-PR run is a success and a "no proposal" (e.g. no API
+    # key) is reported, not crashed. WITH --verify-base-url the caller asked "is it actually fixed?", so ONLY a
+    # signed `remediated` is success: `opened-pr-still-vulnerable` and `opened-pr-unverified` MUST exit non-zero,
+    # or `vigil patch --verify-base-url ... && echo fixed` would print "fixed" for a STILL-VULNERABLE target.
+    if str(result.status).startswith("refused"):
+        return 1
+    if verify_oracle is not None and not bool(result.remediated):
+        return 1
+    return 0
 
 
 def _remediate_safe_ref(ref: str) -> str:
@@ -356,6 +416,159 @@ def _reconstruct_exploit_request(finding: Any, entry: dict) -> "tuple[Optional[d
             f"(oracle_context.request_payload), the insertion point (payload_param / insertion_point), and a "
             f"reconstructable endpoint — refusing to fabricate one (fail-closed).")
     return {"endpoint_path": endpoint, "param": param, "payload": payload}, ""
+
+
+# The ONE oracle family the live fix-verification re-drive genuinely supports (GAP B). It is the same family
+# `vigil remediate --prove` re-drives: a response-side error signature. Any other channel is REFUSED rather
+# than mis-driven — see `_build_patch_fix_oracle`.
+_PATCH_VERIFY_CHANNEL = "error_signature"
+
+
+def _patch_verify_exploit_url(base_url: str, spec: dict, nonce: str) -> str:
+    """The re-drive URL: the ORIGINAL exploit (``param`` = ``payload``) against the operator-supplied patched
+    deployment, plus a cache-busting ``rc`` nonce (the SAME ``nonce_param`` the prove adapter uses, so an
+    interposed cache cannot answer this run's probe with a stale body). Deterministic apart from the caller's
+    nonce; ``urlencode`` preserves the payload's metacharacters over the wire."""
+    from urllib.parse import urlencode
+    base = str(base_url).rstrip("/")
+    path = "/" + str(spec["endpoint_path"]).lstrip("/")
+    query = urlencode(sorted({str(spec["param"]): str(spec["payload"]), "rc": str(nonce)}.items()))
+    return f"{base}{path}?{query}"
+
+
+def _build_patch_fix_oracle(*, finding: Any, slug: str, base_dir: str, run_dir: str, finding_ref: str,
+                            verify_base_url: str) -> "tuple[Optional[Any], str]":
+    """GAP B — build the LIVE fix-verification oracle ``vigil patch`` threads into ``autopatch_live``.
+
+    Returns ``(oracle, "")`` or ``(None, why)``. It is the ONLY way ``vigil patch`` can mint ``remediated``,
+    and every gate here is fail-closed: a wrong 'remediated' is worse than no verification at all, so each
+    check REFUSES (the caller exits non-zero, patching nothing) rather than degrade into a weaker claim.
+
+    The chain mirrors ``vigil remediate --prove`` exactly, reusing its machinery:
+
+      1. the finding must have an addressable ``ref`` — else its retained material cannot be matched by
+         ``check_id`` and another finding's positive control could be substituted;
+      2. ``--verify-base-url`` must be an http(s) URL with a host;
+      3. the RETAINED re-verifiable entry for THIS finding (``_match_reverifiable_entry`` — exact check_id,
+         never a sole-entry substitution);
+      4. CHANNEL GUARD — only ``error_signature`` is re-drivable today. Refusing is better than mis-driving a
+         different oracle family over bytes that family never reads (a vacuous non-fire looks like silence);
+      5. the retained firing ``oracle_context`` (the POSITIVE CONTROL) must be present AND must still make the
+         ORIGINAL oracle FIRE when re-executed here — otherwise a silent re-drive later cannot be
+         distinguished from a broken probe;
+      6. the exploit request is RECONSTRUCTED from the retained material (``_reconstruct_exploit_request``),
+         never fabricated;
+      7. SCOPE — the verification target is validated by CRUCIBLE's own ``validate_action`` charter/scope gate
+         (a pure pre-flight, no I/O) before any executor exists, and every re-drive request then goes through
+         the gated ``HttpExecutor`` for ``slug`` (authority / kill-switch / scope / budget / rate-limit). No
+         new ungated egress path is opened.
+
+    HONEST LIMIT (stated where it is created, not hidden): the re-drive exercises the LIVE DEPLOYMENT the
+    operator points ``--verify-base-url`` at. That the deployment actually carries the patch this run
+    proposed is the OPERATOR's assertion — the sandbox ``patched_build`` ref is not cryptographically bound to
+    the running service. The oracle proves "the original exploit no longer fires against THIS deployment",
+    which is what a remediation certificate here claims, and nothing more.
+    """
+    import secrets
+    from urllib.parse import urlsplit
+
+    ref = str(getattr(finding, "ref", "") or "").strip()
+    if not ref:
+        return None, ("the trusted finding has no addressable ref — its retained re-verifiable proof material "
+                      "cannot be matched by check_id (refusing rather than risk verifying against another "
+                      "finding's positive control; fail-closed).")
+
+    target = str(verify_base_url or "").strip()
+    host = urlsplit(target).hostname or ""
+    if not (target.startswith(("http://", "https://")) and host):
+        return None, ("--verify-base-url must be an http(s) URL with a host, e.g. http://127.0.0.1:8080 — the "
+                      "PATCHED, REDEPLOYED service to re-drive the original exploit against (and it MUST be "
+                      "authorized in the engagement charter scope).")
+
+    # (3) the RETAINED re-verifiable proof material for THIS finding (exact check_id match — fail-closed).
+    from .proof.run import read_reverifiable
+    entries = read_reverifiable(run_dir).get("active_findings", [])
+    entry = _match_reverifiable_entry(entries, ref, finding_ref)
+    if entry is None:
+        return None, (f"no retained re-verifiable proof material for finding {ref!r} under "
+                      f"{run_dir}/proofs/reverifiable.json (found {len(entries)} entr(y/ies)). The engagement "
+                      f"persists the original firing oracle_context there — run it first; the positive control "
+                      f"cannot be fabricated. Pass --finding-ref to disambiguate.")
+
+    # (4) CHANNEL GUARD — the live re-drive genuinely supports ONE oracle family. Never mis-drive another.
+    channel = str(entry.get("channel") or "")
+    if channel != _PATCH_VERIFY_CHANNEL:
+        return None, (f"finding {ref!r} was confirmed on the {channel or '?'!r} channel; the live fix-"
+                      f"verification re-drive currently supports ONLY the {_PATCH_VERIFY_CHANNEL} channel "
+                      f"(error_based_sqli). Refusing rather than mis-driving a different oracle family "
+                      f"(fail-closed).")
+    bug_class = str(entry.get("bug_class") or "error_based_sqli")
+
+    # (5) the POSITIVE CONTROL: present, and it must STILL fire the original oracle when re-executed.
+    original_firing_context = entry.get("oracle_context")
+    if not (isinstance(original_firing_context, dict) and original_firing_context):
+        return None, (f"finding {ref!r} has no retained firing oracle_context (the positive control) — silence "
+                      f"on the patched deployment could not be distinguished from a broken probe. Refusing.")
+    from framework.v2.verify.reverify import reverify_context      # lazy — FATAL-2
+    try:
+        control = reverify_context(dict(original_firing_context), bug_class=bug_class, ref=ref)
+    except Exception as exc:  # noqa: BLE001 — a control we cannot re-execute proves nothing (fail-closed)
+        return None, (f"the retained positive control for {ref!r} could not be re-executed ({exc}) — a silent "
+                      f"re-drive could not be distinguished from a broken probe. Refusing.")
+    if not getattr(control, "reproduced", False):
+        return None, (f"the retained positive control for {ref!r} does NOT re-fire the {bug_class} oracle, so a "
+                      f"SILENT re-drive would prove nothing (a broken probe looks exactly the same). Refusing.")
+
+    # (6) the ORIGINAL exploit request, reconstructed from retained data — never fabricated.
+    spec, why = _reconstruct_exploit_request(finding, entry)
+    if spec is None:
+        return None, why
+
+    # (7) SCOPE — CRUCIBLE's own charter/scope gate, pure pre-flight (no I/O), before an executor exists. The
+    #     gated executor re-runs this same chain per request with its resolved posture; it stays the authority.
+    from framework.v2.agents.scope_gate import validate_action     # lazy — FATAL-2
+    decision = validate_action(slug=slug, method="GET", target_url=target)
+    if not getattr(decision, "allowed", False):
+        return None, (f"the verification target {target!r} is NOT authorized under the engagement charter for "
+                      f"{slug!r} ({getattr(decision, 'refusal_kind', '?')}): {getattr(decision, 'reason', '')} "
+                      f"— refusing (fail-closed; `vigil patch` opens no ungated egress path).")
+
+    # The STABLE governance key under --base-dir signs the remediation attestation (same composition as the
+    # prove verb), and provisioning the signed authority first means the executor's authority gate has it.
+    from vigil_core.vault import Vault
+    from .live.wiring import provision_authority
+    prov = provision_authority(slug=slug, scope=[host], base_dir=base_dir,
+                               vault=Vault(Path(base_dir) / "vault"))
+
+    from framework.v2.agents import HttpExecutor                   # lazy — FATAL-2
+    # The re-drive request shape the gated executor reads — the SAME duck-typed record the live prove adapter
+    # sends (reused rather than re-declared, so both verbs put identical bytes on the wire).
+    from .remediation.live_adapter import _HttpRequest
+    executor = HttpExecutor(engagement_slug=slug, base_url=target, prompt_callback=lambda *_a: False)
+    url = _patch_verify_exploit_url(target, spec, secrets.token_hex(8))
+
+    def redrive(_request: Any, _patched_build: Any) -> "Optional[dict]":
+        """Re-drive the ORIGINAL exploit against the live patched deployment and hand back the FRESHLY captured
+        bytes in the plain-dict capture shape ``fix_oracle`` re-fires the oracle over. Returns None on a gate
+        refusal / an unanswered target — the fix-oracle turns that into a RAISE → ``unverified``. A missing
+        answer is NEVER silence."""
+        try:
+            resp = executor.gated_fetch(_HttpRequest(url=url, method="GET"))
+        except Exception:  # noqa: BLE001 — an executor/transport crash is not a fix (fail-closed)
+            return None
+        status = (resp or {}).get("status")
+        if status in (0, None):     # a gate refusal AND a transport failure both land here: not an answer
+            return None
+        body = str((resp or {}).get("body") or "")
+        return {"exchanges": [{"channel": _PATCH_VERIFY_CHANNEL, "role": "mutated",
+                               "response_bytes_ref": "resp", "bug_class": bug_class}],
+                "blobs": {"resp": body.encode("utf-8", errors="replace")}}
+
+    from .remediation.fix_oracle import build_run_fix_oracle
+    oracle = build_run_fix_oracle(
+        run_dir=run_dir, finding_ref=ref, redrive=redrive, engagement_slug=slug, signers=prov.signers,
+        bug_class=bug_class, expected_channel=channel)
+    return oracle, ""
 
 
 def _cmd_remediate(args: argparse.Namespace) -> int:
@@ -2082,6 +2295,22 @@ def build_parser() -> argparse.ArgumentParser:
     ppatch.add_argument("--ledger", default="",
                         help="the durable single-use nonce ledger DIRECTORY (--open-pr; one authorization → one PR)")
     ppatch.add_argument("--pr-base", default="", help="the PR base branch (default: the repo's default branch)")
+    # LIVE FIX-VERIFICATION (GAP B) — OFF by default. Absent --verify-base-url the run is byte-identical to
+    # before (no oracle ⇒ `remediated` stays False and the PR is an unverified PROPOSAL). Named --verify-base-url
+    # rather than the prove verb's --target-base-url deliberately: `vigil patch` already owns --target-branch /
+    # --target-repo, and adding --target-base-url would make the existing `--target-b…` abbreviation AMBIGUOUS —
+    # a behaviour change on the OFF path. Semantics are otherwise identical to `vigil remediate --prove`.
+    ppatch.add_argument("--verify-base-url", default="",
+                        help="OFF by default. The LIVE, PATCHED, REDEPLOYED service to re-drive the ORIGINAL "
+                             "exploit against, e.g. http://127.0.0.1:8080 — it MUST be authorized in the "
+                             "engagement charter scope (else REFUSED). Supplying it wires the fix-verification "
+                             "oracle: 'remediated' is minted ONLY if the original oracle goes SILENT over the "
+                             "freshly re-captured bytes. Supported channel: error_signature (error_based_sqli) "
+                             "— any other confirmed channel REFUSES rather than mis-drive another oracle family. "
+                             "That the deployment carries THIS run's patch is the operator's assertion.")
+    ppatch.add_argument("--run-dir", default="",
+                        help="the run dir holding proofs/reverifiable.json (the retained ORIGINAL firing "
+                             "oracle_context = the positive control) for --verify-base-url; default = --base-dir")
     ppatch.set_defaults(func=_cmd_patch)
 
     prem = sub.add_parser(
