@@ -145,7 +145,8 @@ sovereign whoami, it **substitutes** the offense console credential on the outbo
 header and any `?token=`), so the browser never holds it and an unauthenticated request never reaches a
 backend. It also **strips** any client-supplied `X-VIGIL-*` header — by **class** (case- and
 hyphen/underscore-normalised, so no `X_VIGIL_Role` variant survives) — and **stamps** the resolved
-`X-VIGIL-Principal`/`X-VIGIL-Role` for attribution (and future per-action offense RBAC).
+`X-VIGIL-Principal`/`X-VIGIL-Role` (plus, as of S1, an unforgeable `X-VIGIL-Role-Sig` HMAC hop-assertion)
+for attribution and the offense console's per-action RBAC gate (`_rbac_ok`).
 
 **Hop-only credential — enforced on the RESPONSE too (RED-PEN BLOCK-1).** Substituting the credential on the
 *request* is not sufficient: a backend serves its **own** static `index.html` at `/` **token-free** with the
@@ -195,9 +196,11 @@ cleartext and the owner credential is removed — or the relay is refused.**
   (`bind_ok`); front it with the operator's TLS edge as today.
 - The accounts' **trust root is the owner-signed spine**; a compromised owner key or a locally-writable
   accounts store is the existing residual (unchanged by this slice).
-- The offense-plane floor is **coarse** (read vs. `run_engagement`); the offense console does not yet do
-  per-action RBAC internally — the fine-grained action→permission map remains on the sovereign plane, and
-  the forwarded `X-VIGIL-Role` is the seam for a future offense-side per-action gate.
+- The offense console now does **per-action RBAC internally** (S1 — `vigil_core.rbac.OFFENSE_ACTION_PERM`,
+  enforced in `framework.v2.console.server._rbac_ok` against a proxy-stamped **HMAC hop-assertion**). The
+  honest bound: enforcement rides that hop-assertion, so a client holding the offense **console token
+  directly** (no hop-signed role) is **owner-equivalent** by construction — the gate protects the
+  proxy-forwarded per-user path, not a direct console-token holder.
 - **Revocation lag:** a bearer stays valid for at most the auth-cache TTL (≤30 s) after revocation, and an
   already-open SSE stream is authenticated only at connect.
 - **HA is active-passive, not synchronous multi-writer.** An active-passive failover profile *is* built
@@ -210,20 +213,47 @@ cleartext and the owner credential is removed — or the relay is refused.**
   `tools/ha/mirror-sync.sh` rsync delta), **not** synchronous replication; and witnesses are **independent
   trust, not failover**.
 
+## Delivered since this foundation was written (with honest bounds)
+
+Items flagged "deferred / not built" in the first cut of this record are now **merged**. They are written
+here with the exact bound each carries — delivered, not soft-pedalled, and not overclaimed.
+
+- **Per-action offense-plane RBAC (S1, #380).** The offense console maps every state-changing POST to a
+  permission (`vigil_core.rbac.OFFENSE_ACTION_PERM`: owner-tier `offense_authority` on host-exec / infra /
+  authority / patch-apply routes, operator-tier `run_engagement` on ordinary run/edit/session routes,
+  read-tier on the protective kill-switch *trip*; default-deny for any unmapped route). Enforced in
+  `framework.v2.console.server._rbac_ok` against a **constant-time HMAC hop-assertion** the proxy stamps
+  (`_hop_assertion_valid`, bound to principal+role+method+path+ts in a freshness window). **Honest bound:** a
+  client holding the console token **directly** (no hop-signed role) is **owner-equivalent** by construction.
+- **Cryptographic per-user identities (S3, #382).** An owner can bind an Ed25519 `user_pubkey` to an account
+  (`enroll_pubkey`, owner-signed into the grant, byte-identical when absent); a user logs in by signing a
+  single-use server challenge (`/api/login/challenge` → PoP branch of `/api/login`; replay-guarded by an
+  O_EXCL single-use `ChallengeLedger`). **Honest bound:** keypair PoP is an **additional** login method — the
+  bearer stays the ongoing session carrier, and the trust root is still the **owner-signed grant**.
+- **MFA (TOTP) + optional password (S4, #387).** `governor/totp.py` (stdlib RFC-6238); the secret is shown
+  once as an `otpauth://` provisioning URI and **sealed** via the owner vault before it is signed into the
+  grant. A TOTP-enrolled account must present a valid current code at `/api/login` (fail-closed). `set_password`
+  adds an *optional* weaker salted-scrypt login; keypair PoP is the stronger path.
+- **OIDC Relying Party — OFF by default (S5, #388).** `config.oidc_enabled()` defaults **off**; when off the
+  routes are **not registered** (byte-identical, no egress). When on, the `id_token` is verified against JWKS
+  (**asymmetric algs only**; `alg:none`/HS* never implemented) with iss/aud/exp/iat/nbf + a single-use `nonce`
+  bound to a single-use `state`, and the verified identity is mapped to an owner-signed `governor.account`
+  grant — **role from the grant, never a claim**; a verified identity with no owner-signed account is refused.
+  **Honest bounds:** OIDC targets an operator-run IdP on the private tunnel (a public cloud IdP breaks the
+  air-gap), and a UI landing page that adopts the returned bearer **still needs `state`-binding + PKCE** (see
+  Deferred below, `docs/OIDC-RP.md`).
+- **Hard-prune accounts fold (S2, #381).** `SnapshotState` now carries an account seed (per-username LWW
+  state + high-water + cred), `_fold` seeds from the committed snapshot before folding the live window
+  (mirrored across `resolve()` and `accounts()`), and `spine/prune.py::stranded_active_accounts` fails a prune
+  **closed** rather than orphan an active account whose only owner-signed grant sits below the boundary.
+
 ## Deferred (honest scope — flagged, not built)
 
 - **Per-screen permissions across all 30 screens.** The foundation covers nav visibility (`V.can`) + real
   enforcement at the enumerated load-bearing actions + a demonstrated per-button gate (Safety → Release).
   Comprehensive per-button gating on every screen is not done; the **server is the enforcement of record**
   (every mutation is re-checked and 403s).
-- **Per-action offense-plane RBAC.** The command-UI proxy now enforces per-user auth + a coarse offense
-  floor (read vs. `run_engagement`), and forwards `X-VIGIL-Role` — but the offense console (8787) does not
-  yet map each of its own POST routes to a permission. Owner-authority offense actions (`offense_approve`/
-  `offense_bind_authority`) remain sovereign-gated (`offense_authority`, owner).
-- **Hard-prune fold.** The accounts fold is a genesis scan (byte-safe under the Slice-C empty snapshot). A
-  future cold-archive prune must extend `SnapshotState` with an accounts seed (per-username LWW state +
-  high-water) + a referential-floor assert, mirrored in `resolve()` and `accounts()`.
-- **SSO / OIDC / MFA / password flows.** Not in scope.
-- **Cryptographic per-user identities.** Bearer tokens are the foundation; the stronger replacement is
-  per-user keypairs + proof-of-possession via `vigil_core.delegation.DelegationCert` +
-  `vigil_core.capability.WielderProof` (owner-signed, expiring, role/scope-bound).
+- **OIDC UI session-adoption (PKCE + state-browser-binding).** The OIDC RP (S5) stops at returning the
+  verified bearer as JSON. Before any browser landing page may **auto-adopt** that bearer into a session,
+  `state`-browser-binding + PKCE (S256) are **required** (`docs/OIDC-RP.md`, "Required follow-on") — **not
+  built**. Until then OIDC login is an API-level identity proof, not a wired browser SSO landing.
