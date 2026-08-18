@@ -473,7 +473,7 @@ checkpoints      : 2                         ← state snapshotted to the signed
 $ vigil ledger who
   seq=0  os=kali  git=…  host=kali  key=349311e6…  did=engage → http://127.0.0.1:18080/…
 $ vigil verify-ledger
-  ledger: VERIFIED — records link, sign, and never back-date (monotonic, hardware-anchored)
+  ledger: 1 records — VERIFIED: link, sign, and never back-date (monotonic non-decreasing)
 ```
 
 One offensive fact, seven defensive detection facts, a verified who/when record — all signed, all re-checkable offline.
