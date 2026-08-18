@@ -493,6 +493,16 @@ def load_library(directory: str | Path = LIBRARY_DIR) -> list[LibraryEntry]:
     return list(_read_library_dir(path))
 
 
+def library_stats(directory: str | Path = LIBRARY_DIR) -> tuple[int, int]:
+    """``(number of entries, number of distinct bug classes)`` in the shipped check
+    library — derived from the loaded registry so a caller NEVER hardcodes the corpus
+    size (which drifts as entries are added/removed). The default-dir load is memoized,
+    so a coverage disclosure may call this at every report render without re-reading the
+    ~170 JSON files."""
+    entries = load_library(directory)
+    return len(entries), len({e.bug_class for e in entries})
+
+
 def select_entries(entries: Iterable[LibraryEntry], tokens: set[str]) -> list[LibraryEntry]:
     """The subset of ``entries`` whose :meth:`LibraryEntry.applies` is True for
     the fingerprint ``tokens`` — the fingerprint-gated selection the engine runs

@@ -1614,6 +1614,8 @@ def _engage_body(args: argparse.Namespace, spine: object) -> int:
         if gv is not None and not gv.is_fact:
             line += f"  ⚠ {gv.render_as} ({gv.verdict.value}: {gv.reason})"
         print(line)
+    from .scanner.report import coverage_line
+    print(f"  {coverage_line(report)}")
     if report.passive_findings:
         print(f"  passive findings  : {len(report.passive_findings)}")
     if report.dom_xss_candidates:

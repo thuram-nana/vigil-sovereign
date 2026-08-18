@@ -283,6 +283,11 @@ def build_report(report: ScanReport, *, attack_paths: list | None = None,
             "by_grounding": g_counts,
             "strict_evidence": strict_evidence,
         },
+        # Coverage honesty (W16-4): what fraction of the check corpus this scan actually
+        # exercised. `full_coverage` is true only when the declarative library (scanner.
+        # library, run only under --library) actually contributed checks — so a machine
+        # consumer/CI can tell a default seed-set scan from a full-corpus one.
+        "coverage": report.coverage(),
         "fingerprint": sorted(report.fingerprint.tokens) if report.fingerprint else [],
         "discovered_endpoints": list(report.discovered_endpoints),
         "findings": [f.__dict__ for f in findings],
@@ -348,6 +353,15 @@ def to_html(report: ScanReport, *, grounding: list | None = None,
     """A self-contained human report: severity summary + per-finding cards."""
     doc = build_report(report, grounding=grounding, strict_evidence=strict_evidence)
     s = doc["summary"]
+    _cov = doc["coverage"]
+    _cov_note = (
+        f"checks: ran {_cov['built_in_run']} built-in"
+        + (f" + {_cov['library_run']} library (scanner.library) — full corpus"
+           if _cov["full_coverage"]
+           else f"; scanner.library ({_cov['library_available']} checks) NOT run — "
+                f"re-run with --library for full coverage (the TIMING oracle fires only "
+                f"with --library)")
+    )
     e = html.escape
     rows = "".join(
         f"<tr><td>{e(sev)}</td><td>{n}</td></tr>"
@@ -379,6 +393,7 @@ code{{background:#f5f5f5;padding:.1rem .3rem;border-radius:3px}}
 </style></head><body>
 <h1>CRUCIBLE report</h1>
 <p class=sub>{e(doc['target'])} · {s['confirmed']} confirmed · {s['passive']} passive · {s['dom_xss_candidates']} DOM-XSS leads · {s['discovered_endpoints']} endpoints</p>
+<p class=sub>{e(_cov_note)}</p>
 <h2>Severity summary</h2><table><tr><th>Severity</th><th>Count</th></tr>{rows}</table>
 <p class=sub>{_footer_note(s)}</p>
 <h2>Findings</h2>{''.join(cards) or '<p>No findings.</p>'}
@@ -422,3 +437,20 @@ def render(report: ScanReport, fmt: str = "json", *,
     if fmt == "html":
         return to_html(report, grounding=grounding, strict_evidence=strict_evidence)
     raise ValueError(f"unknown report format {fmt!r}; expected json|sarif|html")
+
+
+def coverage_line(report: ScanReport) -> str:
+    """A one-line, operator-facing coverage disclosure for the text summary — the same
+    truth the machine ``coverage`` object carries. It states what actually ran and, when
+    the declarative library did NOT run, exactly how to get full coverage. Deterministic;
+    the library size + class count are derived from the loaded registry (never hardcoded)."""
+    from .library import library_stats
+    cov = report.coverage()
+    available, classes = library_stats()
+    if cov["full_coverage"]:
+        return (f"checks: ran {cov['built_in_run']} built-in (DEFAULT_CHECKS) + "
+                f"{cov['library_run']} library (scanner.library / {classes} bug classes) "
+                f"— full corpus")
+    return (f"checks: ran {cov['built_in_run']} built-in (DEFAULT_CHECKS); scanner.library "
+            f"({available} checks / {classes} classes) NOT run — re-run with --library "
+            f"for full coverage; the TIMING oracle fires only with --library")

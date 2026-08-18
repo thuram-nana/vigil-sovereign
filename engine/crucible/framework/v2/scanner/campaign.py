@@ -106,6 +106,11 @@ class ScanReport(BaseModel):
     # Drives which fingerprint-gated checks were selected.
     fingerprint: Fingerprint | None = None
     library_checks_run: int = 0
+    # Coverage honesty: how many BUILT-IN point checks (the DEFAULT_CHECKS seed roster)
+    # the active audit committed to run. Paired with library_checks_run + the shipped
+    # library size, this lets a run state exactly what fraction of the check corpus it
+    # exercised (see ``coverage()``), so a default scan is never mistaken for comprehensive.
+    built_in_checks_run: int = 0
     # Static DOM-XSS source->sink flows over the crawled page corpus. These are
     # CANDIDATES (leads), never oracle-confirmed — kept strictly separate from
     # active_findings so the prove-don't-guess property is not diluted. Dynamic,
@@ -177,6 +182,25 @@ class ScanReport(BaseModel):
         if self.active_findings:
             counts["Confirmed"] = len(self.active_findings)
         return counts
+
+    def coverage(self) -> dict[str, object]:
+        """An HONEST self-report of check-corpus coverage for THIS scan.
+
+        The default run exercises only the built-in seed roster (``DEFAULT_CHECKS``); the
+        far larger declarative library (``scanner.library``) runs ONLY under ``--library``.
+        This object states exactly what ran — ``built_in_run`` (the seed checks), the shipped
+        ``library_available`` size, and ``library_run`` (0 unless the library was engaged) —
+        so no consumer mistakes a default scan for a comprehensive one. ``library_available``
+        is derived from the loaded registry (never hardcoded). ``full_coverage`` is true only
+        when the library actually contributed checks (``library_run > 0``)."""
+        from .library import library_stats
+        library_available, _classes = library_stats()
+        return {
+            "built_in_run": self.built_in_checks_run,
+            "library_available": library_available,
+            "library_run": self.library_checks_run,
+            "full_coverage": self.library_checks_run > 0,
+        }
 
 
 class WebScanCampaign:
@@ -1029,6 +1053,7 @@ class WebScanCampaign:
             graphql_leads=graphql_leads,
             fingerprint=fp,
             library_checks_run=library_checks_run,
+            built_in_checks_run=len(self.checks),
             exercised_probes=exercised_probes,
             discovered_surfaces=discovered_surfaces,
             steer_signals=steer_signals,
