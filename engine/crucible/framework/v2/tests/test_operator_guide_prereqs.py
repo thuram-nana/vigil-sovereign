@@ -56,9 +56,10 @@ def test_oob_relay_prerequisite_and_inert_checks_caveat_are_documented() -> None
     # the relay itself is the prerequisite, and the four affected classes must be named.
     for needle in ("relay", "ssrf", "xxe", "rce", "deserialization"):
         assert needle in doc, f"OPERATOR-GUIDE no longer names the OOB relay / affected class: {needle!r} absent"
-    # the load-bearing CAVEAT: without a relay these checks do nothing against a remote
-    # target (inert / skipped, never guessed) and an operator wrongly concludes 'clean'.
-    for needle in ("inert", "skip", "remote target", "wrongly concludes", "clean"):
+    # the load-bearing CAVEAT: without a relay these checks are inert against a remote target —
+    # NOT skipped: the engine still exercises them (injects blind payloads) but the loopback
+    # callback can't return, so nothing confirms and an operator wrongly concludes 'clean'.
+    for needle in ("inert", "exercises", "remote target", "wrongly concludes", "clean"):
         assert needle in doc, f"OPERATOR-GUIDE no longer states the inert-checks caveat: {needle!r} absent"
     # the count claim ('four of eleven') is grounded in scanner.checks.DEFAULT_CHECKS.
     assert "eleven" in doc and "four" in doc, "OPERATOR-GUIDE no longer states four-of-eleven checks are OOB"
