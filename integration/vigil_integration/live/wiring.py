@@ -46,7 +46,7 @@ from ..detection.registry import run_all_detections
 from ..oracle_adapter import confirm_and_certify
 from .approval_token import ApprovalAuthority
 from .engine import EngineSeams, VigilEngine
-from .executor import _TERMINAL_TOOL, execute, execute_terminal
+from .executor import _TERMINAL_TOOL, ExecRecord, execute, execute_terminal
 from .nonce_ledger import NonceLedger
 from .governance_identity import DEFAULT_GOVERNANCE_KEY_FILE, load_or_create_governance_keypair
 from .spine_identity import DEFAULT_SPINE_KEY_FILE, SPINE_KEY_ID, load_or_create_spine_keypair
@@ -258,6 +258,15 @@ class EngineConfig:
     approval_authority: Optional[ApprovalAuthority] = None
     approval_token_source: Optional[Callable[[], Optional[tuple]]] = None
     approval_nonce_dir: Optional[str] = None
+    # F11 — the observability EMIT seam destination. OFF BY DEFAULT (None ⇒ no telemetry span emitted;
+    # the engine run is byte-identical to today). Set to a LOOPBACK OTLP collector base url
+    # (e.g. "http://127.0.0.1:4318" — the `docker compose --profile observability` sidecar) to wire the
+    # live, loopback-pinned OTLPSink so each governed ExecRecord the loop emits is exported to the
+    # collector as a spine-bound, secret-free OTel span. Emit-only + fail-closed: a non-loopback endpoint
+    # makes the sink REFUSE every export (never egresses), and a down/absent collector never affects the
+    # run's truth. This is the opt-in that makes `docker-compose.yml`'s otel-collector service and the
+    # AS-BUILT "OTLP exporter wired into the engine" claim actually true.
+    otlp_endpoint: Optional[str] = None
 
 
 def _offense_scope_source(slug: str, trust_root: Any):
@@ -719,11 +728,16 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         # roots the persisted head. Best-effort + fail-closed (never raises into the engine's end-of-run).
         _persist_blackboard_chain(config.base_dir, config.slug, prov.signers)
 
+    # -- F11: the observability EMIT seam. OFF BY DEFAULT (no otlp_endpoint ⇒ None ⇒ no telemetry span,
+    # byte-identical to today). When a loopback OTLP endpoint is configured, each signed ExecRecord the loop
+    # emits becomes a spine-bound OTel span exported to the collector via the loopback-pinned OTLPSink.
+    emit = _build_emit(config.slug, config.otlp_endpoint)
+
     seams = EngineSeams(
         think=think_seam, gate=gate, run_tool=run_tool, oracle=oracle, attest=attest,
         checkpoint=checkpoint, rebuild=rebuild, detect=detect, approval=approval,
         operator_messages=operator_messages, deploy_fireteam=deploy_fireteam,
-        project=graph_project, persist_spine=persist_spine, spine_post=spine_post,
+        project=graph_project, persist_spine=persist_spine, spine_post=spine_post, emit=emit,
     )
     return VigilEngine(slug=config.slug, seams=seams,
                        require_attestation=config.require_attestation,
@@ -733,6 +747,95 @@ def build_engine(config: EngineConfig) -> VigilEngine:
 # ---------------------------------------------------------------------------------------------------
 # seam builders (each returns None — the fail-closed default — when its dependency cannot be wired)
 # ---------------------------------------------------------------------------------------------------
+
+
+def _build_emit(slug: str, otlp_endpoint: Optional[str], *,
+                sink: Any = None) -> Optional[Callable[[Any], None]]:
+    """F11: build the engine's observability EMIT seam. OFF BY DEFAULT: with no ``otlp_endpoint`` (and no
+    injected ``sink``) this returns ``None`` — the engine emits no telemetry span, byte-identical to today.
+
+    When an OTLP endpoint IS configured, register the live loopback-pinned ``OTLPSink`` (via
+    :func:`observability.make_sink`) and return an adapter that maps each signed ``ExecRecord`` the loop
+    emits into a spine-bound, secret-free OTel ``Span`` and exports it to the collector. The span's
+    identity derives from the record's ``record_id``/``seq`` (deterministic — no wallclock/RNG), and every
+    attribute is F3-redacted inside the recorder builders, so nothing secret reaches the collector.
+
+    EMIT-ONLY + fail-closed: the seam authorizes nothing (returns ``None`` per call); a non-loopback
+    endpoint makes the sink refuse every export; a missing observability plane / ``opentelemetry`` / a down
+    collector degrades to no telemetry and NEVER affects the run's truth (the engine also swallows any emit
+    exception at its call site). ``sink`` is an injectable seam for tests (a plain capturing callable); left
+    ``None`` it is resolved from ``otlp_endpoint`` via ``make_sink``. Offense-side, lazy observability
+    import (import-clean; no framework)."""
+    try:
+        from ..observability import (
+            SpanKind,
+            SpanStatus,
+            complete_span,
+            derive_trace_id,
+            make_sink,
+            new_span,
+        )
+    except Exception:  # noqa: BLE001 — no observability plane ⇒ no telemetry (never affects the run)
+        return None
+
+    if sink is None:
+        if not otlp_endpoint:
+            return None                      # OFF by default — byte-identical to no emit seam
+        try:
+            sink = make_sink(otlp_endpoint=otlp_endpoint)
+        except Exception:  # noqa: BLE001
+            return None
+    if sink is None:
+        return None
+
+    trace_id = derive_trace_id(slug)
+
+    def emit(record: Any) -> None:
+        # The loop emits signed ExecRecords; map each to a spine-bound Span and export it best-effort.
+        # Total — a non-ExecRecord or any mapping error simply produces no span (telemetry never denies
+        # cognition); the built Span is already F3-redacted by ``new_span``.
+        if not isinstance(record, ExecRecord):
+            return                           # no signal for a non-record (the engine only emits ExecRecords)
+        try:
+            tool = str(getattr(record, "tool", "") or "")
+            seq = coerce_int_safe(getattr(record, "seq", 0))
+            ts = coerce_int_safe(getattr(record, "now", 0))
+            exit_code = getattr(record, "exit_code", None)
+            ok = isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code == 0
+            unset = exit_code is None
+            status = SpanStatus.OK if (ok or unset) else SpanStatus.ERROR
+            attrs = {
+                "vigil.tool": tool,
+                "vigil.phase": str(getattr(record, "phase", "") or ""),
+                "vigil.tier": str(getattr(record, "tier", "") or ""),
+                "vigil.target": str(getattr(record, "target", "") or ""),
+                "vigil.exit_code": exit_code if (isinstance(exit_code, int)
+                                                 and not isinstance(exit_code, bool)) else "",
+                "vigil.destructive": bool(getattr(record, "destructive", False)),
+                "vigil.timed_out": bool(getattr(record, "timed_out", False)),
+            }
+            span = new_span(("live.exec:" + tool) if tool else "live.exec", trace_id=trace_id,
+                            kind=SpanKind.CLIENT, spine_hash=str(getattr(record, "record_id", "") or ""),
+                            seq=seq, ts=ts, attributes=attrs)
+            span = complete_span(span, ts=ts, status=status)
+            if span is not None:
+                sink(span)
+        except Exception:  # noqa: BLE001 — telemetry mapping never raises into the loop
+            pass
+
+    return emit
+
+
+def coerce_int_safe(value: Any) -> int:
+    """A tiny total int coercion for the emit adapter (bool/str/None → 0 or the int); never raises."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _build_gate(prov: Provisioned, *, ceiling: str = "A1") -> Optional[Callable[..., Any]]:
