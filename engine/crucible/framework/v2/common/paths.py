@@ -5,10 +5,22 @@ The framework can live anywhere on disk. Every subsystem resolves
 paths through this module rather than hard-coding. Discovery order:
 
   1. CRUCIBLE_ROOT env var (validated: must contain CLAUDE.md).
-  2. Walk up from the running script until CLAUDE.md is found.
-  3. Walk up from this module's location.
+  2. Walk up from this module's location until CLAUDE.md is found
+     (the package location is stable regardless of how the CLI was invoked).
+  3. Walk up from the running script (sys.argv[0]).
   4. Walk up from CWD.
   5. Fail with CrucibleRootNotFound.
+
+Why the module location is tried before the invoking script: when the CLI is
+run through a console-script wrapper (`vigil`/`crucible` in a venv `bin/`),
+sys.argv[0] points into that `bin/` dir, and walking up from there can reach a
+directory that happens to hold an UNRELATED CLAUDE.md (e.g. one under $HOME).
+Rooting there would send the governance key, kill-switch, entitlement trust
+root, findings and evidence to the wrong tree — a security-relevant mis-root.
+`__file__` is inside the installed package, so its walk resolves to the real
+repo root whenever the package lives in the source tree; only when it does not
+(a true site-packages install with no CLAUDE.md above it) do we fall through to
+the argv[0]/CWD candidates, exactly as before.
 
 Resolution is cached after first success. Tests that need to point at
 a different root may call `_reset_cache()`.
@@ -50,9 +62,15 @@ def crucible_root() -> Path:
             return p
 
     candidates: list[Path | None] = []
+    # This module's location FIRST: it lives inside the installed package, so its
+    # walk resolves to the real repo root regardless of how the CLI was invoked. A
+    # console-script wrapper's argv[0] points into a venv `bin/`, whose walk can hit
+    # an unrelated CLAUDE.md (e.g. under $HOME) and mis-root the governance key /
+    # kill-switch / entitlement to the wrong tree. argv[0] and CWD remain as
+    # fallbacks for a true site-packages install where __file__ has no CLAUDE.md above it.
+    candidates.append(Path(__file__).parent)
     if sys.argv and sys.argv[0]:
         candidates.append(Path(sys.argv[0]).parent)
-    candidates.append(Path(__file__).parent)
     candidates.append(Path.cwd())
 
     for c in candidates:
