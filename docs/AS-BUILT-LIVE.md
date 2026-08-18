@@ -72,15 +72,23 @@ $ vigil ledger who
   seq=0  os=kali  git=Water Hacker  host=kali  key=349311e69bf1f574…  did=engage → http://127.0.0.1:18080/…  (phase=informational)
   seq=1  os=kali  git=Water Hacker  host=kali  key=349311e69bf1f574…  did=engage → http://127.0.0.1:18080/…  (phase=informational)
 $ vigil ledger when
-  seq=0  at=2026-07-21T22:27:23…  monotonic=1  (TPM-anchored)
-  seq=1  at=2026-07-21T22:27:24…  monotonic=2  (TPM-anchored)
+  seq=0  at=2026-07-21T22:27:23…  monotonic=1  (software-chain)
+  seq=1  at=2026-07-21T22:27:24…  monotonic=2  (software-chain)
 $ vigil verify-ledger
   ledger: 2 records — VERIFIED: link, sign, and never back-date (monotonic non-decreasing)
 ```
 
-The time is **TPM-anchored** (the box has a TPM; the monotonic counter is hardware-grounded), so a
-record cannot be back-dated; it degrades to the software hash-chain when the TPM op is unavailable
-(never weaker than the chain).
+> **Correction (W0-5).** An earlier capture of this transcript rendered both records as `(TPM-anchored)`.
+> That was a render bug: `vigil ledger when` truthiness-tested the `grounded` STRING sentinel, so it
+> labelled **every** record `(TPM-anchored)` regardless of source. The `monotonic=1`/`monotonic=2` values
+> above are the persisted **software** counter (a hardware TPM monotonic counter is a large, box-persistent
+> value, not `1`/`2`), so these records are software-grounded and now correctly render `(software-chain)`.
+> The fixed code emits `(TPM-anchored)` only for a record whose anchor actually reports `grounded == "tpm"`.
+
+The monotonic counter is a never-decreasing WHEN anchor, so a record cannot be back-dated. It is
+**hardware-grounded only when a TPM monotonic-counter op is available** (the anchor then reports
+`grounded == "tpm"` and the record renders `(TPM-anchored)`); otherwise it is the persisted software
+counter shown here (`(software-chain)`) — never weaker than the hash-chain, but not a hardware claim.
 
 ### The AEGIS Detection Mirror (WS-4) — dual certs over the target's own telemetry
 `detection/`. Run over the loopback app's real `access.log` + `auth.log`, the edge-plane oracles minted

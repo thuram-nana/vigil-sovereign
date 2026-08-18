@@ -1477,7 +1477,11 @@ def _cmd_ledger(args: argparse.Namespace) -> int:
     else:
         print(f"=== usage ledger — WHEN ({len(records)} records, chain verified) ===")
         for e in ledger_when(records):
-            anchored = "TPM-anchored" if getattr(e, "grounded", False) else "software-chain"
+            # ``grounded`` is a STRING sentinel ("tpm" | "software"; MonotonicAnchor default "software"),
+            # never a bool — it must be compared to the exact hardware value. A truthiness test rendered
+            # "TPM-anchored" for EVERY record (a non-empty string is truthy), manufacturing hardware
+            # provenance for pure software-counter entries; only ``== "tpm"`` is hardware-anchored.
+            anchored = "TPM-anchored" if getattr(e, "grounded", "") == "tpm" else "software-chain"
             print(f"  seq={getattr(e, 'seq', '?')}  at={getattr(e, 'at', '?')}  "
                   f"monotonic={getattr(e, 'monotonic', '?')}  ({anchored})")
     return 0
