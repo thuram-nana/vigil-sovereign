@@ -575,26 +575,56 @@ def _no_send(_request):  # pragma: no cover - chaining is pure reasoning, never 
 # Fixes / remediation (P6) — the run's fixable findings + the gated remediation ladder-of-record.
 #
 # HONEST SCOPE: this composes REAL CRUCIBLE-native data (the run's oracle-confirmed findings + their
-# per-finding remediation guidance from the report). The gated ladder below is the ACCURATE, documented
-# process the sovereign auto-patch pipeline follows (vigil_integration.remediation) — it is served so the
-# UI hard-codes no process text. Live auto-application (clone / build / open-PR) is a SEPARATE, sovereign-
-# gated capability that must be provisioned + explicitly authorized; this console never runs it.
+# per-finding remediation guidance from the report). The ladder below is served (rather than hard-coded in
+# the UI) and describes the pipeline the Apply button actually drives: `vigil patch` →
+# `vigil_integration.live.codefix_runner.autopatch_live` → `vigil_integration.autopatch.loop.autopatch`.
+#
+# THE TIERS ARE MEASURED, NOT DECORATIVE. Each gated row's tier is what the WARDEN gate really decides for
+# that stage's tool name under the floor/ceiling the live runner wires
+# (`decide_tool(name, classify=default_classify, floor="A2", ceiling="A1")` in
+# `codefix_runner.CodefixSession.gate`): A2 for all four, which is ABOVE the A1 offense auto-ceiling, so NONE
+# of them auto-runs. The three non-destructive stages QUEUE for owner approval (the Apply click, i.e.
+# `--approve`, is what satisfies them); the PR stage is refused outright unless the operator separately
+# enabled it (`--open-pr`) and had it m-of-n signed, which is why its pill says "off by default" rather than
+# "queues". `integration/tests/test_fix_ladder_matches_the_gate.py` pins these rows against that gate,
+# measuring the queue AND the refusal, so the text cannot drift from it.
+# (The pipeline's own ledger LABELS the steps A1/A2/A3 — `autopatch/loop.py` TIER_* — but those labels are
+# recorded on the step, they are not the gate's decision; the ladder shows the decision.)
+#
+# Opening a PR is never done from this console: `actions.apply_fix` never passes `--open-pr`.
 # ---------------------------------------------------------------------------
 
 _REMEDIATION_LADDER = (
     {"stage": "triage", "tier": "—",
      "what": "Pick what to fix — ONLY an oracle-confirmed FACT with signed evidence is eligible. "
              "A LEAD (unproven) can never trigger a code change."},
-    {"stage": "clone", "tier": "A1",
-     "what": "Clone the target repo and cut a fix branch. Reversible and internal."},
-    {"stage": "edit", "tier": "A2",
-     "what": "Apply the AI-proposed edits — each file needs YOUR explicit approval; a timeout auto-REJECTS "
-             "(fail-closed). Only explicit, path-validated files are staged — never a bulk `git add -A`."},
-    {"stage": "build", "tier": "A3",
-     "what": "Build the patched code in a sandbox."},
-    {"stage": "open-pr", "tier": "A3 · m-of-n",
-     "what": "Open a pull request — a DISTINCT, explicit multi-signer (m-of-n) approval, separate from the "
-             "per-file approval. Nothing is merged for you."},
+    {"stage": "propose", "tier": "— (no gate)",
+     "what": "A model proposes the fix as a minimal unified diff, BEFORE any gated stage runs; only "
+             "path-safe, repo-relative files in it are kept. It is not on the WARDEN tool gate because it "
+             "writes nothing, but it does pass the model-egress sovereignty policy — and it is load-bearing: "
+             "with no model reachable (no API key, or an egress refusal) nothing is proposed and the run "
+             "ends with NO patch at all."},
+    {"stage": "clone", "tier": "A2 · queues",
+     "what": "Clone the target repo into a DISPOSABLE workdir and cut a fix branch — your own tree is never "
+             "touched. The WARDEN gate puts this at A2, above the A1 offense auto-ceiling, so it QUEUES for "
+             "owner approval: the Apply button here (`--approve` on the CLI) is what satisfies it. Without "
+             "that approval the ladder stops here and clones nothing."},
+    {"stage": "edit", "tier": "A2 · queues",
+     "what": "Approve the proposed edits for the DISPOSABLE clone. Gated A2 → queues for the same operator "
+             "approval. Your edit approval is given ONCE, UP FRONT — the Apply button here, or "
+             "`--apply-edits --approve` on the CLI — and it pre-approves every file in the proposal; there "
+             "is no per-file prompt on either path. Without that opt-in every proposed file times out and is "
+             "REJECTED (fail-closed). Each file is still gated, path-checked and deadline-checked "
+             "individually, and only explicit, path-validated files are staged — never a bulk `git add -A`."},
+    {"stage": "build", "tier": "A2 · queues",
+     "what": "Apply the approved diff inside the disposable clone and prove it applies cleanly to the real "
+             "code. Gated A2 → queues for the same operator approval. (A full compile/test build is not "
+             "wired yet — this leg proves the patch applies, not that it builds.)"},
+    {"stage": "open-pr", "tier": "A2 · off by default · m-of-n",
+     "what": "Open a pull request — OFF by default and NEVER run from this console: the ladder reaches this "
+             "stage and is REFUSED here. The WARDEN tier is the same A2 queue as the stages above, but on top "
+             "of it this stage needs the explicit `--open-pr` switch, a provisioned GitHub token, and a "
+             "SEPARATE owner-inclusive m-of-n signed authorization. Nothing is merged for you."},
     {"stage": "verify", "tier": "—",
      "what": "Marked FIXED only when the original exploit oracle goes SILENT on the patched build — i.e. the "
              "bug can no longer be proven. If it still fires, the PR opens as a proposal marked still-vulnerable."},
@@ -605,19 +635,37 @@ def remediate_plan(run_id: str) -> dict[str, Any]:
     """The Fixes view for a run: its oracle-confirmed, fixable findings (each with the report's own
     remediation guidance) + the gated ladder-of-record any auto-fix would follow. Read-only + resilient;
     a pending/empty run yields an honest empty state, never fabricated fixes. Whether the operator asked
-    for fixes at launch (`apply_fixes`) is surfaced from the run meta (it is a REQUEST, not an auto-run)."""
+    for fixes at launch (`apply_fixes`) is surfaced from the run meta (it is a REQUEST, not an auto-run).
+
+    ``runnable``/``why_not`` are the SAME precondition ``actions.apply_fix`` enforces, computed by the ONE
+    shared helper (``actions.fix_precondition``) so the two can never drift: the UI renders the gated "Apply
+    fix (gated)" button ONLY when ``runnable`` is true, and shows ``why_not`` verbatim otherwise. It must
+    never offer an action the backend is guaranteed to refuse. Note the honest consequence today: a run only
+    HAS a rendered report.json if it was a URL/loopback scan, and only a codebase (Strix) run with a signed
+    offense spine is runnable — so ``why_not`` is what the operator actually sees, and it names exactly what
+    is missing plus the CLI path that works now.
+
+    Per finding, ``ref`` is withheld (left "") unless it is BOTH present in the rendered report AND a token
+    ``apply_fix`` would accept, for the same reason."""
     from . import actions
 
     meta = _safe(lambda: json.loads((actions.run_dir(run_id) / "meta.json").read_text(encoding="utf-8")),
                  default={}) or {}
     doc = _safe(lambda: json.loads((actions.run_dir(run_id) / "report.json").read_text(encoding="utf-8")),
                 default=None)
+    pre = _safe(lambda: actions.fix_precondition(run_id),
+                default={"runnable": False, "why_not": "this run's fix precondition could not be read"}) or {}
     base = {"run_id": run_id, "ladder": list(_REMEDIATION_LADDER),
             "apply_fixes_requested": bool(meta.get("apply_fixes")),
             "live_execution": False,
-            "note": ("VIGIL shows what to fix and the exact gated process an auto-fix follows. Live "
-                     "auto-application (clone, build, open a PR) is a separate sovereign-gated capability "
-                     "that must be provisioned and authorized — nothing is cloned, built, or opened here.")}
+            # the gated-apply precondition of record (identical to apply_fix's own) — the UI's button gate.
+            "runnable": bool(pre.get("runnable")),
+            "why_not": "" if pre.get("runnable") else str(pre.get("why_not") or ""),
+            "note": ("VIGIL shows what to fix and the gated process an auto-fix follows. Opening this page "
+                     "clones, builds and opens nothing: every gated stage below QUEUES for owner approval, "
+                     "and the ladder runs only on your explicit Apply click — into a DISPOSABLE clone, never "
+                     "your own tree. Opening a pull request is never done from here; it needs the separate "
+                     "m-of-n-authorized `vigil patch --open-pr`.")}
     if doc is None:
         return {**base, "pending": True, "fixable": [], "lead_count": 0,
                 "status": meta.get("status", "unknown")}
@@ -629,10 +677,12 @@ def remediate_plan(run_id: str) -> dict[str, Any]:
         # a finding is FIXABLE only if it is an oracle-confirmed FACT (its own oracle re-fires) — the same
         # honest gate the Findings hub uses; a lead (unproven) is counted but never offered for auto-fix.
         if f.get("grounding") == "fact":
+            ref = str(f.get("check_id") or f.get("id") or f.get("ref") or "")
             fixable.append({
                 # the stable finding reference the gated `vigil patch` ladder keys on (== the reverifiable.json
-                # check_id). Absent → the Fixes screen offers the CLI path, never a broken button.
-                "ref": str(f.get("check_id") or f.get("id") or f.get("ref") or ""),
+                # check_id). Absent OR not an argv-safe token → withheld, and the Fixes screen offers the CLI
+                # path rather than a button whose only possible answer is "invalid finding reference".
+                "ref": ref if actions._valid_finding_ref(ref) else "",
                 "title": f.get("title", ""), "bug_class": f.get("bug_class", ""),
                 "severity": f.get("severity", ""), "location": f.get("location", ""),
                 "confirmed_by": f.get("confirmed_by", ""),

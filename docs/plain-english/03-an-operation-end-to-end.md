@@ -1647,9 +1647,10 @@ Its stated constraints:
   auto-fixed.
 - The action on that screen is **non-destructive and never raises a proposed code change**
   for review.
-- Live application of a fix — taking a copy of the source, building it, raising a proposed
-  code change — is a separate capability that must be provisioned and authorised. Nothing is
-  copied, built or raised from the screen.
+- Loading the screen copies, builds and raises nothing. The gated ladder runs only on the
+  operator's explicit Apply click, and even then only into a **throwaway copy** of the source —
+  the original tree is never touched. Raising a proposed code change is never done from the
+  screen at all: that stays a separately provisioned and authorised command-line act.
 
 The one destructive path that is wired is raising a proposed code change for a human to
 review, and it is off by default. Turning it on requires all of: a signed authorisation, an

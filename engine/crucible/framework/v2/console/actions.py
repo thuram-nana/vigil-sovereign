@@ -2143,62 +2143,133 @@ def proof_export(run_id: str) -> dict:
                     "reproduction but NOT authenticity."}
 
 
-def apply_fix(run_id: str, finding_ref: str) -> dict:
-    """Fixes screen (U1): run the GATED, NON-DESTRUCTIVE auto-patch ladder for ONE oracle-confirmed finding by
-    shelling ``vigil patch`` — the SAME provenance-grounded gated verb the CLI uses. The driving finding comes
-    from the engagement's OWN signed spine (``--from-spine``, never raw JSON); ``--apply-edits`` applies the fix
-    into a DISPOSABLE clone + sandbox-build, so the real source is never touched and NO PR is opened. Returns the
-    verb's REAL output — a proof-of-fix on success, or its fail-closed refusal verbatim (e.g. a missing signed
-    spine, or no model to propose a patch). The console NEVER opens a PR: that stays a deliberate m-of-n CLI act
-    (`vigil patch --open-pr`), and `remediated=True` is EARNED only when the driving oracle re-fires SILENT on
-    the rebuilt patch (the live re-drive capability), never asserted here.
+def _valid_finding_ref(finding_ref: str) -> bool:
+    """Is this finding reference safe to place in the ``vigil patch`` argv? The ref is an argv element AND is
+    echoed into the spine finding lookup — so it must stay a bare token: no separators, no ``..``, no leading
+    dash, no whitespace, bounded length. Shared by ``apply_fix`` (which REFUSES an unsafe ref) and by
+    ``api.remediate_plan`` (which withholds the ref, so the UI offers the CLI path instead of a button whose
+    only possible answer is "invalid finding reference")."""
+    ref = str(finding_ref or "").strip()
+    return bool(ref) and len(ref) <= 200 and not ref.startswith("-") and ".." not in ref \
+        and not any(c in ref for c in "/\\ \t\r\n")
 
-    Fail-closed: a bad run id (``run_dir`` raises ValueError → do_POST maps to 404), an unsafe finding ref, a run
-    with no repository to patch (a live-target/URL/cloud run), or an unresolvable ``vigil`` bin each refuse cleanly.
+
+def fix_precondition(run_id: str) -> dict:
+    """THE single source of truth for "can the gated auto-patch actually RUN for this run?".
+
+    ``apply_fix`` enforces this predicate before it spawns anything, and ``api.remediate_plan`` returns it to
+    the Fixes screen so the UI renders the "Apply fix (gated)" button ONLY when the answer is yes — and the
+    exact, actionable reason otherwise. One helper, two callers, so the button and the backend can never drift
+    into the state this replaced: a button the backend was guaranteed to refuse.
+
+    Runnable requires ALL of:
+      * a readable run meta (the run exists);
+      * a valid engagement slug to ground the finding in;
+      * ``mode == "codebase"`` with a target repo — only a codebase (Strix) run has a source tree to patch;
+      * a resolvable ``vigil`` entrypoint (the verb is subprocessed, never imported);
+      * the engagement's OWN signed offense spine at ``<base>/<slug>.spine`` — ``vigil patch --from-spine``
+        grounds the driving finding there and NEVER in raw JSON.
+
+    Returns ``{runnable, why_not, slug, repo, base_dir, spine, vigil, command}``. Total: a bad/traversing run
+    id or an unreadable meta is a clean, honest ``runnable=False``, never an exception. ``why_not`` is "" iff
+    runnable; ``command`` is the equivalent CLI invocation (shown to the operator when the console cannot run
+    it here), and ``vigil`` is "" when no entrypoint resolved.
     """
-    rd = run_dir(run_id)                        # traversal-guarded; raises ValueError on a bad id → 404
-    finding_ref = str(finding_ref or "").strip()
-    # the ref is an argv element AND is echoed into the spine finding lookup — keep it a bare token, never a
-    # path / flag / whitespace-injection (no separators, no '..', no leading dash).
-    if (not finding_ref or len(finding_ref) > 200 or finding_ref.startswith("-") or ".." in finding_ref
-            or any(c in finding_ref for c in "/\\ \t\r\n")):
-        return {"ok": False, "error": "invalid finding reference"}
+    base_dir = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    out = {"runnable": False, "why_not": "", "slug": "", "repo": "", "base_dir": base_dir,
+           "spine": "", "vigil": "", "command": ""}
     try:
+        rd = run_dir(run_id)                    # traversal-guarded; raises ValueError on a bad id
         meta = json.loads((rd / "meta.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {"ok": False, "error": f"no such run {run_id!r}"}
+    except (OSError, ValueError, TypeError):
+        return {**out, "why_not": f"no such run {run_id!r}"}
+    if not isinstance(meta, dict):
+        return {**out, "why_not": f"no such run {run_id!r}"}
     slug = str(meta.get("slug") or "").strip()
     if not _valid_slug(slug):
-        return {"ok": False, "error": "this run has no valid engagement slug to ground the fix in."}
+        return {**out, "why_not": "this run has no valid engagement slug to ground the fix in — the gated "
+                                  "auto-patch applies to a codebase (Strix) assessment launched under an "
+                                  "engagement slug."}
+    out["slug"] = slug
     repo = str(meta.get("target") or "").strip()
     # only a codebase (Strix) run has a source tree to patch; a live-target (URL/cloud/aegis) run has nothing.
     if str(meta.get("mode")) != "codebase" or not repo:
-        return {"ok": False, "runnable": False,
-                "error": "this run has no repository to patch — the gated auto-patch applies to a codebase "
-                         "(Strix) run's source. Run a codebase assessment to enable a gated fix here."}
+        return {**out, "why_not": "this run has no repository to patch — the gated auto-patch applies to a "
+                                  "codebase (Strix) run's source. Run a codebase assessment to enable a "
+                                  "gated fix here."}
+    out["repo"] = repo
     vigil = _vigil_bin()
     if not vigil:
-        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+        return {**out, "why_not": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    out["vigil"] = vigil
     # PROVENANCE PRE-CHECK (honesty): `vigil patch --from-spine` grounds the finding in the engagement's OWN
     # signed offense spine at <base>/<slug>.spine — written ONLY by the integration `vigil engage` flow, NOT by
     # a console Strix codebase run. So rather than shell the verb only to surface its cryptic fail-closed error,
-    # we check the spine exists first and, if not, return an HONEST, actionable refusal naming exactly what is
-    # needed. `--base-dir` is passed EXPLICITLY so this check and the verb agree on the same base.
-    base_dir = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    # check the spine exists first and, if not, say exactly what is needed. `--base-dir` is passed EXPLICITLY to
+    # the verb so this check and the verb agree on the same base.
     spine = Path(base_dir) / f"{slug}.spine"
+    out["spine"] = str(spine)
+    out["command"] = (f"vigil patch --from-spine {slug} --finding-ref <ref> --target-repo <repo> "
+                      f"--base-dir {base_dir} --apply-edits --approve")
     if not spine.is_file():
-        return {"ok": False, "runnable": False,
-                "error": (f"no signed offense spine for {slug!r} at {spine} — the gated auto-patch grounds the "
-                          "finding in the engagement's OWN signed spine (never raw JSON), and a console Strix "
-                          "codebase run does not emit one yet. To enable a gated fix, run this engagement through "
-                          f"`vigil engage --slug {slug} --base-dir {base_dir}` (which writes the signed spine), "
-                          "then apply the fix here."),
-                "command": (f"vigil patch --from-spine {slug} --finding-ref {finding_ref} "
-                            f"--target-repo <repo> --base-dir {base_dir} --apply-edits")}
+        return {**out, "why_not": (
+            f"no signed offense spine for {slug!r} at {spine} — the gated auto-patch grounds the finding in "
+            "the engagement's OWN signed spine (never raw JSON), and a console Strix codebase run does not "
+            "emit one yet. To enable a gated fix, run this engagement through "
+            f"`vigil engage --slug {slug} --base-dir {base_dir}` (which writes the signed spine), then apply "
+            "the fix here.")}
+    return {**out, "runnable": True}
+
+
+def apply_fix(run_id: str, finding_ref: str) -> dict:
+    """Fixes screen (U1): run the GATED, NON-DESTRUCTIVE auto-patch ladder for ONE oracle-confirmed finding by
+    shelling ``vigil patch`` — the SAME provenance-grounded gated verb the CLI uses. The driving finding comes
+    from the engagement's OWN signed spine (``--from-spine``, never raw JSON).
+
+    WHAT THE CONSOLE PATH REALLY DOES (the Fixes screen states exactly this, and the served ladder agrees):
+      * A MODEL PROPOSES FIRST. Before any gated stage, the verb asks a Claude coder for a minimal unified
+        diff for this finding. That leg is not on the WARDEN tool gate (it writes nothing) but it IS
+        load-bearing: with no model reachable — no ``ANTHROPIC_API_KEY``, or an egress refusal from the
+        sovereignty policy — nothing is proposed and the run ends with NO patch (status
+        ``no-patch-proposed``). The verb prints that status + reason and it is returned verbatim in
+        ``output`` below, not hidden.
+      * ``--approve`` — the operator's Apply click IS the human-approval leg the WARDEN gate requires. Every
+        stage of this ladder (``git_clone`` / ``code_edit`` / ``sandbox_build``) classifies A2 under the
+        offense floor A2 + ceiling A1 the live runner wires, i.e. ABOVE the auto-bar, so each QUEUES; without
+        ``--approve`` the gate queues at CLONE and the ladder cannot even clone, so omitting it would render a
+        button that is guaranteed to refuse. This mirrors the governed terminal/sandbox verbs, which already
+        pass ``--approve`` on an operator click.
+      * ``--apply-edits`` — a blanket, up-front approval of EVERY proposed file, applied into a DISPOSABLE
+        clone. There is NO per-file prompt on this path (or on the CLI's): each file is still individually
+        gated, path-validated and deadline-checked, but the decision is the single opt-in given here. Without
+        that opt-in every proposed file times out and is REJECTED (fail-closed).
+      * NEVER ``--open-pr``. The real source is never touched and no PR is opened; opening one stays a
+        deliberate m-of-n CLI act (``vigil patch --open-pr``), and ``remediated=True`` is EARNED only when the
+        driving oracle re-fires SILENT on the rebuilt patch — never asserted here.
+
+    Returns the verb's REAL output — a proof-of-fix on success, or its fail-closed refusal verbatim.
+
+    Fail-closed: an unsafe finding ref refuses first (it never reaches argv); everything else is the ONE
+    shared precondition :func:`fix_precondition` — the same predicate ``api.remediate_plan`` returns to the UI
+    as ``runnable``/``why_not``, so the button is offered only when this function can actually proceed. A bad
+    run id (``run_dir`` raises ValueError → do_POST maps to 404) refuses cleanly.
+    """
+    run_dir(run_id)                             # traversal-guarded; raises ValueError on a bad id → 404
+    finding_ref = str(finding_ref or "").strip()
+    if not _valid_finding_ref(finding_ref):
+        return {"ok": False, "runnable": False, "error": "invalid finding reference"}
+    pre = fix_precondition(run_id)
+    if not pre["runnable"]:
+        out = {"ok": False, "runnable": False, "error": pre["why_not"]}
+        if pre["spine"]:                        # the no-spine refusal names the exact CLI equivalent
+            out["command"] = (f"vigil patch --from-spine {pre['slug']} --finding-ref {finding_ref} "
+                              f"--target-repo <repo> --base-dir {pre['base_dir']} --apply-edits --approve")
+        return out
+    slug, repo, base_dir = pre["slug"], pre["repo"], pre["base_dir"]
     # NON-DESTRUCTIVE + NEVER --open-pr from the console. The spawn is an argv LIST (no shell); slug + ref are
     # validated tokens; the repo path lives only in argv (no shell), never interpolated.
-    cmd = [vigil, "patch", "--from-spine", slug, "--finding-ref", finding_ref,
-           "--target-repo", repo, "--base-dir", base_dir, "--apply-edits"]
+    cmd = [pre["vigil"], "patch", "--from-spine", slug, "--finding-ref", finding_ref,
+           "--target-repo", repo, "--base-dir", base_dir, "--apply-edits", "--approve"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # noqa: S603
     except (OSError, subprocess.SubprocessError) as e:
@@ -2207,13 +2278,17 @@ def apply_fix(run_id: str, finding_ref: str) -> dict:
     return {"ok": proc.returncode == 0, "runnable": True, "rc": proc.returncode,
             "finding_ref": finding_ref, "slug": slug,
             "command": ("vigil patch --from-spine " + slug + " --finding-ref " + finding_ref
-                        + " --target-repo <repo> --base-dir " + base_dir + " --apply-edits"),
+                        + " --target-repo <repo> --base-dir " + base_dir + " --apply-edits --approve"),
             "output": out or "(no output)",
-            "note": ("Non-destructive: `vigil patch` proposes a fix and, IF it can, applies it into a DISPOSABLE "
-                     "clone + sandbox-build — your source is never touched and no PR is opened. The real per-run "
-                     "status/applied_paths/remediated are in the output above. `remediated=True` is EARNED only "
-                     "when the driving oracle re-fires SILENT on the rebuilt patch (the live re-drive capability); "
-                     "opening a real PR is a separate m-of-n-gated CLI act (`vigil patch --open-pr`).")}
+            "note": ("Non-destructive: your Apply click is the operator approval for the gated non-destructive "
+                     "stages AND a blanket up-front approval of every proposed edit (there is no per-file "
+                     "prompt on this path); the edits land in a DISPOSABLE clone, so your source is never "
+                     "touched and no PR is opened. A model has to propose the diff first — with none reachable "
+                     "the run ends with no patch proposed, and the status/reason below says so. The real "
+                     "per-run status/applied_paths/remediated are in the output above. `remediated=True` is "
+                     "EARNED only when the driving oracle re-fires SILENT on the rebuilt patch (the live "
+                     "re-drive capability); opening a real PR is a separate m-of-n-gated CLI act "
+                     "(`vigil patch --open-pr`).")}
 
 
 # =====================================================================================================
