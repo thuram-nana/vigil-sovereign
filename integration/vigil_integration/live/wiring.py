@@ -39,6 +39,7 @@ from vigil_core.crypto import sign
 
 from ..agent.state import AgentState, Phase
 from ..attestation import anchor as _anchor
+from ..attestation import head_pin as _head_pin
 from ..attestation.identity import load_or_create_operator_keypair, operator_signer, resolve_operator
 from ..attestation.ledger import make_ledger_writer, read_ledger, require_attestation
 from ..detection.registry import run_all_detections
@@ -321,11 +322,20 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         existing = read_ledger(ledger_path)
         next_seq = (existing[-1].seq + 1) if existing else 0
         head = existing[-1].record_hash if existing else None   # None → record_usage uses GENESIS_PREV
-        return require_attestation(
+        verdict = require_attestation(
             operator=operator, action=action, target=target, phase=phase,
             at=_wallclock_iso(), prev_hash=head, signer=op_signer, seq=next_seq,
             anchor_state_path=anchor_path, writer=ledger_writer,
         )
+        # W10-4 #476: on a successful, durably-recorded attest, refresh the OUT-OF-BASE durable head/count
+        # pin to the ledger's new head + record count, so a later TRUNCATED-tail / wiped ledger fails closed
+        # against the surviving pin. The post-append state is exactly `existing` + the minted record, so this
+        # is always the true current (head, count) — a single successful attest self-heals a previously
+        # best-effort-skipped pin write. The pin lives host-level (survives `rm -rf <base>`), like the anchor.
+        att = getattr(verdict, "attestation", None)
+        if getattr(verdict, "allowed", False) and att is not None:
+            _head_pin.write_head_pin(ledger_path, head=att.record_hash, count=len(existing) + 1)
+        return verdict
 
     # -- gate (F2/F3): the conjunctive gate over the signed authority --------------------------------
     gate = _build_gate(prov, ceiling=config.offense_ceiling)
