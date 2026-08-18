@@ -63,7 +63,7 @@ key present. Do **not** confuse these with the create/assign/revoke CLI verbs in
 - As the **owner**, enroll alice's Ed25519 public key: `POST /api/action` `{action:"enroll_pubkey",
   username:"alice", user_pubkey:"<base64 raw ed25519 public key>"}`. It is owner-signed into her grant; an
   account is bearer-only until enrolled.
-- As **alice**, log in by proof-of-possession (no bearer needed): `GET /api/login/challenge` → a single-use
+- As **alice**, log in by proof-of-possession (no bearer needed): `POST /api/login/challenge` → a single-use
   server nonce; sign `DOMAIN_TAG + challenge` with her private key; `POST /api/login`
   `{username:"alice", challenge, signature}` → a fresh session bearer is minted.
 
@@ -125,7 +125,7 @@ pass condition is a refusal.
 | **3.3 Owner token never reaches the browser** | As **alice**, request `/offense/` through the proxy; inspect the raw response body | the owner token is **absent** (redacted); alice cannot scrape and replay it |
 | **3.4 Revoked bearer stops working** | `sigil accounts revoke bob`; within the auth-cache TTL (≤30 s) bob's next request | **401** once the cache expires (note the ≤30 s revocation lag — this is expected, documented behavior) |
 | **3.5 Protected-domain guard is owner-only** | As **bob (operator)**, attempt to set `VIGIL_ALLOW_PROTECTED_DOMAINS` on | **refused** — only the owner (`toggle_protected_guard`) may change it |
-| **3.6 Per-action offense RBAC** | As **alice (viewer)** through `vigil up`, POST an **owner-tier** offense action (e.g. `/offense/api/terminal/run`, `/offense/api/authority/provision`) | **403 / refused** — the proxy stamps a signed hop-assertion, the console verifies it and `role_can` denies `offense_authority`. An *operator* is allowed the operator-tier routes (e.g. launch/retry) but still denied the owner-tier ones. |
+| **3.6 Per-action offense RBAC (console gate)** | As **bob (operator)** through `vigil up` — bob clears the coarse proxy floor because he holds `run_engagement` — POST an **owner-tier** offense action (e.g. `/offense/api/authority/provision`) | **403 / refused** — the proxy stamps a signed hop-assertion, the console verifies it, and `role_can("operator", "offense_authority")` is **false**. (A **viewer** is refused one step earlier at the proxy floor, which requires `run_engagement` for any mutation — that 403 is the coarse floor, not the S1 console gate.) |
 
 > **3.6 detail — the honest bound.** The per-action offense gate protects the **proxy-forwarded per-user
 > path**: a request that carries the offense **console token directly** (no hop-signed role) is
