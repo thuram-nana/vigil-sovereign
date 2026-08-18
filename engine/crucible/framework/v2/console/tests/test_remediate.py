@@ -1,7 +1,9 @@
 """P6 — the Fixes / remediation plan. It composes REAL run data (oracle-confirmed findings + their
 remediation guidance) with the served gated ladder-of-record. The honest invariants:
   * ONLY oracle-confirmed FACTs are offered as fixable; unproven leads are counted, never fixable;
-  * it NEVER claims live execution — `live_execution` is always False (the console runs no clone/build/PR);
+  * it NEVER claims live execution — `live_execution` is always False: READING the plan runs nothing.
+    (The gated ladder runs only from an explicit `actions.apply_fix` call, i.e. an Apply click, and
+    that path never opens a PR.);
   * a pending/absent run yields an honest empty state, never fabricated fixes.
 """
 from __future__ import annotations
@@ -43,7 +45,10 @@ def test_only_confirmed_facts_are_fixable():
         f = r["fixable"][0]
         assert f["bug_class"] == "sqli" and f["remediation"] == "Parameterize the query."
         assert r["live_execution"] is False              # never claims to run a live fix
-        assert [s["stage"] for s in r["ladder"]] == ["triage", "clone", "edit", "build", "open-pr", "verify"]
+        # "propose" is a REAL leg of the pipeline the ladder describes (autopatch.loop runs the coder
+        # before any gate; no model ⇒ status "no-patch-proposed"), so the screen names it.
+        assert [s["stage"] for s in r["ladder"]] == ["triage", "propose", "clone", "edit", "build",
+                                                     "open-pr", "verify"]
     finally:
         _cleanup(rid)
 

@@ -318,6 +318,7 @@ jobs:
               --ignore=integration/tests/test_dossier.py \
               --ignore=integration/tests/test_session_dossier.py \
               --ignore=integration/tests/test_fix_oracle.py \
+              --ignore=integration/tests/test_fix_ladder_matches_the_gate.py \
               --ignore=integration/tests/test_remediation_cert.py \
               --ignore=integration/tests/test_remediation_conformance.py \
               --ignore=integration/tests/test_prove_driver.py \
@@ -405,6 +406,7 @@ jobs:
               integration/tests/test_dossier.py \
               integration/tests/test_session_dossier.py \
               integration/tests/test_fix_oracle.py \
+              integration/tests/test_fix_ladder_matches_the_gate.py \
               integration/tests/test_remediation_cert.py \
               integration/tests/test_remediation_conformance.py \
               integration/tests/test_prove_driver.py \

@@ -620,6 +620,304 @@ def test_tail_contiguous_during_concurrent_compact():
     assert not errors, errors[:3]
 
 
+# --- C-1: the reader/compaction TOCTOU, driven DETERMINISTICALLY -------------------------------------
+#
+# The two tests above are timing stress: they hit the race only when the scheduler cooperates (it did in
+# CI on PR #391 — `SpineError('spine manifest (generation 13) references a missing segment: …seg-6.jsonl')`
+# — and did not on #390 from the same base). The tests below DRIVE the exact interleaving instead of
+# racing for it: a reader takes its manifest snapshot at generation G, a full compaction then commits
+# G+1 and unlinks every superseded plaintext, and only THEN does the reader stat/open the files its
+# snapshot named. Each fails deterministically without the fix. Their negative controls pin the other
+# half of the contract: a segment missing at an UNCHANGED generation is real corruption and must RAISE.
+
+
+def _compact_inside_the_resolve_window(monkeypatch, p: Path, *, skip: int = 0) -> dict:
+    """Run a COMPLETE compaction immediately after the read path takes its manifest snapshot, so the caller
+    is left holding a stale (generation G) view while the on-disk truth is G+1 with the superseded
+    plaintext segments unlinked — the exact C-1 interleaving, with no reliance on timing.
+
+    `skip` manifest reads pass through untouched first: get() reads the manifest once for its change-token
+    before it resolves segments, so skip=1 lands the compaction in ITS resolve window. The store under test
+    must be constructed BEFORE arming this (a constructor read would otherwise burn the shot)."""
+    from sigil.spine import store as store_mod
+    real_read = store_mod.read_manifest
+    state = {"reads": 0, "fired": 0}
+
+    def racing_read(layout):
+        m = real_read(layout)                              # the reader's snapshot, taken BEFORE the compact
+        state["reads"] += 1
+        if (state["fired"] == 0 and state["reads"] > skip and m is not None
+                and any(sg.sealed and sg.codec == "none" for sg in m.segments)):
+            state["fired"] = 1                             # set first: compact()'s own reads must not re-fire
+            SpineStore(p).compact()                        # commits gen+1, THEN unlinks the superseded files
+        return m
+
+    monkeypatch.setattr(store_mod, "read_manifest", racing_read)
+    return state
+
+
+def _segmented_store(prefix: str, n: int = 22) -> tuple[Path, SpineStore]:
+    d = _fresh_dir(prefix)
+    p = d / "spine.jsonl"
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=5)
+    s.migrate()
+    _append_n(s, n)                                        # 4 sealed plaintext segments + an active
+    return p, s
+
+
+def test_iter_records_reresolves_when_compaction_supersedes_the_snapshot(monkeypatch):
+    """C-1: iter_records() resolved the segment list from manifest generation G; a compaction committed
+    G+1 and unlinked the plaintext G still named. The reader must RE-READ the manifest and complete the
+    scan, not raise 'references a missing segment'. Without the fix this raises deterministically."""
+    p, _s = _segmented_store("sigil-c1-iter-")
+    r = SpineStore(p)                                      # construct BEFORE arming (see the helper's note)
+    state = _compact_inside_the_resolve_window(monkeypatch, p)
+    seqs = [rec.seq for rec in r.iter_records()]
+    assert state["fired"] == 1, "the interleaving never fired — the test would be vacuous"
+    assert seqs == list(range(22)), f"the scan must stay a contiguous chain from genesis: {seqs}"
+
+
+def test_tail_reresolves_when_compaction_supersedes_the_snapshot(monkeypatch):
+    """C-1 for the bounded-window read: tail() must survive the same interleaving with a contiguous
+    window (the device-arm replay-dedup gate depends on it), not raise."""
+    p, _s = _segmented_store("sigil-c1-tail-")
+    r = SpineStore(p)
+    state = _compact_inside_the_resolve_window(monkeypatch, p)
+    got = [rec.seq for rec in r.tail(12)]
+    assert state["fired"] == 1
+    assert got == list(range(10, 22)), f"tail window must be contiguous and complete: {got}"
+
+
+def test_get_reresolves_when_compaction_supersedes_the_snapshot(monkeypatch):
+    """C-1 for the point read: get() indexes through the same resolver (_ensure_index), so it must
+    re-resolve too rather than fail closed on a segment that was merely superseded."""
+    p, _s = _segmented_store("sigil-c1-get-")
+    r = SpineStore(p)
+    state = _compact_inside_the_resolve_window(monkeypatch, p, skip=1)   # skip get()'s change-token read
+    rec = r.get(7)
+    assert state["fired"] == 1
+    assert rec is not None and rec.seq == 7
+
+
+def test_missing_segment_at_unchanged_generation_still_raises():
+    """NEGATIVE CONTROL (the half that must NOT be tolerated): a segment that is genuinely gone while the
+    manifest generation is UNCHANGED is real corruption, and every read path must still fail CLOSED and
+    loudly (invariant 15) — naming the missing segment, not blaming 'churn'."""
+    import pytest
+    d = _fresh_dir("sigil-c1-neg-")
+    lay = _make_segmented(d, [3, 3, 3])                    # generation 1; seg-0/seg-1 sealed, seg-2 active
+    p = d / "spine.jsonl"
+    assert read_manifest(lay).generation == 1
+    (lay.segments_dir / "seg-00000001.jsonl").unlink()      # vanishes; the manifest still names it at gen 1
+
+    for label, call in (("iter_records", lambda: list(SpineStore(p).iter_records())),
+                        ("tail", lambda: SpineStore(p).tail(4)),
+                        ("count", lambda: SpineStore(p).count()),
+                        ("verify", lambda: SpineStore(p).verify())):
+        with pytest.raises(SpineError) as ei:
+            call()
+        msg = str(ei.value)
+        assert "references a missing segment" in msg and "seg-00000001.jsonl" in msg, f"{label}: {msg}"
+        assert "generation 1" in msg, f"{label} must name the generation it fails at: {msg}"
+    assert read_manifest(lay).generation == 1, "a failed read must not mutate the manifest"
+
+
+def test_segment_vanishing_at_open_time_at_unchanged_generation_still_raises(monkeypatch):
+    """NEGATIVE CONTROL for the OPEN-time half of the rule. The resolve succeeds (the file is there), then
+    the file is unlinked WITHOUT any manifest swap, so the open raises FileNotFoundError. Because the
+    generation did not move, that is genuine loss — the read-path retry must NOT absorb it as compaction
+    churn; it must re-raise as a loud missing-segment SpineError."""
+    import pytest
+    p, _s = _segmented_store("sigil-c1-openneg-")
+    r = SpineStore(p)
+    real_open, fired = SpineStore._open_segment, {"n": 0}
+
+    def vanishing_open(self, path):
+        if fired["n"] == 0:
+            fired["n"] = 1
+            path.unlink()                              # NO manifest swap: the generation is UNCHANGED
+        return real_open(self, path)                   # -> FileNotFoundError, straight into the retry arm
+
+    monkeypatch.setattr(SpineStore, "_open_segment", vanishing_open)
+    with pytest.raises(SpineError) as ei:
+        list(r.iter_records())
+    assert fired["n"] == 1
+    assert "references a missing segment" in str(ei.value), str(ei.value)
+    assert "kept moving" not in str(ei.value), "real loss must not be reported as compaction churn"
+
+
+def test_perpetual_manifest_churn_fails_loudly_and_does_not_hang(monkeypatch):
+    """The retry is BOUNDED. Under a pathological writer that never stops swapping the manifest, a reader
+    must surface a loud SpineError after a finite number of re-resolves — never spin forever, and never
+    fall back to a short chain."""
+    import pytest
+    d = _fresh_dir("sigil-c1-churn-")
+    lay = _make_segmented(d, [3, 3])
+    p = d / "spine.jsonl"
+    (lay.segments_dir / "seg-00000000.jsonl").unlink()
+    ticks = iter(range(1_000, 11_000))                 # always != the real generation, and never repeats
+    monkeypatch.setattr(SpineStore, "_manifest_generation", lambda self: next(ticks))
+    with pytest.raises(SpineError) as ei:
+        list(SpineStore(p).iter_records())
+    assert "kept changing" in str(ei.value), str(ei.value)
+
+
+def test_missing_segment_with_manifest_vanishing_in_resolve_window_still_raises(monkeypatch):
+    """C-1 / BLOCK-1 (fail-closed -> fail-OPEN regression). Interior segments are genuinely DELETED and the
+    manifest itself is removed INSIDE the resolver's retry window (generation -> -1, which is NOT a strictly-
+    forward move — the same shape reset()/an in-flight migrate produces). Every full read path must still
+    RAISE: the manifest vanishing must NOT be mistaken for a benign compaction supersession and absorbed into
+    a SILENT SHORT CHAIN (invariant 15). Before the `> gen` fix this returned count()==3 / tail(9)==[6,7,8].
+    The store is constructed BEFORE arming so the raise is attributable to the resolver, not the ctor read."""
+    import pytest
+    from sigil.spine import store as store_mod
+    real_read = store_mod.read_manifest                    # the genuine reader, captured once (never chained)
+    for label, call in (("iter_records", lambda s: list(s.iter_records())),
+                        ("count", lambda s: s.count()),
+                        ("entries", lambda s: s.entries()),
+                        ("verify", lambda s: s.verify()),
+                        ("tail", lambda s: s.tail(9))):
+        d = _fresh_dir("sigil-c1-mvanish-")
+        lay = _make_segmented(d, [3, 3, 3])                # generation 1, seqs 0..8
+        p = d / "spine.jsonl"
+        (lay.segments_dir / "seg-00000001.jsonl").unlink()  # REAL LOSS: seqs 3,4,5 gone from disk
+        s = SpineStore(p)                                  # construct BEFORE arming
+        state = {"n": 0}
+
+        def racing_read(layout, _lay=lay, _st=state):
+            m = real_read(layout)                          # the resolver's snapshot: gen 1, 3 segments
+            _st["n"] += 1
+            if _st["n"] == 1:                              # remove the manifest strictly inside the resolve
+                _lay.manifest_path.unlink()
+            return m
+
+        monkeypatch.setattr(store_mod, "read_manifest", racing_read)
+        with pytest.raises(SpineError) as ei:
+            call(s)
+        assert "references a missing segment" in str(ei.value), f"{label}: {ei.value}"
+        assert state["n"] >= 1, f"{label}: the interleaving never fired — the test would be vacuous"
+
+
+def test_manifest_vanishing_on_a_retry_raises_not_legacy_fallback(monkeypatch):
+    """C-1 / BLOCK-1 point (2): the no-manifest legacy fallback is FIRST-ATTEMPT-ONLY. If the resolver
+    already held a manifest (gen >= 0), took a snapshot that looked SUPERSEDED (generation appears to have
+    moved strictly forward, so it retries), and on the RE-RESOLVE finds the manifest GONE (gen -> -1, not a
+    forward move), it must RAISE 'manifest disappeared' — never silently fall back to the single active file
+    (a short chain)."""
+    import pytest
+    from sigil.spine import store as store_mod
+    d = _fresh_dir("sigil-c1-retryvanish-")
+    lay = _make_segmented(d, [3, 3, 3])                    # generation 1
+    p = d / "spine.jsonl"
+    (lay.segments_dir / "seg-00000001.jsonl").unlink()      # a segment the snapshot names is missing
+    s = SpineStore(p)                                      # construct BEFORE arming
+    monkeypatch.setattr(SpineStore, "_manifest_generation", lambda self: 999)   # forward -> attempt 0 retries
+    real_read, state = store_mod.read_manifest, {"n": 0}
+
+    def racing_read(layout):
+        state["n"] += 1
+        if state["n"] == 1:
+            return real_read(layout)                       # attempt 0: the real manifest (gen 1)
+        return None                                        # the retry finds the manifest gone
+
+    monkeypatch.setattr(store_mod, "read_manifest", racing_read)
+    with pytest.raises(SpineError) as ei:
+        list(s.iter_records())
+    assert "manifest disappeared" in str(ei.value), str(ei.value)
+    assert state["n"] >= 2, "the retry never happened — the point-(2) branch was not exercised"
+
+
+def test_get_survives_compaction_during_index_scan(monkeypatch):
+    """C-1 / BLOCK-2 (the race is NOT closed on get()/_ensure_index). get() builds its index via
+    _ensure_index -> _scan_segment, which OPENS each segment. A compaction that commits gen+1 and unlinks the
+    superseded plaintext AFTER the resolve but DURING the scan must be re-resolved (the manifest now names the
+    .gz), never surface as a bare FileNotFoundError. The C-1 fix left this open() outside any retry."""
+    p, _s = _segmented_store("sigil-c1-getscan-")
+    r = SpineStore(p)                                      # a cold reader: get() will build the index now
+    real_ls, fired = SpineStore._load_sidecar, {"n": 0}
+
+    def racing_load_sidecar(self, ps, pth):
+        if fired["n"] == 0:
+            fired["n"] = 1
+            SpineStore(p).compact()                        # commits gen+1, THEN unlinks the plaintext, mid-scan
+        return real_ls(self, ps, pth)
+
+    monkeypatch.setattr(SpineStore, "_load_sidecar", racing_load_sidecar)
+    rec = r.get(7)
+    assert fired["n"] == 1, "the interleaving never fired — the test would be vacuous"
+    assert rec is not None and rec.seq == 7
+
+
+def test_iter_records_survives_compaction_during_start_locus_index_scan(monkeypatch):
+    """C-1 / BLOCK-2 for the indexed iter_records path: _start_locus -> _ensure_index -> _scan_segment opens
+    segments too, and the C-1 fix left _start_locus OUTSIDE the retry try. A compaction unlinking a plaintext
+    during that index build must be re-resolved, not escape as a bare FileNotFoundError."""
+    p, _s = _segmented_store("sigil-c1-iterscan-")
+    r = SpineStore(p)
+    real_ls, fired = SpineStore._load_sidecar, {"n": 0}
+
+    def racing_load_sidecar(self, ps, pth):
+        if fired["n"] == 0:
+            fired["n"] = 1
+            SpineStore(p).compact()
+        return real_ls(self, ps, pth)
+
+    monkeypatch.setattr(SpineStore, "_load_sidecar", racing_load_sidecar)
+    got = [x.seq for x in r.iter_records(since_seq=3)]
+    assert fired["n"] == 1
+    assert got == list(range(4, 22)), got
+
+
+def test_get_index_scan_open_at_unchanged_generation_still_raises(monkeypatch):
+    """C-1 / BLOCK-2 NEGATIVE control: if a plaintext is unlinked during get()'s index scan WITHOUT any
+    manifest swap (generation UNCHANGED), that is genuine loss — the get() retry must NOT absorb it; the next
+    re-resolve RAISES a loud missing-segment SpineError, never a silent value read from surviving segments."""
+    import pytest
+    p, _s = _segmented_store("sigil-c1-getscan-neg-")
+    r = SpineStore(p)
+    lay = SpineLayout.for_path(p)
+    victim = [sg for sg in read_manifest(lay).segments if sg.sealed][1]
+    real_ls, fired = SpineStore._load_sidecar, {"n": 0}
+
+    def racing_load_sidecar(self, ps, pth):
+        if fired["n"] == 0:
+            fired["n"] = 1
+            lay.seg_path(victim).unlink()                  # NO manifest swap -> generation is UNCHANGED
+        return real_ls(self, ps, pth)
+
+    monkeypatch.setattr(SpineStore, "_load_sidecar", racing_load_sidecar)
+    with pytest.raises(SpineError) as ei:
+        r.get(7)
+    assert fired["n"] == 1
+    assert "references a missing segment" in str(ei.value), str(ei.value)
+    assert "kept moving" not in str(ei.value) and "kept changing" not in str(ei.value), \
+        "real loss at an unchanged generation must not be reported as compaction churn"
+
+
+def test_compaction_publishes_the_new_manifest_before_unlinking(monkeypatch):
+    """The WRITE-side half of the C-1 contract, pinned so a future refactor cannot invert it: compaction
+    must COMMIT the new-generation manifest (segment flipped to gzip) BEFORE unlinking the plaintext it
+    supersedes. If the unlink ever came first, no reader-side generation check could tell a superseded
+    file from a lost one, and the race would be unfixable rather than merely retryable."""
+    p, s = _segmented_store("sigil-c1-order-")
+    lay = SpineLayout.for_path(p)
+    violations: list[str] = []
+    real_unlink = Path.unlink
+
+    def checked_unlink(self, *a, **kw):
+        if self.parent == lay.segments_dir and self.name.endswith(".jsonl"):
+            m = read_manifest(lay)
+            if m is not None and any(lay.seg_path(sg) == self for sg in m.segments):
+                violations.append(f"unlinked {self.name} while the manifest (generation "
+                                  f"{m.generation}) still referenced it")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", checked_unlink)
+    assert s.compact() > 0, "the fixture must have sealed plaintext to compact"
+    assert not violations, violations
+    assert [r.seq for r in SpineStore(p).iter_records()] == list(range(22))
+
+
 def test_two_concurrent_compactors_no_crash():
     """Review BLOCK-2: two compactors on the same spine must not clobber a shared temp and crash — each
     uses a unique temp; both complete (or no-op), and the spine verifies."""

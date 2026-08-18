@@ -5,7 +5,13 @@ A finished run leaves a ``report.json`` on disk in the **scanner export shape**
 (:mod:`scanner.report`), whose findings look like::
 
     {kind, bug_class, title, severity, confidence, location, confirmed_by,
-     evidence, remediation, references, re_verifiable, grounding}
+     evidence, remediation, references, re_verifiable, grounding, check_id}
+
+``check_id`` is the producing check's stable id — non-empty ONLY when that finding's
+``grounding`` is ``"fact"`` (its oracle re-fired at render time). Every lead carries "": the
+passive/DOM-XSS ones, and any ACTIVE finding whose proof no longer re-grounds. This adapter
+neither reads nor needs it; it is listed here only so the documented shape stays honest about
+what the export actually contains.
 
 The report renderers (:mod:`report.generate`, :mod:`report.export`) consume a very different
 shape — :class:`agents.models.FindingPayload` — which *requires* ``finding_slug``, ``surface``
