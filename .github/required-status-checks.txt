@@ -1,0 +1,38 @@
+# Canonical required status checks for the `main` branch of thuram-nana/vigil-sovereign.
+#
+# THIS FILE IS THE SINGLE SOURCE OF TRUTH. Three things key on it, and must never disagree:
+#   1. tools/governance/require-checks.sh  — reads this file to set live branch protection (--apply).
+#   2. docs/tests/test_required_checks_canonical.py — an OFFLINE required test that asserts every name
+#      here is produced by a real pull_request-triggered job, that no nightly-only job is listed, and
+#      that every doc stating a required-check count/list agrees with this file.
+#   3. .github/workflows/branch-protection-verify.yml — reads live protection from the GitHub API and
+#      fails if it drifts from this list.
+#
+# RULES:
+#   - One check context per line. Blank lines and lines beginning with `#` are ignored.
+#   - A name here MUST equal a job `name:` in .github/workflows/*.yml that runs on `pull_request`.
+#     A required check that no PR job produces blocks EVERY pull request forever (the exact trap
+#     tools/governance/require-checks.sh is arranged around). The offline test refuses that.
+#   - The nightly-only `livefire full table (nightly)` is deliberately NOT here: it never reports on a
+#     PR, so requiring it would block every PR. The offline test asserts it stays out.
+#   - Order is not significant; every consumer compares as a set. This file is kept in the GitHub API's
+#     case-insensitive order purely so a human can diff it against the live settings by eye.
+#
+# Live protection also sets: strict = true (branch must be up to date), enforce_admins = false
+# (the owner keeps an attributable admin override), allow_force_pushes = false, allow_deletions = false.
+# Required reviews and required signed commits are NOT enabled — a deliberate, scheduled handoff, not a
+# shipped control. Do not add a line here for a control that is not actually enforced.
+
+A14 supply-chain gate
+CRUCIBLE core on vigil_core
+CRUCIBLE eval + benchmark corpus
+formal (TLA+ core-invariant model check, F1)
+gateway egress gate (P6)
+integration two-env boundary (P5)
+livefire smoke (per-PR subset)
+SIGIL governor gates (P7 — offense gate + authn)
+SIGIL lint (ruff blocking + mypy can-complete)
+strix Claude-runtime (P8)
+the briefing explains every agent and capability
+vigil_core — shared integrity substrate
+WARDEN Rust kernel (A10 durability)

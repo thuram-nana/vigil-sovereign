@@ -12125,7 +12125,7 @@ account that created it open, and which is encrypted at rest once the hardware v
 |---|---|---|---|---|
 | **Owner key** (the root of everything) | Owner-only file under the owner's home directory on the sovereign side (`~/.sigil/spine/keys/`) | The owner's own account on that one machine | Approvals, delegations to every other key, the owner-side record's summary and its anti-rollback floor, governance decisions | The most serious loss. Nothing already signed becomes invalid, but no new delegation or approval can be signed until a new owner key is created — and every party who pinned the old owner key must be given the new one. Recoverable only from the encrypted off-box backup (section 6). |
 | **Record data key** | Owner-only file beside the owner key | The owner's account | Nothing — it is an encryption key, not a signing key. It scrambles the contents of the owner-side record. | The stored record cannot be read back. Included in the off-box backup. |
-| **Permission-kernel key** | A file beside the permission kernel's own action log, under the owner's home directory (`~/.sigil/warden/keys`). Created automatically the first time the kernel opens | The account the kernel runs as | Every action record the permission kernel writes — one per tool invocation — and the signed summary that fixes the log's length | The existing action log can no longer be verified. It is **not** in the off-box backup, so treat the action log as a local audit trail rather than as recoverable evidence. Nothing already published elsewhere is affected. |
+| **Permission-kernel key** | A file beside the permission kernel's own action log, under the owner's home directory (`~/.sigil/warden/`). Created automatically the first time the kernel opens | The account the kernel runs as | Every action record the permission kernel writes — one per tool invocation — and the signed summary that fixes the log's length | The existing action log can no longer be verified under a freshly-created key. The permission-kernel dir (its action log, this key, and the tool registry) **is now included in the off-box backup** and its key is restored owner-only (0600), so a machine loss no longer costs the action log — but a key *rotation* still means records signed under the old key verify only under the old public key. Nothing already published elsewhere is affected. |
 | **Device keys** (the owner's phone, and any other approving device) | On the device itself. The device generates its own key and **never holds the owner key** | Each device separately | Each request that device makes to the desktop, and each approval it gives to a queued action | That device can no longer request or approve anything. The owner revokes it and pairs a replacement. Nothing else is affected. A revocation must itself be owner-signed, but once signed it carries no freshness requirement of any kind, so a lost phone can always be disarmed (section 11). |
 | **Engagement-record key** (called the "spine" key in code) | Owner-only file in the working directory of the offensive engine (`offense-spine.key`) | The account running the offensive engine | The running log of an engagement, the record of every command executed, and defensive detection certificates | The existing engagement log cannot be continued: a new key does not verify the earlier lines of the same log file. Start a fresh engagement and re-issue the owner delegation (section 6). |
 | **Governance key** | Owner-only file in the same working directory (`offense-governance.key`) | The account running the offensive engine | Evidence certificates for confirmed weaknesses, and the engagement's authority record | Already-issued certificates still verify (they are checked against the public half, which travels with the evidence). New certificates need a new key plus a new owner delegation. |
@@ -12150,10 +12150,11 @@ Two observations worth drawing out of that table:
 - **Only two keys have no recovery path other than the off-box backup**: the owner key and the
   master key that seals things to one machine. Everything else can be regenerated and
   re-blessed by the owner.
-- **The backup does not cover everything, and the table shows which.** The permission kernel's
-  own key — the one signing the log of every tool invocation — is not in it, and neither are the
-  three offensive working keys. Losing any of those costs the continuity of a local log, not any
-  published evidence. Section 6.2 states the boundary in full.
+- **The backup now covers both the trust root and the permission kernel.** The permission
+  kernel's own key — the one signing the log of every tool invocation — is included, restored
+  owner-only. The three offensive working keys are covered by a **separate** offense backup file
+  (the two planes are never packaged into one archive — see 6.2). Section 6.2 states the boundary
+  in full.
 
 #### Every stored secret is sealed under its own purpose
 
@@ -12322,15 +12323,21 @@ ask to see it.
 or in any recovery service. That is a deliberate property: a copy held by someone else is a
 copy that can be compelled or stolen.
 
-**There is a portable, encrypted, off-machine backup**, and it exists precisely because the
+**There is a portable, passphrase-encrypted backup**, and it exists precisely because the
 hardware sealing of section 5 binds secrets to one physical machine. The code's own opening
 line names the problem: sealing to a machine's chip means "a dead disk is unrecoverable from
-the vault alone — the whole audit ledger and all memory would be lost".
+the vault alone — the whole audit ledger and all memory would be lost". Be precise about the
+word *off-machine*: by default the backup is written to the **same host's disk** (`~/vigil-backups`),
+and the scheduled timer runs it **air-gapped** (no network). That file is *portable* (it restores
+on new hardware) and *encrypted*, but it is not genuinely off-**host** until it is copied to
+another machine. That copy is a **separate, opt-in step** — see honest limit 4.
 
 The backup command packages, into one encrypted file:
 
 - the owner-side record itself (all of it, with its signed summary),
 - the anti-rollback floor and the software-integrity manifest,
+- the **permission-kernel directory** — its signed action log, its own signing key, and the tool
+  registry — with the kernel key restored owner-only (0600),
 - the **owner private key**, and the key that encrypts the record's contents.
 
 Two properties make it safe to keep off the machine:
@@ -12350,21 +12357,46 @@ Two properties make it safe to keep off the machine:
 Restoring onto new hardware re-seals the recovered secrets under the **new** machine's chip if
 one is present, so the recovered system is protected again rather than left in the open.
 
-Three honest limits on the backup:
+Four honest limits on the backup:
 
-1. **It is a manual command.** Nothing schedules it. There is no automatic backup timer in the
-   shipped service definitions. If the operator does not run it, there is no backup. An
-   assessor should ask how often it is run and where the file is kept.
-2. **It covers the sovereign (owner) side only.** The offensive engine's working keys — the
-   engagement-record key, the governance key, the operator key — are not in it, and neither is
-   an engagement's collected evidence. That is survivable: those keys can be regenerated and
-   re-blessed by the owner (6.3), whereas the owner key cannot be re-blessed by anyone; and a
-   finished evidence package is an ordinary set of files that the operator should archive the
-   way they archive any other case record. But it does mean the backup command is not a
-   whole-system backup, and should not be described to anyone as one.
+1. **It can now be scheduled.** The standalone `sigil backup` is still a manual command, but the
+   unified `vigil backup` verb takes a passphrase-encrypted local backup of **both** planes, and a shipped systemd
+   user timer (`infra/systemd/vigil-backup.timer`) fires it on a daily cadence with retention
+   (keep the last N, and anything within N days). Freshness is only ever as current as the last
+   fire of that timer, and the timer carries the passphrase in a `0600` environment file — which
+   is weaker than typing it interactively, so the example file spells out the trade-off and the
+   systemd-credentials alternative. An assessor should still ask where the backup file is kept
+   and confirm a test restore has been done.
+2. **The two planes are backed up as two SEPARATE encrypted files — never one merged archive.**
+   The sovereign file covers the owner side (owner key, record, floor, integrity manifest, and now
+   the permission-kernel dir). The offensive engine's working keys — the engagement-record key, the
+   governance key, the operator key — plus its spine and its collected evidence are covered by a
+   **separate** offense backup file, whose internal manifest is signed by the offensive governance
+   key. They are deliberately never packaged together, because one process holding both planes'
+   secrets at once would breach the two-process trust boundary. Each file needs its own passphrase.
+   Be precise about what that governance signature buys on the offense file: because the signature
+   lives *inside* the passphrase-encrypted body and restore checks it against the key carried in the
+   same body, by default anyone who holds the passphrase could re-sign a substitute manifest — so
+   **by default the offense file's authenticity is passphrase-possession, exactly like the sovereign
+   file** (the passphrase is the real root of trust, next point). To get genuine governance-key
+   authenticity you must **pin** the expected governance public key out of band at restore time
+   (`vigil restore --expect-governance-pubkey <base64>`); with that pin, a passphrase-holder who does
+   not also hold the governance *private* key cannot pass off a forged backup. The governance key's
+   own tie to the owner remains the owner-signed delegation.
 3. **The passphrase becomes the root of trust for that file.** Anyone holding both the backup
    file and its passphrase holds the owner key. It should be treated with the same seriousness
    as the key itself — ideally split between two custodians or held in a safe.
+4. **Off-*host* replication is a separate, opt-in step — the scheduled backup is local and
+   air-gapped.** The daily timer writes to the same host's disk with no network, so on its own it
+   does not survive that host being destroyed. To get a genuine second copy on another machine,
+   run `vigil backup --push <dest>` (or the shipped, network-enabled `vigil-backup-push.service` /
+   `.timer`, kept separate from the air-gapped local unit). Push copies **only the already-encrypted
+   files** (ciphertext) plus the fingerprint manifest — no plaintext and no passphrase ever leave
+   the host — and the pushed copy is itself a valid restore source. Only a local-directory transport
+   ships today (a mounted remote filesystem, an sshfs mount, or a removable disk); rsync/scp/object-
+   store backends are structured to slot in behind the same contract. The **remote's** own security
+   (who can read that directory) is the operator's responsibility, and an assessor should confirm a
+   test restore has been done *from the pushed copy*, not only the local one.
 
 #### 6.3 What to do when a specific key is lost
 
@@ -12373,7 +12405,7 @@ Three honest limits on the backup:
 | **The owner key**, with a backup available | Everything already signed still verifies | Restore the backup onto the replacement machine, then run the verification command against the restored copy to confirm the recovered owner signature. |
 | **The owner key**, with no backup | Everything already signed still verifies, forever, against the old public key | There is no recovery path. A new owner identity must be created; every party who pinned the old owner key must be given the new one out of band; and every delegation must be re-issued. Be aware of one sharp edge: the software does not treat a missing owner key as an error — the next owner-signing command simply creates a new one. Nothing announces "the owner key is gone", so an operator can rotate their own trust root by accident. Keeping the backup is the guard against this. |
 | **The machine, or the TPM chip in it** | Everything already published still verifies | The sealed copies on that disk are permanently unreadable, by design. Restore the off-box backup onto the new machine. Without a backup, the record and the owner key are gone; published evidence is unaffected. |
-| **The permission kernel's own key** | Everything already published elsewhere still verifies | The kernel creates a fresh one automatically the next time it opens. The existing action log cannot be verified under it, and there is no backup — that log is a local audit trail. If it matters to you as evidence, archive it before this can happen, and note the log's length and last fingerprint somewhere outside the machine. |
+| **The permission kernel's own key** | Everything already published elsewhere still verifies | If the whole machine is lost, restore the off-box backup — the permission-kernel dir (its key, action log, and tool registry) is now packaged in it, restored owner-only, so the log is recoverable. If instead the key alone is *rotated*, the kernel creates a fresh one the next time it opens, and records signed under the old key verify only under the old public key. Still note the log's length and last fingerprint somewhere outside the machine as a cross-check. |
 | **A device key** (a lost or stolen phone) | Everything else is unaffected | Revoke the device on the owner's side, then pair a replacement. The revocation is honoured from the moment it is written; the desktop bridge recomputes the authorised set on every single request rather than caching it, so a revoke bites immediately rather than at the next restart. |
 | **A witness key** | Every counter-signature that witness already gave still verifies | Enrol a replacement witness and re-publish the roster. If losses take the set below the required number, no new summary can be witnessed until that is fixed — which is the intended behaviour of a several-must-sign scheme. |
 | **The engagement-record key** | Everything already signed still verifies | Generate a fresh one (it is created automatically when absent), export its public half, and have the owner re-issue the delegation. Do not try to continue the old engagement's log with a new key — the earlier lines of that file will not verify under it. Start a new engagement. |
@@ -12470,8 +12502,10 @@ grants; it can never create one.
   key, or the governance key. Rotation of those is an operator action, following the procedure
   in 6.4, not a scheduled process. An assessor should treat key-rotation cadence as an
   operational policy question to put to the operator, not as something the software enforces.
-- **There is no automated backup schedule either**, and no rotation command for the owner key
-  itself. Both are procedures an operator runs, not features the software drives.
+- **A daily backup timer now ships** (`vigil-backup.timer`, driving `vigil backup` over both
+  planes with retention), so unattended off-box backup is a feature the software drives — though
+  there is still no automatic *rotation* command for the owner key itself; rotation remains a
+  procedure an operator runs. The timer's freshness is only as current as its last fire.
 - **Withdrawing a capability grant is not instantaneous, and nothing distributes it for you.**
   Two limits, both stated rather than smoothed over. The new revocation list has to reach the
   deployment: the software reads it from the deployment's own files and never fetches it from
@@ -13024,7 +13058,7 @@ governance root plus witnesses, which the project describes in-repo as stronger.
 | Rejection of weak and non-standard public keys | **Fully working**, with a documented adversarial-review origin. |
 | Purpose labels preventing a signature being reused across contexts | **Working** for twenty-four distinct signing purposes, ten of them held in a shared registry and the rest declared beside the code that uses them (Appendix A lists all of them). Explicitly **not applied** to three surfaces — the offensive engagement record, the usage ledger and the owner-side governance events — which the registry names as the next hardening, plus the evidence-package manifest, which it does not name. On all four, separation rests on the shape of what is signed rather than on a label. |
 | Anti-replay guard on the owner's signed decisions | **Working**, delivered in this release. Five kinds of decision record gained an issue time inside the signed part and a per-item high-water mark; a sixth already had one. Only the dangerous direction is guarded, deliberately. Covered by its own test suite, which I ran: 67 tests, all passing. It defends against an attacker who can append to the owner's record, not against one holding the owner's private key. |
-| Permission-kernel action log: every tool invocation individually signed and chained | **Working.** Present and populated on the machine this was written on. Its key is **not** included in the off-box backup, so treat the action log as a local audit trail rather than as recoverable evidence. |
+| Permission-kernel action log: every tool invocation individually signed and chained | **Working.** Present and populated on the machine this was written on. Its key and log are **now included** in the off-box backup (the key restored owner-only), so the action log is recoverable evidence after a machine loss — a key rotation still leaves old records verifiable only under the old public key. |
 | Evidence certificates: authenticity, binding, file integrity, reproduction, claim grounding, known shape | **Fully working.** |
 | Chained record with signed head; detection of deletion, reorder, alteration, truncation, suppression, injection | **Fully working as a mechanism.** Not exercised on the owner's own record here: on the machine this was written on the chain links cleanly over sixteen entries, but nothing has signed a head, so on that host growth and truncation are not yet distinguishable. Signing one is a single operator command. |
 | Standalone offline checkers with no dependency on this system | **Fully working**, with the honest exception that they cannot re-run the original test. |
@@ -13037,7 +13071,7 @@ governance root plus witnesses, which the project describes in-repo as stronger.
 | Binding a capability grant to particular machines, and optionally to a named operator | **Working.** A gated function is refused when the running machine cannot present an identifier the grant was bound to. The software does not itself measure the hardware: it consumes an attested identity the deployment supplies, and falls back to the machine's installation identifier or, weakest, its hostname. How strong that binding really is depends on which of the three a deployment relies on. |
 | Withdrawing a capability grant before it expires | **Working** — a signed revocation list, protected against an older list being replayed over a newer one, and a grant may be issued so that a missing list denies it outright. Two honest limits: the issuing institution must deliver the new list to the deployment (nothing fetches it), and the decision is re-evaluated when the software next starts, not mid-run. |
 | Build and release safeguards: exact-version and fingerprint locking of every third-party package, content-pinned base images, a generated parts list checked back against the lock, and a gate that blocks on critical published flaws | **Working and part of the released software**, enforced automatically on every proposed change, with a deliberately planted failing case run first to prove the gate can still refuse. Honestly bounded: it blocks on **critical** findings only. High findings are reported and tracked rather than suppressed — including one in this chapter's own signature library, whose fix **has now been delivered** across every first-party declaration. Two residuals, both stated rather than smoothed over: the vendored copy of the third-party agent still names an older release, and on the machine this was written on the sovereign virtual environment had not yet been rebuilt onto the fixed one. |
-| Encrypted, signed, off-machine backup of the owner key and the owner-side record | **Working**, verified before anything is written on restore. It is a manual command — **nothing schedules it**. |
+| Encrypted, signed, off-machine backup of the owner key and the owner-side record (and now the permission-kernel dir) | **Working**, verified before anything is written on restore. A shipped systemd user timer (`vigil-backup.timer`) now schedules `vigil backup` daily across both planes with retention; the standalone `sigil backup` remains available manually. |
 | Key escrow or a vendor-held recovery copy | **Does not exist, by design.** The backup and its passphrase are the only recovery path. |
 | Documented replacement procedure for each key | **Supported by the commands described in section 6.4**; the owner key has no rotation command and is replaced by re-issuing every delegation from a new identity. |
 | Anti-rollback floor | **Working**, with a clearly stated limit against a same-host attacker holding owner privileges. |
@@ -13110,9 +13144,9 @@ a deployment rather than about code:
     fail-safe direction — a refusal, not a false approval — but an operator should know it can
     happen, and should not be surprised into thinking the system is broken.
 18. **Is your permission-kernel action log part of your backup and retention plan?** It is
-    individually signed and chained, and it is the record of every tool invocation. It is
-    deliberately *not* in the encrypted off-box backup, so if it matters to you as evidence, you
-    have to archive it yourself.
+    individually signed and chained, and it is the record of every tool invocation. It **is now**
+    included in the encrypted off-box backup (its key restored owner-only), so a machine loss no
+    longer costs it — confirm the daily backup timer is enabled and that you have tested a restore.
 19. **Where does the evidence for a completed engagement live once the engagement is over?** The
     off-box backup covers the owner's side. Finished evidence packages are ordinary files and are
     the operator's to archive, the way any other case record would be. Ask to see where they go
@@ -15314,19 +15348,22 @@ are present and intact.
 That last clause is worth noting on its own. The quarantine removes the capability while
 preserving the credit.
 
-#### 13.6 The nine automated checks that must pass
+#### 13.6 The thirteen automated checks that must pass
 
-Every proposed change must clear nine independent automated jobs before it can be merged.
-All nine are registered on the repository as *required status checks* on the main line of
-development, and force-pushing to that line and deleting it are both blocked — so the checks
-cannot be sidestepped by rewriting history.
+Every proposed change must clear thirteen independent automated jobs before it can be merged.
+All thirteen are registered on the repository as *required status checks* on the main line of
+development; the branch must also be up to date with the main line before a merge, and
+force-pushing to that line and deleting it are both blocked — so the checks cannot be sidestepped
+by rewriting history. The exact thirteen are written down in one committed file,
+`.github/required-status-checks.txt`, which the apply-tool, an offline test and a live-settings
+check all read, so this list and the live configuration cannot drift apart.
 
 One qualification, stated here because it is the sort of thing an auditor should be told
 rather than left to discover: administrator enforcement is deliberately left **off**, which
 means the repository's owner retains an explicit override and *can* merge without the checks
 being green. For every other contributor, and for every automated agent working in the
 repository, the gate is unconditional. For the owner it is a deliberate and attributable act
-rather than an impossibility. Both facts — the nine required checks and the owner override —
+rather than an impossibility. Both facts — the thirteen required checks and the owner override —
 can be confirmed by anyone with read access by querying the repository's own
 branch-protection settings, rather than taken on this briefing's word.
 
@@ -15343,6 +15380,10 @@ In plain terms:
 | Formal verification | A mathematical model checker verifies four core invariants of the design, and separately verifies that it catches a deliberately broken variant of each — so a green result means the checker is awake. Its scope is honestly limited: it checks the model, not the running code. |
 | Rust safety kernel | The independent classifier kernel: its record chain, its anti-rollback behaviour, its tier logic and its cryptography. |
 | Supply-chain gate | Everything in this section: image pinning, lock currency and installability, the inventory cross-check, and the vulnerability scan with its negative control. |
+| Accuracy corpus | The full recall/precision benchmark corpus and the longer soak — the expensive companion to the decisive accuracy assertions that are also folded into the offensive engine core (see below). |
+| Lint and types | Style and type hygiene across the whole tree: the linter blocks, and the type checker must run to completion. |
+| Briefing completeness | This briefing still names and explains every agent and capability the code declares; it goes red the moment the document falls behind the code. |
+| Live-fire smoke | A fast slice of the live-fire proving range: a real tool the engine drives against a loopback target, with a negative control proven to have run and an egress guard proving nothing left the host. |
 
 The supply-chain gate is kept as a separate job for a stated reason: the work it does —
 resolving fingerprints against a public package index, downloading a vulnerability
@@ -15362,9 +15403,11 @@ already required — so an accuracy regression can no longer pass the automated 
 unnoticed, under the same owner-override caveat noted above that applies to every
 required check. That much is enforced in the code of the required job itself,
 independently of any branch-protection setting — a setting a person with the right
-access can change. The expensive part — the full corpus and the longer soak —
-stays in the separate, non-required job; only the quick, decisive assertions were
-folded into the required one.
+access can change. The expensive part — the full corpus and the longer soak — now runs as its own
+required job (`CRUCIBLE eval + benchmark corpus`); the quick, decisive assertions
+were additionally folded into the required offensive-engine-core job, so the
+measurement is gated from both sides — and that in-code half holds independently of
+any branch-protection setting.
 
 Two smaller pieces of the same machinery are worth recording precisely, because
 each is easy to overstate.
@@ -15380,11 +15423,11 @@ is not turned on today. So it makes ownership explicit and requests the right
 reviewer; it does not by itself gate a change.
 
 **A script that keeps the required-checks list and the owner-binding in step.** Run
-deliberately by a person after a change has merged, it brings the repository's
-required-checks list and its owner-binding into line with the code. It refuses to
-run until the workflow it would mark required is actually present — because a
-required check that no workflow ever produces would block every future change from
-then on.
+deliberately by a person after a change has merged, it reads the committed source of
+truth (`.github/required-status-checks.txt`) and brings the repository's required-checks
+list and its owner-binding into line with it. It refuses to mark a check required until
+the workflow that produces it is actually present on the main line — because a required
+check that no workflow ever produces would block every future change from then on.
 
 ---
 
@@ -23410,20 +23453,23 @@ recording them.
 is not required to pass is a report, not a gate, so the position on the shared
 code repository is worth stating exactly, and it was read from the repository's
 own settings rather than from a document. The main line of code is protected:
-**nine checks are required to pass before a change can be merged**, and the
-supply-chain gate described above is one of the nine. The other eight cover the
+**thirteen checks are required to pass before a change can be merged**, and the
+supply-chain gate described above is one of the thirteen. The other twelve cover the
 shared integrity substrate, the offensive core, the autonomous agent's runtime,
 the assistant half's permission gates, the outbound-traffic gate, the separation
-of the two halves, the machine-checked mathematical model of the core rules, and
-the durability of the permission kernel. Rewriting history on that line and
-deleting it are both disabled.
+of the two halves, the machine-checked mathematical model of the core rules,
+the durability of the permission kernel, the accuracy benchmark corpus, the linter
+and type checker, the briefing-completeness census that keeps this document honest,
+and a fast live-fire smoke slice. The exact thirteen are the committed list in
+`.github/required-status-checks.txt`. Rewriting history on that line and deleting it
+are both disabled, and the branch must be up to date before a merge.
 
 Three things are **not** switched on, and a procurement officer should have them
 volunteered rather than discover them:
 
 - **Administrators are exempt.** A repository administrator can merge without the
-  nine checks passing. On a single-maintainer project that is a documented
-  posture, not an oversight — but it means "nine required checks" is a statement
+  thirteen checks passing. On a single-maintainer project that is a documented
+  posture, not an oversight — but it means "thirteen required checks" is a statement
   about the ordinary path, not about every possible path.
 - **Review by a second person is not required** by the repository's settings.
 - **Signed commits are not required** by the repository's settings.
@@ -24750,8 +24796,8 @@ above enforceable rather than merely present.
   half alike. A security product that lags its own cryptography library is in no position to
   lecture anyone about dependencies.
 - **The gate is a required check, not an advisory one.** The repository's main branch is
-  protected, and nine automated checks — including the supply-chain gate — must pass before a
-  change can be merged. Rewriting or deleting the branch's history is disabled. Three honest
+  protected, and thirteen automated checks — including the supply-chain gate — must pass before a
+  change can be merged, on a branch up to date with `main`. Rewriting or deleting the branch's history is disabled. Three honest
   gaps go with that, and an evaluator should be told them rather than left to find them:
   repository administrators are **exempt** from the required checks; independent review of a
   change by a second person is **not** required by the configuration; and commit signatures

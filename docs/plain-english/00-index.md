@@ -423,28 +423,34 @@ mapping from each model to the exact part of the code it abstracts is written do
 own correspondence document.
 
 **The automated build-and-test pipeline.** Verified for this index: every proposed change runs
-through eleven independent jobs across two pipelines. Nine of them can block the merge, and those
-nine are what the briefing means whenever it says "the required checks": the shared integrity core;
-the offensive engine's own tests; the outbound-network gate; the integration layer; the vendored
-agent's runtime; the sovereign side's permission gates; the formal proofs above; the permission
-kernel written in a compiled language; and, in the separate second pipeline, the supply-chain gate
-described immediately below. Two further jobs run on every change and, as their own jobs, only report rather
-than block: the full benchmark corpus, and a completeness check on this briefing itself, which reads
-the agent roster and the named capabilities out of the source code and fails if the document has
-stopped explaining one of them. That last one exists because this document once fell a whole half of
-the system behind the code without anyone noticing. The fourth revision did not leave the parts that
-matter most in a merely-reporting job, though. The accuracy claim's decisive assertions — that the
-benchmark finds every planted weakness and raises no false alarm — were folded *into* one of the
-required checks, so an accuracy regression now blocks a change even though the expensive corpus around
-it still only reports; and the check that keeps the record of driven and deliberately-undriven tools
-honest was folded into a required check too. A fast slice of the proving range now runs on every
-change as well. A prepared script, run deliberately by a person after this work lands, adds that
-slice, the reporting benchmark and the completeness check to the required list itself and binds the
-owner to them — held back until the range check is on the main line, because a required check that no
-job produces would block every change forever. The required nine are registered on the main line of
-development, which also blocks force-pushing and deletion. Administrator enforcement is
-deliberately off, so the repository's owner keeps an explicit override and can merge without
-them; every other contributor and every automated agent is bound unconditionally. Chapter 8's section "How the product's own build is assured" gives the full
+through fourteen independent jobs across three pipelines. Thirteen of them can block the merge —
+every job that runs on a pull request — and those thirteen are what the briefing means whenever it
+says "the required checks": the shared integrity core; the offensive engine's own tests; the accuracy
+benchmark corpus; the outbound-network gate; the integration layer; the vendored agent's runtime; the
+sovereign side's permission gates; the linter and type checker; the formal proofs above; the
+permission kernel written in a compiled language; the completeness check on this briefing itself; a
+fast live-fire smoke slice; and, in a separate pipeline, the supply-chain gate described immediately
+below. The one job that does *not* gate a change is the full live-fire table, which runs only on the
+nightly schedule and never on a pull request, so it reports but cannot block. The completeness check —
+which reads the agent roster and the named capabilities out of the source code and fails if the
+document has stopped explaining one of them — is itself now a required check; it exists because this
+document once fell a whole half of the system behind the code without anyone noticing. The accuracy
+claim's decisive assertions — that the benchmark finds every planted weakness and raises no false
+alarm — were folded *into* the already-required offensive-engine core, so that half is enforced in
+code independently of any branch-protection setting; and the full benchmark corpus around it is now a
+required check in its own right, so the accuracy measurement is gated from both sides. A prepared
+governance script — `tools/governance/require-checks.sh`, run deliberately by the owner — brought the
+live-fire slice, the benchmark corpus, the linter and the completeness check into the required list
+and bound the owner to them; it reads one committed source of truth,
+`.github/required-status-checks.txt`, and refuses to mark a check required until the workflow that
+produces it is on the main line, because a required check that no job produces would block every
+change forever. All thirteen are registered as required status checks on the main line of
+development, which also requires a branch to be up to date before merging and blocks force-pushing
+and deletion. Administrator enforcement is deliberately off, so the repository's owner keeps an
+explicit override and can merge without them; every other contributor and every automated agent is
+bound unconditionally. Required reviews and signed commits are *not* enforced — a deliberate,
+scheduled handoff, not a shipped control. Chapter 8's section "How the product's own build is
+assured" gives the full
 account.
 
 **Safeguards over the system's own software supply chain.** This work applies the prove-don't-guess
@@ -882,7 +888,7 @@ re-derived for this index at the version named above.
 | 186 named intergovernmental domains, and 14 government/military/educational suffix patterns | Read `integration/vigil_integration/safety/hard_guardrail.py` |
 | That the categorical block has no live call site | Search the repository for `assert_not_hard_blocked` and observe that the only matches are its own package, the safety package that re-exports it, its tests, and two research documents |
 | The four machine-checked safety properties, and their deliberately broken twins | Read `formal/README.md` and `formal/CORRESPONDENCE.md`, then run `bash formal/check.sh` |
-| The ten build-and-test jobs, the eleventh supply-chain gate, and which nine of them can block a merge | Read `.github/workflows/ci.yml` and `.github/workflows/supply-chain.yml`, then compare against the required checks listed in the repository's own branch-protection settings |
+| The eleven CI jobs, the supply-chain gate, and the two live-fire jobs — and which thirteen of them can block a merge | Read `.github/workflows/ci.yml`, `.github/workflows/supply-chain.yml` and `.github/workflows/livefire.yml`, then compare against the required checks in the repository's own branch-protection settings — or against `.github/required-status-checks.txt`, the committed list they are set from |
 | 1,816 package fingerprints | Count the lines containing `--hash=sha256:` in `engine/crucible/framework/v2/requirements.lock.txt` (640) and `infra/supply-chain/sovereign.lock.txt` (1,176) |
 | That every outside container image is pinned by content | Run `python3 infra/supply-chain/image_pins.py --check` |
 | That the vulnerability gate can actually fire, and that its exemption list is empty | Read the "negative control" step in `.github/workflows/supply-chain.yml`, and read `.trivyignore` |

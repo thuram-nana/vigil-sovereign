@@ -2102,19 +2102,22 @@ are present and intact.
 That last clause is worth noting on its own. The quarantine removes the capability while
 preserving the credit.
 
-### 13.6 The nine automated checks that must pass
+### 13.6 The thirteen automated checks that must pass
 
-Every proposed change must clear nine independent automated jobs before it can be merged.
-All nine are registered on the repository as *required status checks* on the main line of
-development, and force-pushing to that line and deleting it are both blocked — so the checks
-cannot be sidestepped by rewriting history.
+Every proposed change must clear thirteen independent automated jobs before it can be merged.
+All thirteen are registered on the repository as *required status checks* on the main line of
+development; the branch must also be up to date with the main line before a merge, and
+force-pushing to that line and deleting it are both blocked — so the checks cannot be sidestepped
+by rewriting history. The exact thirteen are written down in one committed file,
+`.github/required-status-checks.txt`, which the apply-tool, an offline test and a live-settings
+check all read, so this list and the live configuration cannot drift apart.
 
 One qualification, stated here because it is the sort of thing an auditor should be told
 rather than left to discover: administrator enforcement is deliberately left **off**, which
 means the repository's owner retains an explicit override and *can* merge without the checks
 being green. For every other contributor, and for every automated agent working in the
 repository, the gate is unconditional. For the owner it is a deliberate and attributable act
-rather than an impossibility. Both facts — the nine required checks and the owner override —
+rather than an impossibility. Both facts — the thirteen required checks and the owner override —
 can be confirmed by anyone with read access by querying the repository's own
 branch-protection settings, rather than taken on this briefing's word.
 
@@ -2131,6 +2134,10 @@ In plain terms:
 | Formal verification | A mathematical model checker verifies four core invariants of the design, and separately verifies that it catches a deliberately broken variant of each — so a green result means the checker is awake. Its scope is honestly limited: it checks the model, not the running code. |
 | Rust safety kernel | The independent classifier kernel: its record chain, its anti-rollback behaviour, its tier logic and its cryptography. |
 | Supply-chain gate | Everything in this section: image pinning, lock currency and installability, the inventory cross-check, and the vulnerability scan with its negative control. |
+| Accuracy corpus | The full recall/precision benchmark corpus and the longer soak — the expensive companion to the decisive accuracy assertions that are also folded into the offensive engine core (see below). |
+| Lint and types | Style and type hygiene across the whole tree: the linter blocks, and the type checker must run to completion. |
+| Briefing completeness | This briefing still names and explains every agent and capability the code declares; it goes red the moment the document falls behind the code. |
+| Live-fire smoke | A fast slice of the live-fire proving range: a real tool the engine drives against a loopback target, with a negative control proven to have run and an egress guard proving nothing left the host. |
 
 The supply-chain gate is kept as a separate job for a stated reason: the work it does —
 resolving fingerprints against a public package index, downloading a vulnerability
@@ -2150,9 +2157,11 @@ already required — so an accuracy regression can no longer pass the automated 
 unnoticed, under the same owner-override caveat noted above that applies to every
 required check. That much is enforced in the code of the required job itself,
 independently of any branch-protection setting — a setting a person with the right
-access can change. The expensive part — the full corpus and the longer soak —
-stays in the separate, non-required job; only the quick, decisive assertions were
-folded into the required one.
+access can change. The expensive part — the full corpus and the longer soak — now runs as its own
+required job (`CRUCIBLE eval + benchmark corpus`); the quick, decisive assertions
+were additionally folded into the required offensive-engine-core job, so the
+measurement is gated from both sides — and that in-code half holds independently of
+any branch-protection setting.
 
 Two smaller pieces of the same machinery are worth recording precisely, because
 each is easy to overstate.
@@ -2168,11 +2177,11 @@ is not turned on today. So it makes ownership explicit and requests the right
 reviewer; it does not by itself gate a change.
 
 **A script that keeps the required-checks list and the owner-binding in step.** Run
-deliberately by a person after a change has merged, it brings the repository's
-required-checks list and its owner-binding into line with the code. It refuses to
-run until the workflow it would mark required is actually present — because a
-required check that no workflow ever produces would block every future change from
-then on.
+deliberately by a person after a change has merged, it reads the committed source of
+truth (`.github/required-status-checks.txt`) and brings the repository's required-checks
+list and its owner-binding into line with it. It refuses to mark a check required until
+the workflow that produces it is actually present on the main line — because a required
+check that no workflow ever produces would block every future change from then on.
 
 ---
 

@@ -933,8 +933,8 @@ above enforceable rather than merely present.
   half alike. A security product that lags its own cryptography library is in no position to
   lecture anyone about dependencies.
 - **The gate is a required check, not an advisory one.** The repository's main branch is
-  protected, and nine automated checks — including the supply-chain gate — must pass before a
-  change can be merged. Rewriting or deleting the branch's history is disabled. Three honest
+  protected, and thirteen automated checks — including the supply-chain gate — must pass before a
+  change can be merged, on a branch up to date with `main`. Rewriting or deleting the branch's history is disabled. Three honest
   gaps go with that, and an evaluator should be told them rather than left to find them:
   repository administrators are **exempt** from the required checks; independent review of a
   change by a second person is **not** required by the configuration; and commit signatures

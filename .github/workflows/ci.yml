@@ -60,13 +60,13 @@ jobs:
       # files under it run).
       #
       # THE ACCURACY GATE IS HERE ON PURPOSE (test_recall_baseline / test_gate, ~50s of
-      # this job's ~8m). They also run in `crucible-eval`, which is NOT a required check
-      # — so the product's accuracy claim (recall 1.0, precision 1.0, fp 0, fn 0, the
-      # committed core byte-identically reproduced, its Ed25519 signature verified against
-      # a source-pinned trust root) could regress and still merge. Running them in a
-      # REQUIRED job makes that impossible in CODE, independently of any branch-protection
-      # setting, which is a setting somebody can change. The expensive corpus/soak stays in
-      # crucible-eval so this job's critical path barely moves.
+      # this job's ~8m). They also run in `crucible-eval`, which is now ALSO a required
+      # check — but keeping the decisive assertions here matters anyway: the product's
+      # accuracy claim (recall 1.0, precision 1.0, fp 0, fn 0, the committed core
+      # byte-identically reproduced, its Ed25519 signature verified against a source-pinned
+      # trust root) is enforced in CODE by this already-required job, independently of any
+      # branch-protection setting, which is a setting somebody can change. The expensive
+      # corpus/soak stays in crucible-eval so this job's critical path barely moves.
       CRUCIBLE_UNCOVERED_SUITES: >-
         framework/v2/veracity
         framework/v2/kernel
@@ -158,12 +158,12 @@ jobs:
       # workflow's critical path (~8m, every other job <4m), so eval runs HERE, in
       # parallel — coverage added at ~zero wall-clock cost instead of dropped.
       #
-      # NOTE FOR THE OPERATOR: `main` is branch-protected with 9 required status
-      # checks. This is a NEW check name, so until it is added to that required list
-      # it will run and report but will NOT block a merge. crucible-core (already
-      # required) carries the security-critical half — veracity, kernel, planner,
-      # sensors, defender, memory, analysis — deliberately, so the enforcement gap
-      # is limited to the measurement suite.
+      # NOTE FOR THE OPERATOR: `main` is branch-protected with 13 required status
+      # checks (committed in .github/required-status-checks.txt), and this job —
+      # `CRUCIBLE eval + benchmark corpus` — is now one of them, so it BLOCKS a merge.
+      # crucible-core (also required) still carries the security-critical half —
+      # veracity, kernel, planner, sensors, defender, memory, analysis — so the
+      # accuracy claim is gated from both sides.
       CRUCIBLE_EVAL_SUITES: framework/v2/eval
     steps:
       - uses: actions/checkout@v4
