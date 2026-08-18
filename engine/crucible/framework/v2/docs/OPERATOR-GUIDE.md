@@ -327,9 +327,83 @@ the callback URL — most SSRF, JNDI-over-LDAP-referral-to-HTTP, webhook gadgets
 A **DNS-only** interaction (a `nslookup`/`dig` with no HTTP fetch) needs a
 DNS-capable relay, which is a documented future extension, not silently implied.
 
+### Without a relay, four always-on checks are inert against a remote target
+
+This is the single most consequential operational fact in this section, so it is
+stated plainly rather than left to be inferred. Of the **eleven** always-on seed
+checks a standard scan runs, **four are out-of-band checks** — server-side
+request forgery (`ssrf-oob`), blind XXE (`xxe-oob`), blind remote command
+execution (`rce-oob`) and unsafe deserialization / JNDI (`deserialization-oob`).
+Each is confirmed *only* by a call-back, so each needs a receiver the target can
+actually reach:
+
+- Against a **remote** target with **no relay configured**, the callback base is
+  the loopback receiver, which a remote host cannot reach. These four checks are
+  therefore **inert**: the engine **skips them and records that it skipped
+  them** — it never guesses a result in their place.
+- The trap this creates: an operator who does not know this runs an `engage`
+  against a remote target, sees **no** SSRF / XXE / RCE / deserialization
+  findings, and wrongly concludes the target is clean of those classes. It was
+  never tested for them. Stand up a collaborator relay on a
+  charter-allowlisted host (above) — or point `--oob-relay-url` at one — to make
+  these four checks live against a remote target.
+
+The loopback default is genuinely sufficient for a **co-resident** target (the
+`scan` case, where the app runs on the same host); the inert-checks caveat bites
+only for a genuinely remote `engage`.
+
 ---
 
-## 9. The kill-switch — the absolute stop
+## 9. Authenticated scanning — most of the surface is behind a login
+
+Most of a real application's attack surface — ordering, payments, admin screens,
+other users' records — is reachable only while logged in. A scan that sees only
+the anonymous front door tests a fraction of the app. CRUCIBLE ships an
+authenticated-scanning building block for exactly this; it is easy to miss
+because the loopback `scan` and remote `engage` runners **do not expose it as a
+single login flag**, so this section states what exists and how to reach it.
+
+**What exists (`scanner/session.py`).** `AuthSession` wraps the gated `send`
+executor into an authenticated one: it carries a **cookie jar**, performs a
+**`LoginSequence`** (usually a POST of operator-supplied credentials), detects
+when the session has gone (a 401/403, or a logged-out marker in the page), and
+**re-authenticates once and retries** before giving up — Burp's session handling
+in one composable object. The crawler and the audit engine each take only a
+`send` callable, so authentication is added *around* them without weakening the
+boundary: it sends only through the injected, scope / charter / kill-switch-gated
+executor, with operator-supplied credentials for an authorized target.
+
+```python
+from framework.v2.scanner.session import AuthSession, LoginSequence
+auth = AuthSession(raw_send, LoginSequence(
+    url="https://app.example/login", body="user=alice&password=…"))
+Crawler(auth.send).crawl(base + "/account")          # crawls authenticated
+AuditEngine(auth.send).audit(request_behind_login)   # scans authenticated
+```
+
+**How to enable it today — be precise, the paths differ:**
+
+- The session component **is built and tested** and is composed into a scan by a
+  small programme (as above); it is a **building block, not a CLI flag**. The
+  loopback `scan` and remote `engage` runners currently carry **no
+  username/password login flag for the primary identity**. If an engagement
+  depends on scanning deeply behind a login, plan to either supply the session as
+  request headers or have an engineer wire `AuthSession` in.
+- The **two-identity access-control pack** *is* on the command line, off by
+  default: `--access-control` with `--ac-ref` (the object references to attempt
+  to cross-read) and `--ac-victim-header` (a header such as `Cookie: session=BOB`
+  authenticating the second identity). It is a genuinely two-identity experiment
+  — act as one user, compare against what a *different* user legitimately sees —
+  so the operator supplies both identities; with no `--ac-ref` it builds nothing
+  and says so, never guessing.
+
+Prepare before day one: test accounts at the privilege levels you need, the exact
+login steps, and the record identifiers each account owns. The system cannot
+conjure them.
+
+---
+
+## 10. The kill-switch — the absolute stop
 
 The off-switch is always present. Every `engage` auto-wires a kill-switch bound
 to the slug; it is a **file on disk**, so it survives a process restart and a trip
@@ -357,7 +431,7 @@ and fails closed if it is missing or badly signed.
 
 ---
 
-## 10. A sane first session
+## 11. A sane first session
 
 1. `python3 -m framework.v2 status` — confirm the environment resolves.
 2. Stand up (or point at) a **loopback** copy of the target.
