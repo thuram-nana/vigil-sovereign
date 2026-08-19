@@ -107,14 +107,26 @@ class HttpRepeaterTool:
             if self._executor_factory is not None:
                 ex = self._executor_factory(slug=slug, base_url=base_url, ctx=ctx)
             else:
+                # W16-2: PIN the governance trust root via the SAME resolver the production engage
+                # path uses (engage._engage_authority_trust_root) so a provisioned EngagementAuthority
+                # is loaded VERIFIED (load_verified_authority), not trusted UNSIGNED. Without this pin
+                # `auto_load_authority=True` falls to `load_authority`, which accepts an UNSIGNED (or
+                # tampered) document — a doc widening the validity window / allow_destructive /
+                # live_destructive_acknowledged / max_actions was believed, and a failed load left
+                # ONLY the kill-switch. That is the exact fail-open W16-2 closed on engage.py; this
+                # offensive-tier repeater must match it, not remain the weaker path. The resolver
+                # returns None for GREENFIELD (no authority provisioned -> documented kill-switch-only
+                # path preserved), the TrustRoot when an authority AND a governance trust root are
+                # both discoverable (an unsigned/tampered doc is then refused before any I/O), and
+                # raises EngagementRefused when an authority IS provisioned but NO trust root is
+                # discoverable — which `run` catches and fails the replay CLOSED rather than build an
+                # unpinned executor that would apply the authority unsigned.
+                from ..engage import _engage_authority_trust_root
                 ex = HttpExecutor(
                     engagement_slug=slug,
                     base_url=base_url,
-                    # Load the signed EngagementAuthority (time-box validity window, max-actions
-                    # ceiling, environment binding) exactly as the production engage path does
-                    # (engage.py) — else the offensive-tier repeater would enforce ONLY the
-                    # kill-switch and a replay could fire after the authorization window closed.
                     auto_load_authority=True,
+                    trust_root=_engage_authority_trust_root(slug),
                     prompt_callback=getattr(ctx, "prompt_callback", None) or stdin_prompt_with_timeout,
                     request_budget=self._request_budget,
                     timeout_seconds=self._timeout_seconds,
@@ -149,12 +161,24 @@ class HttpRepeaterTool:
         pairs = normalize_headers(args.get("headers"))
         headers = [[k, v] for (k, v) in pairs if k.lower() != _IDENTITY_HEADER]
 
-        executor = self._executor_for(ctx.slug, base_url_of(url), ctx)
+        # EngagementRefused is defined in engage.py; import lazily (cheap sys.modules lookup after
+        # first load) to keep the repeater package independently importable and cycle-free.
+        from ..engage import EngagementRefused
+
+        request_view = {"method": method, "url": url, "headers": headers, "has_body": body is not None}
+        try:
+            executor = self._executor_for(ctx.slug, base_url_of(url), ctx)
+        except EngagementRefused as exc:
+            # W16-2 fail-closed: an EngagementAuthority is provisioned for this engagement but NO
+            # governance trust root is discoverable to VERIFY it. Refuse the replay rather than build
+            # an executor that would apply the authority UNSIGNED — nothing leaves the host.
+            return ToolResult(
+                ok=False, refused=True, gate="authority", note=str(exc),
+                output={"response": None, "request": request_view})
         request = _RepeaterHttpRequest(method=method, url=url, headers=headers, body=body)
         resp = executor.gated_fetch(request)
 
         refused = resp.get("refused") if isinstance(resp, dict) else None
-        request_view = {"method": method, "url": url, "headers": headers, "has_body": body is not None}
         if refused:
             # The executor's inner gate chain (scope/destructive/budget/rate-limit/egress/authority)
             # declined the replay — nothing left the host. Surface it as a refusal.

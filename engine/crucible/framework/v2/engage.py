@@ -1209,13 +1209,20 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
     discover_send = None
     discover_ex = None
     if getattr(args, "autonomous_discover", False):
+        # W16-2 (LOW): resolve the signed-authority trust root OUTSIDE the best-effort try below.
+        # An EngagementRefused here (an authority IS provisioned but no governance trust root is
+        # discoverable to VERIFY it) is an AUTHORIZATION refusal, not a value-add build hiccup — it
+        # must be SURFACED (propagated to the caller's fail-closed handler), never swallowed into a
+        # silent discovery-skip that would proceed as if no authority were provisioned. Only a
+        # genuine executor build error stays best-effort-skipped inside the try.
+        discover_trust_root = _engage_authority_trust_root(args.slug)
         try:
             discover_ex = HttpExecutor(
                 engagement_slug=args.slug,
                 base_url=_origin(args.seed_url),
                 auto_load_authority=True,
                 # W16-2: same signed-authority pin as the scan executor above.
-                trust_root=_engage_authority_trust_root(args.slug),
+                trust_root=discover_trust_root,
                 request_budget=max(1, int(getattr(args, "autonomous_budget", 8))),
                 prompt_callback=prompt_callback_from_args(args) or stdin_prompt_with_timeout,
             )
@@ -1725,5 +1732,14 @@ def _engage_body(args: argparse.Namespace, spine: object) -> int:
     # result.report.active_findings (deterministic + deduped, for downstream consumers / the spine);
     # the already-printed report and the byte-identical default/benchmark path are unaffected.
     if getattr(args, "autonomous", False):
-        _run_autonomous(args, result, spine)
+        try:
+            _run_autonomous(args, result, spine)
+        except EngagementRefused as e:
+            # W16-2 (LOW): the autonomous DISCOVERY leg refused because an EngagementAuthority is
+            # provisioned but no governance trust root is discoverable to verify it. Surface it as a
+            # clean fail-closed refusal (matching the scan-path handler) rather than let the resolver's
+            # authorization refusal be swallowed into a silent discovery-skip. The already-printed
+            # authoritative scan/report above is unaffected; the non-zero exit flags the refusal.
+            print(f"engagement refused (autonomous discovery): {e}")
+            return 2
     return 0

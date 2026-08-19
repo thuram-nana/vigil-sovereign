@@ -263,6 +263,51 @@ def test_resolver_pins_trust_root_only_when_authority_provisioned(isolated):
 
 
 # ---------------------------------------------------------------------------
+# W16-2 (LOW): the autonomous DISCOVERY leg SURFACES the resolver's EngagementRefused
+# (it used to be swallowed by the best-effort `except Exception` into a silent skip).
+# ---------------------------------------------------------------------------
+
+
+def test_autonomous_discover_surfaces_engagement_refused(isolated):
+    """FAIL-BEFORE / PASS-AFTER for the LOW: with the resolver call moved OUTSIDE the discover
+    leg's best-effort ``try``, an EngagementRefused (an authority IS provisioned but no governance
+    trust root is discoverable to verify it) PROPAGATES out of ``_run_autonomous`` instead of being
+    swallowed into ``discover_send = None``. The engage CLI turns it into a clean fail-closed
+    refusal. Before the fix the resolver raised INSIDE the try and the refusal was silently hidden
+    (``_run_autonomous`` returned normally)."""
+    from types import SimpleNamespace
+
+    from framework.v2.authority.store import save_authority
+    from framework.v2.engage import _run_autonomous
+
+    isolated("alpha", "127.0.0.1")
+    # an authority IS provisioned (an unsigned doc is enough to exist on disk); NO trust root.
+    save_authority(_authority("127.0.0.1"))
+    assert not _paths.trust_root_path().exists()
+
+    args = SimpleNamespace(slug="alpha", seed_url="http://127.0.0.1/",
+                           autonomous_discover=True, autonomous_budget=8)
+    with pytest.raises(EngagementRefused, match="trust root"):
+        _run_autonomous(args, None, None)
+
+
+def test_autonomous_discover_greenfield_does_not_raise(isolated):
+    """NEGATIVE CONTROL: greenfield (no authority provisioned) resolves to a None pin, so the
+    discovery leg does NOT raise EngagementRefused — the refusal is specific to a provisioned-but-
+    unverifiable authority, never a blanket abort of the autonomous cycle."""
+    from types import SimpleNamespace
+
+    from framework.v2.engage import _run_autonomous
+
+    isolated("alpha", "127.0.0.1")   # no authority, no trust root
+    args = SimpleNamespace(slug="alpha", seed_url="http://127.0.0.1:1/",
+                           autonomous_discover=True, autonomous_budget=8)
+    # the best-effort cycle over a None result returns (an AutonomyResult or None) but never raises
+    # the authorization refusal.
+    _run_autonomous(args, None, None)
+
+
+# ---------------------------------------------------------------------------
 # all four governed fields, on the engage-loaded authority
 # ---------------------------------------------------------------------------
 
@@ -365,7 +410,10 @@ def test_v2_limitations_authority_claim_is_true_of_the_code():
     # the code the doc names must actually exist and be wired at BOTH executor sites.
     assert "def _engage_authority_trust_root(" in engage_src
     assert "trust_root=_engage_authority_trust_root(slug)" in engage_src         # scan path
-    assert "trust_root=_engage_authority_trust_root(args.slug)" in engage_src    # discover path
+    # discover path: the resolver is called for the discover slug OUTSIDE the best-effort try (so an
+    # EngagementRefused surfaces, not swallowed — W16-2 LOW) and its result is pinned as trust_root.
+    assert "discover_trust_root = _engage_authority_trust_root(args.slug)" in engage_src
+    assert "trust_root=discover_trust_root" in engage_src
 
     # the doc must name the real function and must NOT still assert the authority is unsigned.
     assert "_engage_authority_trust_root" in limitations
