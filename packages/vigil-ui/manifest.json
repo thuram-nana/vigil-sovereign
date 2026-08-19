@@ -1,7 +1,7 @@
 {
   "name": "vigil-ui",
   "version": "1",
-  "description": "VIGIL COMMAND unified UI bundle — no build, no CDN, strict-CSP native. Vendored into both plane servers by sync.sh; each server derives its static filename allowlist from static_allowlist.",
+  "description": "VIGIL COMMAND unified UI bundle — no build, no CDN, strict-CSP native. Vendored into both plane servers by sync.sh, which copies a FIXED file set from its own hardcoded list; no code reads static_allowlist — it records the intended served set for review, kept in sync with sync.sh by hand.",
   "index": "index.html",
   "static_allowlist": ["style.css", "ui.js", "manual.js", "app.js"],
   "build": { "style.css": ["tokens.css", "components.css"] },

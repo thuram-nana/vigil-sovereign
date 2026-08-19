@@ -1227,19 +1227,23 @@ it is like pressing a lift button twice — and each step is fail-closed, so a s
 cannot complete stops the installation rather than continuing in a half-configured
 state.
 
-### 6.7 Two operational questions this briefing cannot answer from the code
+### 6.7 Two operational notes for a deployment
 
 Stated plainly, because silence would be misleading:
 
-- **Backup and restore.** The repository ships no documented backup-and-restore
-  procedure, and none was found in the reading done for this chapter. This matters more
-  here than for ordinary software, because of the anti-rollback floor: the system
-  deliberately **refuses** a record that is shorter than the high-water mark it has
-  already seen. A naive restore from an older copy is therefore not merely stale — it
-  will be rejected, and correctly so. An agency deployment should treat "what exactly do
-  we back up (the record, the floor marker, the keys, the evidence tree), and what is the
-  tested restore procedure" as an open question to settle before go-live, not as
-  something the product answers today.
+- **Backup and restore.** A documented, purpose-built backup-and-restore procedure
+  **does** ship. `vigil backup` writes an off-box, passphrase-encrypted backup of **both**
+  planes as two *separate* encrypted files (never a merged archive — one process holding
+  both planes' secrets would breach the two-env boundary), each with a signed file manifest;
+  `vigil restore` verifies every part's manifest **before** it writes a byte and refuses to
+  report success on a chain that does not re-verify. It is deliberately anti-rollback-aware:
+  the durable floor is part of what is captured, so a restore lands the high-water mark
+  rather than tripping it, and the identity keys are re-wrapped for fresh hardware. (Sources:
+  `integration/vigil_integration/backup.py`, `apps/sigil/sigil/backup.py`, the `backup`/
+  `restore` verbs in `integration/vigil_integration/cli.py`, and the scheduled/off-host units
+  under `infra/systemd/vigil-backup*`.) What stays a **deployment decision** — not a missing
+  feature — is the key-management policy for the never-stored backup passphrase, and running
+  the tested restore drill before go-live.
 - **Multiple analysts sharing one deployment.** The design as read is single-operator:
   one owner key, one owner identity, one approval queue. Per-analyst attribution beyond
   the signed usage record, and what it would mean for several analysts to share a
