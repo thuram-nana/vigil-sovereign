@@ -3,7 +3,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help all setup up down services services-down logs smoke strix systemd envs egress-guard clean-services bench benchmark
+.PHONY: help all setup up down services services-down logs smoke strix systemd envs egress-guard clean-services bench benchmark bench-perf bench-perf-record
 
 # extra flags for `make up`, e.g.  make up ARGS="--domain vigil.example.com --no-browser"
 ARGS ?=
@@ -50,6 +50,17 @@ benchmark: ## comparative head-to-head vs installed incumbents (sqlmap/wapiti/ni
 	@PYTHONPATH=engine/crucible .venv-offense/bin/python -m framework.v2 benchmark \
 	  --report $(BENCH_DOCS)/benchmark-comparative.md --json $(BENCH_DOCS)/benchmark-comparative.json \
 	  --sign $$( [ -f $(BENCH_KEY) ] && printf -- '--signing-key %s --key-id benchmark-owner' "$$(cat $(BENCH_KEY))" )
+
+# PERFORMANCE regression gate (issue #423) — the complement to the ACCURACY scorecard above.
+# `bench` gates recall/precision; `bench-perf` gates wall-clock / throughput / peak-memory over the
+# vigil_core hot integrity paths against a COMMITTED baseline (tools/perf/baselines/perf-baseline.json),
+# failing on regression beyond the band. Stdlib-only harness; vigil_core supplies the real cases (needs
+# `pip install -e packages/core/vigil_core`, or its deps on PYTHONPATH). See tools/perf/README.md.
+bench-perf: ## PERFORMANCE gate: wall-clock/throughput/peak-mem floors over vigil_core hot paths vs committed baseline
+	@PYTHONPATH=packages/core/vigil_core python3 tools/perf/perf_bench.py check
+
+bench-perf-record: ## re-record the committed perf baseline (EXPLICIT, reviewed change — COMMIT the diff)
+	@PYTHONPATH=packages/core/vigil_core python3 tools/perf/perf_bench.py record
 
 down: ## stop a running `vigil up` (backends + reverse proxy)
 	@[ -n "$(VIGIL)" ] || { echo "vigil not found — run ./bootstrap.sh (or make setup) first" >&2; exit 127; }

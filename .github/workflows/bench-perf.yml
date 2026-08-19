@@ -1,0 +1,48 @@
+# Performance-regression gate (W2-6, issue #423) — ADVISORY, non-blocking.
+#
+# The complement to the accuracy scorecard. Before this, CI's only regression gate was accuracy
+# (`make bench`); a change that halved throughput or doubled peak memory of the hot integrity paths
+# shipped green. This job runs `make bench-perf`, which measures wall-clock / throughput / peak
+# memory of the `vigil_core` hot paths and fails on regression beyond a committed band, plus a
+# self-test whose NEGATIVE CONTROL proves the gate is not a no-op (an artificially slowed path is
+# rejected). Green on the current tree.
+#
+# ADVISORY ON PURPOSE. This job's name is deliberately NOT added to
+# .github/required-status-checks.txt (which stays byte-identical at 13 checks): a wall-clock gate
+# wants its baseline re-recorded on the CI runner class before it blocks merges. The gate LOGIC is
+# already proven in a REQUIRED check — docs/tests/test_perf_gate.py rides "the briefing explains
+# every agent and capability" (`pytest docs/tests -q`). Promoting this job to required is a separate,
+# reviewed change (per W0-1 #396 / W0-2 #397).
+#
+# Third-party actions are SHA-pinned (a comment names the tag) — same pins as supply-chain.yml.
+name: vigil-bench-perf
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bench-perf:
+    name: performance regression gate (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+      - name: install vigil_core (supplies the real hot-path cases)
+        run: pip install -e packages/core/vigil_core
+      - name: negative control — the gate rejects an artificially slowed path
+        run: python tools/perf/perf_bench.py selftest
+      - name: perf gate — hot paths vs committed baseline (fail on regression beyond band)
+        run: make bench-perf
