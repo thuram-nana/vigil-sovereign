@@ -1,0 +1,155 @@
+# release — sign the BUILD, not only the product.
+#
+# WHY THIS EXISTS. Everywhere else in this repository the *product* signs what it emits:
+# findings, remediation certificates, the audit spine. Until now the *build of the product*
+# signed nothing — docs/SUPPLY-CHAIN.md said so in as many words. An operator who pulled a
+# `vigil-core` wheel had a hash lock proving the wheel had not changed since it was locked, and
+# no way at all to prove WHO built it or FROM WHAT. This workflow closes that: every release
+# artifact leaves here carrying (1) a Sigstore/cosign signature, (2) an SLSA build-provenance
+# attestation, and (3) a PEP 740 attestation for the wheel — each independently verifiable by a
+# third party, OFFLINE, from the Sigstore bundle alone (the Rekor inclusion proof travels inside
+# it, so no call home is needed to check it).
+#
+# WHEN IT RUNS. Tag push only (`v*`). It does NOT run on pull requests, so it will not report on
+# the PR that introduces it — that is expected. Its SHAPE is asserted offline instead, by
+# integration/tests/test_release_provenance.py, which runs in the required "integration two-env
+# boundary (P5)" job on every PR. The workflow is ADVISORY: it is not in
+# .github/required-status-checks.txt, because a required check must be producible by a
+# pull_request-triggered job and a tag-triggered one never is.
+#
+# ACTIONS ARE PINNED TO FULL COMMIT SHAS. A `@v4` tag is a mutable pointer on someone else's
+# repository, executing with this workflow's token. The test asserts every `uses:` here is a
+# 40-hex SHA.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Least privilege at the top; the one job that needs to mint OIDC-backed signatures widens it.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Build-time tooling, version-pinned. NOT added to any runtime requirements spec: a build
+  # backend and an attestation signer are not part of the deployed attack surface.
+  BUILD_VERSION: "1.5.0"
+  PYPI_ATTESTATIONS_VERSION: "0.0.30"
+  # The single package with a clean, registry-shippable wheel (hatchling, no native ext).
+  PACKAGE_DIR: "packages/core/vigil_core"
+
+jobs:
+  build-sign-attest:
+    name: build, sign and attest release artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # OIDC: keyless cosign signing, the PEP 740 signer, and attest-build-provenance all mint a
+      # short-lived Sigstore identity from this token. No long-lived key touches the runner.
+      id-token: write
+      # attest-build-provenance writes the SLSA statement to the GitHub attestations API.
+      attestations: write
+    steps:
+      # Actions are third-party code running with this workflow's token — pinned to full SHAs.
+      - name: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: setup python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.13"
+
+      - name: build wheel + sdist
+        run: |
+          python -m pip install --upgrade "build==${BUILD_VERSION}"
+          python -m build --outdir dist "${PACKAGE_DIR}"
+          echo "built artifacts:"
+          ls -l dist/
+
+      # (2) SLSA build provenance over EVERY artifact this run produced. The subject is the
+      # sha256 of each file, so the attestation is bound to these exact bytes.
+      - name: SLSA build provenance
+        uses: actions/attest-build-provenance@520d128f165991a6c774bcb264f323e3d70747f4 # v2.2.0
+        with:
+          subject-path: "dist/*"
+
+      # (1) Sigstore/cosign keyless signature for every artifact, emitted as an offline-
+      # verifiable bundle (certificate + signature + Rekor inclusion proof in one file).
+      - name: install cosign
+        uses: sigstore/cosign-installer@c56c2d3e59e4281cc41dea2217323ba5694b171e # v3.8.0
+
+      - name: cosign sign every artifact (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          for f in dist/*.whl dist/*.tar.gz; do
+            [ -e "$f" ] || continue
+            echo "signing: $f"
+            cosign sign-blob --yes \
+              --bundle "${f}.cosign.bundle" \
+              "$f"
+          done
+
+      # (3) PEP 740 attestation for every wheel (and the sdist too). `.publish.attestation`
+      # files are the exact objects PyPI stores and serves for third-party verification.
+      - name: PEP 740 attestations
+        run: |
+          python -m pip install "pypi-attestations==${PYPI_ATTESTATIONS_VERSION}"
+          python -m pypi_attestations sign dist/*.whl dist/*.tar.gz
+          echo "attestations produced:"
+          ls -l dist/*.publish.attestation
+
+      # A verification script that verifies the artifacts THIS run just produced — the offline
+      # cosign check plus a NEGATIVE CONTROL proving a tampered artifact is rejected.
+      - name: verify signatures + attestations (offline) + tamper negative control
+        run: bash .github/scripts/verify-release-artifacts.sh dist
+
+      - name: upload signed artifacts + attestations
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: vigil-release-signed
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/*.cosign.bundle
+            dist/*.publish.attestation
+          if-no-files-found: error
+          retention-days: 90
+
+  # OPT-IN actual publish. Gated on a repository variable so a tag push does NOT try to upload
+  # to PyPI until a maintainer has configured Trusted Publishing (OIDC) for the project. When
+  # enabled, gh-action-pypi-publish attaches PEP 740 attestations at upload time as well.
+  publish-pypi:
+    name: publish to PyPI (opt-in, trusted publishing)
+    needs: build-sign-attest
+    if: ${{ vars.PUBLISH_TO_PYPI == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: download built artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: vigil-release-signed
+          path: dist
+      - name: strip signature side-cars (only distributions are uploaded)
+        # The cosign bundle is not a distribution; the pre-generated PEP 740 attestations are
+        # removed too so gh-action-pypi-publish generates its own at upload time (attestations: true).
+        run: rm -f dist/*.cosign.bundle dist/*.publish.attestation
+      - name: publish
+        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26 # v1.14.2
+        with:
+          attestations: true
+          packages-dir: dist
+          repository-url: ${{ vars.PYPI_REPOSITORY_URL }}
+          skip-existing: true
