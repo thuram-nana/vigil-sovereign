@@ -1,0 +1,17 @@
+# VIGIL HA — the deploy set. `kubectl apply -k infra/ha/k8s/` (or, better, the gated tools/ha/deploy.sh)
+# brings up the whole stack from THIS list. The NetworkPolicy is a REQUIRED resource here — listed FIRST so
+# the proxy-only ingress lock lands before the sovereign cockpit — and MUST NOT be removed: without it any
+# in-cluster workload can scrape the owner token off the cockpit's token-free `GET /` and act as OWNER.
+# tools/ha/deploy.sh runs a preflight (tools/ha/require_networkpolicy.py) that REFUSES to deploy if this
+# manifest is absent, does not deny the cross-workload path, or the cluster has no NetworkPolicy controller.
+# See docs/architecture/HA-PROFILE.md §1.2 and infra/ha/k8s/README.md.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - networkpolicy.yaml         # REQUIRED — cockpit reachable ONLY via the proxy (owner-token leak vector)
+  - services.yaml
+  - qdrant-statefulset.yaml
+  - neo4j-statefulset.yaml
+  - otel-deployment.yaml
+  - sovereign-statefulset.yaml
+  - proxy-deployment.yaml
