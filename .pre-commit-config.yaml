@@ -51,7 +51,7 @@ repos:
   # of synthetic test/fixture material). A real secret committed to shipped source or config fails.
   # ------------------------------------------------------------------------------------------------
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.21.2  # commit a9e1950fe247fbb08817393121691474c55a6cfa
+    rev: v8.28.0  # aligned with security-scan.yml + the full-tree scan; 8.28.0 honours .gitleaks.toml [[allowlists]] path scoping (8.21.2 did not)
     hooks:
       - id: gitleaks
 
