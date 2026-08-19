@@ -387,7 +387,12 @@ install_launcher() {  # name  target
 }
 install_launcher vigil "$REPO/.venv-offense/bin/vigil"
 install_launcher sigil "$REPO/.venv-sovereign/bin/sigil"
-case ":$PATH:" in *":$HOME/.local/bin:"*) : ;; *) warn "add ~/.local/bin to your PATH to use 'vigil'/'sigil' directly.";; esac
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) : ;;
+  *) warn "add ~/.local/bin to your PATH — WITHOUT 'vigil' resolvable, TWO features degrade silently: the"
+     warn "  console Terminal Run button errors, and the agentic/fireteam engage bridge falls back to the"
+     warn "  non-agentic engine. Verify after fixing PATH with: vigil doctor";;
+esac
 
 if [ "$DO_SYSTEMD" = 1 ]; then
   step "4b install user systemd units"
