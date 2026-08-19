@@ -3,7 +3,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help all setup up down services services-down logs smoke strix systemd envs egress-guard clean-services bench benchmark bench-perf bench-perf-record
+.PHONY: help all setup up down services services-down logs smoke strix aegis-image systemd envs egress-guard clean-services bench benchmark bench-perf bench-perf-record
 
 # extra flags for `make up`, e.g.  make up ARGS="--domain vigil.example.com --no-browser"
 ARGS ?=
@@ -78,6 +78,9 @@ logs: ## follow the Qdrant logs
 
 strix: ## build the local Kali strix sandbox image (large; needs Docker)
 	docker compose --profile strix build strix-sandbox
+
+aegis-image: ## build the AEGIS defensive gateway sidecar image (framework/v2/aegis/Dockerfile; needs Docker)
+	docker compose --profile aegis build aegis-gateway
 
 systemd: ## install the user systemd units (cockpit + consolidate)
 	./bootstrap.sh --systemd
