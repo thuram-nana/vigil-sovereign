@@ -115,8 +115,13 @@ def gitleaks_allowlist_paths(text: str) -> list[str]:
     body = m.group(1)
     out: list[str] = []
     # TOML string forms: '''triple''', "double", 'single'. Each match yields three groups; one is set.
+    # NOTE: the single-quote alternative can match the empty '' straddling a '''…''' boundary, yielding a
+    # spurious empty capture. Drop empties — an empty string is a parse artifact, never a real allowlist
+    # path — so it cannot be mistaken for the catch-all "" entry below.
     for triple, double, single in re.findall(r"'''(.*?)'''|\"(.*?)\"|'(.*?)'", body, re.S):
-        out.append(triple or double or single)
+        val = triple or double or single
+        if val:
+            out.append(val)
     return out
 
 
