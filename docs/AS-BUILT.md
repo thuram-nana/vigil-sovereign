@@ -50,10 +50,10 @@ impossibility. Anyone with read access can re-derive this in one command — it 
   (`docs/proof-carrying-finding/`), with canonical-bytes parity proven and tamper rejection.
 - **Falsifiable, tamper-evident benchmark** (#182): `make bench` → a signed scorecard (precision/recall/FPR
   with safe negative controls; m-of-n Ed25519 + out-of-band fingerprint pin).
-- **Attack-path + chokepoint triage** (#181): `vigil attack-paths <slug>` — shortest paths, the ranked
+- **Attack-path + chokepoint triage** (#181): `vigil crucible attack-paths <slug>` — shortest paths, the ranked
   chokepoint ("which one fix breaks the most attack paths"), blast radius, and a what-if, over a pure
   spine→world-model projection.
-- **Confidence calibration** (#183, `calibration report`: ECE/Brier/reliability bins — display-only, never
+- **Confidence calibration** (#183, `vigil crucible calibration report`: ECE/Brier/reliability bins — display-only, never
   promotes) and **coverage-guided, oracle-gated, non-evasive discovery** (#183, `scanner/coverage.py`:
   re-ranks effort, never gates a surface out, never confirms without an oracle).
 

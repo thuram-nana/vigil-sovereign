@@ -3,7 +3,7 @@
 The single, committed, **no-build, strict-CSP** single-page app that fronts the *whole* system.
 `packages/vigil-ui/` is the one source of truth (`app.js`, `ui.js`, `manual.js`, `tokens.css` +
 `components.css` → `style.css`, `index.html`, `manifest.json`); `sync.sh` vendors it **byte-identically**
-into both plane servers' static dirs. It is a hash-router over **21 screens** that federates the two
+into both plane servers' static dirs. It is a hash-router over **31 screens** that federates the two
 isolated trust planes behind one browser origin — the keyless **offense** plane (CRUCIBLE console + gated
 api) via `OFF()`, and the owner-key **sovereign** plane (SIGIL cockpit) via `SOV()` — building all DOM
 with `VUI.h` (no framework, no inline handlers, no `eval`). The UI is a *driver*, not an authority: it
@@ -32,21 +32,21 @@ Exported on `window.VUI` at `ui.js:151–153`. This is the entire framework:
   (`:129`), `icon` (`:134`, a fixed inline-SVG glyph set — the only place `html:` innerHTML is used, and
   only for static markup), `toast` (`:97`), `router` (`:105`).
 
-### `app.js` — the shell + all 21 screens
+### `app.js` — the shell + all 31 screens
 
 - **Config / plane prefixes** (`app.js:12–14`): `CFG = window.VIGIL_CFG`, then
   `SOV(p) = CFG.api.sovereign + p` and `OFF(p) = CFG.api.offense + p`. **Every** fetch prepends one of
   these — `OFF(...)` for offense (CRUCIBLE console/gated api), `SOV(...)` for the owner cockpit (SIGIL).
 - **`const NAV`** (`app.js:19–47`) — the navigation model: three groups (`DO` / `MANAGE` / `LEARN`),
   each item `{ id, label, icon, ready, owner? }`. `owner: true` marks a sovereign-owner-plane screen
-  (`safety`, `charter`, `apikeys`, `settings`). This array is one of the three sides of the system-map
+  (`safety`, `charter`, `apikeys`, `settings`, `users`). This array is one of the three sides of the system-map
   contract (below).
 - **Shell**: `shell()` (`app.js:119–129`) builds `#topbar`, `#nav`, `#main > #screen`, and the detail
   drawer. `topbar()` (`:50`) has the plane segmented toggle (`all`/`offense`/`defense`), the live/
   kill-switch pill, counts, and the safety pill. `renderNav()` + its `visible()` filter (`:91–104`),
   `navItem()` (`:105–116`), `current()` (`:117`, derives the active screen id from `location.hash`).
 - **`route()`** (`app.js:3989–4018`) — the hash router. `current()` → an `if (id === "…") {
-  render…(screen); return; }` branch per screen (21 branches); an unready/unknown id falls to
+  render…(screen); return; }` branch per screen (31 branches); an unready/unknown id falls to
   `renderStub` (`:3135`). It calls `teardownLive()` (`:853`) first so any SSE stream / interval from the
   previous screen is closed. Each `render*(screen)` fetches read-only JSON (or fires a gated action) and
   mounts DOM with `V.h`.
@@ -99,13 +99,13 @@ Three lists must stay set-equal, and CI enforces it:
 route() ids**, a cardinality guard (a duplicate or unparseable id can't vanish — raw token count must
 equal distinct-id count), and **≥1 synonym per screen** (voice nav). Extraction is *scoped* to the
 `const NAV = [...]` block (`_nav_block`, `:42`) and the `function route()` body (`_route_block`, `:49`)
-so unrelated ids (scan modes, wizard targets, providers) are never picked up. The 21 screens:
+so unrelated ids (scan modes, wizard targets, providers) are never picked up. The 31 screens:
 
 | Group | ids |
 |-------|-----|
-| DO | `home` `assess` `chat` `live` `findings` `proof` `report` `fixes` `defense` |
-| MANAGE | `sessions` `activity` `safety` `charter` `apikeys` `tools` `brain` `compliance` `assurance` `settings` |
-| LEARN | `manual` `knowledge` |
+| DO | `home` `assess` `chat` `terminal` `live` `findings` `proof` `report` `fixes` `defense` `replay` |
+| MANAGE | `library` `sessions` `activity` `safety` `charter` `apikeys` `tools` `brain` `mcp` `system` `budgets` `compliance` `assurance` `settings` `users` `governance` |
+| LEARN | `trust` `posture` `manual` `knowledge` |
 
 ## Invariants this package must preserve (and why)
 
