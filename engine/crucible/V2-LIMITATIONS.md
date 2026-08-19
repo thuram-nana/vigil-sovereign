@@ -1078,10 +1078,19 @@ What is NOT here — honest scope:
   remains is having the planner/coordinator construct the executor with a
   per-engagement authority by default, rather than the operator wiring it
   explicitly.
-- **Authority is unsigned.** Unlike the entitlement layer, the authority
-  document is plain JSON, not threshold-signed. For high-assurance
-  deployments it should carry the same Ed25519 signing as entitlements so
-  a tampered scope is detected.
+- **Authority signing — LANDED, and REQUIRED on the engage path (W16-2).**
+  The authority document now carries the same Ed25519 m-of-n threshold
+  signing as entitlements (`authority/signing.py`, `SignedAuthority`,
+  `store.load_verified_authority`), so a tampered scope/window/`allow_destructive`/
+  `max_actions` is detected at load. The production `engage` path is no longer the
+  weaker plane: `engage._engage_authority_trust_root` PINS the governance trust
+  root whenever an authority document AND a trust root are discoverable, so
+  `HttpExecutor(auto_load_authority=True, trust_root=…)`'s `_authority_gate` REQUIRES
+  a valid signed authority — an unsigned or tampered document is refused before any
+  network I/O, exactly as the VIGIL plane's `conjunctive_gate.build_offense_gate`
+  refuses a `None` trust root. Greenfield (no authority provisioned) still runs on
+  the documented kill-switch-only path; an authority provisioned without a
+  discoverable trust root is refused rather than trusted unsigned.
 
 ## 24. Social-engineering defence (socialdefense)
 
