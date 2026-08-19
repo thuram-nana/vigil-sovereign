@@ -39,6 +39,12 @@ def _isolate(tmp_path, monkeypatch):
               "OPENAI_API_BASE", "OPENAI_BASE_URL", "LITELLM_BASE_URL", "OLLAMA_API_BASE"):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.delenv("CRUCIBLE_SOVEREIGNTY_TIER", raising=False)
+    # HERMETIC (RE-RE-RED-PEN, the NON-env JSON channel): point the Strix child's JSON config path at a
+    # NON-EXISTENT temp file by default, so no test reads the operator's real ~/.strix/cli-config.json (a
+    # persisted remote base there would otherwise perturb the gate). A test that exercises the JSON channel
+    # overrides this seam explicitly via the `strix_json` helper below.
+    monkeypatch.setattr(actions_mod, "_strix_config_json_path",
+                        lambda: tmp_path / "no-such-strix-cli-config.json")
     yield tmp_path
 
 
@@ -682,5 +688,270 @@ def test_child_alias_guard_noop_under_permissive(monkeypatch):
     monkeypatch.setenv("OLLAMA_API_BASE", REMOTE)
     try:
         assert actions_mod._strix_child_alias_guard({}) == ({}, [])
+    finally:
+        _sov.set_policy(None)
+
+
+# ══ RE-RE-RED-PEN — the NON-env air-gap channel: the JSON config file + persist auto-write ════════════════
+# Strix's config.loader.load_settings() resolves api_base with precedence env > ~/.strix/cli-config.json
+# (_read_json_overrides) > field defaults, and persist_current() on every CLI startup AUTO-WRITES any set
+# api_base env var back into that JSON file. So a JSON-planted (or prior-run-persisted) REMOTE base repoints
+# the spawned child under AIR_GAPPED with a byte-CLEAN env — the env-only gate saw no base, trusted the local
+# NAME, and permitted; the child then dialed the remote host and egressed the source. Two independent defenses
+# close it: (POSITIVE CONTROL) the guard PINS LLM_API_BASE — highest precedence — to the loopback base (or the
+# provider's local default when bare), so the JSON file / persist / defaults can no longer win; and
+# (DEFENSE-IN-DEPTH) the refusal classifies the child's ACTUAL full resolution (env > JSON > defaults) and
+# refuses a remote result pre-spawn. Every endpoint channel is now closed: env aliases, the JSON file, the
+# persist auto-write, and the field defaults.
+
+import json as _json
+
+# the JSON file can carry ANY of Strix's api_base aliases (persist writes the FIRST-present one).
+_JSON_ALIASES = ["LLM_API_BASE", "OPENAI_API_BASE", "OPENAI_BASE_URL", "LITELLM_BASE_URL", "OLLAMA_API_BASE"]
+
+
+def _plant_strix_json(tmp_path, env_block, monkeypatch):
+    """Write a Strix cli-config.json ({"env": {...}}) and point the gate's JSON seam at it — exactly the file
+    _read_json_overrides reads and persist_current writes. Returns the path."""
+    p = tmp_path / "planted-cli-config.json"
+    p.write_text(_json.dumps({"env": env_block}), encoding="utf-8")
+    monkeypatch.setattr(actions_mod, "_strix_config_json_path", lambda: p)
+    return p
+
+
+# -- the JSON-channel helpers in isolation -----------------------------------------------------------------
+
+def test_json_config_base_reads_planted_file(tmp_path, monkeypatch):
+    _plant_strix_json(tmp_path, {"OPENAI_BASE_URL": REMOTE}, monkeypatch)
+    assert actions_mod._strix_json_config_base() == REMOTE
+
+
+def test_json_config_base_first_present_alias_wins(tmp_path, monkeypatch):
+    # PRECEDENCE within the file mirrors the child: OPENAI_BASE_URL precedes OLLAMA_API_BASE in the alias set.
+    _plant_strix_json(tmp_path, {"OPENAI_BASE_URL": "http://a:11434", "OLLAMA_API_BASE": "http://b:11434"},
+                      monkeypatch)
+    assert actions_mod._strix_json_config_base() == "http://a:11434"
+
+
+def test_json_config_base_absent_file_is_empty():
+    # the autouse _isolate seam points at a non-existent path → no base from this channel.
+    assert actions_mod._strix_json_config_base() == ""
+
+
+def test_resolved_base_env_wins_over_json(tmp_path, monkeypatch):
+    # env alias present → env value (the child skips the JSON file for a field whose env var is set).
+    _plant_strix_json(tmp_path, {"OPENAI_BASE_URL": REMOTE}, monkeypatch)
+    monkeypatch.setenv("LLM_API_BASE", "http://127.0.0.1:11434")
+    assert actions_mod._strix_resolved_base({}, include_json=True) == "http://127.0.0.1:11434"
+
+
+def test_resolved_base_falls_through_to_json_when_env_clean(tmp_path, monkeypatch):
+    # no env alias + include_json → the child falls through to the JSON file (env > JSON > defaults).
+    _plant_strix_json(tmp_path, {"OPENAI_BASE_URL": REMOTE}, monkeypatch)
+    assert actions_mod._strix_resolved_base({}, include_json=True) == REMOTE
+    # env-only resolution (the guard's classification) deliberately IGNORES the JSON file so the pin wins.
+    assert actions_mod._strix_resolved_base({}, include_json=False) == ""
+
+
+# -- DEFENSE-IN-DEPTH: the refusal classifies the child's full env>JSON>defaults resolution -----------------
+
+@pytest.mark.parametrize("provider", _LOCAL_PROVIDERS)
+@pytest.mark.parametrize("alias", _JSON_ALIASES)
+def test_gate_refuses_json_planted_remote_for_every_local_provider(air_gapped, monkeypatch, tmp_path,
+                                                                    provider, alias):
+    # THE FIX: env byte-CLEAN, but the JSON file carries a REMOTE api_base under <alias> → the gate resolves
+    # the base through env>JSON>defaults → cloud_only → REFUSED under AIR_GAPPED. Before: env-only base → ""
+    # → the local NAME was trusted → PERMITTED → the child read the JSON remote and egressed the source.
+    monkeypatch.setenv("STRIX_LLM", f"{provider}/qwen")
+    _plant_strix_json(tmp_path, {alias: REMOTE}, monkeypatch)
+    assert _sov.classify(actions_mod._strix_sovereignty_backend({})) == "cloud_only"
+    refusal = actions_mod._strix_sovereignty_refusal({})
+    assert refusal and "AIR_GAPPED" in refusal
+
+
+@pytest.mark.parametrize("alias", _JSON_ALIASES)
+def test_gate_refuses_json_planted_remote_openai_prefix(air_gapped, monkeypatch, tmp_path, alias):
+    # openai (OpenAI-compatible self-hosted): a JSON-remote base → NOT loopback → 'openai' → cloud_only → REFUSED.
+    monkeypatch.setenv("STRIX_LLM", "openai/qwen")
+    _plant_strix_json(tmp_path, {alias: REMOTE}, monkeypatch)
+    assert _sov.classify(actions_mod._strix_sovereignty_backend({})) == "cloud_only"
+    assert actions_mod._strix_sovereignty_refusal({})
+
+
+@pytest.mark.parametrize("alias", _JSON_ALIASES)
+def test_gate_permits_json_planted_loopback(air_gapped, monkeypatch, tmp_path, alias):
+    # PRESERVE the legit case: a LOOPBACK base in the JSON file is a real local endpoint → local → PERMITTED.
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    _plant_strix_json(tmp_path, {alias: "http://127.0.0.1:11434"}, monkeypatch)
+    assert actions_mod._strix_sovereignty_refusal({}) == ""
+
+
+def test_gate_env_loopback_wins_over_json_remote(air_gapped, monkeypatch, tmp_path):
+    # env LLM_API_BASE (loopback) is set → env wins over the JSON file (mirrors the child) → PERMITTED.
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    monkeypatch.setenv("LLM_API_BASE", "http://127.0.0.1:11434")
+    _plant_strix_json(tmp_path, {"OPENAI_BASE_URL": REMOTE}, monkeypatch)
+    assert actions_mod._strix_sovereignty_refusal({}) == ""
+
+
+def test_gate_env_remote_refused_even_with_json_loopback(air_gapped, monkeypatch, tmp_path):
+    # the inverse: env LLM_API_BASE remote wins over a JSON loopback → REFUSED (env is higher precedence).
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    monkeypatch.setenv("LLM_API_BASE", REMOTE)
+    _plant_strix_json(tmp_path, {"OLLAMA_API_BASE": "http://127.0.0.1:11434"}, monkeypatch)
+    assert actions_mod._strix_sovereignty_refusal({}) and "AIR_GAPPED" in actions_mod._strix_sovereignty_refusal({})
+
+
+def test_persist_auto_write_remote_is_refused(air_gapped, monkeypatch, tmp_path):
+    # THE persist_current() CASE: a prior run had OPENAI_BASE_URL=REMOTE in env; Strix's startup persist_current
+    # wrote {"env": {"OPENAI_BASE_URL": REMOTE}} into the cli-config.json. A LATER run with a byte-clean env
+    # reads it back → REFUSED. (Same file shape _read_json_overrides consumes; covered by the JSON channel.)
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    _plant_strix_json(tmp_path, {"OPENAI_BASE_URL": REMOTE}, monkeypatch)   # what persist_current would have written
+    assert _sov.classify(actions_mod._strix_sovereignty_backend({})) == "cloud_only"
+    assert actions_mod._strix_sovereignty_refusal({}) and "AIR_GAPPED" in actions_mod._strix_sovereignty_refusal({})
+
+
+# -- GROUNDING: the planted JSON really does repoint the REAL Strix child (env > JSON > defaults) -----------
+
+def test_real_strix_child_dials_json_planted_remote(tmp_path, monkeypatch):
+    # Prove the leak is REAL against Strix's own resolver, and that the env pin defeats it — not a mock of it.
+    loader = pytest.importorskip("strix.config.loader")
+    settings = pytest.importorskip("strix.config").load_settings
+    for v in _JSON_ALIASES:
+        monkeypatch.delenv(v, raising=False)
+    cfg = tmp_path / "cli-config.json"
+    cfg.write_text(_json.dumps({"env": {"OPENAI_BASE_URL": REMOTE}}), encoding="utf-8")
+    saved_override, saved_cached = loader._override, loader._cached
+    try:
+        loader.apply_config_override(cfg)                       # point the real loader at the planted file
+        assert settings().llm.api_base == REMOTE                # CLEAN env + JSON-planted remote → child dials REMOTE
+        monkeypatch.setenv("LLM_API_BASE", "http://127.0.0.1:11434")
+        loader._cached = None                                   # a fresh child re-resolves
+        assert settings().llm.api_base == "http://127.0.0.1:11434"   # the env pin (highest precedence) DEFEATS the JSON
+    finally:
+        loader._override, loader._cached = saved_override, saved_cached
+
+
+# -- POSITIVE CONTROL: the guard PINS LLM_API_BASE over the JSON channel (never leaves it unset) ------------
+
+def test_child_alias_guard_pins_default_over_json_remote(air_gapped, monkeypatch, tmp_path):
+    # env byte-CLEAN, JSON carries a REMOTE base. The guard's classification is JSON-BLIND (local by NAME), so
+    # it PINS LLM_API_BASE to the provider's loopback default and STRIPS the siblings — env beats the JSON file.
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    _plant_strix_json(tmp_path, {"OPENAI_BASE_URL": REMOTE}, monkeypatch)
+    overrides, remove = actions_mod._strix_child_alias_guard({})
+    assert overrides == {"LLM_API_BASE": "http://localhost:11434"}    # PINNED loopback default (not the JSON remote)
+    assert REMOTE not in overrides.values()
+    assert set(remove) == set(_SIBLING_ALIASES)
+
+
+def test_child_alias_guard_bare_daemon_pins_default_not_unset(air_gapped, monkeypatch):
+    # THE CORE POSITIVE-CONTROL CHANGE: a truly BARE local daemon (no base env, no JSON) must PIN LLM_API_BASE
+    # to the loopback default — NEVER leave it unset (unset lets the JSON file / persist / defaults win).
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    overrides, remove = actions_mod._strix_child_alias_guard({})
+    assert overrides.get("LLM_API_BASE") == "http://localhost:11434"
+    assert "LLM_API_BASE" in overrides                               # explicitly SET, not absent
+    assert set(remove) == set(_SIBLING_ALIASES)
+
+
+def test_child_alias_guard_bare_daemon_respects_configured_loopback_host(air_gapped, monkeypatch):
+    # the pin prefers the console's configured loopback endpoint (CRUCIBLE_OLLAMA_HOST) when it is loopback.
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    monkeypatch.setenv("CRUCIBLE_OLLAMA_HOST", "http://127.0.0.1:9999")
+    overrides, _ = actions_mod._strix_child_alias_guard({})
+    assert overrides == {"LLM_API_BASE": "http://127.0.0.1:9999"}
+
+
+@pytest.mark.parametrize("provider", _LOCAL_PROVIDERS)
+def test_child_alias_guard_pins_loopback_for_every_local_provider(air_gapped, monkeypatch, provider):
+    # every local-classified provider gets a LOOPBACK pin (never unset) so no non-env channel can repoint it.
+    from framework.v2.console import chat as chat_mod
+    monkeypatch.setenv("STRIX_LLM", f"{provider}/qwen")
+    overrides, remove = actions_mod._strix_child_alias_guard({})
+    base = overrides.get("LLM_API_BASE", "")
+    ok, _host = chat_mod._url_host_is_local(base)
+    assert base and ok, f"{provider}: LLM_API_BASE must be pinned to a loopback base, got {base!r}"
+    assert set(remove) == set(_SIBLING_ALIASES)
+
+
+# -- END-TO-END: a JSON-planted remote REFUSES the launch (no spawn); a bare daemon runs with the pin -------
+
+@pytest.mark.parametrize("alias", _JSON_ALIASES)
+def test_launch_codebase_json_planted_remote_REFUSED_no_spawn(spawn, air_gapped, monkeypatch, tmp_path, alias):
+    # END-TO-END (the CONFIRMED exploit via the NON-env channel): env byte-CLEAN, JSON carries a remote base.
+    # The launch is REFUSED and NOTHING spawns — before the fix it spawned and the child dialed the JSON remote.
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen2.5-coder:32b")
+    _plant_strix_json(tmp_path, {alias: REMOTE}, monkeypatch)
+    r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path)})
+    assert "error" in r and "AIR_GAPPED" in r["error"]
+    assert spawn == {}                                             # never spawned → the source never left the host
+
+
+def test_retry_codebase_json_planted_remote_REFUSED(spawn, monkeypatch, tmp_path):
+    # a run launched under PERMISSIVE, retried after the tier is lowered to AIR_GAPPED with a JSON-planted
+    # remote, is REFUSED on retry (no re-spawn) rather than re-shipping the source via the JSON channel.
+    _sov.set_policy(None)
+    try:
+        r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path)})
+        _finish(r["run_id"])
+        spawn.clear()
+        monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "AIR_GAPPED")
+        monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+        _plant_strix_json(tmp_path, {"OPENAI_BASE_URL": REMOTE}, monkeypatch)
+        r2 = actions_mod.retry_run(r["run_id"])
+        assert r2["ok"] is False and "AIR_GAPPED" in r2["error"]
+        assert spawn == {}
+    finally:
+        _sov.set_policy(None)
+
+
+def test_child_env_bare_daemon_pins_default_endpoint(real_spawn, air_gapped, monkeypatch, tmp_path):
+    # LOOPBACK/BARE STILL RUNS: env byte-CLEAN, no JSON → the child the SPAWN receives has LLM_API_BASE PINNED
+    # to the loopback default (never unset), no remote sibling present, and the run proceeds normally.
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen2.5-coder:32b")
+    r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path)})
+    assert r["status"] == "running"
+    assert real_spawn.wait()
+    env = real_spawn.last
+    assert env["LLM_API_BASE"] == "http://localhost:11434"           # PINNED default (positive control)
+    for a in _SIBLING_ALIASES:
+        assert a not in env
+    assert REMOTE not in env.values()
+
+
+def test_child_env_json_remote_pin_beats_the_file(real_spawn, air_gapped, monkeypatch, tmp_path):
+    # POSITIVE CONTROL end-to-end via the guard directly (the refusal is the primary defense end-to-end, but
+    # this proves the SECOND, independent defense): even with the JSON file carrying a remote base, the child
+    # env the guard builds pins LLM_API_BASE to loopback with no remote value present.
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    _plant_strix_json(tmp_path, {"OPENAI_BASE_URL": REMOTE}, monkeypatch)
+    overrides, remove = actions_mod._strix_child_alias_guard({})
+    child = {**{k: v for k, v in __import__("os").environ.items()}, **overrides}
+    for k in list(child):
+        if k.upper() in {a.upper() for a in remove}:
+            child.pop(k, None)
+    assert child["LLM_API_BASE"] == "http://localhost:11434"
+    assert REMOTE not in child.values()
+
+
+# -- PERMISSIVE stays byte-identical (the operator allowed cloud there) -------------------------------------
+
+def test_json_remote_permissive_permits_and_byte_identical(real_spawn, monkeypatch, tmp_path):
+    # PERMISSIVE: the JSON channel is the operator's OWN config and cloud is allowed — the refusal does NOT
+    # fire and the guard is a NO-OP: no LLM_API_BASE injected, no sibling stripped, the child env is byte-identical.
+    _sov.set_policy(None)
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "PERMISSIVE")
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    _plant_strix_json(tmp_path, {"OPENAI_BASE_URL": REMOTE}, monkeypatch)
+    try:
+        assert actions_mod._strix_sovereignty_refusal({}) == ""
+        assert actions_mod._strix_child_alias_guard({}) == ({}, [])
+        r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path)})
+        assert r["status"] == "running"
+        assert real_spawn.wait()
+        env = real_spawn.last
+        assert "LLM_API_BASE" not in env                            # not injected (byte-identical)
     finally:
         _sov.set_policy(None)

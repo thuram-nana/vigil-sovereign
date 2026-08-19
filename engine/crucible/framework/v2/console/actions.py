@@ -462,9 +462,10 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
     run context — ``VIGIL_PROOF_RUN_DIR`` — so the proof_sink writes proofs under this run's dir).
 
     ``env_remove`` deletes keys from the child env AFTER the merge (case-insensitive) — used by the Strix
-    sovereignty spawn to STRIP the unvalidated ``api_base`` aliases (``OPENAI_API_BASE`` / ``OPENAI_BASE_URL``
-    / ``LITELLM_BASE_URL`` / ``OLLAMA_API_BASE``) so a stray ambient alias cannot repoint the child off-host;
-    ``LLM_API_BASE`` (the loopback-validated one) is never in the remove list. Empty/None ⇒ byte-identical."""
+    sovereignty POSITIVE CONTROL to STRIP the unvalidated ``api_base`` aliases (``OPENAI_API_BASE`` /
+    ``OPENAI_BASE_URL`` / ``LITELLM_BASE_URL`` / ``OLLAMA_API_BASE``) so none can shadow the pinned
+    ``LLM_API_BASE`` (which ``env_extra`` sets to the loopback base — highest precedence, so it beats the JSON
+    config file and defaults too); ``LLM_API_BASE`` is never in the remove list. Empty/None ⇒ byte-identical."""
     child_env = {**os.environ, **(env_extra or {})} if (env_extra or env_remove) else None
     if child_env is not None and env_remove:
         _rm = {str(k).upper() for k in env_remove}
@@ -756,8 +757,9 @@ def retry_run(run_id: str) -> dict:
     if _is_strix_run:
         # **strix_env is merged LAST so a re-resolved LOCAL pin OVERRIDES the global cloud default in the child;
         # for a cloud/no-pick retry it is {} → byte-identical to the pre-GAP-1 Proof-Studio-only env.
-        # W0-7 LEG 2: same alias strip/canonicalize as the launch path, so a retried LOCAL run under a sovereign
-        # tier cannot be repointed off-host by a stray ambient sibling alias (PERMISSIVE ⇒ byte-identical).
+        # W0-7 POSITIVE CONTROL: same pin-LLM_API_BASE + strip-siblings as the launch path, so a retried LOCAL
+        # run under a sovereign tier cannot be repointed off-host by ANY channel — sibling alias, the JSON config
+        # file, the persist auto-write, or a default (env beats them all) (PERMISSIVE ⇒ byte-identical).
         _alias_extra, env_remove = _strix_child_alias_guard(strix_env)
         env_extra = {"VIGIL_PROOF_RUN_DIR": new_rd, "VIGIL_ENGAGEMENT": slug,
                      "VIGIL_BASE_DIR": os.environ.get("VIGIL_BASE_DIR") or ".vigil-live",
@@ -1043,12 +1045,66 @@ def _strix_api_base_aliases() -> "list[str]":
     return ["LLM_API_BASE", "OPENAI_API_BASE", "OPENAI_BASE_URL", "LITELLM_BASE_URL", "OLLAMA_API_BASE"]
 
 
-def _strix_resolved_base(strix_llm_env: dict) -> str:
+# W0-7 (RE-RE-RED-PEN — the NON-env air-gap channel) — the env aliases are only ONE of the child's api_base
+# sources. Strix's ``config.loader.load_settings()`` resolves ``api_base`` with precedence **env > the JSON
+# file (~/.strix/cli-config.json, ``_read_json_overrides``) > field defaults**, and ``persist_current()`` on
+# every CLI startup AUTO-WRITES any set api_base env var back into that JSON file. So a JSON-planted (or a
+# prior-run-persisted) REMOTE base repoints the child under AIR_GAPPED even with a byte-clean env — the
+# env-only gate sees no base, trusts the local NAME, and permits. Detecting each spelling is whack-a-mole;
+# the DURABLE fix is a POSITIVE CONTROL — pin the child's ``LLM_API_BASE`` (highest precedence) to the
+# validated LOOPBACK base (or the provider's local default when bare), so the JSON file + persist + defaults
+# can no longer win — plus a defense-in-depth REFUSAL that classifies the child's ACTUAL full resolution
+# (env > JSON > defaults) and refuses a remote result pre-spawn. The JSON path mirrors ``strix.config.loader``
+# (``_override or _DEFAULT_PATH``); the child our console spawns passes no ``--config`` so it uses the default.
+def _strix_config_json_path() -> "Path":
+    """The JSON config file the spawned Strix child reads for its api_base (env > THIS file > defaults). Mirrors
+    ``strix.config.loader`` (``_override or _DEFAULT_PATH`` = ``~/.strix/cli-config.json``). A monkeypatch seam for
+    tests. Total: never raises."""
+    try:
+        from strix.config import loader as _loader   # offense-plane vendored tool; never sigil (FATAL-2)
+        p = getattr(_loader, "_override", None) or getattr(_loader, "_DEFAULT_PATH", None)
+        if p:
+            return Path(p)
+    except Exception:  # noqa: BLE001 — fall back to Strix's documented default path
+        pass
+    return Path.home() / ".strix" / "cli-config.json"
+
+
+def _strix_json_config_base() -> str:
+    """The ``api_base`` the spawned Strix child would take from its JSON config file — the FIRST-present alias
+    (Strix's own precedence, case-insensitive) in the file's ``{"env": {...}}`` block. This is the channel
+    ``_read_json_overrides`` feeds when NO api_base env var is set (env wins over the file). ``""`` when the
+    file is absent / unreadable / carries no api_base alias. Total: never raises — a config it cannot read is
+    treated as "no base" (the positive pin still forces LLM_API_BASE regardless)."""
+    try:
+        path = _strix_config_json_path()
+        if not path.exists():
+            return ""
+        data = json.loads(path.read_text(encoding="utf-8"))
+        env_block = data.get("env", {}) if isinstance(data, dict) else {}
+        if not isinstance(env_block, dict):
+            return ""
+        block_ci = {str(k).upper(): v for k, v in env_block.items()}
+        for alias in _strix_api_base_aliases():
+            val = str(block_ci.get(str(alias).upper()) or "").strip()
+            if val:
+                return val
+    except Exception:  # noqa: BLE001 — unreadable JSON ⇒ no base from this channel (fail-safe; pin still forces)
+        return ""
+    return ""
+
+
+def _strix_resolved_base(strix_llm_env: dict, *, include_json: bool = False) -> str:
     """The ``api_base`` the spawned Strix child WILL dial: the FIRST-present alias (Strix's own precedence)
     across the per-session pin (``strix_llm_env``) then ``os.environ`` — exactly how the child, handed
     ``{**os.environ, **env_extra}``, resolves it via ``AliasChoices``. Case-insensitive, mirroring Strix's
     ``case_sensitive=False``. This — NOT ``LLM_API_BASE`` alone — is what the loopback gate must classify.
-    Total: never raises."""
+
+    ``include_json``: when True (the REFUSAL/classification path) AND no env alias is set, also consult the
+    child's JSON config file — reproducing Strix's env > JSON > defaults precedence so a JSON-planted /
+    persisted remote base is classified (and refused) exactly as the child would dial it. The GUARD path calls
+    it with ``include_json=False`` (env-only) on purpose: its job is to PIN over the JSON channel, so a
+    JSON-remote base must not flip the run's local classification and suppress the pin. Total: never raises."""
     try:
         osenv_ci = {str(k).upper(): v for k, v in os.environ.items()}
         pin_ci = {str(k).upper(): v for k, v in (strix_llm_env or {}).items()}
@@ -1059,13 +1115,49 @@ def _strix_resolved_base(strix_llm_env: dict) -> str:
                 val = osenv_ci.get(au)
             val = str(val or "").strip()
             if val:
-                return val
+                return val                             # an env alias is set ⇒ the JSON file is skipped (env wins)
+        if include_json:
+            return _strix_json_config_base()           # no env alias ⇒ the child falls through to the JSON file
     except Exception:  # noqa: BLE001 — cannot resolve ⇒ empty (the gate treats "no base" as default-localhost)
         return ""
     return ""
 
 
-def _strix_sovereignty_backend(strix_llm_env: dict) -> str:
+# A LOOPBACK default endpoint per local backend, used when a permitted LOCAL run has NO explicit base env so
+# the guard can still PIN ``LLM_API_BASE`` (never leave it unset — an unset base lets the JSON file/defaults
+# win). Ollama's real default is 11434; the OpenAI-compatible servers use their conventional local ports. Only
+# the loopback authority matters for sovereignty (keeping the source on-host); the port is best-effort so a
+# legitimately-bare daemon still runs.
+_STRIX_LOCAL_DEFAULT_BASE = {
+    "ollama":      "http://localhost:11434",
+    "vllm":        "http://localhost:8000",
+    "tgi":         "http://localhost:8080",
+    "llama-cpp":   "http://localhost:8080",
+    "self-hosted": "http://localhost:8080",
+    "dryrun":      "http://localhost:11434",
+}
+
+
+def _strix_local_default_base(backend_name: str) -> str:
+    """A LOOPBACK base to PIN for a permitted LOCAL run with no explicit api_base env — so the child's
+    ``LLM_API_BASE`` is set (highest precedence) and the JSON file / persisted config / field defaults cannot
+    repoint it. Prefers the console's configured local endpoint (``chat._configured_local_endpoint`` — e.g. a
+    loopback ``CRUCIBLE_OLLAMA_HOST``) when it is itself loopback, else the per-backend default above. Total:
+    never raises; always returns a loopback URL."""
+    name = (backend_name or "").strip().lower()
+    try:
+        from . import chat as _chat
+        ep = str(_chat._configured_local_endpoint(name) or "").strip()
+        if ep:
+            ok, _host = _chat._url_host_is_local(ep)
+            if ok:
+                return ep
+    except Exception:  # noqa: BLE001 — fall through to the per-backend default below
+        pass
+    return _STRIX_LOCAL_DEFAULT_BASE.get(name, "http://localhost:11434")
+
+
+def _strix_sovereignty_backend(strix_llm_env: dict, *, include_json: bool = True) -> str:
     """The ``kernel.sovereignty`` backend NAME the spawned Strix codebase agent must be gated as.
 
     The child runs with ``STRIX_LLM`` = the per-session LOCAL pin (``strix_llm_env['STRIX_LLM']``) when one
@@ -1076,7 +1168,12 @@ def _strix_sovereignty_backend(strix_llm_env: dict) -> str:
     ``local`` ONLY when its base URL is loopback (or unset = its default localhost daemon) — a SET-but-remote
     base fail-closes to the cloud sentinel ``openai`` (``classify() → cloud_only``, refused under every
     sovereign tier). A non-local/unknown prefix keeps its raw provider name, which ``classify()`` places in the
-    right cloud class (unknown ⇒ ``cloud_only``)."""
+    right cloud class (unknown ⇒ ``cloud_only``).
+
+    ``include_json`` (default True, the REFUSAL path): resolve the base over the child's FULL precedence —
+    env aliases > the JSON config file > defaults — so a JSON-planted / persisted remote base is classified
+    (and refused) exactly as the child would dial it. The GUARD passes ``include_json=False`` (env-only): its
+    job is to PIN over the JSON channel, so a JSON-remote base must not flip the local classification there."""
     from ..kernel import sovereignty as _sovereignty
     model = str(strix_llm_env.get("STRIX_LLM") or os.environ.get("STRIX_LLM", "") or "").strip()
     if not model:
@@ -1090,10 +1187,11 @@ def _strix_sovereignty_backend(strix_llm_env: dict) -> str:
     # The endpoint the child WILL dial. It gates every LOCAL-family backend below: a local backend is trusted
     # ``local`` only when this base is LOOPBACK (or unset = the backend's default localhost daemon). Shared by
     # the ``openai`` self-hosted branch AND the map fall-through so ONE loopback rule governs every local name.
-    # Resolved over Strix's WHOLE ``api_base`` alias set in the child's own precedence (NOT ``LLM_API_BASE``
-    # alone) — else an ambient ``OPENAI_BASE_URL`` / ``OLLAMA_API_BASE`` with ``LLM_API_BASE`` unset would
-    # repoint the child off-host while this gate saw no base and trusted the local NAME (the air-gap leak).
-    base = _strix_resolved_base(strix_llm_env)
+    # Resolved over Strix's WHOLE ``api_base`` alias set in the child's own precedence AND (refusal path) the
+    # JSON config file — NOT ``LLM_API_BASE`` alone — else an ambient ``OPENAI_BASE_URL`` / ``OLLAMA_API_BASE``
+    # or a JSON-planted base with ``LLM_API_BASE`` unset would repoint the child off-host while this gate saw
+    # no base and trusted the local NAME (the air-gap leak).
+    base = _strix_resolved_base(strix_llm_env, include_json=include_json)
 
     def _base_is_loopback() -> bool:
         try:
@@ -1146,31 +1244,44 @@ def _strix_sovereignty_refusal(strix_llm_env: dict) -> str:
 
 
 def _strix_child_alias_guard(strix_llm_env: dict) -> "tuple[dict, list[str]]":
-    """LEG 2 (defense-in-depth) — neutralize the UNVALIDATED ``api_base`` aliases in the spawned Strix child's
-    environment so ONLY the loopback-validated ``LLM_API_BASE`` can point it, even if the gate's alias list ever
-    drifts from Strix's own. Returns ``(env_extra_overrides, env_remove)`` for the ``_spawn_background`` call:
+    """POSITIVE CONTROL — FORCE the spawned Strix child's endpoint instead of trying to detect every remote
+    channel. Under a SOVEREIGN tier for a LOCAL-classified run this returns a child-env override that PINS
+    ``LLM_API_BASE`` to the validated loopback base and STRIPS every sibling api_base alias, so NO other
+    channel — a stray ambient sibling, the JSON config file (``~/.strix/cli-config.json``), the
+    ``persist_current`` auto-write, or a field default — can repoint the child off-host. ``LLM_API_BASE`` is
+    an env var, and env is HIGHEST precedence in Strix's ``load_settings()`` (env > JSON file > defaults), so a
+    pinned ``LLM_API_BASE`` structurally beats them all. Returns ``(env_extra_overrides, env_remove)`` for
+    ``_spawn_background``:
 
       * ``({}, [])`` — under PERMISSIVE (the operator has NOT promised locality; the child env stays
-        BYTE-IDENTICAL to today, siblings untouched), OR when the run does not classify ``local`` (a cloud run
-        under a sovereign tier is refused BEFORE spawn by the gate, so this branch is defensive only).
-      * ``({"LLM_API_BASE": <resolved loopback base>}, [<every OTHER alias>])`` — under a SOVEREIGN tier for a
-        LOCAL-classified run: canonicalize the gate-validated loopback base into ``LLM_API_BASE`` and STRIP
-        ``OPENAI_API_BASE`` / ``OPENAI_BASE_URL`` / ``LITELLM_BASE_URL`` / ``OLLAMA_API_BASE`` from the child, so
-        a stray ambient remote alias cannot repoint it. Preserves the legitimate loopback case — a base set via
-        any alias becomes ``LLM_API_BASE``; an empty base (a bare default-localhost daemon) leaves ``LLM_API_BASE``
-        unset and simply strips the siblings.
+        BYTE-IDENTICAL to today, siblings untouched), OR when the run does not classify ``local`` by NAME (a
+        cloud run under a sovereign tier is refused BEFORE spawn by the gate, so this branch is defensive only).
+      * ``({"LLM_API_BASE": <loopback base>}, [<every OTHER alias>])`` — under a SOVEREIGN tier for a
+        LOCAL-classified run: ALWAYS pin ``LLM_API_BASE`` and strip ``OPENAI_API_BASE`` / ``OPENAI_BASE_URL`` /
+        ``LITELLM_BASE_URL`` / ``OLLAMA_API_BASE``. The base is the gate-validated env base when one is set
+        (loopback by construction — a remote env base classifies cloud and never reaches here), else the
+        provider's LOCAL default endpoint (``_strix_local_default_base`` — e.g. ``http://localhost:11434`` for
+        ollama). It is NEVER left unset: an unset ``LLM_API_BASE`` would let the JSON file / persisted config /
+        default win — the exact NON-env channel this positive control closes.
 
-    Total: never raises — any failure returns ``({}, [])`` (byte-identical), because the run it guards has
-    ALREADY passed the loopback gate (``_strix_sovereignty_refusal``), so a guard fault must not block it."""
+    The LOCAL classification here is JSON-BLIND (``include_json=False``): the guard's purpose is to PIN over the
+    JSON channel, so a JSON-planted remote base must not flip a local-NAME run to ``cloud_only`` and suppress
+    the pin. The defense-in-depth REFUSAL (``_strix_sovereignty_refusal``, JSON-aware) still fires pre-spawn on
+    that same JSON-remote base; the two are independent. Total: never raises — any failure returns ``({}, [])``
+    (byte-identical), because the run it guards has ALREADY passed the loopback gate, so a guard fault must not
+    block it."""
     try:
         from ..kernel import sovereignty as _sovereignty
         if _sovereignty.current().tier == _sovereignty.Tier.PERMISSIVE:
             return {}, []                              # PERMISSIVE: byte-identical child env (no strip, no override)
-        if _sovereignty.classify(_strix_sovereignty_backend(strix_llm_env)) != "local":
+        backend = _strix_sovereignty_backend(strix_llm_env, include_json=False)  # JSON-blind: PIN over the JSON channel
+        if _sovereignty.classify(backend) != "local":
             return {}, []                              # cloud runs are gate-refused pre-spawn; defensive no-op
         remove = [a for a in _strix_api_base_aliases() if str(a).upper() != "LLM_API_BASE"]
-        base = _strix_resolved_base(strix_llm_env)
-        return ({"LLM_API_BASE": base} if base else {}), remove
+        base = _strix_resolved_base(strix_llm_env, include_json=False)   # env-only, loopback by construction
+        if not base:
+            base = _strix_local_default_base(backend)  # bare daemon: PIN the provider's loopback default, never unset
+        return {"LLM_API_BASE": base}, remove
     except Exception:  # noqa: BLE001 — a guard fault never blocks the already-gate-permitted local spawn
         return {}, []
 
@@ -1629,9 +1740,10 @@ def launch_assessment(body: dict) -> dict:
         # The gate is on regardless (safe hard-block if no authority is provisioned in that base).
         # GAP-1: **strix_llm_env is merged LAST so a LOCAL pick's STRIX_LLM/LLM_API_BASE OVERRIDES the global
         # cloud default in the child; for a cloud/no-pick run it is {} and this is byte-identical to before.
-        # W0-7 LEG 2: under a sovereign tier for a LOCAL run, canonicalize the validated loopback base into
-        # LLM_API_BASE and STRIP the unvalidated sibling aliases from the child, so a stray ambient
-        # OPENAI_BASE_URL/OLLAMA_API_BASE cannot repoint it off-host (PERMISSIVE ⇒ ({},[]) ⇒ byte-identical).
+        # W0-7 POSITIVE CONTROL: under a sovereign tier for a LOCAL run, PIN LLM_API_BASE to the validated
+        # loopback base (or the provider's local default when bare) and STRIP the sibling aliases, so NO channel
+        # — a stray ambient sibling, the JSON config file, the persist auto-write, or a default — can repoint the
+        # child off-host (env is highest precedence in load_settings) (PERMISSIVE ⇒ ({},[]) ⇒ byte-identical).
         _alias_extra, _alias_remove = _strix_child_alias_guard(strix_llm_env)
         _spawn_background(run_id, rd, cmd, meta, capture_report=False,
                           env_extra={"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug,
