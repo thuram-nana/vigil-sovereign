@@ -312,13 +312,52 @@ Stated plainly, because a hardening document that only lists wins is a marketing
   list. Its live-scan extras are now hash-locked *for install* — exported to
   `infra/supply-chain/strix.lock` and installed `--require-hashes`, see §2 — though the gate still
   does not *regenerate* the upstream `uv.lock` itself.)
-- **No signature verification.** Hashes prove the artifact did not change between lock time and
-  install time. They do not prove the artifact was published by whoever you think — that needs
-  PEP 740 attestations / sigstore, which is not wired here.
+- **Build signing — scoped to the release wheel.** Hashes prove an artifact did not change
+  between lock time and install time; they do not prove *who* built it or *from what*. That gap
+  is now closed for the one artifact this repo actually publishes: `.github/workflows/release.yml`
+  (tag push only, `v*`) builds the `packages/core/vigil_core` wheel + sdist and attaches to each
+  a Sigstore/cosign signature, an SLSA build-provenance attestation, and a PEP 740 attestation
+  for the wheel. See *What is signed, and by which identity* below. The boundary: this does not
+  cover the editable `-e ./…` install path an operator runs via `bootstrap.sh` (there is no
+  registry artifact to sign there), nor the third-party dependency layer, which is guarded by the
+  hash locks above and not by these signatures.
 - **Base-image digests are re-resolved against Docker Hub only.** An image on another registry
   would report `??` in the drift report rather than being checked.
 - **Drift is advisory, and so are MEDIUM-and-below findings.** They are surfaced, not enforced.
   That is a deliberate trade (see above), not an oversight. HIGH and CRITICAL now block.
+
+## What is signed, and by which identity
+
+The tag-triggered release workflow (`.github/workflows/release.yml`, `on: push: tags: [v*]`)
+signs the release build. It runs only on a version-tag push, so it does not report on ordinary
+pull requests; its shape is asserted offline on every PR by
+`integration/tests/test_release_provenance.py` (which runs in the required *integration two-env
+boundary (P5)* job). The workflow is advisory — a tag-triggered job cannot be a required PR
+check, and it is deliberately kept out of `.github/required-status-checks.txt`.
+
+For each artifact it builds (the `vigil-core` wheel and sdist):
+
+- **Sigstore / cosign signature** — `cosign sign-blob` produces an offline-verifiable bundle
+  (`*.cosign.bundle`) carrying the signing certificate, the signature, and the Rekor inclusion
+  proof, so a third party can verify without calling home.
+- **SLSA build provenance** — `actions/attest-build-provenance` binds an in-toto provenance
+  statement to the sha256 of each artifact.
+- **PEP 740 attestation** — `pypi-attestations` emits a `*.publish.attestation` for each wheel
+  (and the sdist); when Trusted Publishing is enabled (`vars.PUBLISH_TO_PYPI == 'true'`),
+  `pypa/gh-action-pypi-publish` also attaches attestations at upload time.
+
+**The identity.** All three are keyless (Sigstore), so the signer is not a long-lived key but the
+workflow's own GitHub OIDC identity:
+
+```
+issuer:   https://token.actions.githubusercontent.com
+identity: https://github.com/<owner>/<repo>/.github/workflows/release.yml@refs/tags/<tag>
+```
+
+`verify-release-artifacts.sh` verifies each signature against exactly that issuer and a
+`certificate-identity-regexp` pinned to this workflow at a tag ref, and — as a negative control
+that fails the job if it does not hold — appends a byte to a copy of each artifact and requires
+the tampered copy to be **rejected** by the same offline verify path.
 
 ## Follow-ups
 
@@ -338,4 +377,9 @@ Stated plainly, because a hardening document that only lists wins is a marketing
    and `cryptography==50.0.0` (the scan surfaced `cryptography 46.0.7` in the vendored lock as the
    third HIGH once the first two were cleared), the tree scans clean at HIGH, and the gate blocks
    HIGH+CRITICAL (`supply-chain.yml`). See §4.
-5. Add PEP 740 / sigstore attestation verification on top of the hashes.
+5. ~~**Add PEP 740 / sigstore attestation verification on top of the hashes**~~ — **DONE (W3-4,
+   #427).** `.github/workflows/release.yml` signs the release wheel/sdist with cosign, emits SLSA
+   provenance, and produces PEP 740 attestations, then verifies them offline with a tamper
+   negative control (`.github/scripts/verify-release-artifacts.sh`); the shape is pinned offline
+   by `integration/tests/test_release_provenance.py`. Boundary: it covers the published
+   `vigil-core` artifact only, not the editable install path — see the §6 bullet above.
