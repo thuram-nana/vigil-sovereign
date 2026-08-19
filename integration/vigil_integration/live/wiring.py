@@ -894,13 +894,16 @@ class StandingApproval:
     The old standing path was a BLANKET boolean: with ``owner_approves_offense`` set (``--approve-offense``),
     :func:`_approval_gate` upgraded EVERY queued WARDEN action to allow, so a single flag auto-fired every
     future action an autonomous agent proposed — an autonomously-proposed ``terminal.run`` executed with no
-    per-action click, falsifying "an autonomous agent can never auto-fire" / "nothing the AI proposes runs on
-    its own". This binds the standing grant to the ONE specific action it authorizes: the gate promotes a
-    ``queue`` to ``allow`` ONLY for the exact ``(tool_name, target, action_digest)`` the operator's grant is
-    spent on, and the grant is SINGLE-USE — a second, DISTINCT queued action is never auto-promoted by the
-    same standing approval (it stays queued → the executor denies it). The legitimate approve-one workflow is
-    preserved (the specifically-approved action runs); a single flag can no longer auto-allow every future
-    queued action.
+    per-action click. This binds the standing grant to the ONE specific action it authorizes: the gate
+    promotes a ``queue`` to ``allow`` ONLY for the exact ``(tool_name, target)`` the operator's grant is spent
+    on (the args-digest is recorded at :meth:`bind` for the audit trail; :meth:`authorize` matches on
+    tool+target), and the grant is SINGLE-USE — a second, DISTINCT queued action is never auto-promoted by the
+    same standing approval (it stays queued → the executor denies it). Honest scope: this does NOT restore an
+    absolute "nothing auto-fires" invariant — under ``--approve-offense`` the FIRST bound action still
+    auto-fires (that is what the standing grant is). It reduces autonomous auto-fire from EVERY queued action
+    to AT-MOST-ONE per engine run; the no-auto-fire property is the no-flag path, where the operator approves
+    each action individually. The legitimate approve-one workflow is preserved (the specifically-approved
+    action runs); a single flag can no longer auto-allow every future queued action.
 
     ``granted`` is the operator's standing approval (``owner_approves_offense`` / an explicit ``--approve``).
     :meth:`bind` records the action currently being authorized (its gate-seen ``(tool, target)`` + args-digest),

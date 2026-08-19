@@ -2516,8 +2516,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="drive `think` with a homegrown propose-only decision brain (e.g. hexstrike) "
                          "instead of the Claude/replay path — gate + executor + oracle unchanged")
     pe.add_argument("--approve-offense", action="store_true",
-                    help="the operator's standing approval to run queued offense tools against their "
-                         "own chartered loopback (the human leg of the conjunctive gate; scope still enforced)")
+                    help="a SINGLE-USE standing approval to run ONE queued offense action against the "
+                         "operator's own chartered loopback (the human leg of the conjunctive gate; scope "
+                         "still enforced). It reduces autonomous auto-fire from EVERY queued action to "
+                         "at-most-one per run — a second distinct queued action stays queued; it does NOT "
+                         "mean nothing auto-fires (approve each action individually for that)")
     pe.add_argument("--resume", action="store_true",
                     help="continue this slug's engagement from its last SIGNED checkpoint (the same "
                          "{slug}.spine) instead of starting fresh — the network-failure / crash recovery "
