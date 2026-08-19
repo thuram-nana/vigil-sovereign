@@ -59,3 +59,22 @@ def _pin_declared_tool_binaries(monkeypatch):
     monkeypatch.setattr(_executor, "_which", _fake_which)
     monkeypatch.setattr(_executor, "_version_banner", _fake_banner)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_attestation_state_dir(tmp_path_factory, monkeypatch):
+    """Keep the HOST-LEVEL attestation state hermetic per test. W10-3/W10-4 moved the monotonic anchor
+    counter and the durable head/count pin OUT of the engagement base dir (so ``rm -rf <base>`` cannot
+    erase them) and into :data:`attestation.anchor.DEFAULT_STATE_DIR` (``~/.vigil/attestation`` in
+    production). Without this redirect, every ``build_engine`` test would write the real user's
+    ``~/.vigil/attestation/monotonic.counter`` and read a value carried over from prior runs — polluting the
+    home dir and making anchor assertions flaky. Point that dir at a throwaway per test. A no-op where the
+    attestation package is not importable (framework-free legs). A test that needs a SPECIFIC location
+    monkeypatches ``anchor.DEFAULT_STATE_DIR`` in its own body — applied after this fixture, so it wins."""
+    try:
+        from vigil_integration.attestation import anchor as _anchor
+    except Exception:  # noqa: BLE001 — a leg without the attestation package needs no redirect
+        yield
+        return
+    monkeypatch.setattr(_anchor, "DEFAULT_STATE_DIR", tmp_path_factory.mktemp("attest-state"))
+    yield

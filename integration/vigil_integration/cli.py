@@ -1468,7 +1468,28 @@ def _load_and_verify_ledger(path: str, *, base_dir: str) -> tuple[list, object]:
         )
     records = read_ledger(path)
     resolver = operator_key_resolver(keypair_path=str(Path(base_dir) / "operator.key"))
-    verification = verify_ledger(records, resolve_key=resolver)
+    # W10-4 #476: consult the durable OUT-OF-BASE head/count pin. Internal consistency alone cannot catch a
+    # TRUNCATED tail / partial wipe (a valid prefix is itself consistent), so when a durable pin persisted
+    # out-of-band exists, pin ``expected_head``/``expected_count`` → a dropped tail FAILS closed. When NO pin
+    # exists (fresh / legacy / lost), behave exactly as #558 (present ledger verifies on internal
+    # consistency) and REPORT "unpinned" — never imply truncation protection we do not have. A pin that
+    # DISAGREES with a present ledger is the whole point: it fails closed.
+    import dataclasses
+
+    from .attestation import head_pin as _head_pin
+    pin = _head_pin.read_head_pin(path)
+    if pin is not None:
+        verification = verify_ledger(records, resolve_key=resolver,
+                                     expected_head=pin.head, expected_count=pin.count)
+        note = " [durable head anchor pinned]"
+    else:
+        verification = verify_ledger(records, resolve_key=resolver)
+        note = (" [UNPINNED (no durable head anchor) — internal consistency only; a truncated tail / wipe "
+                "is NOT detectable here]")
+    try:
+        verification = dataclasses.replace(verification, reason=str(verification.reason) + note)
+    except Exception:  # noqa: BLE001 — annotation is cosmetic; never let it change the ok/fail verdict
+        pass
     return records, verification
 
 

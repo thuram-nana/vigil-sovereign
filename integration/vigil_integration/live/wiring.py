@@ -38,6 +38,8 @@ from vigil_core import KeyPair, generate_keypair
 from vigil_core.crypto import sign
 
 from ..agent.state import AgentState, Phase
+from ..attestation import anchor as _anchor
+from ..attestation import head_pin as _head_pin
 from ..attestation.identity import load_or_create_operator_keypair, operator_signer, resolve_operator
 from ..attestation.ledger import make_ledger_writer, read_ledger, require_attestation
 from ..detection.registry import run_all_detections
@@ -304,7 +306,14 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     op_signer = operator_signer(keypair=op_kp)
     ledger_path = str(base / "usage-ledger.jsonl")
     ledger_writer = make_ledger_writer(ledger_path)
-    anchor_path = str(base / "attest-anchor.json")
+    # W10-3 #475: the MONOTONIC anchor lives HOST-LEVEL (~/.vigil/attestation/), NOT co-located in the
+    # engagement base dir. Co-locating it (the old `base/attest-anchor.json`) meant a single `rm -rf <base>`
+    # erased the ledger AND its monotonic counter together, so deletion stopped being detectable and a
+    # rollback could re-attest under a reset counter. The counter is host-WIDE by design (anchor.py), so a
+    # shared host location is correct. MIGRATION (additive, non-bricking): adopt an existing install's
+    # in-base counter into the host location without EVER lowering it, so an upgrade never resets to 0.
+    anchor_path = str(_anchor.default_counter_path())
+    _anchor.migrate_floor(base / "attest-anchor.json", Path(anchor_path))
 
     def attest(*, action: str, target: str, phase: str, seq: int, prev_hash: str) -> Any:
         # The usage ledger is its OWN append-only hash-chain: continue it from its current head so
@@ -313,11 +322,20 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         existing = read_ledger(ledger_path)
         next_seq = (existing[-1].seq + 1) if existing else 0
         head = existing[-1].record_hash if existing else None   # None → record_usage uses GENESIS_PREV
-        return require_attestation(
+        verdict = require_attestation(
             operator=operator, action=action, target=target, phase=phase,
             at=_wallclock_iso(), prev_hash=head, signer=op_signer, seq=next_seq,
             anchor_state_path=anchor_path, writer=ledger_writer,
         )
+        # W10-4 #476: on a successful, durably-recorded attest, refresh the OUT-OF-BASE durable head/count
+        # pin to the ledger's new head + record count, so a later TRUNCATED-tail / wiped ledger fails closed
+        # against the surviving pin. The post-append state is exactly `existing` + the minted record, so this
+        # is always the true current (head, count) — a single successful attest self-heals a previously
+        # best-effort-skipped pin write. The pin lives host-level (survives `rm -rf <base>`), like the anchor.
+        att = getattr(verdict, "attestation", None)
+        if getattr(verdict, "allowed", False) and att is not None:
+            _head_pin.write_head_pin(ledger_path, head=att.record_hash, count=len(existing) + 1)
+        return verdict
 
     # -- gate (F2/F3): the conjunctive gate over the signed authority --------------------------------
     gate = _build_gate(prov, ceiling=config.offense_ceiling)

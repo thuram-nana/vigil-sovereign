@@ -21,6 +21,8 @@ from __future__ import annotations
 from .anchor import (
     DEFAULT_STATE_DIR,
     TpmProbe,
+    default_counter_path,
+    migrate_floor,
     read_monotonic_anchor,
 )
 from .identity import (
@@ -67,5 +69,5 @@ __all__ = [
     # live wiring (operator identity, keypair, signer, trust anchor, monotonic anchor)
     "resolve_operator", "load_or_create_operator_keypair", "operator_signer", "operator_key_resolver",
     "fingerprint", "read_monotonic_anchor", "SignerFn", "ResolveKeyFn", "TpmProbe",
-    "DEFAULT_STATE_DIR", "DEFAULT_KEYPAIR_FILE",
+    "DEFAULT_STATE_DIR", "DEFAULT_KEYPAIR_FILE", "default_counter_path", "migrate_floor",
 ]
