@@ -219,30 +219,72 @@ def test_unsigned_charter_refuses_replay(
     assert ex.refused and ex.gate == "scope" and not ex.sent
 
 
+# ---------------------------------------------------------------------------
+# W16-2 — the OFFENSIVE repeater PINS the governance trust root (parity with engage.py)
+#
+# helpers: route the authority store + governance trust root under tmp (deterministic regardless
+# of any real deployment material on the box) and build EngagementAuthority docs.
+# ---------------------------------------------------------------------------
+
+
+def _isolate_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, trust_root: bool):
+    """Route ``authority_path`` and ``trust_root_path`` under ``tmp_path``. When ``trust_root`` is
+    True, provision a 1-of-1 governance trust root (so the repeater loads a provisioned authority
+    VERIFIED); else the trust-root path is left ABSENT so ``load_trust_root()`` returns None.
+    Returns ``(authority_path, signer)`` where ``signer`` is ``{kid: priv}`` (empty if no root)."""
+    from framework.v2.common import paths as _p
+    from framework.v2.entitlement import provision
+
+    apath = tmp_path / "alpha.authority.json"
+    trpath = tmp_path / "trust-root.json"
+    monkeypatch.setattr(_p, "authority_path", lambda s: apath)
+    monkeypatch.setattr(_p, "trust_root_path", lambda: trpath)
+    signer: dict = {}
+    if trust_root:
+        ak, priv = provision.new_authorizer("a0", "Authoriser 0")
+        provision.write_trust_root(provision.build_trust_root([ak], threshold=1))
+        signer = {"a0": priv}
+    return apath, signer
+
+
+def _repeater_authority(host: str, *, not_before=None, not_after=None,
+                        allow_destructive: bool = True, max_actions: int = 10_000):
+    from datetime import datetime, timedelta, timezone
+
+    from framework.v2.authority.models import EngagementAuthority, TargetEnvironment
+    now = datetime.now(timezone.utc)
+    return EngagementAuthority(
+        engagement_slug="alpha",
+        environment=TargetEnvironment.TWIN,
+        scope=[host],
+        not_before=not_before or (now - timedelta(hours=1)),
+        not_after=not_after or (now + timedelta(hours=1)),
+        allow_destructive=allow_destructive,
+        max_actions=max_actions,
+    )
+
+
 def test_expired_authority_refuses_replay(
     isolated_engagement, grant_exploit, httpserver: HTTPServer, tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Review-fix regression: the repeater loads the signed EngagementAuthority (auto_load_authority),
-    # so a CLOSED time-box refuses a replay exactly as the production engage path does — even though
-    # the charter still lists the host and the kill-switch is untripped.
+    # Review-fix regression, now under the W16-2 signed regime: the repeater PINS the governance
+    # trust root, so a SIGNED EngagementAuthority is loaded VERIFIED and its CLOSED time-box refuses
+    # a replay through the same authority gate as the production engage path — even though the
+    # charter still lists the host and the kill-switch is untripped.
     from datetime import datetime, timezone
 
-    from framework.v2.authority.models import EngagementAuthority, TargetEnvironment
-    from framework.v2.authority.store import save_authority
-    from framework.v2.common import paths as _p
+    from framework.v2.authority.signing import sign_authority
+    from framework.v2.authority.store import save_signed_authority
 
     isolated_engagement("alpha", httpserver.host)
     httpserver.expect_request("/x").respond_with_data("ok")
-    apath = tmp_path / "alpha.authority.json"
-    monkeypatch.setattr(_p, "authority_path", lambda s: apath)
-    save_authority(EngagementAuthority(
-        engagement_slug="alpha",
-        environment=TargetEnvironment.TWIN,
-        scope=[httpserver.host],
+    apath, signer = _isolate_auth(tmp_path, monkeypatch, trust_root=True)
+    save_signed_authority(sign_authority(_repeater_authority(
+        httpserver.host,
         not_before=datetime(2020, 1, 1, tzinfo=timezone.utc),
         not_after=datetime(2020, 1, 2, tzinfo=timezone.utc),   # window closed years ago
-    ), apath)
+    ), signer), apath)
 
     rep = Repeater(slug="alpha")
     ex = rep.replay(RepeaterRequest.capture(httpserver.url_for("/x")))
@@ -250,7 +292,137 @@ def test_expired_authority_refuses_replay(
 
     assert ex.refused and not ex.sent               # the closed authorization window refuses the replay
     assert len(httpserver.log) == 0                 # nothing ever left the host
-    assert len(httpserver.log) == 0
+
+
+def test_repeater_refuses_unsigned_authority_when_trust_root_present(
+    isolated_engagement, grant_exploit, httpserver: HTTPServer, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W16-2 FAIL-BEFORE / PASS-AFTER + NEGATIVE CONTROL for the OFFENSIVE repeater path.
+
+    A governance trust root is provisioned and an attacker-writable UNSIGNED authority granting the
+    world (in scope, destructive, a huge budget, a wide-open window) is written. With the W16-2 pin
+    the repeater loads the authority VERIFIED — an unsigned doc fails that load, the executor's
+    ``_authority_gate`` fails closed, and NOT ONE request reaches the server.
+
+    NEGATIVE CONTROL / fail-before: reverting only the repeater pin (``trust_root=None``) restores
+    the old ``load_authority`` path — the unsigned doc is TRUSTED and the replay reaches the server,
+    so ``len(httpserver.log) == 0`` flips to non-empty. That is the assertion that proves the pin,
+    not some unrelated gate, is doing the work."""
+    from framework.v2.authority.store import save_authority
+
+    isolated_engagement("alpha", httpserver.host)
+    httpserver.expect_request("/x").respond_with_data("ok")
+    apath, _ = _isolate_auth(tmp_path, monkeypatch, trust_root=True)
+    # attacker-writable UNSIGNED authority granting itself the world (in-window, in-scope).
+    save_authority(_repeater_authority(httpserver.host, allow_destructive=True,
+                                       max_actions=1_000_000), apath)
+
+    rep = Repeater(slug="alpha")
+    ex = rep.replay(RepeaterRequest.capture(httpserver.url_for("/x")))
+    rep.close()
+
+    assert ex.refused and not ex.sent, "unsigned authority was TRUSTED — the repeater did not pin the trust root"
+    assert len(httpserver.log) == 0, "a request leaked despite an unverifiable (unsigned) authority"
+
+
+def test_repeater_refuses_tampered_signed_authority(
+    isolated_engagement, grant_exploit, httpserver: HTTPServer, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A validly-signed authority whose on-disk document is then tampered (scope widened, budget
+    inflated) must fail the verified load and be refused before any I/O."""
+    import json
+
+    from framework.v2.authority.signing import sign_authority
+    from framework.v2.authority.store import save_signed_authority
+
+    isolated_engagement("alpha", httpserver.host)
+    httpserver.expect_request("/x").respond_with_data("ok")
+    apath, signer = _isolate_auth(tmp_path, monkeypatch, trust_root=True)
+    save_signed_authority(sign_authority(_repeater_authority(httpserver.host), signer), apath)
+    blob = json.loads(apath.read_text(encoding="utf-8"))
+    blob["document"]["scope"] = ["*"]
+    blob["document"]["max_actions"] = 1_000_000
+    apath.write_text(json.dumps(blob), encoding="utf-8")
+
+    rep = Repeater(slug="alpha")
+    ex = rep.replay(RepeaterRequest.capture(httpserver.url_for("/x")))
+    rep.close()
+
+    assert ex.refused and not ex.sent
+    assert len(httpserver.log) == 0, "tampered signed authority was trusted — a request leaked"
+
+
+def test_repeater_accepts_correctly_signed_authority(
+    isolated_engagement, grant_exploit, httpserver: HTTPServer, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NEGATIVE CONTROL for the refusals above: the pinned gate is NOT a blanket deny. A correctly-
+    signed, in-window, in-scope authority is ACCEPTED and the (non-destructive) replay reaches the
+    server."""
+    from framework.v2.authority.signing import sign_authority
+    from framework.v2.authority.store import save_signed_authority
+
+    isolated_engagement("alpha", httpserver.host)
+    httpserver.expect_request("/x").respond_with_data("ok", status=200)
+    apath, signer = _isolate_auth(tmp_path, monkeypatch, trust_root=True)
+    save_signed_authority(sign_authority(_repeater_authority(httpserver.host), signer), apath)
+
+    rep = Repeater(slug="alpha")
+    ex = rep.replay(RepeaterRequest.capture(httpserver.url_for("/x")))
+    rep.close()
+
+    assert ex.ok and ex.sent and not ex.refused, "a correctly-signed authority was refused — the gate is a no-op deny"
+    assert ex.status == 200
+    assert len(httpserver.log) == 1
+
+
+def test_repeater_refuses_when_authority_provisioned_but_no_trust_root(
+    isolated_engagement, grant_exploit, httpserver: HTTPServer, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An EngagementAuthority is provisioned but NO governance trust root is discoverable to verify
+    it. ``_engage_authority_trust_root`` raises ``EngagementRefused``; the repeater must fail the
+    replay CLOSED (gate ``authority``) rather than build an UNPINNED executor that would apply the
+    authority unsigned — the exact fail-open W16-2 closes, now also on the offensive repeater path."""
+    from framework.v2.authority.store import save_authority
+
+    isolated_engagement("alpha", httpserver.host)
+    httpserver.expect_request("/x").respond_with_data("ok")
+    apath, _ = _isolate_auth(tmp_path, monkeypatch, trust_root=False)   # trust-root path left ABSENT
+    save_authority(_repeater_authority(httpserver.host), apath)          # authority IS provisioned
+
+    rep = Repeater(slug="alpha")
+    ex = rep.replay(RepeaterRequest.capture(httpserver.url_for("/x")))
+    rep.close()
+
+    assert ex.refused and ex.gate == "authority" and not ex.sent
+    assert len(httpserver.log) == 0, "an unpinned-but-provisioned authority leaked a request"
+
+
+def test_repeater_greenfield_no_authority_still_replays(
+    isolated_engagement, grant_exploit, httpserver: HTTPServer, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NEGATIVE CONTROL against over-blocking: greenfield (no authority document, no trust root)
+    resolves to a None trust root, so the documented kill-switch-only path is preserved and a
+    legitimate replay still reaches the server — the fix does not break the normal path."""
+    from framework.v2.engage import _engage_authority_trust_root
+
+    isolated_engagement("alpha", httpserver.host)
+    httpserver.expect_request("/x").respond_with_data("ok", status=200)
+    _isolate_auth(tmp_path, monkeypatch, trust_root=False)   # neither authority nor trust root exists
+
+    assert _engage_authority_trust_root("alpha") is None     # greenfield -> no pin
+
+    rep = Repeater(slug="alpha")
+    ex = rep.replay(RepeaterRequest.capture(httpserver.url_for("/x")))
+    rep.close()
+
+    assert ex.ok and ex.sent and not ex.refused, "greenfield replay was broken — no request reached the server"
+    assert ex.status == 200
+    assert len(httpserver.log) == 1
 
 
 def test_unentitled_replay_is_refused_and_sends_nothing(
