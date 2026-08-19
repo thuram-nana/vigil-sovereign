@@ -1047,6 +1047,29 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
 # ---- the hook WS-A calls -----------------------------------------------------
 
 
+def _surface_inconclusive(sink: Any, task: FusionTask, res: Any) -> None:
+    """Consume the sensor's INCONCLUSIVE marker (``SensorResult.inconclusive``): a missing prerequisite
+    meant the sensor assessed NOTHING, so — for a product whose thesis is a SOUND NEGATIVE — it must NOT
+    vanish into a silent CLEAN (a missing-prereq run indistinguishable from a clean run). Surface it as a
+    DISTINCT, typed spine event (``source='sensor:inconclusive'``) that a report/verdict layer keys on,
+    NAMING the sensor and the missing prerequisite — visibly distinct from a plain sensor failure's bare
+    ``tool_result``. Only fires on a genuine inconclusive (the caller guards on ``res.inconclusive``), so
+    it never stamps an assessed/clean run inconclusive. Best-effort and total: a sink of None, a sink
+    without the helper, or a sink that raises never perturbs the fusion pass (a spine write is fire-and-
+    forget)."""
+    if sink is None:
+        return
+    emit = getattr(sink, "sensor_inconclusive", None)
+    if not callable(emit):
+        return
+    try:
+        # The prerequisite name is the keyable signal; the full human reason stays on the linked
+        # tool_result, so the surfaced observation stays concise (no duplicated INCONCLUSIVE prose).
+        emit(task.sensor, missing_prerequisite=res.missing_prerequisite)
+    except Exception:
+        pass   # a spine write NEVER sinks the fusion pass
+
+
 def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
     """Fuse the run's SAFE sensors into ``world`` and return the LEAD ``Observation``s minted.
 
@@ -1058,9 +1081,12 @@ def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
     LEAD to an ``oracle:``-grounded FACT in ``world``. Returns the observations minted (the LEADS).
 
     Fail-closed and total: a refused/failed sensor mints nothing; an empty plan returns ``[]``; a
-    sensor that raises is skipped rather than sinking the pass. Deterministic: the caller-supplied
-    seq (``base + task index``) stamps each batch, no wallclock/rng. This is WS-A's ``_run_autonomous``
-    hook — it is only reached on the opt-in autonomous path, so the default gate stays byte-identical."""
+    sensor that raises is skipped rather than sinking the pass. A sensor that returns INCONCLUSIVE (a
+    missing cloud/K8s prerequisite meant NOTHING was assessed) is SURFACED as a distinct spine event
+    (``_surface_inconclusive``) so it is never folded into a silent CLEAN. Deterministic: the caller-
+    supplied seq (``base + task index``) stamps each batch, no wallclock/rng. This is WS-A's
+    ``_run_autonomous`` hook — only reached on the opt-in autonomous path, so the default gate stays
+    byte-identical."""
     tasks = _resolve_tasks(slug, ctx)
     if not tasks:
         return []
@@ -1084,6 +1110,11 @@ def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
                              ingest=ingest, seq=seq, sink=sink)
         except Exception:
             continue   # a sensor blowing up never sinks the whole fusion pass
+        # A missing-prerequisite (cloud/K8s) run assessed NOTHING — surface it as a DISTINCT spine event
+        # so it is distinguishable from a clean negative, NEVER a silent CLEAN. (An assessed/clean or a
+        # finding run is not inconclusive, so nothing is surfaced here for it.)
+        if res.inconclusive:
+            _surface_inconclusive(sink, task, res)
         minted.extend(res.observations)
         # LEAD -> FACT, where an oracle re-fires over the sensor's OWN retained evidence.
         _reverify(world, task, res, seq=seq, slug=slug or "", connect=reach_connect,
