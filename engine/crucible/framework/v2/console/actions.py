@@ -713,6 +713,11 @@ def retry_run(run_id: str) -> dict:
                                                            str(meta.get("session_id") or ""))
         if _strix_refusal:
             return {"ok": False, "error": _strix_refusal}
+        # W0-7 (Strix sovereignty gate): re-assert the tier on the RETRY path too, or a retried codebase run
+        # would re-spawn against the (possibly cloud) STRIX_LLM without the gate the launch path now enforces.
+        _strix_sov_refusal = _strix_sovereignty_refusal(strix_env)
+        if _strix_sov_refusal:
+            return {"ok": False, "error": _strix_sov_refusal}
     new_id = _new_run_id()
     rd = run_dir(new_id)
     rd.mkdir(parents=True, exist_ok=True)
@@ -959,6 +964,83 @@ def _strix_session_llm_env(model_id: str, session_id: str) -> "tuple[dict, str]"
                     "model, so a Strix codebase run cannot confirm it is local — refused rather than risk egressing "
                     "the source to the cloud default. Re-pick the model, or pick a cloud model explicitly.")
     return {}, ""                                        # genuinely no pick → global STRIX_LLM default (honest)
+
+
+# W0-7 (Strix sovereignty gate) — the Strix codebase agent is a MODEL EGRESS site: it hands the operator's
+# SOURCE to whatever model ``STRIX_LLM`` names (default CLOUD ``anthropic/claude-opus-4-8``). Every other
+# egress site (kernel.llm._construct, the console terminal router, the chat local-reason path) passes the
+# SAME ``kernel.sovereignty`` ladder BEFORE constructing/spawning, so AIR_GAPPED / SOVEREIGN_CLOUD /
+# TRUSTED_CLOUD refuse a disallowed backend at construction. Strix was the ONE egress site that did not —
+# under AIR_GAPPED a no-pick (or cloud-pick) codebase run still spawned against the cloud default and shipped
+# the source to Anthropic. The two helpers below close that gap by classifying the model the child WILL run
+# with and asserting it against the active tier, mirroring the other sites exactly.
+#
+# The LiteLLM provider prefixes below MIRROR ``apps/sigil/.../ui/settings.py`` PROVIDERS[*]["strix"] format
+# strings (the SOURCE OF TRUTH) — REPLICATED, not imported: that module is SOVEREIGN-side and importing it
+# into this OFFENSE interpreter would breach the two-env boundary (FATAL-2). Only the prefixes whose LiteLLM
+# spelling DIFFERS from the kernel.sovereignty backend name need mapping (``vertex_ai``→``vertex``,
+# ``azure``→``azure_openai``); ``ollama`` / ``bedrock`` / ``mistral`` map to themselves; ``anthropic`` is
+# resolved through ``direct_anthropic_backend_name()`` (ZDR attestation); ``openai`` (the self-hosted
+# family) is LOCAL only when its base URL is loopback. Any unrecognised prefix falls through to the raw
+# provider, which ``sovereignty.classify()`` conservatively treats as ``cloud_only`` — fail-closed.
+_STRIX_PROVIDER_TO_SOVEREIGNTY = {
+    "ollama":   "ollama",
+    "bedrock":  "bedrock",
+    "vertex_ai": "vertex",
+    "mistral":  "mistral",
+    "azure":    "azure_openai",
+}
+
+
+def _strix_sovereignty_backend(strix_llm_env: dict) -> str:
+    """The ``kernel.sovereignty`` backend NAME the spawned Strix codebase agent must be gated as.
+
+    The child runs with ``STRIX_LLM`` = the per-session LOCAL pin (``strix_llm_env['STRIX_LLM']``) when one
+    was resolved, else the ambient global ``STRIX_LLM``, else Strix's built-in cloud default
+    (``anthropic/claude-opus-4-8``). We resolve that SAME precedence here and classify the LiteLLM provider
+    prefix into the backend name ``assert_permitted`` understands. Total: never raises; anything unrecognised
+    resolves to a name ``classify()`` treats as ``cloud_only`` (fail-closed — refused under every sovereign
+    tier)."""
+    from ..kernel import sovereignty as _sovereignty
+    model = str(strix_llm_env.get("STRIX_LLM") or os.environ.get("STRIX_LLM", "") or "").strip()
+    if not model:
+        # No STRIX_LLM anywhere → Strix's built-in default is a DIRECT consumer-Anthropic call.
+        return _sovereignty.direct_anthropic_backend_name()
+    provider = model.split("/", 1)[0].strip().lower()
+    if provider == "anthropic":
+        # ZDR attestation moves a direct Anthropic client from cloud_only → trusted_cloud (one rule, one place).
+        return _sovereignty.direct_anthropic_backend_name()
+    if provider == "openai":
+        # self-hosted (OpenAI-compatible) is LOCAL only when its base URL is loopback; otherwise fail-closed cloud.
+        base = str(strix_llm_env.get("LLM_API_BASE") or os.environ.get("LLM_API_BASE", "") or "").strip()
+        try:
+            from . import chat as _chat
+            ok, _host = _chat._url_host_is_local(base)
+        except Exception:  # noqa: BLE001 — cannot prove loopback ⇒ NOT local (fail-closed cloud_only via "openai")
+            ok = False
+        return "self-hosted" if (base and ok) else "openai"   # classify("openai") → cloud_only (fail-closed)
+    return _STRIX_PROVIDER_TO_SOVEREIGNTY.get(provider, provider)  # unknown prefix → classify() cloud_only
+
+
+def _strix_sovereignty_refusal(strix_llm_env: dict) -> str:
+    """W0-7 — the SAME ``kernel.sovereignty`` gate every other model-egress site passes, applied to the Strix
+    codebase agent's resolved model BEFORE it is spawned. Returns ``""`` when the active tier permits that
+    backend, else the policy's own refusal message (so a codebase run under AIR_GAPPED / SOVEREIGN_CLOUD /
+    TRUSTED_CLOUD refuses the cloud default at construction — nothing spawns, the source never egresses). A
+    LOCAL pin classifies ``local`` and is permitted under every tier, so this is a NO-OP for the local/Ollama
+    path. Fail-closed: a policy that cannot be evaluated REFUSES rather than egresses."""
+    from ..common.errors import SovereigntyViolation
+    from ..kernel import sovereignty as _sovereignty
+    name = _strix_sovereignty_backend(strix_llm_env)
+    try:
+        _sovereignty.current().assert_permitted(name)
+    except SovereigntyViolation as e:
+        return (f"{e} A Strix codebase run would send your source to this backend; refused at construction. "
+                f"Pick a local model (Ollama / self-hosted), or raise the sovereignty tier.")
+    except Exception as e:  # noqa: BLE001 — "cannot decide" is never "permitted"
+        return (f"the sovereignty policy could not be evaluated ({type(e).__name__}); refusing the Strix "
+                f"codebase run rather than risk egressing the source. Pick a local model, or set the tier.")
+    return ""
 
 
 def engage_instruct(slug: str, text: str) -> dict:
@@ -1375,6 +1457,14 @@ def launch_assessment(body: dict) -> dict:
         strix_llm_env, strix_refusal = _strix_session_llm_env(model, session_id)
         if strix_refusal:
             return {"error": strix_refusal}
+        # W0-7 (Strix sovereignty gate): the resolved STRIX_LLM (per-session pin, else ambient global, else the
+        # cloud default) is a MODEL EGRESS of the operator's SOURCE — pass the SAME kernel.sovereignty ladder
+        # every other egress site passes, BEFORE the Docker pre-flight/spawn. A sovereign tier refuses the cloud
+        # default at construction (the tier docstring's "Cloud refused at construction"); a LOCAL pin classifies
+        # `local` and is permitted, so the Ollama/self-hosted path is untouched. Fail-closed on an uncheckable policy.
+        strix_sov_refusal = _strix_sovereignty_refusal(strix_llm_env)
+        if strix_sov_refusal:
+            return {"error": strix_sov_refusal}
         ready, why = _docker_ready()
         if not ready:
             return {"error": f"a codebase run uses the Strix sandbox, which needs Docker — {why}. Start "
