@@ -169,6 +169,45 @@ def preflight_fusion(slug: str) -> None:
             "engage; fill the 'Signed:' line before launching")
 
 
+def _engage_authority_trust_root(slug: str) -> object | None:
+    """Discover the governance trust root to PIN on the production ``engage`` path so a
+    provisioned :class:`~.authority.models.EngagementAuthority` is loaded VERIFIED
+    (``load_verified_authority``) rather than trusted UNSIGNED — closing W16-2 and matching
+    the VIGIL plane, whose ``conjunctive_gate.build_offense_gate`` refuses a ``None`` trust
+    root outright ("a None trust_root loads the CRUCIBLE authority UNSIGNED").
+
+    The engage path used to build ``HttpExecutor(auto_load_authority=True)`` with NO
+    ``trust_root``, so the executor's ``_authority_gate`` fail-closed branch (which fires only
+    when a trust root is pinned) never engaged: a tampered authority widening the validity
+    window / ``allow_destructive`` / ``live_destructive_acknowledged`` / ``max_actions`` was
+    trusted. This resolver pins the trust root so that branch enforces:
+
+    - GREENFIELD (no authority document provisioned for this engagement) -> ``None``: the
+      executor keeps its documented kill-switch-only path, so no greenfield run is broken.
+    - An authority IS provisioned AND a governance trust root is discoverable -> the
+      :class:`~.entitlement.models.TrustRoot`: ``_authority_gate`` then REQUIRES a valid signed
+      document — an UNSIGNED or TAMPERED authority fails the verified load, leaving ``authority``
+      unset, and the gate refuses BEFORE any network I/O.
+    - An authority IS provisioned but NO trust root is discoverable -> ``EngagementRefused``:
+      an UNPINNED authority must never be applied unsigned (the exact fail-open this closes).
+      Provision the governance trust root, or remove the stale authority document to run
+      greenfield (kill-switch only).
+    """
+    from .common import paths as _paths
+    if not _paths.authority_path(slug).is_file():
+        return None  # greenfield: no authority provisioned -> kill-switch-only path preserved
+    from .entitlement.store import load_trust_root
+    trust_root = load_trust_root()  # None iff the governance trust root is absent (present-but-
+    # malformed raises EntitlementError, which propagates as a fail-closed refusal, not a silent load)
+    if trust_root is None:
+        raise EngagementRefused(
+            f"an EngagementAuthority is provisioned for {slug!r} ({_paths.authority_path(slug)}) but "
+            f"no governance trust root is discoverable ({_paths.trust_root_path()}) — refusing to "
+            "apply an UNVERIFIABLE authority on the engage path (W16-2). Provision the trust root, or "
+            "remove the authority document to run greenfield (kill-switch only).")
+    return trust_root
+
+
 def _intel_recon(world: WorldModel, slug: str, seed_url: str, *,
                  fixtures_dir: str | None, max_depth: int) -> object:
     """Best-effort intel recon bound to the run's SHARED world-model. Returns the
@@ -834,6 +873,10 @@ def run_engagement(
             engagement_slug=slug,
             base_url=_origin(seed_url),
             auto_load_authority=True,
+            # W16-2: PIN the governance trust root when an authority is provisioned, so a
+            # signed authority is REQUIRED and verified (an unsigned/tampered doc is refused
+            # before any I/O). None for greenfield -> the kill-switch-only path is preserved.
+            trust_root=_engage_authority_trust_root(slug),
             request_budget=request_budget,
             prompt_callback=prompt_callback or stdin_prompt_with_timeout,
         )
@@ -1171,6 +1214,8 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
                 engagement_slug=args.slug,
                 base_url=_origin(args.seed_url),
                 auto_load_authority=True,
+                # W16-2: same signed-authority pin as the scan executor above.
+                trust_root=_engage_authority_trust_root(args.slug),
                 request_budget=max(1, int(getattr(args, "autonomous_budget", 8))),
                 prompt_callback=prompt_callback_from_args(args) or stdin_prompt_with_timeout,
             )
