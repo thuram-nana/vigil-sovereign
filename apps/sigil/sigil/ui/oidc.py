@@ -31,11 +31,13 @@ import hmac
 import json
 import math
 import os
+import secrets
 import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
@@ -121,8 +123,10 @@ class OidcConfig:
             token_endpoint=str(required["token_endpoint"]).strip(),
             jwks_uri=str(required["jwks_uri"]).strip(),
             scopes=str(settings.get("scopes", "openid") or "openid").strip(),
-            username_claim=str(settings.get("username_claim", "preferred_username") or
-                               "preferred_username").strip(),
+            # DEFAULT the username claim to the IMMUTABLE `sub` (globally unique, IdP-stable). A mutable
+            # claim (preferred_username / email) is opt-in only: if a user can change theirs at the IdP the
+            # account mapping can drift or be steered onto another owner-signed account.
+            username_claim=str(settings.get("username_claim", "sub") or "sub").strip(),
             signing_algs=algs,
             clock_skew_seconds=max(0, skew),
         )
@@ -335,11 +339,32 @@ def identity_from_claims(claims: dict, username_claim: str) -> str:
     return val.strip()
 
 
+# --- PKCE (RFC 7636, S256) ---------------------------------------------------------------------------
+def generate_pkce_verifier() -> str:
+    """A fresh, high-entropy PKCE `code_verifier` (RFC 7636 §4.1: 43-128 chars from the unreserved set
+    `[A-Za-z0-9-._~]`). `secrets.token_urlsafe(64)` yields ~86 url-safe chars (`-`/`_` are in the set),
+    comfortably inside the range and ~512 bits of entropy — unguessable, single-use, bound to the login."""
+    return secrets.token_urlsafe(64)
+
+
+def pkce_challenge_s256(verifier: str) -> str:
+    """The PKCE `code_challenge` for the S256 method: BASE64URL-NOPAD(SHA256(ASCII(verifier))) (RFC 7636
+    §4.2). The challenge travels in the authorize redirect; the matching verifier is sent (only) at the
+    token exchange, so an intercepted authorization code cannot be redeemed without the session's verifier."""
+    if not isinstance(verifier, str) or not verifier:
+        raise OidcError("PKCE code_verifier is blank")
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
 # --- authorize redirect + token exchange -------------------------------------------------------------
-def build_authorize_url(config: OidcConfig, state: str, nonce: str) -> str:
+def build_authorize_url(config: OidcConfig, state: str, nonce: str, *, code_challenge: str) -> str:
     """The IdP authorize URL for a fresh login (response_type=code). `state` and `nonce` are the single-use
     server-minted values recorded in the state store; the IdP echoes `state` at the callback and binds
-    `nonce` into the id_token."""
+    `nonce` into the id_token. `code_challenge` is the S256 PKCE challenge (REQUIRED) — its verifier is held
+    server-side bound to `state` and sent only at token exchange, closing authorization-code injection."""
+    if not isinstance(code_challenge, str) or not code_challenge:
+        raise OidcError("refusing to build an authorize URL without a PKCE code_challenge")
     params = {
         "response_type": "code",
         "client_id": config.client_id,
@@ -347,6 +372,8 @@ def build_authorize_url(config: OidcConfig, state: str, nonce: str) -> str:
         "scope": config.scopes,
         "state": state,
         "nonce": nonce,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
     }
     sep = "&" if urllib.parse.urlparse(config.authorize_endpoint).query else "?"
     return config.authorize_endpoint + sep + urllib.parse.urlencode(params)
@@ -388,15 +415,22 @@ def _http_get_json(url: str, *, timeout: float = 10.0) -> dict:
         return json.loads(_read_capped(r).decode("utf-8"))
 
 
-def exchange_code(config: OidcConfig, code: str, *, http_post=None) -> dict:
+def exchange_code(config: OidcConfig, code: str, *, code_verifier: str, http_post=None) -> dict:
     """Exchange an authorization `code` for tokens at the token endpoint (client_secret_post auth). Returns
     the token response dict; raises OidcError unless it carries a non-empty string `id_token`. `http_post`
-    is injectable `(url, form) -> dict` so tests use a local mock IdP with no network."""
+    is injectable `(url, form) -> dict` so tests use a local mock IdP with no network.
+
+    `code_verifier` is REQUIRED (PKCE, RFC 7636): it is the per-login secret bound to `state` at login and
+    is sent here so the IdP can re-derive the S256 challenge — a blank one is refused so an intercepted or
+    injected authorization code can never be redeemed without the initiating session's verifier."""
     if not isinstance(code, str) or not code:
         raise OidcError("missing authorization code")
+    if not isinstance(code_verifier, str) or not code_verifier:
+        raise OidcError("missing PKCE code_verifier (refusing a non-PKCE token exchange)")
     poster = http_post or _http_post_form
     form = {"grant_type": "authorization_code", "code": code,
-            "redirect_uri": config.redirect_uri, "client_id": config.client_id}
+            "redirect_uri": config.redirect_uri, "client_id": config.client_id,
+            "code_verifier": code_verifier}
     if config.client_secret:
         form["client_secret"] = config.client_secret
     resp = poster(config.token_endpoint, form)
@@ -431,7 +465,19 @@ class JwksProvider:
         return self._cache
 
 
-# --- single-use state→nonce store (mirrors ui.login_challenges.ChallengeLedger) ----------------------
+# --- single-use state→(nonce, PKCE verifier, session-binding) store -----------------------------------
+class OidcLoginRecord(NamedTuple):
+    """What a single login `state` binds together, recovered atomically at the callback:
+      • `nonce`    — echoed inside the id_token; defeats id_token replay.
+      • `verifier` — the PKCE (RFC 7636 S256) `code_verifier`; sent at token exchange so an intercepted /
+                     injected authorization code cannot be redeemed by anyone else.
+      • `sid_hash` — sha256 of the HttpOnly session cookie set at `/api/oidc/login`; the callback proves the
+                     browser presenting the response is the SAME one that started the flow (defeats login-CSRF)."""
+    nonce: str
+    verifier: str
+    sid_hash: str
+
+
 class OidcStateStore:
     """A durable, atomic single-use ledger binding each login `state` to the `nonce` minted with it — one
     marker file per state, where the atomic exclusive-create (mint) and atomic unlink (consume) are the
@@ -481,10 +527,12 @@ class OidcStateStore:
                 live += 1
         return live
 
-    def issue(self, state: str, nonce: str, *, now: "float | None" = None) -> None:
-        """Record a freshly-minted (state, nonce) pair as OUTSTANDING (single-use). Sweeps expired markers
-        first (the bound), refuses at capacity, then `O_CREAT | O_EXCL`-creates the marker storing the bound
-        nonce + issue time. Raises on a blank state/nonce, a full ledger, or a real I/O error."""
+    def issue(self, state: str, nonce: str, *, verifier: str = "", sid_hash: str = "",
+              now: "float | None" = None) -> None:
+        """Record a freshly-minted login `state` as OUTSTANDING (single-use), binding to it the `nonce`, the
+        PKCE `verifier`, and the `sid_hash` of the initiating browser session. Sweeps expired markers first
+        (the bound), refuses at capacity, then `O_CREAT | O_EXCL`-creates the marker storing all three + the
+        issue time. Raises on a blank state/nonce, a full ledger, or a real I/O error."""
         st = str(state or "").strip()
         nc = str(nonce or "").strip()
         if not st or not nc:
@@ -494,7 +542,8 @@ class OidcStateStore:
         if self._sweep(t) >= self.max_outstanding:
             raise RuntimeError(f"OIDC state ledger at capacity ({self.max_outstanding}); retry shortly")
         marker = self._marker(st)
-        payload = json.dumps({"iat": t, "nonce": nc}, ensure_ascii=False)
+        payload = json.dumps({"iat": t, "nonce": nc, "verifier": str(verifier or ""),
+                              "sid_hash": str(sid_hash or "")}, ensure_ascii=False)
         fd = os.open(str(marker), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)   # FileExistsError on a dup
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(payload)
@@ -502,10 +551,12 @@ class OidcStateStore:
             os.fsync(fh.fileno())
         self._fsync_dir()
 
-    def consume(self, state: str, *, now: "float | None" = None) -> "str | None":
-        """ATOMICALLY spend an OUTSTANDING, UNEXPIRED state and return its bound nonce (or None on unknown /
-        expired / already-consumed). The `os.unlink` is the serialization point — of N concurrent consumers
-        exactly one wins; the losers get FileNotFoundError and are refused (replay guard). Never raises."""
+    def consume(self, state: str, *, now: "float | None" = None) -> "OidcLoginRecord | None":
+        """ATOMICALLY spend an OUTSTANDING, UNEXPIRED state and return its bound (nonce, PKCE verifier,
+        sid_hash) record (or None on unknown / expired / already-consumed). The `os.unlink` is the
+        serialization point — of N concurrent consumers exactly one wins; the losers get FileNotFoundError
+        and are refused (replay guard). Never raises. The caller MUST still check the sid_hash against the
+        presenting session cookie and pass the verifier to the token exchange."""
         st = str(state or "").strip()
         if not st:
             return None
@@ -523,7 +574,8 @@ class OidcStateStore:
         t = time.time() if now is None else float(now)
         if t - issued_at > self.ttl:                      # expired (marker now cleaned) → refuse
             return None
-        return nonce
+        return OidcLoginRecord(nonce=nonce, verifier=str(rec.get("verifier", "") or ""),
+                               sid_hash=str(rec.get("sid_hash", "") or ""))
 
     def _fsync_dir(self) -> None:
         try:
