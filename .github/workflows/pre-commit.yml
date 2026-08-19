@@ -47,13 +47,17 @@ jobs:
       - name: full-tree secret scan (gitleaks over the whole repo)
         run: |
           set -euo pipefail
-          ver="8.21.2"
-          sha="5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba"
+          # Pinned to the SAME gitleaks version + invocation the dedicated security-scan.yml gate uses
+          # (8.28.0, `detect --no-git`): the older 8.21.2 `dir` subcommand does not honour the
+          # `[[allowlists]]` path scoping in .gitleaks.toml and reported the 51 example-fixture secrets
+          # the allowlist exists to suppress. Verified: 8.28.0 `detect --no-git` finds no leaks on the tree.
+          ver="8.28.0"
+          sha="a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb"
           url="https://github.com/gitleaks/gitleaks/releases/download/v${ver}/gitleaks_${ver}_linux_x64.tar.gz"
-          curl -sSL -o /tmp/gitleaks.tar.gz "$url"
+          curl -fsSL --retry 3 -o /tmp/gitleaks.tar.gz "$url"
           echo "${sha}  /tmp/gitleaks.tar.gz" | sha256sum -c -
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
-          /tmp/gitleaks dir . --config .gitleaks.toml --redact --no-banner
+          /tmp/gitleaks detect --no-git -s . -c .gitleaks.toml --redact --exit-code 1 --no-banner
 
       # NEGATIVE CONTROLS — prove each gate is not a no-op by feeding it deliberately-bad input through
       # the REAL hook and asserting rejection, then cleaning up. If a hook waves the bad input through,
