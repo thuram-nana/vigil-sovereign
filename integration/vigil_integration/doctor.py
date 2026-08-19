@@ -201,6 +201,251 @@ def _probe_llm_backend() -> dict:
     return out
 
 
+# ── Security-posture probes (W9-4a) ───────────────────────────────────────────────────────────────────
+# One honest line PER security control showing its CURRENT state, so an operator (and a reviewer) sees at a
+# glance which controls are ON vs OFF-by-default. These probes are INFORMATIONAL: none of them calls
+# `_issue()`, so the posture block NEVER changes `vigil doctor`'s exit code or existing behaviour (the
+# refuse-to-start PRODUCTION gate is a separate later slice, W9-4b). Every probe reads REAL on-disk / env
+# state — never an optimistic default — and fails SOFT to "UNKNOWN": a missing/unreadable control is
+# reported, never a crash.
+#
+# FATAL-2 (the two-env boundary): `doctor` is the OFFENSE/integration plane. It NEVER imports `sigil` or the
+# `framework`. The one SOVEREIGN-plane control (vault / secrets-at-rest) is read WITHOUT importing sigil — by
+# reading the on-disk state under SIGIL_HOME (the TPM-sealed KEK blobs vs the plaintext `sigil.env`). The
+# entitlement control is read WITHOUT importing the framework — by reading the trust-root file on disk. Every
+# path below is pure pathlib / os / subprocess(systemctl); no offense or sovereign package is imported.
+
+# mirror of entitlement.policy._ENFORCE_ENV — enforcement is ACTIVE iff this is truthy OR a trust root exists
+_ENTITLEMENT_ENFORCE_ENV = "CRUCIBLE_ENTITLEMENT_ENFORCED"
+# mirror of gateway.vigil_gateway.docker.STRIX_NETWORK_ENV — set ⇒ the Strix sandbox is pinned onto the gate
+_STRIX_SANDBOX_NETWORK_ENV = "STRIX_DOCKER_SANDBOX_NETWORK"
+# the sealed-KEK blob filenames the sovereign vault provisions (mirror of vigil_core.kek._SEAL_PUB/_SEAL_PRIV)
+_VAULT_SEAL_PUB = "kek.tpm.pub"
+_VAULT_SEAL_PRIV = "kek.tpm.priv"
+
+
+def _sigil_home() -> Path:
+    """SIGIL_HOME — the sovereign plane's home dir (env override, else ~/.sigil). Stdlib mirror of
+    sigil.config._resolve_home, read WITHOUT importing sigil (FATAL-2)."""
+    return Path(os.path.expanduser(os.environ.get("SIGIL_HOME", "~/.sigil")))
+
+
+def _display_path(p: "Path | str") -> str:
+    """A tidy, portable rendering of a path for the human report: collapse a leading $HOME to `~` so the
+    posture lines don't embed an absolute per-user path. Never raises."""
+    s = str(p)
+    try:
+        home = os.path.expanduser("~")
+        if home and home != "~" and (s == home or s.startswith(home + os.sep)):
+            return "~" + s[len(home):]
+    except OSError:
+        pass
+    return s
+
+
+def _crucible_root(repo: Path) -> "Path | None":
+    """The CRUCIBLE tree (holds CLAUDE.md + framework/v2 + targets) — a boundary-safe, no-import mirror of
+    framework.v2.common.paths.crucible_root's discovery: an explicit CRUCIBLE_ROOT (validated to contain
+    CLAUDE.md) wins, else `<repo>/engine/crucible`, else `<repo>` itself, else a walk up from repo. None when
+    no CLAUDE.md is found (⇒ the framework-scoped controls report UNKNOWN rather than guessing)."""
+    env = os.environ.get("CRUCIBLE_ROOT", "").strip()
+    if env:
+        p = Path(env).expanduser()
+        try:
+            if (p / "CLAUDE.md").is_file():
+                return p
+        except OSError:
+            pass
+    try:
+        for cand in (repo / "engine" / "crucible", repo, *repo.parents):
+            if (cand / "CLAUDE.md").is_file():
+                return cand
+    except OSError:
+        return None
+    return None
+
+
+def _entitlement_dir(repo: Path) -> "Path | None":
+    """Where the entitlement trust root lives — CRUCIBLE_ENTITLEMENT_DIR override, else
+    `<crucible_root>/framework/v2/.entitlement`. Stdlib mirror of framework...paths.entitlement_dir; no
+    import. None when the crucible root can't be located and no override is set."""
+    override = os.environ.get("CRUCIBLE_ENTITLEMENT_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    root = _crucible_root(repo)
+    return (root / "framework" / "v2" / ".entitlement") if root is not None else None
+
+
+def _posture_sovereignty() -> "tuple[str, str]":
+    """The sovereignty TIER — PERMISSIVE (dev default) admits cloud LLM egress; a raised rung gates it."""
+    tier = _resolve_tier()
+    if tier == "PERMISSIVE":
+        return "PERMISSIVE", ("dev default — the sovereignty ladder binds but admits cloud LLM egress; set "
+                              "CRUCIBLE_SOVEREIGNTY_TIER (AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD) to raise it")
+    return tier, f"CRUCIBLE_SOVEREIGNTY_TIER={tier} — LLM egress is gated by this tier"
+
+
+def _posture_egress(services: dict) -> "tuple[str, str]":
+    """The egress gate. ON only if the gated topology is ACTUALLY wired: the vigil-gateway container is
+    running AND the Strix sandbox is pinned onto the locked-down net (STRIX_DOCKER_SANDBOX_NETWORK set). Off
+    by default — a gateway that isn't running, or a sandbox not pinned onto it, does NOT gate egress."""
+    pinned = bool(os.environ.get(_STRIX_SANDBOX_NETWORK_ENV, "").strip())
+    gw = services.get("vigil-gateway") if isinstance(services, dict) else None
+    if isinstance(gw, dict) and "error" in gw:
+        return "UNKNOWN", f"gateway probe failed: {gw['error']}"
+    running = isinstance(gw, dict) and gw.get("state") == "running"
+    if running and pinned:
+        return "ON", "vigil-gateway container running and the sandbox is pinned onto the gated net"
+    if running and not pinned:
+        return "OFF", (f"vigil-gateway is running but {_STRIX_SANDBOX_NETWORK_ENV} is unset — the sandbox is "
+                       f"NOT pinned onto the gated net, so egress is not routed through it")
+    if isinstance(gw, dict):
+        return "OFF", (f"no vigil-gateway container running (state: {gw.get('state', 'absent')!r}); "
+                       f"{_STRIX_SANDBOX_NETWORK_ENV} {'set' if pinned else 'unset'}")
+    return "OFF", (f"the gated egress topology is not up (docker/gateway absent); "
+                   f"{_STRIX_SANDBOX_NETWORK_ENV} {'set' if pinned else 'unset'}")
+
+
+def _posture_entitlement(repo: Path) -> "tuple[str, str]":
+    """The capability-entitlement gate. ACTIVE iff a trust root is provisioned OR
+    CRUCIBLE_ENTITLEMENT_ENFORCED is truthy; else UNGOVERNED (gated capabilities permitted but not enforced).
+    Read from the on-disk trust-root file — the framework is NEVER imported (FATAL-2)."""
+    if os.environ.get(_ENTITLEMENT_ENFORCE_ENV, "").strip().lower() in _SOVEREIGN_TRUTHY:
+        return "ACTIVE", f"{_ENTITLEMENT_ENFORCE_ENV} is set — gated capabilities fail closed"
+    d = _entitlement_dir(repo)
+    if d is None:
+        return "UNKNOWN", "could not locate the entitlement dir (no CRUCIBLE_ROOT / CLAUDE.md found)"
+    tr = d / "trust-root.json"
+    try:
+        present = tr.is_file()
+    except OSError:
+        return "UNKNOWN", f"could not read {tr}"
+    if present:
+        return "ACTIVE", f"trust root provisioned ({_display_path(tr)}) — gated capabilities fail closed"
+    return "UNGOVERNED", (f"no trust root at {_display_path(tr)} — gated capabilities are permitted (logged at "
+                          f"WARNING) but NOT enforced")
+
+
+def _posture_vault() -> "tuple[str, str]":
+    """The sovereign-plane secrets-at-rest control, read WITHOUT importing sigil (FATAL-2): the TPM-sealed
+    KEK blobs under SIGIL_HOME/vault (⇒ SEALED, secrets rest as ciphertext) vs the legacy plaintext
+    `sigil.env` (⇒ UNPROVISIONED, keys plaintext). A live OS-keyring backend is NOT observable from disk
+    (see the honest-limits note); this probe reports the on-disk at-rest state."""
+    home = _sigil_home()
+    vault = home / "vault"
+    try:
+        sealed = (vault / _VAULT_SEAL_PUB).is_file() and (vault / _VAULT_SEAL_PRIV).is_file()
+        env_plain = (home / "sigil.env").is_file()
+    except OSError:
+        return "UNKNOWN", f"could not read {home}"
+    if sealed:
+        return "SEALED", f"TPM-sealed KEK provisioned at {_display_path(vault)} — secrets rest as ciphertext"
+    if env_plain:
+        return "UNPROVISIONED", (f"keys plaintext ({_display_path(home / 'sigil.env')}) — run `sigil vault "
+                                 f"provision` to seal secrets at rest")
+    return "UNPROVISIONED", (f"no owner vault at {_display_path(vault)} and no secret store yet — a secret would "
+                             f"seal to the plaintext {_display_path(home / 'sigil.env')}")
+
+
+def _posture_backups(repo: Path) -> "tuple[str, str]":
+    """Are the systemd backup/reprove/HA timers enabled? Enumerated from infra/systemd/*.timer and probed
+    with `systemctl is-enabled`. ON iff at least one is enabled; OFF when none are (the default — the units
+    ship in the repo but are not installed/enabled)."""
+    timers_dir = repo / "infra" / "systemd"
+    try:
+        timer_files = sorted(p.name for p in timers_dir.glob("*.timer")) if timers_dir.is_dir() else []
+    except OSError:
+        timer_files = []
+    if not timer_files:
+        return "UNKNOWN", f"no timer units found under {_display_path(timers_dir)}"
+    total = len(timer_files)
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        return "UNKNOWN", f"systemctl not available — cannot read enablement of {total} timer unit(s)"
+    enabled: list = []
+    for name in timer_files:
+        try:
+            r = subprocess.run([systemctl, "is-enabled", name], capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.stdout.strip() == "enabled":
+            enabled.append(name)
+    if enabled:
+        return "ON", f"{len(enabled)}/{total} systemd timers enabled: {', '.join(enabled)}"
+    return "OFF", (f"0/{total} systemd timers enabled ({', '.join(t[:-6] for t in timer_files)}) — "
+                   f"backups/reprove/HA are not running")
+
+
+def _posture_charter(repo: Path) -> "tuple[str, str]":
+    """Is a signed charter + EngagementAuthority present for the active engagement? The active slug is
+    VIGIL_ENGAGEMENT (as the console exports to Strix); absent one, scan for ANY non-template target that has
+    both a charter and a signed authority. Read from disk; the framework is NEVER imported (FATAL-2)."""
+    root = _crucible_root(repo)
+    if root is None:
+        return "UNKNOWN", "could not locate the crucible root (no CRUCIBLE_ROOT / CLAUDE.md found)"
+    targets = root / "targets"
+    authority_dir = root / "framework" / "v2" / ".authority"
+
+    def _has_charter(slug: str) -> bool:
+        try:
+            return (targets / slug / "charter.md").is_file()
+        except OSError:
+            return False
+
+    def _has_authority(slug: str) -> bool:
+        try:
+            return (authority_dir / f"{slug}.authority.json").is_file()
+        except OSError:
+            return False
+
+    slug = os.environ.get("VIGIL_ENGAGEMENT", "").strip()
+    if slug:
+        ch, au = _has_charter(slug), _has_authority(slug)
+        if ch and au:
+            return "PRESENT", f"engagement {slug!r}: signed charter + EngagementAuthority present"
+        if ch:
+            return "CHARTER-ONLY", f"engagement {slug!r}: charter present but NO signed EngagementAuthority"
+        return "ABSENT", f"engagement {slug!r}: no charter under {_display_path(targets / slug)}"
+
+    try:
+        slugs = ([p.name for p in targets.iterdir() if p.is_dir() and not p.name.startswith("_")]
+                 if targets.is_dir() else [])
+    except OSError:
+        slugs = []
+    provisioned = sorted(s for s in slugs if _has_charter(s) and _has_authority(s))
+    chartered = sorted(s for s in slugs if _has_charter(s))
+    if provisioned:
+        return "PRESENT", (f"no active VIGIL_ENGAGEMENT; {len(provisioned)} engagement(s) with "
+                           f"charter+authority: {', '.join(provisioned)}")
+    if chartered:
+        return "CHARTER-ONLY", (f"no active VIGIL_ENGAGEMENT; charter(s) but no signed authority: "
+                                f"{', '.join(chartered)}")
+    return "ABSENT", "no active VIGIL_ENGAGEMENT and no chartered engagement under targets/"
+
+
+def _collect_posture(repo: Path, services: dict) -> list:
+    """The security-posture block: one honest line PER control, its CURRENT state read from real on-disk /
+    env state (never an optimistic default). INFORMATIONAL — never flips `ok`. Every probe fails soft to
+    UNKNOWN. FATAL-2: the sovereign-plane vault and the framework entitlement are read from DISK, importing
+    neither sigil nor framework. The order is the plan's: egress-gate, vault, sovereignty, entitlement,
+    backups, charter."""
+    def _entry(control: str, fn) -> dict:
+        try:
+            state, detail = fn()
+        except Exception as exc:  # noqa: BLE001 — a posture probe must never crash the report
+            state, detail = "UNKNOWN", f"probe error: {type(exc).__name__}: {exc}"
+        return {"control": control, "state": state, "detail": detail}
+
+    return [
+        _entry("egress-gate", lambda: _posture_egress(services)),
+        _entry("vault", _posture_vault),
+        _entry("sovereignty", _posture_sovereignty),
+        _entry("entitlement", lambda: _posture_entitlement(repo)),
+        _entry("backups", lambda: _posture_backups(repo)),
+        _entry("charter", lambda: _posture_charter(repo)),
+    ]
+
+
 def collect(repo_root) -> dict:
     """Assemble the health report as a plain dict (JSON-safe). Never raises — every probe fails soft."""
     repo = Path(repo_root)
@@ -298,6 +543,13 @@ def collect(repo_root) -> dict:
         _note(f"the LLM backend {str(llm.get('backend'))!r} at {llm.get('endpoint')} is not answering on "
               f"loopback — a LOCAL model pick will REFUSE (it never falls back to cloud). Start it, or pick a "
               f"cloud model / set CRUCIBLE_LLM_BACKEND.")
+
+    # 8) Security posture (W9-4a) — one honest line PER security control showing its CURRENT state (ON vs
+    #    OFF-by-default). INFORMATIONAL: `_collect_posture` calls NEITHER `_issue()` nor `_note()`, so it
+    #    changes neither the exit code nor any existing report field (the refuse-to-start production gate is
+    #    W9-4b). FATAL-2: the sovereign vault + framework entitlement are read from DISK — neither sigil nor
+    #    framework is imported. `services` is passed so egress-gate reuses the already-collected gateway state.
+    report["posture"] = _collect_posture(repo, services)
     return report
 
 
@@ -349,6 +601,24 @@ def render(report: dict) -> str:
         lines.append(seg)
         if llm.get("detail"):
             lines.append(f"     {llm['detail']}")
+    posture = report.get("posture")
+    if posture:
+        # INFORMATIONAL: one line PER control, its CURRENT state. An OFF/UNPROVISIONED/UNGOVERNED/ABSENT
+        # line is NOT a failure (these are off-by-default) — the marker distinguishes an engaged control
+        # (OK) from an off one (..) from an unreadable one (??). None of this affects the exit code.
+        _on = {"ON", "SEALED", "ACTIVE", "PRESENT"}
+        _unknown = {"UNKNOWN"}
+        lines.append("\nSecurity posture (informational — off-by-default controls; does NOT affect the "
+                     "exit code):")
+        width = max((len(str(p.get("control", ""))) for p in posture), default=0)
+        for p in posture:
+            control, state = str(p.get("control", "?")), str(p.get("state", "?"))
+            detail = str(p.get("detail", ""))
+            mark = "OK " if state in _on else ("?? " if state in _unknown else ".. ")
+            seg = f"  {mark}{(control + ':'):<{width + 1}} {state}"
+            if detail:
+                seg += f"  — {detail}"
+            lines.append(seg)
     issues = report.get("issues", [])
     if issues:
         lines.append("\nAction needed (blocks bring-up):")

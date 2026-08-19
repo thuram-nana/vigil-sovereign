@@ -633,6 +633,22 @@ The full, per-component command list is in [`.github/workflows/ci.yml`](.github/
 
 ## Running it
 
+### 0. Check your security posture — `vigil doctor`
+
+The strong controls this README describes (the egress gate, the sovereignty tier, the entitlement gate, the sealed vault, the backup/reprove timers, a signed charter) are **off, permissive, or unprovisioned by default**. That is deliberate — a fresh checkout runs on the safe core without provisioning — but it means the on-state you read about above is *not* the state you get for free. `vigil doctor` ends with a **security-posture block**: one honest line per control showing its **current** state, so you (and any reviewer) can see at a glance what is actually engaged. On a fresh checkout it reads:
+
+```text
+Security posture (informational — off-by-default controls; does NOT affect the exit code):
+  .. egress-gate: OFF  — no vigil-gateway container running (state: 'absent'); STRIX_DOCKER_SANDBOX_NETWORK unset
+  .. vault:       UNPROVISIONED  — keys plaintext (~/.sigil/sigil.env) — run `sigil vault provision` to seal secrets at rest
+  .. sovereignty: PERMISSIVE  — dev default — the sovereignty ladder binds but admits cloud LLM egress; set CRUCIBLE_SOVEREIGNTY_TIER (AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD) to raise it
+  .. entitlement: UNGOVERNED  — no trust root at ~/vigil/engine/crucible/framework/v2/.entitlement/trust-root.json — gated capabilities are permitted (logged at WARNING) but NOT enforced
+  .. backups:     OFF  — 0/6 systemd timers enabled (vigil-backup-drill, vigil-backup-push, vigil-backup, vigil-ha-mirror, vigil-posture, vigil-reprove) — backups/reprove/HA are not running
+  .. charter:     ABSENT  — no active VIGIL_ENGAGEMENT and no chartered engagement under targets/
+```
+
+Each line reads the **real** on-disk / environment state — never an optimistic default — and a control it cannot read reports `UNKNOWN` rather than guessing. The block is **informational**: it never changes `vigil doctor`'s exit code (a refuse-to-start production gate is a separate, later change). `vigil doctor` itself imports no `framework`/`strix`/`sigil`; the one sovereign-plane line (`vault`) is read from disk, so the two trust planes never co-load to produce it.
+
 ### 1. Start the controlled target
 
 ```bash
