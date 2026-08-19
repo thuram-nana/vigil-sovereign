@@ -120,6 +120,16 @@ services:
       VIGIL_GATEWAY_PROXY_TOKEN: "${{VIGIL_GATEWAY_PROXY_TOKEN:-}}"
       VIGIL_GATEWAY_CHARTER_SLUG: "{charter_slug}"
     command: ["vigil-gateway", "serve-proxy", "--host", "{bind_ip}", "--port", "{self.proxy_port}"]
+    healthcheck:
+      # The gate is only "up" when the proxy is actually LISTENING on its pinned sandbox bind. A bad or
+      # missing charter scope makes serve-proxy fail closed and exit, which this probe (and `up --wait`)
+      # surface as UNHEALTHY instead of a silent exit-0-but-dead container. Read-only-safe: a bare TCP
+      # connect, no writes, no third-party deps (the runtime image is stdlib-only python).
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('{bind_ip}', {self.proxy_port}), 2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 """
 
     # -- imperative network creation (alternative to compose) --------------------------
@@ -189,7 +199,11 @@ services:
         networks/containers that do not already exist. Builds the image first if it is absent (and a
         context dir is given). Returns a small status dict."""
         built = self.ensure_image(context_dir, image) if (build and context_dir is not None) else False
-        proc = self._run(["compose", "-f", str(compose_file), "up", "-d"], timeout=BUILD_TIMEOUT)   # may pull
+        # `--wait` blocks until every service is running AND (given the vigil-gateway healthcheck) HEALTHY,
+        # and returns non-zero if one never gets there — so a gateway that starts then exits (bad/missing
+        # charter scope) is a compose FAILURE here rather than an exit-0-but-dead container. This is the
+        # belt; the caller's own container_state() check (below, and in `vigil up`) is the suspenders.
+        proc = self._run(["compose", "-f", str(compose_file), "up", "-d", "--wait"], timeout=BUILD_TIMEOUT)  # may pull
         if proc.returncode != 0:
             raise RuntimeError(f"docker compose up failed: {proc.stderr.strip()[-800:]}")
         return {"image_built": built, "gateway": self.container_state()}

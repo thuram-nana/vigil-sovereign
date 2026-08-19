@@ -35,3 +35,13 @@ services:
       VIGIL_GATEWAY_PROXY_TOKEN: "${VIGIL_GATEWAY_PROXY_TOKEN:-}"
       VIGIL_GATEWAY_CHARTER_SLUG: ""
     command: ["vigil-gateway", "serve-proxy", "--host", "172.31.240.2", "--port", "48081"]
+    healthcheck:
+      # The gate is only "up" when the proxy is actually LISTENING on its pinned sandbox bind. A bad or
+      # missing charter scope makes serve-proxy fail closed and exit, which this probe (and `up --wait`)
+      # surface as UNHEALTHY instead of a silent exit-0-but-dead container. Read-only-safe: a bare TCP
+      # connect, no writes, no third-party deps (the runtime image is stdlib-only python).
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('172.31.240.2', 48081), 2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

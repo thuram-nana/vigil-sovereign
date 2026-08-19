@@ -103,6 +103,18 @@ def test_compose_up_raises_on_compose_failure(fake):
         SandboxNetworking().compose_up("compose.yml", context_dir="gateway")
 
 
+def test_compose_up_waits_for_healthy(fake):
+    # W0-6 defence-in-depth: `--wait` makes `docker compose up -d` block until the gateway is running/
+    # healthy (per the compose healthcheck) and return non-zero otherwise, so a start-then-exit gateway is a
+    # compose FAILURE here, not an exit-0-but-dead container. (The caller's container_state() check is the
+    # belt to this suspenders — see integration/tests/test_up_egress_gate_failclosed.py.)
+    fd = fake(image=True, container="running")
+    SandboxNetworking().compose_up("compose.yml", context_dir="gateway")
+    compose_calls = [c for c in fd.calls if len(c) > 1 and c[1] == "compose"]
+    assert compose_calls, "expected a `docker compose` invocation"
+    assert all("--wait" in c for c in compose_calls)                  # every compose-up blocks on readiness
+
+
 def test_status_reports_create_if_absent_snapshot(fake):
     fake(image=True, sandbox_net=True, egress_net=False, container="running")
     st = SandboxNetworking().status()
@@ -126,6 +138,7 @@ def test_committed_compose_matches_render_and_is_sane():
     assert f"image: {DEFAULT_IMAGE}" in committed
     assert "internal: true" in committed                               # the sandbox net is deny-default
     assert f"ipv4_address: {net.sandbox_gateway_ip()}" in committed     # the pinned sandbox-net bind
+    assert "healthcheck:" in committed and "start_period:" in committed  # W0-6 gate-readiness probe (--wait)
     for netname in (SANDBOX_NETWORK, EGRESS_NETWORK):
         assert netname in committed
 
