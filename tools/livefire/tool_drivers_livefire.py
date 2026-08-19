@@ -1191,8 +1191,49 @@ def write_fixtures(workdir: str) -> Fixtures:
 @dataclass
 class Governance:
     signer: Callable[[bytes], Any]
-    gate: Callable[..., Any]
+    # The conjunctive gate (CRUCIBLE scope ∧ WARDEN tier ∧ the m-of-n destructive leg) — WITHOUT any
+    # approval wrapper. sqlmap/hydra classify A2, so under the A1 ceiling the gate QUEUES them (the WARDEN
+    # human leg). The harness supplies that human leg PER ACTION via :func:`approve_action_gate` (W0-11):
+    # a single blanket promote-all no longer exists, so a driver of MULTIPLE trusted offense actions must
+    # approve each one, exactly as the engine's ``run_tool`` binds each action before executing it.
+    base_gate: Callable[..., Any]
     notes: list = field(default_factory=list)
+
+
+def approve_action_gate(base_gate: Callable[..., Any], tool_name: Any, tool_args: Any) -> Callable[..., Any]:
+    """The harness is the TRUSTED human leg, approving EACH offense action individually (W0-11 / #406).
+
+    The standing ``--approve-offense`` grant is no longer a BLANKET boolean that auto-promotes every queued
+    WARDEN action — it is a PER-ACTION, single-use :class:`StandingApproval` bound to the ONE action it
+    authorizes. So a harness that drives many trusted offense rows can no longer rely on one blanket wrapper;
+    it must approve each row on its own, precisely as the engine's ``run_tool`` does before every execution.
+
+    This mints a FRESH single-use grant, binds it to exactly THIS action, and wraps the base gate so the
+    grant is SPENT on this one action. The ``(tool, target)`` pair is computed by the executor's OWN
+    ``derive_gate_binding`` — with the same default scope/allowed_ips :func:`run_leg`'s ``execute`` uses — so
+    it equals the pair the gate is called with BYTE-FOR-BYTE; the ``action_digest`` binds the args. The next
+    row mints its own grant (re-granted per action — the operator approving each). An action that is NOT
+    bound (an underivable / out-of-scope target, or — at the gate — a DIFFERENT action than the one bound)
+    stays QUEUED and is DENIED: no blanket promote-all is reintroduced.
+    """
+    from vigil_integration.live.approval_token import action_digest
+    from vigil_integration.live.executor import derive_gate_binding
+    from vigil_integration.live.wiring import StandingApproval, _approval_gate
+
+    standing = StandingApproval(True)
+    # scope/allowed_ips default to None here AND in run_leg's execute(), so the loopback-pinned (tool,
+    # target) derived here is the exact pair the gate sees inside the executor.
+    binding = derive_gate_binding(tool_name, tool_args)
+    if binding is not None:
+        gtool, gtarget = binding
+        try:
+            digest = action_digest(gtool, gtarget, tool_args)
+        except Exception:  # noqa: BLE001 — a non-serialisable args ⇒ no binding ⇒ the action stays QUEUED
+            standing.unbind()
+        else:
+            standing.bind(gtool, gtarget, digest)
+    # binding is None (underivable / out-of-scope target) ⇒ standing stays unbound ⇒ the gate DENIES.
+    return _approval_gate(base_gate, standing)
 
 
 def build_governance(workdir: str) -> Governance:
@@ -1205,7 +1246,7 @@ def build_governance(workdir: str) -> Governance:
     from vigil_integration.destruction_gate import (DestructionAuthority, DestructionAuthorization,
                                                     DestructiveAction, sign_authorization)
     from vigil_integration.live.nonce_ledger import NonceLedger
-    from vigil_integration.live.wiring import _approval_gate, default_classify
+    from vigil_integration.live.wiring import default_classify
 
     notes: list = []
 
@@ -1258,11 +1299,15 @@ def build_governance(workdir: str) -> Governance:
                         destruction_action=action, destruction_signed=signed)
         return wrapped
 
-    # The approval wrapper is the production seam for an owner-approved tool call: WARDEN queues
-    # anything above the A1 ceiling (sqlmap and hydra classify A2) and the operator's approval is the
-    # human leg. It is imported rather than re-written; a copy of it here would only test the copy.
+    # The per-action approval is the production seam for an owner-approved tool call: WARDEN queues
+    # anything above the A1 ceiling (sqlmap and hydra classify A2) and the operator's approval is the human
+    # leg. W0-11 made that standing grant PER-ACTION + single-use — one flag no longer auto-fires every
+    # queued action — so the base gate is stored WITHOUT the approval wrapper and :func:`run_leg` mints a
+    # fresh per-action grant (:func:`approve_action_gate`) bound to each row before it runs, exactly as the
+    # engine's ``run_tool`` binds each action. ``_approval_gate`` / ``StandingApproval`` are imported (never
+    # re-written); a copy of them here would only test the copy.
     return Governance(signer=lambda b: sign(gov.private_key_b64, b),
-                      gate=_approval_gate(with_destruction(real_gate)), notes=notes)
+                      base_gate=with_destruction(real_gate), notes=notes)
 
 
 # =====================================================================================================
@@ -1918,9 +1963,14 @@ def run_leg(proof: ToolProof, tool_args: dict, label: str, gov: Governance, seq:
     from vigil_integration.live.wiring import DEFAULT_DESTRUCTIVE_VIEW, DEFAULT_TOOL_VIEW
 
     leg = Leg(label=label)
+    # W0-11: approve THIS action, then run it. A fresh single-use standing grant is bound to exactly this
+    # (tool, target, args) — the harness is the operator's human leg, approving each row individually — so a
+    # queued A2 tool (sqlmap/hydra) is upgraded to allow for this one action only. The base gate is passed the
+    # same default scope/allowed_ips ``derive_gate_binding`` used, so the bound pair equals the gate-seen pair.
+    gate = approve_action_gate(gov.base_gate, proof.tool, tool_args)
     result = execute(
         proof.tool, tool_args, proof.phase,
-        gate=gov.gate, view=DEFAULT_TOOL_VIEW, destructive_view=DEFAULT_DESTRUCTIVE_VIEW,
+        gate=gate, view=DEFAULT_TOOL_VIEW, destructive_view=DEFAULT_DESTRUCTIVE_VIEW,
         signer=gov.signer, seq=seq, timeout=proof.timeout,
     )
     leg.ran = bool(result.ran)
