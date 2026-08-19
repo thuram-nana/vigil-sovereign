@@ -224,6 +224,10 @@ class ElevenLabsTts:
             raise RuntimeError("ElevenLabsTts needs ELEVENLABS_API_KEY (env or ~/.sigil/sigil.env)")
         url = (f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream"
                f"?output_format=pcm_16000")
+        # W16-9: SIGIL-plane voice egress under the sovereignty tier — a sovereign/air-gapped
+        # tier REFUSES this cloud TTS (the local PiperTts is the sovereign alternative).
+        from ..sovereignty import assert_endpoint_permitted
+        assert_endpoint_permitted(url, purpose="voice TTS (ElevenLabs)")
         body = json.dumps({"text": text, "model_id": self.model_id}).encode("utf-8")
         req = urllib.request.Request(url, data=body, method="POST",
                                      headers={"xi-api-key": self.api_key, "content-type": "application/json"})
@@ -267,8 +271,13 @@ class ElevenLabsAsr:
              f"Content-Type: audio/wav\r\n\r\n").encode(),
             wav_bytes, b"\r\n", f"--{boundary}--\r\n".encode(),
         ]
+        # W16-9: SIGIL-plane voice egress under the sovereignty tier — a sovereign/air-gapped
+        # tier REFUSES this cloud STT (the local WhisperAsr is the sovereign alternative).
+        from ..sovereignty import assert_endpoint_permitted
+        _asr_url = "https://api.elevenlabs.io/v1/speech-to-text"
+        assert_endpoint_permitted(_asr_url, purpose="voice STT (ElevenLabs)")
         req = urllib.request.Request(
-            "https://api.elevenlabs.io/v1/speech-to-text", data=b"".join(parts), method="POST",
+            _asr_url, data=b"".join(parts), method="POST",
             headers={"xi-api-key": self.api_key, "content-type": f"multipart/form-data; boundary={boundary}"})
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
@@ -287,6 +296,9 @@ def find_voices(query: str = "jarvis", api_key: str | None = None, timeout: int 
     if not key:
         raise RuntimeError("find_voices needs ELEVENLABS_API_KEY (env or ~/.sigil/sigil.env)")
     url = "https://api.elevenlabs.io/v1/shared-voices?" + urllib.parse.urlencode({"search": query, "page_size": 25})
+    # W16-9: voice-library lookup is cloud egress too — gated under the sovereignty tier.
+    from ..sovereignty import assert_endpoint_permitted
+    assert_endpoint_permitted(url, purpose="voice library lookup (ElevenLabs)")
     req = urllib.request.Request(url, headers={"xi-api-key": key})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
