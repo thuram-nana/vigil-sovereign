@@ -79,6 +79,7 @@ from urllib.parse import urlsplit
 from ..agents.tools import ToolContext, ToolResult
 from ..entitlement.models import Capability
 from ..intel.models import Observation
+from .base import inconclusive_result
 from .cloud import _load_export, cloud_observations
 
 # S3 ACL grantee group URIs that denote "anyone" (public) / "any AWS account" (effectively public).
@@ -578,17 +579,18 @@ class CloudLiveSensor:
         try:
             import boto3  # noqa: F401
         except Exception:
-            return ToolResult(ok=False, note=(
-                "cloud_live: boto3 not installed — live AWS collection unavailable (fail-closed no-op). "
+            return inconclusive_result("cloud_live", missing="boto3", detail=(
+                "boto3 not installed — live AWS collection unavailable (fail-closed no-op). "
                 "Install it (`pip install boto3`) to enable live cloud posture."))
         try:
             session = boto3.Session(region_name=self._region)
             creds = session.get_credentials()
         except Exception as e:
-            return ToolResult(ok=False, note=f"cloud_live: could not initialise an AWS session (fail-closed): {e}")
+            return inconclusive_result("cloud_live", missing="ambient AWS credentials", detail=(
+                f"could not initialise an AWS session (fail-closed): {e}"))
         if creds is None:
-            return ToolResult(ok=False, note=(
-                "cloud_live: no ambient AWS credentials discoverable (environment / shared config / SSO "
+            return inconclusive_result("cloud_live", missing="ambient AWS credentials", detail=(
+                "no ambient AWS credentials discoverable (environment / shared config / SSO "
                 "cache / instance-profile / task-role / IRSA) — fail-closed no-op. Configure the HOST's "
                 "read-only AWS identity; VIGIL discovers and uses it — you need not hand credentials over."))
         kw = self._client_kwargs()
@@ -596,8 +598,8 @@ class CloudLiveSensor:
             ident = session.client("sts", **kw).get_caller_identity()
             account = str(ident.get("Account") or "")
         except Exception as e:
-            return ToolResult(ok=False, note=(
-                f"cloud_live: STS get-caller-identity failed — the ambient credentials are invalid/expired "
+            return inconclusive_result("cloud_live", missing="valid, reachable AWS credentials", detail=(
+                f"STS get-caller-identity failed — the ambient credentials are invalid/expired "
                 f"or the endpoint is unreachable (fail-closed): {e}"))
         try:
             buckets = self._collect_s3(session.client("s3", **kw))

@@ -129,6 +129,40 @@ There is no CIDR — enumerate hosts or use `*.` wildcards.
 
 ---
 
+## Live cloud & Kubernetes posture — two prerequisites (a missing one is INCONCLUSIVE, never CLEAN)
+
+The live, read-only cloud and Kubernetes posture collectors — `cloud_live` (AWS),
+`gcp_live`, `azure_live`, and `k8s_live` — are gated Tier-2 sensors. Each needs
+**two** prerequisites, and if **either** is missing the run is reported as an
+explicit **INCONCLUSIVE** result that **names the missing prerequisite** — it is
+**never** a clean result. (For a product whose thesis is a *sound negative*,
+reporting "not assessed" as "found nothing" would be a silent CLEAN — the worst
+possible failure mode, so it is refused.)
+
+1. **Ambient, read-only credentials.** The collector discovers the *host's own*
+   identity from the platform default chain — never a secret passed on the command
+   line or the spine:
+   - **AWS** (`cloud_live`): boto3's chain — environment / shared config / SSO cache
+     / EC2 instance-profile / ECS/EKS task-role / a pod's IRSA identity.
+   - **GCP** (`gcp_live`): Application Default Credentials (plus a resolvable project,
+     `GOOGLE_CLOUD_PROJECT`).
+   - **Azure** (`azure_live`): a `DefaultAzureCredential` service principal / managed
+     identity (plus `AZURE_SUBSCRIPTION_ID`).
+   - **Kubernetes** (`k8s_live`): an in-cluster ServiceAccount or a `KUBECONFIG`.
+
+   With **no ambient identity the run is INCONCLUSIVE**, not clean.
+
+2. **A provisioned egress scope — `targets/<slug>/collector-hosts.txt`.** The
+   control-plane / apiserver host the collector will reach must be declared in this
+   file so the egress gate authorises it. With **no matching entry the run is
+   INCONCLUSIVE** — `k8s_live` names `collector-hosts.txt` explicitly — not clean.
+
+Provision both, and an assessed run reports either the finding it proves or a CLEAN
+that states its coverage. Provision neither, and you get an honest INCONCLUSIVE that
+tells you exactly what to configure.
+
+---
+
 ## Codebase / source-review targets (strix)
 
 ```bash

@@ -33,6 +33,52 @@ from ..intel.refs import EntityRef, canonicalize
 from ..worldmodel.models import EdgeKind, NodeKind
 
 
+# ---------------------------------------------------------------------------
+# INCONCLUSIVE outcome — a missing prerequisite is NEVER a clean negative
+# ---------------------------------------------------------------------------
+#
+# A live cloud/K8s sensor cannot assess a target it could not reach. Its prerequisites are AMBIENT
+# read-only credentials (the host's own identity) and a provisioned egress scope
+# (``targets/<slug>/collector-hosts.txt``). When one is MISSING the sensor has assessed NOTHING — and
+# for a product whose thesis is a SOUND NEGATIVE, reporting "assessed nothing" as "found nothing" is
+# the worst failure mode: a silent CLEAN. So a missing prerequisite mints a structured, machine-
+# readable INCONCLUSIVE outcome that NAMES the prerequisite and is visibly distinct from an assessed
+# run — never a clean negative.
+
+INCONCLUSIVE = "inconclusive"
+
+
+def inconclusive_result(sensor: str, *, missing: str, detail: str) -> ToolResult:
+    """Mint a MISSING-PREREQUISITE sensor outcome as an explicit, machine-readable INCONCLUSIVE
+    verdict — NEVER a clean negative.
+
+    A live cloud/K8s sensor that lacks a prerequisite (AMBIENT read-only credentials, or a provisioned
+    egress scope — ``targets/<slug>/collector-hosts.txt``) has assessed NOTHING. Reporting that as
+    "found nothing" is a silent CLEAN — the worst failure mode for a sound-negative product. So the
+    outcome is ``ok=False`` (nothing ran to completion) carrying a TYPED marker in ``output`` —
+    ``status='inconclusive'``, ``assessed=False``, ``missing_prerequisite=<name>`` — that a report/
+    verdict layer keys on to keep a not-assessed surface OUT of any clean negative, plus a loud
+    ``note`` that leads with INCONCLUSIVE and names what was not assessed. The marker rides in
+    ``output`` because a failed ToolResult carries no facts, so that field is free for the reason
+    (a report keys on the TYPED marker, not on the free-text note). Total."""
+    return ToolResult(
+        ok=False,
+        note=(f"{sensor}: INCONCLUSIVE — a missing prerequisite means NOTHING was assessed; this is "
+              f"NOT a clean result. {detail}"),
+        output={"status": INCONCLUSIVE, "assessed": False, "missing_prerequisite": missing,
+                "sensor": sensor},
+    )
+
+
+def is_inconclusive(result: Any) -> bool:
+    """True iff ``result`` is a structured INCONCLUSIVE sensor outcome (a missing prerequisite meant
+    NOTHING was assessed) — the signal a verdict/report layer keys on to keep a not-assessed surface
+    out of a clean negative. Total: a plain failure, an assessed ``ok=True`` result, or ``None`` is
+    NOT inconclusive."""
+    out = getattr(result, "output", None)
+    return isinstance(out, dict) and out.get("status") == INCONCLUSIVE and out.get("assessed") is False
+
+
 @runtime_checkable
 class Sensor(Protocol):
     """A gated tool that also knows how to NORMALIZE its output into world-model observations.
@@ -62,6 +108,20 @@ class SensorResult:
     @property
     def ok(self) -> bool:
         return self.result.ok and not self.result.refused
+
+    @property
+    def inconclusive(self) -> bool:
+        """True iff a prerequisite was missing so NOTHING was assessed — a not-assessed outcome the
+        caller must keep OUT of any clean negative (see ``inconclusive_result``)."""
+        return is_inconclusive(self.result)
+
+    @property
+    def missing_prerequisite(self) -> str:
+        """The prerequisite whose absence made the run inconclusive ('' when the run was assessed)."""
+        out = getattr(self.result, "output", None)
+        if self.inconclusive and isinstance(out, dict):
+            return str(out.get("missing_prerequisite") or "")
+        return ""
 
 
 def service_observations(
