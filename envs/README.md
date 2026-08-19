@@ -14,6 +14,12 @@ Build both (prefers `uv`, falls back to venv+pip):
 bash envs/build_envs.sh        # creates .venv-sovereign and .venv-offense, then verifies the boundary
 ```
 
+Third-party deps install from the committed **hash locks** under `pip --require-hashes` (see
+`docs/SUPPLY-CHAIN.md`): the framework closure from each plane's lock, and `vendor/strix`'s heavy
+live-scan extras from a dedicated `infra/supply-chain/strix.lock` (exported from `vendor/strix/uv.lock`;
+regenerate with `infra/supply-chain/gen-strix-lock.sh`). A missing lock **aborts** the build under
+`VIGIL_POSTURE=production` and only warns otherwise — never a silent unlocked fallback.
+
 The member sets are `envs/sovereign.txt` and `envs/offense.txt` (editable installs). The uv
 workspace root (`/pyproject.toml`) lists all members for discovery; the two **isolated** locks are
 these two sets, because a single uv workspace resolves to one shared environment — which is exactly

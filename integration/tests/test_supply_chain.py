@@ -21,13 +21,18 @@ Pure stdlib + pytest, so this file adds nothing to the dependency surface it aud
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
+import io
 import os
 import re
 import stat
 import subprocess
 import sys
 import tempfile
+import venv
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -36,6 +41,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "supply-chain.yml"
 TRIVYIGNORE = REPO_ROOT / ".trivyignore"
+
+#: vendor/strix's live-scan extras are NOT in the offense framework lock; they have a DEDICATED
+#: hash-pinned lock (exported from the committed vendor/strix/uv.lock) so `envs/build_envs.sh` can
+#: install them under `--require-hashes` instead of resolving them fresh from PyPI on every operator
+#: install — the largest unlocked surface in the product, co-loaded with the offense engine ([W3-6]).
+STRIX_LOCK = REPO_ROOT / "infra/supply-chain/strix.lock"
+STRIX_PYPROJECT = REPO_ROOT / "vendor/strix/pyproject.toml"
+BUILD_ENVS = REPO_ROOT / "envs" / "build_envs.sh"
 
 #: Every committed hash-pinned lock, and the pip-compile input it is generated from.
 #: Two locks, not one: the sovereign/offense split (FATAL-2) means the two environments must
@@ -462,3 +475,257 @@ def test_the_justification_check_can_actually_fail() -> None:
             f"stdout={code.stdout!r}\nstderr={code.stderr!r}"
         )
     assert TRIVYIGNORE == src  # the real path was not mutated for other tests
+
+
+# ======================================================================================
+# 3. vendor/strix's live-scan extras are hash-locked (W3-6)
+#
+# vendor/strix (the offense agent body) declares heavy live-scan deps — openai-agents[litellm],
+# litellm, openai, docker, textual, cvss, caido-sdk-client + their transitive closure — that are
+# NOT in the offense framework lock. Before this slice they resolved FRESH from PyPI on every
+# operator install (envs/build_envs.sh), the largest unlocked surface in the product and co-loaded
+# with the offense engine. This section proves: the closure is committed and fully hash-pinned; the
+# install uses --require-hashes; no operator install path resolves it unlocked; the missing-lock
+# fallback FAILS in production posture (and only warns in dev); and --require-hashes actually rejects
+# a corrupted or missing hash (the gate is not a no-op).
+# ======================================================================================
+
+
+def _pinned_names(lock: Path) -> set[str]:
+    """Canonical `name` of every `name==version` pin in a requirements lock."""
+    return {
+        _canon(m.group(1))
+        for m in map(_PINNED_LINE.match, lock.read_text(encoding="utf-8").splitlines())
+        if m
+    }
+
+
+def _strix_declared_runtime_deps() -> set[str]:
+    """Canonical names of vendor/strix's declared `[project].dependencies` (extras/specifiers stripped)."""
+    import tomllib  # stdlib >=3.11; the locks (and this repo) target 3.13
+
+    data = tomllib.loads(STRIX_PYPROJECT.read_text(encoding="utf-8"))
+    deps = data["project"]["dependencies"]
+    # "openai-agents[litellm]==0.14.6" -> "openai-agents"; "openai>=2.26.0,<2.45" -> "openai"
+    return {_canon(re.split(r"[\[<>=!~;\s]", d.strip(), maxsplit=1)[0]) for d in deps}
+
+
+def _extract_bash_function(script: Path, name: str) -> str | None:
+    """Return the text of a top-level bash function `name() { ... }` (closing `}` at column 0)."""
+    lines = script.read_text(encoding="utf-8").splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith(f"{name}() {{")), None)
+    if start is None:
+        return None
+    end = next((j for j in range(start + 1, len(lines)) if lines[j] == "}"), None)
+    if end is None:
+        return None
+    return "\n".join(lines[start : end + 1])
+
+
+def _build_synthetic_wheel(dst_dir: Path, name: str = "obsidianfixture", ver: str = "1.0") -> tuple[Path, str]:
+    """A minimal but VALID pure-python wheel + its sha256, so pip can install it offline from a
+    --find-links dir. Lets the --require-hashes gate be exercised end-to-end with no network."""
+
+    def b64(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    dist = f"{name}-{ver}.dist-info"
+    files = {
+        f"{name}/__init__.py": b'__version__ = "1.0"\n',
+        f"{dist}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {ver}\n".encode(),
+        f"{dist}/WHEEL": b"Wheel-Version: 1.0\nGenerator: obsidian\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    record = [f"{arc},sha256={b64(hashlib.sha256(d).digest())},{len(d)}" for arc, d in files.items()]
+    record.append(f"{dist}/RECORD,,")
+    files[f"{dist}/RECORD"] = ("\n".join(record) + "\n").encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for arc, d in files.items():
+            z.writestr(arc, d)
+    whl = dst_dir / f"{name}-{ver}-py3-none-any.whl"
+    whl.write_bytes(buf.getvalue())
+    return whl, hashlib.sha256(whl.read_bytes()).hexdigest()
+
+
+def test_strix_lock_exists_and_is_fully_hash_pinned() -> None:
+    """The committed strix lock must exist and carry a sha256 hash on EVERY pin.
+
+    `--require-hashes` is all-or-nothing: pip rejects the whole file if a single requirement is
+    unpinned or unhashed, so one hashless line does not weaken the guarantee — it removes it.
+    """
+    assert STRIX_LOCK.is_file(), (
+        f"missing {STRIX_LOCK.relative_to(REPO_ROOT)} — vendor/strix's live-scan extras have no "
+        f"hash-locked closure, so they resolve fresh from PyPI on every install. Regenerate with:\n"
+        f"  bash infra/supply-chain/gen-strix-lock.sh"
+    )
+    lines = STRIX_LOCK.read_text(encoding="utf-8").splitlines()
+    pins = [m.group(1) for m in map(_PINNED_LINE.match, lines) if m]
+    assert len(pins) >= 50, (
+        f"{STRIX_LOCK.relative_to(REPO_ROOT)} has only {len(pins)} pins — strix's closure is dozens "
+        f"of packages; a lock this small is a placeholder or a broken export."
+    )
+    missing: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = _PINNED_LINE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        # A pin's hashes may sit on the same line or on following `\`-continued lines.
+        has_hash = "hash=" in lines[i]
+        j = i
+        while lines[j].rstrip().endswith("\\"):
+            j += 1
+            if j < len(lines) and "hash=" in lines[j]:
+                has_hash = True
+        if not has_hash:
+            missing.append(m.group(1))
+        i = j + 1
+    assert not missing, (
+        f"{STRIX_LOCK.relative_to(REPO_ROOT)} has pins with NO --hash= (breaks --require-hashes for "
+        f"the whole file): {missing}"
+    )
+
+
+def test_strix_lock_covers_strix_declared_runtime_deps() -> None:
+    """A lock that silently dropped one of strix's declared deps would leave it installed unpinned.
+
+    Every name in vendor/strix/pyproject.toml `[project].dependencies` must appear as a pin in the
+    lock (mirrors the offense/sovereign 'lock covers its .in' check).
+    """
+    declared = _strix_declared_runtime_deps()
+    pinned = _pinned_names(STRIX_LOCK)
+    uncovered = sorted(declared - pinned)
+    assert not uncovered, (
+        f"{STRIX_LOCK.relative_to(REPO_ROOT)} does not pin these declared strix runtime deps "
+        f"(they would install unpinned): {uncovered}. Regenerate: bash infra/supply-chain/gen-strix-lock.sh"
+    )
+
+
+def test_build_envs_installs_strix_extras_under_require_hashes() -> None:
+    """The operator install path must install strix's extras from the hash lock, not resolve fresh."""
+    text = _strip_comments(BUILD_ENVS.read_text(encoding="utf-8"))
+    assert 'STRIX_LOCK="infra/supply-chain/strix.lock"' in text, (
+        "envs/build_envs.sh does not declare STRIX_LOCK pointing at the committed strix lock"
+    )
+    assert '--require-hashes -r "$STRIX_LOCK"' in text, (
+        "envs/build_envs.sh does not install the strix live-scan extras under --require-hashes — "
+        "they would resolve fresh from PyPI on every operator install (the W3-6 defect)."
+    )
+
+
+def test_no_operator_install_path_resolves_strix_extras_unlocked() -> None:
+    """No install path in the repo may resolve strix's extras without hashes.
+
+    The pre-fix build installed `venv_pip "$venv" "${withdep[@]}"` — strix WITH its live-scan deps and
+    NO hashes — unconditionally. That line, and its 'not hash-locked' rationale, must be gone. The
+    only remaining fresh strix install is the dev-only fallback, reached solely when the strix lock is
+    absent (which is fail-closed in production posture, proven separately).
+    """
+    text = _strip_comments(BUILD_ENVS.read_text(encoding="utf-8"))
+    assert 'venv_pip "$venv" "${withdep[@]}"' not in text, (
+        "the pre-fix UNCONDITIONAL unlocked strix install is still present in build_envs.sh"
+    )
+    # The strix install must be gated on the strix lock: --no-deps when locked (extras already pinned),
+    # and the ONLY fresh (deps-from-PyPI) strix install must be the dev fallback reached AFTER
+    # lock_missing_or_die has run (fail-closed in production posture).
+    assert 'if [ -n "$strix_locked" ]; then' in text, "the strix install is not gated on the strix lock"
+    assert '--no-deps -e "$s"' in text, (
+        "when the strix lock IS present, strix must install --no-deps over the pinned extras"
+    )
+    fresh = [mo.start() for mo in re.finditer(r'venv_pip "\$venv" -e "\$s"', text)]
+    assert len(fresh) == 1, (
+        f"expected exactly one (guarded) fresh strix editable install, found {len(fresh)} — a stray "
+        f"unhashed strix install may have slipped in"
+    )
+    guard = text.find('lock_missing_or_die "$STRIX_LOCK"')
+    assert 0 <= guard < fresh[0], (
+        "the fresh strix editable install is NOT preceded by the lock_missing_or_die guard — strix "
+        "extras could install unlocked without the production-posture refusal"
+    )
+    # bootstrap.sh (the only documented install path) must delegate, never install strix itself.
+    boot = REPO_ROOT / "bootstrap.sh"
+    if boot.is_file():
+        bt = _strip_comments(boot.read_text(encoding="utf-8"))
+        assert "vendor/strix" not in bt, (
+            "bootstrap.sh installs vendor/strix directly, bypassing build_envs.sh's hash lock"
+        )
+
+
+def test_unlocked_fallback_fails_closed_in_production_posture() -> None:
+    """The missing-lock fallback must ABORT under VIGIL_POSTURE=production and only WARN otherwise.
+
+    This executes the SHIPPED `lock_missing_or_die` from build_envs.sh (not a copy). The dev path
+    exiting 0 is the NEGATIVE CONTROL: it proves the guard is posture-CONDITIONAL, not a blanket
+    abort that would 'pass' vacuously, and not a no-op that never fires.
+    """
+    fn = _extract_bash_function(BUILD_ENVS, "lock_missing_or_die")
+    assert fn is not None, (
+        "build_envs.sh has no lock_missing_or_die function — the fallback is still a silent, "
+        "unconditional degrade to fresh resolution (the W3-6 defect)."
+    )
+    script = fn + '\nlock_missing_or_die "infra/supply-chain/strix.lock" "the strix live-scan lock"\n'
+
+    def run(posture: str | None):
+        env = {k: v for k, v in os.environ.items() if k != "VIGIL_POSTURE"}
+        if posture is not None:
+            env["VIGIL_POSTURE"] = posture
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+
+    prod = run("production")
+    assert prod.returncode != 0, (
+        "VIGIL_POSTURE=production did NOT refuse the missing strix lock — the unlocked fallback "
+        f"still succeeds in production posture.\nstdout={prod.stdout!r}\nstderr={prod.stderr!r}"
+    )
+    assert "FATAL" in prod.stderr, f"production refusal is not loud: stderr={prod.stderr!r}"
+    assert run("Prod").returncode != 0, "posture match is not case-insensitive (Prod should refuse)"
+
+    # NEGATIVE CONTROL: dev / unset posture warns loudly but does NOT abort.
+    for dev_posture in (None, "dev"):
+        dev = run(dev_posture)
+        assert dev.returncode == 0, (
+            f"VIGIL_POSTURE={dev_posture!r} aborted — the guard is a blanket abort, not a posture "
+            f"gate (a green production refusal would then be meaningless).\nstderr={dev.stderr!r}"
+        )
+        assert "warn" in dev.stderr.lower(), f"dev fallback is silent, not a loud warning: {dev.stderr!r}"
+
+
+def test_require_hashes_rejects_a_corrupted_or_missing_hash() -> None:
+    """NEGATIVE CONTROL for the hash gate itself: --require-hashes must REFUSE a corrupted hash and a
+    missing hash, and ACCEPT the correct one. Fully offline (a hand-built wheel served from a local
+    --find-links dir), so it proves the mechanism build_envs.sh relies on is not a no-op."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        find_links = root / "fl"
+        find_links.mkdir()
+        whl, good_sha = _build_synthetic_wheel(find_links)
+
+        vdir = root / "venv"
+        try:
+            venv.create(vdir, with_pip=True)
+        except Exception as exc:  # pragma: no cover — venv/ensurepip should exist in CI
+            pytest.skip(f"cannot create a venv to exercise pip --require-hashes: {exc}")
+        pip = vdir / ("Scripts" if os.name == "nt" else "bin") / "pip"
+
+        def install(req_text: str):
+            req = root / "req.txt"
+            req.write_text(req_text, encoding="utf-8")
+            return subprocess.run(
+                [str(pip), "install", "--require-hashes", "--no-index",
+                 "--find-links", str(find_links), "--dry-run", "-r", str(req)],
+                capture_output=True, text=True,
+            )
+
+        ok = install(f"obsidianfixture==1.0 --hash=sha256:{good_sha}\n")
+        assert ok.returncode == 0, (
+            "the CORRECT hash was rejected — the gate is broken the other way (blanket-reject), so a "
+            f"passing real lock would prove nothing.\nstdout={ok.stdout!r}\nstderr={ok.stderr!r}"
+        )
+
+        bad = install("obsidianfixture==1.0 --hash=sha256:" + ("0" * 64) + "\n")
+        assert bad.returncode != 0, "a CORRUPTED hash was ACCEPTED — --require-hashes is a no-op"
+        assert "sha256" in (bad.stdout + bad.stderr).lower(), "no hash-mismatch diagnostic emitted"
+
+        mis = install("obsidianfixture==1.0\n")
+        assert mis.returncode != 0, "a MISSING hash was ACCEPTED — --require-hashes is a no-op"
+        assert "hash" in (mis.stdout + mis.stderr).lower(), "no missing-hash diagnostic emitted"

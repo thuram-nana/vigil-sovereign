@@ -1019,11 +1019,11 @@ detail: [`docs/SUPPLY-CHAIN.md`](SUPPLY-CHAIN.md).
   `>=50`, `apps/sigil/requirements.txt:1` `==50.0.0`) and both locks regenerated.
 - **An SBOM**, and **SHA-pinned GitHub Actions** in the supply-chain workflow.
 - **What it does NOT prove, verbatim from the policy doc's own §6:** `ci.yml` still installs unpinned
-  ranges; **so does `bootstrap.sh`, the only documented install path** (`envs/build_envs.sh:14-23` installs
-  `envs/*.txt`, which are `-e` lines with no hashes) — so the locks are proven installable in CI and are
-  **not** what an operator installs today; non-Python ecosystems (`vendor/strix/uv.lock`,
-  `apps/sigil/kernel/Cargo.lock`, a `package-lock.json`) are scanned but not locked by us; hashes are not
-  signatures (PEP 740 / sigstore is not wired); and drift plus HIGH findings are advisory.
+  ranges (its test jobs — not the operator path) — `bootstrap.sh`/`envs/build_envs.sh` now install the
+  framework closure **and** `vendor/strix`'s live-scan extras from the committed locks under
+  `--require-hashes`, with the first-party `-e` members `--no-deps` on top; Cargo/npm ecosystems
+  (`apps/sigil/kernel/Cargo.lock`, a `package-lock.json`) are scanned but not locked by us; hashes are
+  not signatures (PEP 740 / sigstore is not wired); and drift plus HIGH findings are advisory.
 
 ### Cross-check against existing docs
 

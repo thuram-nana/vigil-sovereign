@@ -14,13 +14,18 @@
 #   * env-sovereign is FULLY reproducible — the sovereign lock covers every third-party runtime dep of
 #     its members (vigil_core, sigil, integration), all installed --no-deps over the lock.
 #   * env-offense's FRAMEWORK closure (vigil_core, engine/crucible, gateway, integration) is
-#     reproducible from the offense lock; vendor/strix's live-scan extras are NOT in that lock and are
-#     fetched fresh (see the strix note in build() — matches the existing "install as needed" design).
-#     Locking strix too would need a separate strix lock (a follow-on).
+#     reproducible from the offense lock; vendor/strix's heavy live-scan extras (openai-agents/litellm/
+#     openai/docker/textual/cvss/caido-sdk-client + their transitive closure) are NOT in that lock but
+#     ARE reproducible from a DEDICATED hash-pinned strix lock (infra/supply-chain/strix.lock, exported
+#     from the committed vendor/strix/uv.lock — regenerate with infra/supply-chain/gen-strix-lock.sh).
+#     Both layers install under `--require-hashes`; the strix lock is applied FIRST so the framework
+#     lock, applied next, wins any shared-dependency version (e.g. keeps cryptography>=50 — the
+#     CVE-2026-69247 fix — over strix's older transitive pin). The members go in --no-deps on top.
 #   * PEP 517 BUILD backends (setuptools-rust for the Rust WARDEN kernel; hatchling/setuptools) are
 #     fetched from the index under build isolation — build-time tools are not in the runtime locks.
-# If a lock is absent on this checkout the build falls back to fresh member resolution (warned) so it
-# degrades rather than hard-failing.
+# If a required lock is absent on this checkout the build FAILS in production posture
+# (VIGIL_POSTURE=production) and otherwise warns LOUDLY and degrades to fresh, unlocked resolution —
+# never a SILENT fallback. That fail-closed posture is the control [W9-4] builds on.
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
@@ -33,6 +38,7 @@ fi
 
 SOVEREIGN_LOCK="infra/supply-chain/sovereign.lock.txt"
 OFFENSE_LOCK="engine/crucible/framework/v2/requirements.lock.txt"
+STRIX_LOCK="infra/supply-chain/strix.lock"   # vendor/strix's hash-pinned live-scan extras (env-offense only)
 
 venv_pip() {  # venv_pip <venv> <pip-args...>  — uv when present, else the venv's pip
   local venv="$1"; shift
@@ -42,6 +48,25 @@ venv_pip() {  # venv_pip <venv> <pip-args...>  — uv when present, else the ven
   else
     "$venv/bin/pip" install "$@"
   fi
+}
+
+lock_missing_or_die() {  # <lock-path> <human-label> — the fail-closed rule for a missing hash lock.
+  # PRODUCTION posture (VIGIL_POSTURE=production|prod) REFUSES to resolve dependencies unlocked and
+  # aborts the build (set -e amplifies the explicit exit). Any other posture (dev, the default) warns
+  # LOUDLY and lets the caller degrade to fresh resolution. Never a SILENT fallback. See [W9-4].
+  local lock="$1" label="$2" posture="${VIGIL_POSTURE:-}"
+  posture="${posture,,}"
+  case "$posture" in
+    production|prod)
+      echo "    [FATAL] $label is missing ($lock) and VIGIL_POSTURE=${VIGIL_POSTURE} — refusing to" \
+           "resolve dependencies UNLOCKED in production posture. Commit the lock (regenerate the strix" \
+           "lock with infra/supply-chain/gen-strix-lock.sh; see docs/SUPPLY-CHAIN.md), or unset" \
+           "VIGIL_POSTURE for a dev build." >&2
+      exit 1 ;;
+    *)
+      echo "    [warn] $label is MISSING ($lock) — falling back to FRESH, UNLOCKED resolution (NOT" \
+           "hash-locked). VIGIL_POSTURE=production REFUSES this; set it in every deployment." >&2 ;;
+  esac
 }
 
 members_of() {  # echo the `-e <path>` editable targets declared in a plane's reqs file
@@ -58,24 +83,59 @@ build() {  # name  lock  reqs-file
     "$venv/bin/pip" install --upgrade pip >/dev/null
   fi
   # Split the editable members (single source of membership = envs/<plane>.txt):
-  #  * MOST members' runtime deps ARE in the lock -> install --no-deps (fully reproducible).
+  #  * MOST members' runtime deps ARE in the framework lock -> install --no-deps (fully reproducible).
   #  * vendor/strix is the exception: its heavy live-scan deps (openai-agents/litellm/docker/textual/…)
-  #    are deliberately NOT in the framework lock ("install as needed to run a live scan"), so it is
-  #    installed WITH deps. Its SHARED deps (pydantic/requests) are already pinned by the lock and
-  #    satisfy strix, so this adds strix's extras without churning the locked closure.
-  local nodep=() withdep=() m
+  #    are deliberately NOT in the framework lock, so they come from the DEDICATED hash-pinned strix
+  #    lock ($STRIX_LOCK) — installed under --require-hashes too, so strix's extras NEVER resolve fresh
+  #    from PyPI. strix itself then installs editable --no-deps over those pinned extras.
+  local nodep=() strix=() m s framework_locked="" strix_locked=""
   while IFS= read -r m; do
     [ -z "$m" ] && continue
-    if [ "$m" = "./vendor/strix" ]; then withdep+=(-e "$m"); else nodep+=(-e "$m"); fi
+    if [ "$m" = "./vendor/strix" ]; then strix+=("$m"); else nodep+=(-e "$m"); fi
   done < <(members_of "$reqs")
+
+  # 1. vendor/strix's live-scan extras FIRST (offense only), so the framework lock applied in step 2
+  #    WINS every shared-dependency version — e.g. keeps cryptography>=50 (the CVE-2026-69247 fix) over
+  #    strix's older transitive pin. strix's UNIQUE extras stay at the strix lock's pins.
+  if [ "${#strix[@]}" -gt 0 ]; then
+    if [ -f "$STRIX_LOCK" ]; then
+      echo "    strix live-scan extras (reproducible, hash-locked): $STRIX_LOCK"
+      venv_pip "$venv" --require-hashes -r "$STRIX_LOCK"      # refuses ANY unpinned/unhashed package
+      strix_locked=1
+    else
+      lock_missing_or_die "$STRIX_LOCK" "the strix live-scan lock"   # production: exits here
+    fi
+  fi
+
+  # 2. Framework third-party closure — the AUTHORITATIVE layer for shared deps.
   if [ -f "$lock" ]; then
     echo "    third-party (reproducible, hash-locked): $lock"
     venv_pip "$venv" --require-hashes -r "$lock"      # refuses ANY unpinned/unhashed package
-    [ "${#nodep[@]}" -gt 0 ] && { echo "    members (editable, --no-deps): ${nodep[*]}"; venv_pip "$venv" --no-deps "${nodep[@]}"; }
-    [ "${#withdep[@]}" -gt 0 ] && { echo "    strix (editable, WITH live-scan deps — not hash-locked): ${withdep[*]}"; venv_pip "$venv" "${withdep[@]}"; }
+    framework_locked=1
   else
-    echo "    [warn] $lock missing on this checkout — falling back to FRESH member resolution (NOT hash-locked)"
-    venv_pip "$venv" "${nodep[@]}" "${withdep[@]}"
+    lock_missing_or_die "$lock" "the env-$name framework lock"       # production: exits here
+  fi
+
+  # 3. First-party members. Their runtime deps are already satisfied by the framework lock -> --no-deps
+  #    (except in the dev-only unlocked fallback, where the lock was absent and they pull deps fresh).
+  if [ "${#nodep[@]}" -gt 0 ]; then
+    if [ -n "$framework_locked" ]; then
+      echo "    members (editable, --no-deps): ${nodep[*]}"; venv_pip "$venv" --no-deps "${nodep[@]}"
+    else
+      echo "    members (editable, WITH deps — UNLOCKED dev fallback): ${nodep[*]}"; venv_pip "$venv" "${nodep[@]}"
+    fi
+  fi
+
+  # 4. strix itself. Its extras are already present from the strix lock (step 1) -> editable --no-deps;
+  #    in the dev-only unlocked fallback (strix lock absent) it pulls its extras fresh.
+  if [ "${#strix[@]}" -gt 0 ]; then
+    if [ -n "$strix_locked" ]; then
+      echo "    strix (editable, --no-deps — extras satisfied by the strix lock): ${strix[*]}"
+      for s in "${strix[@]}"; do venv_pip "$venv" --no-deps -e "$s"; done
+    else
+      echo "    [warn] strix (editable, WITH deps — UNLOCKED dev fallback): ${strix[*]}" >&2
+      for s in "${strix[@]}"; do venv_pip "$venv" -e "$s"; done
+    fi
   fi
   # Completeness gate: `pip check` verifies every INSTALLED package's declared dependencies are
   # satisfied, so a member that declares a runtime dep the lock OMITTED fails HERE, at build time. This
