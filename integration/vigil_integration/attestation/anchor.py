@@ -17,9 +17,12 @@ Unified floor: the returned value is always strictly greater than the persisted 
 that exceeds it, or ``floor + 1``), and the floor is re-persisted to the new value — so even switching
 grounding source, a stuck TPM, or a regressed TPM read can never make the anchor go backwards.
 
-Total by construction: the TPM probe is injectable and every branch (probe, file read, file write) is
-guarded, so ``read_monotonic_anchor`` never raises — an unreadable/unwritable substrate degrades to a
-plain software increment, never a crash. No wallclock, no RNG: the counter is a pure floor-advance.
+Fail-closed floor (W0-14 #409): a genuinely ABSENT counter is a fresh start (floor 0 — a first run must be
+able to mint), and a TPM/probe or a best-effort WRITE failure still degrades to a software increment. But a
+counter file that EXISTS yet is invalid — unreadable, non-integer/torn, or negative — is a tamper/fault on
+the exact value that prevents rollback, so ``read_monotonic_anchor`` RAISES (:class:`FloorReadError`) rather
+than silently resetting the floor to 0; the mint path converts that to a fail-closed DENY (no anchor ⇒ no
+record ⇒ the engagement gate refuses). No wallclock, no RNG: the counter is a pure floor-advance.
 """
 
 from __future__ import annotations
@@ -68,14 +71,34 @@ def _default_tpm_probe() -> Optional[int]:
     return None
 
 
+class FloorReadError(Exception):
+    """The persisted software floor EXISTS but is invalid — unreadable (I/O / permission), non-integer /
+    torn, or negative. Raised so a tampered/faulted counter fails CLOSED: the anchor cannot be read ⇒ no
+    record is minted ⇒ the engagement gate DENIES — instead of silently resetting the rollback floor to 0
+    (the old fail-open, W0-14 #409). A genuinely ABSENT counter is NOT this error: a fresh install has no
+    file and legitimately starts at 0."""
+
+
 def _read_floor(path: Path) -> int:
-    """Read the persisted software floor, total. A missing/torn/negative value reads as 0 (a fresh
-    counter), never an exception."""
+    """Read the persisted software floor. A genuinely ABSENT file reads as 0 (a fresh counter — a first
+    run MUST be able to mint). But a file that EXISTS yet cannot be parsed to a NON-NEGATIVE int —
+    unreadable (permission / I/O), non-integer / torn, or negative — is a tamper/fault signal on the very
+    value that prevents rollback, so it raises :class:`FloorReadError` (fail CLOSED) rather than silently
+    becoming 0 (W0-14 #409). Never returns a negative value; never silently returns 0 for a corrupt file."""
     try:
-        v = int(path.read_text().strip())
-    except Exception:  # noqa: BLE001 — no file / non-int / unreadable → start the floor at 0
-        return 0
-    return v if v >= 0 else 0
+        raw = path.read_text()
+    except FileNotFoundError:
+        return 0                       # genuinely absent → fresh counter (legitimate first run)
+    except OSError as exc:             # present but unreadable (permission / I/O / is-a-dir) → fail closed
+        raise FloorReadError(f"software floor at {path} is unreadable: {exc}") from exc
+    s = raw.strip()
+    try:
+        v = int(s)
+    except ValueError as exc:          # present but non-integer / torn → corrupt, fail closed (NOT a 0)
+        raise FloorReadError(f"software floor at {path} is non-integer ({s!r})") from exc
+    if v < 0:                          # a negative floor is invalid — fail closed (NOT a silent 0)
+        raise FloorReadError(f"software floor at {path} is negative ({v})")
+    return v
 
 
 def _write_floor(path: Path, value: int) -> None:
@@ -108,12 +131,21 @@ def migrate_floor(old_path: Path, new_path: Path) -> bool:
     migration raises the shared host floor to its own old value only when that is higher; a later
     engagement carrying a LOWER legacy counter can never regress it. A missing old file is a no-op (a fresh
     install has nothing to adopt). Total / best-effort: any read/write failure leaves the new floor
-    unchanged (it never regresses)."""
+    unchanged (it never regresses).
+
+    W0-14 #409: ``_read_floor`` now RAISES on a present-but-invalid (unreadable / non-integer / negative)
+    counter rather than silently reading 0. Migration stays total AND never masks a tamper: a corrupt/
+    unreadable OLD counter cannot be adopted (leave the new floor untouched), and a corrupt/unreadable NEW
+    counter is NOT overwritten with a lower legacy value (that would heal a tamper DOWN) — it is left for
+    the next mint to fail closed on. Either read failure is a no-op that never regresses the floor."""
     old_p, new_p = Path(old_path), Path(new_path)
     if not old_p.exists():
         return False
-    old_v = _read_floor(old_p)          # >= 0; an unreadable/torn old counter reads as 0 (adopt nothing)
-    cur_v = _read_floor(new_p)          # 0 when the new host counter does not yet exist
+    try:
+        old_v = _read_floor(old_p)      # >= 0; a corrupt/unreadable old counter → cannot adopt (no-op)
+        cur_v = _read_floor(new_p)      # 0 when the new host counter does not yet exist; a corrupt/
+    except FloorReadError:              # unreadable NEW counter must NOT be overwritten down to old_v —
+        return False                    # leave it for the next mint to fail closed on; never mask a tamper
     if old_v > cur_v:
         _write_floor(new_p, old_v)      # raise the host floor to the legacy value; NEVER lower it
         return True
@@ -131,7 +163,13 @@ def read_monotonic_anchor(
     TPM first: if the (injectable) probe returns an int greater than the floor, that TPM value is used
     (``grounded="tpm"``). Otherwise the value is ``floor + 1`` (``grounded="software"``) — this covers no
     TPM, a stuck TPM, or a TPM read at/below the floor, and guarantees the anchor never decreases even
-    across a grounding switch. The floor is then re-persisted to the returned value. Total: never raises."""
+    across a grounding switch. The floor is then re-persisted to the returned value.
+
+    Fail-closed on a tampered floor (W0-14 #409): a genuinely absent counter, a raising probe, and a
+    best-effort write failure all still return a value (they degrade to a software increment). But a
+    PRESENT-but-invalid counter file (unreadable / non-integer / negative) propagates
+    :class:`FloorReadError` — the mint path (:func:`ledger.record_usage`) catches it and returns no
+    attestation, so the engagement gate DENIES rather than minting under a silently-reset floor of 0."""
     path = Path(state_path) if state_path else (DEFAULT_STATE_DIR / _COUNTER_FILE)
     probe = tpm_probe if tpm_probe is not None else _default_tpm_probe
     floor = _read_floor(path)

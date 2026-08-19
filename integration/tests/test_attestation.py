@@ -538,3 +538,106 @@ def test_verify_ledger_total_on_malformed_signature():
     for resolve_key in ({"ab" * 32: "!!not-a-key!!"}, {"ab" * 32: "A" * 43 + "="}):
         v = _L.verify_ledger([rec], resolve_key=resolve_key)   # must NOT raise
         assert v.ok is False and "seq 0" in v.reason
+
+
+# --- W0-14 #409: BIND the wall-clock `at` to the monotonic counter; HARDEN the software floor ---------
+
+
+def _mint_with_at(kp, op, *, at, monotonic, prev, seq):
+    """Mint one validly-signed record with an EXPLICIT wall-clock ``at`` and monotonic anchor — the
+    non-repudiation threat model: the operator can sign, and signs a record carrying a chosen ``at``."""
+    att = record_usage(
+        operator=op, action="nmap -sV 127.0.0.1", target="http://127.0.0.1:18080/", phase="informational",
+        at=at, prev_hash=prev, signer=operator_signer(keypair=kp), seq=seq,
+        anchor=MonotonicAnchor(value=monotonic, grounded="software"),
+    )
+    assert att is not None
+    return att
+
+
+def test_INVARIANT_back_dated_at_with_valid_counter_fails():
+    """W0-14 #409 — a record with a VALID, advancing monotonic counter but an EARLIER wall-clock ``at``
+    than the prior record (the 'prove I acted before I did' repudiation attack) must FAIL verification.
+    Both records are validly signed — only the wall-clock is back-dated. This test FAILS on a tree without
+    the fix (the pre-fix verify checked only the counter, so the back-dated ``at`` verified ``ok``)."""
+    kp = _kp()
+    op = _operator(kp)
+    r0 = _mint_with_at(kp, op, at="2026-07-21T12:00:00+00:00", monotonic=10, prev="0" * 64, seq=0)
+    # seq 1: counter ADVANCES (10 -> 20, a valid non-decreasing anchor) but ``at`` is BACK-DATED an hour.
+    r1 = _mint_with_at(kp, op, at="2026-07-21T11:00:00+00:00", monotonic=20, prev=r0.record_hash, seq=1)
+    res = verify_ledger([r0, r1], resolve_key=operator_key_resolver(keypair=kp))
+    assert res.ok is False
+    assert "back-dated" in res.reason and "seq 1" in res.reason
+
+
+def test_NEGCONTROL_forward_and_equal_at_still_verify():
+    """Negative control for W0-14 #409 — the ``at`` gate is NOT a blanket refusal: a well-formed chain
+    whose wall-clock moves FORWARD verifies, and an EQUAL ``at`` (two actions in the same instant) is
+    allowed (the rule is non-decreasing, mirroring the monotonic anchor)."""
+    kp = _kp()
+    op = _operator(kp)
+    resolver = operator_key_resolver(keypair=kp)
+    r0 = _mint_with_at(kp, op, at="2026-07-21T12:00:00+00:00", monotonic=10, prev="0" * 64, seq=0)
+    fwd = _mint_with_at(kp, op, at="2026-07-21T13:00:00+00:00", monotonic=20, prev=r0.record_hash, seq=1)
+    assert verify_ledger([r0, fwd], resolve_key=resolver).ok is True
+    eq = _mint_with_at(kp, op, at="2026-07-21T12:00:00+00:00", monotonic=20, prev=r0.record_hash, seq=1)
+    assert verify_ledger([r0, eq], resolve_key=resolver).ok is True
+
+
+def test_software_floor_fails_closed_on_corrupt_negative_unreadable(tmp_path):
+    """W0-14 #409 — a PRESENT-but-invalid software floor (non-integer / torn-empty / negative / unreadable)
+    must fail CLOSED (raise :class:`FloorReadError`), NOT silently read as 0 — a silent 0 resets the exact
+    value that prevents rollback. This test FAILS on a tree without the fix (pre-fix ``_read_floor`` caught
+    every exception and returned 0). A genuinely ABSENT file still reads as 0 (a fresh install must mint)."""
+    from vigil_integration.attestation.anchor import _read_floor, FloorReadError
+
+    for name, content in (("corrupt", "not-an-int"), ("torn", ""), ("negative", "-5")):
+        p = tmp_path / f"{name}.counter"
+        p.write_text(content)
+        try:
+            got = _read_floor(p)
+        except FloorReadError:
+            got = "REFUSED"
+        assert got == "REFUSED", f"{name} floor must fail closed, not read as {got!r}"
+
+    unreadable = tmp_path / "unreadable.counter"
+    unreadable.write_text("100")
+    os.chmod(unreadable, 0o000)
+    if os.access(unreadable, os.R_OK):        # running as root bypasses the perm bit — skip only that leg
+        os.chmod(unreadable, 0o644)
+    else:
+        try:
+            _read_floor(unreadable)
+            raised = False
+        except FloorReadError:
+            raised = True
+        os.chmod(unreadable, 0o644)
+        assert raised, "an unreadable floor must fail closed, not read as 0"
+
+    # A corrupt floor must fail closed at MINT time too: no anchor -> no attestation (fail-closed DENY).
+    corrupt = tmp_path / "mint.counter"
+    corrupt.write_text("garbage")
+    kp = _kp()
+    op = _operator(kp)
+    att = record_usage(operator=op, action="a", target="t", phase="p", at="2026-07-21T12:00:00+00:00",
+                       prev_hash="0" * 64, signer=operator_signer(keypair=kp), seq=0,
+                       anchor_state_path=str(corrupt))
+    assert att is None, "minting over a corrupt floor must fail closed (no attestation)"
+
+
+def test_NEGCONTROL_wellformed_and_absent_floor_still_read(tmp_path):
+    """Negative control for W0-14 #409 — the hardened floor read is NOT always-refusing: a well-formed
+    floor returns its value and advances the anchor, and a genuinely ABSENT counter (fresh install) still
+    reads as 0 so the first attestation can be minted."""
+    from vigil_integration.attestation.anchor import _read_floor, read_monotonic_anchor
+
+    good = tmp_path / "good.counter"
+    good.write_text("7")
+    assert _read_floor(good) == 7
+    a = read_monotonic_anchor(state_path=str(good), tpm_probe=lambda: None)
+    assert a.value == 8 and a.grounded == "software"     # floor+1, advances normally
+
+    absent = tmp_path / "does-not-exist.counter"
+    assert _read_floor(absent) == 0                       # fresh install: missing file -> 0 (legitimate)
+    b = read_monotonic_anchor(state_path=str(absent), tpm_probe=lambda: None)
+    assert b.value == 1 and b.grounded == "software"      # first mint on a fresh box succeeds
