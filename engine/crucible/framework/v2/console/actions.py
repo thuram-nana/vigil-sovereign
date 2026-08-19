@@ -980,16 +980,21 @@ def _strix_session_llm_env(model_id: str, session_id: str) -> "tuple[dict, str]"
 # into this OFFENSE interpreter would breach the two-env boundary (FATAL-2). Only the prefixes whose LiteLLM
 # spelling DIFFERS from the kernel.sovereignty backend name need mapping (``vertex_ai``→``vertex``,
 # ``azure``→``azure_openai``); ``bedrock`` / ``mistral`` map to themselves; ``anthropic`` is resolved through
-# ``direct_anthropic_backend_name()`` (ZDR attestation); ``openai`` (the self-hosted family) AND ``ollama`` are
-# LOCAL only when their base URL is loopback (a remote-pointed base fail-closes to ``cloud_only``) — both
-# get a dedicated branch in ``_strix_sovereignty_backend`` BEFORE this map. Any unrecognised prefix falls
-# through to the raw provider, which ``sovereignty.classify()`` conservatively treats as ``cloud_only``.
+# ``direct_anthropic_backend_name()`` (ZDR attestation). Any prefix NOT in this map falls through to the raw
+# provider name; ``sovereignty.classify()`` then decides its trust class. A truly unrecognised prefix is
+# conservatively ``cloud_only`` (fail-closed) — but a LOCAL-classified name (``ollama`` / ``vllm`` / ``tgi`` /
+# ``llama-cpp`` / ``self-hosted`` / ``dryrun``) is trusted ``local`` ONLY after the shared loopback gate in
+# ``_strix_sovereignty_backend`` confirms its base URL is loopback; a remote-pointed base fail-closes to
+# ``cloud_only``. ``openai`` (the OpenAI-compatible self-hosted family) is the one prefix with a dedicated
+# branch there, because its DEFAULT (no base) is CLOUD (api.openai.com) — unlike the local daemons, whose
+# default endpoint is localhost, so an empty base for THEM is legitimately local.
 _STRIX_PROVIDER_TO_SOVEREIGNTY = {
-    "ollama":   "ollama",
     "bedrock":  "bedrock",
     "vertex_ai": "vertex",
     "mistral":  "mistral",
     "azure":    "azure_openai",
+    # NOTE: the former ``"ollama": "ollama"`` entry is REMOVED — it is superseded by the raw-name fall-through
+    # (``ollama`` classifies local) plus the shared loopback gate below; a dedicated entry was unreachable/dead.
 }
 
 
@@ -999,9 +1004,12 @@ def _strix_sovereignty_backend(strix_llm_env: dict) -> str:
     The child runs with ``STRIX_LLM`` = the per-session LOCAL pin (``strix_llm_env['STRIX_LLM']``) when one
     was resolved, else the ambient global ``STRIX_LLM``, else Strix's built-in cloud default
     (``anthropic/claude-opus-4-8``). We resolve that SAME precedence here and classify the LiteLLM provider
-    prefix into the backend name ``assert_permitted`` understands. Total: never raises; anything unrecognised
-    resolves to a name ``classify()`` treats as ``cloud_only`` (fail-closed — refused under every sovereign
-    tier)."""
+    prefix into the backend name ``assert_permitted`` understands. Total: never raises. Every LOCAL-classified
+    backend (``ollama`` / ``vllm`` / ``tgi`` / ``llama-cpp`` / ``self-hosted`` / ``dryrun``) is trusted
+    ``local`` ONLY when its base URL is loopback (or unset = its default localhost daemon) — a SET-but-remote
+    base fail-closes to the cloud sentinel ``openai`` (``classify() → cloud_only``, refused under every
+    sovereign tier). A non-local/unknown prefix keeps its raw provider name, which ``classify()`` places in the
+    right cloud class (unknown ⇒ ``cloud_only``)."""
     from ..kernel import sovereignty as _sovereignty
     model = str(strix_llm_env.get("STRIX_LLM") or os.environ.get("STRIX_LLM", "") or "").strip()
     if not model:
@@ -1011,31 +1019,39 @@ def _strix_sovereignty_backend(strix_llm_env: dict) -> str:
     if provider == "anthropic":
         # ZDR attestation moves a direct Anthropic client from cloud_only → trusted_cloud (one rule, one place).
         return _sovereignty.direct_anthropic_backend_name()
-    if provider == "openai":
-        # self-hosted (OpenAI-compatible) is LOCAL only when its base URL is loopback; otherwise fail-closed cloud.
-        base = str(strix_llm_env.get("LLM_API_BASE") or os.environ.get("LLM_API_BASE", "") or "").strip()
+
+    # The endpoint the child WILL dial. It gates every LOCAL-family backend below: a local backend is trusted
+    # ``local`` only when this base is LOOPBACK (or unset = the backend's default localhost daemon). Shared by
+    # the ``openai`` self-hosted branch AND the map fall-through so ONE loopback rule governs every local name.
+    base = str(strix_llm_env.get("LLM_API_BASE") or os.environ.get("LLM_API_BASE", "") or "").strip()
+
+    def _base_is_loopback() -> bool:
         try:
             from . import chat as _chat
             ok, _host = _chat._url_host_is_local(base)
-        except Exception:  # noqa: BLE001 — cannot prove loopback ⇒ NOT local (fail-closed cloud_only via "openai")
-            ok = False
-        return "self-hosted" if (base and ok) else "openai"   # classify("openai") → cloud_only (fail-closed)
-    if provider == "ollama":
-        # `ollama` classifies LOCAL — but only when it dials a LOOPBACK host. A caller-injected ollama pointed
-        # at a REMOTE base (LLM_API_BASE=http://evil:11434) would egress the source under AIR_GAPPED if we
-        # trusted the provider NAME alone, so mirror the openai sibling: a SET-but-non-loopback base fail-closes
-        # to cloud_only. An EMPTY base = the default localhost daemon (legitimately local) — preserved.
-        base = str(strix_llm_env.get("LLM_API_BASE") or os.environ.get("LLM_API_BASE", "") or "").strip()
-        if base:
-            try:
-                from . import chat as _chat
-                ok, _host = _chat._url_host_is_local(base)
-            except Exception:  # noqa: BLE001 — cannot prove loopback ⇒ NOT local (fail-closed cloud_only)
-                ok = False
-            if not ok:
-                return "openai"   # remote-pointed ollama → classify("openai") → cloud_only (fail-closed)
-        return "ollama"           # empty base (default localhost daemon) or loopback base → local
-    return _STRIX_PROVIDER_TO_SOVEREIGNTY.get(provider, provider)  # unknown prefix → classify() cloud_only
+        except Exception:  # noqa: BLE001 — cannot prove loopback ⇒ NOT local (fail-closed cloud_only)
+            return False
+        return bool(ok)
+
+    if provider == "openai":
+        # OpenAI-compatible SELF-HOSTED: LOCAL only on a proven-loopback base. Unlike the local daemons below,
+        # its DEFAULT (no base) is api.openai.com — CLOUD — so an EMPTY base stays ``openai`` → cloud_only.
+        return "self-hosted" if (base and _base_is_loopback()) else "openai"
+
+    backend = _STRIX_PROVIDER_TO_SOVEREIGNTY.get(provider, provider)
+    if _sovereignty.classify(backend) == "local":
+        # THE SHARED GATE (ollama / vllm / tgi / llama-cpp / self-hosted / dryrun): a caller-injected local NAME
+        # pointed at a REMOTE base (LLM_API_BASE=http://evil:11434) would egress the source under AIR_GAPPED if
+        # trusted on the NAME alone — the same air-gap leak the openai/ollama fixes closed. A SET-but-non-
+        # loopback base fail-closes to the cloud sentinel; an EMPTY base = the backend's default localhost
+        # endpoint (a bare local daemon), legitimately local — preserved (mirrors ollama's default semantics).
+        if base and not _base_is_loopback():
+            return "openai"   # remote-pointed local backend → classify("openai") → cloud_only (fail-closed)
+        return backend        # empty (default localhost) or loopback base → local
+    # Non-local: the fall-through PRESERVES the raw provider name. ``classify()`` places it (bedrock/vertex/
+    # mistral → sovereign_cloud; azure_openai/anything-unknown → cloud_only). Local-classified names never
+    # reach here — they are gated by the loopback check above.
+    return backend
 
 
 def _strix_sovereignty_refusal(strix_llm_env: dict) -> str:
