@@ -41,9 +41,25 @@ registered claim check — signature first, so an unverified payload is never tr
   present, equals it); **`exp`/`iat`/`nbf`** are within the configured clock skew.
 - **`nonce`** is present and equals the single-use `nonce` minted at login (constant-time compare).
 
-`state` and `nonce` are single-use, TTL-bounded, and **bound together** in a server-side ledger (the same
-atomic `O_EXCL`/`unlink` discipline as the S3 login-challenge ledger): a replayed callback finds its `state`
-already spent, and a `state`/`nonce` mix-and-match cannot pass.
+`state`, `nonce`, the **PKCE `code_verifier`**, and the **hash of the browser session cookie** are single-use,
+TTL-bounded, and **bound together** in a server-side ledger (the same atomic `O_EXCL`/`unlink` discipline as
+the S3 login-challenge ledger): a replayed callback finds its `state` already spent, and a `state`/`nonce`
+mix-and-match cannot pass.
+
+## PKCE + session-bound `state` (login-CSRF / authorization-code injection defence)
+
+Two bindings make the RP safe to drive a browser session (both REQUIRED, enforced in the callback):
+
+- **PKCE (RFC 7636, S256).** `/api/oidc/login` mints a high-entropy `code_verifier`, sends only its
+  `code_challenge` (`code_challenge_method=S256`) in the authorize redirect, and holds the verifier
+  server-side bound to the `state`. The token exchange sends the `code_verifier`; a blank one is **refused**.
+  An intercepted or injected authorization `code` is therefore useless without the initiating session's
+  verifier.
+- **Session-bound `state`.** `/api/oidc/login` sets an `HttpOnly; SameSite=Lax` session cookie (`Path=/api/oidc`)
+  and binds its SHA-256 into the `state` record. The callback recomputes the hash of the presented cookie and
+  **rejects a missing or mismatched one** (constant-time compare). An attacker cannot feed a victim their own
+  authorization response — the victim's browser does not carry the initiating session cookie, so the callback
+  refuses. `SameSite=Lax` still rides the IdP's top-level GET redirect back to the RP.
 
 ## Honest bounds — private IdP only, egress posture
 
@@ -66,22 +82,20 @@ already spent, and a `state`/`nonce` mix-and-match cannot pass.
   live cap (the mint refuses with a retry hint until the TTL clears) — acceptable because the endpoint is
   opt-in and private-tunnel-only, but worth knowing.
 
-## Required follow-on before a UI landing page adopts the bearer (NOT done here)
+## Browser-facing readiness (login-CSRF / code-injection closed — W16-6)
 
-This slice deliberately stops at returning the verified bearer as JSON. **Before** any UI landing page
-auto-adopts that bearer into the browser session, two things are REQUIRED — omitting them makes login-CSRF
-/ authorization-code injection live:
+The two follow-ons that were previously outstanding are now **implemented and REQUIRED** (see the PKCE +
+session-bound `state` section above):
 
-1. **Bind `state` to the initiating browser session.** The single-use `state` currently proves the
-   callback corresponds to a login *this server* minted; it does not yet prove it is the *same browser*
-   that started the flow. The landing page must tie the `state` to the initiating session (e.g. a
-   `HttpOnly; SameSite` session cookie set at `/api/oidc/login` and checked at the callback) so an
-   attacker cannot feed a victim their own authorization response.
-2. **Add PKCE** (`code_challenge`/`code_verifier`, S256). The verifier must be bound to the session and
-   sent at token exchange, closing authorization-code injection/interception.
+1. **`state` is bound to the initiating browser session** via an `HttpOnly; SameSite=Lax` cookie set at
+   `/api/oidc/login` and checked at the callback — an attacker cannot feed a victim their own authorization
+   response.
+2. **PKCE (`code_challenge`/`code_verifier`, S256)** is minted at login (verifier held server-side, bound to
+   `state`) and sent at token exchange — closing authorization-code injection/interception.
 
-Until both land, treat the RP as a verification core to be driven by tests / a trusted local caller — not
-as a browser-facing SSO endpoint.
+The callback refuses a missing/mismatched session cookie and a blank/absent PKCE verifier. This is the
+security core a UI landing page can build on; the callback still returns the bearer as JSON (auto-adopting it
+into a browser cookie session remains a separate UI concern).
 
 ## Configuration (only read when enabled)
 
@@ -96,7 +110,7 @@ as a browser-facing SSO endpoint.
 | `SIGIL_OIDC_TOKEN_ENDPOINT` | IdP token endpoint (code → tokens) |
 | `SIGIL_OIDC_JWKS_URI` | IdP JWKS URL (id_token signature keys) |
 | `SIGIL_OIDC_SIGNING_ALGS` | asymmetric-only allowlist, default `RS256` (e.g. `RS256,ES256`) |
-| `SIGIL_OIDC_USERNAME_CLAIM` | which verified claim maps to a `governor.account` username. **Prefer an IdP-guaranteed-unique, IMMUTABLE claim** (e.g. `sub`). `preferred_username`/`email` are MUTABLE at some IdPs — if a user can change theirs, the account mapping can drift or be steered onto another account. Default `preferred_username` for usability; set to `sub` (or an immutable unique claim) for the strongest binding. |
+| `SIGIL_OIDC_USERNAME_CLAIM` | which verified claim maps to a `governor.account` username. **Defaults to the IMMUTABLE `sub`** (IdP-guaranteed-unique, stable). `preferred_username`/`email` are MUTABLE at some IdPs — if a user can change theirs, the account mapping can drift or be steered onto another account — so using one is an **explicit opt-in** (set `SIGIL_OIDC_USERNAME_CLAIM=preferred_username`), knowingly trading the strongest binding for usability. |
 | `SIGIL_OIDC_CLOCK_SKEW_SECONDS` | exp/iat/nbf tolerance (default `60`) |
 
 A configured `none`/`HS*` in `SIGIL_OIDC_SIGNING_ALGS`, or any missing endpoint, is refused at load — the RP

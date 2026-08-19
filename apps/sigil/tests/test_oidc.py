@@ -25,6 +25,7 @@ import base64
 import hashlib
 import hmac
 import http.client
+import http.cookies
 import itertools
 import json
 import tempfile
@@ -48,7 +49,13 @@ TOKEN = "owner-shared-token-oidc-xyz"
 ISSUER = "https://idp.internal.tailnet/realms/vigil"      # an OPERATOR-RUN IdP identifier (tunnel-reachable)
 CLIENT_ID = "vigil-cockpit"
 REDIRECT_URI = "http://127.0.0.1:8733/api/oidc/callback"
+_SID_COOKIE = "sigil_oidc_sid"       # the HttpOnly session-binding cookie the RP sets at /api/oidc/login
 _iss = itertools.count(1)
+# a minimal, VALID from_settings() input with NO username_claim (so the immutable `sub` default applies)
+_BASE_SETTINGS = {"issuer": ISSUER, "client_id": CLIENT_ID, "client_secret": "s", "redirect_uri": REDIRECT_URI,
+                  "authorize_endpoint": "http://127.0.0.1:1/a", "token_endpoint": "http://127.0.0.1:1/t",
+                  "jwks_uri": "http://127.0.0.1:1/j", "scopes": "openid", "signing_algs": ["RS256"],
+                  "clock_skew_seconds": 60}
 
 
 def _issue() -> float:
@@ -76,6 +83,7 @@ class MockIdP:
         self.ec_priv = ec.generate_private_key(ec.SECP256R1())
         self.ec_kid = "ec-key-1"
         self.next_id_token: "str | None" = None            # the token the mock token-endpoint will return
+        self.last_token_form: "dict | None" = None         # the form the RP posted to /token (PKCE assertions)
 
     # --- JWKS ---
     def _rsa_jwk(self) -> dict:
@@ -93,6 +101,7 @@ class MockIdP:
 
     # --- injectable hooks for build_server ---
     def http_post(self, url: str, form: dict) -> dict:      # the mock token endpoint
+        self.last_token_form = dict(form)                  # capture (PKCE code_verifier assertions)
         return {"id_token": self.next_id_token, "token_type": "Bearer", "access_token": "opaque"}
 
     def jwks_fetcher(self, url: str) -> dict:               # the mock JWKS endpoint
@@ -193,17 +202,29 @@ def _raw(port: int, method: str, path: str, headers: "dict | None" = None):
     return status, doc, loc
 
 
-def _login_state_nonce(port: int):
-    """Hit /api/oidc/login (no redirect-follow) and pull the single-use state+nonce out of the Location."""
-    status, _doc, loc = _raw(port, "GET", "/api/oidc/login")
+def _login(port: int):
+    """Hit /api/oidc/login (no redirect-follow); return (state, nonce, sid, params). Captures BOTH the
+    single-use `state`/`nonce` AND the PKCE `code_challenge` from the authorize URL, and the value of the
+    HttpOnly session-binding cookie set in the Set-Cookie header — the callback needs that cookie back."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/api/oidc/login", headers={"Host": f"127.0.0.1:{port}"})
+    r = conn.getresponse()
+    r.read()
+    status, loc, setck = r.status, r.getheader("Location"), r.getheader("Set-Cookie")
+    conn.close()
     assert status == 302 and loc, (status, loc)
-    q = parse_qs(urlparse(loc).query)
-    return q["state"][0], q["nonce"][0]
+    params = parse_qs(urlparse(loc).query)
+    sid = http.cookies.SimpleCookie(setck)[_SID_COOKIE].value if setck else ""
+    return params["state"][0], params["nonce"][0], sid, params
 
 
-def _callback(port: int, idp: MockIdP, id_token: str, state: str, *, code: str = "auth-code-1"):
+def _callback(port: int, idp: MockIdP, id_token: str, state: str, *, sid: "str | None" = None,
+              code: str = "auth-code-1"):
+    """Drive the callback. `sid` (when given) is replayed as the session-binding cookie — the SAME browser
+    that started the flow. Omit it (or pass a different value) to model a login-CSRF / injected response."""
     idp.next_id_token = id_token
-    return _raw(port, "GET", f"/api/oidc/callback?code={code}&state={state}")
+    headers = {"Cookie": f"{_SID_COOKIE}={sid}"} if sid else None
+    return _raw(port, "GET", f"/api/oidc/callback?code={code}&state={state}", headers)
 
 
 # ================================================================== OFF-by-default
@@ -246,9 +267,9 @@ def test_valid_rs256_id_token_maps_to_account_and_yields_working_bearer(monkeypa
     s, port, spine = _serve(idp)
     try:
         _mkaccount(spine, "alice", "operator")
-        state, nonce = _login_state_nonce(port)
+        state, nonce, sid, _ = _login(port)
         token = idp.mint(nonce=nonce, alg="RS256", username="alice")
-        status, doc, _ = _callback(port, idp, token, state)
+        status, doc, _ = _callback(port, idp, token, state, sid=sid)
         assert status == 200 and doc["authenticated"] is True
         assert doc["username"] == "alice" and doc["role"] == "operator"
         bearer = doc["bearer"]
@@ -263,9 +284,9 @@ def test_valid_es256_id_token_also_verifies(monkeypatch):
     s, port, spine = _serve(idp)
     try:
         _mkaccount(spine, "erin", "analyst")
-        state, nonce = _login_state_nonce(port)
+        state, nonce, sid, _ = _login(port)
         token = idp.mint(nonce=nonce, alg="ES256", username="erin")
-        status, doc, _ = _callback(port, idp, token, state)
+        status, doc, _ = _callback(port, idp, token, state, sid=sid)
         assert status == 200 and doc["role"] == "analyst"
         assert _raw(port, "GET", "/api/snapshot", {"X-SIGIL-Token": doc["bearer"]})[0] == 200
     finally:
@@ -280,10 +301,10 @@ def test_role_comes_from_owner_signed_grant_not_from_a_claim(monkeypatch):
     s, port, spine = _serve(idp)
     try:
         _mkaccount(spine, "mallory", "viewer")             # owner granted VIEWER only
-        state, nonce = _login_state_nonce(port)
+        state, nonce, sid, _ = _login(port)
         token = idp.mint(nonce=nonce, username="mallory",
                          extra={"role": "owner", "roles": ["owner", "operator"], "groups": ["admins"]})
-        status, doc, _ = _callback(port, idp, token, state)
+        status, doc, _ = _callback(port, idp, token, state, sid=sid)
         assert status == 200 and doc["username"] == "mallory"
         assert doc["role"] == "viewer", "the ROLE must come from the owner-signed grant, never from a claim"
     finally:
@@ -297,9 +318,9 @@ def test_verified_identity_with_no_owner_signed_account_is_refused(monkeypatch):
     _enable_oidc(monkeypatch, idp)
     s, port, spine = _serve(idp)
     try:
-        state, nonce = _login_state_nonce(port)
+        state, nonce, sid, _ = _login(port)
         token = idp.mint(nonce=nonce, username="ghost")    # no _mkaccount("ghost")
-        status, doc, _ = _callback(port, idp, token, state)
+        status, doc, _ = _callback(port, idp, token, state, sid=sid)
         assert status == 401 and doc.get("authenticated") is False
         assert "no owner-signed account" in doc["error"]
         assert "bearer" not in doc
@@ -317,7 +338,7 @@ def test_id_token_verification_rejects_every_attack(monkeypatch, variant):
     s, port, spine = _serve(idp)
     try:
         _mkaccount(spine, "alice", "operator")             # a REAL mapped account, so ONLY the token is bad
-        state, nonce = _login_state_nonce(port)
+        state, nonce, sid, _ = _login(port)
         if variant == "alg_none":
             token = idp.mint(nonce=nonce, alg="none", sign_key="none")
         elif variant == "hs256_confusion":
@@ -342,7 +363,7 @@ def test_id_token_verification_rejects_every_attack(monkeypatch, variant):
             token = idp.mint(nonce=nonce, extra={"exp": float("inf")})     # a never-expiring token
         elif variant == "nbf_inf":
             token = idp.mint(nonce=nonce, extra={"nbf": float("inf")})     # non-finite nbf
-        status, doc, _ = _callback(port, idp, token, state)
+        status, doc, _ = _callback(port, idp, token, state, sid=sid)
         assert status == 401, f"{variant} should be refused"
         assert doc.get("authenticated") is False and "bearer" not in doc, variant
     finally:
@@ -355,10 +376,10 @@ def test_state_is_single_use_replay_is_refused(monkeypatch):
     s, port, spine = _serve(idp)
     try:
         _mkaccount(spine, "alice", "operator")
-        state, nonce = _login_state_nonce(port)
+        state, nonce, sid, _ = _login(port)
         token = idp.mint(nonce=nonce, username="alice")
-        assert _callback(port, idp, token, state)[0] == 200            # first use wins
-        status, doc, _ = _callback(port, idp, token, state)            # same state again → spent
+        assert _callback(port, idp, token, state, sid=sid)[0] == 200            # first use wins
+        status, doc, _ = _callback(port, idp, token, state, sid=sid)            # same state again → spent
         assert status == 401 and "state" in doc["error"] and "bearer" not in doc
     finally:
         s.shutdown()
@@ -371,13 +392,127 @@ def test_totp_enrolled_mapped_account_still_needs_second_factor(monkeypatch):
     try:
         # a dummy non-empty "sealed" blob is enough: _check_totp demands a code the redirect can't carry
         _mkaccount(spine, "carol", "operator", totp_secret=base64.b64encode(b"sealed-placeholder").decode())
-        state, nonce = _login_state_nonce(port)
+        state, nonce, sid, _ = _login(port)
         token = idp.mint(nonce=nonce, username="carol")
-        status, doc, _ = _callback(port, idp, token, state)
+        status, doc, _ = _callback(port, idp, token, state, sid=sid)
         assert status == 401 and doc.get("second_factor_required") is True
         assert "bearer" not in doc, "OIDC identity-1 alone must not mint a bearer for a 2FA account"
     finally:
         s.shutdown()
+
+
+# ================================================================== W16-6: PKCE + session-bound state
+def test_authorize_carries_pkce_and_token_exchange_sends_matching_verifier(monkeypatch):
+    """The authorize redirect MUST carry a PKCE `code_challenge` (+ method=S256), and the token exchange MUST
+    send the matching `code_verifier` (never the challenge). Closes authorization-code injection/interception:
+    a stolen `code` is useless without the session-held verifier."""
+    idp = MockIdP()
+    _enable_oidc(monkeypatch, idp)
+    s, port, spine = _serve(idp)
+    try:
+        _mkaccount(spine, "alice", "operator")
+        state, nonce, sid, params = _login(port)
+        assert params.get("code_challenge_method") == ["S256"], "authorize must request PKCE S256"
+        challenge = params["code_challenge"][0]
+        assert challenge and "code_verifier" not in params, "the verifier must NOT ride in the authorize URL"
+        token = idp.mint(nonce=nonce, username="alice")
+        status, doc, _ = _callback(port, idp, token, state, sid=sid)
+        assert status == 200 and doc["authenticated"] is True
+        form = idp.last_token_form or {}
+        assert "code_verifier" in form and "code_challenge" not in form, "verifier goes to /token, not authorize"
+        # the verifier the RP sent, S256-hashed, must equal the challenge it advertised at authorize
+        assert _oidc.pkce_challenge_s256(form["code_verifier"]) == challenge
+    finally:
+        s.shutdown()
+
+
+def test_callback_requires_session_bound_cookie_defeats_login_csrf(monkeypatch):
+    """NEGATIVE CONTROL for login-CSRF / authorization-response injection: the callback binds `state` to the
+    initiating browser via an HttpOnly cookie set at /api/oidc/login. A response presented by a DIFFERENT
+    browser (no cookie, or a mismatched one — an attacker feeding a victim the attacker's own auth response)
+    is REFUSED with no bearer; the SAME browser (correct cookie) still completes."""
+    idp = MockIdP()
+    _enable_oidc(monkeypatch, idp)
+    s, port, spine = _serve(idp)
+    try:
+        _mkaccount(spine, "alice", "operator")
+        # (a) MISSING cookie — the classic login-CSRF: victim's browser lacks the initiating session cookie.
+        state, nonce, sid, _ = _login(port)
+        token = idp.mint(nonce=nonce, username="alice")
+        status, doc, _ = _callback(port, idp, token, state, sid=None)
+        assert status == 401 and "session" in doc["error"] and "bearer" not in doc
+        # (b) MISMATCHED cookie — an attacker's own session id cannot vouch for a victim's browser.
+        state2, nonce2, sid2, _ = _login(port)
+        token2 = idp.mint(nonce=nonce2, username="alice")
+        status, doc, _ = _callback(port, idp, token2, state2, sid="not-the-initiating-session")
+        assert status == 401 and "session" in doc["error"] and "bearer" not in doc
+        # (c) POSITIVE: the SAME browser (correct cookie) completes — the gate is not a blanket deny.
+        state3, nonce3, sid3, _ = _login(port)
+        token3 = idp.mint(nonce=nonce3, username="alice")
+        status, doc, _ = _callback(port, idp, token3, state3, sid=sid3)
+        assert status == 200 and doc["authenticated"] is True and doc["bearer"]
+    finally:
+        s.shutdown()
+
+
+def test_login_sets_httponly_samesite_lax_session_cookie(monkeypatch):
+    """DOC-TRUTH + hardening: /api/oidc/login sets the session-binding cookie HttpOnly, SameSite=Lax,
+    Path=/api/oidc (so script can't read it, a cross-site subresource can't send it, but the IdP's top-level
+    GET redirect back to the callback still carries it)."""
+    idp = MockIdP()
+    _enable_oidc(monkeypatch, idp)
+    s, port, spine = _serve(idp)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/api/oidc/login", headers={"Host": f"127.0.0.1:{port}"})
+        r = conn.getresponse()
+        r.read()
+        setck = r.getheader("Set-Cookie") or ""
+        conn.close()
+        assert setck.startswith(_SID_COOKIE + "="), setck
+        low = setck.lower()
+        assert "httponly" in low and "samesite=lax" in low and "path=/api/oidc" in low, setck
+    finally:
+        s.shutdown()
+
+
+def test_default_username_claim_is_immutable_sub(monkeypatch):
+    """With SIGIL_OIDC_USERNAME_CLAIM unset the mapping claim DEFAULTS to the IMMUTABLE `sub`, NOT the mutable
+    `preferred_username`. An id_token whose `preferred_username` names a real account but whose `sub` does not
+    must map on `sub` (and vice-versa) — so a user who can change their preferred_username cannot steer onto
+    another owner-signed account."""
+    idp = MockIdP()
+    _enable_oidc(monkeypatch, idp)
+    monkeypatch.delenv("SIGIL_OIDC_USERNAME_CLAIM", raising=False)      # exercise the DEFAULT
+    from sigil import config
+    assert config.oidc_settings()["username_claim"] == "sub"
+    assert _oidc.OidcConfig.from_settings({**_BASE_SETTINGS}).username_claim == "sub"
+    s, port, spine = _serve(idp)
+    try:
+        _mkaccount(spine, "sub-immutable-9", "operator")               # account keyed on the immutable sub
+        state, nonce, sid, _ = _login(port)
+        # preferred_username points at a DIFFERENT (non-existent) account; the mapping must ignore it.
+        token = idp.mint(nonce=nonce, sub="sub-immutable-9", username="attacker-chosen-handle")
+        status, doc, _ = _callback(port, idp, token, state, sid=sid)
+        assert status == 200 and doc["username"] == "sub-immutable-9" and doc["role"] == "operator"
+    finally:
+        s.shutdown()
+
+
+def test_exchange_code_refuses_blank_pkce_verifier():
+    """Unit: the token exchange REFUSES a blank code_verifier (PKCE is required, not best-effort)."""
+    cfg = _oidc.OidcConfig.from_settings({**_BASE_SETTINGS})
+    with pytest.raises(_oidc.OidcError):
+        _oidc.exchange_code(cfg, "auth-code-1", code_verifier="",
+                            http_post=lambda url, form: {"id_token": "x.y.z"})
+    with pytest.raises(_oidc.OidcError):
+        _oidc.build_authorize_url(cfg, "state", "nonce", code_challenge="")   # authorize needs the challenge
+
+
+def test_pkce_s256_matches_rfc7636_appendix_b_vector():
+    """The RFC 7636 Appendix B worked example pins the S256 transform (BASE64URL-NOPAD(SHA256(verifier)))."""
+    assert _oidc.pkce_challenge_s256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk") == \
+        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
 
 # ================================================================== MUTATION: verify is load-bearing
@@ -390,34 +525,35 @@ def test_neutering_signature_verify_flips_bad_signature_pass_to_leak(monkeypatch
     s, port, spine = _serve(idp)
     try:
         _mkaccount(spine, "alice", "operator")
-        state, nonce = _login_state_nonce(port)
+        state, nonce, sid, _ = _login(port)
         bad = idp.mint(nonce=nonce, username="alice", sign_key="wrong")
-        assert _callback(port, idp, bad, state)[0] == 401             # real verify refuses the bad signature
+        assert _callback(port, idp, bad, state, sid=sid)[0] == 401             # real verify refuses the bad signature
 
         monkeypatch.setattr(_oidc, "_verify_signature", lambda *a, **k: None)   # NEUTER the check
-        state2, nonce2 = _login_state_nonce(port)
+        state2, nonce2, sid2, _ = _login(port)
         bad2 = idp.mint(nonce=nonce2, username="alice", sign_key="wrong")
-        status, doc, _ = _callback(port, idp, bad2, state2)
+        status, doc, _ = _callback(port, idp, bad2, state2, sid=sid2)
         assert status == 200 and doc.get("bearer"), "neutering signature verify must LEAK — check is load-bearing"
     finally:
         s.shutdown()
 
 
 # ================================================================== unit lane: state store + verifier
-def test_state_store_single_use_binds_nonce_and_refuses_mix(tmp_path):
+def test_state_store_single_use_binds_nonce_verifier_sid_and_refuses_mix(tmp_path):
     store = _oidc.OidcStateStore(tmp_path / "oidc-state")
-    store.issue("state-A", "nonce-A")
-    store.issue("state-B", "nonce-B")
-    assert store.consume("state-A") == "nonce-A"           # returns the BOUND nonce
+    store.issue("state-A", "nonce-A", verifier="ver-A", sid_hash="sid-A")
+    store.issue("state-B", "nonce-B", verifier="ver-B", sid_hash="sid-B")
+    rec = store.consume("state-A")                         # returns the BOUND (nonce, verifier, sid_hash)
+    assert (rec.nonce, rec.verifier, rec.sid_hash) == ("nonce-A", "ver-A", "sid-A")
     assert store.consume("state-A") is None                # single-use: replay refused
     assert store.consume("unknown-state") is None          # unknown → refused (mix-and-match can't pass)
-    assert store.consume("state-B") == "nonce-B"           # a different state carries a different nonce
+    assert store.consume("state-B").verifier == "ver-B"    # a different state carries a different binding
 
 
 def test_state_store_ttl_expiry(tmp_path):
     store = _oidc.OidcStateStore(tmp_path / "oidc-state", ttl_seconds=10.0)
     store.issue("s", "n", now=1000.0)
-    assert store.consume("s", now=1005.0) == "n"           # within TTL
+    assert store.consume("s", now=1005.0).nonce == "n"     # within TTL
     store.issue("s2", "n2", now=1000.0)
     assert store.consume("s2", now=1100.0) is None         # past TTL → refused
 

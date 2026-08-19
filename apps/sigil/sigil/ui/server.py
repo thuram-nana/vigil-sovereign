@@ -26,7 +26,9 @@ Security model (the red-pen keystone):
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
+import http.cookies
 import ipaddress
 import json
 import secrets
@@ -469,19 +471,37 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True, **self._principal_json(p), "bearer": bearer})
 
     # --- OIDC Relying Party (S5, SHIPPED OFF BY DEFAULT) ------------------------------------------
+    _OIDC_SID_COOKIE = "sigil_oidc_sid"                 # HttpOnly session cookie binding state↔browser
+
+    def _oidc_cookie(self) -> str:
+        """The value of the OIDC session-binding cookie on THIS request (or "" — fail-closed). Parsed with
+        the stdlib cookie jar; a malformed/absent header yields "" so the callback simply refuses."""
+        raw = self.headers.get("Cookie") or ""
+        if not raw:
+            return ""
+        try:
+            jar = http.cookies.SimpleCookie(raw)
+        except http.cookies.CookieError:
+            return ""
+        m = jar.get(self._OIDC_SID_COOKIE)
+        return m.value if m else ""
+
     def _oidc_state_store(self):
-        """The single-use OIDC state→nonce ledger, rooted next to the spine file (one dir per spine, so a
-        test's temp spine gets its own isolated ledger — mirrors the S3 challenge ledger)."""
+        """The single-use OIDC state ledger (binds each state to its nonce + PKCE verifier + session-cookie
+        hash), rooted next to the spine file (one dir per spine, so a test's temp spine gets its own isolated
+        ledger — mirrors the S3 challenge ledger)."""
         from .oidc import OidcStateStore
         base = Path(self.server.spine_path)
         return OidcStateStore(base.parent / (base.name + ".oidc-state"))
 
     def _oidc_login(self):
         """POST/GET /api/oidc/login — 302 redirect to the IdP authorize endpoint with a fresh, unguessable,
-        SINGLE-USE `state` + `nonce` (bound together and recorded OUTSTANDING). Same-origin/Host gated (anti
-        DNS-rebinding) like `_login`, but token-free: the point is to bootstrap a session for a caller that
-        holds no bearer yet. A misconfigured OIDC (missing SIGIL_OIDC_* settings) fails LOUD (500), never a
-        silent half-login. Reached ONLY when SIGIL_OIDC_ENABLED is on (the route is otherwise unregistered)."""
+        SINGLE-USE `state` + `nonce` + PKCE S256 `code_challenge`, and sets an HttpOnly SameSite session
+        cookie whose hash is bound to the `state` (all recorded OUTSTANDING together). Same-origin/Host gated
+        (anti DNS-rebinding) like `_login`, but token-free: the point is to bootstrap a session for a caller
+        that holds no bearer yet. The `state` is thus bound to THIS browser (anti login-CSRF) and the PKCE
+        verifier is held server-side (anti code-injection). A misconfigured OIDC (missing SIGIL_OIDC_*
+        settings) fails LOUD (500). Reached ONLY when SIGIL_OIDC_ENABLED is on (route otherwise unregistered)."""
         if not self._origin_host_ok():
             return self._deny(403, "denied (origin / host)")
         from . import oidc as _oidc
@@ -491,14 +511,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny(500, f"oidc is enabled but misconfigured: {str(e)[:200]}")
         state = secrets.token_urlsafe(32)              # 256-bit CSPRNG — unguessable, single-use
         nonce = secrets.token_urlsafe(32)              # bound to `state`; echoed back inside the id_token
+        verifier = _oidc.generate_pkce_verifier()      # PKCE: held server-side, sent only at token exchange
+        challenge = _oidc.pkce_challenge_s256(verifier)
+        sid = secrets.token_urlsafe(32)                # the HttpOnly session cookie value (browser binding)
+        sid_hash = hashlib.sha256(sid.encode("utf-8")).hexdigest()
         try:
-            self._oidc_state_store().issue(state, nonce)
+            self._oidc_state_store().issue(state, nonce, verifier=verifier, sid_hash=sid_hash)
         except Exception:  # noqa: BLE001 — a ledger I/O error must not leak internals; refuse the mint
             return self._deny(500, "could not mint an oidc login state")
-        location = _oidc.build_authorize_url(config, state, nonce)
+        location = _oidc.build_authorize_url(config, state, nonce, code_challenge=challenge)
         self.send_response(302)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
+        # Bind `state` to THIS browser: an HttpOnly, SameSite=Lax cookie set here and re-checked at the
+        # callback. SameSite=Lax still rides the IdP's top-level GET redirect back to us, but a cross-site
+        # POST/subresource cannot carry it; HttpOnly keeps script from reading it; Path scopes it to /api/oidc.
+        self.send_header("Set-Cookie", f"{self._OIDC_SID_COOKIE}={sid}; Path=/api/oidc; Max-Age=600; "
+                                       "HttpOnly; SameSite=Lax")
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("Referrer-Policy", "no-referrer")     # the state/nonce never leak via Referer
         self.end_headers()
@@ -507,9 +536,12 @@ class Handler(BaseHTTPRequestHandler):
         """GET /api/oidc/callback?code&state — the IdP redirects here after the user authenticates. Steps,
         each fail-closed to 401 with NO bearer:
           1. Host/Origin gate (anti-rebind).
-          2. CONSUME the single-use `state` → recover the `nonce` bound to it (CSRF + replay + a state/nonce
-             mix-and-match all fail here; a replayed callback finds its state already spent).
-          3. Exchange `code` at the token endpoint; VERIFY the id_token (RS256/ES256 against the IdP JWKS,
+          2. CONSUME the single-use `state` → recover the bound (`nonce`, PKCE `verifier`, `sid_hash`);
+             replay + a state/nonce mix-and-match fail here (a replayed callback finds its state spent).
+          2b. SESSION-BIND: the presenting browser's HttpOnly cookie must hash to the state's bound `sid_hash`
+             (anti login-CSRF — an attacker cannot feed a victim their own authorization response).
+          3. Exchange `code` at the token endpoint WITH the PKCE `verifier` (anti code-injection); VERIFY the
+             id_token (RS256/ES256 against the IdP JWKS,
              rejecting alg:none/symmetric/wrong-kid/bad-sig/bad-iss/bad-aud/expired, and requiring the
              nonce to equal the one minted at login).
           4. Map the VERIFIED identity claim to an owner-signed `governor.account`. The ROLE comes from that
@@ -527,14 +559,28 @@ class Handler(BaseHTTPRequestHandler):
                                "error": f"idp returned an error: {str(err)[:120]}"}, 401)
         code = q.get("code", [""])[0]
         state = q.get("state", [""])[0]
-        # (2) single-use state → bound nonce. Unknown / expired / already-used → refuse before any token work.
-        nonce = self._oidc_state_store().consume(state)
-        if not nonce:
+        # (2) single-use state → bound (nonce, PKCE verifier, sid_hash). Unknown / expired / already-used →
+        # refuse before any token work. Consuming FIRST spends the state, so a login-CSRF attempt that fails
+        # the session check below still burns the state (no retry).
+        rec = self._oidc_state_store().consume(state)
+        if rec is None:
             return self._json({"ok": False, "authenticated": False,
                                "error": "unknown, expired, or already-used oidc state"}, 401)
+        # (2b) SESSION-BOUND STATE (anti login-CSRF / code-injection): the browser presenting this response
+        # must be the SAME one that started the flow — its HttpOnly cookie must hash to the sid bound to the
+        # state at login. A missing/mismatched cookie (an attacker feeding a victim their own auth response)
+        # is refused. Constant-time compare; fail-closed on a blank bound hash.
+        presented = self._oidc_cookie()
+        if not rec.sid_hash or not presented or not hmac.compare_digest(
+                hashlib.sha256(presented.encode("utf-8")).hexdigest(), rec.sid_hash):
+            return self._json({"ok": False, "authenticated": False,
+                               "error": "oidc state is not bound to this browser session "
+                                        "(missing/mismatched session cookie)"}, 401)
+        nonce = rec.nonce
         try:
             config = _oidc.load_config()
-            token_resp = _oidc.exchange_code(config, code, http_post=self.server.oidc_http_post)
+            token_resp = _oidc.exchange_code(config, code, code_verifier=rec.verifier,
+                                             http_post=self.server.oidc_http_post)
             provider = _oidc.JwksProvider(config.jwks_uri, fetcher=self.server.oidc_jwks_fetcher)
             claims = _oidc.verify_id_token(
                 token_resp["id_token"], jwks_keys=provider.keys(), issuer=config.issuer,

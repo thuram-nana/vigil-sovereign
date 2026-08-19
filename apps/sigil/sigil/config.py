@@ -178,8 +178,10 @@ def oidc_settings() -> dict:
         "token_endpoint": (g("SIGIL_OIDC_TOKEN_ENDPOINT") or "").strip(),
         "jwks_uri": (g("SIGIL_OIDC_JWKS_URI") or "").strip(),
         "scopes": (g("SIGIL_OIDC_SCOPES") or "openid profile email").strip(),
-        # which verified id_token claim carries the username that must match an owner-signed account
-        "username_claim": (g("SIGIL_OIDC_USERNAME_CLAIM") or "preferred_username").strip(),
+        # which verified id_token claim carries the username that must match an owner-signed account.
+        # DEFAULT is the IMMUTABLE `sub` (globally unique + IdP-stable): a mutable claim (preferred_username
+        # /email) is opt-in only, because if a user can change theirs the mapping can drift or be steered.
+        "username_claim": (g("SIGIL_OIDC_USERNAME_CLAIM") or "sub").strip(),
         # asymmetric-only signing-alg allowlist for the id_token (RS256 default; ES256 also supported)
         "signing_algs": [a.strip().upper() for a in (g("SIGIL_OIDC_SIGNING_ALGS") or "RS256").split(",")
                          if a.strip()],
