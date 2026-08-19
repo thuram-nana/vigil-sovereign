@@ -152,8 +152,10 @@ class SpineSink:
         as a DISTINCT, typed spine event, so a not-assessed surface is never folded into a clean negative
         (the silent CLEAN that ``sensors.base.inconclusive_result`` mints the marker to prevent). It rides
         on a dedicated ``source='sensor:inconclusive'`` observation — no new event kind / migration — that
-        a report/verdict layer keys on, VISIBLY distinct from a plain sensor failure's ``tool_result`` (a
-        bare ``ok=False``). ``parent_id = tool_call_id`` links it to the invocation. Best-effort
+        a report/verdict layer CAN key on (the keyable signal on the audit spine; no such consumer is wired
+        yet — the marker ``SensorResult.inconclusive`` is what ``fuse_sensors`` consumes today), VISIBLY
+        distinct from a plain sensor failure's ``tool_result`` (a bare ``ok=False``). ``parent_id =
+        tool_call_id`` links it to the invocation. Best-effort
         (swallow-on-error): a spine write never perturbs the fusion pass."""
         return self._post("observation", {
             "source": "sensor:inconclusive",
