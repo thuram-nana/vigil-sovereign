@@ -395,6 +395,7 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     from .approval_broker import ApprovalBroker, approvals_root, load_authority
     effective_authority = config.approval_authority or load_authority(config.base_dir)
     approval_broker: Optional[ApprovalBroker] = None
+    standing_approval: Optional[StandingApproval] = None
 
     if gate is None:
         approval_gate = None
@@ -411,7 +412,17 @@ def build_engine(config: EngineConfig) -> VigilEngine:
             now=_time.time, token_source=_token_source,
         )
     else:
-        approval_gate = _approval_gate(gate)
+        # W0-11 (#406): the STANDING (keyless) approval is now PER-ACTION + single-use. The old path wrapped
+        # the gate in a BLANKET boolean — with ``owner_approves_offense`` set (``--approve-offense``),
+        # ``_approval_gate`` upgraded EVERY queued WARDEN action to allow, so ONE flag auto-fired every future
+        # action an autonomous agent proposed (an autonomously-proposed ``terminal.run`` ran with no per-action
+        # click). Now the standing grant is BOUND (by ``run_tool`` below) to the ONE action it authorizes and
+        # SPENT on it: the gate promotes a ``queue`` to ``allow`` only for that exact ``(tool, target,
+        # args-digest)``. A second, DISTINCT queued action is NEVER auto-promoted by the same grant — it stays
+        # queued and the executor denies it. The approve-ONE workflow is preserved; a single flag can no longer
+        # auto-allow every future queued action.
+        standing_approval = StandingApproval(config.owner_approves_offense)
+        approval_gate = _approval_gate(gate, standing_approval)
 
     # The per-action token gate is the ACTIVE authority mechanism only when an authority is provisioned AND
     # the gate wired. In that mode a queued TOOL call is routed to the token gate (the real, per-action,
@@ -419,11 +430,12 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     _token_gate_active = effective_authority is not None and approval_gate is not None
 
     def _bind_approval_action(tool: Any, is_terminal: bool) -> None:
-        # Bind (into the broker) the EXACT action the gate will authorize, so a matching owner-signed token
-        # upgrades ONLY this action. The (tool_name, target) is derived by the ONE shared executor helper
-        # (``derive_gate_binding``) so it equals the gate-seen pair BYTE-FOR-BYTE; the action_digest binds the
-        # args. Underivable target / non-broker mode ⇒ bind nothing ⇒ the action stays QUEUED (fail-closed).
-        if approval_broker is None:
+        # Bind the EXACT action the gate will authorize, so a matching owner approval upgrades ONLY this
+        # action. The (tool_name, target) is derived by the ONE shared executor helper (``derive_gate_binding``)
+        # so it equals the gate-seen pair BYTE-FOR-BYTE; the action_digest binds the args. Underivable target ⇒
+        # bind nothing ⇒ the action stays QUEUED (fail-closed). Binds whichever per-action approval mechanism is
+        # active: the owner-signed token broker (token mode) AND/OR the standing single-use grant (W0-11).
+        if approval_broker is None and standing_approval is None:
             return
         from .approval_token import ApprovalAction, action_digest
         from .executor import derive_gate_binding
@@ -438,11 +450,24 @@ def build_engine(config: EngineConfig) -> VigilEngine:
             binding = derive_gate_binding(getattr(tool, "tool_name", None), args_for_digest,
                                           scope=offense_scope)
         if binding is None:
-            approval_broker.bind(None)
+            if approval_broker is not None:
+                approval_broker.bind(None)
+            if standing_approval is not None:
+                standing_approval.unbind()
             return
         gtool, gtarget = binding
-        act = ApprovalAction(gtool, gtarget, action_digest(gtool, gtarget, args_for_digest))
-        approval_broker.bind(act, args_preview=args_for_digest)
+        try:
+            digest = action_digest(gtool, gtarget, args_for_digest)
+        except Exception:  # noqa: BLE001 — a non-serialisable args ⇒ no binding ⇒ the action stays QUEUED
+            if approval_broker is not None:
+                approval_broker.bind(None)
+            if standing_approval is not None:
+                standing_approval.unbind()
+            return
+        if approval_broker is not None:
+            approval_broker.bind(ApprovalAction(gtool, gtarget, digest), args_preview=args_for_digest)
+        if standing_approval is not None:
+            standing_approval.bind(gtool, gtarget, digest)
 
     def run_tool(tool: Any, phase: Phase, seq: int, *, approved: bool = False) -> Any:
         _seq["n"] = seq
@@ -454,10 +479,11 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         is_terminal = (isinstance(getattr(tool, "tool_name", None), str)
                        and tool.tool_name.strip().lower() == _TERMINAL_TOOL)
 
-        # Per-action binding (A2 §4): when the broker-backed per-action token gate is the active gate, bind
-        # the action it will authorize BEFORE execution, so the gate's ``token_source()`` publishes the
-        # pending request + spends only a token bound to THIS exact (tool, target, args).
-        if approved and active_gate is approval_gate and approval_broker is not None:
+        # Per-action binding (A2 §4 / W0-11): when the per-action approval gate is the active gate, bind the
+        # action it will authorize BEFORE execution, so the gate spends ONLY an approval bound to THIS exact
+        # (tool, target, args) — an owner-signed token (broker) and/or the standing single-use grant.
+        if approved and active_gate is approval_gate and (
+                approval_broker is not None or standing_approval is not None):
             _bind_approval_action(tool, is_terminal)
 
         # T3 — AUTONOMOUS TERMINAL: the governed LOCAL terminal is a DISTINCT executor path. execute_terminal
@@ -862,20 +888,93 @@ def _build_gate(prov: Provisioned, *, ceiling: str = "A1") -> Optional[Callable[
         return None
 
 
-def _approval_gate(real_gate: Callable[..., Any]) -> Callable[..., Any]:
+class StandingApproval:
+    """The STANDING (keyless) operator approval, made PER-ACTION and single-use (W0-11 / #406).
+
+    The old standing path was a BLANKET boolean: with ``owner_approves_offense`` set (``--approve-offense``),
+    :func:`_approval_gate` upgraded EVERY queued WARDEN action to allow, so a single flag auto-fired every
+    future action an autonomous agent proposed — an autonomously-proposed ``terminal.run`` executed with no
+    per-action click, falsifying "an autonomous agent can never auto-fire" / "nothing the AI proposes runs on
+    its own". This binds the standing grant to the ONE specific action it authorizes: the gate promotes a
+    ``queue`` to ``allow`` ONLY for the exact ``(tool_name, target, action_digest)`` the operator's grant is
+    spent on, and the grant is SINGLE-USE — a second, DISTINCT queued action is never auto-promoted by the
+    same standing approval (it stays queued → the executor denies it). The legitimate approve-one workflow is
+    preserved (the specifically-approved action runs); a single flag can no longer auto-allow every future
+    queued action.
+
+    ``granted`` is the operator's standing approval (``owner_approves_offense`` / an explicit ``--approve``).
+    :meth:`bind` records the action currently being authorized (its gate-seen ``(tool, target)`` + args-digest),
+    exactly as the token-mode broker binds; :meth:`authorize` (called by the gate) commits + spends the grant
+    on that one action and refuses everything else. NOT thread-safe (the engine loop is single-threaded);
+    holds no key — it is a bounded per-action gate token, never an unbounded standing pass.
+    """
+
+    def __init__(self, granted: bool) -> None:
+        self._granted = bool(granted)
+        self._pending: Optional[tuple] = None      # (tool, target, digest) bound for the CURRENT gate call
+        self._authorized: Optional[tuple] = None   # the ONE action the grant was spent on (audit)
+        self._spent = False
+
+    @property
+    def granted(self) -> bool:
+        return self._granted
+
+    @property
+    def spent(self) -> bool:
+        return self._spent
+
+    @property
+    def authorized_action(self) -> Optional[tuple]:
+        return self._authorized
+
+    def bind(self, tool_name: Any, target: Any, digest: Any) -> None:
+        """Record the exact action about to be gated (its gate-seen tool+target and the args-digest). Called
+        by ``run_tool`` before each approved execution — mirrors the broker's per-action bind."""
+        d = str(digest)
+        self._pending = (str(tool_name), str(target), d) if d else None
+
+    def unbind(self) -> None:
+        """Clear the current binding — an underivable/non-serialisable action binds NOTHING (fail-closed)."""
+        self._pending = None
+
+    def authorize(self, tool_name: str, target: str) -> bool:
+        """The gate's per-action check. True IFF the standing grant is present, UNSPENT, and the action
+        currently bound matches the ``(tool_name, target)`` the gate is deciding — at which point the grant is
+        COMMITTED to that one action and SPENT (single-use). A missing/blank binding, an already-spent grant,
+        or a tool/target mismatch all return False (fail-closed) so the queue stays a queue."""
+        if not self._granted or self._spent or self._pending is None:
+            return False
+        p_tool, p_target, p_digest = self._pending
+        if p_tool != str(tool_name) or p_target != str(target) or not p_digest:
+            return False
+        self._authorized = self._pending
+        self._spent = True
+        return True
+
+
+def _approval_gate(real_gate: Callable[..., Any],
+                   source: Optional["StandingApproval"] = None) -> Callable[..., Any]:
     """Wrap the conjunctive gate so a WARDEN 'queue' (in-envelope, owner-approval-needed) is upgraded to
-    'allow' — the human leg satisfied by the operator's signed approval. A CRUCIBLE 'deny' (out of
-    scope / killswitch / budget) is PRESERVED: approval never widens scope. A destructive action's
-    m-of-n leg is unaffected (it denies, not queues, without its quorum)."""
+    'allow' — the human leg satisfied by the operator's standing approval — but ONLY for the SPECIFIC action
+    that grant is bound to and spent on (``source``), never a blanket promote-all (W0-11). A CRUCIBLE 'deny'
+    (out of scope / killswitch / budget) is PRESERVED: approval never widens scope. A destructive action's
+    m-of-n leg is unaffected (it denies, not queues, without its quorum).
+
+    ``source`` is the PER-ACTION standing grant (:class:`StandingApproval`): the gate promotes a queue ONLY
+    when ``source.authorize(tool_name, target)`` confirms this exact bound action is the one the (single-use)
+    grant authorizes. With no ``source`` — or one that is not granted / already spent / bound to a different
+    action — NOTHING is promoted (the queue stays a queue → the executor denies): a bare standing flag can no
+    longer auto-allow every future queued action."""
 
     def gate(tool_name: str, target: str, destructive: bool = False, **kw: Any) -> Any:
         verdict = real_gate(tool_name, target, destructive, **kw)
         outcome = getattr(verdict, "outcome", "deny")
-        if outcome == "queue":
-            # rebuild an allow verdict of the same shape (duck-typed to GateVerdict).
+        if outcome == "queue" and source is not None and source.authorize(tool_name, target):
+            # rebuild an allow verdict of the same shape (duck-typed to GateVerdict) for THIS one action.
             from ..conjunctive_gate import GateVerdict
             return GateVerdict(True, "allow",
-                               f"owner-approved (WARDEN human leg satisfied); {getattr(verdict, 'reason', '')}",
+                               "owner-approved (per-action standing grant, single-use; WARDEN human leg "
+                               f"satisfied); {getattr(verdict, 'reason', '')}",
                                getattr(verdict, "crucible_allowed", True), getattr(verdict, "warden", None))
         return verdict
 
@@ -960,10 +1059,15 @@ class TerminalRuntime:
     ``terminal.run`` classifies A2 under the ONE shared WARDEN classifier, so under the A1 offense ceiling
     the conjunctive gate QUEUES it: without ``approval_gate`` it can never run; with it (an operator
     ``--approve``) it is admitted. The allowlist inside ``execute_terminal`` still bounds it to local
-    read/inspect binaries, so no command — approved or not — can egress or write."""
+    read/inspect binaries, so no command — approved or not — can egress or write.
+
+    W0-11: ``standing`` is the PER-ACTION grant the ``approval_gate`` is bound to. The CLI verb binds it to
+    the EXACT command the operator typed (:meth:`StandingApproval.bind`) before running, so ``--approve``
+    admits that ONE command and nothing else — the approval gate is action-bound, never a blanket promote."""
 
     gate: Optional[Callable[..., Any]]
     approval_gate: Optional[Callable[..., Any]]
+    standing: "StandingApproval"
     signer: Optional[Callable[[bytes], str]]
     view: dict
     destructive_view: dict
@@ -997,7 +1101,12 @@ def build_terminal_runtime(*, slug: str = "loopback", base_dir: str) -> Terminal
 
     # The conjunctive gate over the signed authority at the A1 ceiling — terminal.run (A2) QUEUES under it.
     gate = _build_gate(prov, ceiling="A1")
-    approval_gate = _approval_gate(gate) if gate is not None else None
+    # W0-11: the operator's ``--approve`` IS the standing grant (granted=True); the CLI verb binds it to the
+    # ONE command being run before invoking the executor, so the approval gate is action-bound (single-use),
+    # never a blanket promote-all. An unbound grant promotes NOTHING (fail-closed) — running without a bind
+    # keeps the command QUEUED, exactly as no ``--approve`` would.
+    standing = StandingApproval(True)
+    approval_gate = _approval_gate(gate, standing) if gate is not None else None
 
     # The stable, vault-sealed offense-spine identity; its Ed25519 signature over the ExecRecord bytes is the
     # executor's signer (byte-identical to build_engine.exec_signer).
@@ -1007,7 +1116,7 @@ def build_terminal_runtime(*, slug: str = "loopback", base_dir: str) -> Terminal
         return sign(spine_kp.private_key_b64, message)
 
     return TerminalRuntime(
-        gate=gate, approval_gate=approval_gate, signer=exec_signer,
+        gate=gate, approval_gate=approval_gate, standing=standing, signer=exec_signer,
         view=DEFAULT_TOOL_VIEW, destructive_view=DEFAULT_DESTRUCTIVE_VIEW,
         history_path=str(base / "terminal-history.jsonl"), slug=slug,
     )

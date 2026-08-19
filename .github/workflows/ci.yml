@@ -353,6 +353,7 @@ jobs:
               integration/tests/test_typed_outcomes.py \
               integration/tests/test_engine_live.py \
               integration/tests/test_engine_terminal.py \
+              integration/tests/test_approval_per_action_standing.py \
               integration/tests/test_executor_scoped.py \
               integration/tests/test_executor_terminal.py \
               integration/tests/test_cli_terminal.py \
