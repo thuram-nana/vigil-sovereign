@@ -45,6 +45,7 @@ from typing import Any
 from ..agents.tools import ToolContext, ToolResult
 from ..entitlement.models import Capability
 from ..intel.models import Observation
+from .base import inconclusive_result
 from .cloud import _is_anon, _load_export, cloud_observations
 
 # Bucket-label keys the operator uses to DECLARE data sensitivity, and the values that mean "sensitive".
@@ -323,24 +324,27 @@ class GcpLiveSensor:
         try:
             import google.auth  # optional dependency
         except Exception:
-            return ToolResult(ok=False, note=(
-                "gcp_live: google-auth not installed — live GCP collection unavailable (fail-closed no-op). "
+            return inconclusive_result("gcp_live", missing="google-auth", detail=(
+                "google-auth not installed — live GCP collection unavailable (fail-closed no-op). "
                 "Install google-cloud-storage + google-cloud-resource-manager + google-cloud-org-policy."))
         try:
             credentials, adc_project = google.auth.default(
                 scopes=["https://www.googleapis.com/auth/cloud-platform.read-only"])
         except Exception as e:
-            return ToolResult(ok=False, note=(
-                "gcp_live: no ambient Google credentials discoverable (Application Default Credentials) — "
-                f"fail-closed no-op: {type(e).__name__}"))
+            return inconclusive_result(
+                "gcp_live", missing="ambient Google credentials (Application Default Credentials)", detail=(
+                    "no ambient Google credentials discoverable (Application Default Credentials) — "
+                    f"fail-closed no-op: {type(e).__name__}"))
         project = self._project or str(adc_project or "")
         if not project:
-            return ToolResult(ok=False, note=(
-                "gcp_live: could not resolve a GCP project (set GOOGLE_CLOUD_PROJECT) — fail-closed no-op."))
+            return inconclusive_result(
+                "gcp_live", missing="a resolvable GCP project (GOOGLE_CLOUD_PROJECT)", detail=(
+                    "could not resolve a GCP project (set GOOGLE_CLOUD_PROJECT) — fail-closed no-op."))
         try:
             from google.cloud import storage  # optional dependency
         except Exception:
-            return ToolResult(ok=False, note="gcp_live: install google-cloud-storage to enable live GCP collection")
+            return inconclusive_result("gcp_live", missing="google-cloud-storage", detail=(
+                "install google-cloud-storage to enable live GCP collection."))
         org_pap = self._safe(lambda: self._collect_org_pap(project, credentials))
         try:
             buckets = self._collect_buckets(storage.Client(project=project, credentials=credentials))

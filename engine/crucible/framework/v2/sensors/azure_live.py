@@ -44,6 +44,7 @@ from typing import Any
 from ..agents.tools import ToolContext, ToolResult
 from ..entitlement.models import Capability
 from ..intel.models import Observation
+from .base import inconclusive_result
 from .cloud import _load_export, cloud_observations
 
 # Container publicAccess levels that expose blobs ANONYMOUSLY (no credential). "None"/"" is private.
@@ -270,31 +271,35 @@ class AzureLiveSensor:
 
     def run(self, args: dict, ctx: ToolContext) -> ToolResult:
         if not self._subscription:
-            return ToolResult(ok=False, note=(
-                "azure_live: no subscription resolvable (set AZURE_SUBSCRIPTION_ID) — fail-closed no-op."))
+            return inconclusive_result(
+                "azure_live", missing="a resolvable subscription (AZURE_SUBSCRIPTION_ID)", detail=(
+                    "no subscription resolvable (set AZURE_SUBSCRIPTION_ID) — fail-closed no-op."))
         try:
             from azure.identity import DefaultAzureCredential  # optional dependency
         except Exception:
-            return ToolResult(ok=False, note=(
-                "azure_live: azure-identity not installed — live Azure collection unavailable (fail-closed "
+            return inconclusive_result("azure_live", missing="azure-identity", detail=(
+                "azure-identity not installed — live Azure collection unavailable (fail-closed "
                 "no-op). Install azure-identity + azure-mgmt-storage + azure-mgmt-authorization."))
         try:
             credential = DefaultAzureCredential()
         except Exception as e:
-            return ToolResult(ok=False, note=(
-                f"azure_live: no ambient Azure credential discoverable (service principal / managed identity) "
-                f"— fail-closed no-op: {type(e).__name__}"))
+            return inconclusive_result(
+                "azure_live", missing="ambient Azure credential (service principal / managed identity)", detail=(
+                    f"no ambient Azure credential discoverable (service principal / managed identity) "
+                    f"— fail-closed no-op: {type(e).__name__}"))
         try:
             from azure.mgmt.storage import StorageManagementClient  # optional dependency
         except Exception:
-            return ToolResult(ok=False, note="azure_live: install azure-mgmt-storage to enable live Azure collection")
+            return inconclusive_result("azure_live", missing="azure-mgmt-storage", detail=(
+                "install azure-mgmt-storage to enable live Azure collection."))
         try:
             containers, account_public, account_net = self._collect_storage(
                 StorageManagementClient(credential, self._subscription))
         except Exception as e:
-            return ToolResult(ok=False, note=(
-                f"azure_live: Azure Storage enumeration failed — credential invalid/expired or access denied "
-                f"(fail-closed): {type(e).__name__}"))
+            return inconclusive_result(
+                "azure_live", missing="valid, reachable Azure credential", detail=(
+                    f"Azure Storage enumeration failed — credential invalid/expired or access denied "
+                    f"(fail-closed): {type(e).__name__}"))
         role_assignments = self._safe(lambda: self._collect_rbac(credential, self._subscription), [])
         inventory = azure_inventory_from_responses(
             containers=containers, account_public_by_id=account_public,

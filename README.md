@@ -529,6 +529,17 @@ VIGIL is scrupulous about this (it would be ironic for an anti-hallucination sys
 > stubbed, the catalog says so inline. The 2026-08 Verifiable-Fact program adds `vigil remediate --prove` + the
 > verifiable-remediation cluster (§1, §4).
 
+> **Live cloud & Kubernetes posture needs two prerequisites — and a missing one is INCONCLUSIVE, never CLEAN.**
+> The live, read-only cloud/K8s posture collectors (`cloud_live` / `gcp_live` / `azure_live` / `k8s_live`) each
+> require **(1) ambient, read-only credentials** — the *host's own* identity from the platform default chain (AWS
+> environment / SSO / instance-profile / task-role / IRSA; GCP Application Default Credentials; Azure
+> `DefaultAzureCredential`; Kubernetes an in-cluster ServiceAccount or `KUBECONFIG`), never a secret handed on the
+> command line — and **(2) a provisioned egress scope in `targets/<slug>/collector-hosts.txt`** naming the
+> control-plane / apiserver host the collector will reach. If **either** prerequisite is missing the run is an
+> explicit **INCONCLUSIVE** result that *names the missing prerequisite* — **never a clean negative.** For a
+> product whose thesis is a sound negative, reporting "not assessed" as "found nothing" would be a silent CLEAN,
+> the worst failure mode; see [`docs/DEPLOY.md`](docs/DEPLOY.md) § *Live cloud & Kubernetes posture*.
+
 > **Now merged (PR #157):** the governed **local Terminal** — `execute_terminal` (an allowlist that cannot egress
 > by construction, tiered A2 → queue → signed, redacted record), its natural-language **AI chatbot**
 > (`terminal_propose`/`terminal_dryrun`/`terminal_run`, where the AI proposes and the allowlist + your approval

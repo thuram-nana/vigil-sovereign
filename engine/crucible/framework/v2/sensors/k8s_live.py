@@ -44,6 +44,7 @@ from ..entitlement.models import Capability
 from ..intel.models import Credibility, IntelSourceKind, Observation, Reliability, SourceReliability
 from ..intel.refs import EntityRef
 from ..worldmodel.models import NodeKind
+from .base import inconclusive_result
 
 # RBAC subjects that denote an UNAUTHENTICATED caller.
 _ANON_SUBJECTS = frozenset({"system:anonymous", "system:unauthenticated"})
@@ -226,8 +227,8 @@ class K8sLiveSensor:
         try:
             from kubernetes import client, config  # optional dependency
         except Exception:
-            return ToolResult(ok=False, note=(
-                "k8s_live: the kubernetes client is not installed — live cluster collection unavailable "
+            return inconclusive_result("k8s_live", missing="kubernetes client", detail=(
+                "the kubernetes client is not installed — live cluster collection unavailable "
                 "(fail-closed no-op). `pip install kubernetes` to enable."))
         loaded = False
         try:
@@ -240,19 +241,21 @@ class K8sLiveSensor:
             except Exception:
                 loaded = False
         if not loaded:
-            return ToolResult(ok=False, note=(
-                "k8s_live: no cluster config discoverable (in-cluster ServiceAccount or a KUBECONFIG) — "
-                "fail-closed no-op. Seal a kubeconfig in the Cloud-credentials plane, or run in-cluster."))
+            return inconclusive_result(
+                "k8s_live", missing="cluster credentials (in-cluster ServiceAccount or a KUBECONFIG)", detail=(
+                    "no cluster config discoverable (in-cluster ServiceAccount or a KUBECONFIG) — "
+                    "fail-closed no-op. Seal a kubeconfig in the Cloud-credentials plane, or run in-cluster."))
         # DECLARED == ACTUAL egress, fail-closed: the egress gate is skipped for an empty egress_hosts, so
         # verify HERE that the apiserver we actually loaded is the host we declared (and the operator
         # provisioned). An ambient/default kubeconfig pointing at an un-declared cluster is REFUSED.
         actual_host = self._safe(
             lambda: urlsplit(str(client.Configuration.get_default_copy().host or "")).hostname) or ""
         if not self.egress_hosts or actual_host not in self.egress_hosts:
-            return ToolResult(ok=False, note=(
-                f"k8s_live: the loaded cluster apiserver {actual_host or '?'!r} was not the declared egress "
-                f"host {self.egress_hosts or '()'} — fail-closed. Provision the apiserver host in "
-                f"targets/<slug>/collector-hosts.txt so the read is in scope."))
+            return inconclusive_result(
+                "k8s_live", missing="targets/<slug>/collector-hosts.txt (the apiserver egress scope)", detail=(
+                    f"the loaded cluster apiserver {actual_host or '?'!r} was not the declared egress "
+                    f"host {self.egress_hosts or '()'} — fail-closed. Provision the apiserver host in "
+                    f"targets/<slug>/collector-hosts.txt so the read is in scope."))
         bindings = self._safe(lambda: self._reduce_bindings(client.RbacAuthorizationV1Api()), [])
         controls = k8s_workload_controls(bindings=bindings)
         return ToolResult(
