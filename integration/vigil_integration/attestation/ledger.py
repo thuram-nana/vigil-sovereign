@@ -347,15 +347,18 @@ def verify_ledger(
     expected_count: Optional[int] = None,
 ) -> LedgerVerification:
     """Verify the presented ledger: append-only contiguity + each record hash + non-decreasing monotonic
-    anchor + operator binding + every Ed25519 signature. Total — never raises.
+    anchor + non-back-dated wall-clock ``at`` + operator binding + every Ed25519 signature. Total — never
+    raises.
 
     DENY-BY-DEFAULT on trust: without a ``resolve_key`` trust anchor the signatures cannot be checked, so
     a non-empty ledger is NOT ``ok``. STRICT: any row that does not coerce, a hash that does not
-    recompute, a broken ``prev_hash`` link or ``seq`` gap, a monotonic value that decreases, an unbound
-    operator, a ``key_id`` that is not the operator's fingerprint, an untrusted ``key_id``, or an invalid
-    signature — ANY of these fails the whole ledger (a tampered / reordered / interior-deleted / forged
-    entry is caught). Ordered by ``seq`` (with ``prev_hash`` linkage), so verification is independent of
-    the input list's order.
+    recompute, a broken ``prev_hash`` link or ``seq`` gap, a monotonic value that decreases, a wall-clock
+    ``at`` that predates the prior record while the counter advanced (W0-14 #409 — the ``at`` is BOUND to
+    the monotonic-advancing chain, so a back-dated timestamp with a valid counter no longer verifies), an
+    unbound operator, a ``key_id`` that is not the operator's fingerprint, an untrusted ``key_id``, or an
+    invalid signature — ANY of these fails the whole ledger (a tampered / reordered / interior-deleted /
+    forged / back-dated entry is caught). Ordered by ``seq`` (with ``prev_hash`` linkage), so verification
+    is independent of the input list's order.
 
     SCOPE — what internal consistency alone CANNOT catch: this function proves the presented records are a
     self-consistent chain rooted at genesis. Because a valid PREFIX of a chain is itself a self-consistent
@@ -400,6 +403,7 @@ def verify_ledger(
     prev_hash = GENESIS_PREV
     prev_seq: Optional[int] = None
     prev_monotonic: Optional[int] = None
+    prev_at: Optional[str] = None
     operators: list[str] = []
     for rec in ordered:
         content = _content(seq=rec.seq, prev_hash=rec.prev_hash, operator=rec.operator, action=rec.action,
@@ -414,6 +418,20 @@ def verify_ledger(
             return LedgerVerification(False, f"chain break: seq gap at {rec.seq}", 0, ())
         if prev_monotonic is not None and rec.monotonic < prev_monotonic:
             return LedgerVerification(False, f"monotonic anchor decreased at seq {rec.seq} "
+                                      "(back-dating rejected)", 0, ())
+        # W0-14 #409 — BIND the wall-clock ``at`` to the monotonic-advancing chain. Both ``at`` and
+        # ``monotonic`` are signed DATA on the same record, but only ``monotonic`` was checked for
+        # forward motion; a record with a valid, ADVANCING counter but an EARLIER ``at`` (the
+        # non-repudiation attack: "prove I acted before I did") therefore verified. Now a record later in
+        # the chain (strictly higher ``seq``, non-decreasing ``monotonic``) must NOT carry an ``at`` that
+        # predates the prior record's. ``at`` is the engine's ISO-8601 UTC string (``_wallclock_iso``), so
+        # a lexicographic compare IS a chronological one; equal timestamps (same instant) are allowed
+        # (non-decreasing, mirroring the monotonic rule). This is a pure string-order check — no wallclock
+        # or RNG enters the chain math, and the chain is still ORDERED by ``seq`` alone (``at`` stays
+        # signed DATA, never an ordering key).
+        if prev_at is not None and rec.at < prev_at:
+            return LedgerVerification(False, f"wall-clock at back-dated at seq {rec.seq}: earlier than "
+                                      "the prior record while the monotonic counter advanced "
                                       "(back-dating rejected)", 0, ())
         if not rec.operator.is_bound():
             return LedgerVerification(False, f"unbound operator at seq {rec.seq} (missing operator)", 0, ())
@@ -438,6 +456,7 @@ def verify_ledger(
         prev_hash = rec.record_hash
         prev_seq = rec.seq
         prev_monotonic = rec.monotonic
+        prev_at = rec.at
         if rec.operator.key_fingerprint not in operators:
             operators.append(rec.operator.key_fingerprint)
     # External-anchor pins (optional): the presented chain is internally consistent, but a valid PREFIX is
