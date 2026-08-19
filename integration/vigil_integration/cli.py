@@ -14,6 +14,11 @@ One entry point over the whole fused system. NATIVE verbs (handled in-process, o
   * ``vigil detect --access-log`` — run the Detection Mirror (defensive oracle plane) over log files;
                                     each fire is certificate-re-verified before it counts as a FACT.
                                     (Distinct from ``vigil aegis detect`` — the AEGIS-app firewall verdict.)
+  * ``vigil posture attest|verify|endpoint`` — mint + sign a Certificate of Non-Exploitability from a live
+                                    loopback coverage scan, re-verify a bundle OFFLINE via its own shipped
+                                    VIGIL-free verifier, or serve the signed bundle read-only to a
+                                    counterparty (loopback/tunnel-bound; default port 8788, off the
+                                    console's 8787).
   * ``vigil patch --finding-envelope|--from-spine`` — run the gated auto-patch ladder over a PROVENANCE-
                                     GROUNDED confirmed finding (signed envelope OR the engagement's signed
                                     spine — never raw JSON). Default is a non-destructive propose-only dry
@@ -2414,6 +2419,18 @@ def _cmd_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_posture(args: argparse.Namespace) -> int:
+    """``vigil posture <attest|verify|endpoint> …`` — the Certificate of Non-Exploitability verb.
+
+    Forwards IN-PROCESS to the posture sub-CLI (offense side; every framework touch inside it stays
+    function-local, and it never imports sigil — FATAL-2 holds). The sub-CLI owns its own argparse, so the
+    sub-verb + its flags are captured verbatim as an ``argparse.REMAINDER`` and passed through untouched.
+    This is what makes ``docs/TRUTHENOVATION.md``'s ``vigil posture attest|verify`` real; the same logic is
+    also reachable as ``python -m vigil_integration.posture …``."""
+    from .posture.cli import main as posture_main  # stdlib-only at import (framework stays function-local)
+    return int(posture_main(list(args.posture_args or [])))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vigil", description="the VIGIL sovereign engine — one control plane over two isolated processes",
@@ -3057,6 +3074,15 @@ def build_parser() -> argparse.ArgumentParser:
     prs.add_argument("--passphrase-env", dest="passphrase_env", default="VIGIL_BACKUP_PASSPHRASE",
                      help="env var holding the backup passphrase (never passed on argv)")
     prs.set_defaults(func=_cmd_restore)
+
+    ppos = sub.add_parser(
+        "posture",
+        help="Certificate of Non-Exploitability — mint (attest), verify offline, or serve a signed posture "
+             "bundle. Sub-verbs: attest --out … | verify --bundle … | endpoint --bundle … "
+             "(run `vigil posture attest -h` etc. for each).")
+    ppos.add_argument("posture_args", nargs=argparse.REMAINDER,
+                      help="the posture sub-verb and its flags (passed through to the posture sub-CLI verbatim)")
+    ppos.set_defaults(func=_cmd_posture)
 
     return p
 

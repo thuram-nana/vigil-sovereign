@@ -6,8 +6,10 @@
   verify  — re-verify a bundle exactly as a distrusting third party would: shell out to the bundle's
             OWN shipped ``verify_offline.py`` (VIGIL-free) with the pins. Exit 0 iff SOUND.
 
-(A future packaging step registers this as the ``vigil posture`` dispatch verb; the logic is here so it
-is runnable + testable today without a reinstall.)
+This IS the ``vigil posture`` dispatch verb: ``vigil_integration.cli`` forwards ``vigil posture …`` here
+in-process (offense side; every framework touch stays function-local), so ``vigil posture attest|verify``
+works as ``docs/TRUTHENOVATION.md`` documents. It is also runnable directly as
+``python -m vigil_integration.posture …`` (identical logic).
 """
 
 from __future__ import annotations
@@ -70,6 +72,7 @@ def _read(p: Path) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .endpoint import DEFAULT_ENDPOINT_PORT  # framework-free; the single source of the default port
     ap = argparse.ArgumentParser(prog="vigil posture",
                                  description="Certificate of Non-Exploitability — mint + verify.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -98,7 +101,9 @@ def main(argv: list[str] | None = None) -> int:
                                         "a counterparty can poll + verify it offline")
     e.add_argument("--bundle", required=True, help="the bundle directory to serve")
     e.add_argument("--host", default="127.0.0.1")
-    e.add_argument("--port", type=int, default=8787)
+    e.add_argument("--port", type=int, default=DEFAULT_ENDPOINT_PORT,
+                   help=f"loopback/tunnel port (default {DEFAULT_ENDPOINT_PORT}; DELIBERATELY off the "
+                        f"offense console's 8787 so both can run at once)")
     e.set_defaults(fn=_cmd_endpoint)
 
     args = ap.parse_args(argv)

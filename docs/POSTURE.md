@@ -50,13 +50,14 @@ reachable. That denominator-on-the-face is what makes the negative believable wh
 letters are not.
 
 ## Reproduce / operate
+The `vigil posture` verb dispatches to this module (equivalently, `python -m vigil_integration.posture …`):
 ```bash
 # mint a certificate + portable bundle from a live scan of an authorized target
-python -m vigil_integration.posture attest --out ./run --engagement my-engagement
+vigil posture attest --out ./run --engagement my-engagement
 # a counterparty re-verifies OFFLINE (no VIGIL), with the out-of-band pins
-python -m vigil_integration.posture verify --bundle ./run/bundle
-# serve it read-only so a counterparty can poll + verify
-python -m vigil_integration.posture endpoint --bundle ./run/bundle --host 127.0.0.1 --port 8787
+vigil posture verify --bundle ./run/bundle
+# serve it read-only so a counterparty can poll + verify (default port 8788, off the console's 8787)
+vigil posture endpoint --bundle ./run/bundle --host 127.0.0.1
 # continuously re-prove on a cadence (systemd: infra/systemd/vigil-posture.{service,timer})
 python -m vigil_integration.posture.reprove --series-dir ./series --cycles 1
 ```
