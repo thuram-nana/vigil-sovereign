@@ -447,7 +447,8 @@ def _boot_id() -> str:
 
 
 def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
-                      capture_report: bool, env_extra: "dict | None" = None) -> None:
+                      capture_report: bool, env_extra: "dict | None" = None,
+                      env_remove: "list[str] | None" = None) -> None:
     """Run ``cmd`` as a daemon subprocess, recording status transitions into meta.json. When
     ``capture_report`` (the scan path) and it exits 0 with JSON on stdout, the report is saved for
     the Findings screen; otherwise stdout/stderr are retained for the run detail. Mirrors
@@ -458,8 +459,17 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
     ``reconcile_orphaned_runs``) instead of showing as live forever, and later resumed.
 
     ``env_extra`` is merged over ``os.environ`` for the child (used to hand a Strix run its Proof Studio
-    run context — ``VIGIL_PROOF_RUN_DIR`` — so the proof_sink writes proofs under this run's dir)."""
-    child_env = {**os.environ, **env_extra} if env_extra else None
+    run context — ``VIGIL_PROOF_RUN_DIR`` — so the proof_sink writes proofs under this run's dir).
+
+    ``env_remove`` deletes keys from the child env AFTER the merge (case-insensitive) — used by the Strix
+    sovereignty spawn to STRIP the unvalidated ``api_base`` aliases (``OPENAI_API_BASE`` / ``OPENAI_BASE_URL``
+    / ``LITELLM_BASE_URL`` / ``OLLAMA_API_BASE``) so a stray ambient alias cannot repoint the child off-host;
+    ``LLM_API_BASE`` (the loopback-validated one) is never in the remove list. Empty/None ⇒ byte-identical."""
+    child_env = {**os.environ, **(env_extra or {})} if (env_extra or env_remove) else None
+    if child_env is not None and env_remove:
+        _rm = {str(k).upper() for k in env_remove}
+        for _k in [k for k in child_env if str(k).upper() in _rm]:
+            child_env.pop(_k, None)
 
     def _run() -> None:
         try:
@@ -742,13 +752,18 @@ def retry_run(run_id: str) -> dict:
     capture_report = ("scan" in new_cmd and "--format" in new_cmd)
     # a Strix run needs its Proof Studio env re-pointed at the NEW run dir (else its proofs mis-locate).
     env_extra = None
+    env_remove = None
     if _is_strix_run:
         # **strix_env is merged LAST so a re-resolved LOCAL pin OVERRIDES the global cloud default in the child;
         # for a cloud/no-pick retry it is {} → byte-identical to the pre-GAP-1 Proof-Studio-only env.
+        # W0-7 LEG 2: same alias strip/canonicalize as the launch path, so a retried LOCAL run under a sovereign
+        # tier cannot be repointed off-host by a stray ambient sibling alias (PERMISSIVE ⇒ byte-identical).
+        _alias_extra, env_remove = _strix_child_alias_guard(strix_env)
         env_extra = {"VIGIL_PROOF_RUN_DIR": new_rd, "VIGIL_ENGAGEMENT": slug,
                      "VIGIL_BASE_DIR": os.environ.get("VIGIL_BASE_DIR") or ".vigil-live",
-                     **strix_env}
-    _spawn_background(new_id, rd, new_cmd, new_meta, capture_report=capture_report, env_extra=env_extra)
+                     **strix_env, **_alias_extra}
+    _spawn_background(new_id, rd, new_cmd, new_meta, capture_report=capture_report,
+                      env_extra=env_extra, env_remove=env_remove)
     return {"ok": True, "run_id": new_id, "resumed": resume, "parent": run_id}
 
 
@@ -998,6 +1013,58 @@ _STRIX_PROVIDER_TO_SOVEREIGNTY = {
 }
 
 
+# W0-7 (RE-RED-PEN HIGH — the sibling-alias air-gap leak) — the spawned Strix child resolves its ``api_base``
+# from pydantic ``AliasChoices``: the FIRST-present of ``LLM_API_BASE`` / ``OPENAI_API_BASE`` /
+# ``OPENAI_BASE_URL`` / ``LITELLM_BASE_URL`` / ``OLLAMA_API_BASE`` (vendor/strix/strix/config/settings.py
+# ``LlmSettings.api_base``, ``case_sensitive=False``). ``_spawn_background`` hands the child
+# ``{**os.environ, **env_extra}``, so ALL of those aliases pass through untouched. The gate below MUST classify
+# the base the child WILL DIAL — so it resolves the base from the SAME alias set in the SAME precedence, NOT
+# ``LLM_API_BASE`` alone. Otherwise a stray/ambient ``OPENAI_BASE_URL`` / ``OLLAMA_API_BASE`` (both common
+# ambient vars) with ``LLM_API_BASE`` UNSET repoints the child off-host while the gate sees no base, trusts the
+# ollama/self-hosted NAME as local, and permits — the source egresses under AIR_GAPPED. Two legs close it:
+# (1) the gate resolves the base over the whole alias set (here); (2) the spawn path strips the unvalidated
+# siblings so ONLY the loopback-validated ``LLM_API_BASE`` can point the child (``_strix_child_alias_guard``).
+def _strix_api_base_aliases() -> "list[str]":
+    """The env-var aliases Strix's ``LlmSettings.api_base`` honors, IN PRECEDENCE ORDER (first present wins).
+
+    Sourced from Strix's OWN ``AliasChoices`` when importable — so an upstream alias addition/re-order is picked
+    up automatically and drift can't silently re-open the leak — else the replicated tuple below (kept in sync
+    with vendor/strix/strix/config/settings.py ``LlmSettings.api_base``). Importing ``strix.config.settings`` is
+    offense-plane-safe: Strix is the vendored OFFENSE tool this console spawns; it does NOT import sigil (FATAL-2
+    is the sovereign side). Total: never raises."""
+    try:
+        from strix.config.settings import LlmSettings  # offense-plane vendored tool; never sigil (FATAL-2)
+        choices = [c for c in LlmSettings.model_fields["api_base"].validation_alias.choices
+                   if isinstance(c, str)]
+        if choices:
+            return choices
+    except Exception:  # noqa: BLE001 — fall back to the replicated tuple (keep in sync with settings.py)
+        pass
+    return ["LLM_API_BASE", "OPENAI_API_BASE", "OPENAI_BASE_URL", "LITELLM_BASE_URL", "OLLAMA_API_BASE"]
+
+
+def _strix_resolved_base(strix_llm_env: dict) -> str:
+    """The ``api_base`` the spawned Strix child WILL dial: the FIRST-present alias (Strix's own precedence)
+    across the per-session pin (``strix_llm_env``) then ``os.environ`` — exactly how the child, handed
+    ``{**os.environ, **env_extra}``, resolves it via ``AliasChoices``. Case-insensitive, mirroring Strix's
+    ``case_sensitive=False``. This — NOT ``LLM_API_BASE`` alone — is what the loopback gate must classify.
+    Total: never raises."""
+    try:
+        osenv_ci = {str(k).upper(): v for k, v in os.environ.items()}
+        pin_ci = {str(k).upper(): v for k, v in (strix_llm_env or {}).items()}
+        for alias in _strix_api_base_aliases():
+            au = str(alias).upper()
+            val = pin_ci.get(au)                       # env_extra is merged OVER os.environ for the child
+            if val is None:
+                val = osenv_ci.get(au)
+            val = str(val or "").strip()
+            if val:
+                return val
+    except Exception:  # noqa: BLE001 — cannot resolve ⇒ empty (the gate treats "no base" as default-localhost)
+        return ""
+    return ""
+
+
 def _strix_sovereignty_backend(strix_llm_env: dict) -> str:
     """The ``kernel.sovereignty`` backend NAME the spawned Strix codebase agent must be gated as.
 
@@ -1023,7 +1090,10 @@ def _strix_sovereignty_backend(strix_llm_env: dict) -> str:
     # The endpoint the child WILL dial. It gates every LOCAL-family backend below: a local backend is trusted
     # ``local`` only when this base is LOOPBACK (or unset = the backend's default localhost daemon). Shared by
     # the ``openai`` self-hosted branch AND the map fall-through so ONE loopback rule governs every local name.
-    base = str(strix_llm_env.get("LLM_API_BASE") or os.environ.get("LLM_API_BASE", "") or "").strip()
+    # Resolved over Strix's WHOLE ``api_base`` alias set in the child's own precedence (NOT ``LLM_API_BASE``
+    # alone) — else an ambient ``OPENAI_BASE_URL`` / ``OLLAMA_API_BASE`` with ``LLM_API_BASE`` unset would
+    # repoint the child off-host while this gate saw no base and trusted the local NAME (the air-gap leak).
+    base = _strix_resolved_base(strix_llm_env)
 
     def _base_is_loopback() -> bool:
         try:
@@ -1073,6 +1143,36 @@ def _strix_sovereignty_refusal(strix_llm_env: dict) -> str:
         return (f"the sovereignty policy could not be evaluated ({type(e).__name__}); refusing the Strix "
                 f"codebase run rather than risk egressing the source. Pick a local model, or set the tier.")
     return ""
+
+
+def _strix_child_alias_guard(strix_llm_env: dict) -> "tuple[dict, list[str]]":
+    """LEG 2 (defense-in-depth) — neutralize the UNVALIDATED ``api_base`` aliases in the spawned Strix child's
+    environment so ONLY the loopback-validated ``LLM_API_BASE`` can point it, even if the gate's alias list ever
+    drifts from Strix's own. Returns ``(env_extra_overrides, env_remove)`` for the ``_spawn_background`` call:
+
+      * ``({}, [])`` — under PERMISSIVE (the operator has NOT promised locality; the child env stays
+        BYTE-IDENTICAL to today, siblings untouched), OR when the run does not classify ``local`` (a cloud run
+        under a sovereign tier is refused BEFORE spawn by the gate, so this branch is defensive only).
+      * ``({"LLM_API_BASE": <resolved loopback base>}, [<every OTHER alias>])`` — under a SOVEREIGN tier for a
+        LOCAL-classified run: canonicalize the gate-validated loopback base into ``LLM_API_BASE`` and STRIP
+        ``OPENAI_API_BASE`` / ``OPENAI_BASE_URL`` / ``LITELLM_BASE_URL`` / ``OLLAMA_API_BASE`` from the child, so
+        a stray ambient remote alias cannot repoint it. Preserves the legitimate loopback case — a base set via
+        any alias becomes ``LLM_API_BASE``; an empty base (a bare default-localhost daemon) leaves ``LLM_API_BASE``
+        unset and simply strips the siblings.
+
+    Total: never raises — any failure returns ``({}, [])`` (byte-identical), because the run it guards has
+    ALREADY passed the loopback gate (``_strix_sovereignty_refusal``), so a guard fault must not block it."""
+    try:
+        from ..kernel import sovereignty as _sovereignty
+        if _sovereignty.current().tier == _sovereignty.Tier.PERMISSIVE:
+            return {}, []                              # PERMISSIVE: byte-identical child env (no strip, no override)
+        if _sovereignty.classify(_strix_sovereignty_backend(strix_llm_env)) != "local":
+            return {}, []                              # cloud runs are gate-refused pre-spawn; defensive no-op
+        remove = [a for a in _strix_api_base_aliases() if str(a).upper() != "LLM_API_BASE"]
+        base = _strix_resolved_base(strix_llm_env)
+        return ({"LLM_API_BASE": base} if base else {}), remove
+    except Exception:  # noqa: BLE001 — a guard fault never blocks the already-gate-permitted local spawn
+        return {}, []
 
 
 def engage_instruct(slug: str, text: str) -> dict:
@@ -1529,10 +1629,15 @@ def launch_assessment(body: dict) -> dict:
         # The gate is on regardless (safe hard-block if no authority is provisioned in that base).
         # GAP-1: **strix_llm_env is merged LAST so a LOCAL pick's STRIX_LLM/LLM_API_BASE OVERRIDES the global
         # cloud default in the child; for a cloud/no-pick run it is {} and this is byte-identical to before.
+        # W0-7 LEG 2: under a sovereign tier for a LOCAL run, canonicalize the validated loopback base into
+        # LLM_API_BASE and STRIP the unvalidated sibling aliases from the child, so a stray ambient
+        # OPENAI_BASE_URL/OLLAMA_API_BASE cannot repoint it off-host (PERMISSIVE ⇒ ({},[]) ⇒ byte-identical).
+        _alias_extra, _alias_remove = _strix_child_alias_guard(strix_llm_env)
         _spawn_background(run_id, rd, cmd, meta, capture_report=False,
                           env_extra={"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug,
                                      "VIGIL_BASE_DIR": os.environ.get("VIGIL_BASE_DIR") or ".vigil-live",
-                                     **strix_llm_env})
+                                     **strix_llm_env, **_alias_extra},
+                          env_remove=_alias_remove)
         return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "progress",
                 **unapplied}
 

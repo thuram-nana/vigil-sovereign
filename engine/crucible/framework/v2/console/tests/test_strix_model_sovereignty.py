@@ -13,6 +13,8 @@ No network call is ever made; ``_spawn_background`` is stubbed so nothing is act
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from framework.v2.console import actions as actions_mod
@@ -31,7 +33,10 @@ def _isolate(tmp_path, monkeypatch):
     # inheriting THIS. Start every local-model config var cleared so each test sets exactly what it means.
     monkeypatch.setenv("STRIX_LLM", CLOUD_DEFAULT)
     for v in ("LLM_API_BASE", "CRUCIBLE_OLLAMA_MODEL", "CRUCIBLE_OLLAMA_HOST",
-              "CRUCIBLE_SELFHOSTED_MODEL", "CRUCIBLE_SELFHOSTED_ENDPOINT"):
+              "CRUCIBLE_SELFHOSTED_MODEL", "CRUCIBLE_SELFHOSTED_ENDPOINT",
+              # the sibling api_base aliases Strix's AliasChoices ALSO honors — cleared so every test starts
+              # from a known base state and an ambient one from the runner can't perturb the gate (RE-RED-PEN).
+              "OPENAI_API_BASE", "OPENAI_BASE_URL", "LITELLM_BASE_URL", "OLLAMA_API_BASE"):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.delenv("CRUCIBLE_SOVEREIGNTY_TIER", raising=False)
     yield tmp_path
@@ -451,5 +456,231 @@ def test_retry_codebase_cloud_default_REFUSED_under_air_gap(spawn, monkeypatch, 
         r2 = actions_mod.retry_run(r["run_id"])
         assert r2["ok"] is False and "AIR_GAPPED" in r2["error"]
         assert spawn == {}
+    finally:
+        _sov.set_policy(None)
+
+
+# ══ RE-RED-PEN HIGH — the sibling api_base ALIAS air-gap leak ═════════════════════════════════════════════
+# Strix's LlmSettings.api_base honors AliasChoices(LLM_API_BASE, OPENAI_API_BASE, OPENAI_BASE_URL,
+# LITELLM_BASE_URL, OLLAMA_API_BASE) — FIRST present wins. The gate resolved the base from LLM_API_BASE ALONE,
+# so with LLM_API_BASE UNSET and a sibling alias pointed at a REMOTE host the gate saw NO base, trusted the
+# local NAME, and PERMITTED — while the spawned child dialed the remote host and egressed the source under
+# AIR_GAPPED. OPENAI_BASE_URL / OPENAI_API_BASE are common AMBIENT vars, so it fires as benign misconfig too.
+# Two legs close it: (1) the gate resolves the base over the WHOLE alias set in the child's precedence; (2) the
+# spawn path STRIPS the unvalidated siblings so only the loopback-validated LLM_API_BASE can point the child.
+
+# the sibling aliases (LLM_API_BASE excluded — that one is the validated/canonical one).
+_SIBLING_ALIASES = ["OPENAI_API_BASE", "OPENAI_BASE_URL", "LITELLM_BASE_URL", "OLLAMA_API_BASE"]
+REMOTE = "http://evil.example:11434"
+
+
+# -- the alias-resolution helpers in isolation -------------------------------------------------------------
+
+def test_api_base_aliases_matches_strix_settings():
+    # DRIFT GUARD: our alias list equals Strix's own AliasChoices (sourced from settings.py, or the replica).
+    assert actions_mod._strix_api_base_aliases() == [
+        "LLM_API_BASE", "OPENAI_API_BASE", "OPENAI_BASE_URL", "LITELLM_BASE_URL", "OLLAMA_API_BASE"]
+
+
+def test_resolved_base_follows_child_precedence(monkeypatch):
+    # PRECEDENCE mirrors the child: OPENAI_BASE_URL precedes OLLAMA_API_BASE in the alias set → wins.
+    monkeypatch.delenv("LLM_API_BASE", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://a:11434")
+    monkeypatch.setenv("OLLAMA_API_BASE", "http://b:11434")
+    assert actions_mod._strix_resolved_base({}) == "http://a:11434"
+    # a per-session pin's LLM_API_BASE is FIRST of all → wins over any ambient sibling (env_extra over env).
+    assert actions_mod._strix_resolved_base({"LLM_API_BASE": "http://pin:11434"}) == "http://pin:11434"
+
+
+def test_resolved_base_is_case_insensitive(monkeypatch):
+    # Strix uses case_sensitive=False, so a lowercase alias is honored by the child — the gate matches it too.
+    monkeypatch.delenv("LLM_API_BASE", raising=False)
+    monkeypatch.setenv("ollama_api_base", REMOTE)
+    try:
+        assert actions_mod._strix_resolved_base({}) == REMOTE
+    finally:
+        monkeypatch.delenv("ollama_api_base", raising=False)
+
+
+# -- LEG 1: the gate resolves the base over the whole alias set --------------------------------------------
+
+@pytest.mark.parametrize("provider", _LOCAL_PROVIDERS)
+@pytest.mark.parametrize("alias", _SIBLING_ALIASES)
+def test_gate_refuses_remote_sibling_alias_for_every_local_provider(air_gapped, monkeypatch, provider, alias):
+    # THE FIX (leg 1): LLM_API_BASE UNSET + a SIBLING alias pointed REMOTE → the gate resolves the base from the
+    # alias set (child precedence) → cloud_only → REFUSED under AIR_GAPPED. Before: base=LLM_API_BASE only →
+    # empty → the local NAME was trusted → PERMITTED → the child egressed the source via the sibling alias.
+    monkeypatch.setenv("STRIX_LLM", f"{provider}/qwen")
+    monkeypatch.delenv("LLM_API_BASE", raising=False)
+    monkeypatch.setenv(alias, REMOTE)
+    assert _sov.classify(actions_mod._strix_sovereignty_backend({})) == "cloud_only"
+    refusal = actions_mod._strix_sovereignty_refusal({})
+    assert refusal and "AIR_GAPPED" in refusal
+
+
+@pytest.mark.parametrize("alias", _SIBLING_ALIASES)
+def test_gate_refuses_remote_sibling_alias_openai_prefix(air_gapped, monkeypatch, alias):
+    # the openai (OpenAI-compatible self-hosted) prefix: a remote sibling base → NOT loopback → 'openai'
+    # sentinel → cloud_only → REFUSED. Its default (no base) is api.openai.com — CLOUD — so it must fail closed.
+    monkeypatch.setenv("STRIX_LLM", "openai/qwen")
+    monkeypatch.delenv("LLM_API_BASE", raising=False)
+    monkeypatch.setenv(alias, REMOTE)
+    assert _sov.classify(actions_mod._strix_sovereignty_backend({})) == "cloud_only"
+    assert actions_mod._strix_sovereignty_refusal({})
+
+
+@pytest.mark.parametrize("alias", _SIBLING_ALIASES)
+def test_gate_permits_loopback_sibling_alias(air_gapped, monkeypatch, alias):
+    # PRESERVE the legit case: a LOOPBACK sibling alias (LLM_API_BASE still unset) is a real local endpoint →
+    # classifies local → PERMITTED under AIR_GAPPED (must not over-block a legitimately-local backend).
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    monkeypatch.delenv("LLM_API_BASE", raising=False)
+    monkeypatch.setenv(alias, "http://127.0.0.1:11434")
+    assert actions_mod._strix_sovereignty_refusal({}) == ""
+
+
+def test_gate_llm_api_base_loopback_wins_over_remote_sibling(air_gapped, monkeypatch):
+    # PRECEDENCE (happy path): LLM_API_BASE is FIRST in the alias set → a loopback LLM_API_BASE wins even with a
+    # remote sibling present → PERMITTED (matches the child, which also honors LLM_API_BASE first).
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    monkeypatch.setenv("LLM_API_BASE", "http://127.0.0.1:11434")
+    monkeypatch.setenv("OPENAI_API_BASE", REMOTE)               # lower precedence — ignored by child AND gate
+    assert actions_mod._strix_sovereignty_refusal({}) == ""
+
+
+def test_gate_remote_llm_api_base_refused_even_with_loopback_sibling(air_gapped, monkeypatch):
+    # the inverse: a REMOTE LLM_API_BASE wins (first alias) even if a lower sibling is loopback → REFUSED.
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    monkeypatch.setenv("LLM_API_BASE", REMOTE)
+    monkeypatch.setenv("OLLAMA_API_BASE", "http://127.0.0.1:11434")
+    assert actions_mod._strix_sovereignty_refusal({}) and "AIR_GAPPED" in actions_mod._strix_sovereignty_refusal({})
+
+
+# -- LEG 1 end-to-end: the launch/retry path does NOT spawn -----------------------------------------------
+
+@pytest.mark.parametrize("alias", _SIBLING_ALIASES)
+def test_launch_codebase_remote_sibling_alias_REFUSED_no_spawn(spawn, air_gapped, monkeypatch, alias, tmp_path):
+    # END-TO-END (the CONFIRMED exploit): STRIX_LLM=ollama + LLM_API_BASE UNSET + <sibling>=REMOTE under
+    # AIR_GAPPED. The launch is REFUSED and NOTHING spawns — before the fix it spawned and shipped the source.
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen2.5-coder:32b")
+    monkeypatch.delenv("LLM_API_BASE", raising=False)
+    monkeypatch.setenv(alias, REMOTE)
+    r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path)})
+    assert "error" in r and "AIR_GAPPED" in r["error"]
+    assert spawn == {}                                          # never spawned → the source never left the host
+
+
+# -- LEG 2 (defense-in-depth): the child env the SPAWN receives carries no unvalidated remote alias --------
+
+@pytest.fixture()
+def real_spawn(monkeypatch):
+    """Run the REAL _spawn_background but stub subprocess.Popen so nothing execs — capture the child ``env``
+    the child would TRULY receive (os.environ merged with env_extra, THEN env_remove stripped)."""
+    monkeypatch.setattr(actions_mod, "_docker_ready", lambda: (True, "ready"))
+    envs: list = []
+    ev = threading.Event()
+
+    class _FakeProc:
+        def __init__(self, *a, env=None, **kw):
+            envs.append(env)
+            self.pid = 4242
+            self.returncode = 0
+            ev.set()
+
+        def communicate(self, timeout=None):
+            return ("", "")
+
+        def kill(self):  # pragma: no cover — timeout path not exercised
+            pass
+
+    monkeypatch.setattr(actions_mod.subprocess, "Popen", lambda *a, **kw: _FakeProc(*a, **kw))
+
+    class _Handle:
+        def wait(self, timeout=5):
+            ok = ev.wait(timeout)
+            ev.clear()
+            return ok
+
+        @property
+        def last(self):
+            return envs[-1] if envs else None
+
+    return _Handle()
+
+
+def test_child_env_strips_remote_sibling_leg2(real_spawn, air_gapped, monkeypatch, tmp_path):
+    # LEG 2: a LOCAL run permitted via a loopback LLM_API_BASE (first alias), but with an ambient REMOTE sibling
+    # of LOWER precedence. The child the SPAWN actually receives must carry NO remote sibling — so even if
+    # Strix's alias precedence ever drifted, the child cannot be repointed off-host. LLM_API_BASE survives.
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen2.5-coder:32b")
+    monkeypatch.setenv("LLM_API_BASE", "http://127.0.0.1:11434")   # first alias, loopback → PERMITTED
+    monkeypatch.setenv("OLLAMA_API_BASE", REMOTE)                  # lower-precedence ambient remote sibling
+    r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path)})
+    assert r["status"] == "running"
+    assert real_spawn.wait()
+    env = real_spawn.last
+    assert env is not None
+    for a in _SIBLING_ALIASES:
+        assert a not in env, f"{a} must be stripped from the child env"
+    assert env["LLM_API_BASE"] == "http://127.0.0.1:11434"        # the validated loopback base survives
+    assert env["STRIX_LLM"] == "ollama/qwen2.5-coder:32b"
+
+
+def test_child_env_bare_daemon_strips_remote_sibling_leg2(real_spawn, air_gapped, monkeypatch, tmp_path):
+    # LEG 2 with a BARE default-localhost daemon (no base at all set legitimately) but a stray ambient remote
+    # sibling of a DIFFERENT spelling than what leg-1 resolved first: here LLM_API_BASE unset, and only
+    # LITELLM_BASE_URL=loopback (permits), plus OLLAMA_API_BASE=REMOTE (lower precedence, stray). The child
+    # must be stripped of every sibling; leg-1 canonicalizes the loopback base into LLM_API_BASE.
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen2.5-coder:32b")
+    monkeypatch.delenv("LLM_API_BASE", raising=False)
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:11434")   # first-present loopback → PERMITTED
+    monkeypatch.setenv("OLLAMA_API_BASE", REMOTE)                      # lower precedence, stray remote
+    r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path)})
+    assert r["status"] == "running"
+    assert real_spawn.wait()
+    env = real_spawn.last
+    for a in _SIBLING_ALIASES:
+        assert a not in env, f"{a} must be stripped from the child env"
+    assert env["LLM_API_BASE"] == "http://127.0.0.1:11434"            # canonicalized from the loopback alias
+
+
+def test_child_env_byte_identical_under_permissive(real_spawn, monkeypatch, tmp_path):
+    # PERMISSIVE: leg 2 is a NO-OP — the child env is byte-identical to today. A sibling alias (even a
+    # non-default loopback the operator legitimately set) is NOT stripped or rewritten. Proves the strip is
+    # tier-gated: the operator has allowed cloud egress, so nothing is enforced or perturbed.
+    _sov.set_policy(None)
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "PERMISSIVE")
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    monkeypatch.delenv("LLM_API_BASE", raising=False)
+    monkeypatch.setenv("OLLAMA_API_BASE", "http://127.0.0.1:9999")     # a non-default loopback the operator set
+    try:
+        r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path)})
+        assert r["status"] == "running"
+        assert real_spawn.wait()
+        env = real_spawn.last
+        assert env["OLLAMA_API_BASE"] == "http://127.0.0.1:9999"       # preserved under PERMISSIVE — untouched
+        assert "LLM_API_BASE" not in env                               # not injected either (byte-identical)
+    finally:
+        _sov.set_policy(None)
+
+
+# -- the leg-2 guard helper in isolation -------------------------------------------------------------------
+
+def test_child_alias_guard_local_under_air_gap(air_gapped, monkeypatch):
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    monkeypatch.setenv("LLM_API_BASE", "http://127.0.0.1:11434")
+    monkeypatch.setenv("OLLAMA_API_BASE", REMOTE)
+    overrides, remove = actions_mod._strix_child_alias_guard({})
+    assert overrides == {"LLM_API_BASE": "http://127.0.0.1:11434"}
+    assert set(remove) == set(_SIBLING_ALIASES)
+
+
+def test_child_alias_guard_noop_under_permissive(monkeypatch):
+    _sov.set_policy(None)
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "PERMISSIVE")
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen")
+    monkeypatch.setenv("OLLAMA_API_BASE", REMOTE)
+    try:
+        assert actions_mod._strix_child_alias_guard({}) == ({}, [])
     finally:
         _sov.set_policy(None)
