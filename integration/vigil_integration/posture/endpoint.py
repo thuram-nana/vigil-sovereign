@@ -22,6 +22,13 @@ from typing import Any
 
 from ..witness_service import bind_ok
 
+# The default port the read-only posture endpoint binds. DELIBERATELY off 8787: that is the offense
+# console's fixed port (``uiproxy.CONSOLE_PORT``), and the two must be able to run AT THE SAME TIME — you
+# serve the signed posture bundle to a counterparty WHILE the console is up. Binding 8787 by default put
+# the posture endpoint straight on top of the console (issue #546). 8788 sits just above it, clear of the
+# fixed UI ports (proxy 8770 · cockpit 8733 · console 8787 · api 8799).
+DEFAULT_ENDPOINT_PORT = 8788
+
 
 class PostureEndpointError(Exception):
     """Refused to serve (e.g. a public bind) — fail-closed."""
