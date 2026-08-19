@@ -2105,9 +2105,15 @@ def _cmd_terminal(args: argparse.Namespace) -> int:
     if rt.signer is None:
         return _refuse("no signer wired — refusing to run an unrecordable command (fail-closed)")
 
-    # --approve is the operator's standing approval: execute under the approval gate (WARDEN human leg
-    # satisfied → the A2 queue is upgraded to allow). Without it, the base gate QUEUES terminal.run and
-    # execute_terminal denies at authorization — the command is prepared + gated but never run.
+    # --approve is the operator's approval: execute under the approval gate (WARDEN human leg satisfied → the
+    # A2 queue is upgraded to allow). Without it, the base gate QUEUES terminal.run and execute_terminal denies
+    # at authorization — the command is prepared + gated but never run. W0-11: the approval gate is PER-ACTION
+    # (single-use) — bind it to THIS exact command so ``--approve`` admits only the one command the operator
+    # typed, never a blanket promote-all.
+    if args.approve and rt.approval_gate is not None:
+        from .live.approval_token import action_digest
+        rt.standing.bind("terminal.run", "127.0.0.1",
+                         action_digest("terminal.run", "127.0.0.1", {"command": command}))
     active_gate = rt.approval_gate if (args.approve and rt.approval_gate is not None) else rt.gate
 
     seq = _terminal_next_seq(rt.history_path)
@@ -2173,6 +2179,12 @@ def _cmd_sandbox(args: argparse.Namespace) -> int:
             return _refuse(f"could not create the sandbox workspace ({type(e).__name__}) — refused (fail-closed)")
     history = str(_Path(args.base_dir) / "sandbox-history.jsonl")
 
+    # W0-11: the approval gate is PER-ACTION (single-use) — bind it to THIS exact command so ``--approve``
+    # admits only the one command the operator typed, never a blanket promote-all.
+    if args.approve and rt.approval_gate is not None:
+        from .live.approval_token import action_digest
+        rt.standing.bind("sandbox.exec", "127.0.0.1",
+                         action_digest("sandbox.exec", "127.0.0.1", {"command": command}))
     active_gate = rt.approval_gate if (args.approve and rt.approval_gate is not None) else rt.gate
     seq = _terminal_next_seq(history)
     res = execute_sandbox(
