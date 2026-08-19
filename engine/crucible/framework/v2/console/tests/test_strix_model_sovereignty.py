@@ -301,6 +301,41 @@ def test_gate_permits_local_self_hosted_loopback_pin_under_air_gap(air_gapped):
     env = {"STRIX_LLM": "openai/qwen", "LLM_API_BASE": "http://127.0.0.1:8000/v1"}
     assert actions_mod._strix_sovereignty_refusal(env) == ""
 
+# -- RED-PEN MEDIUM (air-gap gap): a caller-injected ollama pointing at a REMOTE base must NOT be trusted --
+# -- as `local` on the PROVIDER NAME alone — mirror the openai sibling's loopback check on the ollama path. --
+
+def test_gate_remote_pointed_ollama_classifies_cloud_only():
+    # the backend NAME for a remote-pointed ollama is the cloud-only sentinel (fail-closed) — NOT `ollama`/local.
+    name = actions_mod._strix_sovereignty_backend(
+        {"STRIX_LLM": "ollama/x", "LLM_API_BASE": "http://evil.example:11434"})
+    assert _sov.classify(name) == "cloud_only"
+
+def test_gate_refuses_remote_pointed_ollama_under_air_gap(air_gapped, monkeypatch):
+    # REPRO: a no-pick run inherits the AMBIENT STRIX_LLM/LLM_API_BASE. A caller-injected ollama pointed at a
+    # REMOTE host would egress the source under AIR_GAPPED if `local` were decided by the provider NAME alone.
+    # The loopback check on the ollama path fail-closes it to cloud_only → REFUSED (like the openai sibling).
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen2.5-coder:32b")
+    monkeypatch.setenv("LLM_API_BASE", "http://evil.example:11434")
+    refusal = actions_mod._strix_sovereignty_refusal({})
+    assert refusal and "AIR_GAPPED" in refusal
+
+def test_gate_refuses_remote_ip_ollama_under_air_gap(air_gapped):
+    # a non-loopback IP base is likewise refused (not just a hostname).
+    refusal = actions_mod._strix_sovereignty_refusal(
+        {"STRIX_LLM": "ollama/x", "LLM_API_BASE": "http://10.0.0.5:11434"})
+    assert refusal and "AIR_GAPPED" in refusal
+
+def test_gate_permits_bare_ollama_no_base_under_air_gap(air_gapped, monkeypatch):
+    # PRESERVE the legitimate path: a bare ollama with NO base = the default localhost daemon → local → PERMITTED.
+    monkeypatch.setenv("STRIX_LLM", "ollama/qwen2.5-coder:32b")
+    monkeypatch.delenv("LLM_API_BASE", raising=False)
+    assert actions_mod._strix_sovereignty_refusal({}) == ""
+
+def test_gate_permits_loopback_base_ollama_under_air_gap(air_gapped):
+    # a loopback-pinned ollama base still classifies local → PERMITTED (the per-session resolver's happy path).
+    assert actions_mod._strix_sovereignty_refusal(
+        {"STRIX_LLM": "ollama/x", "LLM_API_BASE": "http://127.0.0.1:11434"}) == ""
+
 def test_gate_backend_classification_matches_settings_prefixes():
     # the LiteLLM prefix → sovereignty backend name mirror is correct (drift guard for the two differing spellings).
     assert actions_mod._strix_sovereignty_backend({"STRIX_LLM": "bedrock/anthropic.claude-opus-5"}) == "bedrock"
