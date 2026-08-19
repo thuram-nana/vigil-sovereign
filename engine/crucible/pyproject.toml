@@ -85,3 +85,50 @@ where = ["."]
 include = ["framework*"]
 exclude = ["*.tests", "*.tests.*"]
 namespaces = false
+
+# ── quality gates (W2-2 #419) ──────────────────────────────────────────────────────────────────────
+# ruff + mypy over the WHOLE importable `framework/` tree (~1000 modules) INCLUDING its tests (tests are
+# LINTED, not excluded). Rule set is WIDER than the historical `E9,F,B` (adds C4/PIE/PLE/ISC/FLY/T10/SLOT
+# real-bug families). This is the FIRST lint config this tree has ever had, so it carries the most
+# pre-existing pyflakes/bugbear debt; a config-only slice does not rewrite ~1000 files, so those specific
+# sub-codes are deferred with a TODO and burned down + re-enabled by the W2-1 ratchet (#418). Where the
+# firing is genuinely intentional (a Trojan-Source / zero-width-space carrier in the AEGIS boundary
+# detector) it is scoped via per-file-ignores so PLE STAYS ON for the rest of the tree. CLEAN today
+# (`ruff check framework` == 0).
+#
+# ruff discovers THIS config for every framework/*.py (framework/v2/pyproject.toml has no [tool.ruff],
+# so ruff walks up to here); per-file-ignore globs below are relative to engine/crucible/.
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E9", "F", "B", "C4", "PIE", "PLE", "ISC", "FLY", "T10", "SLOT"]
+ignore = [
+    "B007", "B008", "B011", "B904", "B905",
+    "C401", "C408", "C416", "C419", "C420",
+    "PIE810", "FLY002", "ISC002", "ISC003",
+    # Pre-existing debt on a first-ever-linted tree (config-only slice); TODO(W2-1 #418) fix + re-enable:
+    "F401",   # unused imports (58 re-export __init__.py + ~61 scattered)
+    "F541",   # f-string without placeholders
+    "F811",   # redefinition of unused name
+    "F821",   # undefined name (annotation-only refs)
+    "F841",   # unused local
+    "B023",   # function-uses-loop-variable (closure-over-loop-var) — real; audit + fix under the ratchet
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests ARE linted; loosen the patterns that are legitimate (or pre-existing debt) in test code:
+"**/tests/**" = ["E402", "F401", "F541", "F811", "F841", "B011", "B015", "B017", "PLE2515"]
+# The AEGIS boundary detector deliberately embeds control / zero-width characters as detection fixtures;
+# keep PLE2502 (bidirectional-unicode / Trojan-Source) + PLE2515 (ZWSP) ON everywhere ELSE:
+"**/aegis/boundary.py" = ["PLE2502", "PLE2515"]
+
+[tool.mypy]
+# Pragmatic ENTRY posture for this root config (the nested framework/v2/pyproject.toml keeps its own
+# stricter v2-scoped [tool.mypy] for `mypy` runs from framework/v2/). Tests are IN SCOPE here.
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = false
+warn_redundant_casts = true
+check_untyped_defs = false
