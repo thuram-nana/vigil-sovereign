@@ -48,9 +48,12 @@ The AI is only ever allowed to *propose*. A separate **oracle** must *prove*. A 
 >   needs a signed charter the UI cannot mint for you.
 > - **Third parties are out of scope by default** (payment / identity / CDN / email / hosting providers). You
 >   may test *your own integration* with them; never attack the third party itself.
-> - **Loopback by default; destructive tools are gated.** The reference charter is `127.0.0.1`-only with no
->   external egress; destructive tools (metasploit / sqlmap / hydra) require an **m-of-n threshold sign-off**
->   even against loopback. The web UI can never widen a charter-signed scope.
+> - **Loopback by default; destructive tools are denied in the live engine.** The reference charter is
+>   `127.0.0.1`-only with no external egress; in the **live engagement engine** destructive tools
+>   (metasploit / sqlmap / hydra) are **denied outright** — its conjunctive gate wires no threshold-destruction
+>   authority, so a destructive action fails closed rather than running. The **m-of-n threshold sign-off**
+>   governs the **code-fix / PR path** instead (`vigil patch --open-pr`, and live-fire). The web UI can never
+>   widen a charter-signed scope.
 > - **No warranty, your responsibility.** The software is provided **"AS IS", without warranty**; **you are
 >   solely responsible** for how you use it, and the authors are **not liable** for any use or misuse.
 >
@@ -258,7 +261,7 @@ The reasoning loop and everything that supports it, built in thirteen numbered s
 - **`agent/phases.py`** — the attack phase machine (recon → exploitation → post-exploitation) mapped onto WARDEN tiers; moving deeper is one careful step at a time and needs a signed approval.
 - **`agent/cognition.py`** — non-authoritative "cognition governors": stall-and-loop detectors and an honesty auditor that cross-checks the AI's "I made progress" claim against measured reality. They can *re-rank or defer* work — they can **never** decide a finding is true.
 - **`agent/checkpoint.py`** — snapshots the whole run into the signed spine, so a session can be rebuilt and re-verified later; a fact can never be reconstructed without its evidence.
-- **`safety/`** — the untrusted-input boundary: every piece of attacker-controllable text is wrapped in an unpredictable "treat this as inert data" envelope; a non-disableable hard block refuses categorically-forbidden targets (government/military/etc.); a fail-closed parser turns AI output into typed, safe proposals; and an SSRF pre-filter (SSRF = "server-side request forgery," tricking the server into fetching a forbidden address) guards network fetches.
+- **`safety/`** — the untrusted-input boundary: every piece of attacker-controllable text is wrapped in an unpredictable "treat this as inert data" envelope; an owner-disableable hard block (fail-safe default: on) refuses categorically-forbidden targets (government/military/etc.); a fail-closed parser turns AI output into typed, safe proposals; and an SSRF pre-filter (SSRF = "server-side request forgery," tricking the server into fetching a forbidden address) guards network fetches.
 - **`tools/`** — the governed tool boundary: every tool call is subordinated to the phase → tier → gate chain; an unregistered or out-of-phase tool is denied before the gate is even consulted. Includes a pluggable, least-privilege MCP-server registry (MCP is the emerging standard plug-in interface for AI tools).
 - **`graph/`** — attack-chain graph *memory*: a rebuilt-from-the-record map of what's been confirmed, kept strictly separate (confirmed facts vs. leads) and authorizing *nothing*.
 - **`fireteam/`** — governed parallel specialists: a fan-out of sub-agents, each capped at a safe tier, unable to escalate themselves, with all writes serialized so signatures never corrupt; only oracle-reconfirmed facts survive the merge.
@@ -486,13 +489,19 @@ applied to a shell: **the AI only proposes; the allowlist + WARDEN gate + your a
 command — whether typed directly or proposed by the chatbot — travels the identical path:
 
 1. **Parsed with no shell.** The command is refused whole if it contains any shell metacharacter — `;` `&` `|` `>` `<` `$` `(` `)` `{` `}` `\`, a backtick, or a NUL/newline — then split on whitespace into an argv list and run with `shell=False`, so no pipe, redirect, substitution, glob, or variable-expansion can ever survive to a token.
-2. **Allowlist-validated.** `argv[0]` must be one of a curated set of **local read/print binaries only** — `ls cat head tail wc stat pwd whoami id uname echo df du ps uptime grep cut tr`, plus `find` restricted to a read-only *predicate allowlist* (the exec/write predicates `-exec`/`-delete`/`-fprint*`/… are refused *by omission*, not by a denylist), plus `date`/`hostname` admitted **bare only** (a flag/operand could set the clock or hostname — a host write). Every network binary (`curl`/`wget`/`nc`/`ssh`/…), every interpreter (`bash`/`python`/`awk`/…), and every writer (`tee`/`cp`/`rm`/`sed -i`/…) is simply absent, and therefore denied.
+2. **Allowlist-validated.** `argv[0]` must be one of a curated set of **local read/inspect binaries** — the full set is generated verbatim from `_TERMINAL_ALLOWLIST` in `integration/vigil_integration/live/executor.py`, and a doc-truth test fails if this list drifts from the code:
+   <!-- BEGIN GENERATED: terminal-allowlist (from executor.py _TERMINAL_ALLOWLIST; do not hand-edit — a test asserts this equals the code set) -->
+   `arch base32 base64 basename cal cat cksum cmp column comm cut date df diff dirname du echo expand file find fold free grep groups head hexdump hostname id locale ls lsblk lscpu md5sum nl nproc od paste ps pwd readlink realpath rev sha1sum sha256sum sha512sum sort stat strings tac tail tr uname uniq uptime wc whoami`
+   <!-- END GENERATED: terminal-allowlist -->
+   Most are pure read/print — safe under **any** argv. Four are write-capable in general and so are admitted **only under a read-only flag/predicate allowlist that rejects every write/exec form by omission**: `find` (read-only *predicate* allowlist — the exec/write predicates `-exec`/`-delete`/`-fprint*`/… refused), and `sort`/`uniq`/`file` (read-only *flag* allowlist — `sort -o`/`--output`/`--compress-program`, a second `uniq` output operand, and `file -C` all refused). `date`/`hostname` are admitted **bare only** (a flag/operand could set the clock or hostname — a host write). Every network binary (`curl`/`wget`/`nc`/`ssh`/…), every interpreter (`bash`/`python`/`awk`/…), every *unguarded* writer (`tee`/`cp`/`rm`/`sed -i`/…), plus `env`/`printenv` (dump secrets / `env PROG` execs) and `getent` (DNS egress), are simply absent, and therefore denied.
 3. **Classified WARDEN A2 → queued for you.** `terminal.run` classifies at tier A2 under the one shared WARDEN classifier, so under the A1 offense ceiling the conjunctive gate **QUEUES** it — it can *never* auto-run. Your **Run** click is the operator approval that upgrades the queue to allow.
 4. **Run, then signed.** The approved argv runs under a timeout + output cap, and the result is written as a **signed, redacted `ExecRecord`** on the tamper-evident spine (no signer wired ⇒ the command is refused *before* it runs, because an unrecordable command is unprovable).
 
 Because of step 2, a Terminal command can **neither reach the network, write or modify a file, nor spawn an
-interpreter — by construction:** no such binary is on the allowlist, so there is nothing to pin and nothing
-that can egress. (The test suite drives a hostile red-pen battery at it — network binaries, interpreters,
+interpreter — by construction:** no network or interpreter binary is on the allowlist, and the four
+write-capable binaries that are (`find`/`sort`/`uniq`/`file`) are bounded to their read-only forms by the
+flag/predicate allowlists above — so under any accepted argv there is nothing to pin and nothing
+that can egress or write. (The test suite drives a hostile red-pen battery at it — network binaries, interpreters,
 writers, shell metacharacters, unsafe `find` predicates, and even coreutils option-abbreviation bypasses like
 `sort --compress=curl` — and every one is refused.)
 

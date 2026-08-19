@@ -1945,7 +1945,10 @@ def _execute(tool_name: Any, tool_args: Any, phase: Any, *, gate, view, destruct
 #   * The few binaries that COULD exec/write are handled by ALLOWLIST, not a spelling denylist — a red-pen
 #     proved a denylist cannot be complete (GNU getopt_long accepts unambiguous prefix ABBREVIATIONS like
 #     `sort --compress=`/`--out=`, and coreutils have positional aliases like `date MMDDhhmm`). So:
-#       - ``sort``/``uniq``/``file``/``env`` — genuinely exec/write-capable; simply NOT on the allowlist.
+#       - ``sort``/``uniq``/``file`` — exec/write-capable in general, so admitted ONLY under a read-only
+#         FLAG allowlist (``_SORT_SAFE_FLAGS``/``_UNIQ_SAFE_FLAGS``; ``file`` with -C/--compile refused) that
+#         rejects every write/exec spelling by OMISSION. ``env``/``printenv`` (``env PROG`` execs / dumps
+#         secrets) and ``getent`` (DNS egress) are genuinely exec/egress-capable and NOT on the allowlist.
 #       - ``find``  — every ``-``-leading token must be on the read-only predicate allowlist
 #                     (``_FIND_SAFE_PREDICATES``); the exec/write predicates (-exec/-execdir/-delete/-fprint*/
 #                     -fls/-ok*/…) are refused by OMISSION (no missed spelling can slip through). Non-``-``
@@ -1960,15 +1963,19 @@ def _execute(tool_name: Any, tool_args: Any, phase: Any, *, gate, view, destruct
 #     ``ExecRecord`` — reusing the exact machinery ``execute`` uses. Total: any failure is a DENY, never a
 #     raise.
 
-# The curated LOCAL read/inspect allowlist. Only binaries that can NEITHER exec, write a file, NOR egress
-# under ANY argv are admitted, so "no egress / no host-write by construction" is TRUE, not merely guarded.
-# A red-pen refuted an earlier spelling-DENYLIST guard: GNU getopt_long accepts any unambiguous prefix
-# ABBREVIATION (`sort --compress=` ≡ `--compress-program`, `sort --out=` ≡ `--output`) and coreutils have
-# positional aliases (`date MMDDhhmm` sets the clock, a 2nd `uniq` operand is an output file) — a denylist of
-# spellings can never be complete. So the exec/write-capable binaries (sort/uniq/file/env) are DROPPED; the
-# only capable binary kept is `find`, admitted via a read-only PREDICATE ALLOWLIST (below) that rejects the
-# exec/write predicates by OMISSION (immune to any missed spelling); and the two host-state PRINTERS
-# (date/hostname) are admitted BARE only (a flag/operand could set the clock/hostname).
+# The curated LOCAL read/inspect allowlist. MOST entries are pure read/print — safe under ANY argv. FOUR are
+# exec/write-capable in general and are KEPT ONLY under a read-only flag/predicate allowlist that rejects
+# every write/exec spelling by OMISSION, so under any ACCEPTED argv they too can neither egress nor write:
+# "no egress / no host-write by construction" holds for the pure-read set outright, and for these four by a
+# fail-closed allowlist. A red-pen refuted an earlier spelling-DENYLIST guard: GNU getopt_long accepts any
+# unambiguous prefix ABBREVIATION (`sort --compress=` ≡ `--compress-program`, `sort --out=` ≡ `--output`) and
+# coreutils have positional aliases (`date MMDDhhmm` sets the clock, a 2nd `uniq` operand is an output file) —
+# a denylist of spellings can never be complete, so an ALLOWLIST is used instead. The FOUR capable binaries
+# KEPT (guarded): `find` (read-only PREDICATE allowlist below), and `sort`/`uniq`/`file` (read-only FLAG
+# allowlists — `sort -o`/`--output`/`--compress-program`, a 2nd `uniq` output operand, and `file -C` are all
+# refused by OMISSION). GENUINELY ABSENT (not admittable safely, hence NOT on the allowlist): `env`/`printenv`
+# (dump secrets / `env PROG` execs), `getent` (DNS egress), `xxd -r` (writes its 2nd operand). The two
+# host-state PRINTERS (date/hostname) are admitted BARE only (a flag/operand could set the clock/hostname).
 _TERMINAL_ALLOWLIST: frozenset = frozenset({
     # pure read/print — safe under ANY argv (no exec/write/egress option or operand exists). Read files,
     # dirs, and system state; transform stdin→stdout; hash/inspect/compare — the full LOCAL read toolkit:

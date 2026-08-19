@@ -1,4 +1,4 @@
-"""F1 — hard_guardrail: the deterministic, non-disableable scope floor (pre-charter)."""
+"""F1 — hard_guardrail: the deterministic, owner-disableable (fail-safe default: on) scope floor (pre-charter)."""
 
 from __future__ import annotations
 

@@ -9,9 +9,10 @@ Two load-bearing invariants every later fusion phase depends on:
 plus two deny-by-default pre-filters that sit BEFORE the charter/gate and complement — never
 replace — the sovereign core:
 
-  * ``hard_guardrail`` — a deterministic, non-disableable scope block for categorically-never targets
-    (government / military / educational / intergovernmental), evaluated before the charter is even
-    consulted;
+  * ``hard_guardrail`` — a deterministic, owner-disableable (fail-safe default: on) scope block for
+    categorically-never targets (government / military / educational / intergovernmental), evaluated
+    before the charter is even consulted. Its MATCHER is a pure, env-free predicate; only whether callers
+    ENFORCE it is owner-controlled (``VIGIL_ALLOW_PROTECTED_DOMAINS`` — see ``protected_guard_enabled``);
   * ``url_guard`` — an application-layer SSRF/metadata pre-filter for LLM inference endpoints and
     agent fetch targets, delegating IP classification to the P6 egress gate's denylist so there is a
     single source of truth for the always-denied ranges.
