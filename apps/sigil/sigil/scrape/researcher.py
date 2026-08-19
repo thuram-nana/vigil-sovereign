@@ -71,8 +71,8 @@ class WebResearcher(Scholar):
     @staticmethod
     def _compose(question, grounded, advisory, pages, skips) -> str:
         lines = [f"# SCRIBE web research — {question}", "",
-                 f"Pages fetched: {len(pages)}. Grounded claims: {len(grounded)}. "
-                 f"Advisory (ungrounded): {len(advisory)}. Skipped: {len(skips)}.", ""]
+                 (f"Pages fetched: {len(pages)}. Grounded claims: {len(grounded)}. "
+                 f"Advisory (ungrounded): {len(advisory)}. Skipped: {len(skips)}."), ""]
         if grounded:
             lines.append("## Grounded (verbatim source span · the authoritative evidence)")
             for g in grounded:
