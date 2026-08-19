@@ -254,9 +254,12 @@ def _provision(args: argparse.Namespace) -> int:
     doc = _document_from_args(args)
     signed = prov.sign_entitlement(doc, privs)
 
-    # Only now touch disk: trust root then entitlement.
-    tr_path = prov.write_trust_root(trust_root)
+    # Only now touch disk. Write the ENTITLEMENT first, then the trust root: enforcement only activates once
+    # a trust root exists, so if the second write fails (ENOSPC/EACCES/crash) the deployment lands in the
+    # SAFE INACTIVE/UNGOVERNED state (a lone entitlement.json verifies INACTIVE), never GOVERNED-but-denied
+    # (a lone trust-root.json). Fail toward UNGOVERNED, per the module's own doctrine.
     ent_path = prov.write_entitlement(signed)
+    tr_path = prov.write_trust_root(trust_root)
 
     keys_out = Path(args.keys_out) if args.keys_out else (paths.entitlement_dir() / "authorizer-keys.json")
     paths.secure_write(
