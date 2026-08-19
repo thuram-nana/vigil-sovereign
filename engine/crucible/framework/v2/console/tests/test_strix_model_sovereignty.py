@@ -336,6 +336,49 @@ def test_gate_permits_loopback_base_ollama_under_air_gap(air_gapped):
     assert actions_mod._strix_sovereignty_refusal(
         {"STRIX_LLM": "ollama/x", "LLM_API_BASE": "http://127.0.0.1:11434"}) == ""
 
+# -- RED-PEN MEDIUM (air-gap gap, part 2): the loopback gate must cover EVERY local-classified backend, not --
+# -- just ollama/openai. `vllm` / `tgi` / `llama-cpp` / `self-hosted` / `dryrun` classify `local` by NAME via --
+# -- the raw-name fall-through; before the SHARED gate they were trusted local with a REMOTE base and leaked --
+# -- the source under AIR_GAPPED. Route every classify()=='local' name through the ONE loopback check. --------
+
+# every provider prefix whose sovereignty backend name classifies `local` (the whole air-gap-sensitive set).
+_LOCAL_PROVIDERS = ["ollama", "vllm", "tgi", "llama-cpp", "self-hosted", "dryrun"]
+
+@pytest.mark.parametrize("provider", _LOCAL_PROVIDERS)
+def test_every_local_provider_is_local_classified(provider):
+    # sanity/drift guard: each of these names really does classify `local` (so the gate below is the only thing
+    # standing between a remote-pointed base and an AIR_GAPPED source leak).
+    assert _sov.classify(provider) == "local"
+
+@pytest.mark.parametrize("provider", _LOCAL_PROVIDERS)
+def test_gate_remote_base_refused_for_every_local_provider(air_gapped, provider):
+    # THE FIX: a caller-injected local NAME pointed at a REMOTE base is fail-closed to the cloud sentinel →
+    # classify() cloud_only → REFUSED at construction under AIR_GAPPED. (Before the shared gate, only ollama
+    # was covered; vllm/tgi/llama-cpp/self-hosted/dryrun leaked because they classified `local` on the NAME.)
+    env = {"STRIX_LLM": f"{provider}/x", "LLM_API_BASE": "http://evil.example:11434"}
+    assert _sov.classify(actions_mod._strix_sovereignty_backend(env)) == "cloud_only"
+    refusal = actions_mod._strix_sovereignty_refusal(env)
+    assert refusal and "AIR_GAPPED" in refusal
+
+@pytest.mark.parametrize("provider", _LOCAL_PROVIDERS)
+def test_gate_remote_ip_base_refused_for_every_local_provider(air_gapped, provider):
+    # a non-loopback IP base (not just a hostname) is likewise refused for every local provider.
+    env = {"STRIX_LLM": f"{provider}/x", "LLM_API_BASE": "http://10.0.0.5:11434"}
+    assert actions_mod._strix_sovereignty_refusal(env) and "AIR_GAPPED" in actions_mod._strix_sovereignty_refusal(env)
+
+@pytest.mark.parametrize("provider", _LOCAL_PROVIDERS)
+def test_gate_bare_base_runs_for_every_local_provider(air_gapped, monkeypatch, provider):
+    # PRESERVE the legitimate path: a bare local pick with NO base = its default localhost daemon → local →
+    # PERMITTED under AIR_GAPPED (must not over-block a legitimately-local backend).
+    monkeypatch.delenv("LLM_API_BASE", raising=False)
+    assert actions_mod._strix_sovereignty_refusal({"STRIX_LLM": f"{provider}/x"}) == ""
+
+@pytest.mark.parametrize("provider", _LOCAL_PROVIDERS)
+def test_gate_loopback_base_runs_for_every_local_provider(air_gapped, provider):
+    # a loopback-pinned base still classifies local → PERMITTED for every local provider.
+    env = {"STRIX_LLM": f"{provider}/x", "LLM_API_BASE": "http://127.0.0.1:11434"}
+    assert actions_mod._strix_sovereignty_refusal(env) == ""
+
 def test_gate_backend_classification_matches_settings_prefixes():
     # the LiteLLM prefix → sovereignty backend name mirror is correct (drift guard for the two differing spellings).
     assert actions_mod._strix_sovereignty_backend({"STRIX_LLM": "bedrock/anthropic.claude-opus-5"}) == "bedrock"
