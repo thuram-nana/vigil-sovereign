@@ -22,10 +22,10 @@ NOT reinvent adjudication, scope, or the egress floor — it composes the three 
      service/port the tool reports "open", the runner reproduces the claim INDEPENDENTLY with a bounded,
      gated handshake (``framework.v2.verify.capture_handshake``) and judges the RETAINED connect
      evidence with the pure ``service_reachability_oracle`` — exactly CRUCIBLE's prove-don't-guess rule
-     that "a scanner's say-so alone never confirms". Only on a fired oracle is a proof-carrying
-     certificate minted + signed (``oracle_adapter.confirm_and_certify``, ``provenance="live_redrive"``
-     — the handshake IS a live re-drive of the scope-gated target). Everything else stays a labelled
-     lead.
+     that "a scanner's say-so alone never confirms". Only on a fired oracle ADMITTED to its registered
+     evidence branch is a proof-carrying certificate minted + signed (through the admission choke
+     ``verdict.admit`` + ``oracle_adapter.certify_admitted``, ``provenance="live_redrive"`` — the
+     handshake IS a live re-drive of the scope-gated target). Everything else stays a labelled lead.
 
 Honesty / residual (see docs/DEFERRED-INFRA.md R4): the MECHANISM is tool-agnostic — any external tool
 plus an output parser and an oracle mapping plugs in. Only the PRESENT-tool path (nmap against a
@@ -294,6 +294,13 @@ class Redrive:
     bug_class: str
     capture: Callable[..., dict]              # (host, port, *, slug, protocol) -> captured evidence
     context: Callable[[dict], "dict | None"]  # captured evidence -> oracle_context (None -> skip)
+    branch: str = ""                          # the ONE registered evidence branch this re-drive admits to
+    #                                         # (verdict.admit). The runner routes the oracle outcome through
+    #                                         # admission under this branch's declared capability, so a
+    #                                         # clean_incapable branch (weak_crypto: leaf-cert only) returns
+    #                                         # INCONCLUSIVE on a conclusive non-fire instead of the false
+    #                                         # CLEAN a direct confirm_and_certify would emit. Empty /
+    #                                         # unregistered => the runner refuses to mint (fail-closed).
 
 
 @dataclass(frozen=True)
@@ -348,8 +355,9 @@ def _weak_crypto_context(handshake: dict) -> "dict | None":
 # Both re-drives SHARE the one _tls_capture function object, so the runner negotiates ONE handshake and
 # judges it for both a weak protocol/cipher and a broken-hash cert.
 _TLS_REDRIVES: "tuple[Redrive, ...]" = (
-    Redrive("weak_tls", _tls_capture, _weak_tls_context),
-    Redrive("weak_crypto_artifact", _tls_capture, _weak_crypto_context),
+    Redrive("weak_tls", _tls_capture, _weak_tls_context, branch="tls_weakness.tls_handshake"),
+    Redrive("weak_crypto_artifact", _tls_capture, _weak_crypto_context,
+            branch="weak_crypto.cert_signature_algorithm"),
 )
 
 
@@ -555,6 +563,51 @@ def _reachable_context(handshake: dict) -> dict:
     return reachable_context(handshake)
 
 
+def _oracle_signal(finding: "dict") -> "tuple[bool, bool]":
+    """Run the deterministic oracle over the finding's retained oracle_context and return
+    ``(fired, conclusive)`` WITHOUT minting, so admission sees the oracle's answer BEFORE any certificate
+    exists (mirrors ``live.sbom._oracle_signal`` / ``live.web_redrive._oracle_signal``).
+
+      * ``fired``      — an oracle fired at/above the verifier threshold over the retained context.
+      * ``conclusive`` — the oracle rendered a DECISIVE verdict (fired, or ``probe_verdict`` == ``clean``);
+                         a one-sided non-signal is non-conclusive => INCONCLUSIVE at admission.
+
+    FATAL-2: every framework import is function-local (offense-side only)."""
+    from framework.v2.scanner.engine import probe_verdict  # noqa: PLC0415
+    from framework.v2.verify.confirmation import adjudicate_finding, confirmed_from_result  # noqa: PLC0415
+    from framework.v2.verify.verifier import OracleVerifier  # noqa: PLC0415
+
+    verifier = OracleVerifier()
+    oracle_context = finding.get("oracle_context") or {}
+    result = adjudicate_finding(finding, oracle_context, verifier)
+    fired = confirmed_from_result(result, finding, verifier) is not None
+    verdict, _kinds = probe_verdict(result)
+    conclusive = fired or verdict == "clean"
+    return fired, conclusive
+
+
+def _admit_redrive(branch: str, *, fired: bool, conclusive: bool):
+    """Admit a runner re-drive's oracle outcome to its ONE registered evidence branch, or ``None`` when the
+    branch is unset / not in the registry (fail-closed — the runner mints nothing rather than bypass
+    admission).
+
+    ``observed`` carries what a GATED LIVE re-drive that captured judgeable evidence knows about itself: the
+    channel was established (a re-drive whose capture yielded no evidence returned a ``None`` context and was
+    SKIPPED before this point) and the re-drive was gate-authorized (``scope_gate.authorize`` + the pre-flight
+    gate both passed upstream). Only the preconditions a branch DECLARES are consulted, so the superset is
+    honest: reachability/TLS branches key on ``gate_authorized``; a channel-keyed branch keys on
+    ``channel_established``. Body-derived preconditions are deliberately NOT asserted here — the runner does no
+    body-decoded re-drive, so a hypothetical body branch would correctly fail its precondition rather than
+    falsely clear.
+
+    FATAL-2: the verdict import is function-local (pure stdlib module)."""
+    from .verdict import admit, branch_ids  # noqa: PLC0415
+    if not branch or branch not in branch_ids():
+        return None
+    return admit(branch, fired=fired, conclusive=conclusive,
+                 observed={"channel_established": True, "gate_authorized": True})
+
+
 def run_external_tool(
     spec: ToolSpec,
     target: str,
@@ -578,11 +631,14 @@ def run_external_tool(
          (never a silent un-gated fallback).
       3. ``backend.run(...)`` launches the tool through the topology and captures its output.
       4. For each ``ProposedService`` parsed from the output, reproduce a gated handshake
-         (``capture``) and drive ``oracle_adapter.confirm_and_certify`` (``provenance="live_redrive"``)
-         — a fired oracle mints a signed proof-carrying FACT; anything else is a labelled lead.
+         (``capture``) and route the outcome through the ADMISSION choke — ``verdict.admit`` applies the
+         re-drive's registered branch capability, then ``oracle_adapter.certify_admitted``
+         (``provenance="live_redrive"``) mints ONLY a FACT admission. A fired oracle over a FACT-capable
+         branch mints a signed proof-carrying FACT; a conclusive non-fire over a clean_incapable branch is
+         INCONCLUSIVE (never a false CLEAN); anything else is a labelled lead.
 
     ``signers`` = the governance authorisers ``[(key_id, priv_b64)]`` — required (a zero-signature
-    certificate is never labelled a fact; confirm_and_certify enforces this)."""
+    certificate is never labelled a fact; certify_admitted -> confirm_and_certify enforces this)."""
     # 0. PRE-FLIGHT GATE on the tool exec (crit 3/11): kill-switch + charter-context + entitlement, BEFORE
     #    scope/egress or any traffic — so a tripped kill-switch halts the tool SUBPROCESS, not just the later
     #    oracle re-drive. (WARDEN A2 + the m-of-n conjunctive approval are enforced upstream at the body/
@@ -617,8 +673,10 @@ def run_external_tool(
 
     outcome = backend.run(spec.build_argv(target), timeout=timeout)
 
-    # function-local (FATAL-2): drive the existing anti-hallucination adapter — do NOT reimplement it.
-    from ..oracle_adapter import Outcome, confirm_and_certify
+    # function-local (FATAL-2): drive the existing anti-hallucination adapter through the ADMISSION choke
+    # (verdict.admit + oracle_adapter.certify_admitted) — do NOT reimplement it and do NOT call
+    # confirm_and_certify directly (that skips every branch-capability check).
+    from ..oracle_adapter import Outcome, certify_admitted
 
     # Tool-level ERROR: the run timed out or the process could not spawn (exit_code is None). Its output is
     # untrustworthy — a chatty scanner that timed out mid-write must not have a truncated row treated as a
@@ -630,7 +688,8 @@ def run_external_tool(
     # The re-drives to run per proposed service. Empty spec.redrives ⇒ the legacy reachability re-drive
     # (built from the injectable `capture` param), so nmap + every existing caller are byte-for-byte
     # unchanged. A TLS/etc. spec carries its OWN runner-owned re-drives on the spec.
-    redrives = spec.redrives or (Redrive("service_reachable", capture, _reachable_context),)
+    redrives = spec.redrives or (Redrive("service_reachable", capture, _reachable_context,
+                                         branch="service_reachability.tcp_handshake"),)
     # Best-effort tool VERSION (criterion 9): run the spec's version_argv ONCE through the SAME gated backend
     # (no target traffic) and stamp the parsed version into every FACT this run mints. Never fatal — an
     # absent/failing version_argv just leaves the version "" (dropped from the cert → byte-identical).
@@ -662,9 +721,24 @@ def run_external_tool(
                 "insertion_point": f"{svc.host}:{svc.port}",
                 "oracle_context": oracle_context,
             }
-            res = confirm_and_certify(
-                finding, engagement_slug=engagement_slug, signers=signers, provenance="live_redrive",
-                tool_version=tool_version, freshness_ttl_seconds=freshness_ttl_seconds)
+            # ADMISSION DECIDES, MINTING EXECUTES (mirrors live.sbom / live.web_redrive). Run the
+            # deterministic oracle for its (fired, conclusive) signal WITHOUT minting, attribute it to this
+            # re-drive's ONE registered branch, and let admit() apply that branch's declared capability. A
+            # clean_incapable branch (weak_crypto: leaf-cert only) then returns INCONCLUSIVE on a conclusive
+            # non-fire instead of the false CLEAN a direct confirm_and_certify would emit. certify_admitted
+            # mints ONLY a FACT admission.
+            fired, conclusive = _oracle_signal(finding)
+            admitted = _admit_redrive(rd.branch, fired=fired, conclusive=conclusive)
+            if admitted is None:
+                # No registered evidence branch for this re-drive (unset/unregistered) — the runner refuses
+                # to mint (fail-closed): NEVER a fabricated FACT and NEVER a false CLEAN.
+                outcomes.append({"check_id": item, "bug_class": rd.bug_class,
+                                 "outcome": Outcome.UNSUPPORTED.value})
+                continue
+            res = certify_admitted(
+                finding, admitted, engagement_slug=engagement_slug, signers=signers,
+                provenance="live_redrive", tool_version=tool_version,
+                freshness_ttl_seconds=freshness_ttl_seconds)
             # retain the exact context keyed by the result's finding_ref so a caller can re-verify the
             # signed certificate OFFLINE (verify_certificate needs the context; the cert stores its digest).
             contexts[res.finding_ref] = oracle_context

@@ -45,6 +45,7 @@ from vigil_integration.live.external_tool import (  # noqa: E402
     nmap_service_scan,
     run_external_tool,
 )
+from vigil_integration.oracle_adapter import Outcome  # noqa: E402
 
 SIGNER = generate_keypair()
 SIGNERS = [("root0", SIGNER.private_key_b64)]
@@ -386,6 +387,26 @@ def _weakcrypto_selfsigned_cert():
     return cert_p.read_bytes(), key_p.read_bytes()
 
 
+def _stronghash_selfsigned_cert():
+    """A self-signed X.509 cert with a 2048-bit RSA key signed with the STRONG SHA-256 hash + its key (PEM).
+    The weak_crypto_artifact oracle conclusively does NOT fire on it — the runner presents this cert so the
+    re-drive reaches the CONCLUSIVE-non-fire branch (not the None-skip / not the FACT branch). Generated via
+    the openssl CLI to mirror the SHA-1 helper; skips if openssl is absent."""
+    import subprocess
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    cert_p, key_p = Path(d) / "c.pem", Path(d) / "k.pem"
+    proc = subprocess.run(
+        ["openssl", "req", "-x509", "-sha256", "-newkey", "rsa:2048", "-nodes",
+         "-keyout", str(key_p), "-out", str(cert_p), "-days", "3650",
+         "-subj", "/CN=vigil-stronghash-test.local"],
+        capture_output=True, text=True)
+    if proc.returncode != 0 or not cert_p.is_file():
+        pytest.skip(f"openssl could not mint a SHA-256 cert here (rc={proc.returncode}): {proc.stderr[:200]}")
+    return cert_p.read_bytes(), key_p.read_bytes()
+
+
 class _TLSServer:
     """A minimal threaded loopback TLS server that completes handshakes presenting the given cert."""
     def __init__(self, cert_pem: bytes, key_pem: bytes):
@@ -487,6 +508,45 @@ def test_tls_no_cert_yields_no_crypto_fact():
 
     assert _weak_crypto_context({"connected": True}) is None      # no cert_der_b64 -> skip
     assert _weak_tls_context({"connected": False}) is None        # failed handshake -> skip
+
+
+def test_loopback_tls_strong_hash_cert_is_inconclusive_not_clean(tmp_path: Path):
+    """SLICE W16-13 end-to-end coverage of the MIGRATED runner over a real loopback TLS server presenting a
+    STRONG (SHA-256) leaf cert. The runner negotiates its own gated handshake, retains the cert, and the
+    weak_crypto_artifact oracle does NOT fire. The outcome now flows through the ADMISSION choke
+    (``_oracle_signal`` -> ``verdict.admit`` -> ``certify_admitted``) under the registered
+    ``weak_crypto.cert_signature_algorithm`` branch (clean_capable:false — the re-drive captures only the
+    LEAF cert, so a non-firing cannot certify the whole chain free of weak crypto): the result is
+    INCONCLUSIVE, never a CLEAN and never a fabricated FACT. This exercises the new mint path live; the
+    ROUTING itself (no direct ``confirm_and_certify``) is discriminated by the claim-discipline frontier
+    test. Because the weak_crypto oracle is non-conclusive on a strong leaf, the clean_capable:false
+    declaration is the STANDING guard that keeps this INCONCLUSIVE rather than a false CLEAN the moment any
+    conclusive-clean channel is added to this branch."""
+    from vigil_integration.live.external_tool import tls_scan
+
+    _charter(tmp_path, "127.0.0.1")
+    cert_pem, key_pem = _stronghash_selfsigned_cert()
+    srv = _TLSServer(cert_pem, key_pem)
+    gate = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
+    try:
+        res = run_external_tool(
+            tls_scan(port=srv.port), "127.0.0.1",
+            scope_gate=gate, backend=_FakeTLSBackend(),
+            engagement_slug="alpha", signers=SIGNERS, timeout=30.0)
+    finally:
+        srv.close()
+
+    assert res.status == "ran"
+    wc = [o for o in res.outcomes if o["bug_class"] == "weak_crypto_artifact"]
+    assert wc, f"expected a weak_crypto_artifact outcome over the presented cert; outcomes={res.outcomes}"
+    # the whole point: a clean_incapable (leaf-only) branch must NOT leak a CLEAN on a conclusive non-fire
+    assert all(o["outcome"] != Outcome.CLEAN.value for o in wc), (
+        f"a clean_incapable branch (leaf-cert only) leaked a false CLEAN through the runner: {wc}")
+    assert any(o["outcome"] == Outcome.INCONCLUSIVE.value for o in wc), (
+        f"the conclusive non-fire must be INCONCLUSIVE, not CLEAN/other: {wc}")
+    # and a strong-hash cert mints no weak_crypto FACT
+    assert not any(getattr(f, "confirmed_by", "") == "tls_weakness" for f in res.facts), (
+        "a strong-hash cert must not mint a weak-crypto FACT")
 
 
 # ===================================================================================================

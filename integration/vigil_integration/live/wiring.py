@@ -10,9 +10,10 @@ factory that binds those seams to the real sovereign machinery for a live engage
     (WARDEN tier ∧ CRUCIBLE scope/window/budget ∧ m-of-n for destructive).
   * **run_tool** (F3/F9) → :func:`live.executor.execute`, the governed, loopback-PINNED subprocess
     runner, pre-wired with the gate + a real Ed25519 spine signer.
-  * **oracle** (F2) → :func:`oracle_adapter.confirm_and_certify`: the LLM's ``exploit_succeeded`` is a
-    LEAD until the deterministic oracle re-fires over the RETAINED ``oracle_context`` and a signed,
-    proof-carrying certificate is minted.
+  * **oracle** (F2) → the ADMISSION choke (:func:`verdict.admit` + :func:`oracle_adapter.certify_admitted`):
+    the LLM's ``exploit_succeeded`` is a LEAD until the deterministic oracle re-fires over the RETAINED
+    ``oracle_context``, is ADMITTED to its registered evidence branch, and a signed, proof-carrying
+    certificate is minted for a FACT admission.
   * **checkpoint** (F2b) → :class:`live.spine_vigilcore.VigilCoreSpine.write_state` (append-only signed).
   * **detect** (WS-4) → :func:`detection.registry.run_all_detections` over the target's own logs.
   * **project** (F4), **emit** (F11) → optional; wired when Neo4j / an OTLP collector are present, else
@@ -43,7 +44,6 @@ from ..attestation import head_pin as _head_pin
 from ..attestation.identity import load_or_create_operator_keypair, operator_signer, resolve_operator
 from ..attestation.ledger import make_ledger_writer, read_ledger, require_attestation
 from ..detection.registry import run_all_detections
-from ..oracle_adapter import confirm_and_certify
 from .approval_token import ApprovalAuthority
 from .engine import EngineSeams, VigilEngine
 from .executor import _TERMINAL_TOOL, ExecRecord, execute, execute_terminal
@@ -511,7 +511,7 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         except Exception:  # noqa: BLE001
             return (AgentState(), 0)
 
-    # -- oracle (F2): confirm_and_certify over the retained oracle_context, PLUS the T2 live re-drive --
+    # -- oracle (F2): admission (verdict.admit + certify_admitted) over the retained oracle_context, PLUS the T2 live re-drive --
     def _redrive_executor_factory(base_url: str) -> Any:
         # A gated CRUCIBLE HttpExecutor bound to the SAME engagement slug the engine provisioned — its
         # charter/scope/kill-switch/budget gate chain admits ONLY the chartered hosts, so the re-drive is
@@ -1013,6 +1013,64 @@ def build_terminal_runtime(*, slug: str = "loopback", base_dir: str) -> Terminal
     )
 
 
+def _oracle_signal(finding: "dict") -> "tuple[bool, bool]":
+    """Run the deterministic oracle over the finding's retained oracle_context and return
+    ``(fired, conclusive)`` WITHOUT minting, so admission sees the oracle's answer BEFORE any certificate
+    exists (mirrors ``live.sbom._oracle_signal`` / ``live.web_redrive._oracle_signal``).
+
+    FATAL-2: every framework import is function-local (offense-side only)."""
+    from framework.v2.scanner.engine import probe_verdict  # noqa: PLC0415
+    from framework.v2.verify.confirmation import adjudicate_finding, confirmed_from_result  # noqa: PLC0415
+    from framework.v2.verify.verifier import OracleVerifier  # noqa: PLC0415
+
+    verifier = OracleVerifier()
+    oracle_context = finding.get("oracle_context") or {}
+    result = adjudicate_finding(finding, oracle_context, verifier)
+    fired = confirmed_from_result(result, finding, verifier) is not None
+    verdict, _kinds = probe_verdict(result)
+    conclusive = fired or verdict == "clean"
+    return fired, conclusive
+
+
+def _redrive_branch_for(bug_class: str) -> "Optional[str]":
+    """The registered evidence branch a wiring re-drive of ``bug_class`` admits to, or ``None`` when the
+    class has NO registered branch (an arbitrary LLM-proposed class). ``error_based_sqli`` — the only class
+    the live re-drive supports — maps to the single-response ``error_signature`` branch. The mapping is
+    DERIVED against the branch registry (``verdict.branch_ids``) so it can never name a branch that does not
+    exist: a class with no registered branch returns ``None`` and the caller keeps the claim a LEAD
+    (fail-closed). FATAL-2: imports are function-local."""
+    from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+    from .verdict import branch_ids  # noqa: PLC0415
+    mapping = {"error_based_sqli": "error_signature.datastore_error"}
+    branch = mapping.get(normalize_bug_class(bug_class))
+    return branch if branch in branch_ids() else None
+
+
+def _admit_and_mint(finding: "dict", *, prov: Provisioned, provenance: str,
+                    observed: "dict") -> "Optional[str]":
+    """Route ONE finding through the claim-discipline choke (mirrors ``live.sbom`` / ``live.web_redrive``):
+    run the deterministic oracle for its ``(fired, conclusive)`` signal WITHOUT minting, attribute it to the
+    finding's REGISTERED evidence branch, let ``verdict.admit`` apply that branch's declared capability, and
+    mint ONLY what admission returns as a FACT via ``oracle_adapter.certify_admitted``.
+
+    Returns the signed certificate's ``finding_ref`` on a FACT, else ``None`` (the claim stays a LEAD). A
+    ``bug_class`` with no registered branch returns ``None`` (never reaches ``admit``). An LLM-provenanced
+    context can never become a FACT — ``certify_admitted(provenance="llm")`` demotes even a fired admission
+    to a LEAD (audit G4) — so the LLM path always returns ``None`` here; only ``provenance="live_redrive"``
+    over a channel-established re-drive can mint. FATAL-2: adapter/verdict imports are function-local."""
+    from ..oracle_adapter import certify_admitted  # noqa: PLC0415
+    from .verdict import admit  # noqa: PLC0415
+
+    branch = _redrive_branch_for(str(finding.get("bug_class", "")))
+    if branch is None:
+        return None   # no registered evidence branch → nothing to admit against → LEAD (fail-closed)
+    fired, conclusive = _oracle_signal(finding)
+    admitted = admit(branch, fired=fired, conclusive=conclusive, observed=observed)
+    res = certify_admitted(finding, admitted, engagement_slug=prov.slug, signers=prov.signers,
+                           provenance=provenance)
+    return res.finding_ref if getattr(res, "is_fact", False) else None
+
+
 def _build_oracle(
     prov: Provisioned,
     *,
@@ -1032,7 +1090,7 @@ def _build_oracle(
 
     AUDIT G4 — the LEAD-only fallback (unchanged): the context here is the model's own
     ``analysis.extracted_info['oracle_context']`` — LLM-PROVENANCED — so it is passed with
-    ``provenance="llm"`` and ``confirm_and_certify`` demotes it to a LEAD even when the oracle fires. A
+    ``provenance="llm"`` and ``certify_admitted`` demotes it to a LEAD even when the oracle fires. A
     crafted-but-firing context therefore CANNOT mint a signed FACT (the exact route this gate closes)."""
 
     def oracle(raw_output: str, analysis: Any, *, redrive: Optional[dict] = None) -> Optional[str]:
@@ -1058,12 +1116,19 @@ def _build_oracle(
             "insertion_point": str(info.get("insertion_point") or ""),
             "oracle_context": octx,
         }
+        # ADMISSION DECIDES, MINTING EXECUTES (the claim-discipline choke; mirrors live.sbom /
+        # live.web_redrive). The oracle_context here is the model's OWN extracted_info — LLM-provenanced —
+        # so even a fired oracle over a registered branch is demoted to a LEAD by
+        # certify_admitted(provenance="llm"): a signed FACT requires reproduction from a non-LLM channel
+        # (audit G4). An arbitrary LLM-proposed class has NO registered evidence branch, so admit() refuses
+        # it (UnregisteredBranch, surfaced as None by _redrive_branch_for) and the claim stays a LEAD. This
+        # path therefore mints no FACT — but it routes through admit() instead of confirm_and_certify, so a
+        # class with no reviewed branch capability can never reach a CLEAN/FACT here (fail-closed).
         try:
-            res = confirm_and_certify(finding, engagement_slug=prov.slug, signers=prov.signers,
-                                      provenance="llm")
-        except Exception:  # noqa: BLE001 — an oracle/cert error confirms nothing (fail-closed)
+            return _admit_and_mint(finding, prov=prov, provenance="llm",
+                                   observed={"channel_established": False})
+        except Exception:  # noqa: BLE001 — an oracle/cert/admission error confirms nothing (fail-closed)
             return None
-        return res.finding_ref if getattr(res, "is_fact", False) else None
 
     return oracle
 
@@ -1156,8 +1221,13 @@ def _live_redrive_fact(
     if not isinstance(fresh_ctx, dict) or not fresh_ctx:
         return None
 
-    # MINT — confirm_and_certify re-fires the ORIGINAL oracle over the FRESH wire bytes; provenance=
-    # "live_redrive" is the non-LLM channel the sovereign anti-hallucination gate requires for a FACT.
+    # MINT THROUGH ADMISSION — attribute the outcome to the registered ``error_signature.datastore_error``
+    # branch (a single-response error-signature channel: FACT-capable, clean_capable:false), then
+    # certify_admitted re-fires the ORIGINAL oracle over the FRESH wire bytes and mints ONLY a FACT.
+    # provenance="live_redrive" is the non-LLM channel the sovereign anti-hallucination gate requires. A
+    # channel WAS established (obs.reachable && obs.valid checked above), so the branch precondition holds; a
+    # conclusive non-fire is INCONCLUSIVE (never a false CLEAN — absence of an error signature is not proof
+    # the target is not injectable).
     finding = {
         "check_id": str(info.get("check_id") or "finding"),
         "bug_class": "error_based_sqli",
@@ -1165,11 +1235,10 @@ def _live_redrive_fact(
         "oracle_context": fresh_ctx,     # the FRESH re-drive context — the LLM's claimed context is DISCARDED
     }
     try:
-        res = confirm_and_certify(finding, engagement_slug=prov.slug, signers=prov.signers,
-                                  provenance="live_redrive")
-    except Exception:  # noqa: BLE001 — a cert error confirms nothing (fail-closed)
+        return _admit_and_mint(finding, prov=prov, provenance="live_redrive",
+                               observed={"channel_established": True})
+    except Exception:  # noqa: BLE001 — a cert/admission error confirms nothing (fail-closed)
         return None
-    return res.finding_ref if getattr(res, "is_fact", False) else None
 
 
 # ---------------------------------------------------------------------------------------------------

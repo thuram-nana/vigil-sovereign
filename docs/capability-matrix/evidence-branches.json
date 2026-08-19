@@ -494,6 +494,42 @@
         "engine/crucible/framework/v2/verify/k8s_rbac_grant.py:confirm_k8s_rbac_grant",
         "integration/vigil_integration/live/k8s_rbac_grant_verify.py:grant_verify"
       ]
+    },
+    {
+      "id": "error_signature.datastore_error",
+      "check": "run_exploit_trial",
+      "evidence": "VIGIL's own gated LIVE re-drive of the LLM-proposed exploit request against the in-charter target; the deterministic error_signature oracle re-fires over the TARGET'S FRESH response bytes (the model's claimed context is discarded), so the FACT is decided by the wire bytes alone.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "A SINGLE-RESPONSE error_signature channel: a fired oracle proves the in-charter target emitted a datastore/parser-error signature on the exploit request, NOT that the payload CAUSED the error (a target that emits a static error banner independent of input would also fire; the same limit as the base error_signature oracle, scoped to operator-authorized hosts). It is a POSITIVE-only detector: a non-firing is UNINFORMATIVE by construction, because SQL injection can be present over a boolean/time/out-of-band channel this single response cannot see, so absence of an error signature can NEVER establish the target is not injectable. NOT CLEAN-capable.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "A response-side error-signature re-drive is a POSITIVE-only detector whose absence of a signal is uninformative by construction; a sound CLEAN (SQL injection absent) is a different, coverage-based capability spanning the boolean/time/out-of-band channels and a benign differential control, not this single-response error-signature branch, so clean-capability is deliberately not a target here.",
+      "evidence_surface": "service_response",
+      "implementation_refs": [
+        "integration/vigil_integration/live/wiring.py:_live_redrive_fact"
+      ]
+    },
+    {
+      "id": "weak_crypto.cert_signature_algorithm",
+      "check": "capture_tls_handshake",
+      "evidence": "the signature hash algorithm of the leaf certificate the peer presented in VIGIL's own gated TLS handshake, judged by the deterministic weak_crypto_artifact oracle (a broken hash — MD5/SHA-1 — fires); the runner judges the cert it itself retrieved, never the proposer tool's rows.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "gate_authorized"
+      ],
+      "limitation": "Judges ONLY the leaf certificate the peer presented in a single handshake. A weak-hash INTERMEDIATE or root CA in the presented chain is not captured here (the re-drive retains the leaf DER only), so a non-firing over the leaf cannot certify the endpoint's whole certificate chain free of weak crypto. NOT CLEAN-capable: absence of a broken signature hash on the leaf is not absence of weak crypto in the chain.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "CLEAN requires capturing and judging the FULL presented chain (leaf + intermediates + root) so that 'no broken signature hash' becomes a bounded negative over the whole chain rather than the leaf certificate alone; until the re-drive retains and adjudicates the entire chain, a non-firing stays INCONCLUSIVE.",
+      "evidence_surface": "tls_handshake",
+      "implementation_refs": [
+        "integration/vigil_integration/live/external_tool.py:_weak_crypto_context"
+      ]
     }
   ]
 }

@@ -392,11 +392,16 @@ def test_no_sovereign_live_module_mints_by_calling_confirm_and_certify_directly(
     return CLEAN).
 
     This scans the SOURCE of every ``integration/vigil_integration/live/*.py`` and fails on a direct call.
-    ``sbom.py`` (this slice's migration) MUST be clean. A small, DOCUMENTED residual allowlist names the
-    modules whose own admission migration is a LATER slice: ``wiring.py`` (drives arbitrary LLM-proposed bug
-    classes that have no registered evidence branch yet, so admission has nothing to key on until those
-    branches exist) and ``external_tool.py`` (the tool-runner). The frontier may only SHRINK — a NEW direct
-    caller, or a regression in any migrated module (including sbom.py), fails here."""
+    ``sbom.py`` (an earlier slice's migration) MUST be clean. The residual ``_PENDING_MIGRATION`` frontier
+    is now EMPTY (SLICE W16-13): ``wiring.py`` (its LLM-provenanced LEAD path + the ``error_based_sqli`` live
+    re-drive) and ``external_tool.py`` (the tool-runner's per-service re-drives) both route through
+    ``verdict.admit`` + ``oracle_adapter.certify_admitted`` — the ``error_based_sqli`` live re-drive admits to
+    the registered ``error_signature.datastore_error`` branch and the tool-runner's weak-crypto re-drive to
+    ``weak_crypto.cert_signature_algorithm`` (both clean_capable:false, so a conclusive non-fire is
+    INCONCLUSIVE, not the false CLEAN a direct mint emitted); an arbitrary LLM class with no registered branch
+    is REFUSED by ``admit`` (UnregisteredBranch) rather than minted. The frontier may only SHRINK — a NEW
+    direct caller, or a regression in any migrated module (including sbom.py), fails here against an empty
+    frontier."""
     import ast  # noqa: PLC0415
 
     live = _ROOT / "integration" / "vigil_integration" / "live"
@@ -430,8 +435,11 @@ def test_no_sovereign_live_module_mints_by_calling_confirm_and_certify_directly(
                 return True
         return False
 
-    # The migration FRONTIER, not a permanent exemption. sbom.py is deliberately NOT here.
-    _PENDING_MIGRATION = {"wiring.py", "external_tool.py"}
+    # The migration FRONTIER, not a permanent exemption. It is now EMPTY: every sovereign live/* module
+    # mints through the admission choke (verdict.admit + oracle_adapter.certify_admitted). sbom.py,
+    # web_redrive.py, wiring.py and external_tool.py are all migrated — NONE may call confirm_and_certify
+    # directly. A new module that does, or a regression in a migrated one, fails here with an empty frontier.
+    _PENDING_MIGRATION: "set[str]" = set()
 
     offenders = {py.name for py in sorted(live.glob("*.py"))
                  if _mints_directly(py.read_text(encoding="utf-8"))}
