@@ -30,8 +30,12 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-import numpy as np
 import pytest
+
+# W16-9 red-pen fix: numpy is absent in the sigil-governor CI job; importorskip makes this module SKIP
+# (not error) there, and — being module-level — it also guards the sigil.voice.backends import below,
+# which triggers numpy at collection. Matches the suite's numpy-optional convention.
+np = pytest.importorskip("numpy")
 
 from sigil import sovereignty as sv
 from sigil.consolidate.extract import ApiProvider, LocalProvider
