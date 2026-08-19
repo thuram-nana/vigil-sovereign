@@ -1,0 +1,251 @@
+# Security scanning — CodeQL, secret scanning, and SAST.  [W2-3 / #420]
+#
+# WHY THIS WORKFLOW EXISTS. This repository vendors an offensive-security toolchain and holds
+# Ed25519 signing material, yet had no CodeQL, no secret scanning, and no SAST anywhere. This file
+# adds all three. It is a NEW workflow — ci.yml is untouched — and it is ADVISORY: none of its jobs
+# are in .github/required-status-checks.txt, so it reports on every PR without being able to block a
+# merge while the rulesets are still bedding in. The blocking gates it wraps (gitleaks over the
+# working tree, semgrep over the curated ruleset) are nonetheless REAL: each is verified to be clean
+# on the current tree, and each carries an in-workflow NEGATIVE CONTROL that plants a known-bad input
+# and FAILS THE JOB if the scanner does not fire — so a green tick here can never mean "the scanner
+# silently found nothing because it was misconfigured".
+#
+# GREEN-ON-A-CLEAN-TREE, HONESTLY. A raw gitleaks run flags 51 example secrets that live in test
+# fixtures, docs, eval corpora and two false positives; a raw SAST pack drowns in the intended
+# behaviour of the pentest scripts. Rather than mute the finding, the policy is written down and
+# scoped: .gitleaks.toml (path allowlist + two scoped false positives) and .semgrep/vigil-sast.yml
+# (a small, high-signal ruleset that excludes framework/scripts/**). Both are checked in and pinned
+# by docs/tests/test_security_scan_policy.py, which also RE-RUNS the scanners against a planted
+# fixture to prove the catch is real.
+#
+# SUPPLY CHAIN. Every third-party action is pinned to a full commit SHA (a tag is a mutable pointer
+# on someone else's repo, executing with this workflow's token); the gitleaks binary is pinned by
+# version AND by the sha256 of its release tarball; semgrep and bandit are pinned to exact versions.
+
+name: security-scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GITLEAKS_VERSION: "8.28.0"
+  GITLEAKS_SHA256: "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb"
+  SEMGREP_VERSION: "1.172.0"
+  BANDIT_VERSION: "1.8.6"
+
+jobs:
+  # ================================================================================================
+  # 1. CodeQL — semantic analysis of the Python sources. Findings surface in the Security tab; the
+  #    analyze step exits 0 regardless, so this job is green by construction and purely additive.
+  # ================================================================================================
+  codeql-python:
+    name: CodeQL Python (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: initialize CodeQL (python)
+        uses: github/codeql-action/init@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-action v3 (codeql-bundle-v2.26.3)
+        with:
+          languages: python
+          # security-extended broadens the default query pack; findings are advisory (Security tab).
+          queries: security-extended
+
+      - name: analyze (python)
+        uses: github/codeql-action/analyze@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-action v3 (codeql-bundle-v2.26.3)
+        with:
+          category: "/language:python"
+
+  # ================================================================================================
+  # 2. Secret scanning — gitleaks over the working tree (the GATE) plus the git history (advisory).
+  # ================================================================================================
+  secret-scan:
+    name: secret scan — gitleaks (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: checkout (full history for the history scan)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: install gitleaks (version- and sha256-pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      # NEGATIVE CONTROL, run BEFORE the gate on purpose. The gate below passes because this tree is
+      # clean — which is indistinguishable from a scanner that silently matches nothing. So plant a
+      # realistic (non-example) secret in a NON-allowlisted path, run the EXACT committed config, and
+      # require it to FAIL. Then plant the same secret under an allowlisted tests/ path and require it
+      # to PASS — proving the allowlist is SCOPED by path, not a blanket mute of the rule.
+      - name: negative control — the gate can actually fire, and its allowlist is scoped
+        run: |
+          set -euo pipefail
+          # Assembled at runtime via printf so NO secret-shaped literal is ever committed to this
+          # file (which the gate below itself scans). The result has a valid slack-bot-token shape;
+          # the trailing segment is random. The `xoxb-%s` in the format string is not a match — the
+          # rule needs an alphanumeric immediately after `xoxb-`, and here that is a `%`.
+          suffix="$(head -c 64 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 24)"
+          secret="$(printf 'xoxb-%s-%s-%s' '2837465019283' '9182736450192' "$suffix")"
+          nc="$(mktemp -d)"
+          mkdir -p "$nc/service/app" "$nc/tests"
+          printf 'SLACK_BOT_TOKEN = "%s"\n' "$secret" > "$nc/service/app/config.py"
+          printf 'SLACK_BOT_TOKEN = "%s"\n' "$secret" > "$nc/tests/test_fixture.py"
+          cfg="${GITHUB_WORKSPACE}/.gitleaks.toml"
+
+          set +e
+          gitleaks detect --no-git -s "$nc/service" -c "$cfg" --redact --exit-code 1 --no-banner
+          rc_src=$?
+          gitleaks detect --no-git -s "$nc/tests" -c "$cfg" --redact --exit-code 1 --no-banner
+          rc_test=$?
+          set -e
+
+          if [ "$rc_src" -eq 0 ]; then
+            echo "::error::NEGATIVE CONTROL FAILED — gitleaks exited 0 on a planted secret in service code. The gate cannot fail, so its green tick is meaningless. Fix the config; do not merge."
+            exit 1
+          fi
+          if [ "$rc_test" -ne 0 ]; then
+            echo "::error::NEGATIVE CONTROL FAILED — the tests/ allowlist did not apply (rc=${rc_test}); the allowlist is misconfigured."
+            exit 1
+          fi
+          echo "negative control OK — planted secret caught in service code (rc=${rc_src}); allowlist correctly scoped to tests/ (rc=${rc_test})."
+
+      # THE GATE. gitleaks over the whole working tree with the committed policy. Non-zero blocks.
+      - name: gitleaks GATE — working tree must be clean
+        run: |
+          gitleaks detect --no-git -c .gitleaks.toml --redact --exit-code 1 --no-banner \
+            --report-format sarif --report-path gitleaks-tree.sarif .
+
+      # ADVISORY: the full git history. Old commits can carry since-removed material that is not a
+      # defect in THIS change and that the author cannot rewrite under the pressure of a red build.
+      - name: gitleaks history scan (ADVISORY, never blocks)
+        if: always()
+        continue-on-error: true
+        run: |
+          gitleaks detect -c .gitleaks.toml --redact --exit-code 1 --no-banner \
+            --report-format sarif --report-path gitleaks-history.sarif .
+
+      - name: upload gitleaks reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gitleaks-reports
+          path: gitleaks-*.sarif
+          if-no-files-found: ignore
+
+  # ================================================================================================
+  # 3. SAST — semgrep (the curated GATE) plus bandit (advisory).
+  # ================================================================================================
+  sast:
+    name: SAST — semgrep + bandit (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: set up Python 3.13
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+
+      - name: install pinned SAST tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "semgrep==${SEMGREP_VERSION}" "bandit==${BANDIT_VERSION}"
+          semgrep --version
+          bandit --version
+
+      # NEGATIVE CONTROL for the semgrep gate: plant one match of every curated rule OUTSIDE the tree
+      # and require the ruleset to fire. If it does not, the gate below is a no-op.
+      - name: negative control — the semgrep ruleset actually fires
+        run: |
+          set -euo pipefail
+          nc="$(mktemp -d)"
+          cat > "$nc/bad.py" <<'PY'
+          import requests, yaml, ssl, subprocess
+          def a(u): return requests.get(u, verify=False)
+          def b(s): return yaml.load(s)
+          def c(): return ssl._create_unverified_context()
+          def d(app): app.run(host="0.0.0.0", debug=True)
+          def e(name): return subprocess.run(f"ls {name}", shell=True)
+          PY
+          set +e
+          semgrep --config "${GITHUB_WORKSPACE}/.semgrep/vigil-sast.yml" --error \
+                  --quiet --metrics off --disable-version-check "$nc"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::NEGATIVE CONTROL FAILED — the semgrep ruleset matched nothing on a fixture that violates every rule. The gate below is a no-op; fix the ruleset."
+            exit 1
+          fi
+          echo "negative control OK — the curated ruleset fires on the planted fixture (rc=${rc})."
+
+      # THE GATE. semgrep over the curated ruleset. --error makes any finding a non-zero exit.
+      - name: semgrep GATE — curated ruleset must be clean
+        run: |
+          semgrep --config .semgrep/vigil-sast.yml --error \
+                  --quiet --metrics off --disable-version-check \
+                  --sarif --output semgrep.sarif .
+
+      # ADVISORY: bandit over a curated subset. Report-only — it never blocks (its clean-tree count on
+      # a vendored pentest toolchain is not something a PR author can drive to zero).
+      - name: bandit scan (ADVISORY, never blocks)
+        if: always()
+        continue-on-error: true
+        run: |
+          bandit -c bandit.yaml -r . -q -f txt || true
+
+      # bandit's negative control is deterministic, so it is NOT advisory: prove the curated config
+      # fires on a planted fixture.
+      - name: negative control — the bandit config actually fires
+        if: always()
+        run: |
+          set -euo pipefail
+          nc="$(mktemp -d)"
+          cat > "$nc/bad.py" <<'PY'
+          import subprocess, yaml
+          DB_PASSWORD = "s3cr3t-hardcoded-value-not-a-placeholder"
+          def load(s): return yaml.load(s)
+          def run(x): return subprocess.Popen("echo " + x, shell=True)
+          PY
+          set +e
+          bandit -c "${GITHUB_WORKSPACE}/bandit.yaml" -r "$nc" -q -f txt
+          rc=$?
+          set -e
+          # bandit exits non-zero when it reports issues at/above the threshold.
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::NEGATIVE CONTROL FAILED — bandit reported nothing on a fixture with a hardcoded password, an unsafe yaml.load and shell=True. The advisory scan is a no-op; fix bandit.yaml."
+            exit 1
+          fi
+          echo "negative control OK — the bandit config fires on the planted fixture (rc=${rc})."
+
+      - name: upload semgrep sarif
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          if-no-files-found: ignore

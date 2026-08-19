@@ -1,0 +1,78 @@
+# Curated SAST ruleset for thuram-nana/vigil-sovereign — consumed by .github/workflows/security-scan.yml.
+#
+# WHY A CURATED RULESET. Pointing a stock SAST pack at a repository that VENDORS an offensive-security
+# toolchain buries the signal: the pentest scripts legitimately open raw sockets, disable TLS to probe
+# arbitrary targets, and shell out. A gate that is red on intended behaviour gets muted. So this file is
+# a SMALL set of rules for patterns that are a defect in THIS codebase's own application/service code —
+# each verified to produce ZERO findings on the current tree, so a new match is a real regression, not
+# noise. The workflow's negative control plants one match of each and requires the gate to fire.
+#
+# Offensive tooling under framework/scripts/ is where "disable TLS / shell out" is the job, not a bug,
+# so the TLS rule excludes it by path. Everything else is scanned in full.
+
+rules:
+  - id: python-requests-verify-false
+    languages: [python]
+    severity: ERROR
+    message: >-
+      TLS certificate verification disabled (verify=False) on an outbound HTTP request in
+      service code. A MITM can read and rewrite the traffic. Remove verify=False or pin a CA bundle.
+    metadata:
+      category: security
+      cwe: "CWE-295: Improper Certificate Validation"
+    paths:
+      exclude:
+        - "**/framework/scripts/**"
+    patterns:
+      - pattern: requests.$M(..., verify=False, ...)
+
+  - id: python-yaml-load-unsafe
+    languages: [python]
+    severity: ERROR
+    message: >-
+      yaml.load() without an explicit safe Loader deserializes arbitrary Python objects and is an
+      RCE sink on untrusted input. Use yaml.safe_load() or pass Loader=yaml.SafeLoader.
+    metadata:
+      category: security
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+    patterns:
+      - pattern: yaml.load($X)
+
+  - id: python-ssl-unverified-context
+    languages: [python]
+    severity: ERROR
+    message: >-
+      ssl._create_unverified_context() disables certificate verification for every socket that uses
+      the returned context. Use ssl.create_default_context().
+    metadata:
+      category: security
+      cwe: "CWE-295: Improper Certificate Validation"
+    patterns:
+      - pattern: ssl._create_unverified_context(...)
+
+  - id: python-flask-debug-true
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Running a WSGI app with debug=True exposes the Werkzeug interactive debugger, which is a
+      remote-code-execution console when reachable. Never enable it outside a developer's machine.
+    metadata:
+      category: security
+      cwe: "CWE-489: Active Debug Code"
+    patterns:
+      - pattern: $APP.run(..., debug=True, ...)
+
+  - id: python-subprocess-shell-true-interpolated
+    languages: [python]
+    severity: ERROR
+    message: >-
+      subprocess call with shell=True whose command is built by string interpolation is a
+      command-injection sink. Pass an argument list and drop shell=True.
+    metadata:
+      category: security
+      cwe: "CWE-78: OS Command Injection"
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.$M(f"...", ..., shell=True, ...)
+          - pattern: subprocess.$M("...".format(...), ..., shell=True, ...)
+          - pattern: subprocess.$M($A % $B, ..., shell=True, ...)

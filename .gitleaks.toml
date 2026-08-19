@@ -1,0 +1,68 @@
+# gitleaks policy for thuram-nana/vigil-sovereign  — consumed by .github/workflows/security-scan.yml
+#
+# WHY THIS FILE EXISTS. This repository VENDORS an offensive-security toolchain and ships a large
+# corpus of tests, fixtures, checklists and eval corpora that carry EXAMPLE secrets on purpose —
+# an IMDS capture fixture, a mobile-posture sample, an assessment technique catalogue, a GitLab
+# eval corpus with a demo root password. A raw `gitleaks` run flags 51 such strings. Every one of
+# them is a fixture, a doc, a vendored helper, or a false positive on a redaction regex / a dict
+# key — none is a live credential. Without a scoped policy the gate would be red on a clean tree,
+# and a gate that is red for reasons the author cannot fix is a gate that gets switched off.
+#
+# THE POLICY. Start from the full gitleaks default ruleset (nothing is weakened), then allowlist by
+# PATH the directories whose secret-shaped strings are example-by-design, plus two narrowly-scoped
+# false positives in real source. The allowlist is by path and by a specific regex — it is NOT a
+# blanket mute of a rule. Application/source code outside these paths is scanned in full, which is
+# exactly what the workflow's negative control proves: a secret planted in a non-allowlisted path
+# still fails the scan.
+#
+# HONEST SCOPE. Allowlisting `tests/` means a real credential committed INTO a test file would be
+# missed by this gate. That is a deliberate trade against 44 example-secret fixtures the repo needs;
+# the CodeQL and SAST jobs, and code review, remain in force over those files.
+
+title = "vigil-sovereign secret-scan policy"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Test suites and fixtures carry example secrets by design (44 known matches)."
+paths = [
+  '''(^|/)tests?/''',
+  '''(^|/)test_[^/]*\.py$''',
+  '''(^|/)conftest\.py$''',
+]
+
+[[allowlists]]
+description = "Documentation, checklists and assessment write-ups quote example credentials as prose."
+paths = [
+  '''^docs/''',
+  '''(^|/)checklists/''',
+  '''\.md$''',
+]
+
+[[allowlists]]
+description = "Eval corpora are captured third-party app snapshots with demo/default credentials."
+paths = [
+  '''(^|/)eval/corpus''',
+  '''(^|/)corpus_apps/''',
+]
+
+[[allowlists]]
+description = "Agent workflow helper scripts under .claude quote key/token vocabulary in prompt prose."
+paths = [
+  '''(^|/)\.claude/''',
+]
+
+[[allowlists]]
+description = "False positive: console/actions.py is the REDACTION module; its PEM-header regex literals are masking patterns, not keys."
+condition = "AND"
+paths = ['''engine/crucible/framework/v2/console/actions\.py''']
+regexTarget = "match"
+regexes = ['''-----BEGIN [A-Z ]*PRIVATE KEY-----''']
+
+[[allowlists]]
+description = "False positive: approval_token.py — `signature_b64` is a dataclass field name, not an API key."
+condition = "AND"
+paths = ['''engine/crucible/../integration/vigil_integration/live/approval_token\.py$''', '''(^|/)approval_token\.py$''']
+regexTarget = "match"
+regexes = ['''signature_b64''']
