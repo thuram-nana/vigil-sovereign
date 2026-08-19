@@ -145,3 +145,20 @@ class SpineSink:
         return self._post("tool_result", {"tool": tool, "ok": bool(ok), "refused": bool(refused),
                                           "gate": gate, "summary": summary, "note": note},
                           parent_id=tool_call_id)
+
+    def sensor_inconclusive(self, sensor: str, *, missing_prerequisite: str, detail: str = "",
+                            tool_call_id: int | None = None) -> int | None:
+        """Surface a sensor's INCONCLUSIVE outcome — a missing prerequisite meant NOTHING was assessed —
+        as a DISTINCT, typed spine event, so a not-assessed surface is never folded into a clean negative
+        (the silent CLEAN that ``sensors.base.inconclusive_result`` mints the marker to prevent). It rides
+        on a dedicated ``source='sensor:inconclusive'`` observation — no new event kind / migration — that
+        a report/verdict layer keys on, VISIBLY distinct from a plain sensor failure's ``tool_result`` (a
+        bare ``ok=False``). ``parent_id = tool_call_id`` links it to the invocation. Best-effort
+        (swallow-on-error): a spine write never perturbs the fusion pass."""
+        return self._post("observation", {
+            "source": "sensor:inconclusive",
+            "surface": str(sensor or "(sensor)"),
+            "summary": (f"INCONCLUSIVE: sensor {sensor} did NOT assess the surface — missing prerequisite: "
+                        f"{missing_prerequisite}. Not a clean result. {detail}").strip(),
+            "confidence": 0.0,
+        }, parent_id=tool_call_id)

@@ -1206,3 +1206,113 @@ def test_active_exposure_is_idempotent_over_re_runs(
     assert "finding:active_exposure:acme-public-assets" in ids
     fuse_sensors(world, "alpha", plan)                                # a stable finding id, no duplicate
     assert {n.id for n in world.all_nodes()} == ids
+
+
+# ---- W16-3 red-pen fix: a FUSION run SURFACES a sensor's INCONCLUSIVE, never a silent CLEAN --------
+#
+# The sensor layer mints a structured INCONCLUSIVE marker for a missing cloud/K8s prerequisite
+# (sensors/base.inconclusive_result; proven at the sensor layer in
+# sensors/tests/test_missing_prerequisite_inconclusive.py). But a marker nothing CONSUMES is orphaned:
+# at the layer the operator/report sees, a missing-prerequisite run was still indistinguishable from a
+# clean run. These tests prove fuse_sensors is now a REAL consumer — it reads SensorResult.inconclusive
+# and emits a DISTINCT ``source='sensor:inconclusive'`` spine event naming the missing prerequisite —
+# and that the consumer is not a no-op that stamps every run inconclusive (an ASSESSED run surfaces
+# none). FAIL-BEFORE / PASS-AFTER: revert the ``if res.inconclusive: _surface_inconclusive(...)`` hunk
+# in fuse_sensors and no sensor:inconclusive event is emitted, so the positive assertion below fails.
+
+
+def _fake_boto3_no_credentials():
+    """A boto3 whose default chain yields NO ambient credentials (the missing prerequisite)."""
+    return SimpleNamespace(Session=lambda **_: SimpleNamespace(get_credentials=lambda: None))
+
+
+class _AwsBoom:
+    """Any AWS client whose every call is denied — each datum degrades away, never sinking the run."""
+
+    def __getattr__(self, _name):
+        def _raise(*_a, **_k):
+            raise RuntimeError("AccessDenied")
+        return _raise
+
+
+def _fake_boto3_with_credentials():
+    """A boto3 whose default chain YIELDS ambient credentials + a working STS identity — an ASSESSED
+    (empty) account: a genuine exercised-clean run, NOT inconclusive."""
+    sts = SimpleNamespace(get_caller_identity=lambda: {"Account": "123456789012"})
+
+    class _Session:
+        def __init__(self, **_):
+            pass
+
+        def get_credentials(self):
+            return object()                                  # truthy → ambient identity present
+
+        def client(self, svc, **_kw):
+            return sts if svc == "sts" else _AwsBoom()       # STS works; the rest degrade (empty account)
+
+    return SimpleNamespace(Session=_Session)
+
+
+def _spine(tmp_path: Path):
+    """A real Blackboard + SpineSink so a surfaced event is schema-validated and queryable end-to-end."""
+    from framework.v2.agents.blackboard import open_blackboard
+    from framework.v2.agents.spine_sink import SpineSink
+
+    bb = open_blackboard(db_path=tmp_path / "bb.sqlite")
+    return bb, SpineSink(bb, "alpha")
+
+
+def _cloud_live_fusion(sink, boto3_fake, monkeypatch: pytest.MonkeyPatch):
+    """Drive a real end-to-end FUSION run of the gated LIVE cloud_live sensor (not a bare sensor call):
+    fuse_sensors → run_sensor → invoke_tool's fail-closed gate chain → the sensor's own run(). The
+    localhost endpoint keeps egress on an always-permitted host so the gate PASSES and the sensor
+    actually runs (proving the surfacing is exercised through the real gate, not around it)."""
+    import sys
+
+    monkeypatch.setenv("CRUCIBLE_AWS_ENDPOINT_URL", "http://localhost:4566")   # egress_hosts=('localhost',) → permitted
+    monkeypatch.setitem(sys.modules, "boto3", boto3_fake)
+    world = WorldModel()
+    ctx = SimpleNamespace(fusion_tasks=[{"sensor": "cloud_live", "args": {}}], sink=sink)
+    fuse_sensors(world, "alpha", ctx)
+
+
+def _inconclusive_events(bb):
+    return [r for r in bb.read(engagement="alpha", kinds=["observation"])
+            if r.payload.get("source") == "sensor:inconclusive"]
+
+
+def test_fusion_run_surfaces_inconclusive_as_a_distinct_spine_event(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing-prerequisite (no ambient AWS credentials) cloud_live run, driven THROUGH fuse_sensors,
+    emits a distinct ``sensor:inconclusive`` spine event that NAMES the missing prerequisite — so the
+    not-assessed surface is distinguishable from a clean negative at the layer the report sees."""
+    bb, sink = _spine(tmp_path)
+    _cloud_live_fusion(sink, _fake_boto3_no_credentials(), monkeypatch)
+
+    events = _inconclusive_events(bb)
+    assert len(events) == 1, "the fusion run must surface exactly one distinct inconclusive event"
+    payload = events[0].payload
+    assert payload["surface"] == "cloud_live"                          # NAMES the sensor
+    assert "ambient AWS credentials" in payload["summary"]            # NAMES the missing prerequisite
+    assert "INCONCLUSIVE" in payload["summary"]                       # loud, distinct from a plain failure
+
+    # And it is genuinely DISTINCT from the sensor's tool_result (a bare ok=False that, alone, is
+    # indistinguishable from a plain sensor failure — the orphaned-marker bug this fix closes).
+    tr = [r for r in bb.read(engagement="alpha", kinds=["tool_result"]) if r.payload.get("tool") == "cloud_live"]
+    assert tr and tr[0].payload["ok"] is False and tr[0].payload["refused"] is False
+    bb.close()
+
+
+def test_fusion_run_ASSESSED_surfaces_no_inconclusive_event(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """NEGATIVE CONTROL (must not stamp every run inconclusive / must not break a legitimate path): with
+    the prerequisite PRESENT the cloud_live run is ASSESSED (ok=True, empty account) — the fusion run
+    surfaces NO sensor:inconclusive event, and the sensor genuinely RAN (its tool_result is ok=True, not
+    a refusal), so 'no inconclusive event' is because the run was assessed, not because the gate refused."""
+    bb, sink = _spine(tmp_path)
+    _cloud_live_fusion(sink, _fake_boto3_with_credentials(), monkeypatch)
+
+    assert _inconclusive_events(bb) == []                             # an assessed run is never stamped inconclusive
+    tr = [r for r in bb.read(engagement="alpha", kinds=["tool_result"]) if r.payload.get("tool") == "cloud_live"]
+    assert tr and tr[0].payload["ok"] is True and tr[0].payload["refused"] is False   # it RAN and was assessed
+    bb.close()

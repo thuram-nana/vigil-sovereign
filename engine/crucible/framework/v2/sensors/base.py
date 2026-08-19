@@ -42,8 +42,10 @@ from ..worldmodel.models import EdgeKind, NodeKind
 # (``targets/<slug>/collector-hosts.txt``). When one is MISSING the sensor has assessed NOTHING — and
 # for a product whose thesis is a SOUND NEGATIVE, reporting "assessed nothing" as "found nothing" is
 # the worst failure mode: a silent CLEAN. So a missing prerequisite mints a structured, machine-
-# readable INCONCLUSIVE outcome that NAMES the prerequisite and is visibly distinct from an assessed
-# run — never a clean negative.
+# readable INCONCLUSIVE outcome that NAMES the prerequisite, which ``engage_fusion.fuse_sensors``
+# CONSUMES (via ``SensorResult.inconclusive`` -> ``_surface_inconclusive``) to emit a distinct
+# ``source='sensor:inconclusive'`` spine event — so a FUSION run's missing-prerequisite outcome is
+# visibly distinct from an assessed run, never a clean negative.
 
 INCONCLUSIVE = "inconclusive"
 
@@ -56,11 +58,12 @@ def inconclusive_result(sensor: str, *, missing: str, detail: str) -> ToolResult
     egress scope — ``targets/<slug>/collector-hosts.txt``) has assessed NOTHING. Reporting that as
     "found nothing" is a silent CLEAN — the worst failure mode for a sound-negative product. So the
     outcome is ``ok=False`` (nothing ran to completion) carrying a TYPED marker in ``output`` —
-    ``status='inconclusive'``, ``assessed=False``, ``missing_prerequisite=<name>`` — that a report/
-    verdict layer keys on to keep a not-assessed surface OUT of any clean negative, plus a loud
-    ``note`` that leads with INCONCLUSIVE and names what was not assessed. The marker rides in
-    ``output`` because a failed ToolResult carries no facts, so that field is free for the reason
-    (a report keys on the TYPED marker, not on the free-text note). Total."""
+    ``status='inconclusive'``, ``assessed=False``, ``missing_prerequisite=<name>`` — that
+    ``engage_fusion.fuse_sensors`` keys on (via ``SensorResult.inconclusive``) to emit a distinct
+    ``sensor:inconclusive`` spine event, keeping a not-assessed surface OUT of any clean negative, plus a
+    loud ``note`` that leads with INCONCLUSIVE and names what was not assessed. The marker rides in
+    ``output`` because a failed ToolResult carries no facts, so that field is free for the reason (the
+    fusion consumer keys on the TYPED marker, not on the free-text note). Total."""
     return ToolResult(
         ok=False,
         note=(f"{sensor}: INCONCLUSIVE — a missing prerequisite means NOTHING was assessed; this is "
@@ -72,9 +75,10 @@ def inconclusive_result(sensor: str, *, missing: str, detail: str) -> ToolResult
 
 def is_inconclusive(result: Any) -> bool:
     """True iff ``result`` is a structured INCONCLUSIVE sensor outcome (a missing prerequisite meant
-    NOTHING was assessed) — the signal a verdict/report layer keys on to keep a not-assessed surface
-    out of a clean negative. Total: a plain failure, an assessed ``ok=True`` result, or ``None`` is
-    NOT inconclusive."""
+    NOTHING was assessed) — the signal ``engage_fusion.fuse_sensors`` keys on (via
+    ``SensorResult.inconclusive``) to surface the not-assessed surface as a distinct spine event rather
+    than a clean negative. Total: a plain failure, an assessed ``ok=True`` result, or ``None`` is NOT
+    inconclusive."""
     out = getattr(result, "output", None)
     return isinstance(out, dict) and out.get("status") == INCONCLUSIVE and out.get("assessed") is False
 
@@ -111,8 +115,9 @@ class SensorResult:
 
     @property
     def inconclusive(self) -> bool:
-        """True iff a prerequisite was missing so NOTHING was assessed — a not-assessed outcome the
-        caller must keep OUT of any clean negative (see ``inconclusive_result``)."""
+        """True iff a prerequisite was missing so NOTHING was assessed — a not-assessed outcome that
+        ``engage_fusion.fuse_sensors`` reads and surfaces as a distinct ``sensor:inconclusive`` spine
+        event, so it is never folded into a clean negative (see ``inconclusive_result``)."""
         return is_inconclusive(self.result)
 
     @property
