@@ -540,7 +540,10 @@ def test_verify_ledger_total_on_malformed_signature():
         assert v.ok is False and "seq 0" in v.reason
 
 
-# --- W0-14 #409: BIND the wall-clock `at` to the monotonic counter; HARDEN the software floor ---------
+# --- W0-14 #409 (RED-PEN reconcile): `at` is untrusted ADVISORY data — the MONOTONIC COUNTER, not the
+#     wall-clock `at`, is the anti-back-dating authority. verify must NOT hard-fail a legitimate ledger on
+#     a benign wall-clock step-back (NTP), yet the counter must still catch a real rollback. HARDEN the
+#     software floor (fail-closed on STRUCTURAL corruption; honest about a smaller-valid-int rollback). ----
 
 
 def _mint_with_at(kp, op, *, at, monotonic, prev, seq):
@@ -555,33 +558,53 @@ def _mint_with_at(kp, op, *, at, monotonic, prev, seq):
     return att
 
 
-def test_INVARIANT_back_dated_at_with_valid_counter_fails():
-    """W0-14 #409 — a record with a VALID, advancing monotonic counter but an EARLIER wall-clock ``at``
-    than the prior record (the 'prove I acted before I did' repudiation attack) must FAIL verification.
-    Both records are validly signed — only the wall-clock is back-dated. This test FAILS on a tree without
-    the fix (the pre-fix verify checked only the counter, so the back-dated ``at`` verified ``ok``)."""
-    kp = _kp()
-    op = _operator(kp)
-    r0 = _mint_with_at(kp, op, at="2026-07-21T12:00:00+00:00", monotonic=10, prev="0" * 64, seq=0)
-    # seq 1: counter ADVANCES (10 -> 20, a valid non-decreasing anchor) but ``at`` is BACK-DATED an hour.
-    r1 = _mint_with_at(kp, op, at="2026-07-21T11:00:00+00:00", monotonic=20, prev=r0.record_hash, seq=1)
-    res = verify_ledger([r0, r1], resolve_key=operator_key_resolver(keypair=kp))
-    assert res.ok is False
-    assert "back-dated" in res.reason and "seq 1" in res.reason
-
-
-def test_NEGCONTROL_forward_and_equal_at_still_verify():
-    """Negative control for W0-14 #409 — the ``at`` gate is NOT a blanket refusal: a well-formed chain
-    whose wall-clock moves FORWARD verifies, and an EQUAL ``at`` (two actions in the same instant) is
-    allowed (the rule is non-decreasing, mirroring the monotonic anchor)."""
+def test_benign_at_stepback_with_advancing_counter_verifies():
+    """W0-14 #409 RED-PEN — the wall clock is UNTRUSTED (that is the whole reason the monotonic anchor
+    exists). A LEGITIMATE ledger whose wall-clock ``at`` steps BACK between records (a benign NTP
+    correction) while the monotonic counter ADVANCES must VERIFY. A false 'back-dated' verdict here would
+    contradict the module's own wall-clock-is-untrusted premise. This is the fail-before / pass-after for
+    the reconcile: it FAILS on the pre-reconcile tree (the naive ``at`` hard-fail rejected the step-back)
+    and PASSES once verify relies on the monotonic anchor alone."""
     kp = _kp()
     op = _operator(kp)
     resolver = operator_key_resolver(keypair=kp)
     r0 = _mint_with_at(kp, op, at="2026-07-21T12:00:00+00:00", monotonic=10, prev="0" * 64, seq=0)
-    fwd = _mint_with_at(kp, op, at="2026-07-21T13:00:00+00:00", monotonic=20, prev=r0.record_hash, seq=1)
-    assert verify_ledger([r0, fwd], resolve_key=resolver).ok is True
-    eq = _mint_with_at(kp, op, at="2026-07-21T12:00:00+00:00", monotonic=20, prev=r0.record_hash, seq=1)
-    assert verify_ledger([r0, eq], resolve_key=resolver).ok is True
+    # benign NTP step-back: ``at`` goes 12:00 -> 11:00 while the counter ADVANCES 10 -> 20 (a real record).
+    r1 = _mint_with_at(kp, op, at="2026-07-21T11:00:00+00:00", monotonic=20, prev=r0.record_hash, seq=1)
+    res = verify_ledger([r0, r1], resolve_key=resolver)
+    assert res.ok is True, res.reason
+
+
+def test_at_ordering_is_irrelevant_to_verify_incl_cross_timezone():
+    """W0-14 #409 RED-PEN — ``at`` is advisory signed DATA, never a verify/ordering key: FORWARD, EQUAL,
+    and BACKWARD wall-clock all verify on a well-formed advancing chain — including an ``at`` written in a
+    DIFFERENT timezone offset (the old lexicographic ``at`` compare was unsound across offsets; dropping
+    the gate removes that whole class of false positive)."""
+    kp = _kp()
+    op = _operator(kp)
+    resolver = operator_key_resolver(keypair=kp)
+    r0 = _mint_with_at(kp, op, at="2026-07-21T12:00:00+00:00", monotonic=10, prev="0" * 64, seq=0)
+    # forward, equal, an-hour-back, and a NON-UTC offset that is chronologically LATER (17:00Z) yet sorts
+    # LEXICOGRAPHICALLY earlier than 12:00+00:00 — the exact case the naive string compare mis-flagged.
+    for at1 in ("2026-07-21T13:00:00+00:00", "2026-07-21T12:00:00+00:00",
+                "2026-07-21T11:00:00+00:00", "2026-07-21T12:00:00-05:00"):
+        r1 = _mint_with_at(kp, op, at=at1, monotonic=20, prev=r0.record_hash, seq=1)
+        assert verify_ledger([r0, r1], resolve_key=resolver).ok is True, at1
+
+
+def test_monotonic_counter_still_catches_backdating_regardless_of_at():
+    """W0-14 #409 RED-PEN — anti-back-dating is NOT weakened by dropping the ``at`` gate: the MONOTONIC
+    COUNTER remains the authority. A record whose counter ROLLS BACK fails even when its wall-clock ``at``
+    moves innocently FORWARD — proving the catch is the counter, not the string. (Companion to the pre-
+    existing test_INVARIANT_back_dated_monotonic_fails.)"""
+    kp = _kp()
+    op = _operator(kp)
+    resolver = operator_key_resolver(keypair=kp)
+    r0 = _mint_with_at(kp, op, at="2026-07-21T12:00:00+00:00", monotonic=100, prev="0" * 64, seq=0)
+    # the REAL attack: the counter rolls back 100 -> 50 even as ``at`` advances 12:00 -> 13:00.
+    r1 = _mint_with_at(kp, op, at="2026-07-21T13:00:00+00:00", monotonic=50, prev=r0.record_hash, seq=1)
+    res = verify_ledger([r0, r1], resolve_key=resolver)
+    assert res.ok is False and "monotonic" in res.reason and "back-dating" in res.reason
 
 
 def test_software_floor_fails_closed_on_corrupt_negative_unreadable(tmp_path):
@@ -641,3 +664,30 @@ def test_NEGCONTROL_wellformed_and_absent_floor_still_read(tmp_path):
     assert _read_floor(absent) == 0                       # fresh install: missing file -> 0 (legitimate)
     b = read_monotonic_anchor(state_path=str(absent), tpm_probe=lambda: None)
     assert b.value == 1 and b.grounded == "software"      # first mint on a fresh box succeeds
+
+
+def test_floor_rollback_to_smaller_valid_int_reads_but_is_caught_downstream(tmp_path):
+    """W0-14 #409 RED-PEN (LOW honesty) — the fail-closed floor read catches STRUCTURAL corruption only
+    (unreadable / non-integer / negative). It does NOT — and cannot, from the read alone — catch a floor
+    tampered DOWN to a smaller VALID non-negative integer: that value reads as well-formed. This test
+    documents that honest bound AND proves the rollback is caught DOWNSTREAM by verify_ledger's non-
+    decreasing-monotonic check over the presented chain (not by the read)."""
+    from vigil_integration.attestation.anchor import _read_floor, read_monotonic_anchor
+
+    p = tmp_path / "rolled.counter"
+    p.write_text("100")
+    assert _read_floor(p) == 100
+    # attacker rolls the floor DOWN to a smaller VALID integer — the read ACCEPTS it (no structural fault).
+    p.write_text("50")
+    assert _read_floor(p) == 50                          # reads fine; the read alone does NOT catch this
+    a = read_monotonic_anchor(state_path=str(p), tpm_probe=lambda: None)
+    assert a.value == 51                                 # mints a LOWER anchor than the pre-tamper 100
+
+    # ...but verify_ledger catches the resulting decrease once the full chain is presented:
+    kp = _kp()
+    op = _operator(kp)
+    resolver = operator_key_resolver(keypair=kp)
+    r0 = _mint_with_at(kp, op, at="2026-07-21T12:00:00+00:00", monotonic=100, prev="0" * 64, seq=0)
+    r1 = _mint_with_at(kp, op, at="2026-07-21T13:00:00+00:00", monotonic=51, prev=r0.record_hash, seq=1)
+    res = verify_ledger([r0, r1], resolve_key=resolver)
+    assert res.ok is False and "monotonic" in res.reason

@@ -23,6 +23,14 @@ counter file that EXISTS yet is invalid — unreadable, non-integer/torn, or neg
 the exact value that prevents rollback, so ``read_monotonic_anchor`` RAISES (:class:`FloorReadError`) rather
 than silently resetting the floor to 0; the mint path converts that to a fail-closed DENY (no anchor ⇒ no
 record ⇒ the engagement gate refuses). No wallclock, no RNG: the counter is a pure floor-advance.
+
+SCOPE — what the fail-closed read does NOT catch (honest bound): it catches STRUCTURAL corruption of the
+floor (unreadable / non-integer-torn / negative). It does NOT — and cannot, from the read alone — catch a
+floor tampered DOWN to a smaller VALID non-negative integer: that value reads as well-formed. That rollback
+is caught DOWNSTREAM, not here — a later record then carries a lower ``monotonic`` than an earlier one, and
+:func:`ledger.verify_ledger`'s non-decreasing-monotonic check (plus the external head/count pin, which
+catches a truncated tail) rejects the presented chain. The read hardens the fail-OPEN reset-to-0; the
+cross-record monotonic invariant is what defeats a rollback to a smaller valid floor.
 """
 
 from __future__ import annotations
@@ -72,11 +80,13 @@ def _default_tpm_probe() -> Optional[int]:
 
 
 class FloorReadError(Exception):
-    """The persisted software floor EXISTS but is invalid — unreadable (I/O / permission), non-integer /
-    torn, or negative. Raised so a tampered/faulted counter fails CLOSED: the anchor cannot be read ⇒ no
-    record is minted ⇒ the engagement gate DENIES — instead of silently resetting the rollback floor to 0
-    (the old fail-open, W0-14 #409). A genuinely ABSENT counter is NOT this error: a fresh install has no
-    file and legitimately starts at 0."""
+    """The persisted software floor EXISTS but is STRUCTURALLY invalid — unreadable (I/O / permission),
+    non-integer / torn, or negative. Raised so a tampered/faulted counter fails CLOSED: the anchor cannot
+    be read ⇒ no record is minted ⇒ the engagement gate DENIES — instead of silently resetting the rollback
+    floor to 0 (the old fail-open, W0-14 #409). A genuinely ABSENT counter is NOT this error: a fresh
+    install has no file and legitimately starts at 0. Bound (honest): a floor tampered DOWN to a smaller
+    VALID non-negative integer is NOT this error either — it reads as well-formed; that rollback is caught
+    downstream by :func:`ledger.verify_ledger`'s non-decreasing-monotonic check, not by this read."""
 
 
 def _read_floor(path: Path) -> int:
@@ -169,7 +179,10 @@ def read_monotonic_anchor(
     best-effort write failure all still return a value (they degrade to a software increment). But a
     PRESENT-but-invalid counter file (unreadable / non-integer / negative) propagates
     :class:`FloorReadError` — the mint path (:func:`ledger.record_usage`) catches it and returns no
-    attestation, so the engagement gate DENIES rather than minting under a silently-reset floor of 0."""
+    attestation, so the engagement gate DENIES rather than minting under a silently-reset floor of 0. This
+    hardens the reset-to-0 fail-open ONLY: a floor tampered DOWN to a smaller VALID integer still reads and
+    mints ``floor+1``, but the resulting lower anchor is rejected by :func:`ledger.verify_ledger`'s
+    non-decreasing-monotonic check over the presented chain (+ the external head/count pin)."""
     path = Path(state_path) if state_path else (DEFAULT_STATE_DIR / _COUNTER_FILE)
     probe = tpm_probe if tpm_probe is not None else _default_tpm_probe
     floor = _read_floor(path)
