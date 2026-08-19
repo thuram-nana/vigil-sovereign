@@ -232,8 +232,15 @@ here with the exact bound each carries — delivered, not soft-pedalled, and not
   bearer stays the ongoing session carrier, and the trust root is still the **owner-signed grant**.
 - **MFA (TOTP) + optional password (S4, #387).** `governor/totp.py` (stdlib RFC-6238); the secret is shown
   once as an `otpauth://` provisioning URI and **sealed** via the owner vault before it is signed into the
-  grant. A TOTP-enrolled account must present a valid current code at `/api/login` (fail-closed). `set_password`
-  adds an *optional* weaker salted-scrypt login; keypair PoP is the stronger path.
+  grant. On the login methods that bootstrap a **fresh session from a first factor** — PoP, password, OIDC —
+  a TOTP-enrolled account must present a valid current code at `/api/login` (fail-closed). The **bearer
+  branch** is **not** gated by the enrolment (`_check_totp(..., require=False)`, W17-1 #535): a bearer is
+  itself a possession credential and the SPA login gate posts `{token}` only, so gating there would
+  permanently brick UI login — a code-less bearer login is allowed, while a `{totp}` code that **is** supplied
+  alongside the bearer is still validated (a wrong one is refused, so the gate is not a no-op). The owner
+  enrols via `sigil accounts enroll-totp <user>` (or the `enroll_totp` action) and **removes** a lost factor
+  via `sigil accounts disable-totp <user>` (the documented recovery path). `set_password` adds an *optional*
+  weaker salted-scrypt login; keypair PoP is the stronger path.
 - **OIDC Relying Party — OFF by default (S5, #388).** `config.oidc_enabled()` defaults **off**; when off the
   routes are **not registered** (byte-identical, no egress). When on, the `id_token` is verified against JWKS
   (**asymmetric algs only**; `alg:none`/HS* never implemented) with iss/aud/exp/iat/nbf + a single-use `nonce`

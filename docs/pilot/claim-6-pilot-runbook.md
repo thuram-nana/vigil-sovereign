@@ -73,15 +73,21 @@ once (reproduces audit row 10).
 
 **1b.2 — MFA / TOTP second factor (`enroll_totp`):**
 
-- As the **owner**, enroll TOTP for alice: `POST /api/action` `{action:"enroll_totp", username:"alice"}`.
-  The response carries an `otpauth://` **provisioning URI shown ONCE** — scan it into an authenticator now;
-  the secret is **sealed** at rest (owner vault) and is never recoverable from the spine. (Enrollment needs a
-  provisioned owner vault; if it is not, the action returns a clean "provision the vault" error.)
-- As **alice**, log in: `POST /api/login` now requires a valid current `totp` code **in addition** to her
-  method (bearer or PoP).
+- As the **owner**, enroll TOTP for alice: `POST /api/action` `{action:"enroll_totp", username:"alice"}` (or,
+  at the host, `sigil accounts enroll-totp alice`). The response carries an `otpauth://` **provisioning URI
+  shown ONCE** — scan it into an authenticator now; the secret is **sealed** at rest (owner vault) and is
+  never recoverable from the spine. (Enrollment needs a provisioned owner vault; if it is not, the action
+  returns a clean "provision the vault" error.)
+- As **alice**, log in: on the methods that bootstrap a **fresh session from a first factor** — **PoP** and
+  **password** — `POST /api/login` now requires a valid current `totp` code **in addition**. The **bearer**
+  method is **not** gated by the enrolment (a bearer is itself a possession credential and the SPA login gate
+  posts `{token}` only — gating it would permanently brick UI login, W17-1 #535); a `totp` code supplied
+  alongside a bearer **is** still validated.
 
-**Expected pass:** a login **without** the code, or with a **stale** code, is **refused (401)**; the current
-code succeeds (reproduces audit row 11). The second factor is enforced only at `/api/login`, fail-closed.
+**Expected pass:** a **PoP / password** login **without** the code, or with a **stale** code, is **refused
+(401)**; the current code succeeds (reproduces audit row 11). A **bearer** login without a code still
+succeeds. The second factor is enforced only at `/api/login`, fail-closed. To remove a lost authenticator,
+the owner runs `sigil accounts disable-totp alice` (the recovery path).
 
 **1b.3 — Optional password login (`set_password`), if you want the weaker fallback:**
 

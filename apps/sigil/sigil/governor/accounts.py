@@ -346,6 +346,26 @@ class AccountsRegistry:
                                    issued_at=float(issued_at), user_pubkey=acct.user_pubkey,
                                    totp_secret=blob, password_hash=acct.password_hash)
 
+    def disable_totp(self, username: str, *, issued_at: float) -> int:
+        """Remove the TOTP second factor from an active account — the SAFE direction (drops a factor). This
+        is the documented RECOVERY path (issue W17-1) for an account whose authenticator was lost: the owner
+        re-signs the grant KEEPING role + bearer + user_pubkey + password and CLEARING `totp_secret`, so the
+        next fold sees no second factor (a clear grant omits the key entirely, byte-identical to a
+        never-enrolled account's core). `issued_at` is bumped to STRICTLY exceed the per-username high-water
+        (mirrors `mint_session_bearer`) so the clear is always honored — never silently dropped as a stale
+        replay under a same-tick clock. Owner is the sole signer. Idempotent (re-disabling a TOTP-less
+        account just re-writes it without the factor). Fail-closed on an unknown / revoked account."""
+        if self.owner_key is None:
+            raise ValueError("disable_totp requires the owner signing key")
+        u = _check_username(username)
+        acct = self._fold().get(u)
+        if acct is None:
+            raise ValueError(f"no such active account {u!r} (create it first, or it was revoked)")
+        iat = max(float(issued_at), math.nextafter(acct.issued_at, math.inf))
+        return self._append_active(u, acct.role, cred_hash=acct.cred_hash, cred_salt=acct.cred_salt,
+                                   issued_at=iat, user_pubkey=acct.user_pubkey,
+                                   totp_secret=None, password_hash=acct.password_hash)
+
     def set_password(self, username: str, password: str, *, issued_at: float) -> int:
         """Owner-set a scrypt password hash for an existing active account — the S4 OPTIONAL weaker login.
         Hashes internally (salted scrypt); the plaintext password NEVER reaches the spine (only its one-way
