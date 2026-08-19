@@ -887,7 +887,7 @@ SCITT -->|"receipt anchored to"| CKPT</pre>
           </div>
           <div class="invariant">
             <div class="invariant-label">INVARIANT</div>
-            <p>A gated action can never proceed unless a signed WHO/WHEN/WHAT record is durably recorded first (mandatory, fail-closed on durability). The ledger is append-only + hash-chained + Ed25519-signed; a tampered/reordered/interior-deleted/forged/back-dated entry fails verification, and no wallclock/RNG touches the chain math (Ed25519 signing is deterministic). Every public function is total.</p>
+            <p>A gated action can never proceed unless a signed WHO/WHEN/WHAT record is durably recorded first (mandatory, fail-closed on durability). The ledger is append-only + hash-chained + Ed25519-signed; a tampered/reordered/interior-deleted/forged entry fails verification, and a rollback / re-dated entry is caught by the monotonic anchor (the anti-back-dating authority — the wall-clock timestamp is not itself a trusted security boundary, so a benign clock step-back does not fail a legitimate ledger). No wallclock/RNG touches the chain math (Ed25519 signing is deterministic). Every public function is total.</p>
           </div>
         </article>
         <article class="card">
