@@ -163,6 +163,42 @@ def test_provision_refuses_to_overwrite_without_force(capsys: pytest.CaptureFixt
     assert cli.main(base + ["--force"]) == 0
 
 
+def test_provision_is_atomic_invalid_valid_days_writes_nothing() -> None:
+    """A bad --valid-days must abort with NOTHING written to disk.
+
+    Writing a trust root is what turns enforcement ACTIVE, and once ACTIVE
+    every gated capability is DENIED until a valid entitlement grants it. So
+    if the ceremony wrote the trust root before validating the grant, an
+    invalid --valid-days (or any doc-build/sign error) would leave the
+    deployment GOVERNED-but-denied — strictly worse than the UNGOVERNED state
+    it started from. Provisioning must be atomic-ish: validate/build/sign the
+    entitlement fully in memory BEFORE it touches disk.
+
+    NEGATIVE CONTROL: the deployment starts UNGOVERNED (no material on disk).
+    """
+    assert not paths.trust_root_path().exists()
+    assert not paths.entitlement_path().exists()
+
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "provision",
+                "--institution-id", "inst-atomic",
+                "--institution-name", "Atomic",
+                "--tier", "standard",
+                "--valid-days", "0",  # invalid — must abort the WHOLE ceremony
+            ]
+        )
+
+    # The abort left nothing behind: no trust root (so enforcement never went
+    # ACTIVE) and no entitlement. The deployment is still UNGOVERNED.
+    assert not paths.trust_root_path().exists(), (
+        "invalid grant left a trust root on disk — deployment is now "
+        "GOVERNED-but-denied"
+    )
+    assert not paths.entitlement_path().exists()
+
+
 def test_bad_signer_spec_is_rejected(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(
         [

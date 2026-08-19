@@ -241,12 +241,21 @@ def _provision(args: argparse.Namespace) -> int:
         privs[key_id] = priv
 
     trust_root = prov.build_trust_root(authorizers, args.threshold)
-    tr_path = prov.write_trust_root(trust_root)
 
+    # Build and sign the entitlement while EVERYTHING is still in memory —
+    # _document_from_args validates --valid-days and can raise, and signing can
+    # fail — so that a bad grant aborts the ceremony with NOTHING on disk. If we
+    # wrote the trust root first, an invalid grant would leave the deployment
+    # GOVERNED-but-denied (a trust root turns enforcement ACTIVE, and without a
+    # valid entitlement every gated capability is then denied) — strictly worse
+    # than the UNGOVERNED state it started from. Sign with every authoriser
+    # (>= threshold), so the grant verifies under the trust root regardless of
+    # threshold.
     doc = _document_from_args(args)
-    # Sign with every authoriser (>= threshold), so the grant verifies under
-    # the trust root regardless of threshold.
     signed = prov.sign_entitlement(doc, privs)
+
+    # Only now touch disk: trust root then entitlement.
+    tr_path = prov.write_trust_root(trust_root)
     ent_path = prov.write_entitlement(signed)
 
     keys_out = Path(args.keys_out) if args.keys_out else (paths.entitlement_dir() / "authorizer-keys.json")
