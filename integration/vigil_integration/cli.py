@@ -1842,6 +1842,16 @@ def _cmd_up(args: argparse.Namespace) -> int:
             from vigil_gateway.docker import SandboxNetworking
             _res = SandboxNetworking().compose_up(
                 _repo / "infra" / "docker" / "docker-compose.yml", build=True, context_dir=_repo / "gateway")
+            # A clean compose_up (exit 0) is NOT proof the gate is UP. `docker compose up -d` returns 0 as
+            # soon as the container is CREATED, but the gateway proxy fails closed on a missing/bad charter
+            # scope and can exit on the spot — leaving an exit-0-but-DEAD container. Trust the state in hand,
+            # not the exit code: anything other than a RUNNING gateway is a bring-up FAILURE and MUST take the
+            # SAME fail-closed branch below — continuing past a dead gateway runs the sandbox ungated exactly
+            # as a raised bring-up would (the FATAL-1 silent downgrade this whole leg exists to prevent).
+            if str(_res.get("gateway")) != "running":
+                raise RuntimeError(
+                    f"gateway container is not running (state={_res.get('gateway')!r}); `docker compose up -d` "
+                    "returned 0 but the gateway proxy is not up (a missing/bad charter scope fails it closed)")
             print(f"vigil up: gateway topology up ({_json.dumps(_res)})")
         except Exception as _e:  # noqa: BLE001
             if not getattr(args, "allow_ungated_egress", False):

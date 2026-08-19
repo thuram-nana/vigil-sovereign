@@ -7,13 +7,20 @@ skipped") and continued to `run_up`, silently bringing the UI up with the sandbo
 outcome. Now a gateway bring-up failure REFUSES the run (exit 2, `run_up` never reached) UNLESS the operator
 EXPLICITLY passes ``--allow-ungated-egress``, which downgrades the refusal to a loud warning and continues.
 
+TWO bring-up failure shapes both fail closed (RED-PEN W0-6): (1) `compose_up` RAISES; and (2) `compose_up`
+returns cleanly (exit 0) but the gateway container is NOT running — `docker compose up -d` returns 0 once the
+container is created, yet the proxy fails closed on a missing/bad charter scope and exits, leaving an
+exit-0-but-DEAD container. `_cmd_up` treats a non-"running" gateway state as a bring-up failure, same branch.
+
 Fail-before / pass-after: revert ONLY the `_cmd_up` egress-gate hunk and
-``test_gateway_bringup_failure_refuses_ungated`` fails — the old code reached `run_up` after the swallow.
+``test_gateway_bringup_failure_refuses_ungated`` fails; revert ONLY the `!= "running"` state guard and
+``test_exit0_but_dead_gateway_refuses_ungated`` fails — both cases reached `run_up` before the fix.
 
 NEGATIVE CONTROLS (same module) prove the refusal is not a blanket abort / no-op:
-  * a SUCCESSFUL gateway bring-up proceeds to `run_up` (the abort is triggered by the FAILURE, not by
-    `--services` itself);
-  * the explicit `--allow-ungated-egress` override proceeds despite the failure, and does so LOUDLY.
+  * a SUCCESSFUL (running) gateway bring-up proceeds to `run_up` — the abort keys on the FAILURE / dead
+    state, not on `--services` itself nor a blanket refusal of any non-raising path;
+  * the explicit `--allow-ungated-egress` override proceeds despite the failure (raised OR exit-0-dead),
+    and does so LOUDLY.
 
 Hermetic: no docker daemon is touched — SandboxNetworking, RootServices and run_up are all stubbed.
 """
@@ -30,15 +37,21 @@ from vigil_integration import uiproxy as up_mod
 
 
 class _FakeGatewayNet:
-    """Stand-in for SandboxNetworking. `compose_up` raises iff the class-level `boom` flag is set
-    (a simulated bring-up failure); otherwise it returns a healthy status dict."""
+    """Stand-in for SandboxNetworking.
+
+    Two failure shapes are modelled, because `_cmd_up` must fail closed on BOTH:
+      * `boom` set          → `compose_up` RAISES (a simulated bring-up failure — docker unreachable);
+      * `boom` clear         → `compose_up` returns cleanly (exit 0), with `gateway` == `state`. `state`
+        == "running" is a healthy gate; any OTHER value models an EXIT-0-BUT-DEAD container (`docker
+        compose up -d` returned 0 but the proxy fell over on a missing/bad charter scope and exited)."""
 
     boom = True
+    state = "running"
 
     def compose_up(self, *a, **kw):
         if _FakeGatewayNet.boom:
             raise RuntimeError("simulated: docker daemon unreachable")
-        return {"image_built": False, "gateway": "running"}
+        return {"image_built": False, "gateway": _FakeGatewayNet.state}
 
 
 class _FakeRootServices:
@@ -64,6 +77,8 @@ def wired(monkeypatch):
         calls["run_up"] += 1
         return 0
 
+    _FakeGatewayNet.boom = True          # clean per-test defaults (each test sets what it needs)
+    _FakeGatewayNet.state = "running"
     monkeypatch.setattr(gw_docker, "SandboxNetworking", _FakeGatewayNet)
     monkeypatch.setattr(smod, "RootServices", _FakeRootServices)
     monkeypatch.setattr(up_mod, "run_up", _fake_run_up)
@@ -83,6 +98,36 @@ def test_gateway_bringup_failure_refuses_ungated(wired, capsys):
     err = capsys.readouterr().err
     assert "REFUSED" in err                           # and the refusal is loud and specific
     assert "169.254.169.254" in err and "FATAL-1" in err
+
+
+def test_exit0_but_dead_gateway_refuses_ungated(wired, capsys):
+    # RED-PEN W0-6: a CLEAN `compose_up` (exit 0) is NOT proof the gate is up. `docker compose up -d`
+    # returns 0 once the container is CREATED, but the gateway proxy fails closed on a missing/bad charter
+    # scope and exits on the spot — an exit-0-but-DEAD container. A non-"running" gateway must fail closed
+    # exactly like a RAISED bring-up. Fail-before/pass-after: drop the `!= "running"` guard in `_cmd_up`
+    # and this reaches `run_up` UNGATED (rc 0, run_up 1) — the silent gated→ungated downgrade W0-6 forbids.
+    _FakeGatewayNet.boom = False
+    _FakeGatewayNet.state = "exited"                  # compose exit 0, but the gateway container is DEAD
+    rc = cli._cmd_up(_up_args())
+    assert rc == 2                                    # fail-closed: REFUSED, not proceeded
+    assert wired["run_up"] == 0                       # the UI is NEVER brought up ungated
+    err = capsys.readouterr().err
+    assert "REFUSED" in err                           # loud and specific
+    assert "169.254.169.254" in err and "FATAL-1" in err
+    assert "exited" in err                            # the reason names the actual dead state
+
+
+def test_negctl_exit0_dead_override_proceeds_with_warning(wired, capsys):
+    # NEGATIVE CONTROL: the exit-0-but-dead detection is NOT a blanket abort — `--allow-ungated-egress`
+    # still downgrades it to a loud warning and continues, exactly like the raised-failure case. (If the new
+    # guard ignored the override, this would fail.)
+    _FakeGatewayNet.boom = False
+    _FakeGatewayNet.state = "exited"
+    rc = cli._cmd_up(_up_args("--allow-ungated-egress"))
+    assert rc == 0
+    assert wired["run_up"] == 1                        # explicit override → proceeds despite the dead gateway
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "UNGATED" in err and "FATAL-1" in err   # loud, not silent
 
 
 def test_negctl_gateway_up_proceeds(wired):
