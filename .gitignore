@@ -36,3 +36,8 @@ target/
 
 # compiled egress guard (built by `make -C tools/egress-guard`, never committed)
 /tools/egress-guard/egress_guard
+
+# security-scan.yml writes these scanner reports at the repo root during CI (uploaded as artifacts).
+/gitleaks-tree.sarif
+/gitleaks-history.sarif
+/semgrep.sarif

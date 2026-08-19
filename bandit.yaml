@@ -1,0 +1,22 @@
+# Curated bandit configuration for thuram-nana/vigil-sovereign.
+# Consumed by .github/workflows/security-scan.yml as an ADVISORY step (bandit runs report-only;
+# semgrep in .semgrep/vigil-sast.yml is the blocking SAST gate whose clean-tree/negative-control
+# behaviour is pinned by a test). This file curates bandit to a high-signal subset and keeps the
+# offensive toolchain (framework/scripts/**) and the example-laden test suites out of scope.
+exclude_dirs:
+  - "/tests/"
+  - "/test/"
+  - "/framework/scripts/"
+  - "/.git/"
+  - "/node_modules/"
+# High-signal checks for defects in this repo's own service/application code.
+tests:
+  - B105  # hardcoded_password_string
+  - B106  # hardcoded_password_funcarg
+  - B107  # hardcoded_password_default
+  - B201  # flask_debug_true
+  - B307  # eval
+  - B321  # ftplib
+  - B506  # yaml_load
+  - B602  # subprocess_popen_with_shell_equals_true
+  - B605  # start_process_with_a_shell
