@@ -431,20 +431,24 @@ def test_live_redrive_of_a_vulnerable_target_mints_a_fact_whose_cert_reverifies(
     # THE CONVERSE of the LLM-crafted-context test: a live engage run against a loopback target that returns
     # a REAL error-based-SQLi signature MINTS A FACT via the live-redrive path, and the signed cert
     # re-verifies OFFLINE against the FRESH re-driven context (not the LLM's claim).
-    from vigil_integration.live import wiring as W
+    import vigil_integration.oracle_adapter as oa
     from framework.v2.evidence.certify import verify_certificate
 
     _setup_gated_root(tmp_path, monkeypatch, charter_host="127.0.0.1")
 
+    # The live-redrive mint now routes through the admission choke (verdict.admit + certify_admitted);
+    # ``wiring.confirm_and_certify`` no longer exists as a callable seam. Spy on the NEW mint point
+    # ``oracle_adapter.certify_admitted`` (which wiring._admit_and_mint imports function-locally, so patching
+    # the module attribute is honoured at call time — same migrated pattern as test_sbom / test_mesh_cicd).
     captured: list = []
-    real = W.confirm_and_certify
+    real = oa.certify_admitted
 
-    def _spy(finding, **kw):
-        res = real(finding, **kw)
+    def _spy(finding, admitted, **kw):
+        res = real(finding, admitted, **kw)
         if kw.get("provenance") == "live_redrive":
             captured.append((res, finding.get("oracle_context")))
         return res
-    monkeypatch.setattr(W, "confirm_and_certify", _spy)
+    monkeypatch.setattr(oa, "certify_admitted", _spy)
 
     srv = _start_sqli(patched=False)                              # a VULNERABLE target (oracle fires live)
     try:

@@ -549,6 +549,30 @@ def test_loopback_tls_strong_hash_cert_is_inconclusive_not_clean(tmp_path: Path)
         "a strong-hash cert must not mint a weak-crypto FACT")
 
 
+def test_weak_crypto_branch_keeps_a_conclusive_nonfire_inconclusive_not_clean():
+    """LOW (W16-13): the STANDING guard the live TLS test relies on, asserted directly at the admission
+    seam so it discriminates independently of the oracle's conclusiveness on a strong leaf. Even a
+    CONCLUSIVE non-fire (fired=False, conclusive=True) over the registered
+    ``weak_crypto.cert_signature_algorithm`` branch must NOT admit a CLEAN — the branch is
+    ``clean_capable:false`` (leaf-cert only), so it may not assert absence and stays INCONCLUSIVE. This is
+    the assertion that would flip the moment anyone flags that branch clean-capable without capturing the
+    full chain; the end-to-end runner test cannot catch that because its oracle is non-conclusive."""
+    from vigil_integration.live.verdict import admit, Verdict
+
+    v = admit("weak_crypto.cert_signature_algorithm", fired=False, conclusive=True,
+              observed={"gate_authorized": True})
+    assert v.verdict is Verdict.INCONCLUSIVE, (
+        f"a clean_incapable branch must not admit a CLEAN on a conclusive non-fire; got {v.verdict} "
+        f"({v.reason})")
+    # positive control: the SAME conclusive non-fire over a clean_capable branch DOES admit CLEAN, so the
+    # INCONCLUSIVE above is the branch's declared incapability, not a blanket non-fire rule.
+    clean = admit("open_redirect.location_header", fired=False, conclusive=True,
+                  observed={"channel_established": True})
+    assert clean.verdict is Verdict.CLEAN, (
+        f"a clean_capable branch must admit CLEAN on a conclusive non-fire (control); got {clean.verdict} "
+        f"({clean.reason})")
+
+
 # ===================================================================================================
 # 5. PHASE 0.5 — the tool-exec PRE-FLIGHT GATE (kill-switch + charter-context + entitlement), so the
 #    TOOL SUBPROCESS itself is gated (not only the later oracle re-drive). Fail-closed BEFORE any traffic.
