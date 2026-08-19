@@ -16,7 +16,7 @@ availability of the sovereign spine.**
 | `neo4j-statefulset.yaml` | StatefulSet | 1 | **Community = no clustering.** Durable single instance only; HA needs Neo4j Enterprise. |
 | `otel-deployment.yaml` | Deployment | 2 | Active-active stateless. |
 | `services.yaml` | Services | — | ClusterIP + a **headless** Service for the StatefulSet. Sticky sessions on the proxy Service. |
-| `networkpolicy.yaml` | NetworkPolicy | — | **REQUIRED.** Restricts ingress to `vigil-sovereign:8733` to the proxy pods only — the cockpit serves its owner token token-free at `GET /`, so it must be reachable only via the authenticating proxy. |
+| `networkpolicy.yaml` | NetworkPolicy | — | **REQUIRED (enforced in the deploy path — not optional).** Restricts ingress to `vigil-sovereign:8733` to the proxy pods only — the cockpit serves its owner token token-free at `GET /`, so it must be reachable only via the authenticating proxy. The first resource of `kustomization.yaml`; `tools/ha/deploy.sh` REFUSES to deploy without it (or without a NetworkPolicy controller). |
 
 ## Why the proxy runs `--proxy-only` (and binds the pod IP)
 
@@ -55,13 +55,20 @@ scrub that blanks any backend's embedded `data-token="..."` out of relayed HTML 
 a remote cockpit's own token — which the proxy never holds — never reaches a browser).
 
 `networkpolicy.yaml` enforces that the cockpit is reachable **only** from the proxy
-pods (ingress to `vigil-sovereign:8733` restricted to `app: vigil-proxy`). **Apply it —
-do not run the sovereign StatefulSet without it**: any in-cluster workload that reached
-the Service directly could scrape the owner token off `GET /` and act as owner. Note the
-kubelet-probe caveat in that file (some CNIs need the node source allowed too). The
-proxy→cockpit hop is still cleartext HTTP on the pod network (bearer + owner console
-credential): the policy bounds *who* connects, not confidentiality — add a mesh mTLS /
-encrypted CNI if your pod network is untrusted (HA-PROFILE.md §1.2 / §4).
+pods (ingress to `vigil-sovereign:8733` restricted to `app: vigil-proxy`). It is
+**REQUIRED, not optional, and enforced in the deploy path** — do not run the sovereign
+StatefulSet without it: any in-cluster workload that reached the Service directly could
+scrape the owner token off `GET /` and act as owner. You do not have to remember to
+apply it by hand: it is the first resource of `kustomization.yaml` (so a single
+`kubectl apply -k` cannot omit it), and **`tools/ha/deploy.sh` REFUSES to deploy** — its
+`tools/ha/require_networkpolicy.py` preflight exits non-zero — when the policy is absent,
+does not deny the cross-workload path, is not wired into the kustomization, **or the
+cluster has no NetworkPolicy controller (CNI) to enforce it** (an unenforced NetworkPolicy
+object is silently a no-op). Note the kubelet-probe caveat in that file (some CNIs need
+the node source allowed too). The proxy→cockpit hop is still cleartext HTTP on the pod
+network (bearer + owner console credential): the policy bounds *who* connects, not
+confidentiality — add a mesh mTLS / encrypted CNI if your pod network is untrusted
+(HA-PROFILE.md §1.2 / §4).
 
 ## The single-writer invariant (do not "fix" it)
 
@@ -104,14 +111,23 @@ current height.
 
 ## Apply
 
+**Use the gated deploy** — it makes the REQUIRED NetworkPolicy required *in the deploy
+path*, refusing to proceed if the policy is absent, does not deny the cross-workload
+path, is not wired into the kustomization, or the cluster has no NetworkPolicy
+controller to enforce it:
+
 ```
-kubectl apply -f infra/ha/k8s/services.yaml
-kubectl apply -f infra/ha/k8s/networkpolicy.yaml   # REQUIRED — cockpit reachable only via the proxy
-kubectl apply -f infra/ha/k8s/qdrant-statefulset.yaml
-kubectl apply -f infra/ha/k8s/neo4j-statefulset.yaml
-kubectl apply -f infra/ha/k8s/otel-deployment.yaml
-kubectl apply -f infra/ha/k8s/sovereign-statefulset.yaml
-kubectl apply -f infra/ha/k8s/proxy-deployment.yaml
+tools/ha/deploy.sh
+# If your cluster enforces NetworkPolicy via a CNI the preflight cannot auto-detect,
+# attest it out of band (do NOT use this to bypass a cluster with no enforcement):
+#   VIGIL_NETPOL_CONTROLLER_CONFIRMED=1 tools/ha/deploy.sh
+```
+
+The whole set is one kustomization, so the manifest-level equivalent still cannot omit
+the NetworkPolicy (it is the first resource):
+
+```
+kubectl apply -k infra/ha/k8s/
 ```
 
 Front the `vigil-proxy` Service with your own Ingress + TLS (nothing here is

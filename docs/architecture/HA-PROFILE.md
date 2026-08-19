@@ -105,11 +105,17 @@ authenticating boundary**: it establishes per-user identity (delegated whoami) a
 `data-token=""`, so it holds even for a remote cockpit whose token the proxy never
 captured). Therefore:
 
-- **A `NetworkPolicy` is REQUIRED** (`infra/ha/k8s/networkpolicy.yaml`): it restricts
-  ingress to `vigil-sovereign:8733` to the `vigil-proxy` pods only. Any other
-  in-cluster workload that reached the cockpit Service directly could scrape the owner
-  token off `GET /` and act as OWNER. Apply it; do not run the sovereign StatefulSet
-  without it.
+- **A `NetworkPolicy` is REQUIRED, not optional** (`infra/ha/k8s/networkpolicy.yaml`):
+  it restricts ingress to `vigil-sovereign:8733` to the `vigil-proxy` pods only. Any
+  other in-cluster workload that reached the cockpit Service directly could scrape the
+  owner token off `GET /` and act as OWNER. It is **enforced in the deploy path**, not
+  left to operator discipline: it is the first resource of `infra/ha/k8s/kustomization.yaml`
+  (so a single `kubectl apply -k` cannot omit it), and the gated deploy
+  **`tools/ha/deploy.sh` REFUSES to proceed** (its `tools/ha/require_networkpolicy.py`
+  preflight exits non-zero) when the policy is absent, does not deny the cross-workload
+  path, is not wired into the kustomization, **or the cluster has no NetworkPolicy
+  controller (CNI) to enforce it** — an unenforced NetworkPolicy object is silently a
+  no-op and leaves the leak open. Do not run the sovereign StatefulSet without it.
 - **The proxy→cockpit hop is cleartext HTTP inside the pod network** (MEDIUM residual,
   §4): it carries the per-user bearer and the substituted owner console credential. The
   NetworkPolicy bounds *who* may connect; it does not *encrypt* the hop. A cluster whose
