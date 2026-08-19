@@ -151,7 +151,8 @@ _EXACT_ROUTES = {
     "/api/terminal/history": actions.terminal_history,   # T2: recent signed terminal.run records (read-only)
     "/api/certs": api.certs,                    # Trust Center: signed offline-verifiable certificates (metadata only)
     "/api/posture": api.posture,                # Proof of Posture: signed Certificate(s) of Non-Exploitability (metadata only)
-    "/api/brain/decision": api.brain_decision,  # Brain: the propose-only decision engine + its live proposal (if any)
+    # NB: /api/brain/decision is NOT here — it takes an optional `?run=` scope (no cross-run stale fallback),
+    # so it is dispatched in do_GET like the other query-scoped routes, not as a zero-arg exact route.
     "/api/governance": api.governance_data,     # Governance & Gate audit: READ-ONLY posture + m-of-n destruction quorum
     "/api/mcp": api.mcp_data,                    # MCP: the gated capabilities exposed over the stdio MCP server (read-only)
     "/api/services": api.services_data,          # System: readiness (venvs/dirs/ports/binaries) + docker-service state (read-only)
@@ -483,6 +484,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # builds here — building is the CSRF-guarded POST /api/dossier/<run>/build. A bad run id
                 # raises ValueError in dossier_path/run_dir → caught below → 404.
                 self._download_dossier(path[len("/api/dossier/"):-len(".zip")].strip("/"))
+                return
+            if path == "/api/brain/decision":
+                # Brain: the propose-only decision engine + its live proposal. `?run=<id>` scopes the read
+                # to ONE run's persisted proposal with NO cross-run fallback (a run with no proposal → the
+                # honest empty state, never a stale file from an earlier run); absent ⇒ the latest persisted
+                # proposal across runs. A repeated `run` takes the first value; a bad/traversal id is
+                # swallowed inside brain_decision (_safe over run_dir) into the honest empty state, not a 404.
+                q = parse_qs(parts.query)
+                self._json(api.brain_decision((q.get("run") or [""])[0] or None))
                 return
             # Scoped routes are matched BEFORE the zero-arg exact table, so re-listing one of them
             # there by accident could never silently drop the engagement scope back to "all".

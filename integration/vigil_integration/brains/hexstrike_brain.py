@@ -170,6 +170,24 @@ class AttackChain:
                 "success_probability": self.success_probability}
 
 
+def proposal_document(profile: "TargetProfile", steps: "list[AttackStep]", *,
+                      objective: str = "comprehensive", posture: str = "live") -> dict:
+    """Serialise a REAL brain proposal to the exact ``brain-proposal.json`` shape the console reads
+    (``framework.v2.console.api.brain_decision``): ``{target, objective, posture, profile, steps}``, with
+    the per-step ``{tool, priority, params, danger, effectiveness}`` and the profile ``.to_dict()`` fields
+    the Brain-screen decision panel renders. ONE serialiser, used by the producer that persists a proposal
+    (``engine_think.BrainThink``), so the persisted proposal is BYTE-for-byte what the brain proposed — the
+    panel can never show a chain that differs from the one the engine drove. Pure: it invents nothing,
+    computes no facts, and reflects only the profile + steps handed to it (both carry no authority)."""
+    return {
+        "target": profile.target,
+        "objective": objective,
+        "posture": posture,
+        "profile": profile.to_dict(),
+        "steps": [s.to_dict() for s in steps],
+    }
+
+
 class HexstrikeBrain:
     """Deterministic, propose-only decision brain. No network, no evasion, no fact authority."""
 
