@@ -1,0 +1,17 @@
+# yamllint config for the workflow-lint pre-commit hook (W2-5, #422).
+#
+# Scope: GitHub Actions workflow YAML only (passed explicitly with `-c`). It errors on the structural
+# problems that can silently break a workflow — a syntax error, a duplicated key, tab indentation —
+# and stays quiet on cosmetics (line length, comment spacing) so it passes on the current tree while
+# still catching a genuinely malformed workflow. A broken workflow file is how CI silently stops
+# running; this hook makes that a local failure instead.
+extends: relaxed
+rules:
+  line-length: disable
+  document-start: disable
+  comments: disable
+  comments-indentation: disable
+  trailing-spaces: disable
+  empty-lines: disable
+  new-line-at-end-of-file: disable
+  key-duplicates: enable

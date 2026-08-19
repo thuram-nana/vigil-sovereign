@@ -1,0 +1,99 @@
+# Pre-commit gate, mirrored into CI (W2-5, #422).
+#
+# The .pre-commit-config.yaml hooks run locally on `git commit`, but a developer can bypass them with
+# `git commit --no-verify`. This workflow re-runs the SAME hooks on the pull request, where they cannot
+# be skipped — so the local hook is a convenience, not the only line of defence. It is ADVISORY: it is
+# deliberately NOT in .github/required-status-checks.txt (that set is governed by W0-1/#396 and W0-2/
+# #397 and stays byte-identical here). Third-party Actions are pinned to a commit SHA.
+name: pre-commit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    name: pre-commit hooks (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.13"
+
+      # System tools the LOCAL hooks shell out to (mypy + its sigil import deps, yamllint, pytest),
+      # plus pre-commit itself. The remote hook repos (pre-commit-hooks, ruff, gitleaks) are fetched
+      # and built by pre-commit into their own isolated environments.
+      - name: install pre-commit + the tools the local hooks invoke
+        run: |
+          pip install -e packages/core/vigil_core \
+            "pydantic>=2.10,<3" structlog httpx requests PyYAML "cryptography>=42" packaging \
+            mypy yamllint pytest pre-commit
+
+      # POSITIVE PATH — every hook must be green on the tree. This is the check a `--no-verify` commit
+      # cannot escape.
+      - name: pre-commit run --all-files
+        run: pre-commit run --all-files --show-diff-on-failure --color always
+
+      # The gitleaks pre-commit hook scans STAGED changes (right for a commit; on a fresh CI checkout
+      # nothing is staged). This step adds the FULL-TREE secret scan the hook cannot do here, using the
+      # pinned release binary verified against its published SHA-256. Green on the current tree.
+      - name: full-tree secret scan (gitleaks over the whole repo)
+        run: |
+          set -euo pipefail
+          ver="8.21.2"
+          sha="5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${ver}/gitleaks_${ver}_linux_x64.tar.gz"
+          curl -sSL -o /tmp/gitleaks.tar.gz "$url"
+          echo "${sha}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks dir . --config .gitleaks.toml --redact --no-banner
+
+      # NEGATIVE CONTROLS — prove each gate is not a no-op by feeding it deliberately-bad input through
+      # the REAL hook and asserting rejection, then cleaning up. If a hook waves the bad input through,
+      # the step fails. `if <hook>; then <hook passed bad input>` is the failure branch.
+      - name: negative control — gitleaks rejects a planted secret (and honours the allowlist scope)
+        run: |
+          set -e
+          printf 'aws_key_id = "AKIA2E0A8FQ3B7C9K1P4"\n' > apps/sigil/sigil/_negctl_secret.py
+          git add apps/sigil/sigil/_negctl_secret.py
+          if pre-commit run gitleaks; then
+            echo "::error::negative control FAILED — gitleaks did not catch a planted secret"; exit 1
+          fi
+          git rm --cached -q apps/sigil/sigil/_negctl_secret.py; rm -f apps/sigil/sigil/_negctl_secret.py
+          echo "OK: planted secret in shipped source was rejected"
+          # And the SAME secret under a tests/ path must be allowlisted (proves the gate is scoped, not off).
+          mkdir -p apps/sigil/tests
+          printf 'aws_key_id = "AKIA2E0A8FQ3B7C9K1P4"\n' > apps/sigil/tests/_negctl_fixture.py
+          git add apps/sigil/tests/_negctl_fixture.py
+          if ! pre-commit run gitleaks; then
+            echo "::error::allowlist regressed — a synthetic test fixture was flagged as a real secret"; exit 1
+          fi
+          git rm --cached -q apps/sigil/tests/_negctl_fixture.py; rm -f apps/sigil/tests/_negctl_fixture.py
+          echo "OK: synthetic test fixture was correctly allowlisted"
+
+      - name: negative control — ruff rejects an undefined name (F821)
+        run: |
+          set -e
+          printf 'def _neg():\n    return undefined_symbol_xyz\n' > apps/sigil/sigil/_negctl_ruff.py
+          if pre-commit run ruff --files apps/sigil/sigil/_negctl_ruff.py; then
+            echo "::error::negative control FAILED — ruff did not catch F821"; rm -f apps/sigil/sigil/_negctl_ruff.py; exit 1
+          fi
+          rm -f apps/sigil/sigil/_negctl_ruff.py
+          echo "OK: undefined name was rejected"
+
+      - name: negative control — workflow-lint rejects a malformed workflow (duplicate key)
+        run: |
+          set -e
+          printf 'name: bad\non: push\non: pull_request\njobs:\n  a:\n    runs-on: ubuntu-latest\n' > .github/workflows/_negctl.yml
+          if pre-commit run workflow-lint --files .github/workflows/_negctl.yml; then
+            echo "::error::negative control FAILED — workflow-lint did not catch a duplicate key"; rm -f .github/workflows/_negctl.yml; exit 1
+          fi
+          rm -f .github/workflows/_negctl.yml
+          echo "OK: malformed workflow was rejected"

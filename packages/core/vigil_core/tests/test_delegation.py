@@ -165,4 +165,3 @@ def test_offense_spine_role_verifies_and_is_distinct_from_governance():
     with pytest.raises(DelegationError, match="role"):
         verify_delegation(cert, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
                           role=OFFENSE_GOVERNANCE_ROLE, scope="loopback")
-

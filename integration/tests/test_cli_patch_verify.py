@@ -850,4 +850,3 @@ def test_finding_ref_help_never_claims_to_select_the_retained_entry(verb):
     assert "also selects the matching re-verifiable entry" not in h
     assert "can NEVER redirect which retained re-verifiable entry drives" in h
     assert "REFUSED" in h
-

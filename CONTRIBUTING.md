@@ -73,6 +73,43 @@ git config --global commit.gpgsign true
 
 Then upload the public key to your GitHub account (Settings → SSH and GPG keys).
 
+## Running the checks locally (pre-commit)
+
+The repository ships a [`.pre-commit-config.yaml`](./.pre-commit-config.yaml). Install it once and the
+hooks run on every `git commit`:
+
+```bash
+pipx install pre-commit    # or: pip install pre-commit
+pre-commit install         # register the git hook
+pre-commit run --all-files # run every hook over the whole tree
+```
+
+The hooks are:
+
+- **ruff** — blocks on real bug classes (E9/F/B) over the SIGIL package, the same scope and config the
+  `SIGIL lint` CI job blocks on;
+- **mypy (fast subset)** — a *can-complete* gate on the SIGIL package (it fails only if mypy cannot
+  finish — e.g. a parse / type-comment abort; pre-existing type-error debt is not gated here);
+- **gitleaks** — secret scanning, reading [`.gitleaks.toml`](./.gitleaks.toml) (the upstream default
+  ruleset plus an audited allowlist of synthetic test / fixture material);
+- **workflow-lint** — `yamllint` over `.github/workflows/` with
+  [`.github/yamllint-workflows.yaml`](./.github/yamllint-workflows.yaml);
+- **trailing-whitespace / end-of-file-fixer / check-yaml** — file hygiene and YAML parse-validity;
+- **claims / doc-truth** — the shipped doc-truth checks (the full suite is the required
+  `the briefing explains every agent and capability` CI job).
+
+Several hooks are deliberately **scoped** so `pre-commit run --all-files` is green on the current tree;
+the scopes widen as [#419](https://github.com/thuram-nana/vigil-sovereign/issues/419) (ruff / mypy for
+every package) and [#398](https://github.com/thuram-nana/vigil-sovereign/issues/398) (the claims
+registry) land.
+
+**You cannot hide a problem from review by skipping the local hook.** `git commit --no-verify` skips
+the *local* run, but the advisory `pre-commit` workflow re-runs the identical hooks on your pull
+request — together with negative controls that prove each gate still rejects bad input — so the checks
+execute where they cannot be bypassed. That CI leg is advisory: it is intentionally not part of the
+required status-check set committed in
+[`.github/required-status-checks.txt`](./.github/required-status-checks.txt).
+
 ## What your change must satisfy
 
 Every contribution is reviewed against the project's doctrine
