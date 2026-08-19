@@ -1,0 +1,158 @@
+# Scheduled supply-chain scan — the daily counterpart to the A14 push/PR gate.
+#
+# THE GAP THIS CLOSES. .github/workflows/supply-chain.yml (the required "A14 supply-chain gate") only
+# runs on push/PR to `main`. A CVE disclosed against an already-merged, already-pinned dependency is
+# therefore invisible until the next PR happens to touch a lock. This workflow runs DAILY and, when a
+# finding crosses the threshold, OPENS AN ISSUE — so a vulnerability surfaces on its own, with no PR
+# required. Dependabot (.github/dependabot.yml) is the other half: it turns the fix into a PR.
+#
+# ADVISORY, NOT REQUIRED. This is deliberately NOT in .github/required-status-checks.txt. The A14 gate
+# already blocks PRs on CRITICAL; this scan's job is to WATCH over time and RAISE an issue, not to add
+# a second merge-blocker. It runs on pull_request too, but only so its own change can be seen green on
+# the PR that adds it — the issue-opening step fires only on the daily `schedule` event.
+#
+# GREEN ON A CLEAN TREE. The real scan uses the exact configuration the A14 CRITICAL gate uses and
+# which is green today (CRITICAL, the lock file-patterns, .trivyignore), so it finds nothing and opens
+# nothing. The NEGATIVE CONTROL below runs the identical decision path against a fixture with a
+# known-CRITICAL package (written outside the repo, so the real scan never sees it) and ASSERTS the
+# issue-opening path fires — a green run can never mean a silently-broken scanner.
+
+name: scheduled-supply-chain-scan
+
+on:
+  schedule:
+    - cron: "0 6 * * *"        # daily, 06:00 UTC (distinct from livefire's 03:00 nightly)
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "scan and decide but never open an issue"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+  issues: write               # only exercised on the daily schedule (see the open-issue step's `if:`)
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Scanner pinned by version AND by the sha256 of the release tarball — same pins the A14 gate uses,
+  # so both jobs scan with a byte-identical trivy. `curl | sh` from an unpinned URL would be its own
+  # supply-chain hole.
+  TRIVY_VERSION: "0.73.0"
+  TRIVY_SHA256: "2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b"
+  # Severity at which a finding opens an issue. CRITICAL matches the A14 blocking policy (HIGH is
+  # advisory today), so this scan and that gate agree on what is actionable. W3-9 (#432) raises both.
+  ISSUE_SEVERITY: "CRITICAL"
+
+jobs:
+  scheduled-scan:
+    name: scheduled supply-chain scan (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # Third-party actions are pinned to full commit SHAs, not mutable tags — the same SHAs the A14
+      # workflow already pins and a test asserts stay pinned.
+      - name: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: set up Python 3.13
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+
+      - name: install trivy (version- and sha256-pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o /tmp/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  /tmp/trivy.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          sudo install -m 0755 /tmp/trivy /usr/local/bin/trivy
+          trivy --version
+
+      # ------------------------------------------------------------------------------
+      # NEGATIVE CONTROL — runs FIRST and is ASSERTED, exactly like the A14 gate's.
+      #
+      # Scan a fixture with a known-CRITICAL package (written to a temp dir OUTSIDE the repo so the
+      # real scan below never sees it) and run the real decision path in dry-run. `--expect-findings`
+      # makes the step FAIL if the fixture produced nothing at/above the threshold — so if the scanner
+      # or the decision code silently stopped detecting, this goes red instead of shipping a green tick.
+      # Dry-run never opens an issue, so this proves the path without creating one.
+      # ------------------------------------------------------------------------------
+      - name: negative control — prove the issue-opening path fires on a known-vulnerable fixture
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ssc-negative-control
+          printf 'pyyaml==5.3.1\npillow==8.2.0\n' > /tmp/ssc-negative-control/requirements.txt
+          trivy fs --scanners vuln \
+            --severity "${ISSUE_SEVERITY}" \
+            --format json \
+            --output /tmp/ssc-negative-control/report.json \
+            --exit-code 0 \
+            --no-progress \
+            /tmp/ssc-negative-control
+          python3 .github/scripts/supply_chain_scan.py \
+            --report /tmp/ssc-negative-control/report.json \
+            --min-severity "${ISSUE_SEVERITY}" \
+            --dry-run \
+            --expect-findings
+
+      # ------------------------------------------------------------------------------
+      # THE REAL SCAN. Same configuration as the A14 CRITICAL gate that is green today: the lock
+      # file-patterns (trivy's pip analyzer matches by filename and skips *.lock.txt without this) and
+      # .trivyignore. `--exit-code 0` because the DECISION is made by the script, not by trivy's exit
+      # status — this step reports, it never fails the job.
+      # ------------------------------------------------------------------------------
+      - name: scan the committed dependency tree
+        run: |
+          set -euo pipefail
+          trivy fs --scanners vuln \
+            --file-patterns 'pip:.*\.lock\.txt$' \
+            --severity HIGH,CRITICAL \
+            --ignorefile .trivyignore \
+            --format json \
+            --output /tmp/ssc-report.json \
+            --exit-code 0 \
+            --no-progress \
+            .
+
+      - name: decide whether to open an issue
+        id: decide
+        # GITHUB_OUTPUT is a default runner env var; the script writes step outputs to it directly.
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/supply_chain_scan.py \
+            --report /tmp/ssc-report.json \
+            --min-severity "${ISSUE_SEVERITY}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      # Open the issue ONLY on the daily schedule and ONLY when the decision produced findings. On a
+      # pull_request or a dry-run dispatch this step is skipped, so the workflow is green on the PR that
+      # adds it without ever creating an issue. gh is first-party and pre-installed on the runner, so no
+      # extra third-party action needs pinning here.
+      - name: open an issue on new findings (scheduled runs only)
+        # Fires on the daily schedule, and on a manual dispatch UNLESS dry_run was requested. Never on
+        # a pull_request — so the PR that adds this workflow is green without ever creating an issue.
+        if: >-
+          (github.event_name == 'schedule' ||
+           (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true')) &&
+          steps.decide.outputs.findings != '' &&
+          steps.decide.outputs.findings != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_TITLE: ${{ steps.decide.outputs.issue_title }}
+          ISSUE_BODY: ${{ steps.decide.outputs.issue_body }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${ISSUE_BODY}" > /tmp/ssc-issue-body.md
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "${ISSUE_TITLE}" \
+            --body-file /tmp/ssc-issue-body.md \
+            --label "supply-chain" \
+            --label "dependencies"

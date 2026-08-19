@@ -1,0 +1,23 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": ".",
+  "ArtifactType": "filesystem",
+  "Results": [
+    {
+      "Target": "apps/sigil/requirements.txt",
+      "Class": "lang-pkgs",
+      "Type": "pip",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2021-25287",
+          "PkgName": "pillow",
+          "InstalledVersion": "8.2.0",
+          "FixedVersion": "8.3.0",
+          "Severity": "HIGH",
+          "Title": "python-pillow: out-of-bounds read in J2kDecode",
+          "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2021-25287"
+        }
+      ]
+    }
+  ]
+}
