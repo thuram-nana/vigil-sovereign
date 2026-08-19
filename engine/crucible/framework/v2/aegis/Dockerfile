@@ -1,7 +1,12 @@
 # AEGIS Gateway — the DEFENSIVE "provable firewall" as a Docker sidecar.
 #
-# BUILD from the REPO ROOT (the build context must see pyproject.toml + framework/):
-#     docker build -f framework/v2/aegis/Dockerfile -t aegis-gateway .
+# BUILD (from the monorepo ROOT). The image needs the offense engine (engine/crucible → framework.v2)
+# AND the shared integrity substrate framework.v2 imports at load (packages/core/vigil_core), so the
+# substrate is passed as a NAMED build context. The wired one-liner (recommended):
+#     make aegis-image        # == docker compose --profile aegis build aegis-gateway
+# or the equivalent raw build:
+#     docker build -f engine/crucible/framework/v2/aegis/Dockerfile \
+#         --build-context vigil_core=packages/core/vigil_core -t aegis-gateway engine/crucible
 #
 # RUN (observe = read-only; point --upstream at YOUR app; bind 0.0.0.0 to be reachable):
 #     docker run --rm -p 8080:8080 aegis-gateway \
@@ -22,6 +27,14 @@ FROM python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c
 
 # --- build + install the package (the repo-root pyproject delivers importable framework.v2) ---
 WORKDIR /src
+# The shared integrity substrate lives OUTSIDE this (engine/crucible) build context — it is the
+# monorepo's packages/core/vigil_core — so it is supplied as a NAMED build context (docker-compose.yml
+# wires it as `additional_contexts.vigil_core`; the standalone build command in the header passes it via
+# --build-context). framework.v2 imports it at module load (common.errors → vigil_core.IntegrityError),
+# so the gateway cannot even start without it. Pure-Python; its deps (cryptography, pydantic) are also
+# crucible deps, so installing it pulls nothing extra into the image.
+COPY --from=vigil_core . ./vigil_core
+RUN pip install --no-cache-dir ./vigil_core
 # COPY only what the wheel build needs; the rest of the repo (offensive playbooks,
 # engagement data under targets/, the knowledge graph) is deliberately NOT shipped in
 # this defensive image.

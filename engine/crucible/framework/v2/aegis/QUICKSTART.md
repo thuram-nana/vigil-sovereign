@@ -22,11 +22,16 @@ aegis --help
 The `aegis` command equals `python3 -m framework.v2 aegis`; if you prefer not to install, that longer
 form works from a source checkout with no install at all.
 
-**Docker sidecar** (build from the **repo root** — the build context must see `pyproject.toml` +
-`framework/`):
+**Docker sidecar** (build from the **monorepo root**). The image needs both the offense engine
+(`engine/crucible` → `framework.v2`) and the shared integrity substrate it imports at load
+(`packages/core/vigil_core`), so the substrate is passed as a named build context — the wired
+`make aegis-image` target and the compose service both do this for you:
 
 ```bash
-docker build -f framework/v2/aegis/Dockerfile -t aegis-gateway .
+make aegis-image                 # == docker compose --profile aegis build aegis-gateway
+# or the equivalent raw build:
+docker build -f engine/crucible/framework/v2/aegis/Dockerfile \
+    --build-context vigil_core=packages/core/vigil_core -t aegis-gateway engine/crucible
 ```
 
 ---

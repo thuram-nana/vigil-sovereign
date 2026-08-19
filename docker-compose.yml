@@ -14,11 +14,13 @@
 #   graph            neo4j             — the knowledge graph (optional)
 #   observability    otel-collector    — OTLP receiver → stdout (optional)
 #   strix            strix-sandbox     — BUILD-ONLY: the Kali sandbox image strix runs targets in
+#   aegis            aegis-gateway     — BUILD-ONLY: the AEGIS defensive "provable firewall" sidecar image
 #
 # Usage:
 #   docker compose up -d qdrant                       # the default backend
 #   docker compose --profile graph up -d              # + neo4j
 #   docker compose --profile strix build strix-sandbox
+#   docker compose --profile aegis build aegis-gateway
 # =============================================================================
 
 services:
@@ -80,6 +82,35 @@ services:
       context: ./vendor/strix
       dockerfile: containers/Dockerfile
     entrypoint: ["/bin/true"]          # never meant to `up`; an accidental up exits cleanly
+
+  # BUILD-ONLY. The AEGIS gateway is the DEFENSIVE "provable firewall" — an inline reverse proxy
+  # that sits in front of the operator's app (framework/v2/aegis/Dockerfile). Like strix-sandbox,
+  # this service exists to BUILD the image reproducibly; it is deliberately NOT meant to `up` here,
+  # because the gateway REQUIRES `--upstream <your app URL>` + a per-deployment secret at run time
+  # and, to be reachable, a routable `--host 0.0.0.0` bind — none of which belong in a committed,
+  # loopback-only compose default. Build it with:
+  #   docker compose --profile aegis build aegis-gateway     (or `make aegis-image`)
+  # Then run the gateway via the console AEGIS setup button, or by hand:
+  #   docker run --rm -p 8080:8080 vigil/aegis-gateway:local \
+  #       --upstream http://host.docker.internal:3000 --host 0.0.0.0 --mode observe
+  # An accidental `--profile aegis up` is fail-closed: `--upstream` is argparse-required, so the
+  # gateway exits non-zero rather than launching an unconfigured public data plane.
+  aegis-gateway:
+    image: vigil/aegis-gateway:local
+    profiles: ["aegis"]
+    build:
+      # The build context is the engine/crucible subtree ROOT — the ONLY directory that can see BOTH
+      # `pyproject.toml` (its wheel delivers the importable `framework.v2`) AND `framework/` (the
+      # package itself). Its `.dockerignore` keeps the context lean. Pointed anywhere else, the
+      # package COPY + `pip install .` fail — which is exactly why this image was never built despite
+      # being documented in QUICKSTART/DEPLOYMENT.
+      context: ./engine/crucible
+      dockerfile: framework/v2/aegis/Dockerfile
+      # framework.v2 imports the shared integrity substrate at load, and it lives OUTSIDE the
+      # engine/crucible context (packages/core/vigil_core). Supply it as a named build context —
+      # keeps THIS context lean while the image still gets the one dependency it can't start without.
+      additional_contexts:
+        vigil_core: ./packages/core/vigil_core
 
 volumes:
   qdrant-data:

@@ -1,6 +1,7 @@
-# Keep the AEGIS gateway build context lean (it is built from the repo root).
-# Only applies to docker builds whose context is the repo root — i.e. the AEGIS
-# Dockerfile; the corpus-fixture Dockerfiles use their own local contexts.
+# Keep the AEGIS gateway build context lean. This dir (engine/crucible) IS the AEGIS build
+# context (docker-compose.yml sets `context: ./engine/crucible`; the shared vigil_core substrate
+# comes in as a separate named build context). Only applies to docker builds whose context is
+# this dir; the corpus-fixture Dockerfiles use their own local contexts.
 .git
 .gitignore
 graphify-out/
