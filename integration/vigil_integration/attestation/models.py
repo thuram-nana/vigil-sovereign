@@ -75,8 +75,9 @@ class UsageAttestation(BaseModel):
     action: str = ""
     target: str = ""
     phase: str = ""
-    at: str = ""                       # the wall WHEN — injected DATA (never the clock); verify BINDS it to
-                                       # the counter: it may not predate the prior record (W0-14 #409)
+    at: str = ""                       # the wall WHEN — injected DATA (never the clock); ADVISORY replay
+                                       # data only, NOT a verify gate (a settable clock may step back).
+                                       # The monotonic anchor below is the anti-back-dating authority.
     monotonic: int = Field(ge=0)       # the anti-back-dating anchor value (never decreases along a ledger)
     grounded: str = "software"         # "tpm" | "software"
     record_hash: str = Field(min_length=1)
