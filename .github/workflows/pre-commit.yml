@@ -62,25 +62,15 @@ jobs:
       # NEGATIVE CONTROLS — prove each gate is not a no-op by feeding it deliberately-bad input through
       # the REAL hook and asserting rejection, then cleaning up. If a hook waves the bad input through,
       # the step fails. `if <hook>; then <hook passed bad input>` is the failure branch.
-      - name: negative control — gitleaks rejects a planted secret (and honours the allowlist scope)
-        run: |
-          set -e
-          printf 'aws_key_id = "AKIA2E0A8FQ3B7C9K1P4"\n' > apps/sigil/sigil/_negctl_secret.py
-          git add apps/sigil/sigil/_negctl_secret.py
-          if pre-commit run gitleaks; then
-            echo "::error::negative control FAILED — gitleaks did not catch a planted secret"; exit 1
-          fi
-          git rm --cached -q apps/sigil/sigil/_negctl_secret.py; rm -f apps/sigil/sigil/_negctl_secret.py
-          echo "OK: planted secret in shipped source was rejected"
-          # And the SAME secret under a tests/ path must be allowlisted (proves the gate is scoped, not off).
-          mkdir -p apps/sigil/tests
-          printf 'aws_key_id = "AKIA2E0A8FQ3B7C9K1P4"\n' > apps/sigil/tests/_negctl_fixture.py
-          git add apps/sigil/tests/_negctl_fixture.py
-          if ! pre-commit run gitleaks; then
-            echo "::error::allowlist regressed — a synthetic test fixture was flagged as a real secret"; exit 1
-          fi
-          git rm --cached -q apps/sigil/tests/_negctl_fixture.py; rm -f apps/sigil/tests/_negctl_fixture.py
-          echo "OK: synthetic test fixture was correctly allowlisted"
+      #
+      # NOTE (gitleaks): the gitleaks not-a-no-op proof AND the allowlist-scope proof are covered
+      # authoritatively by .github/workflows/security-scan.yml (#420, W2-3) — it plants a secret in
+      # shipped source (must be CAUGHT) and the same secret under a tests/ path (must be ALLOWLISTED),
+      # both with the sha256-pinned 8.28.0 binary via `gitleaks detect --no-git`. We deliberately do NOT
+      # re-run those two controls through `pre-commit run gitleaks` here: the pre-commit hook's own gitleaks
+      # version drives catch-vs-allowlist behaviour, so duplicating the control here would couple this
+      # workflow to the hook's pinned version rather than to the config under test. The full-tree scan above
+      # (same 8.28.0 binary + config as the gate) is the belt-and-suspenders check for THIS workflow.
 
       - name: negative control — ruff rejects an undefined name (F821)
         run: |
