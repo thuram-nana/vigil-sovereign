@@ -66,6 +66,17 @@ jobs:
           languages: python
           # security-extended broadens the default query pack; findings are advisory (Security tab).
           queries: security-extended
+          # Exclude the same test/fixture/eval-corpus paths the gitleaks allowlist covers: they carry
+          # EXAMPLE secrets by design (e.g. the planted fixtures in the secret-scan tests), which CodeQL's
+          # clear-text-storage query flags as false positives. Shipped source is still fully analysed.
+          config: |
+            paths-ignore:
+              - '**/tests/**'
+              - '**/test_*.py'
+              - '**/conftest.py'
+              - 'docs/tests/**'
+              - '**/eval/corpus/**'
+              - '**/corpus_apps/**'
 
       - name: analyze (python)
         uses: github/codeql-action/analyze@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-action v3 (codeql-bundle-v2.26.3)
