@@ -80,20 +80,31 @@ target-version = "py311"
 exclude = ["sigil/bridge/webapp"]   # vendored/static front-end assets
 
 [tool.ruff.lint]
-# Pragmatic entry gate: block on REAL bug classes (pyflakes F: unused/undefined/f-strings; bugbear B:
-# likely bugs; E9: syntax/runtime errors) — NOT stylistic modernization (UP), import ordering (I), or
-# whitespace (E/W) on a large existing codebase. Tighten rule-by-rule over time.
-select = ["E9", "F", "B"]
+# W2-2 (#419): the rule set is WIDER than the historical `E9,F,B` entry gate — it now also blocks the
+# real-bug families flake8-comprehensions (C4), flake8-pie (PIE), the Pylint error subset (PLE, incl.
+# Trojan-Source / bidirectional-unicode PLE2502), implicit-string-concat missing-comma bugs (ISC),
+# static-join (FLY), leftover-debugger (T10) and __slots__ correctness (SLOT). Still NOT stylistic
+# modernization (UP), import ordering (I), or whitespace (E/W). Style-only sub-codes are deferred in
+# `ignore` and are burned down + tightened by the W2-1 ratchet (#418). Tests are LINTED, not excluded.
+select = ["E9", "F", "B", "C4", "PIE", "PLE", "ISC", "FLY", "T10", "SLOT"]
 ignore = [
     "B008",   # function call in an argument default — used deliberately for injectable defaults
     "B011",   # assert False — used intentionally in tests/guards
     "B904",   # raise ... from — style; tighten later (kept selected so B still catches real bug rules)
     "B905",   # zip(strict=) — safety nudge; tighten later
     "B007",   # unused loop control variable — style; tighten later
+    # Comprehension micro-simplifications — style, not a bug class; tighten via the W2-1 ratchet:
+    "C401", "C408", "C416", "C419", "C420",
+    "PIE810",            # combine startswith/endswith — style
+    "FLY002",            # static join -> f-string — style
+    "ISC002", "ISC003",  # multi-line / explicit string concatenation — formatter-adjacent style
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["E402", "F401", "F841", "B011"]   # tests: late imports, unused re-exports/intermediates, assert False
+# tests: late imports, unused re-exports/intermediates, assert False, pytest.raises(Exception):
+"tests/*"     = ["E402", "F401", "F841", "B011", "B015", "B017"]
+"tests/**"    = ["E402", "F401", "F841", "B011", "B015", "B017"]
+"**/tests/**" = ["E402", "F401", "F841", "B011", "B015", "B017"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -107,4 +118,6 @@ ignore_missing_imports = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 check_untyped_defs = false
-exclude = ["sigil/bridge/webapp", "tests"]
+# W2-2 (#419): tests are IN SCOPE (no longer excluded); only the vendored web assets stay out. The
+# existing `sigil-lint` CI job still runs `mypy sigil` (source dir) — that invocation is unaffected.
+exclude = ["sigil/bridge/webapp"]

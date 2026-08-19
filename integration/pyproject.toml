@@ -25,3 +25,43 @@ allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# ── quality gates (W2-2 #419) ──────────────────────────────────────────────────────────────────────
+# ruff + mypy over the package source, its conftest AND its tests (tests LINTED, not excluded). Rule set
+# is WIDER than the historical `E9,F,B` (adds C4/PIE/PLE/ISC/FLY/T10/SLOT). This package carries some
+# pre-existing pyflakes debt that a CONFIG-ONLY slice does not rewrite; those specific sub-codes are
+# deferred with a TODO and burned down + re-enabled file-by-file by the W2-1 ratchet (#418). The
+# genuinely-scoped debt is kept out of the tree-wide gate via per-file-ignores so the rule STAYS ON for
+# the rest of the tree. CLEAN today (`ruff check vigil_integration tests conftest.py` == 0).
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E9", "F", "B", "C4", "PIE", "PLE", "ISC", "FLY", "T10", "SLOT"]
+ignore = [
+    "B007", "B008", "B011", "B904", "B905",
+    "C401", "C408", "C416", "C419", "C420",
+    "PIE810", "FLY002", "ISC002", "ISC003",
+    # Pre-existing pyflakes debt (config-only slice — no source rewrite); TODO(W2-1 #418) fix + re-enable:
+    "F401",   # unused imports scattered across ~9 source modules
+    "F541",   # f-string without placeholders (cli.py)
+    "F841",   # unused local (live/web_redrive.py)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**"    = ["E402", "F401", "F821", "F841", "B011", "B015", "B017", "ISC001", "PLE2515"]
+"**/tests/**" = ["E402", "F401", "F821", "F841", "B011", "B015", "B017", "ISC001", "PLE2515"]
+# F821 here is annotation-only (`Any` referenced under `from __future__ import annotations`, never
+# evaluated at runtime); scoped to cli.py so F821 STAYS ON elsewhere. TODO(W2-1): import Any + re-enable.
+"**/cli.py" = ["F821"]
+# Intentional / stray zero-width-space carriers kept out of the tree-wide PLE2515 gate:
+"**/safety/prompt_safety.py" = ["PLE2515"]   # intentional ZWSP security marker (breaks `<<<` markers)
+"**/graph/projector.py"      = ["PLE2515"]   # stray ZWSP in a docstring — TODO(W2-1)
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = false
+warn_redundant_casts = true
+check_untyped_defs = false

@@ -16,3 +16,42 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["vigil_core"]
+
+# ── quality gates (W2-2 #419) ──────────────────────────────────────────────────────────────────────
+# ruff + mypy config covering BOTH the package source AND its tests (tests are LINTED, not excluded).
+# The rule set is deliberately WIDER than the historical `E9,F,B` entry gate: it adds real-bug families
+# beyond pyflakes/bugbear — flake8-comprehensions (C4), flake8-pie (PIE), the Pylint error subset (PLE,
+# incl. Trojan-Source / bidirectional-unicode PLE2502), implicit-string-concat missing-comma bugs (ISC),
+# static-join-to-f-string (FLY), leftover-debugger (T10) and __slots__ correctness (SLOT). Style-only
+# sub-codes are deferred in `ignore` (NOT excluded wholesale) and are burned down + re-enabled by the
+# W2-1 ratchet (#418). This tree is CLEAN under the config today (`ruff check vigil_core tests` == 0).
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E9", "F", "B", "C4", "PIE", "PLE", "ISC", "FLY", "T10", "SLOT"]
+ignore = [
+    # Intentional patterns / entry-gate carry-over (mirrors apps/sigil):
+    "B007", "B008", "B011", "B904", "B905",
+    # Comprehension micro-simplifications — style, not a bug class; tighten via the W2-1 ratchet:
+    "C401", "C408", "C416", "C419", "C420",
+    "PIE810",            # combine startswith/endswith — style
+    "FLY002",            # static join -> f-string — style
+    "ISC002", "ISC003",  # multi-line / explicit string concatenation — formatter-adjacent style
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests ARE linted; a few patterns are legitimate in test code (late imports, fixture re-exports,
+# intermediate locals, assert-based guards, pytest.raises(Exception)):
+"tests/**"    = ["E402", "F401", "F841", "B011", "B015", "B017"]
+"**/tests/**" = ["E402", "F401", "F841", "B011", "B015", "B017"]
+
+[tool.mypy]
+# Pragmatic entry posture (mirrors apps/sigil): check what's annotated, don't block on the untyped
+# majority. Tests are IN SCOPE (not excluded). Tighten module-by-module via the W2-1 ratchet.
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = false
+warn_redundant_casts = true
+check_untyped_defs = false

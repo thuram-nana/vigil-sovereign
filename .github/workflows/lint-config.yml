@@ -1,0 +1,61 @@
+# W2-2 (#419) — ADVISORY lint/type-config coverage.
+#
+# This slice ADDS ruff + mypy configuration to every package (vigil_core, gateway, integration,
+# engine/crucible, apps/sigil) INCLUDING their tests, with a rule set wider than the historical E9,F,B.
+# The BLOCKING ratchet that promotes these to required, tightens the deferred sub-codes and burns down the
+# per-package debt is W2-1 (#418). Until then this workflow is ADVISORY: it is intentionally NOT listed in
+# .github/required-status-checks.txt and its job name is not a required check, so it never blocks a PR.
+#
+# It is GREEN on the current tree by construction: `ruff check` (with the committed configs) is clean over
+# every covered package + its tests, and the coverage/negative-control test passes. ruff is version-pinned
+# so the validated rule behaviour is what runs here. mypy is run informationally (non-fatal) — the config
+# is the deliverable this slice ships; type-cleanliness is a tracked follow-on.
+name: lint-config advisory (W2-2)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-config-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-config:
+    name: lint-config (W2-2 ruff + mypy — every package incl tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+      - name: install ruff (pinned) + mypy + pytest
+        run: pip install "ruff==0.15.12" mypy pytest
+
+      - name: ruff check — every covered package, source AND tests (BLOCKING within this advisory job)
+        run: |
+          ruff check --no-cache \
+            packages/core/vigil_core/vigil_core packages/core/vigil_core/tests \
+            gateway/vigil_gateway gateway/tests gateway/conftest.py \
+            integration/vigil_integration integration/tests integration/conftest.py \
+            engine/crucible/framework \
+            apps/sigil/sigil apps/sigil/tests
+
+      - name: config-coverage + negative-control test (ruff present ⇒ full run)
+        run: PYTHONPATH=integration:gateway python -m pytest integration/tests/test_lint_config_coverage.py -q
+
+      - name: mypy can-run over each package config (informational; config-only slice, not gated here)
+        run: |
+          set +e
+          for pkg in packages/core/vigil_core gateway integration apps/sigil engine/crucible; do
+            echo "::group::mypy $pkg"
+            ( cd "$pkg" && python -m mypy --config-file pyproject.toml . )
+            echo "::endgroup::"
+          done
+          echo "mypy ran for every package config above (non-fatal — the configs are the W2-2 deliverable; W2-1 gates)."
+          exit 0
