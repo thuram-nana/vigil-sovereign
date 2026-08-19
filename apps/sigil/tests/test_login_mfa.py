@@ -498,3 +498,146 @@ def test_fatal2_new_modules_are_offense_free_and_totp_is_stdlib_only():
     totp_src = pathlib.Path(totp.__file__).read_text(encoding="utf-8")
     assert "import sigil" not in totp_src and "from sigil" not in totp_src
     assert "import vigil_core" not in totp_src and "from vigil_core" not in totp_src
+
+
+# ============================== W17-1: enrolment must not brick the bearer login gate =================
+# Issue #535 — `_login`'s bearer branch called `_check_totp` UNCONDITIONALLY, but the SPA login gate posts
+# `{token}` with no code, so a TOTP-enrolled account got a PERMANENT 401 on the only login path the UI can
+# drive. The fix scopes the bearer branch to `require=False` (a code-less bearer login is allowed — the
+# bearer is a possession credential) WITHOUT disabling the factor (a supplied code is still validated), and
+# keeps the session-bootstrapping flows (PoP / password / OIDC) `require=True`. It also ships the enrolment
+# path (`sigil accounts enroll-totp`) and a recovery verb (`disable-totp`).
+
+def _create_and_enroll(port, username):
+    """Owner-create an account (capturing its ONE-TIME bearer) then owner-bind a TOTP factor. Returns
+    (bearer, base32-secret). No password is set — the point is a bearer-only TOTP-enrolled account, exactly
+    the shape that got bricked."""
+    st, d = _post(port, "/api/action", {"action": "create_account", "username": username, "role": "operator"})
+    assert st == 200, d
+    bearer = d["bearer_token"]
+    code, e = _post(port, "/api/action", {"action": "enroll_totp", "username": username})
+    assert code == 200, e
+    secret = parse_qs(urlparse(e["provisioning_uri"]).query)["secret"][0]
+    return bearer, secret
+
+
+def test_w171_totp_enrolled_account_is_not_bricked_on_the_bearer_login_gate():
+    """FAIL-BEFORE / PASS-AFTER regression (the load-bearing test). A TOTP-enrolled account logs in with
+    `{token}` ONLY — exactly what the SPA gate posts — and gets a WORKING session. Reverting ONLY the bearer
+    branch's `require=False` hunk (back to a default-`require=True` `_check_totp`) turns this 200 into the
+    permanent 401 that was the lockout."""
+    s, port = _serve()
+    try:
+        bearer, _secret = _create_and_enroll(port, "totty")
+        st, d = _login(port, {"token": bearer})               # {token} ONLY — no code, as the SPA gate posts
+        assert st == 200 and d["authenticated"] is True and d["username"] == "totty", d
+        assert _authed_get(port, "/api/snapshot", bearer) == 200          # the session really works downstream
+    finally:
+        s.shutdown()
+
+
+def test_w171_bearer_gate_is_not_a_no_op_a_supplied_wrong_code_is_still_refused():
+    """NEGATIVE CONTROL (bearer branch): `require=False` lifts only the *requirement* to present a code — it
+    does NOT disable the factor. A WRONG code supplied alongside the bearer is refused (so the fix is not a
+    blanket bypass), while the CORRECT current code alongside the bearer is accepted."""
+    s, port = _serve()
+    try:
+        bearer, secret = _create_and_enroll(port, "totty2")
+        st, d = _login(port, {"token": bearer, "totp": "000000"})         # a code IS present, and it is wrong
+        assert st == 401 and d["authenticated"] is False, d               # → refused; the gate is live
+        st2, d2 = _login(port, {"token": bearer, "totp": totp.code_now(secret)})
+        assert st2 == 200 and d2["authenticated"] is True, d2             # the correct code is accepted
+    finally:
+        s.shutdown()
+
+
+def test_w171_password_flow_still_requires_totp_the_second_factor_is_not_disabled():
+    """NEGATIVE CONTROL (required branch): the password login (`require=True`) still REFUSES a MISSING code
+    and a WRONG code for a TOTP-enrolled account. The fix scopes only the bearer branch — it must not weaken
+    the flows that bootstrap a fresh session from a first factor."""
+    s, port = _serve()
+    try:
+        secret = _enroll_totp(port, "totty3")                            # creates account + password + TOTP
+        assert _login(port, {"username": "totty3", "password": "operator-pass-1"})[0] == 401     # missing code
+        assert _login(port, {"username": "totty3", "password": "operator-pass-1",
+                             "totp": "000000"})[0] == 401                                          # wrong code
+        st, d = _login(port, {"username": "totty3", "password": "operator-pass-1",
+                              "totp": totp.code_now(secret)})
+        assert st == 200 and d["authenticated"] is True, d                                         # correct code
+    finally:
+        s.shutdown()
+
+
+def test_w171_disable_totp_removes_the_factor_recovery_path():
+    """Registry lane for the NEW `disable_totp` — the documented RECOVERY path for a lost authenticator. After
+    disabling, the account folds with `totp_secret` None (the factor is gone) while role + bearer + password
+    are PRESERVED, and the clear grant OMITS the `totp_secret` key entirely (byte-identical to a
+    never-enrolled account's core)."""
+    owner = generate_keypair()
+    s = _store()
+    reg = _reg(s, owner)
+    reg.create("erin", "operator", bearer_token="erin-bearer-dddddddddd", issued_at=_issue())
+    reg.set_password("erin", "erin-pass-erin", issued_at=_issue())
+    vault = _module_vault()
+    sealed = base64.b64encode(vault.seal_secret(b"JBSWY3DPEHPK3PXP", context=acc.TOTP_SEAL_CONTEXT)).decode()
+    reg.enroll_totp("erin", sealed, issued_at=_issue())
+    assert reg.account("erin").totp_secret == sealed                     # enrolled
+
+    disable_seq = reg.disable_totp("erin", issued_at=_issue())
+    a = reg.account("erin")
+    assert a is not None and a.totp_secret is None                       # the factor is GONE (recovered)
+    assert a.role == "operator"                                          # role preserved
+    assert a.password_hash and verify_password("erin-pass-erin", a.password_hash)   # password preserved
+    assert reg.resolve("erin-bearer-dddddddddd") == Principal(username="erin", role="operator")  # bearer kept
+    grant = s.get(disable_seq).payload
+    assert "totp_secret" not in grant                                    # a clear grant OMITS the key
+
+
+def test_w171_cli_accounts_enroll_and_disable_totp_verbs(monkeypatch):
+    """CLI lane — `sigil accounts enroll-totp <user>` binds a sealed TOTP factor (folds with `totp_secret`
+    set) and `sigil accounts disable-totp <user>` removes it (folds back to None). The owner vault + key are
+    the module's isolated fake-TPM instances (autouse fixture); the spine is an isolated temp store so the
+    shared SIGIL_HOME is never touched. The account is seeded at a LOW `issued_at` so the CLI's wall-clock
+    enrolment always clears the anti-replay high-water (timing-robust, no sleeps)."""
+    from types import SimpleNamespace
+
+    from sigil import cli
+    from sigil.governor.identity import ensure_owner_keypair
+    owner = ensure_owner_keypair()                                       # module-home key (autouse fixture)
+    spine = tempfile.mktemp(suffix=".jsonl")
+    store = SpineStore(spine)
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: store)        # cmd_accounts' SpineStore() → this store
+    reg = AccountsRegistry(store, owner_key=owner, trusted_pubkey=owner.public_key_b64)
+    reg.create("clara", "operator", bearer_token="clara-bearer-xxxxxxxx", issued_at=1.0)   # low high-water
+    assert reg.account("clara") is not None and reg.account("clara").totp_secret is None
+
+    cli.cmd_accounts(SimpleNamespace(accounts_cmd="enroll-totp", username="clara", role=None))
+    assert reg.account("clara").totp_secret is not None                  # the factor is now bound + sealed
+    cli.cmd_accounts(SimpleNamespace(accounts_cmd="disable-totp", username="clara", role=None))
+    assert reg.account("clara").totp_secret is None                      # recovery: the factor is gone
+
+
+def test_w171_doc_and_cli_verbs_are_true_of_the_code():
+    """DOC-TRUTH guard: the code is the source of truth. Derive the wired accounts verbs from cli.py and the
+    bearer-branch scoping from server.py, and assert docs/CLAIM-6-RBAC.md mirrors BOTH — so the doc cannot
+    silently drift back to the false 'a TOTP-enrolled account must ALWAYS present a code' claim, and the named
+    verbs cannot rot."""
+    import re as _re
+    repo = Path(__file__).resolve().parents[3]
+    cli_src = (repo / "apps" / "sigil" / "sigil" / "cli.py").read_text(encoding="utf-8")
+    server_src = (repo / "apps" / "sigil" / "sigil" / "ui" / "server.py").read_text(encoding="utf-8")
+    doc = repo / "docs" / "CLAIM-6-RBAC.md"
+    # (1) the accounts subparser actually WIRES the new verbs (code = source of truth)
+    m = _re.search(r'"accounts_cmd",\s*choices=\[([^\]]*)\]', cli_src)
+    assert m, "could not locate the accounts_cmd choices in cli.py"
+    verbs = {v.strip().strip("\"'") for v in m.group(1).split(",") if v.strip()}
+    assert {"enroll-totp", "disable-totp"} <= verbs, f"CLI must wire the TOTP verbs, got {verbs}"
+    assert 'a.accounts_cmd == "enroll-totp"' in cli_src, "cmd_accounts must dispatch enroll-totp"
+    assert 'a.accounts_cmd == "disable-totp"' in cli_src, "cmd_accounts must dispatch disable-totp"
+    # (2) the bearer branch is scoped (require=False) — the load-bearing fix
+    assert "require=False" in server_src, "the bearer branch of _login must call _check_totp(..., require=False)"
+    # (3) the doc mirrors both code facts
+    if doc.exists():
+        text = doc.read_text(encoding="utf-8")
+        assert "enroll-totp" in text and "disable-totp" in text, "doc must name the enrolment/recovery verbs"
+        assert "require=False" in text, "doc must state the bearer branch is not gated (require=False)"

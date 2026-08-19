@@ -384,11 +384,15 @@ def cmd_accounts(a) -> None:
     """Bootstrap + manage per-user RBAC accounts (Claim 6). Accounts are OWNER-SIGNED spine grants; the
     owner key (auto-created once) is the sole signer. `create` mints a per-user bearer token and prints it
     ONCE (only its salted hash is stored). `assign` changes a role; `revoke` disables an account (the safe
-    direction). `list` needs no key.
+    direction). `enroll-totp` owner-binds a TOTP second factor (S4) — the plaintext secret is shown once as
+    an otpauth:// URI and sealed at rest, never stored. `disable-totp` removes that factor (the documented
+    RECOVERY path for a lost authenticator — W17-1). `list` needs no key.
 
         sigil accounts create <username> <viewer|analyst|operator>
         sigil accounts assign <username> <viewer|analyst|operator>
         sigil accounts revoke <username>
+        sigil accounts enroll-totp <username>
+        sigil accounts disable-totp <username>
         sigil accounts list
     """
     import time as _time
@@ -405,7 +409,8 @@ def cmd_accounts(a) -> None:
             print(f"  {ac.username:<24} {ac.role:<10} {ac.state}")
         return
     if not a.username:
-        print("  usage: sigil accounts <create|assign|revoke> <username> [role]", file=sys.stderr)
+        print("  usage: sigil accounts <create|assign|revoke|enroll-totp|disable-totp> <username> [role]",
+              file=sys.stderr)
         sys.exit(2)
     if a.accounts_cmd in ("create", "assign") and not a.role:
         print(f"  usage: sigil accounts {a.accounts_cmd} <username> <viewer|analyst|operator>",
@@ -424,6 +429,32 @@ def cmd_accounts(a) -> None:
     elif a.accounts_cmd == "revoke":
         seq = reg.revoke(a.username)
         print(f"  account REVOKED: {a.username} (seq {seq}) — its bearer token no longer authenticates")
+    elif a.accounts_cmd == "enroll-totp":
+        # S4 — owner-bind a TOTP second factor. The plaintext secret is generated HERE, shown ONCE in the
+        # provisioning URI, and SEALED via the owner vault before it lands on the spine (only the sealed blob
+        # is signed into the grant). Sealing needs a provisioned vault — surface the one-time setup cleanly.
+        import base64 as _b64
+
+        from .governor import totp as _totp
+        from .governor.accounts import TOTP_SEAL_CONTEXT
+        from .platform.vault import owner_vault
+        secret = _totp.generate_secret()
+        uri = _totp.provisioning_uri(secret, account_name=a.username, issuer="VIGIL")
+        try:
+            sealed = owner_vault().seal_secret(secret.encode("utf-8"), context=TOTP_SEAL_CONTEXT)
+        except Exception as e:  # noqa: BLE001 — VaultLocked etc. → an actionable refusal, not a traceback
+            print(f"  cannot enroll TOTP: the owner vault must be provisioned to seal the secret at rest "
+                  f"({e}). Run `sigil vault provision` first.", file=sys.stderr)
+            sys.exit(1)
+        seq = reg.enroll_totp(a.username, _b64.b64encode(sealed).decode("ascii"), issued_at=_time.time())
+        print(f"  TOTP ENROLLED for {a.username} (owner-signed, seq {seq})")
+        print("  scan this into your authenticator NOW — shown ONCE; the secret is sealed at rest and never "
+              f"recoverable from the spine:\n    {uri}")
+        print("  the bearer login gate is NOT gated by this factor; PoP / password logins now require a code.")
+    elif a.accounts_cmd == "disable-totp":
+        seq = reg.disable_totp(a.username, issued_at=_time.time())
+        print(f"  TOTP DISABLED for {a.username} (owner-signed, seq {seq}) — the account no longer requires a "
+              f"second factor (recovery path for a lost authenticator).")
     _ = ROLES  # (choices are enforced by argparse below)
 
 
@@ -1478,9 +1509,10 @@ def main(argv=None) -> None:
     pcap.add_argument("--reason", default="", help="reason recorded on the spine")
     pcap.set_defaults(fn=cmd_capability)
     pacc = sub.add_parser("accounts",
-                          help="per-user RBAC accounts (Claim 6): create|assign|revoke|list "
-                               "(owner-signed bearer grants)")
-    pacc.add_argument("accounts_cmd", choices=["create", "assign", "revoke", "list"])
+                          help="per-user RBAC accounts (Claim 6): create|assign|revoke|enroll-totp|"
+                               "disable-totp|list (owner-signed bearer grants)")
+    pacc.add_argument("accounts_cmd",
+                      choices=["create", "assign", "revoke", "enroll-totp", "disable-totp", "list"])
     pacc.add_argument("username", nargs="?", default=None, help="the account username")
     pacc.add_argument("role", nargs="?", default=None, choices=[None, "viewer", "analyst", "operator"],
                       help="role for create/assign (viewer|analyst|operator; 'owner' is not grantable)")

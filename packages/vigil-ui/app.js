@@ -248,10 +248,19 @@
     if (!screen) return;
     const input = h("input.input", { type: "password", placeholder: "Paste your VIGIL bearer token",
       autocomplete: "off", style: { minWidth: "320px" } });
+    // OPTIONAL TOTP second-factor code (W17-1). A bearer login is NOT gated by an enrolment — leave this
+    // blank and the token alone signs you in — but if your account has TOTP enrolled you MAY present the
+    // current code and the server will validate it (a wrong code is refused).
+    const totpInput = h("input.input", { type: "text", inputMode: "numeric", autocomplete: "one-time-code",
+      pattern: "[0-9]*", maxLength: "8", placeholder: "TOTP code (optional)",
+      style: { maxWidth: "180px" } });
     function submit() {
       const tok = (input.value || "").trim();
       if (!tok) { V.toast("Enter your bearer token.", true); return; }
-      V.postJSON(SOV("/api/login"), { token: tok })
+      const body = { token: tok };
+      const code = (totpInput.value || "").trim();
+      if (code) { body.totp = code; }                    // only sent when the user actually typed one
+      V.postJSON(SOV("/api/login"), body)
         .then(function (r) {
           if (!r || !r.authenticated) { V.toast("That token was not accepted.", true); return; }
           V.setSessionToken(tok); V.setPrincipal(r);
@@ -261,14 +270,16 @@
         .catch(function (e) { V.toast((e && e.message) || "Login failed.", true); });
     }
     input.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+    totpInput.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); submit(); } });
     V.mount(screen, h("div.wrap", null, [
       h("div.screen-head", null, [h("h1", null, "Sign in to VIGIL"),
         h("span.sub", null, "Multi-user access control (Claim 6). The owner uses the token printed by `vigil up`.")]),
       V.card("Bearer sign-in", null, [
         h("div.hint", null, "Enter the bearer token the owner issued you (Users & Roles → Create account). "
-          + "Your role decides what you can do; every action is still gated and owner-signed on the server."),
+          + "Your role decides what you can do; every action is still gated and owner-signed on the server. "
+          + "If your account has a TOTP second factor enrolled, you may add the current code (optional)."),
         h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } },
-          [input, h("button.btn.primary", { onClick: submit }, [V.icon("key"), "Sign in"])]),
+          [input, totpInput, h("button.btn.primary", { onClick: submit }, [V.icon("key"), "Sign in"])]),
       ]),
     ]));
   }

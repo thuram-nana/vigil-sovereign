@@ -347,8 +347,11 @@ class Handler(BaseHTTPRequestHandler):
           * bearer (legacy): body {token} → resolve the per-user bearer (or the legacy owner token).
           * password (S4, OPTIONAL/weaker): body {username, password} and no token → verify the salted
             scrypt hash, then mint a fresh session bearer. Keypairs (PoP) are the stronger path.
-        A second factor rides on top of any method: if the resolved account has TOTP enrolled, a valid
-        current {totp} code is ALSO required before {ok:true}.
+        A second factor rides on the session-bootstrapping methods (PoP / password): if the account has TOTP
+        enrolled, a valid current {totp} code is ALSO required before a bearer is minted. The bearer branch is
+        NOT gated by a TOTP enrolment (a bearer is a possession credential and the login gate posts {token}
+        only, so gating there would permanently brick UI login — W17-1); a {totp} code supplied alongside a
+        bearer is still validated.
         Fail-closed 401 for any invalid credential."""
         if not self._origin_host_ok():
             return self._deny(403, "denied (origin / host)")
@@ -375,10 +378,12 @@ class Handler(BaseHTTPRequestHandler):
         p = self._principal_for_token(tok)
         if p is None:
             return self._json({"ok": False, "authenticated": False, "error": "invalid token"}, 401)
-        # S4 second factor: if this account has TOTP enrolled, a valid current code is required even for a
-        # bearer login. The X-SIGIL-Token carrier and every downstream call site are UNCHANGED — the gate
-        # lives only here at /api/login (fail-closed).
-        terr = self._check_totp(p.username, body)
+        # S4 second factor (bearer branch, W17-1): a bearer is itself a possession credential and the SPA
+        # login gate posts `{token}` with no code, so a TOTP enrolment must NOT be able to brick this path —
+        # a code-less bearer login is allowed (require=False). The factor is NOT disabled: a {totp} code that
+        # IS supplied alongside the bearer is still validated (a wrong one is refused). The X-SIGIL-Token
+        # carrier and every downstream call site are UNCHANGED — the gate lives only at /api/login.
+        terr = self._check_totp(p.username, body, require=False)
         if terr is not None:
             return self._json({"ok": False, "authenticated": False, "error": terr}, 401)
         self._json({"ok": True, **self._principal_json(p)})
@@ -574,11 +579,21 @@ class Handler(BaseHTTPRequestHandler):
         base = Path(self.server.spine_path)
         return TotpReplayLedger(base.parent / (base.name + ".totp-replay"))
 
-    def _check_totp(self, username: str, body: dict):
-        """S4 second-factor gate. Returns None when the account has NO TOTP enrolled (nothing to enforce —
-        backward-compat) OR a valid, non-replayed current code is supplied; otherwise returns an error
-        STRING (the caller 401s). Fail-closed: any lookup/unseal fault REFUSES rather than bypasses, and a
-        replayed code (already spent for its step) is refused."""
+    def _check_totp(self, username: str, body: dict, *, require: bool = True):
+        """S4 second-factor gate. Returns None when the check PASSES, else an error STRING (the caller 401s).
+        PASSES when: the account has NO TOTP enrolled (nothing to enforce — backward-compat); OR a valid,
+        non-replayed current code is supplied; OR no code is supplied AND `require` is False. Fail-closed:
+        any lookup/unseal fault REFUSES rather than bypasses, and a replayed code (already spent for its
+        step) is refused.
+
+        `require` (default True) governs ONLY the MISSING-code case. The flows that bootstrap a FRESH session
+        from a first factor — PoP, password, OIDC — pass require=True: an enrolled account that presents no
+        code is refused, so the second factor is real. The bearer branch of `_login` passes require=False: a
+        bearer is ITSELF a possession credential and the SPA login gate posts `{token}` with no code, so a
+        code-LESS bearer login must NOT be gated by an enrolment the client cannot satisfy (that gating was
+        the lockout — issue W17-1). require=False lifts only the REQUIREMENT to present a code; it never
+        disables the factor — a code that IS supplied is still validated on EITHER branch (a wrong / stale /
+        replayed one is refused), so the bearer gate is not a no-op when a client does present a code."""
         from ..governor.accounts import AccountsRegistry
         store = self.server.store()
         try:
@@ -589,7 +604,12 @@ class Handler(BaseHTTPRequestHandler):
             return None                                     # no TOTP bound → nothing to enforce
         code = str(body.get("totp", "") or "")
         if not code:
-            return "a TOTP second-factor code is required for this account"
+            # No code presented. A required flow (PoP / password / OIDC) refuses; the bearer branch
+            # (require=False) allows it — the bearer already proved possession, and the SPA login gate cannot
+            # supply a code, so gating here would permanently brick the account (W17-1).
+            return None if not require else "a TOTP second-factor code is required for this account"
+        # A code WAS presented → validate it on EVERY branch (fail-closed), so require=False is never a
+        # blanket bypass: a wrong / stale / replayed code is still refused below.
         from ..governor import totp as _totp
         from ..governor.accounts import TOTP_SEAL_CONTEXT
         from ..platform.vault import owner_vault
