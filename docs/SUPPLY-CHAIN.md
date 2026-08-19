@@ -183,8 +183,9 @@ security scanner via `curl | sh` from an unpinned URL would be its own supply-ch
 | Severity | Behaviour |
 |---|---|
 | **CRITICAL** | **Blocks.** The job exits non-zero and the pull request cannot merge. |
-| HIGH | Reported in full in the job log. Advisory. |
-| MEDIUM / LOW | Not surfaced by this gate. |
+| **HIGH** | **Blocks.** Raised from advisory to blocking in W3-9 (issue #432) once the vendored HIGH backlog was cleared. |
+| MEDIUM | Reported in full in the job log. Advisory. |
+| LOW | Not surfaced by this gate. |
 
 ### What is scanned
 
@@ -199,45 +200,55 @@ Currently detected: `apps/sigil/kernel/Cargo.lock` (cargo), `apps/sigil/requirem
 
 ### The gate is proved to fire
 
-The gate currently passes with an **empty** allow-list, because this tree has no CRITICAL
+The gate passes with an **empty** allow-list, because this tree has no HIGH or CRITICAL
 findings. That is the right outcome — and it is also indistinguishable from a scanner that is
 misconfigured into reporting nothing: a typo in a flag, a severity string that matches nothing,
 an analyzer that found no files.
 
-So the job runs a **negative control immediately before the gate**: the exact blocking
-configuration, against a fixture of known-CRITICAL packages, which must *fail*. If it passes,
-the job errors out with "the gate below cannot fail, so its green tick means nothing". A gate
+So the job runs a **negative control immediately before the gate**, and W3-9 extended it to
+prove the *raise*, not just that the scanner fires. It uses two fixtures, both outside the repo:
+
+1. a **known-CRITICAL** fixture (`pyyaml==5.3.1`, `pillow==8.2.0`) — the blocking configuration
+   must *fail* on it, as it always did; and
+2. a **HIGH-only** fixture (`pyasn1==0.6.3`: trivy reports 3 HIGH, 0 CRITICAL, fixed in 0.6.4 —
+   exactly the class this change bumped out of `vendor/strix`). The gate severity
+   (`HIGH,CRITICAL`) must *fail* on it, **and** the old `CRITICAL`-only severity must *pass* on
+   it. That pair is the proof that a HIGH now blocks where it previously would not — a control
+   that only fired on CRITICAL could not tell the two thresholds apart.
+
+If any leg comes out the wrong way, the job errors out rather than shipping a green tick. A gate
 that has never fired is not evidence of anything.
 
-### Current findings (run 31643595375): 0 CRITICAL, 8 HIGH
+### Current findings: 0 CRITICAL, 0 HIGH
 
-All HIGH, therefore all advisory, none suppressed:
+A `trivy fs` scan (v0.73.0) of the whole tree with the gate configuration reports **no HIGH or
+CRITICAL findings** on any scanned target — the two `*.lock.txt` locks, `apps/sigil/requirements.txt`,
+`apps/sigil/kernel/Cargo.lock` and `vendor/strix/uv.lock` all come back clean. The gate therefore
+blocks HIGH and CRITICAL with an empty allow-list.
 
-| Package | Where | Advisory | Installed | Fixed in |
+That was **not** true before W3-9. The measured HIGH backlog was **8 findings across 3 packages**,
+all in the vendored strix lock (the first-party locks and `apps/sigil` had already been moved to
+`cryptography>=50` in PR #295):
+
+| Package | Where | Advisory | Was | Fixed in / bumped to |
 |---|---|---|---|---|
-| `cryptography` | `apps/sigil/requirements.txt` + both locks | CVE-2026-69247 | 49.0.0 | 50.0.0 |
-| `cryptography` | `vendor/strix/uv.lock` | CVE-2026-69247, CVE-2026-69249, GHSA-537c-gmf6-5ccf | 46.0.7 | 50.0.0 / 49.0.0 / 48.0.1 |
-| `aiohttp` | `vendor/strix/uv.lock` | CVE-2026-69244 (DoS) | 3.14.1 | 3.14.3 |
-| `pyasn1` | `vendor/strix/uv.lock` | CVE-2026-59884/59885/59886 (DoS) | 0.6.3 | 0.6.4 |
+| `cryptography` | `vendor/strix/uv.lock` | CVE-2026-69247, CVE-2026-69249, GHSA-537c-gmf6-5ccf | 46.0.7 | **50.0.0** (fixes at 50.0.0 / 49.0.0 / 48.0.1) |
+| `aiohttp` | `vendor/strix/uv.lock` | GHSA-cq5v-8q36-5273 (OOB heap read, HIGH) | 3.14.1 | **3.14.3** |
+| `pyasn1` | `vendor/strix/uv.lock` | CVE-2026-59884/59885/59886 (DoS, HIGH) | 0.6.3 | **0.6.4** |
 
-**`cryptography` is a real, actionable first-party finding, not vendored noise.** A fix exists
-(50.0.0), and the repo's own constraint `cryptography>=42,<50` in
-`engine/crucible/framework/v2/requirements.in` — plus `cryptography==49.0.0` in
-`apps/sigil/requirements.txt` — currently forbids taking it. Raising that ceiling changes a
-runtime dependency across **both** environments and belongs in its own change with its own test
-run, not in the change that installed the scanner. It is follow-up 3 below.
+W3-9 bumped all three in `vendor/strix/uv.lock` (hashes re-fetched from PyPI; `cffi` stayed at
+2.0.0, which satisfies `cryptography 50.0.0`'s `cffi>=2.0.0`). The issue named only `aiohttp` and
+`pyasn1`; `cryptography 46.0.7` was the third HIGH the scan surfaced once those two were cleared,
+and it is bumped here too because the threshold cannot rise while any HIGH remains.
 
-**Why CRITICAL blocks and HIGH does not.** This tree vendors a penetration-testing toolchain
-(`vendor/strix`) and a Rust kernel, and scans their lockfiles as well as first-party ones. A
-HIGH-blocking gate over that surface needs an allow-list large enough that nobody reads it, and
-an allow-list nobody reads is worse than no gate — it launders findings. CRITICAL blocking with
-HIGH fully reported keeps the blocking set small enough that each entry is a decision.
-
-The measured HIGH backlog turned out to be **8 findings across 3 packages** (below), which is
-small enough that raising the threshold to HIGH is genuinely reachable rather than aspirational
-— once `cryptography` can move to 50.0.0. Doing so means editing the severity here **and**
-`test_a14_workflow_blocking_severity_is_at_least_critical`, which is deliberate: the threshold
-should be a decision with a diff, not a drive-by.
+**Why HIGH now blocks.** Earlier revisions of this policy blocked on CRITICAL only, because a
+known HIGH backlog sat in `vendor/strix` and a HIGH-blocking gate over it would have needed an
+allow-list large enough that nobody reads it — and an allow-list nobody reads launders findings.
+With the backlog cleared and the tree measured clean at HIGH, the gate blocks HIGH+CRITICAL and
+the blocking set stays small enough that each future entry is a decision. Lowering the threshold
+again means editing the severity in `supply-chain.yml` **and**
+`integration/tests/test_supply_chain.py` (the gate-severity tests), which is deliberate: the
+threshold should be a decision with a diff, not a drive-by.
 
 ### Suppressions
 
@@ -306,8 +317,8 @@ Stated plainly, because a hardening document that only lists wins is a marketing
   PEP 740 attestations / sigstore, which is not wired here.
 - **Base-image digests are re-resolved against Docker Hub only.** An image on another registry
   would report `??` in the drift report rather than being checked.
-- **Drift and HIGH findings are advisory.** They are surfaced, not enforced. That is a
-  deliberate trade (see above), not an oversight.
+- **Drift is advisory, and so are MEDIUM-and-below findings.** They are surfaced, not enforced.
+  That is a deliberate trade (see above), not an oversight. HIGH and CRITICAL now block.
 
 ## Follow-ups
 
@@ -321,9 +332,10 @@ Stated plainly, because a hardening document that only lists wins is a marketing
    (PR #295).** Both environments now require `cryptography>=50`
    (`engine/crucible/framework/v2/requirements.in:46` pins `>=50,<51`,
    `infra/supply-chain/sovereign.in:40` pins `>=50`, `apps/sigil/requirements.txt:1` pins
-   `==50.0.0`) and both locks were regenerated. **Still open from that item:** bump `aiohttp` and
-   `pyasn1` in `vendor/strix`, then raise the blocking threshold from CRITICAL to HIGH — the
-   threshold cannot move while a known HIGH sits in the vendored tree, so the bump gates the
-   raise. The gate currently blocks on CRITICAL (`supply-chain.yml:254`, `:273`) and reports
-   HIGH advisory-only (`:230`).
+   `==50.0.0`) and both locks were regenerated. ~~**Still open from that item:** bump `aiohttp`
+   and `pyasn1` in `vendor/strix`, then raise the blocking threshold from CRITICAL to HIGH~~ —
+   **DONE (W3-9, issue #432).** `vendor/strix/uv.lock` now pins `aiohttp==3.14.3`, `pyasn1==0.6.4`
+   and `cryptography==50.0.0` (the scan surfaced `cryptography 46.0.7` in the vendored lock as the
+   third HIGH once the first two were cleared), the tree scans clean at HIGH, and the gate blocks
+   HIGH+CRITICAL (`supply-chain.yml`). See §4.
 5. Add PEP 740 / sigstore attestation verification on top of the hashes.

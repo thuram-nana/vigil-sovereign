@@ -12,15 +12,18 @@
 # ordinary `integration` job and holds even on a runner with no network.
 #
 # THRESHOLD (see docs/SUPPLY-CHAIN.md for the full policy):
-#   CRITICAL  -> BLOCKS the pull request.
-#   HIGH      -> reported in full, advisory.
-# A gate whose allow-list has to grow without limit to stay green is theatre; a gate that
-# blocks on CRITICAL and reports HIGH keeps meaning something. Every suppression in
-# .trivyignore carries a written justification, and a test enforces that.
+#   HIGH + CRITICAL  -> BLOCK the pull request.
+#   MEDIUM and below -> reported in full, advisory.
+# The threshold was CRITICAL-only for as long as a known HIGH sat in the vendored strix tree
+# (aiohttp, pyasn1 and cryptography); those are bumped (W3-9, issue #432) and the tree now
+# scans clean at HIGH, so the gate blocks HIGH as well as CRITICAL. A gate whose allow-list
+# has to grow without limit to stay green is theatre; blocking HIGH+CRITICAL and reporting the
+# rest keeps meaning something. Every suppression in .trivyignore carries a written
+# justification, and a test enforces that.
 #
-# ADVISORY-BY-DESIGN steps: base-image drift and the HIGH report. Upstream retagging or
-# publishing an advisory is not a defect in the change under review, and a gate that goes red
-# for reasons the author cannot fix is a gate that gets switched off.
+# ADVISORY-BY-DESIGN steps: base-image drift and the full MEDIUM-and-below report. Upstream
+# retagging or publishing an advisory is not a defect in the change under review, and a gate
+# that goes red for reasons the author cannot fix is a gate that gets switched off.
 
 name: a14-supply-chain
 
@@ -232,19 +235,20 @@ jobs:
             trivy-db-${{ env.TRIVY_VERSION }}-
 
       # Full picture first, always, so the log shows what is being ACCEPTED as well as what is
-      # being blocked. HIGH is reported, not enforced (see the threshold note above).
+      # being blocked. MEDIUM and below are reported, not enforced (see the threshold note
+      # above); HIGH and CRITICAL are enforced by the gate at the end of this section.
       #
       # --file-patterns is load-bearing, not tuning. Trivy's pip analyzer matches by FILENAME,
       # so out of the box it scans apps/sigil/requirements.txt but silently skips
       # `*.lock.txt` — which is to say, it skipped both of the locks this job exists to
       # produce. A gate that does not scan the artifacts the change adds is hollow.
-      - name: vulnerability report — HIGH + CRITICAL (ADVISORY, never blocks)
+      - name: vulnerability report — full picture (ADVISORY, never blocks)
         if: always()
         continue-on-error: true
         run: |
           trivy fs --scanners vuln \
             --file-patterns 'pip:.*\.lock\.txt$' \
-            --severity HIGH,CRITICAL \
+            --severity MEDIUM,HIGH,CRITICAL \
             --ignorefile .trivyignore \
             --exit-code 0 \
             --no-progress \
@@ -252,23 +256,35 @@ jobs:
 
       # NEGATIVE CONTROL, and it runs BEFORE the gate on purpose.
       #
-      # The gate below currently passes with an EMPTY allow-list, because this tree has no
+      # The gate below passes with an EMPTY allow-list, because this tree has no HIGH or
       # CRITICAL findings. That is the right outcome, but it is indistinguishable from a
       # misconfigured scanner that reports nothing — a typo in a flag, a scanner that silently
       # found no files, a severity string that matches nothing. So: run the EXACT blocking
-      # configuration against a fixture with known-CRITICAL packages and require it to FAIL.
-      # If it passes, the gate is a no-op and this job says so instead of shipping a green
-      # tick. The fixture lives outside the repo so the real scan never sees it.
+      # configuration against fixtures with KNOWN findings and require it to FAIL. If it
+      # passes, the gate is a no-op and this job says so instead of shipping a green tick. The
+      # fixtures live outside the repo so the real scan never sees them.
+      #
+      # TWO fixtures, because the threshold moved from CRITICAL-only to HIGH+CRITICAL (W3-9,
+      # issue #432) and the control has to prove the RAISE, not just that the scanner fires:
+      #   1. a known-CRITICAL fixture — the blocking config must fail on it (as before);
+      #   2. a HIGH-only fixture (pyasn1==0.6.3: trivy reports 3 HIGH, 0 CRITICAL, fixed in
+      #      0.6.4 — exactly the class this PR bumped out of the vendored tree). The gate
+      #      severity (HIGH,CRITICAL) must FAIL on it, AND the OLD severity (CRITICAL-only)
+      #      must PASS on it. That pair is the proof that a HIGH now blocks where it did not
+      #      before — a plain "scanner fires on CRITICAL" control cannot distinguish the two.
       - name: negative control — prove the blocking configuration actually fires
         if: always()
         run: |
           set -euo pipefail
-          mkdir -p /tmp/a14-negative-control
+          mkdir -p /tmp/a14-negative-control /tmp/a14-negative-control-high
           printf 'pyyaml==5.3.1\npillow==8.2.0\n' > /tmp/a14-negative-control/requirements.txt
+          printf 'pyasn1==0.6.3\n' > /tmp/a14-negative-control-high/requirements.txt
+
+          # (1) known-CRITICAL fixture: the blocking config MUST fail.
           set +e
           trivy fs --scanners vuln \
             --file-patterns 'pip:.*\.lock\.txt$' \
-            --severity CRITICAL \
+            --severity HIGH,CRITICAL \
             --ignorefile "${GITHUB_WORKSPACE}/.trivyignore" \
             --exit-code 1 \
             --no-progress \
@@ -279,15 +295,50 @@ jobs:
             echo "::error::NEGATIVE CONTROL FAILED — the blocking trivy configuration exited 0 on a fixture with known-CRITICAL packages. The gate below cannot fail, so its green tick means nothing. Fix the scanner configuration; do not merge."
             exit 1
           fi
-          echo "negative control OK — the blocking configuration exits ${rc} on known-CRITICAL input."
+          echo "negative control (1/2) OK — the blocking configuration exits ${rc} on known-CRITICAL input."
+
+          # (2a) HIGH-only fixture at the GATE severity: MUST fail (a HIGH blocks now).
+          set +e
+          trivy fs --scanners vuln \
+            --file-patterns 'pip:.*\.lock\.txt$' \
+            --severity HIGH,CRITICAL \
+            --ignorefile "${GITHUB_WORKSPACE}/.trivyignore" \
+            --exit-code 1 \
+            --no-progress \
+            /tmp/a14-negative-control-high
+          rc_high=$?
+          set -e
+          if [ "$rc_high" -eq 0 ]; then
+            echo "::error::NEGATIVE CONTROL FAILED — the HIGH+CRITICAL gate exited 0 on a fixture with a known-HIGH package (pyasn1==0.6.3). The raise to HIGH is not being enforced. Do not merge."
+            exit 1
+          fi
+
+          # (2b) SAME HIGH-only fixture at the OLD CRITICAL-only severity: MUST pass. This is
+          # what proves the finding is HIGH, not CRITICAL — i.e. the pre-W3-9 gate would have
+          # let it through, and the raise is doing real work.
+          set +e
+          trivy fs --scanners vuln \
+            --file-patterns 'pip:.*\.lock\.txt$' \
+            --severity CRITICAL \
+            --ignorefile "${GITHUB_WORKSPACE}/.trivyignore" \
+            --exit-code 1 \
+            --no-progress \
+            /tmp/a14-negative-control-high
+          rc_crit=$?
+          set -e
+          if [ "$rc_crit" -ne 0 ]; then
+            echo "::error::NEGATIVE CONTROL FAILED — the CRITICAL-only config did NOT exit 0 on the HIGH-only fixture; the fixture is no longer HIGH-not-CRITICAL, so it cannot demonstrate the raise. Pick a fresh HIGH-only fixture."
+            exit 1
+          fi
+          echo "negative control (2/2) OK — HIGH-only fixture FAILS at HIGH,CRITICAL (rc=${rc_high}) and PASSES at CRITICAL-only (rc=${rc_crit}): the raise to HIGH blocks a finding the old gate missed."
 
       # THE GATE. A non-zero exit here fails the job and blocks the pull request.
-      - name: vulnerability GATE — CRITICAL blocks
+      - name: vulnerability GATE — HIGH + CRITICAL block
         if: always()
         run: |
           trivy fs --scanners vuln \
             --file-patterns 'pip:.*\.lock\.txt$' \
-            --severity CRITICAL \
+            --severity HIGH,CRITICAL \
             --ignorefile .trivyignore \
             --exit-code 1 \
             --no-progress \

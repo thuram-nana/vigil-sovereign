@@ -352,11 +352,12 @@ def test_a14_workflow_declares_every_leg_of_the_gate() -> None:
 
 
 def test_a14_workflow_blocking_severity_is_at_least_critical() -> None:
-    """The gate must BLOCK on something. Documented threshold: CRITICAL blocks, HIGH reports.
+    """The gate must BLOCK on at least CRITICAL. Documented threshold: HIGH + CRITICAL block.
 
-    Find the trivy invocation that carries `--exit-code 1` and assert CRITICAL is in its
-    severity set. Lowering the blocking tier below CRITICAL should require editing this test,
-    i.e. it should be a decision, not a drive-by.
+    Find every trivy invocation that carries `--exit-code 1` and assert CRITICAL is in its
+    severity set. The floor (CRITICAL still blocks) is invariant across the W3-9 raise to HIGH;
+    `test_a14_gate_blocks_high_not_only_critical` asserts the raise itself. Lowering the
+    blocking tier below CRITICAL should require editing this test — a decision, not a drive-by.
     """
     body = _strip_comments(WORKFLOW.read_text(encoding="utf-8"))
     blocking = [
@@ -372,6 +373,128 @@ def test_a14_workflow_blocking_severity_is_at_least_critical() -> None:
         assert "CRITICAL" in window, (
             "the blocking trivy step does not include CRITICAL in its --severity set:\n" + window
         )
+
+
+def _trivy_commands(body: str) -> list[str]:
+    """Reconstruct each full `trivy fs …` invocation, joining `\\`-continued lines.
+
+    A single `run:` block can hold several trivy calls (the report, the negative control's
+    fixtures, and the gate). Each is returned as one flattened, whitespace-collapsed string so
+    its flags and its final scan target can be inspected together.
+    """
+    lines = body.splitlines()
+    cmds: list[str] = []
+    i = 0
+    while i < len(lines):
+        if "trivy fs" in lines[i]:
+            block = [lines[i]]
+            while block[-1].rstrip().endswith("\\") and i + 1 < len(lines):
+                i += 1
+                block.append(lines[i])
+            flat = " ".join(seg.rstrip().rstrip("\\").strip() for seg in block)
+            cmds.append(re.sub(r"\s+", " ", flat).strip())
+        i += 1
+    return cmds
+
+
+def _gate_severity(cmd: str) -> set[str] | None:
+    """The severity set of a *repo-scanning* blocking trivy call, else None.
+
+    The enforcing gate is the invocation that BLOCKS (`--exit-code 1`) and scans the repository
+    root (its final target token is a bare `.`). The negative-control calls also block, but they
+    scan `/tmp` fixtures, so they are deliberately excluded — this isolates the real gate.
+    """
+    if "--exit-code 1" not in cmd and "--exit-code=1" not in cmd:
+        return None
+    if not cmd.rstrip().endswith(" ."):
+        return None
+    m = re.search(r"--severity[= ]([A-Z,]+)", cmd)
+    if not m:
+        return set()
+    return {s for s in m.group(1).split(",") if s}
+
+
+def test_a14_gate_blocks_high_not_only_critical() -> None:
+    """W3-9: the enforcing gate must block HIGH, not only CRITICAL.
+
+    FAILS on the pre-W3-9 tree, where the repo-scanning gate is `--severity CRITICAL`: HIGH is
+    absent from its severity set. This is the doc/config assertion the issue (#432) asks for —
+    that the trivy severity gate is HIGH.
+    """
+    body = _strip_comments(WORKFLOW.read_text(encoding="utf-8"))
+    gates = [sev for cmd in _trivy_commands(body) if (sev := _gate_severity(cmd)) is not None]
+    assert gates, (
+        "found no repo-scanning blocking trivy invocation (`--exit-code 1` scanning `.`) in the "
+        "A14 workflow — the gate has gone missing"
+    )
+    for sev in gates:
+        assert "HIGH" in sev and "CRITICAL" in sev, (
+            f"the enforcing gate blocks on {sorted(sev)}; W3-9 requires HIGH and CRITICAL. "
+            "The known-open HIGH backlog (aiohttp, pyasn1, cryptography in vendor/strix) must be "
+            "cleared before the threshold can be raised — see docs/SUPPLY-CHAIN.md §4."
+        )
+
+    # NEGATIVE CONTROL: the detector must actually distinguish a CRITICAL-only gate. Feed it the
+    # exact shape of the OLD gate and require it to report HIGH as ABSENT — otherwise this test
+    # would pass vacuously on the pre-W3-9 workflow it is meant to reject.
+    old_gate = "trivy fs --scanners vuln --severity CRITICAL --exit-code 1 --no-progress ."
+    old_sev = _gate_severity(old_gate)
+    assert old_sev == {"CRITICAL"}, f"detector misread the old CRITICAL-only gate as {old_sev}"
+    assert "HIGH" not in old_sev, "negative control broken: detector cannot tell HIGH from CRITICAL"
+
+    # And the documented threshold must agree with the code.
+    doc = (REPO_ROOT / "docs" / "SUPPLY-CHAIN.md").read_text(encoding="utf-8")
+    assert re.search(r"HIGH[^\n]*\bBlock", doc), (
+        "docs/SUPPLY-CHAIN.md no longer states that HIGH blocks — the doc has drifted from the gate"
+    )
+
+
+def _uv_lock_version(text: str, name: str) -> str:
+    """Read a package's pinned version out of a uv.lock without a TOML dependency."""
+    m = re.search(rf'(?m)^\[\[package\]\]\nname = "{re.escape(name)}"\nversion = "([^"]+)"', text)
+    assert m, f"{name} not found in vendor/strix/uv.lock"
+    return m.group(1)
+
+
+def _ge(version: str, floor: tuple[int, ...]) -> bool:
+    """True iff `version` (numeric dotted release) is >= `floor`."""
+    parts = tuple(int(p) for p in re.findall(r"\d+", version))
+    return parts >= floor
+
+
+def test_vendored_strix_lock_cleared_the_high_backlog() -> None:
+    """W3-9: vendor/strix/uv.lock must pin the named HIGH-CVE packages at/above their fixes.
+
+    FAILS on the pre-W3-9 tree, where aiohttp==3.14.1, pyasn1==0.6.3 and cryptography==46.0.7
+    still carry the open HIGH advisories the trivy gate would block on once raised to HIGH:
+      * aiohttp   >= 3.14.3  (GHSA-cq5v-8q36-5273, out-of-bounds heap read)
+      * pyasn1    >= 0.6.4   (CVE-2026-59884/59885/59886, decoder DoS)
+      * cryptography >= 50.0.0 (CVE-2026-69247/69249, GHSA-537c-gmf6-5ccf)
+    """
+    lock = REPO_ROOT / "vendor" / "strix" / "uv.lock"
+    assert lock.is_file(), f"missing {lock}"
+    text = lock.read_text(encoding="utf-8")
+
+    floors: dict[str, tuple[int, ...]] = {
+        "aiohttp": (3, 14, 3),
+        "pyasn1": (0, 6, 4),
+        "cryptography": (50, 0, 0),
+    }
+    below = []
+    for name, floor in floors.items():
+        ver = _uv_lock_version(text, name)
+        if not _ge(ver, floor):
+            below.append(f"{name}=={ver} (< {'.'.join(map(str, floor))})")
+    assert not below, (
+        "vendor/strix/uv.lock still pins packages below their HIGH-CVE fix floor, so the trivy "
+        "gate cannot be raised to HIGH without going red:\n  " + "\n  ".join(below)
+    )
+
+    # NEGATIVE CONTROL: the version comparator must reject a below-floor version and accept the
+    # fixed one, or the assertion above could pass on a lock that was never actually bumped.
+    assert _ge("3.14.3", (3, 14, 3)) and _ge("3.14.10", (3, 14, 3))
+    assert not _ge("3.14.1", (3, 14, 3)), "comparator accepts the vulnerable aiohttp 3.14.1"
+    assert not _ge("46.0.7", (50, 0, 0)), "comparator accepts the vulnerable cryptography 46.0.7"
 
 
 def test_a14_workflow_actions_are_sha_pinned() -> None:

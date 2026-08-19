@@ -2036,37 +2036,42 @@ fails the build rather than producing a confident-looking, wrong bill of materia
 
 ### 13.3 The vulnerability gate, and the proof that it can fire
 
-Every proposed change is scanned for known vulnerabilities in its components. The
-policy is deliberately narrow: a **critical** finding blocks the change and the merge
-cannot proceed; a **high** finding is reported in full but is advisory.
+Every proposed change is scanned for known vulnerabilities in its components. A
+**critical** or **high** finding blocks the change and the merge cannot proceed; a
+**medium** finding is reported in full but is advisory.
 
-The reasoning is written down and is worth repeating, because it is the opposite of
-what looks strict. This repository deliberately contains a vendored penetration-testing
-toolchain. Blocking on every high finding across that surface would require an exception
-list so long that nobody reads it — and an exception list nobody reads is worse than no
-gate at all, because it launders findings into invisibility. Blocking on critical only
-keeps the blocking set small enough that every entry is a decision someone made.
+The threshold was not always this strict, and the history is written down because it is
+the opposite of what looks strict. This repository deliberately contains a vendored
+penetration-testing toolchain, and for a while a known backlog of high findings sat
+inside it. While that backlog existed, blocking on every high finding would have required
+an exception list so long that nobody reads it — and an exception list nobody reads is
+worse than no gate at all, because it launders findings into invisibility. So the gate
+blocked on critical only until the backlog was actually cleared. It has now been cleared
+(the three vulnerable vendored libraries were upgraded at source), the tree scans clean
+at high, and the gate blocks high as well as critical — with the blocking set still small
+enough that every future exception is a decision someone made.
 
 Two supporting rules make that policy honest:
 
-- **The gate proves it can fail.** It currently passes with no exceptions at all,
-  because the tree has no critical findings. But "passing" and "misconfigured into
-  seeing nothing" look identical from outside. So immediately before the real gate runs,
-  the same configuration is run against a fixture of deliberately vulnerable packages,
-  and it must *fail*. If that control passes, the build stops with the message that the
-  gate below cannot fail, so its green tick means nothing.
+- **The gate proves it can fail — and that it fires on a high, not only a critical.** It
+  passes with no exceptions at all, because the tree has no high or critical findings. But
+  "passing" and "misconfigured into seeing nothing" look identical from outside. So
+  immediately before the real gate runs, the same blocking configuration is run against
+  two fixtures of deliberately vulnerable packages: one with a critical finding, and one
+  whose worst finding is *only* high. The high-only fixture must be **blocked** at the new
+  threshold and would have **passed** under the old critical-only threshold — which is the
+  proof that raising the bar did real work. If any of those come out the wrong way, the
+  build stops with the message that the gate's green tick means nothing.
 - **Every exception carries a written reason**, from a fixed list of five permitted
   reasons, and a test rejects a bare entry with no justification. Ignoring a finding
   costs a sentence of explanation.
 
-The project publishes its current position rather than only its policy: at the run
-recorded in its documentation, **zero critical and eight high findings across three
-components**, none suppressed, with the one first-party item — an outdated cryptography
-library — named as real, actionable, and blocked on a version ceiling that had to be
-raised in its own separate change. That change has since been made: the ceiling was
-lifted and the library moved past the vulnerable release at every place it is declared
-in both halves of the system, so the finding is addressed at source rather than
-suppressed. The remaining high findings sit inside the vendored third-party toolchain.
+The project publishes its current position rather than only its policy: a scan of the
+whole tree with the gate configuration now reports **zero critical and zero high
+findings** on every scanned component, none suppressed. The backlog that used to sit here
+— an outdated cryptography library plus two vendored networking/parsing libraries — was
+addressed at source: each was upgraded past its vulnerable release rather than
+suppressed.
 
 ### 13.4 What the build assurance does not prove
 
@@ -2085,8 +2090,8 @@ only lists wins is a marketing document". Repeated here rather than buried:
   gate does not regenerate or fingerprint.
 - **Base-image fingerprints are re-checked against one registry only.** An image hosted
   elsewhere is reported as unknown in the drift report rather than checked.
-- **Drift and high-severity findings are surfaced, not enforced.** That is the
-  deliberate trade described above, not an oversight.
+- **Drift and medium-and-below findings are surfaced, not enforced.** That is the
+  deliberate trade described above, not an oversight. High and critical now block.
 
 ### 13.5 The quarantine on vendored offensive code
 
