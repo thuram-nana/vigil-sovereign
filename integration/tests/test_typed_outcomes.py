@@ -156,7 +156,7 @@ def test_runner_records_skipped_when_capture_yields_no_evidence(tmp_path):
         lambda t: ["skiptool", t],
         lambda o, t: [ProposedService(host=t, port=443, protocol="tcp")],
         redrives=(Redrive("weak_crypto_artifact", lambda h, p, *, slug, protocol: {"connected": True},
-                          lambda cap: None),),
+                          lambda cap: None, branch="weak_crypto.cert_signature_algorithm"),),
     )
     res = run_external_tool(spec, "127.0.0.1", scope_gate=gate, backend=_OkBackend(),
                             engagement_slug="alpha", signers=SIGNERS)
@@ -198,7 +198,8 @@ def test_tool_errored_fact_still_comes_from_the_runner_owned_redrive(tmp_path):
     spec = ToolSpec(
         "toerr", lambda t: ["toerr", t],
         lambda o, t: [ProposedService(host=t, port=443, protocol="tcp")],
-        redrives=(Redrive("open_redirect", lambda h, p, *, slug, protocol: {}, _firing_redrive_ctx),),
+        redrives=(Redrive("open_redirect", lambda h, p, *, slug, protocol: {}, _firing_redrive_ctx,
+                          branch="open_redirect.location_header"),),
     )
     res = run_external_tool(spec, "127.0.0.1", scope_gate=gate, backend=_TimeoutButProposingBackend(),
                             engagement_slug="alpha", signers=SIGNERS)
