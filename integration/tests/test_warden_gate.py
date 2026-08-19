@@ -218,9 +218,9 @@ def test_compose_allows_an_auto_tool(monkeypatch):
     assert warden.decisions[-1].auto
 
 
-def test_attach_from_env_default_on_gates_only_the_shell(monkeypatch, tmp_path):
-    # A1: the gate is ON BY DEFAULT (no env needed). It gates ONLY the arbitrary-exec chokepoint
-    # (exec_command / write_stdin) and auto-runs every other (sandbox-contained) Strix tool — so the agent
+def test_attach_from_env_default_on_gates_the_shell(monkeypatch, tmp_path):
+    # A1: the gate is ON BY DEFAULT (no env needed). It gates the arbitrary-exec chokepoint
+    # (exec_command / write_stdin) and auto-runs the sandbox-contained / read-only Strix tools — so the agent
     # stays functional while its shell is governed. No authority in this base dir ⇒ the shell hard-blocks.
     _install_fake_agents(monkeypatch)
     monkeypatch.delenv("VIGIL_WARDEN_STRIX_GATE", raising=False)
@@ -236,8 +236,47 @@ def test_attach_from_env_default_on_gates_only_the_shell(monkeypatch, tmp_path):
         asyncio.run(composed.on_tool_start("c", "a", _FakeTool("exec_command")))
     with pytest.raises(WardenDenied):
         asyncio.run(composed.on_tool_start("c", "a", _FakeTool("write_stdin")))
-    # a benign Strix tool auto-runs (targeted gating keeps the agent functional).
-    asyncio.run(composed.on_tool_start("c", "a", _FakeTool("web_search")))
+    # a genuinely benign (sandbox-contained / read-only) Strix tool auto-runs (targeted gating keeps the
+    # agent functional). NB: web_search is NO LONGER in this benign set — see the dedicated test below.
+    asyncio.run(composed.on_tool_start("c", "a", _FakeTool("apply_patch")))
+    asyncio.run(composed.on_tool_start("c", "a", _FakeTool("list_requests")))
+
+
+def test_network_touching_tools_are_gated_not_auto(monkeypatch, tmp_path):
+    """W16-5 (#510): ``repeat_request`` (sends attacker-MODIFIED traffic to the target via Caido's replay,
+    never touching ``exec_command``) and ``web_search`` (network egress) must be GATED — not auto-fire —
+    because the shell chokepoint gate does not see them. With no owner authority provisioned in this base
+    dir, both hard-block (fail-safe), exactly like the arbitrary shell.
+
+    NEGATIVE CONTROL: a genuinely sandbox-contained / read-only tool (``list_requests`` reads already-captured
+    traffic; ``apply_patch`` edits the sandbox) still auto-runs — the gate is targeted, not a blanket block.
+    Reverting the classifier hunk (``_STRIX_GATED_TOOLS`` → ``_STRIX_EXEC_TOOLS``) re-classifies both network
+    tools A0 (auto) and this test FAILS."""
+    import vigil_integration.warden_gate as wg
+
+    # unit level: the classifier itself raises exactly the two network tools to A3.
+    assert wg._strix_shell_classifier("repeat_request") == "A3"
+    assert wg._strix_shell_classifier("web_search") == "A3"
+    # ...and the pure decision core turns that A3 into a non-auto QUEUE under the live floor/ceiling.
+    for name in ("repeat_request", "web_search"):
+        d = decide_tool(name, classify=wg._strix_shell_classifier, floor="A0")
+        assert d.tier == "A3" and d.outcome == "queue", name
+
+    _install_fake_agents(monkeypatch)
+    monkeypatch.delenv("VIGIL_WARDEN_STRIX_GATE", raising=False)
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path))
+
+    class _Base:
+        async def on_llm_end(self, *a, **k): ...
+
+    composed = attach_from_env(_Base())
+    # both network-touching tools are gated → no authority ⇒ hard-block (WardenDenied), NOT auto-fire.
+    with pytest.raises(WardenDenied):
+        asyncio.run(composed.on_tool_start("c", "a", _FakeTool("repeat_request")))
+    with pytest.raises(WardenDenied):
+        asyncio.run(composed.on_tool_start("c", "a", _FakeTool("web_search")))
+    # NEGATIVE CONTROL: a benign read-only / sandbox tool is unaffected — it still auto-runs (no raise).
+    asyncio.run(composed.on_tool_start("c", "a", _FakeTool("list_requests")))
     asyncio.run(composed.on_tool_start("c", "a", _FakeTool("apply_patch")))
 
 

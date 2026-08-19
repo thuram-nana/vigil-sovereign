@@ -359,19 +359,36 @@ def _strix_args(raw_arguments: Any) -> Any:
 
 # The Strix arbitrary-execution chokepoint. EVERY CLI invocation the agent makes — nmap, ffuf, python3,
 # curl, agent-browser — flows through ``exec_command`` (``write_stdin`` streams input to a still-running
-# exec_command process). So gating THESE two names gates all arbitrary execution, while Strix's benign,
-# sandbox-contained tools (thinking / notes / todo / web_search / apply_patch / reporting / view_image /
-# load_skill / finish) auto-run and the agent stays functional. This is precisely the audit's gap — the
-# ungoverned agent shell — and nothing more.
+# exec_command process). So gating THESE two names gates all arbitrary execution.
 _STRIX_EXEC_TOOLS = frozenset({"exec_command", "write_stdin"})
+
+# The Strix tools that REACH THE NETWORK without going through ``exec_command`` — so a gate that only
+# watches the shell chokepoint would let them auto-fire, yet each touches the target / egresses and must be
+# owner-gated exactly like the shell (constitution: "a modified request to a REMOTE target must be gated"):
+#   * ``repeat_request`` replays a captured request with attacker-chosen modifications (auth-bypass,
+#     payload injection, parameter tampering) straight to the target via Caido's replay engine. It sends
+#     attacker-MODIFIED traffic to the target over the network and does NOT transit ``exec_command``.
+#     Caido's replay path also need not transit the L3/L4 egress gateway, so this per-action WARDEN
+#     approval is the only layer that reliably governs it.
+#   * ``web_search`` is network EGRESS (a Perplexity-backed lookup) — NOT the sandbox-contained, no-network
+#     tool its previous classification treated it as.
+_STRIX_NETWORK_TOOLS = frozenset({"repeat_request", "web_search"})
+
+# The union the gate floors to A3 (⇒ QUEUE for a single-use owner-signed approval under the A1 ceiling).
+# Everything else Strix exposes is genuinely sandbox-contained / read-only (thinking / notes / todo /
+# apply_patch / reporting / view_image / load_skill / finish / list_requests / view_request / list_sitemap
+# / view_sitemap_entry / …) and auto-runs so the agent stays functional.
+_STRIX_GATED_TOOLS = _STRIX_EXEC_TOOLS | _STRIX_NETWORK_TOOLS
 
 
 def _strix_shell_classifier(name: str) -> str:
-    """A3 for the Strix arbitrary-exec chokepoint (``exec_command`` / ``write_stdin``) so it QUEUES for owner
-    approval under the A1 ceiling; A0 (auto) for every other Strix tool. Deliberately NOT the offense
+    """A3 for the Strix tools that must QUEUE for owner approval under the A1 ceiling — the arbitrary-exec
+    chokepoint (``exec_command`` / ``write_stdin``) AND the tools that reach the network WITHOUT transiting
+    the shell (``repeat_request`` sends attacker-modified traffic to the target; ``web_search`` egresses);
+    A0 (auto) for every other (sandbox-contained / read-only) Strix tool. Deliberately NOT the offense
     ``default_classify`` — that rates every non-recon name A2, which under a default-on gate would block the
-    whole agent. This targets the shell and only the shell."""
-    return "A3" if str(name or "").strip() in _STRIX_EXEC_TOOLS else "A0"
+    whole agent. This targets the target-touching / egress surface and nothing more."""
+    return "A3" if str(name or "").strip() in _STRIX_GATED_TOOLS else "A0"
 
 
 def _build_strix_approver(base_dir: str) -> Optional[Callable[[str, str, Any], bool]]:
@@ -476,9 +493,11 @@ def attach_from_env(base_hooks: Any) -> Any:
     rather than silently proceeding ungoverned. An operator who genuinely wants an ungated run must say so
     with the opt-out env var: a deliberate, visible, auditable act.
 
-    The classifier is :func:`_strix_shell_classifier` (floor A0, ceiling A1): it QUEUES exactly the
-    arbitrary-exec chokepoint (``exec_command`` / ``write_stdin``) and auto-runs every other (sandbox-
-    contained) Strix tool, so the agent stays functional while its shell is governed. A QUEUE is routed to the
+    The classifier is :func:`_strix_shell_classifier` (floor A0, ceiling A1): it QUEUES the arbitrary-exec
+    chokepoint (``exec_command`` / ``write_stdin``) AND the tools that reach the network without transiting
+    the shell (``repeat_request`` — attacker-modified traffic to the target; ``web_search`` — egress), and
+    auto-runs every other (sandbox-contained / read-only) Strix tool, so the agent stays functional while its
+    target-touching / egress surface is governed. A QUEUE is routed to the
     per-action, single-use, owner-signed approval broker via :func:`_build_strix_approver` — the call runs
     ONLY on a valid owner token for THIS exact call; no authority provisioned / no token in the window ⇒
     hard-block (fail-safe). The SDK + broker are imported LAZILY (offense-env only), keeping this module
