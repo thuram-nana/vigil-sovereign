@@ -1051,9 +1051,11 @@ def _surface_inconclusive(sink: Any, task: FusionTask, res: Any) -> None:
     """Consume the sensor's INCONCLUSIVE marker (``SensorResult.inconclusive``): a missing prerequisite
     meant the sensor assessed NOTHING, so — for a product whose thesis is a SOUND NEGATIVE — it must NOT
     vanish into a silent CLEAN (a missing-prereq run indistinguishable from a clean run). Surface it as a
-    DISTINCT, typed spine event (``source='sensor:inconclusive'``) that a report/verdict layer keys on,
-    NAMING the sensor and the missing prerequisite — visibly distinct from a plain sensor failure's bare
-    ``tool_result``. Only fires on a genuine inconclusive (the caller guards on ``res.inconclusive``), so
+    DISTINCT, typed spine event (``source='sensor:inconclusive'``) that a report/verdict layer CAN key on
+    (it is placed on the audit spine as the keyable signal; the marker ``SensorResult.inconclusive`` is what
+    ``fuse_sensors`` consumes today — no report layer keys on the spine event yet), NAMING the sensor and the
+    missing prerequisite — visibly distinct from a plain sensor failure's bare ``tool_result``. Only fires on
+    a genuine inconclusive (the caller guards on ``res.inconclusive``), so
     it never stamps an assessed/clean run inconclusive. Best-effort and total: a sink of None, a sink
     without the helper, or a sink that raises never perturbs the fusion pass (a spine write is fire-and-
     forget)."""
