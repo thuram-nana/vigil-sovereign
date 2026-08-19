@@ -123,6 +123,45 @@ availability is reported separately by `--report-upgrades`, advisory-only.
 
 ---
 
+### vendor/strix's live-scan extras — a third lock, from `uv.lock` not pip-compile
+
+`env-offense` also loads `vendor/strix` (the offense agent body), whose heavy live-scan deps —
+`openai-agents[litellm]`, `litellm`, `openai`, `docker`, `textual`, `cvss`, `caido-sdk-client` and
+their transitive closure — are deliberately **not** in the offense framework `.in`/lock. Before
+[W3-6] they resolved **fresh from PyPI on every operator install** (`envs/build_envs.sh`) — the
+largest unlocked surface in the product, and it co-loads with the offense engine.
+
+They are now pinned in a dedicated lock, **`infra/supply-chain/strix.lock`**, and `build_envs.sh`
+installs it under `--require-hashes` before installing `vendor/strix` itself editable `--no-deps`
+on top, so a fresh machine reproduces the SAME closure and never re-resolves strix.
+
+This lock is generated **differently** from the two pip-compile locks above: strix ships its own
+upstream `uv` lock (`vendor/strix/uv.lock`), so the strix lock is *exported from it* — offline,
+with `uv export --frozen` (no re-resolution) — rather than compiled from an `.in`. Regenerate
+deterministically under Python 3.13 with:
+
+```bash
+bash infra/supply-chain/gen-strix-lock.sh
+```
+
+The strix lock is applied **before** the framework lock so the framework lock wins any
+shared-dependency version — e.g. it keeps `cryptography>=50` (the CVE-2026-69247 fix) over strix's
+older transitive pin. `integration/tests/test_supply_chain.py` asserts the lock is fully
+hash-pinned, covers strix's declared runtime deps, and that no operator install path resolves
+strix's extras unhashed; a hand-built-wheel negative control proves `--require-hashes` actually
+rejects a corrupted or missing hash. It is **not** swept into trivy's `pip:.*\.lock\.txt$`
+pattern (§4) because strix's closure is already scanned through `vendor/strix/uv.lock`.
+
+### Fail-closed vs. degrade — the production posture
+
+If a required lock is absent on a checkout, `build_envs.sh` does **not** silently fall back to a
+fresh, unlocked resolution. With `VIGIL_POSTURE=production` (or `prod`) it **aborts** the build;
+in any other posture (dev, the default) it prints a **loud** warning and degrades. Deployments set
+`VIGIL_POSTURE=production` so a missing lock can never quietly re-open the unlocked surface. [W9-4]
+builds on this posture.
+
+---
+
 ## 3. SBOM
 
 Each lock produces a CycloneDX 1.6 SBOM via `cyclonedx-bom==7.3.1`, uploaded by the gate as the
@@ -247,27 +286,21 @@ Stated plainly, because a hardening document that only lists wins is a marketing
   every PR but are not yet what CI *tests against*. Switching those jobs onto the locks is the
   second follow-up; doing it in this change would have coupled an A14 failure to every unrelated
   test job.
-- **So does the operator's install path — and this is the bigger case of the two.**
-  `bootstrap.sh` is the *only documented* way to install VIGIL, and it delegates to
-  `envs/build_envs.sh:14-23`, which runs `uv pip install -r` / `pip install -r` over
-  `envs/offense.txt` and `envs/sovereign.txt`. Those two files are five `-e ./…` editable lines
-  each, with no hashes and no `--require-hashes`; every transitive dependency therefore resolves
-  live from PyPI at install time. **The hash-locked `infra/supply-chain/sovereign.lock.txt` and
-  `engine/crucible/framework/v2/requirements.lock.txt` are consumed only by
-  `.github/workflows/supply-chain.yml`.** Stated without euphemism: the locks are proven
-  *installable* in CI, and they are not what an operator installs. Closing it means making
-  `build_envs.sh` install the third-party layer from the lock under `--require-hashes` first and
-  the first-party `-e` members second (they have no registry artifact to hash), which changes
-  every install on every host and so is its own reviewed slice rather than a rider on this one.
-  Until that lands, an operator who needs a hash-verified third-party layer can install it
-  themselves first — `pip install --require-hashes -r infra/supply-chain/sovereign.lock.txt` into
-  `.venv-sovereign`, and the offense lock into `.venv-offense` — and then run `./bootstrap.sh`,
-  which does not re-resolve an already-satisfied requirement. Verify rather than assume: read the
-  install output, because a range in `envs/*.txt` that conflicts with a pin will still pull a
-  different wheel over it. This is a workaround, not the control; the control is the follow-up.
-- **Non-Python ecosystems are scanned but not locked by us.** `vendor/strix/uv.lock`,
-  `apps/sigil/kernel/Cargo.lock` and the corpus app's `package-lock.json` are their own upstream
-  artifacts; trivy reads them, but this gate does not regenerate or hash-verify them.
+- **The operator install path now installs from the locks — `ci.yml` is the remaining gap.**
+  `bootstrap.sh` (the only documented install path) delegates to `envs/build_envs.sh`, which
+  installs the third-party framework closure from the lock under `--require-hashes` and then the
+  first-party `-e` members `--no-deps` on top (they have no registry artifact to hash). `vendor/strix`'s
+  live-scan extras are installed the same way, from `infra/supply-chain/strix.lock` (§2). So an
+  operator's install reproduces the locked closure, not a fresh PyPI resolution. What is **not** yet
+  on the locks is `ci.yml` (first bullet): the test jobs still `pip install` loose ranges, so the
+  tree CI *tests against* is not the locked tree. That switch is its own slice ([W3-2]) rather than
+  a rider here.
+- **Cargo / npm ecosystems are scanned but not locked by us.** `apps/sigil/kernel/Cargo.lock`
+  and the corpus app's `package-lock.json` are their own upstream artifacts; trivy reads them, but
+  this gate does not regenerate or hash-verify them. (`vendor/strix/uv.lock` used to be in this
+  list. Its live-scan extras are now hash-locked *for install* — exported to
+  `infra/supply-chain/strix.lock` and installed `--require-hashes`, see §2 — though the gate still
+  does not *regenerate* the upstream `uv.lock` itself.)
 - **No signature verification.** Hashes prove the artifact did not change between lock time and
   install time. They do not prove the artifact was published by whoever you think — that needs
   PEP 740 attestations / sigstore, which is not wired here.
@@ -280,9 +313,10 @@ Stated plainly, because a hardening document that only lists wins is a marketing
 
 1. SHA-pin the actions in `.github/workflows/ci.yml`.
 2. Install from the locks in `ci.yml` so the tested tree is the locked tree.
-3. **Install from the locks in `envs/build_envs.sh`** so the operator's install is the locked
-   install, not only CI's (§6, second bullet). This is the follow-up with the widest reach: today
-   the locks bind CI and nobody else.
+3. ~~**Install from the locks in `envs/build_envs.sh`** so the operator's install is the locked
+   install, not only CI's~~ — **DONE.** `build_envs.sh` installs the framework closure and
+   `vendor/strix`'s live-scan extras under `--require-hashes` ([W3-6]); the `-e` members go on
+   `--no-deps`. The remaining reach is `ci.yml` (item 2).
 4. ~~**Raise `cryptography` past the `<50` ceiling to take the CVE-2026-69247 fix**~~ — **DONE
    (PR #295).** Both environments now require `cryptography>=50`
    (`engine/crucible/framework/v2/requirements.in:46` pins `>=50,<51`,
