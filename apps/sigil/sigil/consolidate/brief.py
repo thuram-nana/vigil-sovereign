@@ -12,8 +12,8 @@ def compose(store: SpineStore) -> tuple[str, dict]:
     due = due_commitments(store, limit=10)
     contras = pending_contradictions(store, limit=10)
     lines = ["# ARCHIVIST brief",
-             f"Open threads: {len(threads)} · Commitments with due dates: {len(due)} · "
-             f"Pending contradictions: {len(contras)}", ""]
+             (f"Open threads: {len(threads)} · Commitments with due dates: {len(due)} · "
+             f"Pending contradictions: {len(contras)}"), ""]
     if threads:
         lines.append("## Open threads (most stale first)")
         for t in threads:

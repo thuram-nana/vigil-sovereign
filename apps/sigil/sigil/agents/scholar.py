@@ -88,8 +88,8 @@ class ClaudeSynthesizer:
 def compose_report(question: str, graded: List[dict], sources: List[str]) -> str:
     grounded = [g for g in graded if g["grounded"]]
     lines = [f"# SCHOLAR research — {question}", "",
-             f"Sources consulted: {len(sources)}. Claims: {len(graded)} "
-             f"({len(grounded)} source-verified, {len(graded) - len(grounded)} unverified).", ""]
+             (f"Sources consulted: {len(sources)}. Claims: {len(graded)} "
+             f"({len(grounded)} source-verified, {len(graded) - len(grounded)} unverified)."), ""]
     if grounded:
         # SERVE THE QUOTE, not the model's claim: the authoritative content is the verbatim source
         # span (which is what actually verified). The model's claim is advisory ONLY — a fabricated
