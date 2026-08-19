@@ -1,0 +1,111 @@
+# Dependency-update automation.
+#
+# WHY THIS EXISTS. Before this file the repository had NO update automation of any kind — no
+# Dependabot, no Renovate, no .snyk. A vulnerability disclosed in an already-pinned dependency sat
+# invisible until a human happened to open a pull request that touched a lock (the A14 gate in
+# .github/workflows/supply-chain.yml only runs on push/PR to `main`). This config makes the update a
+# scheduled, attributable pull request; the scheduled scan in
+# .github/workflows/scheduled-supply-chain-scan.yml is the other half — it surfaces a finding as an
+# issue even when nobody opens a PR at all.
+#
+# ECOSYSTEMS. All five the repository actually contains: pip (Python), cargo (the WARDEN Rust
+# kernel), npm, github-actions (the workflow files themselves), and docker (the service images).
+# The deliberately-vulnerable eval-corpus fixtures under
+# engine/crucible/framework/v2/eval/corpus_apps/_cve/ are NOT listed on purpose — they are meant to
+# stay vulnerable so the engine can prove it detects the CVE, and a Dependabot PR "fixing" one would
+# break the corpus. `vendor/` is third-party quarantined source and is likewise left alone.
+#
+# CADENCE. Weekly for the update PRs (low-noise; a security-relevant bump still surfaces the same day
+# through the scheduled scan's issue), grouped so a batch of minor/patch bumps is one reviewable PR
+# rather than a dozen.
+
+version: 2
+
+updates:
+  # -------------------------------------------------------------------------- pip (Python)
+  - package-ecosystem: "pip"
+    # The real runtime/build manifests. Trivy's lock scanning in A14 covers the resolved trees;
+    # Dependabot watches the top-level manifests these are compiled from.
+    directories:
+      - "/"
+      - "/apps/sigil"
+      - "/gateway"
+      - "/integration"
+      - "/engine/crucible"
+      - "/engine/crucible/framework/v2"
+      - "/packages/core/vigil_core"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "supply-chain"
+    groups:
+      python-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # -------------------------------------------------------------------------- cargo (Rust)
+  - package-ecosystem: "cargo"
+    directory: "/apps/sigil/kernel"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "supply-chain"
+    groups:
+      cargo-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # -------------------------------------------------------------------------- npm
+  # Declared at the root so a production package.json is watched the moment one lands. The repository
+  # currently ships no runtime npm project (the only package.json is the deliberately-vulnerable
+  # st-2014-3744 eval fixture, excluded above), so today this entry is a no-op guard rather than an
+  # active watch — see docs/supply-chain-scheduled-scan.md, which states this plainly.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "supply-chain"
+    groups:
+      npm-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # -------------------------------------------------------------------------- github-actions
+  # Watches the pinned action SHAs in .github/workflows/*. Dependabot bumps a SHA and records the new
+  # tag comment, so the SHA-pin discipline the A14 test enforces stays maintainable.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "supply-chain"
+      - "ci"
+
+  # -------------------------------------------------------------------------- docker
+  - package-ecosystem: "docker"
+    directories:
+      - "/gateway"
+      - "/engine/crucible/framework/v2/aegis"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "supply-chain"

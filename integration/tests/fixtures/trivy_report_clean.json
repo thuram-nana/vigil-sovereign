@@ -1,0 +1,18 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": ".",
+  "ArtifactType": "filesystem",
+  "Results": [
+    {
+      "Target": "engine/crucible/framework/v2/requirements.lock.txt",
+      "Class": "lang-pkgs",
+      "Type": "pip"
+    },
+    {
+      "Target": "infra/supply-chain/sovereign.lock.txt",
+      "Class": "lang-pkgs",
+      "Type": "pip",
+      "Vulnerabilities": []
+    }
+  ]
+}
