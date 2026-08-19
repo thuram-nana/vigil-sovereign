@@ -1,7 +1,7 @@
 # A14 — vulnerability suppressions for the "A14 supply-chain gate" job.
 #
 # THRESHOLD (docs/SUPPLY-CHAIN.md §4):
-#   CRITICAL blocks the pull request. HIGH is reported in full but does not block.
+#   HIGH and CRITICAL block the pull request. MEDIUM and below are reported but do not block.
 #
 # THE ONE RULE: every id below MUST be immediately preceded by a comment block that names
 # the id and gives a reason. `integration/tests/test_supply_chain.py` enforces it, and carries
@@ -25,5 +25,5 @@
 # Prefer fixing over suppressing. A suppression is a decision with an owner, not paperwork.
 # ---------------------------------------------------------------------------------------
 #
-# Currently suppressed: nothing. The gate below is unconditioned — every CRITICAL trivy finds
-# fails the build. Keep it that way for as long as it is honest to.
+# Currently suppressed: nothing. The gate below is unconditioned — every HIGH or CRITICAL trivy
+# finds fails the build. Keep it that way for as long as it is honest to.
