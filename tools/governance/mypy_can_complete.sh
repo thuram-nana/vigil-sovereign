@@ -16,8 +16,20 @@ if [ ! -d "$pkg/sigil" ]; then
 fi
 cd "$pkg" || exit 1
 
+# An ABSENT type-checker must FAIL the gate, not silently pass: without this, `mypy sigil` returns
+# 127 (command-not-found) which is != 2, so the gate would fail-open (report can-complete on no check).
+if ! command -v mypy >/dev/null 2>&1; then
+  echo "::error::mypy is not installed — the can-complete gate cannot run and must not fail-open" >&2
+  exit 1
+fi
+
 mypy sigil
 rc=$?
+# Treat a command-not-found / cannot-execute (>=126) the same as an abort: the gate did not really run.
+if [ "$rc" -ge 126 ]; then
+  echo "::error::mypy could not execute (exit $rc) — the can-complete gate did not run" >&2
+  exit 1
+fi
 if [ "$rc" -eq 2 ]; then
   echo "::error::mypy could NOT complete (exit 2) — a parse/type-comment/config abort regressed" >&2
   exit 1
