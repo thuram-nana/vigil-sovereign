@@ -1746,10 +1746,16 @@ is never stored anywhere.** Lose it and the backup is unrecoverable, by design.
 That is the off-box confidentiality guarantee, and it is also a real operational
 risk your key-management policy must cover.
 
-For the parts the command does not cover — the offensive working directory, the
-engagement folders and their evidence — an ordinary encrypted file backup is the
-answer. There is no separate purpose-built command for those, and this chapter
-will not imply one.
+The offensive half is covered by the same tooling, not left to an ordinary file copy.
+The top-level `vigil backup` command is a *two-plane* orchestrator: it drives the sovereign
+command above as a subprocess **and** writes a second, separate encrypted file for the
+offensive working directory (`.vigil-live` — its signing identities, signed record chain,
+sessions and usage ledger) together with the engine's evidence tree (the reports,
+re-verifiable findings and raw evidence bytes under `.console/runs`, plus the proof
+database). The two planes are always two *separate* encrypted files, never a merged archive
+— one process holding both planes' secrets would breach the two-env boundary — and `vigil
+restore` checks each part's signed manifest before it writes a byte. So a purpose-built
+command *does* cover these parts.
 
 #### Restore — and one warning that is specific to this system
 

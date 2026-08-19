@@ -86,7 +86,7 @@ then `cmp`-asserts the two trees are **byte-identical** (`sync.sh:40–45`). Run
 `window.VIGIL_MANUAL` (`manual.js:8`) is a static array of doc sections; `app.js`'s `renderManual`
 (`app.js:211`) renders it for the `manual` screen. No target/runtime data lives here.
 
-## The 21-screen NAV / route / system-map contract
+## The 31-screen NAV / route / system-map contract
 
 Three lists must stay set-equal, and CI enforces it:
 
