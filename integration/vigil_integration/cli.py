@@ -1826,18 +1826,35 @@ def _cmd_up(args: argparse.Namespace) -> int:
     co-loaded in one interpreter. Binds loopback (or a private/tunnel IP); refuses a public bind."""
     if getattr(args, "services", False):
         # Optional docker preflight: create the egress-gateway + root services (qdrant) if none exist
-        # (idempotent). Both helpers are pure-stdlib, so this stays on the boundary-safe path. Each leg is
-        # independently best-effort — a docker issue must NEVER block the UI bring-up.
+        # (idempotent). Both helpers are pure-stdlib, so this stays on the boundary-safe path. The two legs
+        # are handled DIFFERENTLY: the egress-gate leg FAILS CLOSED (below); the root-services leg (qdrant/
+        # neo4j/otel — not security-critical) stays best-effort so a docker hiccup there never blocks the UI.
         import json as _json
         import pathlib as _pl
         _repo = _pl.Path(__file__).resolve().parents[2]
+        # THE EGRESS-GATE LEG FAILS CLOSED (W0-6 / #401). `--services` brings up the gateway topology whose
+        # whole purpose is to gate the Strix sandbox's egress; if that bring-up FAILS and we continued, the
+        # sandbox would run on Docker's default bridge with a default route to the operator LAN / a third
+        # party / 169.254.169.254 — the gateway/README FATAL-1. A SILENT downgrade from gated to ungated is
+        # the worst outcome, so a gateway bring-up failure ABORTS the run with a loud error UNLESS the
+        # operator EXPLICITLY opts into ungated egress with --allow-ungated-egress (loud warning, continues).
         try:
             from vigil_gateway.docker import SandboxNetworking
             _res = SandboxNetworking().compose_up(
                 _repo / "infra" / "docker" / "docker-compose.yml", build=True, context_dir=_repo / "gateway")
             print(f"vigil up: gateway topology up ({_json.dumps(_res)})")
         except Exception as _e:  # noqa: BLE001
-            print(f"vigil up: gateway services preflight skipped — {_e}", file=sys.stderr)
+            if not getattr(args, "allow_ungated_egress", False):
+                print(f"vigil up: REFUSED (fail-closed) — the egress gate did not come up: {_e}\n"
+                      "  Continuing would run the sandbox UNGATED (a default route to the operator LAN / a "
+                      "third party / 169.254.169.254 — FATAL-1). Refusing to bring the UI up.\n"
+                      "  Fix the gateway bring-up (see `vigil doctor` / `vigil services up`), or, if you "
+                      "accept UNGATED egress for this run, re-run with --allow-ungated-egress.",
+                      file=sys.stderr)
+                return 2
+            print(f"vigil up: WARNING — egress gate did NOT come up ({_e}); continuing UNGATED because "
+                  "--allow-ungated-egress was set. Sandbox egress is NOT gated (FATAL-1 accepted).",
+                  file=sys.stderr)
         try:
             # ABSOLUTE import (not relative `.services`) to keep the `_cmd_up` boundary rule intact —
             # it may relative-import ONLY `.uiproxy`; a pure-stdlib sibling helper comes in by absolute
@@ -2889,7 +2906,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="with --with-telemetry: seconds between spine snapshots (default 15)")
     pu.add_argument("--services", action="store_true",
                     help="also bring up the docker egress-gateway topology (create the networks + gateway "
-                         "container if none exist; idempotent). Best-effort — a docker issue never blocks the UI.")
+                         "container if none exist; idempotent). The EGRESS-GATE leg fails CLOSED: if it does "
+                         "not come up the run is REFUSED (no silent downgrade to ungated egress) unless you "
+                         "pass --allow-ungated-egress. The root-services leg (qdrant/…) stays best-effort.")
+    pu.add_argument("--allow-ungated-egress", action="store_true",
+                    help="with --services: DOWNGRADE the egress gate from fail-closed to a loud warning — "
+                         "if the gateway topology fails to come up, continue anyway with the sandbox UNGATED "
+                         "(a default route to the operator LAN / a third party / 169.254.169.254 — FATAL-1). "
+                         "Off by default; only pass it when you have accepted running without the egress gate.")
     # ---- HA / clustering: a PROXY-ONLY read tier that federates to REMOTE backends -----------------
     pu.add_argument("--proxy-only", action="store_true",
                     help="run ONLY the reverse proxy — do NOT spawn the sovereign cockpit or the offense "

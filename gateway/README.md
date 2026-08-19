@@ -60,6 +60,14 @@ vigil-gateway ensure-networks
 VIGIL_GATEWAY_CHARTER_SLUG=acme vigil-gateway serve-proxy --host 0.0.0.0 --port 48081
 ```
 
+### Fail-closed bring-up (`vigil up --services`)
+`vigil up --services` brings this topology up as a docker preflight. That leg **fails closed**: if the
+gateway topology does not come up, `vigil up` is **REFUSED** (exit non-zero) rather than silently continuing
+with the sandbox on Docker's default bridge — a silent downgrade from gated to ungated egress is the FATAL-1
+above, so it is never taken by default. To deliberately run without the gate (accepting ungated egress for
+that run) pass `--allow-ungated-egress`, which downgrades the refusal to a loud warning and continues. The
+sibling root-services leg (qdrant/neo4j/otel — not security-critical) stays best-effort.
+
 ## Scope caveat
 A **literal** (non-wildcard) in-scope host that resolves to a private IP is reachable through
 the proxy (operators legitimately scope internal staging by name). If such a name is under
