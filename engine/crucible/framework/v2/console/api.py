@@ -1770,14 +1770,22 @@ _BRAIN_DECISION_DOCTRINE = (
 )
 
 
-def brain_decision() -> dict[str, Any]:
+def brain_decision(run_id: "str | None" = None) -> dict[str, Any]:
     """Brain / Decision engine: the ACTIVE propose-only agent-body brain + its live proposal (if any).
 
     READ-ONLY. Reports the installed brain's identity + design credit + the propose-only doctrine (all
     true of the shipped component). A live proposal — an ordered attack chain of LEADs — is surfaced ONLY
     from a real persisted proposal artifact (``<run_dir>/brain-proposal.json``): the provider NEVER runs
     the brain over a synthesized profile (that would fabricate a chain) and NEVER invents tool runs or
-    results. None persisted → ``proposal.present: false`` with an honest note. ``_safe`` throughout."""
+    results. That file is written by the real producer — a ``vigil engage --brain hexstrike`` run persists
+    the chain it drives via ``vigil_integration.brains.engine_think.BrainThink`` — so this reader stays a
+    pure surface over a genuinely-produced artifact.
+
+    SCOPE. ``run_id`` (the console's ``?run=`` query) scopes the read to ONE run's proposal with NO
+    cross-run fallback: a run with no proposal renders the honest empty state, never a STALE proposal from
+    an earlier run. Absent ⇒ the latest persisted proposal across runs (labelled with its ``run_id`` so the
+    panel shows which run produced it). None persisted → ``proposal.present: false`` with an honest note.
+    Fail-closed on a bad id (``run_dir`` raises → ``_safe`` → empty state, never a 500). ``_safe`` throughout."""
     from . import actions
 
     brain = {
@@ -1790,16 +1798,20 @@ def brain_decision() -> dict[str, Any]:
     }
 
     proposal: dict[str, Any] = {"present": False, "note": (
-        "No live proposal wired into this console yet. The brain proposes an ordered recon/assessment "
-        "chain over a TargetProfile assembled from VIGIL's gated observations (never URL guesses); wire "
-        "an engagement's observations to the agent body "
-        "(integration/vigil_integration/brains/hexstrike_body.py) to surface its chain here. The brain is "
+        "No live proposal persisted for this view. A proposal is surfaced when a real "
+        "`vigil engage --brain hexstrike` run persists the ordered chain it drives into its run dir "
+        "(<run_dir>/brain-proposal.json, written by vigil_integration.brains.engine_think.BrainThink over a "
+        "TargetProfile assembled from VIGIL's gated observations — never URL guesses). The brain is "
         "PROPOSE-ONLY — it computes no facts and self-authorizes nothing, and every step it proposes still "
         "crosses the gate + egress gate before anything can run.")}
 
-    # Surface a live proposal ONLY from a real persisted artifact — never fabricated, never brain-invoked here.
-    run_ids = _safe(lambda: [r["run_id"] for r in list_runs().get("runs", []) if r.get("run_id")],
-                    default=[]) or []
+    # Surface a live proposal ONLY from a real persisted artifact — never fabricated, never brain-invoked
+    # here. A `run_id` scopes to that one run (no fallback); absent ⇒ scan all runs newest-first.
+    if run_id:
+        run_ids = [str(run_id)]
+    else:
+        run_ids = _safe(lambda: [r["run_id"] for r in list_runs().get("runs", []) if r.get("run_id")],
+                        default=[]) or []
     for rid in run_ids:
         rd = _safe(lambda r=rid: actions.run_dir(r), default=None)
         if rd is None:

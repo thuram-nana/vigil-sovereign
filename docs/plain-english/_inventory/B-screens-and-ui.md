@@ -648,8 +648,12 @@ gate + egress gate; a finding is a FACT only when a VIGIL oracle fires"), an **A
 real proposal is persisted** — a **Target profile (OBSERVED)** card and the **proposed attack chain**:
 per-step priority, tool, a danger chip (`recon` / `active`), a per-step gate verdict (**auto-eligible**
 only for recon in staging/twin posture, otherwise **queues for owner approval**), an effectiveness
-(prior) bar, and the raw params. **No live proposal → an honest empty state: "No live proposal wired."**
-Data: `GET OFF /api/brain/decision`.
+(prior) bar, and the raw params. That persisted proposal is written by a REAL producer — a
+`vigil engage --brain hexstrike` run persists the ordered chain it drives (via
+`vigil_integration/brains/engine_think.py::BrainThink`) to `<run_dir>/brain-proposal.json`, the exact
+file the panel reads; the reader invents nothing. **No live proposal → an honest empty state: "No live
+proposal wired."** Data: `GET OFF /api/brain/decision` (an optional `?run=<id>` scopes it to one run's
+proposal with no cross-run fallback — a run with no proposal shows empty, never a stale earlier proposal).
 
 **18b. Memory** — four tiles (**Engagements** / **Findings** / **Priors** / **Dead ends**) and a
 **Learned priors (MEMORY)** list (bug_class · archetype · surface → success % with a lower confidence
