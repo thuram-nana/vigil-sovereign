@@ -263,3 +263,115 @@ def test_retry_cloud_codebase_stays_global_default_no_regression(spawn, tmp_path
     env = spawn["env_extra"]
     assert "STRIX_LLM" not in env and "LLM_API_BASE" not in env
     assert env["VIGIL_PROOF_RUN_DIR"] and env["VIGIL_ENGAGEMENT"]
+
+
+# ══ W0-7 (Strix sovereignty gate) — the codebase agent is a MODEL EGRESS; a sovereign tier refuses the ═════
+# ══ cloud default at construction, exactly like every OTHER egress site. Local stays permitted. ══════════
+
+from framework.v2.kernel import sovereignty as _sov
+
+
+@pytest.fixture()
+def air_gapped(monkeypatch):
+    """Force the AIR_GAPPED tier deterministically (env-derived; no leaked injected policy either side)."""
+    _sov.set_policy(None)                                    # start from env-derived, not a stale injection
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "AIR_GAPPED")
+    yield
+    _sov.set_policy(None)                                    # never leak a latched/injected policy to later tests
+
+
+# -- the gate helper in isolation --------------------------------------------------------------------------
+
+def test_gate_refuses_cloud_default_under_air_gap(air_gapped):
+    # empty env → Strix's built-in CLOUD default → REFUSED under AIR_GAPPED.
+    refusal = actions_mod._strix_sovereignty_refusal({})
+    assert refusal and "AIR_GAPPED" in refusal
+
+def test_gate_refuses_ambient_cloud_strix_llm_under_air_gap(air_gapped):
+    # the ambient global STRIX_LLM (=CLOUD_DEFAULT from the fixture) is classified + refused under AIR_GAPPED.
+    refusal = actions_mod._strix_sovereignty_refusal({})
+    assert refusal and "cannot run under sovereignty tier 'AIR_GAPPED'" in refusal
+
+def test_gate_permits_local_ollama_pin_under_air_gap(air_gapped):
+    # a LOCAL loopback pin classifies `local` → permitted under EVERY tier (the local path is untouched).
+    env = {"STRIX_LLM": "ollama/qwen2.5-coder:32b", "LLM_API_BASE": "http://localhost:11434"}
+    assert actions_mod._strix_sovereignty_refusal(env) == ""
+
+def test_gate_permits_local_self_hosted_loopback_pin_under_air_gap(air_gapped):
+    env = {"STRIX_LLM": "openai/qwen", "LLM_API_BASE": "http://127.0.0.1:8000/v1"}
+    assert actions_mod._strix_sovereignty_refusal(env) == ""
+
+def test_gate_backend_classification_matches_settings_prefixes():
+    # the LiteLLM prefix → sovereignty backend name mirror is correct (drift guard for the two differing spellings).
+    assert actions_mod._strix_sovereignty_backend({"STRIX_LLM": "bedrock/anthropic.claude-opus-5"}) == "bedrock"
+    assert actions_mod._strix_sovereignty_backend({"STRIX_LLM": "vertex_ai/claude-opus-5"}) == "vertex"
+    assert actions_mod._strix_sovereignty_backend({"STRIX_LLM": "mistral/mistral-large-latest"}) == "mistral"
+    assert actions_mod._strix_sovereignty_backend({"STRIX_LLM": "azure/dep"}) == "azure_openai"
+    assert actions_mod._strix_sovereignty_backend({"STRIX_LLM": "anthropic/claude-opus-4-8"}) == "anthropic"
+    # openai/ with a NON-loopback base is NOT trusted local → classify() fail-closes it to cloud_only.
+    assert _sov.classify(
+        actions_mod._strix_sovereignty_backend({"STRIX_LLM": "openai/x", "LLM_API_BASE": "https://api.openai.com/v1"})
+    ) == "cloud_only"
+
+def test_gate_permits_sovereign_cloud_bedrock_under_sovereign_cloud_tier(monkeypatch):
+    # not a blanket block: a jurisdictional-cloud STRIX_LLM is PERMITTED at SOVEREIGN_CLOUD (tier semantics honoured).
+    _sov.set_policy(None)
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "SOVEREIGN_CLOUD")
+    try:
+        assert actions_mod._strix_sovereignty_refusal({"STRIX_LLM": "bedrock/anthropic.claude-opus-5"}) == ""
+        # …but a direct consumer-Anthropic STRIX_LLM is still refused at SOVEREIGN_CLOUD.
+        assert actions_mod._strix_sovereignty_refusal({"STRIX_LLM": "anthropic/claude-opus-4-8"})
+    finally:
+        _sov.set_policy(None)
+
+
+# -- the full launch_assessment codebase path under AIR_GAPPED ---------------------------------------------
+
+def test_launch_codebase_cloud_default_REFUSED_under_air_gap(spawn, air_gapped, tmp_path):
+    # THE FIX: no per-session pick under AIR_GAPPED → the CLOUD default would ship the source to Anthropic →
+    # the run is REFUSED at construction and NOTHING is spawned.
+    r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path)})
+    assert "error" in r and "AIR_GAPPED" in r["error"]
+    assert spawn == {}                                      # never spawned → the source never left the host
+
+def test_launch_codebase_cloud_pick_REFUSED_under_air_gap(spawn, air_gapped, tmp_path):
+    # an explicit CLOUD per-session pick under AIR_GAPPED is likewise refused (cloud is refused by the tier).
+    r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path),
+                                       "model": "claude-sonnet-5"})
+    assert "error" in r and "AIR_GAPPED" in r["error"]
+    assert spawn == {}
+
+def test_launch_codebase_local_pick_RUNS_under_air_gap(spawn, air_gapped, monkeypatch, tmp_path):
+    # the LOCAL/Ollama path is UNTOUCHED: a loopback-pinned local pick runs normally under AIR_GAPPED.
+    monkeypatch.setenv("CRUCIBLE_OLLAMA_MODEL", "qwen2.5-coder:32b")
+    monkeypatch.setenv("CRUCIBLE_OLLAMA_HOST", "http://localhost:11434")
+    r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path), "model": "ollama"})
+    assert r["status"] == "running"
+    assert spawn["env_extra"]["STRIX_LLM"] == "ollama/qwen2.5-coder:32b"
+
+def test_launch_codebase_cloud_default_PERMITTED_under_permissive(spawn, monkeypatch, tmp_path):
+    # NEGATIVE CONTROL: the SAME cloud-default run is NOT refused under PERMISSIVE — the gate is tier-specific,
+    # not a blanket block (proves the refusal above is caused by the tier, not by an always-on guard).
+    _sov.set_policy(None)
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "PERMISSIVE")
+    try:
+        r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path)})
+        assert r["status"] == "running" and spawn.get("env_extra") is not None
+    finally:
+        _sov.set_policy(None)
+
+def test_retry_codebase_cloud_default_REFUSED_under_air_gap(spawn, monkeypatch, tmp_path):
+    # the retry path is gated too: a cloud-default codebase run finished under PERMISSIVE, then retried after the
+    # tier is lowered to AIR_GAPPED, is REFUSED on retry (no re-spawn) rather than re-shipping the source.
+    _sov.set_policy(None)
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "PERMISSIVE")
+    try:
+        r = actions_mod.launch_assessment({"mode": "codebase", "target": _proj(tmp_path)})
+        _finish(r["run_id"])
+        spawn.clear()
+        monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "AIR_GAPPED")
+        r2 = actions_mod.retry_run(r["run_id"])
+        assert r2["ok"] is False and "AIR_GAPPED" in r2["error"]
+        assert spawn == {}
+    finally:
+        _sov.set_policy(None)
