@@ -139,8 +139,9 @@ _ALLOW_ENV = "VIGIL_ALLOW_PROTECTED_DOMAINS"
 
 
 class HardBlockError(RuntimeError):
-    """A target is on the deterministic non-disableable scope floor — it must never be touched.
-    Raised fail-closed; must not be caught-and-continued (it is a categorical refusal)."""
+    """A target is on the deterministic scope floor (owner-disableable via ``VIGIL_ALLOW_PROTECTED_DOMAINS``;
+    fail-safe default: on) — it must never be touched while the guard is enabled. Raised fail-closed; must
+    not be caught-and-continued (it is a categorical refusal)."""
 
 
 def _prefold(raw: str) -> str:
