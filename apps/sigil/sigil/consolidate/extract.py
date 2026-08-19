@@ -177,8 +177,13 @@ class ApiProvider:
             "model": self.model, "max_tokens": _mt,
             "messages": [{"role": "user", "content": build_prompt(records)}],
         }).encode("utf-8")
+        # W16-9: SIGIL-plane memory-consolidation egress is now under the sovereignty tier —
+        # an air-gapped/sovereign tier REFUSES this direct-Anthropic call (SovereigntyRefusal).
+        from ..sovereignty import assert_endpoint_permitted
+        url = "https://api.anthropic.com/v1/messages"
+        assert_endpoint_permitted(url, purpose="memory consolidation (Anthropic API)")
         req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages", data=body, method="POST",
+            url, data=body, method="POST",
             headers={"content-type": "application/json", "x-api-key": self.api_key,
                      "anthropic-version": "2023-06-01"})
         try:
@@ -212,7 +217,12 @@ class LocalProvider:
         import json as _json
         import urllib.request
         body = _json.dumps({"model": self.model, "prompt": build_prompt(records), "stream": False}).encode("utf-8")
-        req = urllib.request.Request(f"{self.host.rstrip('/')}/api/generate", data=body, method="POST",
+        url = f"{self.host.rstrip('/')}/api/generate"
+        # W16-9: gate on the RESOLVED endpoint — a LocalProvider ("ollama") pointed at a
+        # cloud host is refused under a sovereign tier, not trusted on its declared label.
+        from ..sovereignty import assert_endpoint_permitted
+        assert_endpoint_permitted(url, purpose="memory consolidation (local model)")
+        req = urllib.request.Request(url, data=body, method="POST",
                                      headers={"content-type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:

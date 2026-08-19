@@ -58,7 +58,12 @@ class MoondreamVision:
             return ""
         body = json.dumps({"model": self.model, "prompt": (question or "Describe what is visible."),
                            "images": [b64], "stream": False}).encode("utf-8")
-        req = urllib.request.Request(f"{self.host.rstrip('/')}/api/generate", data=body, method="POST",
+        url = f"{self.host.rstrip('/')}/api/generate"
+        # W16-9: gate on the RESOLVED endpoint, not the "local" label — a MoondreamVision
+        # pointed at a cloud host is refused under a sovereign tier just like ClaudeVision.
+        from ..sovereignty import assert_endpoint_permitted
+        assert_endpoint_permitted(url, purpose="vision (local VLM)")
+        req = urllib.request.Request(url, data=body, method="POST",
                                      headers={"content-type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -105,8 +110,13 @@ class ClaudeVision:
                 {"type": "text", "text": (question or "Describe what is visible.")},
             ]}],
         }).encode("utf-8")
+        url = "https://api.anthropic.com/v1/messages"
+        # W16-9: SIGIL-plane frontier vision egress is now under the sovereignty tier —
+        # an air-gapped/sovereign tier REFUSES this cloud upload (raises SovereigntyRefusal).
+        from ..sovereignty import assert_endpoint_permitted
+        assert_endpoint_permitted(url, purpose="vision (frontier upload)")
         req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages", data=body, method="POST",
+            url, data=body, method="POST",
             headers={"content-type": "application/json", "x-api-key": self.api_key,
                      "anthropic-version": "2023-06-01"})
         try:

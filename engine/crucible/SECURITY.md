@@ -191,7 +191,8 @@ misconfigured deployment fails closed at startup.
 
 The tier is checked before any model client is constructed and before any
 provider SDK is imported, at **every** model-egress site in the offense
-plane:
+plane — and, as of [W16-9], at every model-egress site in the sovereign
+(SIGIL) plane too:
 
 | Egress site | Reached by | Gate |
 |---|---|---|
@@ -199,6 +200,23 @@ plane:
 | Live think step (`live/think_claude.py`) | `vigil engage` | `think_claude.llm_egress_refusal()` → the same `assert_permitted` |
 | Auto-patch coder (`live/codefix_runner.py`) | `vigil patch`, gated fix-apply | same |
 | Console terminal router (`console/actions.py::terminal_propose`) | the cockpit's natural-language terminal | same |
+| **SIGIL vision** (`sigil/perception/vision.py`) | ambient/frontier perception | `sigil.sovereignty.assert_endpoint_permitted(url)` |
+| **SIGIL memory consolidation** (`sigil/consolidate/extract.py`) | fact extraction | same |
+| **SIGIL voice** (`sigil/voice/backends.py`) | TTS / STT | same |
+
+The SIGIL plane runs in a **separate process** and MUST NOT import the
+offense engine (the FATAL-2 boundary), so `sigil.sovereignty` is a
+self-contained, pure-stdlib re-read of the **same** environment variables
+(`CRUCIBLE_SOVEREIGNTY_TIER`, legacy `CRUCIBLE_SOVEREIGN_MODE`) the offense
+`kernel.sovereignty` reads — one operator decision, honoured by both
+planes. Critically, the SIGIL gate validates the **resolved endpoint**
+(`classify_endpoint(url)`), not a caller-declared backend label: a client
+declaring `backend="ollama"` while pointing at `api.anthropic.com` is
+refused because the endpoint classifies `cloud`. Under a non-PERMISSIVE
+tier the SIGIL cloud endpoints (direct `api.anthropic.com`,
+`api.elevenlabs.io`) are refused; local (`localhost` / RFC-1918 / ULA)
+endpoints keep working, so an air-gapped voice/vision/memory stack runs on
+on-box Ollama / Whisper / Piper.
 
 Non-LLM egress is governed separately and is unchanged: HTTP to the
 target by `agents/scope_gate` + `agents/egress_guard`, intel collectors
@@ -206,21 +224,26 @@ by the collector-hosts allowlist.
 
 Honest limits — the tier does **not** cover:
 
-- The **sovereign (SIGIL) plane's own** model calls (voice, vision,
-  memory consolidation). Those run in a separate process behind SIGIL's
-  own WARDEN policy and read `SIGIL_ANTHROPIC_API_KEY` /
-  `ANTHROPIC_API_KEY` independently of `CRUCIBLE_SOVEREIGNTY_TIER`.
-- A **caller-injected** model client that in-process code declares as a
-  local backend. `backend="ollama"` on a client that actually reaches a
-  cloud endpoint defeats the gate — the declaration is trusted
-  in-process code, not a verified property. An *undeclared* injected
-  client is classified as cloud, so the default is fail-closed.
+- The **URK caller-injected** offense client that in-process code declares
+  as a local backend. In the offense plane `backend="ollama"` on a client
+  that actually reaches a cloud endpoint is trusted in-process code, not a
+  verified property. (An *undeclared* injected client is classified as
+  cloud, so the default is fail-closed. The **SIGIL** plane does not have
+  this gap: its gate keys on the resolved endpoint, not the label.)
 - Egress performed by **third-party tools** the engine shells out to.
   Those are bounded by the gateway / sandbox, not by this ladder.
+- In-process bypass: both gates run in Python inside their own process, so
+  code running in the same process could reach the socket directly. The
+  gate stops the engine *attempting* a disallowed call; it is not a packet
+  filter.
 
-A tier is not a network control. For an enforced boundary combine it with
-the egress gateway (`gateway/`) or host firewalling; the tier guarantees
-the engine will not *attempt* a disallowed model call.
+**A tier is not a network control.** This is true of BOTH the offense and
+the SIGIL gate. For an enforced boundary combine the tier with the egress
+gateway (`gateway/`) or host firewalling ([W0-6] #401 registers the
+network-layer control); the tier guarantees the engine will not *attempt*
+a disallowed model call. Together with [W0-7] #402 and [W10-2] #474 (and
+this [W16-9] SIGIL-plane gate), that is the complete set an air-gap claim
+depends on.
 
 ### Per-tier configuration
 
