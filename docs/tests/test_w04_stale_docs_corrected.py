@@ -102,7 +102,9 @@ REQUIRED_ANCHORS = [
     (TOOLS, "The offensive half is covered by the same tooling"),
     (README, "31 screens"),
     (MANIFEST, "no code reads static_allowlist"),
-    (SUPPLY, "The operator's install path now installs FROM the locks"),
+    # W0-4's SUPPLY-CHAIN correction (operator install now installs from the locks) was superseded on main by
+    # the more complete W3-6/W3-4/W3-9 supply-chain work (PR #565); anchor on that current, equivalent text.
+    (SUPPLY, "operator install path now installs from the locks"),
 ]
 
 
