@@ -150,6 +150,9 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "${ISSUE_BODY}" > /tmp/ssc-issue-body.md
+          # gh does not auto-create labels; ensure they exist so the FIRST real finding does not fail here
+          gh label create supply-chain --repo "${{ github.repository }}" --color ededed --description "supply-chain scan" --force >/dev/null 2>&1 || true
+          gh label create dependencies --repo "${{ github.repository }}" --color ededed --description "dependency updates" --force >/dev/null 2>&1 || true
           gh issue create \
             --repo "${{ github.repository }}" \
             --title "${ISSUE_TITLE}" \
