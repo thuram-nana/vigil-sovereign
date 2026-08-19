@@ -979,10 +979,11 @@ def _strix_session_llm_env(model_id: str, session_id: str) -> "tuple[dict, str]"
 # strings (the SOURCE OF TRUTH) — REPLICATED, not imported: that module is SOVEREIGN-side and importing it
 # into this OFFENSE interpreter would breach the two-env boundary (FATAL-2). Only the prefixes whose LiteLLM
 # spelling DIFFERS from the kernel.sovereignty backend name need mapping (``vertex_ai``→``vertex``,
-# ``azure``→``azure_openai``); ``ollama`` / ``bedrock`` / ``mistral`` map to themselves; ``anthropic`` is
-# resolved through ``direct_anthropic_backend_name()`` (ZDR attestation); ``openai`` (the self-hosted
-# family) is LOCAL only when its base URL is loopback. Any unrecognised prefix falls through to the raw
-# provider, which ``sovereignty.classify()`` conservatively treats as ``cloud_only`` — fail-closed.
+# ``azure``→``azure_openai``); ``bedrock`` / ``mistral`` map to themselves; ``anthropic`` is resolved through
+# ``direct_anthropic_backend_name()`` (ZDR attestation); ``openai`` (the self-hosted family) AND ``ollama`` are
+# LOCAL only when their base URL is loopback (a remote-pointed base fail-closes to ``cloud_only``) — both
+# get a dedicated branch in ``_strix_sovereignty_backend`` BEFORE this map. Any unrecognised prefix falls
+# through to the raw provider, which ``sovereignty.classify()`` conservatively treats as ``cloud_only``.
 _STRIX_PROVIDER_TO_SOVEREIGNTY = {
     "ollama":   "ollama",
     "bedrock":  "bedrock",
@@ -1019,6 +1020,21 @@ def _strix_sovereignty_backend(strix_llm_env: dict) -> str:
         except Exception:  # noqa: BLE001 — cannot prove loopback ⇒ NOT local (fail-closed cloud_only via "openai")
             ok = False
         return "self-hosted" if (base and ok) else "openai"   # classify("openai") → cloud_only (fail-closed)
+    if provider == "ollama":
+        # `ollama` classifies LOCAL — but only when it dials a LOOPBACK host. A caller-injected ollama pointed
+        # at a REMOTE base (LLM_API_BASE=http://evil:11434) would egress the source under AIR_GAPPED if we
+        # trusted the provider NAME alone, so mirror the openai sibling: a SET-but-non-loopback base fail-closes
+        # to cloud_only. An EMPTY base = the default localhost daemon (legitimately local) — preserved.
+        base = str(strix_llm_env.get("LLM_API_BASE") or os.environ.get("LLM_API_BASE", "") or "").strip()
+        if base:
+            try:
+                from . import chat as _chat
+                ok, _host = _chat._url_host_is_local(base)
+            except Exception:  # noqa: BLE001 — cannot prove loopback ⇒ NOT local (fail-closed cloud_only)
+                ok = False
+            if not ok:
+                return "openai"   # remote-pointed ollama → classify("openai") → cloud_only (fail-closed)
+        return "ollama"           # empty base (default localhost daemon) or loopback base → local
     return _STRIX_PROVIDER_TO_SOVEREIGNTY.get(provider, provider)  # unknown prefix → classify() cloud_only
 
 
