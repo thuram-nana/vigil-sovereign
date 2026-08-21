@@ -118,3 +118,34 @@ def test_error_signature_with_a_bound_request_can_mint(tmp_path):
     res = mint({"id": "e2", "bug_class": "error_based_sqli", CAPTURE_KEY: _errsig_capture(with_request=True)})
     assert res is not None, "the gate blocked a request-bound error-signature capture from minting"
     assert getattr(res, "is_fact", False), "a request-bound datastore-error capture did not mint a FACT"
+
+
+def test_error_signature_role_bypass_is_closed(tmp_path):
+    """RED-PEN regression: the oracle adjudicates ``_by_role(exs,'mutated') or exs[0]`` — so a role="" (or
+    any non-'mutated') error-signature exchange with NO bound request is still adjudicated. The gate must
+    select the SAME observed exchange the oracle does, not a literal role=='mutated' filter, and decline."""
+    mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="acme")
+    for role in ("", "q", "observed"):
+        cap = {"exchanges": [{"channel": "error_signature", "role": role, "response_bytes_ref": "resp",
+                              "status": 500, "bug_class": "error_based_sqli"}],
+               "blobs": {"resp": b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"}}
+        res = mint({"id": f"e-role-{role or 'empty'}", "bug_class": "error_based_sqli", CAPTURE_KEY: cap})
+        assert res is None, f"role={role!r} error-signature capture with no request minted instead of a LEAD"
+
+
+def test_error_signature_dangling_or_whitespace_request_ref_is_closed(tmp_path):
+    """RED-PEN regression: the gate must require the request to RESOLVE to non-empty bytes, not merely be a
+    non-empty ref STRING — a dangling ref (no blob) or a whitespace-only ref materializes nothing."""
+    mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="acme")
+    resp = b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"
+    cases = [
+        ("dangling", {"resp": resp}, "req"),                 # request_bytes_ref='req' but no 'req' blob
+        ("ws-bytes", {"resp": resp, "req": b"   "}, "req"),   # resolves to whitespace-only bytes
+        ("ws-ref", {"resp": resp}, "   "),                    # the ref itself is whitespace → no blob
+    ]
+    for name, blobs, ref in cases:
+        cap = {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
+                              "request_bytes_ref": ref, "status": 500, "bug_class": "error_based_sqli"}],
+               "blobs": blobs}
+        res = mint({"id": f"e-{name}", "bug_class": "error_based_sqli", CAPTURE_KEY: cap})
+        assert res is None, f"{name}: an unresolvable/whitespace request ref minted instead of a LEAD"

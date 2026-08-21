@@ -391,16 +391,10 @@
    "subject": "S3: keep the egress wiring SDK-free so its tests actually RUN in the required P8 job"
   },
   {
-   "commit": "0aa1a3513f8d058045af95b6d86941aeb5b51485",
+   "commit": "fd047f312aa314da6eebeeab82242368d0e4a739",
    "file": "022-s6-slice-1-causal-proof-capture-remove-the-retro.patch",
-   "sha256": "8c5570cd4ae2062fc5f2e876aa7bd6d5ea3084bba6053458a36c2ac89d97863f",
+   "sha256": "9ea20882adf59392af9d8ed58111c77320bce63b3f8aee1b683c2e52eb673364",
    "subject": "S6 (slice 1): causal proof capture \u2014 remove the retrospective substring correlation"
-  },
-  {
-   "commit": "33dd46fe6c74dc962d19366d2d72f15e9c415b4d",
-   "file": "023-s6-slice-2-inv-6-gate-bind-the-exploit-request-b.patch",
-   "sha256": "311d7877c4e8e4ccd2f270a444ef39d00413e16f4ec510e4c63ee9a0bcb7a023",
-   "subject": "S6 (slice 2) + inv-6 gate: bind the exploit REQUEST bytes and refuse a FACT without them (inv 6 + 8 MET)"
   }
  ],
  "schema": 1,
@@ -503,7 +497,7 @@
   "vendor/strix/strix/report/__init__.py": "5fb9afa100eb95e08ececc75d24d310f6dd6bb84b00da0b263e29e284c9dca5e",
   "vendor/strix/strix/report/anthropic_pricing.py": "114175e67481568fb7ab08105a10abe1afcc0edee90ee4698de5752e4b50d093",
   "vendor/strix/strix/report/dedupe.py": "f4094770da0dd5616912685269098620f57d7df8c107e1600336a92cb303adb4",
-  "vendor/strix/strix/report/proof_capture.py": "cc39a4d68e4a102a32148c34661f28c606967127536a963be0cdfb262e4af9be",
+  "vendor/strix/strix/report/proof_capture.py": "8a23c9d588b5b8b8924ef77fb71135c6fc55415d692abe47ac0f453f67d44489",
   "vendor/strix/strix/report/sarif.py": "2b32368c31a36628bae7dd6154b9a7190c979ab74ffdfe8ec72ce1c555773cb6",
   "vendor/strix/strix/report/state.py": "6b8d7c23ff30343581906e011c2fdecf43c7d13444bd786153876e6fdb638538",
   "vendor/strix/strix/report/usage.py": "3a526249ca46f9ab28d273f028a6f1327b52671887c909e3609ce48532e5aa27",
@@ -639,7 +633,7 @@
   "vendor/strix/tests_vigil/conftest.py": "d80ca1178799ec22789164cec7afefcc9b3538147f77e10f55bbe8439cffbd48",
   "vendor/strix/tests_vigil/test_anthropic_pricing.py": "21df8733982f747cadb06f569d061a29ff2ec07a0661087de35b86e6f4716d2c",
   "vendor/strix/tests_vigil/test_dedupe_extract.py": "908371cfb9105f8c871152306f9116bdf7d2b817f00974ed585a873ed099e4da",
-  "vendor/strix/tests_vigil/test_proof_capture.py": "8353aab117c4f75970df48c103ef6822d076be74aee9816775133bb24dd3a828",
+  "vendor/strix/tests_vigil/test_proof_capture.py": "9d79e789f4f468057a554fed0b2d8083762bd9edc30fd055ced10e5921263bc3",
   "vendor/strix/tests_vigil/test_reasoning_thinking.py": "56365c986fa3bb04ca250e45f7f2b126732a1c0c4b827d224ea44c75d9d515b0",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
   "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "e3de57c3f4a12ac48f08815597d3c70ee959867bc52b4642470b341052ff55c1",

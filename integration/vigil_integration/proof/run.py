@@ -342,16 +342,6 @@ def build_report_mint(
         except Exception:  # noqa: BLE001 — a malformed/hostile capture drops the mint (stays a LEAD), never raises
             return None
 
-        # INV 6/8 gate: an error-signature FACT rests on a datastore error in the RESPONSE, but a FACT must
-        # ALSO bind the exploit REQUEST that provoked it (inv 8). Without a bound ``request_bytes_ref`` the
-        # certificate would record a response with NO record of what was sent — a claim VIGIL cannot
-        # attribute — so the finding stays a LEAD (no mint). Once ``proof_capture`` binds the request bytes
-        # this passes. Other channels (a ``request_payload`` proof, a process-execution proof) bind their own
-        # causal artifact and are unaffected — the gate is scoped to the response-only error-signature case.
-        if any(getattr(ex, "channel", "") == "error_signature" and getattr(ex, "role", "") == "mutated"
-               and not (getattr(ex, "request_bytes_ref", "") or "") for ex in exchanges):
-            return None
-
         def _resolve(ref: str) -> "bytes | None":
             b = blobs.get(ref)
             if isinstance(b, (bytes, bytearray)):
@@ -359,6 +349,27 @@ def build_report_mint(
             if isinstance(b, str):
                 return b.encode("utf-8")
             return None
+
+        # INV 6/8 gate: an error-signature FACT rests on a datastore error in the RESPONSE, but a FACT must
+        # ALSO bind the exploit REQUEST that provoked it (inv 8). Without it the certificate would record a
+        # response with NO record of what was sent — a claim VIGIL cannot attribute — so the finding stays a
+        # LEAD (no mint). Two things this gate MUST get right (both were reproduced bypasses):
+        #   1. Mirror the ORACLE's observed-exchange selection. ``context_from_exchanges`` adjudicates
+        #      ``_by_role(exs,'mutated') or exs[0]`` — the FIRST error-signature exchange when none is
+        #      'mutated'. ``CapturedExchange.role`` is free-form (default ""), so a role="" exchange would
+        #      sail past a literal role=='mutated' filter yet still be adjudicated. Select the SAME exchange
+        #      the oracle will.
+        #   2. Require the request to RESOLVE to non-empty bytes, not merely be a non-empty ref STRING — a
+        #      dangling ref (no blob) or a whitespace-only ref materializes nothing (``_materialize`` skips
+        #      unresolvable refs) and would leave the FACT resting on the response alone.
+        # Non-error-signature channels (a ``request_payload`` proof, a process-execution proof) bind their
+        # own causal artifact and are unaffected.
+        _errsig = [ex for ex in exchanges if getattr(ex, "channel", "") == "error_signature"]
+        if _errsig:
+            _observed = next((ex for ex in _errsig if getattr(ex, "role", "") == "mutated"), _errsig[0])
+            _req = _resolve(getattr(_observed, "request_bytes_ref", "") or "")
+            if not (_req and _req.strip()):
+                return None
 
         finding = _finding_from_report(report)
         action_id = "poc-" + hashlib.sha256(str(finding["check_id"]).encode("utf-8")).hexdigest()[:16]

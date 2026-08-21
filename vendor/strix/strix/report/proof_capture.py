@@ -86,9 +86,12 @@ def _request_bytes(fetched: Any) -> "bytes | None":
     that could not recover the request simply carries no request binding (⇒ the mint declines a FACT)."""
     req = getattr(fetched, "request", None)
     raw = getattr(req, "raw", None) if req is not None else None
-    if raw is None:
+    # Accept ONLY real request bytes/text — never ``str()``-coerce an arbitrary object (a duck-typed ``.raw``
+    # with a custom ``__str__`` would otherwise fabricate "request" bytes). A non-primitive raw ⇒ no binding
+    # ⇒ the mint declines a FACT (a missing binding is safe; a fabricated one is not).
+    if not isinstance(raw, (bytes, bytearray, str)):
         return None
-    return _as_bytes(raw if isinstance(raw, (bytes, bytearray)) else str(raw))
+    return _as_bytes(raw)
 
 
 def _response_body(fetched: Any, parse: Any) -> tuple["bytes | None", Optional[int]]:
