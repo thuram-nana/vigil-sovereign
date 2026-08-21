@@ -347,7 +347,11 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         return verdict
 
     # -- gate (F2/F3): the conjunctive gate over the signed authority --------------------------------
-    gate = _build_gate(prov, ceiling=config.offense_ceiling)
+    # H1: when a propose-only brain drives the run, let ITS danger class raise a tool's tier (raise-only).
+    # Duck-typed so this module need not import the brains layer; a brain without the hook changes nothing.
+    _brain_floor = getattr(config.brain, "danger_floor", None) if config.brain is not None else None
+    _classify = _brain_floor(default_classify) if callable(_brain_floor) else None
+    gate = _build_gate(prov, ceiling=config.offense_ceiling, classify=_classify)
 
     # The executor's egress guard is keyed off the SAME signed-authority scope the gate enforces (re-loaded
     # per call). Two distinct fail-closed outcomes: (a) a per-call load/verify failure INSIDE the scope source
@@ -864,7 +868,8 @@ def coerce_int_safe(value: Any) -> int:
         return 0
 
 
-def _build_gate(prov: Provisioned, *, ceiling: str = "A1") -> Optional[Callable[..., Any]]:
+def _build_gate(prov: Provisioned, *, ceiling: str = "A1",
+                classify: Optional[Callable[[str], str]] = None) -> Optional[Callable[..., Any]]:
     """The conjunctive gate over the signed authority. None (⇒ every tool call DENIED) if the framework
     gate cannot be built. ``ceiling`` is the operator's standing approval tier (see EngineConfig)."""
     try:
@@ -883,7 +888,8 @@ def _build_gate(prov: Provisioned, *, ceiling: str = "A1") -> Optional[Callable[
             # conjunctive_decide DENIES anyway. So this can never silently drop a *working* kill-switch.
             killswitch = None
         return build_offense_gate(slug=prov.slug, trust_root=prov.trust_root,
-                                  classify=default_classify, ceiling=ceiling, killswitch=killswitch)
+                                  classify=classify or default_classify, ceiling=ceiling,
+                                  killswitch=killswitch)
     except Exception:  # noqa: BLE001 — no gate wired ⇒ deny-by-default (the engine denies every call)
         return None
 

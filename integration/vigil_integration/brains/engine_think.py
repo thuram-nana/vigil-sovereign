@@ -52,6 +52,34 @@ class BrainThink:
         self._steps: Optional[list] = None
         self._i = 0
 
+    def danger_floor(self, base_classify):
+        """Wrap the offense classifier so the PLANNER's danger class can only RAISE a tool's tier.
+
+        H1 — the divergence this closes. The brain classifies every tool it may propose as RECON or ACTIVE,
+        but that judgement was dropped at the engine seam: the tier is re-derived from the executor's own
+        ``default_classify``, whose curated ``_RECON`` set contains ``nuclei`` — a tool the brain calls
+        ACTIVE, and which sends attack templates rather than merely observing. So a brain-proposed ACTIVE
+        step could classify A1 and become auto-eligible. Two VIGIL-owned tables disagreed and the weaker
+        one won.
+
+        RAISE-ONLY, and only on the brain path. An ACTIVE tool never lands below A2; a RECON tool is
+        untouched; a name the brain does not know is untouched; and a tier the base classifier already put
+        ABOVE A2 (a danger-token A3) is never lowered. Non-brain runs keep ``default_classify`` exactly as
+        it was, so this changes no behaviour outside a ``--brain`` engagement.
+        """
+        from .hexstrike_brain import ToolDanger, _TOOL_DANGER
+
+        order = {"A0": 0, "A1": 1, "A2": 2, "A3": 3}
+
+        def _classify(tool_name: str) -> str:
+            base = base_classify(tool_name)
+            if _TOOL_DANGER.get(str(tool_name).strip()) is not ToolDanger.ACTIVE:
+                return base
+            # never lower: take the stricter of the base tier and the ACTIVE floor
+            return base if order.get(base, 0) >= order["A2"] else "A2"
+
+        return _classify
+
     def _profile(self, state: Any):
         target = self._target or getattr(state, "objective", "") or ""
         tt = self._obs.get("target_type")
