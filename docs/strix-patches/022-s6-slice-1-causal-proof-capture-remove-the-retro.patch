@@ -1,6 +1,6 @@
-From 0aa1a3513f8d058045af95b6d86941aeb5b51485 Mon Sep 17 00:00:00 2001
+From fd047f312aa314da6eebeeab82242368d0e4a739 Mon Sep 17 00:00:00 2001
 Subject: [strix-patch 022] S6 (slice 1): causal proof capture — remove the retrospective substring correlation
-X-VIGIL-Commit: 0aa1a3513f8d058045af95b6d86941aeb5b51485
+X-VIGIL-Commit: fd047f312aa314da6eebeeab82242368d0e4a739
 X-VIGIL-Date: 2026-08-21T15:13:08-04:00
 
 diff --git a/vendor/strix/strix/report/proof_capture.py b/vendor/strix/strix/report/proof_capture.py

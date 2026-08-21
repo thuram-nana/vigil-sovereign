@@ -247,13 +247,18 @@ def test_inv06_no_minted_fact_rests_on_bytes_vigil_did_not_send():
       * ERROR-SIGNATURE column (this slice): ``build_report_mint`` REFUSES a FACT for an error-signature
         capture that binds no exploit REQUEST (the ``request_bytes_ref`` gate below) — so a certificate can
         no longer rest on a RESPONSE with no record of what was sent; the finding stays a LEAD until the
-        request is bound (which ``proof_capture`` now does, inv 8). Behaviour is proven in
-        ``test_proof_run.test_error_signature_without_a_bound_request_stays_a_lead`` (response-only → LEAD)
-        and ``..._with_a_bound_request_can_mint`` (request-bound → FACT)."""
+        request is bound (which ``proof_capture`` now does, inv 8). The gate mirrors the ORACLE's observed-
+        exchange selection (not a literal role filter) and requires the request to RESOLVE to non-empty
+        bytes (not merely a non-empty ref string) — both were reproduced bypasses, now closed. Behaviour is
+        proven in ``test_proof_run``: ``..._without_a_bound_request_stays_a_lead`` (response-only → LEAD),
+        ``..._with_a_bound_request_can_mint`` (request-bound → FACT), ``..._role_bypass_is_closed`` (role=""
+        → LEAD), ``..._dangling_or_whitespace_request_ref_is_closed`` (unresolvable ref → LEAD)."""
     mint_code = _fn_code("integration/vigil_integration/proof/run.py", "build_report_mint")
-    assert "request_bytes_ref" in mint_code, (
-        "the captured-bytes mint no longer gates on the exploit REQUEST being bound — a FACT could rest on "
-        "response-only bytes VIGIL did not send"
+    # structural: the gate must RESOLVE the request ref (not just check the string) — a reverted string-only
+    # gate would drop the _resolve()/strip() enforcement. The behavioural tests above are the real guard.
+    assert "request_bytes_ref" in mint_code and "_resolve(" in mint_code and ".strip()" in mint_code, (
+        "the captured-bytes mint no longer resolves + non-empty-checks the exploit REQUEST binding — a FACT "
+        "could rest on response-only bytes VIGIL did not send (dangling/whitespace ref or role bypass)"
     )
 
 
