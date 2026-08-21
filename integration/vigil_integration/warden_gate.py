@@ -279,8 +279,8 @@ class WardenGateHooks:
                 f"WARDEN gate blocked tool {name!r}: {decision.outcome} ({decision.reason}); no approval "
                 f"authority provisioned (run `vigil approve provision-authority`)."
             )
-        target = _strix_target(tool)
         args = _strix_args(getattr(context, "tool_arguments", None))
+        target = _strix_target(name, args)
         try:
             # The approver publishes the pending request then (bounded) waits for a matching owner-signed
             # token — a synchronous, blocking poll. Offload it to a worker thread so the bounded wait does NOT
@@ -330,10 +330,41 @@ def _strix_base_dir() -> str:
     return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
 
 
-def _strix_target(tool: Any) -> str:
-    """Best-effort approval-binding target for a Strix tool call. Strix's shell/exec tools have NO network
-    target (they run locally), so bind them to a constant local sentinel — the single-use nonce still makes
-    each queued invocation independently owner-approved."""
+def _strix_target(tool_name: str, args: Any = None) -> str:
+    """The approval-binding target label an owner SEES before signing a queued Strix call.
+
+    The single-use nonce already binds each queued invocation independently (the action_digest covers the
+    full ``args``), so this label is not what makes a token unforgeable. What it fixes is a DIFFERENT gap:
+    for the network tools the label used to be the constant ``"strix:exec"`` — so an owner asked to approve
+    a ``repeat_request`` saw "exec" and a bare request-id, blind to which HOST the attacker-modified traffic
+    would hit. W16-5 added ``repeat_request`` (attacker-modified traffic to a URL) to the gated set, which
+    made the old "Strix's tools have NO network target" justification false. This resolves the real
+    destination into the label so the owner authorizes a specific host, not a sentinel.
+
+    * ``repeat_request`` — sends a modified copy of a captured request. The destination is
+      ``modifications.url`` when the agent overrides it, else the host of the referenced captured request
+      (which is NOT in the args — only the ``request_id`` is), so bind to the overridden URL if present,
+      else to the specific ``request_id`` the owner can inspect with ``view_request``. Never a constant.
+    * ``web_search`` — external egress (a Perplexity lookup); its destination is that service, not the
+      engagement target. Label it as such so it is never confused with target traffic. The query is in
+      ``args`` and stays bound there.
+    * ``exec_command`` / ``write_stdin`` — the command string IS the payload and is bound via ``args``;
+      they have no single network destination, so the local sentinel remains honest for them.
+    """
+    name = str(tool_name or "").strip()
+    if name == "repeat_request":
+        if isinstance(args, dict):
+            mods = args.get("modifications")
+            if isinstance(mods, dict):
+                url = mods.get("url")
+                if isinstance(url, str) and url.strip():
+                    return f"strix:repeat_request:{url.strip()}"
+            rid = args.get("request_id")
+            if isinstance(rid, (str, int)) and str(rid).strip():
+                return f"strix:repeat_request:req={str(rid).strip()}"
+        return "strix:repeat_request"
+    if name == "web_search":
+        return "strix:web_search"
     return "strix:exec"
 
 
