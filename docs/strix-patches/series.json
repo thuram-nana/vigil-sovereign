@@ -243,6 +243,7 @@
   "vendor/strix/strix/report/dedupe.py",
   "vendor/strix/strix/report/proof_capture.py",
   "vendor/strix/strix/report/state.py",
+  "vendor/strix/strix/runtime/caido_bootstrap.py",
   "vendor/strix/strix/runtime/docker_client.py",
   "vendor/strix/strix/skills/__init__.py",
   "vendor/strix/strix/telemetry/__init__.py",
@@ -257,6 +258,7 @@
   "vendor/strix/tests_vigil/test_proof_capture.py",
   "vendor/strix/tests_vigil/test_reasoning_thinking.py",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py",
+  "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py",
   "vendor/strix/uv.lock"
  ],
  "note": "vendor/strix == the pristine upstream import at base_import_commit, plus the patches below, in order. Verified byte-for-byte.",
@@ -370,10 +372,16 @@
    "subject": "W3-9 (#432): clear the vendored HIGH backlog and raise the trivy gate to HIGH"
   },
   {
-   "commit": "c0c554e808f9194a7d26c36f1713929a5f900a4d",
+   "commit": "5d0865bd4932016b47e13b51ba8936dc1d07daed",
    "file": "019-s0-record-the-vendored-strix-upstream-provenance.patch",
-   "sha256": "cdaac1af5f4e961bf4241249ae98c433e8b066aaaf8bcf3f6c20ce3817586cc0",
+   "sha256": "ed4402ea7b3834335eed63255f5ef266b213e557febd5bbe0b404533789045c3",
    "subject": "S0: record the vendored-Strix upstream provenance and point NOTICE at the patch series"
+  },
+  {
+   "commit": "a12bbfb04786854ca219406bb6ffc04feed2b792",
+   "file": "020-s3-forward-the-sandbox-s-traffic-through-the-vig.patch",
+   "sha256": "b3ec69d3ef09dc4ae5882daeca84d2ff9deb08576f84cf51c3bea1352b6ffdc8",
+   "subject": "S3: forward the sandbox's traffic through the VIGIL gateway (the other half of the S2 pin)"
   }
  ],
  "schema": 1,
@@ -483,7 +491,7 @@
   "vendor/strix/strix/report/writer.py": "b8ff04c3dbcb6b1c3b1759ef796761b09fa872fe5274f2338e93008f3e675205",
   "vendor/strix/strix/runtime/__init__.py": "ac8999103459c5bb68ad82e1adaa6be8a30ccbb779393da8768340b60a76786b",
   "vendor/strix/strix/runtime/backends.py": "005d62b552bb494800d00ef16232499f4baa23b5e8371ff7f88168a6a0da0f04",
-  "vendor/strix/strix/runtime/caido_bootstrap.py": "0ea4800070b9f307f122e422c7aa8e98c2cc549e492eb51e732997bb0b3fd456",
+  "vendor/strix/strix/runtime/caido_bootstrap.py": "e2a0c5b49195705c0095086e5ffde581033d6a4dcb2e32f03cf2cbcb0838738d",
   "vendor/strix/strix/runtime/docker_client.py": "874f20e07f660021844e163e6fb931585a9c3c83ae53204349c788961ad2e903",
   "vendor/strix/strix/runtime/local_dir_staging.py": "4f8bc84226fb42cf816376e1706cecbe72dd633c69bf4a39eb2489f84b7fdabc",
   "vendor/strix/strix/runtime/session_manager.py": "b40dfb64ff65d40b10a41e47968e54b0713776e4e68bf8a427def811d434a5a2",
@@ -614,6 +622,7 @@
   "vendor/strix/tests_vigil/test_proof_capture.py": "2f29a56a184579c449668905ddc21ce57b2cc808671e3a88e744f770674b7230",
   "vendor/strix/tests_vigil/test_reasoning_thinking.py": "56365c986fa3bb04ca250e45f7f2b126732a1c0c4b827d224ea44c75d9d515b0",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
+  "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "db8a9a49ab804998142e06cee1c666833167357f99baef107f832abaf43284f1",
   "vendor/strix/uv.lock": "ef01a512cf243a9b7084e4724a89c52ef8567e6a144057219e72940280716a26"
  },
  "upstream_commit": "230324d2b80a5a27506f85fc521845d8464b04c0",

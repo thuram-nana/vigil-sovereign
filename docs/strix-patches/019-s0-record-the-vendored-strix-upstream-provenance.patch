@@ -1,6 +1,6 @@
-From c0c554e808f9194a7d26c36f1713929a5f900a4d Mon Sep 17 00:00:00 2001
+From 5d0865bd4932016b47e13b51ba8936dc1d07daed Mon Sep 17 00:00:00 2001
 Subject: [strix-patch 019] S0: record the vendored-Strix upstream provenance and point NOTICE at the patch series
-X-VIGIL-Commit: c0c554e808f9194a7d26c36f1713929a5f900a4d
+X-VIGIL-Commit: 5d0865bd4932016b47e13b51ba8936dc1d07daed
 X-VIGIL-Date: 2026-08-21T02:04:23-04:00
 
 diff --git a/vendor/strix/NOTICE b/vendor/strix/NOTICE
