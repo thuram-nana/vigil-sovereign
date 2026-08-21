@@ -674,6 +674,35 @@ def collect(repo_root) -> dict:
         for e in gate["unmet"]:
             _issue(f"PRODUCTION posture (VIGIL_POSTURE={gate['posture']}): {e['control']} is {e['state']} — "
                    f"{e['requirement']} (refuses `vigil up` / `vigil engage` until satisfied)")
+    # 10) Integrity (W6-7) — continuously verify the property the product EXISTS to guarantee: the spine
+    #    hash-chain / attestation. Runs the boundary-safe integrity verifier over the sovereign spine home
+    #    (SIGIL_HOME): chain integrity, signed-head freshness, the anti-rollback floor, clock skew, plus the
+    #    DEAD-MAN check that the scheduled verifier is actually running. A genuine integrity VIOLATION is a
+    #    HARD issue (it flips `ok`); ABSENT/idle states are not. FATAL-2: the verifier reads inert on-disk
+    #    bytes and imports only `vigil_core` — never `sigil`. Function-local import keeps doctor's load path
+    #    light (mirrors the services import above).
+    try:
+        from . import integrity_verifier as _iv
+        ir = _iv.verify_integrity(home)
+        report["integrity"] = {
+            "ok": ir.ok,
+            "checks": [{"check": c.check, "status": c.status, "detail": c.detail} for c in ir.checks],
+        }
+        for c in ir.checks:
+            if c.failed:
+                _issue(f"spine integrity check '{c.check}' FAILED: {c.detail}")
+        stale, hb_detail = _iv.heartbeat_is_stale(_iv._default_heartbeat_path(home))
+        report["integrity"]["heartbeat_stale"] = stale
+        report["integrity"]["heartbeat_detail"] = hb_detail
+        # Dead-man: the periodic verifier not running is a NOTE by default (the timer is opt-in — an
+        # operator who never enabled it should not see a hard failure), but if a spine exists it is a real
+        # gap worth surfacing.
+        if stale:
+            _note(f"the scheduled integrity verifier is not running: {hb_detail} — enable it with "
+                  f"`vigil verify-integrity --watch` (systemd: vigil-integrity.timer).")
+    except Exception as exc:  # noqa: BLE001 — the integrity probe must never crash the report
+        report["integrity"] = {"ok": None, "error": f"{type(exc).__name__}: {exc}", "checks": []}
+        _note(f"the integrity verifier could not run: {exc}")
     return report
 
 
@@ -764,6 +793,20 @@ def render(report: dict) -> str:
             if not c.get("met"):
                 seg += f"  — {c.get('requirement', '')}"
             lines.append(seg)
+    integ = report.get("integrity")
+    if integ is not None:
+        lines.append("\nSpine integrity (the property the product exists to guarantee):")
+        if integ.get("error"):
+            lines.append(f"  ?? verifier error: {integ['error']}")
+        for c in integ.get("checks", []):
+            st = str(c.get("status", "?"))
+            mark = {"ok": "OK ", "fail": "!! ", "warn": ".. ", "absent": "-- ",
+                    "unknown": "?? "}.get(st, "?? ")
+            lines.append(f"  {mark}{c.get('check', '?')}: {st}  — {c.get('detail', '')}")
+        if integ.get("heartbeat_stale") is not None:
+            hb = "!! " if integ.get("heartbeat_stale") else "OK "
+            lines.append(f"  {hb}scheduled-verifier heartbeat: {integ.get('heartbeat_detail', '')}")
+
     issues = report.get("issues", [])
     if issues:
         lines.append("\nAction needed (blocks bring-up):")
