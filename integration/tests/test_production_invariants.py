@@ -39,10 +39,9 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 
 # The scoreboard, as a committed constant. A silent change to what we claim is itself a failure.
-MET = {1, 2, 3, 5, 7, 9, 10, 11}
-UNMET = {4, 6, 8, 12}
+MET = {1, 2, 3, 4, 5, 7, 9, 10, 11}
+UNMET = {6, 8, 12}
 _CLOSED_BY = {
-    4: "S4 — WARDEN default-deny: an unregistered Strix tool must not classify A0",
     6: "S6/S7 — causal capture + a VIGIL-owned re-drive before any FACT",
     8: "S6 — capture the exploit REQUEST bytes into the evidence envelope",
     12: "S9 — a typed verification_degraded state instead of six silent swallows",
@@ -184,16 +183,15 @@ def test_inv03_negative_control_the_gate_can_refuse_and_the_local_map_is_closed(
 
 
 # =========================================================================================
-# 4. No unknown tool executed through a generic shell.                              UNMET
+# 4. No unknown tool executed through a generic shell.                                 MET
 # =========================================================================================
 
-@pytest.mark.xfail(strict=True, reason=f"UNMET — {_CLOSED_BY[4]}")
 def test_inv04_an_unregistered_strix_tool_does_not_auto_run():
     """An unknown/newly-registered Strix tool must fail closed, not classify A0 and auto-run.
 
-    ``_strix_shell_classifier`` returns A3 for a known gated name and **A0 for everything else**, and the
-    hook floor is A0, so there is nothing to raise an unrecognised name. A tool added upstream — or by an
-    agent registering one at runtime — executes with no approval.
+    CLOSED by S4 slice 1: ``_strix_shell_classifier`` now returns A0 only for the EXPLICIT allowlist
+    ``_STRIX_AUTO_TOOLS`` and A3 (queue) for every other name — so a tool added upstream, or one an agent
+    registers at runtime, fails closed to owner approval instead of auto-running under the A0 floor.
     """
     from vigil_integration.warden_gate import _strix_shell_classifier
 
