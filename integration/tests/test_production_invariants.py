@@ -42,7 +42,7 @@ _REPO = Path(__file__).resolve().parents[2]
 MET = {1, 2, 3, 4, 5, 7, 9, 10, 11}
 UNMET = {6, 8, 12}
 _CLOSED_BY = {
-    6: "S6/S7 — causal capture + a VIGIL-owned re-drive before any FACT",
+    6: "S7 — a VIGIL-owned re-drive (web_redrive) on the proof path (S6 slice 1 removed the substring correlation)",
     8: "S6 — capture the exploit REQUEST bytes into the evidence envelope",
     12: "S9 — a typed verification_degraded state instead of six silent swallows",
 }
@@ -243,21 +243,34 @@ def test_inv05_negative_control_admission_can_produce_a_verdict():
 
 @pytest.mark.xfail(strict=True, reason=f"UNMET — {_CLOSED_BY[6]}")
 def test_inv06_a_strix_finding_is_verified_by_traffic_vigil_itself_sent():
-    """Today the proof path adjudicates bytes Caido happened to have recorded; VIGIL sends nothing.
+    """VIGIL-owned verification means VIGIL RE-SENDS the exploit and adjudicates ITS OWN fresh capture — the
+    built-but-uncalled ``live/web_redrive.py`` wired into the proof path (S7). Until that caller exists a
+    minted Strix FACT can still rest on Caido-recorded bytes VIGIL did not itself send.
 
-    ``capture_for_report`` resolves the exchange with a substring HTTPQL query
-    (``req.path.cont`` + newest-first, LIMIT 1) and returns ``control_id = None``, so the oracle's control
-    comparison is dead and no VIGIL-originated request exists to bind the claim to.
-    """
+    S6 slice 1 already removed the retrospective substring correlation (pinned by
+    ``test_inv06_slice1_the_retrospective_substring_correlation_is_removed`` below); but removing the WRONG
+    selector is a necessary step, not the same as VIGIL sending the verifying traffic — which is what closes
+    this invariant."""
+    proof_path = (_src("integration/vigil_integration/proof/sink.py")
+                  + _src("integration/vigil_integration/proof/run.py"))
+    assert "web_redrive" in proof_path, (
+        "no VIGIL-owned re-drive on the proof path — a minted Strix FACT still rests on bytes VIGIL did "
+        "not itself send"
+    )
+
+
+def test_inv06_slice1_the_retrospective_substring_correlation_is_removed():
+    """S6 slice 1 (landed): the exploit exchange is cited causally, never selected by 'the most recent
+    request whose path contains this substring'. Pinned so the unsound selector cannot silently return."""
     capture = _src("vendor/strix/strix/report/proof_capture.py")
-    assert "req.path.cont" not in capture, (
-        "the exploit exchange is still selected by a retrospective substring match rather than cited "
-        "causally by the agent that sent it"
+    assert "req.path.cont" not in capture, "the retrospective path-substring correlation is back"
+    assert "list_requests" not in capture, (
+        "a most-recent/listing correlation is back on the capture path — the selector must be a cited id only"
     )
 
 
 def test_inv06_negative_control_the_causal_identifiers_exist_and_are_simply_unused():
-    """The fix is wiring, not construction: the parameter and the returned ids already exist."""
+    """The remaining fix is wiring, not construction: the parameter and the returned ids already exist."""
     capture = _src("vendor/strix/strix/report/proof_capture.py")
     assert "explicit_ids" in capture, "capture_for_report already accepts explicit ids"
     assert "session_id" in _src("vendor/strix/strix/tools/proxy/caido_api.py"), (

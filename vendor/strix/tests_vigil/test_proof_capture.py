@@ -85,12 +85,29 @@ def test_capture_for_report_uses_an_explicit_request_id():
     assert cap["exchanges"][0]["status"] == 500
 
 
-def test_capture_for_report_auto_correlates_via_list_requests():
+def test_capture_for_report_refuses_without_a_cited_request_id():
+    """The retrospective substring auto-correlation is GONE (S6/inv 6): without an explicitly cited id the
+    capture is refused, so the finding stays a LEAD even though a matching error-bearing request exists in
+    Caido. VIGIL earns the FACT only by re-driving the exchange the agent actually sent (S7)."""
     raw = b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"
+    # a request Caido recorded that the OLD code would have substring-matched and minted a signed FACT from:
     caido = _FakeCaido(by_id={"r1": _Fetched(raw)}, listing={"edges": [{"node": {"id": "r1"}}]})
     cap = asyncio.run(pc.capture_for_report(
         {"finding_class": "sqli", "endpoint": "/search", "method": "GET"}, caido=caido))
-    assert cap is not None and b"ORA-00933" in cap["blobs"]["resp"]
+    assert cap is None, "a finding with no cited request id must NOT auto-correlate into a proof"
+
+
+def test_capture_for_report_never_queries_list_requests_for_correlation():
+    """Negative control: the capture must not fall back to a listing query at all — if it does, a
+    substring / most-recent correlation has crept back in."""
+    class _NoListing(_FakeCaido):
+        async def list_requests(self, **kw):  # noqa: ANN001
+            raise AssertionError("capture_for_report performed a retrospective list_requests correlation")
+
+    caido = _NoListing(by_id={"r1": _Fetched(b"HTTP/1.1 500\r\n\r\nORA-00933")},
+                       listing={"edges": [{"node": {"id": "r1"}}]})
+    assert asyncio.run(pc.capture_for_report(
+        {"finding_class": "sqli", "endpoint": "/search"}, caido=caido)) is None
 
 
 def test_capture_for_report_is_none_without_a_class_or_on_error():
