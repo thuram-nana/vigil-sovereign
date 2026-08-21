@@ -15,6 +15,12 @@
 #     tools/governance/require-checks.sh is arranged around). The offline test refuses that.
 #   - The nightly-only `livefire full table (nightly)` is deliberately NOT here: it never reports on a
 #     PR, so requiring it would block every PR. The offline test asserts it stays out.
+#   - Every OTHER pull_request job that is deliberately NOT required (the advisory security scans, the
+#     pre-commit mirror, the perf-regression gate, the wider W2-2 lint sweep, the daily supply-chain
+#     scan, and the token-gated branch-protection live-pin) is enumerated WITH A STATED REASON in the
+#     KNOWN_ADVISORY ledger of docs/tests/test_required_checks_canonical.py. That offline test asserts
+#     the pull_request job set equals EXACTLY (this file plus that ledger), so a NEW pull_request job
+#     cannot become silently unguarded the way five jobs once did (W0-2 #397).
 #   - Order is not significant; every consumer compares as a set. This file is kept in the GitHub API's
 #     case-insensitive order purely so a human can diff it against the live settings by eye.
 #

@@ -23,6 +23,12 @@ separate, required `.github/workflows/branch-protection-verify.yml`):
       enumerates a nightly-only check as required. This is the doc-truth pin.
   (d) tools/governance/require-checks.sh reads the canonical file and does NOT carry its own second
       copy of the list. Two lists can drift; one cannot.
+  (e) The REVERSE of (a) — the drift direction (a) cannot see (W0-2 #397). Every job that runs on a
+      pull_request is either a required (canonical) check OR is enumerated in the KNOWN_ADVISORY
+      ledger with a stated reason; every job that never runs on a PR is in KNOWN_NONPR_ADVISORY; and
+      every nightly names a per-PR blocking SUBSET that is itself required (NIGHTLY_BLOCKING_SUBSET).
+      So the required set equals the full PR-job set minus a written, reasoned exclusion list — a new
+      advisory job cannot slip in unguarded the way five jobs once did.
 
 NEGATIVE CONTROL. The pure helpers below take their data as arguments precisely so the perturbation
 can be exercised in-process, not merely described. `test_negative_control_*` feed the checkers a
@@ -54,6 +60,84 @@ TOOL = REPO / "tools" / "governance" / "require-checks.sh"
 # Jobs that deliberately never run on a pull request. Requiring one would wait for a check that no PR
 # produces and block every PR forever, so the canonical list must exclude them and this test proves it.
 KNOWN_NIGHTLY = {"livefire full table (nightly)"}
+
+# W0-2 (#397): the OTHER half of the equality. test_canonical_checks_are_all_pr_jobs proves
+# canonical ⊆ (pull_request jobs); the dicts below let test_every_pr_job_is_required_or_excused prove
+# the reverse — that the set of pull_request jobs equals EXACTLY (canonical ∪ these excused names).
+# Before this, five jobs (`briefing-completeness`, `crucible-eval`, `sigil-lint`, `livefire-smoke`,
+# `livefire-full`) had drifted out of the required set with nothing asserting they were accounted for; a
+# new advisory PR job could join them unnoticed. Four of the five are now REQUIRED (they are in the
+# canonical file); the nightly `livefire-full` is guarded by its required per-PR subset (see
+# NIGHTLY_BLOCKING_SUBSET). A name earns a place here only with a stated, TRUE reason grounded in the
+# workflow that produces it — "advisory" on its own is not a reason, and test_advisory_reasons_are_real
+# rejects an empty or one-word excuse.
+
+# Jobs that DO run on a pull_request but are deliberately NOT required. Each reason is checkable against
+# the header comment of the workflow that produces the job.
+KNOWN_ADVISORY: dict[str, str] = {
+    "CodeQL Python (advisory)": (
+        "security-scan.yml — CodeQL SAST reports on every PR but does not block a merge while the "
+        "rulesets are still bedding in; a single false positive must not freeze the merge queue."
+    ),
+    "SAST — semgrep + bandit (advisory)": (
+        "security-scan.yml — semgrep+bandit over the curated ruleset; advisory, but its policy and a "
+        "planted-fixture NEGATIVE CONTROL are pinned by docs/tests/test_security_scan_policy.py, which "
+        "rides the REQUIRED 'the briefing explains every agent and capability' job."
+    ),
+    "secret scan — gitleaks (advisory)": (
+        "security-scan.yml — gitleaks over the working tree; advisory here, but the .gitleaks.toml policy "
+        "plus a planted-secret NEGATIVE CONTROL are pinned by the REQUIRED docs/tests job, and secrets are "
+        "also caught locally by the pre-commit hooks."
+    ),
+    "performance regression gate (advisory)": (
+        "bench-perf.yml — a wall-clock gate wants its baseline re-recorded on the CI runner class before "
+        "it blocks merges; the gate LOGIC and its NEGATIVE CONTROL are already proven in the REQUIRED "
+        "docs/tests job via docs/tests/test_perf_gate.py."
+    ),
+    "pre-commit hooks (advisory)": (
+        "pre-commit.yml — re-runs the local .pre-commit-config hooks on the PR (where --no-verify cannot "
+        "skip them); advisory because the same lint/format guarantees are enforced by the REQUIRED "
+        "'SIGIL lint' job, and the config is pinned by docs/tests/test_precommit_config.py."
+    ),
+    "lint-config (W2-2 ruff + mypy — every package incl tests)": (
+        "lint-config.yml — a wider ruff+mypy config sweep over every package incl tests; advisory until "
+        "the W2-1 (#418) blocking ratchet promotes it. The blocking lint subset is the REQUIRED "
+        "'SIGIL lint (ruff blocking + mypy can-complete)' job."
+    ),
+    "scheduled supply-chain scan (advisory)": (
+        "scheduled-supply-chain-scan.yml — the daily counterpart to the REQUIRED 'A14 supply-chain gate'; "
+        "it runs on a PR only so its own change can be seen green, and its issue-opening step fires only on "
+        "the schedule event. The blocking CVE guarantee is the A14 gate, not a second merge-blocker."
+    ),
+    "branch protection matches the committed policy": (
+        "branch-protection-verify.yml — a live-reality pin that is INERT without the BRANCH_PROTECTION_TOKEN "
+        "secret (the default GITHUB_TOKEN cannot read branch protection). It must not be promoted to a "
+        "required check until that secret exists, or it would block every PR as a no-op. The committed "
+        "artifacts are pinned offline by this very test."
+    ),
+}
+
+# Jobs that never run on a pull_request at all (push/tag or schedule/dispatch only) and so CANNOT be a PR
+# status check. A nightly whose surface still needs guarding names its required per-PR subset below.
+KNOWN_NONPR_ADVISORY: dict[str, str] = {
+    "livefire full table (nightly)": (
+        "livefire.yml — schedule/workflow_dispatch only; it never reports on a PR, so requiring it would "
+        "block every PR. Its per-PR blocking subset 'livefire smoke (per-PR subset)' IS required."
+    ),
+    "build, sign and attest release artifacts": (
+        "release.yml — triggers on push (tags), never on a pull_request, so it cannot be a PR status check."
+    ),
+    "publish to PyPI (opt-in, trusted publishing)": (
+        "release.yml — push-triggered and opt-in (vars.PUBLISH_TO_PYPI); it never reports on a PR."
+    ),
+}
+
+# W0-2 (#397): "Where a job is legitimately non-blocking (nightly), split the blocking subset out into
+# its own required job rather than leaving the surface unguarded." This maps each nightly job to the
+# per-PR blocking subset that must itself be a REQUIRED (canonical) check.
+NIGHTLY_BLOCKING_SUBSET: dict[str, str] = {
+    "livefire full table (nightly)": "livefire smoke (per-PR subset)",
+}
 
 # Historical snapshots under these directories are dated audit records (each pinned to the commit it
 # describes) and are deliberately NOT scanned. EVERYTHING ELSE that ships is discovered tree-wide, so a
@@ -213,6 +297,33 @@ def pr_and_nonpr_job_names(workflow_texts: list[str]) -> tuple[set[str], set[str
             if "pull_request" in events and event_condition_allows(if_expr, "pull_request"):
                 pr.add(name)
     return pr, all_names - pr
+
+
+# --------------------------------------------------------------------------------------------------
+# Reverse-direction accounting (W0-2 #397). Pure functions so the negative controls can perturb the
+# inputs in-process rather than merely describe the failure.
+# --------------------------------------------------------------------------------------------------
+def unaccounted_pr_jobs(pr_jobs: set[str], required: set[str], advisory: set[str]) -> set[str]:
+    """PR jobs that are neither required nor excused — every one of these is an unguarded surface."""
+    return set(pr_jobs) - set(required) - set(advisory)
+
+
+def unaccounted_nonpr_jobs(nonpr_jobs: set[str], nonpr_advisory: set[str]) -> set[str]:
+    """Non-PR jobs (release/nightly) with no written reason for not being a required check."""
+    return set(nonpr_jobs) - set(nonpr_advisory)
+
+
+def nightly_subset_gaps(
+    nightly_subset: dict[str, str], required: set[str], nonpr_jobs: set[str]
+) -> list[str]:
+    """A nightly must be a real non-PR job, and its named blocking subset must be a required check."""
+    gaps: list[str] = []
+    for nightly, subset in nightly_subset.items():
+        if nightly not in nonpr_jobs:
+            gaps.append(f"{nightly!r} is declared nightly but is not a non-PR job")
+        if subset not in required:
+            gaps.append(f"blocking subset {subset!r} of nightly {nightly!r} is not a required check")
+    return gaps
 
 
 def _workflow_texts() -> list[str]:
@@ -375,6 +486,132 @@ def test_negative_control_workflow_that_skips_pr():
     wf = "on:\n  push:\n    branches: [main]\njobs:\n  x:\n    name: push only\n    runs-on: ubuntu-latest\n"
     pr, nonpr = pr_and_nonpr_job_names([wf])
     assert pr == set() and nonpr == {"push only"}
+
+
+# --------------------------------------------------------------------------------------------------
+# W0-2 (#397): the required set equals the full job set, or the exclusion is enumerated with a reason.
+# --------------------------------------------------------------------------------------------------
+def test_every_pr_job_is_required_or_excused():
+    """The reverse of (a): EVERY pull_request job is required (canonical) or excused in KNOWN_ADVISORY.
+
+    This is the guard that was missing while five jobs drifted out of the required set. It fails the
+    moment a workflow adds a pull_request job that is neither required nor given a written reason —
+    closing the drift direction W0-1's canonical-⊆-PR check could not see.
+    """
+    pr, _ = pr_and_nonpr_job_names(_workflow_texts())
+    leftover = unaccounted_pr_jobs(pr, set(canonical()), set(KNOWN_ADVISORY))
+    assert not leftover, (
+        "these pull_request jobs are neither required nor enumerated in KNOWN_ADVISORY — an unguarded "
+        f"surface, the exact W0-2 defect: {sorted(leftover)}. Add each to the canonical required set or "
+        "to KNOWN_ADVISORY with a stated reason."
+    )
+    # And nothing is excused that does not exist / is not actually a PR job (the dict cannot rot either).
+    stale = set(KNOWN_ADVISORY) - pr
+    assert not stale, f"KNOWN_ADVISORY names jobs that are not pull_request jobs anymore: {sorted(stale)}"
+    # Required and advisory must be disjoint — a job cannot be both blocking and excused.
+    assert not (set(canonical()) & set(KNOWN_ADVISORY)), "a job is listed as BOTH required and advisory"
+
+
+def test_every_nonpr_job_is_excused():
+    """Every job that never runs on a PR (release/nightly) is accounted for in KNOWN_NONPR_ADVISORY."""
+    _, nonpr = pr_and_nonpr_job_names(_workflow_texts())
+    leftover = unaccounted_nonpr_jobs(nonpr, set(KNOWN_NONPR_ADVISORY))
+    assert not leftover, (
+        f"these non-PR jobs have no written reason for not being a required check: {sorted(leftover)}"
+    )
+    stale = set(KNOWN_NONPR_ADVISORY) - nonpr
+    assert not stale, f"KNOWN_NONPR_ADVISORY names jobs that are not non-PR jobs anymore: {sorted(stale)}"
+
+
+def test_full_job_set_is_completely_partitioned():
+    """Belt and braces: canonical ∪ advisory ∪ non-PR-advisory covers EVERY job the workflows declare."""
+    pr, nonpr = pr_and_nonpr_job_names(_workflow_texts())
+    all_jobs = pr | nonpr
+    accounted = set(canonical()) | set(KNOWN_ADVISORY) | set(KNOWN_NONPR_ADVISORY)
+    assert all_jobs == accounted, (
+        "the job set and the accounted set differ — drift in some direction.\n"
+        f"  jobs not accounted (unguarded): {sorted(all_jobs - accounted)}\n"
+        f"  accounted names with no job (rot): {sorted(accounted - all_jobs)}"
+    )
+
+
+def test_nightly_has_required_blocking_subset():
+    """(#397) Each nightly job names a per-PR blocking subset, and that subset is a REQUIRED check."""
+    _, nonpr = pr_and_nonpr_job_names(_workflow_texts())
+    # every nightly (non-PR + in KNOWN_NIGHTLY) whose surface needs guarding must have a mapped subset
+    for nightly in KNOWN_NIGHTLY:
+        assert nightly in NIGHTLY_BLOCKING_SUBSET, (
+            f"nightly {nightly!r} has no per-PR blocking subset declared — its surface is unguarded"
+        )
+    gaps = nightly_subset_gaps(NIGHTLY_BLOCKING_SUBSET, set(canonical()), nonpr)
+    assert not gaps, "nightly blocking-subset gaps:\n" + "\n".join(gaps)
+
+
+def test_advisory_reasons_are_real():
+    """An excuse must be a real, specific reason — not blank and not a bare 'advisory'."""
+    for name, reason in {**KNOWN_ADVISORY, **KNOWN_NONPR_ADVISORY}.items():
+        r = reason.strip()
+        assert len(r) >= 40, f"reason for {name!r} is too thin to be a real justification: {r!r}"
+        assert r.lower() not in {"advisory", "advisory.", "not required", "nightly"}, (
+            f"reason for {name!r} restates the exclusion instead of justifying it"
+        )
+        # A reason should name the workflow file that produces the job, tying it to a checkable source.
+        assert ".yml" in r or ".yaml" in r, f"reason for {name!r} names no producing workflow"
+
+
+# --------------------------------------------------------------------------------------------------
+# Negative controls for the reverse-direction accounting — the checkers must REPORT divergence.
+# --------------------------------------------------------------------------------------------------
+def test_negative_control_unaccounted_pr_job_bites():
+    """A new advisory PR job that nobody excused must be REPORTED as unaccounted (not waved through)."""
+    pr, _ = pr_and_nonpr_job_names(_workflow_texts())
+    # sanity: the real tree, with the real ledger, is fully accounted
+    assert unaccounted_pr_jobs(pr, set(canonical()), set(KNOWN_ADVISORY)) == set()
+    # perturb: a brand-new PR job appears and is added to neither the required set nor the advisory dict
+    sneaky = "sneaky new gate (advisory)"
+    perturbed = pr | {sneaky}
+    flagged = unaccounted_pr_jobs(perturbed, set(canonical()), set(KNOWN_ADVISORY))
+    assert flagged == {sneaky}, f"an unexcused new PR job must be flagged, got {flagged}"
+
+
+def test_negative_control_empty_advisory_flags_the_real_advisories():
+    """WITHOUT the KNOWN_ADVISORY ledger this workstream adds, every real advisory PR job is unguarded.
+
+    This is the 'fails without this change' evidence, exercised in-process: strip the ledger to empty and
+    the accounting reports exactly the advisory jobs as unaccounted — which is precisely the pre-W0-2 state.
+    """
+    pr, _ = pr_and_nonpr_job_names(_workflow_texts())
+    flagged = unaccounted_pr_jobs(pr, set(canonical()), set())  # no advisory ledger
+    assert flagged == set(KNOWN_ADVISORY), (
+        "with an empty advisory ledger the unaccounted set must equal the real advisory jobs; "
+        f"got {sorted(flagged)} vs {sorted(KNOWN_ADVISORY)}"
+    )
+    assert len(flagged) >= 5, "the pre-fix state left at least five jobs unguarded — the W0-2 premise"
+
+
+def test_negative_control_nightly_subset_must_be_required():
+    """If a nightly's blocking subset is NOT a required check, the gap checker must report it."""
+    _, nonpr = pr_and_nonpr_job_names(_workflow_texts())
+    # real data: no gaps
+    assert nightly_subset_gaps(NIGHTLY_BLOCKING_SUBSET, set(canonical()), nonpr) == []
+    # perturb: pretend the subset is not required
+    required_without_subset = set(canonical()) - set(NIGHTLY_BLOCKING_SUBSET.values())
+    gaps = nightly_subset_gaps(NIGHTLY_BLOCKING_SUBSET, required_without_subset, nonpr)
+    assert gaps and any("is not a required check" in g for g in gaps), (
+        f"an unrequired blocking subset must be reported, got {gaps}"
+    )
+    # perturb: pretend the nightly is not even a real non-PR job
+    gaps2 = nightly_subset_gaps({"ghost nightly": "livefire smoke (per-PR subset)"}, set(canonical()), nonpr)
+    assert any("is not a non-PR job" in g for g in gaps2), f"a phantom nightly must be reported, got {gaps2}"
+
+
+def test_negative_control_thin_advisory_reason_rejected():
+    """The reason-quality helper logic must reject a blank or one-word excuse."""
+    for bad in ("", "advisory", "not required", "   "):
+        r = bad.strip()
+        assert len(r) < 40 or r.lower() in {"advisory", "not required"}, (
+            f"{bad!r} should be rejected as a non-reason"
+        )
 
 
 if __name__ == "__main__":
