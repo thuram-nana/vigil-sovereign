@@ -375,20 +375,53 @@ _STRIX_EXEC_TOOLS = frozenset({"exec_command", "write_stdin"})
 _STRIX_NETWORK_TOOLS = frozenset({"repeat_request", "web_search"})
 
 # The union the gate floors to A3 (⇒ QUEUE for a single-use owner-signed approval under the A1 ceiling).
-# Everything else Strix exposes is genuinely sandbox-contained / read-only (thinking / notes / todo /
-# apply_patch / reporting / view_image / load_skill / finish / list_requests / view_request / list_sitemap
-# / view_sitemap_entry / …) and auto-runs so the agent stays functional.
 _STRIX_GATED_TOOLS = _STRIX_EXEC_TOOLS | _STRIX_NETWORK_TOOLS
+
+# The EXPLICIT allowlist of Strix tools that are genuinely sandbox-contained / read-only and may auto-run so
+# the agent stays functional. This is the full current tool surface MINUS the gated set — every name here is
+# a real, shipped Strix tool (see ``strix.agents.factory._BASE_TOOLS`` + the SDK Shell/Filesystem
+# capabilities; the offline drift guard in ``test_strix_unknown_tool_fail_closed.py`` harvests the shipped
+# names from the vendored render manifest and fails CI if any shipped tool is neither gated nor here).
+#
+# Why an allowlist and not a denylist: the previous classifier returned A0 (auto) for every name NOT in the
+# gated set — so a NEW upstream tool added on a Strix upgrade (a fresh network/exec surface among them)
+# would AUTO-RUN, ungated, until someone noticed. Invariant 4 ("no unknown tool executed through a generic
+# shell") requires the opposite: an unrecognized tool must FAIL CLOSED (queue for owner approval) until it
+# is explicitly classified here. The two dangerous defaults trade places — the safe one wins.
+_STRIX_AUTO_TOOLS = frozenset({
+    # thinking / skills / lifecycle
+    "think", "load_skill", "finish_scan", "agent_finish",
+    # todo
+    "create_todo", "list_todos", "update_todo", "mark_todo_done", "mark_todo_pending", "delete_todo",
+    # notes
+    "create_note", "list_notes", "get_note", "update_note", "delete_note",
+    # reporting (writes a report artifact; no target traffic)
+    "create_vulnerability_report", "create_dependency_report",
+    # proxy READ tools (inspect already-captured traffic; do NOT send — repeat_request is gated, above)
+    "list_requests", "view_request", "list_sitemap", "view_sitemap_entry", "scope_rules",
+    # agents-graph (spawns/controls CHILD agents, which run under this SAME gate — their exec/network still
+    # queues, so orchestration itself is sandbox-contained)
+    "view_agent_graph", "send_message_to_agent", "wait_for_message", "create_agent", "stop_agent",
+    # filesystem / media (edits inside /workspace; renders a captured image) — no network, no host exec
+    "apply_patch", "view_image",
+})
 
 
 def _strix_shell_classifier(name: str) -> str:
     """A3 for the Strix tools that must QUEUE for owner approval under the A1 ceiling — the arbitrary-exec
     chokepoint (``exec_command`` / ``write_stdin``) AND the tools that reach the network WITHOUT transiting
     the shell (``repeat_request`` sends attacker-modified traffic to the target; ``web_search`` egresses);
-    A0 (auto) for every other (sandbox-contained / read-only) Strix tool. Deliberately NOT the offense
+    A0 (auto) ONLY for the explicitly allowlisted, sandbox-contained / read-only tools in
+    ``_STRIX_AUTO_TOOLS``; and A3 (fail-closed → queue) for EVERY OTHER name — an empty name, or a tool this
+    build does not recognize (e.g. one a Strix upgrade added). Deliberately NOT the offense
     ``default_classify`` — that rates every non-recon name A2, which under a default-on gate would block the
-    whole agent. This targets the target-touching / egress surface and nothing more."""
-    return "A3" if str(name or "").strip() in _STRIX_GATED_TOOLS else "A0"
+    whole agent. This governs the target-touching / egress surface AND makes an unknown tool fail closed."""
+    n = str(name or "").strip()
+    if n in _STRIX_GATED_TOOLS:
+        return "A3"
+    if n in _STRIX_AUTO_TOOLS:
+        return "A0"
+    return "A3"  # unknown / unregistered / empty → fail closed (queue for owner approval)
 
 
 def _build_strix_approver(base_dir: str) -> Optional[Callable[[str, str, Any], bool]]:
@@ -496,8 +529,10 @@ def attach_from_env(base_hooks: Any) -> Any:
     The classifier is :func:`_strix_shell_classifier` (floor A0, ceiling A1): it QUEUES the arbitrary-exec
     chokepoint (``exec_command`` / ``write_stdin``) AND the tools that reach the network without transiting
     the shell (``repeat_request`` — attacker-modified traffic to the target; ``web_search`` — egress), and
-    auto-runs every other (sandbox-contained / read-only) Strix tool, so the agent stays functional while its
-    target-touching / egress surface is governed. A QUEUE is routed to the
+    auto-runs ONLY the explicitly allowlisted sandbox-contained / read-only tools (``_STRIX_AUTO_TOOLS``), so
+    the agent stays functional while its target-touching / egress surface is governed. An UNKNOWN tool — one
+    this build does not recognize, e.g. a fresh surface a Strix upgrade added — FAILS CLOSED to A3 (queue),
+    never auto-runs. A QUEUE is routed to the
     per-action, single-use, owner-signed approval broker via :func:`_build_strix_approver` — the call runs
     ONLY on a valid owner token for THIS exact call; no authority provisioned / no token in the window ⇒
     hard-block (fail-safe). The SDK + broker are imported LAZILY (offense-env only), keeping this module
