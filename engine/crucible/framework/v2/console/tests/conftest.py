@@ -35,3 +35,27 @@ def auth_url(url: str) -> str:
     use, since neither can set a request header."""
     sep = "?" if "?" not in url else "&"
     return f"{url}{sep}token={CONSOLE_TEST_TOKEN}"
+
+@pytest.fixture(autouse=True)
+def _healthy_strix_sandbox_gate(monkeypatch):
+    """S2: pretend the VIGIL egress gateway is up, so console tests exercise CONSOLE behaviour.
+
+    A Strix launch now refuses unless the gateway container is running and the gated sandbox network
+    exists, and it pins the sandbox onto that network. That is correct — before it, every sandbox was
+    created on Docker's default bridge — but it makes every console launch test depend on live Docker,
+    which they must not.
+
+    So these tests get a healthy gate. The gate itself is NOT stubbed out of existence: its refusals, its
+    override, its fail-closed behaviour and the fact that BOTH spawn sites consult it are covered by
+    integration/tests/test_strix_sandbox_gate.py and by invariant 2 in
+    integration/tests/test_production_invariants.py. A test here that wants the refusal path should
+    monkeypatch this back.
+    """
+    try:
+        from framework.v2.console import actions as _actions
+    except Exception:  # pragma: no cover - console not importable in this leg
+        return
+    if hasattr(_actions, "_strix_sandbox_gate"):
+        monkeypatch.setattr(
+            _actions, "_strix_sandbox_gate",
+            lambda: ({"STRIX_DOCKER_SANDBOX_NETWORK": "vigil_sandbox"}, "", ""))

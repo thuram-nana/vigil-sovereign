@@ -141,6 +141,11 @@ services:
             raise RuntimeError("docker binary not found")
         return d
 
+    def network_exists(self, name: "str | None" = None) -> bool:
+        """Public: does the given (default: the sandbox) network exist? Used by the Strix launch pre-flight,
+        which must not reach into a private helper across package boundaries."""
+        return self._network_exists(name or self.sandbox_network)
+
     def _network_exists(self, name: str) -> bool:
         proc = subprocess.run(
             [self._docker_bin(), "network", "inspect", name],
