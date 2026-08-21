@@ -1036,6 +1036,19 @@ further value latches the tier once for the lifetime of the process, so a later
 change cannot relax it mid-engagement. The seal can only ever pin the tier; it can
 never loosen it.
 
+**In the unified `vigil up` deployment, the tier reaches the offense engine when
+it starts.** The engine re-reads the tier from its environment on each call, but a
+child process's environment is fixed at the moment it is launched — so changing the
+tier in the Settings screen updates the sovereign store, not an offense child that
+is already running. The change takes effect the next time the offense plane starts:
+restart it from the Status panel (Stop, then Start), or run `vigil up`. The restart
+**re-resolves the current tier from the sovereign** rather than respawning the
+boot-time snapshot, and it **fails closed** — a momentary sovereign error at restart
+retains the tier already in force rather than relaxing it to the default. The
+Governance screen shows the tier the running engine is actually enforcing; if that
+pill disagrees with the Settings value, the pill is the truth until the offense
+plane restarts, and the Settings screen says so where the tier is set.
+
 **Where the check is made.** Four places in the system construct a model client,
 and all four consult the same policy first: the reasoning step behind a live
 engagement, the automated code-fix component, the console's chat-style terminal,

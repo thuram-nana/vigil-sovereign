@@ -661,11 +661,24 @@ class PlaneControl:
     nothing about scope, the charter, WARDEN's approve-then-run gate, the kill-switch, signing, or what
     counts as a fact. It is process lifecycle, and nothing else."""
 
-    def __init__(self, specs, *, on_started=None, on_stopped=None):
+    def __init__(self, specs, *, on_started=None, on_stopped=None, env_resolver=None, dynamic_env=None):
         # specs: [(name, argv, log_path, extra_env, host, port), ...] — captured from the boot path.
+        #
+        # W10-2 — RE-RESOLVE THE SOVEREIGNTY TIER ON RESTART. When `env_resolver` is supplied, a spec's
+        # `extra_env` is the STATIC per-child env (the session token, hop key, live dir, vigil bin — things
+        # that never change) and the DYNAMIC env (the sovereign-resolved model / keys / **sovereignty tier**)
+        # is re-read from the sovereign at each `start_offense`, then merged UNDER the static env. Without
+        # a resolver the spec's env is the full captured env (legacy behaviour, byte-identical to boot). This
+        # is the fix for the snapshot bug: a tier set in Settings after boot reaches the offense children the
+        # next time the plane is started HERE, with no fresh `vigil up`.
         self._specs = list(specs)
         self._on_started = on_started      # run_up hands us a callback so `vigil down` learns the pids
         self._on_stopped = on_stopped      # …and one so a STOP terminates + un-tracks the boot children
+        self._env_resolver = env_resolver  # () -> (resolved_ok, dynamic_env); re-read at each start_offense
+        # The last KNOWN-GOOD dynamic env — the boot snapshot at first, then the last clean re-resolve. It is
+        # the fail-CLOSED fallback: a transient sovereign error at restart RETAINS this (never RELAXES the
+        # tier) rather than dropping the children to a keyless/PERMISSIVE env.
+        self._last_dynamic_env: dict = dict(dynamic_env or {})
         self._lock = threading.Lock()
         self._children: dict = {}          # name -> Popen, for the ones WE started
         self._started_at = 0.0             # when we last spawned — the basis for the "starting" signal
@@ -721,10 +734,30 @@ class PlaneControl:
                         "detail": "the offense console and API are already answering (or are coming up "
                                   "from a start already in flight).",
                         "status": self._status_locked()}
-            started, failed = [], []
-            for name, argv, log, env, _host, _port in down:
+            # W10-2: re-resolve the DYNAMIC env (model / keys / **sovereignty tier**) ONCE for this start,
+            # so a tier changed in Settings after boot reaches the children WITHOUT a fresh `vigil up`.
+            # Resolve once (not per child) so both backends get one consistent snapshot. Fail CLOSED: a
+            # resolver error keeps the last known-good env — a transient sovereign hiccup must never RELAX
+            # the tier by dropping it (an absent tier resolves to PERMISSIVE in the child).
+            dynamic = dict(self._last_dynamic_env)
+            if self._env_resolver is not None:
                 try:
-                    self._children[name] = _spawn(list(argv), Path(log), extra_env=dict(env or {}))
+                    resolved_ok, fresh = self._env_resolver()
+                except Exception:  # noqa: BLE001 — a resolver crash must fail CLOSED, never widen the tier
+                    resolved_ok, fresh = False, {}
+                if resolved_ok:
+                    dynamic = dict(fresh)
+                    self._last_dynamic_env = dict(fresh)   # remember the last clean answer
+                # else: retain last-known-good `dynamic` — fail closed, never relax on a resolver error
+            started, failed = [], []
+            for name, argv, log, static_env, _host, _port in down:
+                # With a resolver, `static_env` is the per-child STATIC env (token/hop/live-dir/bin) and it
+                # WINS over the re-resolved dynamic env (a resolver can never clobber the session token).
+                # Without a resolver, `static_env` IS the full captured env (legacy — byte-identical to boot).
+                extra_env = ({**dynamic, **(static_env or {})}
+                             if self._env_resolver is not None else dict(static_env or {}))
+                try:
+                    self._children[name] = _spawn(list(argv), Path(log), extra_env=extra_env)
                     started.append(name)
                 except (OSError, ValueError) as exc:
                     failed.append(f"{name} ({type(exc).__name__}: {exc})")
@@ -1768,34 +1801,68 @@ def _materialise_file_secrets(env: dict, runtime_dir: "Optional[Path]") -> dict:
     return env
 
 
+def _probe_offense_runtime_env(sigil_bin: Path) -> "tuple[bool, dict]":
+    """``(resolved_ok, raw_env)`` from ``sigil settings export-runtime-env`` in the SOVEREIGN venv.
+
+    ``resolved_ok`` is True ONLY when the subprocess ran cleanly and returned a JSON OBJECT — an EMPTY
+    object is a valid clean answer (the operator has configured nothing / runs keyless). It is False on
+    any error / non-zero exit / empty or non-JSON / non-object output. The distinction matters at
+    RE-RESOLVE time (W10-2): a caller that re-reads the sovereignty tier on an offense-plane restart must
+    be able to tell "the operator cleanly set PERMISSIVE" (ok, {}) apart from "the sovereign was briefly
+    unreachable" (not ok) — the former honours a deliberate relax, the latter must fail CLOSED and retain
+    the last known tier rather than silently dropping the offense children to PERMISSIVE."""
+    try:
+        proc = subprocess.run(
+            [str(sigil_bin), "settings", "export-runtime-env", "--include-secrets"],
+            capture_output=True, text=True, env=_child_env(), timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return False, {}
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return False, {}
+    try:
+        data = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        return False, {}
+    if not isinstance(data, dict):
+        return False, {}
+    return True, data
+
+
+def _filter_offense_runtime_env(data: dict, runtime_dir: "Optional[Path]") -> dict:
+    """Allowlist + materialise the raw sovereign env into what an offense child may actually receive.
+
+    Defense-in-depth: even though the sovereign emitter is closed to non-offense keys, the CONSUMER also
+    allowlists them by name (str→str, non-empty) — so this can never become an arbitrary env-injection
+    channel even if the emitter changed. BASE64 file-content creds (GCP JSON / kubeconfig) are materialised
+    to a 0600 file here and replaced by their PATH env var; the raw content never reaches an offense
+    child as an env var."""
+    env = {k: str(v) for k, v in data.items()
+           if k in _OFFENSE_ENV_ALLOWLIST and isinstance(v, str) and v}
+    return _materialise_file_secrets(env, runtime_dir)
+
+
+def _resolve_offense_llm_env_result(sigil_bin: Path,
+                                    runtime_dir: "Optional[Path]" = None) -> "tuple[bool, dict]":
+    """Like ``_resolve_offense_llm_env`` but KEEPS the ``resolved_ok`` signal, so ``PlaneControl`` can fail
+    CLOSED — retain the last known-good env, NEVER RELAX the sovereignty tier — when the sovereign is
+    momentarily unreachable at an offense-plane restart, instead of dropping the tier and running the
+    offense children PERMISSIVE."""
+    ok, data = _probe_offense_runtime_env(sigil_bin)
+    if not ok:
+        return False, {}
+    return True, _filter_offense_runtime_env(data, runtime_dir)
+
+
 def _resolve_offense_llm_env(sigil_bin: Path, runtime_dir: "Optional[Path]" = None) -> dict:
     """Ask the SOVEREIGN venv for the runtime LLM env (model vars + resolved API key) and hand it to the
     keyless offense children, so the key/model set in the UI reaches the offense engine WITHOUT the
     offense plane ever importing sigil. The key may live in a keyring / TPM-sealed store only the sovereign
     side can decrypt — hence the subprocess. Captured on a PRIVATE pipe (never the teed backend logs) and
     never printed/logged here. Fail-soft: any error → {} (the offense engine simply runs keyless)."""
-    try:
-        proc = subprocess.run(
-            [str(sigil_bin), "settings", "export-runtime-env", "--include-secrets"],
-            capture_output=True, text=True, env=_child_env(), timeout=20)
-    except (OSError, subprocess.SubprocessError):
+    ok, data = _probe_offense_runtime_env(sigil_bin)
+    if not ok:
         return {}
-    if proc.returncode != 0 or not proc.stdout.strip():
-        return {}
-    try:
-        data = json.loads(proc.stdout)
-    except (ValueError, TypeError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    # Defense-in-depth: even though the sovereign emitter is closed to these keys, the CONSUMER also
-    # allowlists them by name (str→str, non-empty) — so this can never become an arbitrary env-injection
-    # channel even if the emitter changed.
-    env = {k: str(v) for k, v in data.items()
-           if k in _OFFENSE_ENV_ALLOWLIST and isinstance(v, str) and v}
-    # BASE64 file-content creds (GCP JSON / kubeconfig) are materialised to a 0600 file here and replaced by
-    # their PATH env var; the raw content never reaches an offense child as an env var.
-    return _materialise_file_secrets(env, runtime_dir)
+    return _filter_offense_runtime_env(data, runtime_dir)
 
 
 def _resolve_owner_pubkey(sigil_bin: Path) -> "Optional[str]":
@@ -2268,21 +2335,33 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     # `X-SIGIL-Token` (and `?token=` for SSE / downloads) to /sovereign/* and /offense/* alike. Without
     # it the console would mint its own token and every /offense/* call from the UI would 401. The
     # token rides the child's ENV — never argv (argv is world-readable in /proc) and never a log line.
-    console_env = {**offense_llm_env, "VIGIL_LIVE_DIR": str(base.resolve()),
-                   "VIGIL_CONSOLE_TOKEN": token, _CONSOLE_HOP_KEY_ENV: hop_key}
-    # Hand the console child the absolute `vigil` path so its graph-backed engage never SILENTLY falls back
-    # to the non-graph engine when `vigil` isn't on the child's inherited PATH (venv not activated).
+    # The console's STATIC env — the session token, hop key, live dir (+ the vigil bin): things that never
+    # change over the process lifetime. Kept SEPARATE from the sovereign-resolved dynamic env (model / keys /
+    # sovereignty tier) so PlaneControl can RE-RESOLVE only the dynamic half on a restart (W10-2) while the
+    # token/hop key stay pinned. Hand the console child the absolute `vigil` path so its graph-backed engage
+    # never SILENTLY falls back to the non-graph engine when `vigil` isn't on the child's inherited PATH.
     vigil_bin = _console_vigil_bin(crucible_bin)
+    console_static = {"VIGIL_LIVE_DIR": str(base.resolve()),
+                      "VIGIL_CONSOLE_TOKEN": token, _CONSOLE_HOP_KEY_ENV: hop_key}
     if vigil_bin:
-        console_env["VIGIL_BIN"] = vigil_bin
+        console_static["VIGIL_BIN"] = vigil_bin
+    console_env = {**offense_llm_env, **console_static}
     if _track("offense-console", console_argv, logs / "offense-console.log", extra_env=console_env):
         return 1
     if _track("offense-api", api_argv, logs / "offense-api.log", extra_env=offense_llm_env):
         return 1
 
-    # PLANE CONTROL captures THESE spawns — the argv, env and log path just used, byte for byte — so the
-    # button restarts exactly what the boot path started. It is built from what we already have; nothing
-    # about `vigil up` above changed to accommodate it, and no request will ever contribute a value to it.
+    # PLANE CONTROL captures THESE spawns — the argv, STATIC env and log path just used — so the button
+    # restarts exactly what the boot path started. It is built from what we already have; nothing about
+    # `vigil up` above changed to accommodate it, and no request will ever contribute a value to it. W10-2:
+    # the DYNAMIC env (model / keys / **sovereignty tier**) is NOT frozen into the spec — it is re-resolved
+    # from the sovereign at each restart via `_reresolve_offense_env`, with the boot snapshot as the
+    # fail-closed fallback — so a tier changed in Settings after boot takes effect on the next restart HERE.
+    def _reresolve_offense_env() -> "tuple[bool, dict]":
+        # Re-read the sovereign-resolved offense env (the tier included) at restart time. Keeps the
+        # resolved_ok signal so a transient sovereign error fails CLOSED (retain the last known tier).
+        return _resolve_offense_llm_env_result(sigil_bin, base.resolve())
+
     def _adopt(started: "list[tuple[str, subprocess.Popen]]") -> None:
         """A backend restarted through the proxy joins the SAME bookkeeping the boot path uses, so
         Ctrl-C still reaps it and `vigil down` still finds it. Without this a restarted console would
@@ -2314,11 +2393,15 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
             pass
 
     plane_control = PlaneControl(
-        [("offense-console", list(console_argv), logs / "offense-console.log", dict(console_env),
+        # The spec env is the STATIC per-child env: the console keeps token/hop/live-dir/bin; the api has
+        # none (its whole env is the dynamic sovereign-resolved env). The dynamic half is re-resolved at each
+        # restart and merged UNDER these static values, so a token can never be clobbered by a re-resolve.
+        [("offense-console", list(console_argv), logs / "offense-console.log", dict(console_static),
           "127.0.0.1", CONSOLE_PORT),
-         ("offense-api", list(api_argv), logs / "offense-api.log", dict(offense_llm_env),
+         ("offense-api", list(api_argv), logs / "offense-api.log", {},
           "127.0.0.1", API_PORT)],
-        on_started=_adopt, on_stopped=_unadopt)
+        on_started=_adopt, on_stopped=_unadopt,
+        env_resolver=_reresolve_offense_env, dynamic_env=offense_llm_env)
 
     # Readiness (B4): the cockpit's startup is verified via its token, but the offense console/api are
     # spawned fire-and-forget — if one fails to bind (an import error, a port race), the proxy would still

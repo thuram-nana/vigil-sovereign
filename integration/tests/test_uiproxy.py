@@ -759,6 +759,120 @@ def test_plane_control_stop_offense_keeps_a_child_it_could_not_kill(monkeypatch)
     assert "offense-console" in pc._children   # handle KEPT so a retry can re-target the survivor
 
 
+class _FakeAliveProc:
+    """A Popen stand-in that reads as alive, so a spawn `start_offense` performs counts as 'started'."""
+
+    def __init__(self, pid: int = 4242) -> None:
+        self.pid = pid
+
+    def poll(self):
+        return None
+
+
+def test_plane_control_start_offense_reresolves_the_tier(monkeypatch):
+    """W10-2 — a restart RE-RESOLVES the sovereignty tier (and the rest of the dynamic env) from the
+    sovereign; it does NOT respawn the boot-time snapshot. A tier set in Settings AFTER boot reaches the
+    offense children on the next start HERE, with no fresh `vigil up` — the whole point of the fix.
+
+    FAILS WITHOUT THE FIX: pre-fix `start_offense` spawned `dict(env or {})` = the boot snapshot, so the
+    child would carry the boot PERMISSIVE tier and the AIR_GAPPED assertion below would fail. The static
+    session token is asserted to WIN, proving a re-resolve can never clobber the credential."""
+    captured: dict = {}
+
+    def _fake_spawn(argv, log_path, *, extra_env=None):
+        captured[argv[0]] = dict(extra_env or {})
+        return _FakeAliveProc()
+    monkeypatch.setattr(uiproxy, "_spawn", _fake_spawn)
+
+    p1, p2 = _free_port(), _free_port()          # nothing listening → both "down" → both spawned
+    static_console = {"VIGIL_CONSOLE_TOKEN": "tok-STATIC", "VIGIL_LIVE_DIR": "/live"}
+    boot_dynamic = {"CRUCIBLE_SOVEREIGNTY_TIER": "PERMISSIVE"}   # the boot-time snapshot
+
+    resolver_calls = []
+
+    def _resolver():
+        resolver_calls.append(1)
+        # the operator tightened the tier to AIR_GAPPED in Settings after boot, plus a new key
+        return True, {"CRUCIBLE_SOVEREIGNTY_TIER": "AIR_GAPPED", "ANTHROPIC_API_KEY": "sk-NEW"}
+
+    specs = [("offense-console", ["console-bin"], "logc", static_console, "127.0.0.1", p1),
+             ("offense-api", ["api-bin"], "loga", {}, "127.0.0.1", p2)]
+    pc = uiproxy.PlaneControl(specs, env_resolver=_resolver, dynamic_env=boot_dynamic)
+    res = pc.start_offense()
+
+    assert res["result"] == "started"
+    assert resolver_calls == [1]                 # re-resolved EXACTLY once for the whole start (both children)
+    # the re-resolved tier reached BOTH children — NOT the boot PERMISSIVE snapshot
+    assert captured["console-bin"]["CRUCIBLE_SOVEREIGNTY_TIER"] == "AIR_GAPPED"
+    assert captured["api-bin"]["CRUCIBLE_SOVEREIGNTY_TIER"] == "AIR_GAPPED"
+    assert captured["console-bin"]["ANTHROPIC_API_KEY"] == "sk-NEW"
+    # the STATIC env is preserved and WINS — a re-resolve never clobbers the session token / live dir
+    assert captured["console-bin"]["VIGIL_CONSOLE_TOKEN"] == "tok-STATIC"
+    assert captured["console-bin"]["VIGIL_LIVE_DIR"] == "/live"
+
+
+def test_plane_control_start_offense_fails_closed_when_resolver_errors(monkeypatch):
+    """W10-2 negative control — a transient sovereign error at restart must FAIL CLOSED: retain the last
+    known-good tier, NEVER relax it by dropping the tier var (an absent tier resolves to PERMISSIVE in the
+    child). The resolver returns `(False, {})` (sovereign momentarily unreachable) and the boot floor was
+    AIR_GAPPED; the child must still come up AIR_GAPPED. This proves the re-resolve is not a no-op AND that
+    the fallback path is load-bearing (a deliberately bad resolver result is rejected in-run)."""
+    captured: dict = {}
+
+    def _fake_spawn(argv, log_path, *, extra_env=None):
+        captured[argv[0]] = dict(extra_env or {})
+        return _FakeAliveProc()
+    monkeypatch.setattr(uiproxy, "_spawn", _fake_spawn)
+
+    p1 = _free_port()
+    boot_dynamic = {"CRUCIBLE_SOVEREIGNTY_TIER": "AIR_GAPPED"}   # the tier actually in force at boot
+
+    def _resolver():
+        return False, {}                          # sovereign briefly unreachable → resolved_ok False
+
+    specs = [("offense-console", ["console-bin"], "logc", {}, "127.0.0.1", p1)]
+    pc = uiproxy.PlaneControl(specs, env_resolver=_resolver, dynamic_env=boot_dynamic)
+    res = pc.start_offense()
+
+    assert res["result"] == "started"
+    # FAIL CLOSED: the child keeps AIR_GAPPED (the last known-good), never dropped to absent/PERMISSIVE
+    assert captured["console-bin"]["CRUCIBLE_SOVEREIGNTY_TIER"] == "AIR_GAPPED"
+
+
+def test_plane_control_without_resolver_respawns_the_captured_env(monkeypatch):
+    """Back-compat: with NO env_resolver, a spec's env is the FULL captured env and is respawned verbatim
+    (byte-identical to the legacy behaviour) — the split-env path must not change a resolver-less caller."""
+    captured: dict = {}
+
+    def _fake_spawn(argv, log_path, *, extra_env=None):
+        captured[argv[0]] = dict(extra_env or {})
+        return _FakeAliveProc()
+    monkeypatch.setattr(uiproxy, "_spawn", _fake_spawn)
+
+    p1 = _free_port()
+    full_env = {"CRUCIBLE_SOVEREIGNTY_TIER": "SOVEREIGN_CLOUD", "VIGIL_CONSOLE_TOKEN": "tok"}
+    specs = [("offense-console", ["console-bin"], "logc", full_env, "127.0.0.1", p1)]
+    pc = uiproxy.PlaneControl(specs)             # no env_resolver, no dynamic_env
+    res = pc.start_offense()
+    assert res["result"] == "started"
+    assert captured["console-bin"] == full_env   # verbatim respawn of the captured env
+
+
+def test_resolve_offense_llm_env_result_signals_ok_vs_error(tmp_path):
+    """W10-2 plumbing — `_resolve_offense_llm_env_result` distinguishes a CLEAN answer (even an empty one:
+    the operator configured nothing) from a sovereign ERROR, so PlaneControl can fail closed on the latter
+    without treating a deliberate keyless/PERMISSIVE config as a failure."""
+    # clean object with a real tier → (True, {tier})
+    sig = _fake_sigil(tmp_path, "print('{\"CRUCIBLE_SOVEREIGNTY_TIER\": \"AIR_GAPPED\"}')\n")
+    assert uiproxy._resolve_offense_llm_env_result(sig) == (True, {"CRUCIBLE_SOVEREIGNTY_TIER": "AIR_GAPPED"})
+    # clean but EMPTY object (nothing configured) → (True, {}) — a valid answer, NOT an error
+    assert uiproxy._resolve_offense_llm_env_result(_fake_sigil(tmp_path, "print('{}')\n")) == (True, {})
+    # a real error (missing bin / non-zero exit / non-JSON) → (False, {}) so the caller retains last-good
+    assert uiproxy._resolve_offense_llm_env_result(tmp_path / "nope") == (False, {})
+    assert uiproxy._resolve_offense_llm_env_result(_fake_sigil(tmp_path, "sys.exit(3)\n")) == (False, {})
+    assert uiproxy._resolve_offense_llm_env_result(_fake_sigil(tmp_path, "print('not json')\n")) == (False, {})
+
+
 def test_new_plane_routes_are_guarded_like_start(proxy):
     """/offense/stop (POST) and /offense/version (GET) run the SAME guard chain as /offense/start: this
     fixture's proxy has no session token, so every plane route fails closed with a 4xx BEFORE the route
