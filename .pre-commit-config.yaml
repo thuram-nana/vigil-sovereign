@@ -24,10 +24,16 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0  # commit cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b
     hooks:
+      # docs/strix-patches/ is EXCLUDED below: it is a generated, digest-pinned artifact, not source.
+      # series.json records each patch's sha256 and integration/tests/test_strix_patch_series.py
+      # verifies it, so any reformatting — even a harmless one — invalidates the record and fails
+      # that guard. A patch is a record of BYTES: git apply tolerates stripped trailing whitespace
+      # today (no added line currently carries any), but silently rewriting one would make the
+      # series misrepresent the commit it claims to reproduce.
       - id: trailing-whitespace
-        exclude: '^(engine/crucible/|knowledge/claude-memory/|docs/knowledge/|docs/research/|docs/plain-english/|docs/architecture/|docs/assessments/)'
+        exclude: '^(engine/crucible/|knowledge/claude-memory/|docs/knowledge/|docs/research/|docs/plain-english/|docs/architecture/|docs/assessments/|docs/strix-patches/)'
       - id: end-of-file-fixer
-        exclude: '^(engine/crucible/|knowledge/claude-memory/|docs/knowledge/|docs/research/|docs/plain-english/|docs/architecture/|docs/assessments/)'
+        exclude: '^(engine/crucible/|knowledge/claude-memory/|docs/knowledge/|docs/research/|docs/plain-english/|docs/architecture/|docs/assessments/|docs/strix-patches/)'
       - id: check-yaml
         # A YAML file that no longer parses is how a workflow or compose file silently stops working.
         # --allow-multiple-documents: the infra/ha/k8s manifests are legitimately multi-document (`---`).
