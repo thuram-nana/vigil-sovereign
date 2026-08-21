@@ -1,0 +1,79 @@
+From c927dd1b10d9524c2a8b521f46b0c76eb5991aca Mon Sep 17 00:00:00 2001
+Subject: [strix-patch 004] P8: address red-pen findings (Haiku 4.5 thinking + inf-token guard)
+X-VIGIL-Commit: c927dd1b10d9524c2a8b521f46b0c76eb5991aca
+X-VIGIL-Date: 2026-07-20T09:59:14-04:00
+
+diff --git a/vendor/strix/strix/config/models.py b/vendor/strix/strix/config/models.py
+index 2150086b..3a06071e 100644
+--- a/vendor/strix/strix/config/models.py
++++ b/vendor/strix/strix/config/models.py
+@@ -214,13 +214,15 @@ def model_supports_reasoning(model_name: str) -> bool:
+     return _anthropic_supports_thinking(name)
+ 
+ 
+-# Claude extended-thinking families (Opus 4.x, Sonnet 4.x/5, Sonnet 3.7). Haiku and <=3.5 Sonnet
+-# do not support extended thinking, so they are deliberately excluded.
++# Claude extended-thinking families (Opus 4.x, Sonnet 4.x/5, Sonnet 3.7, Haiku 4.x). The older
++# Haiku 3/3.5 and Sonnet <=3.5 do NOT support extended thinking and are deliberately excluded,
++# so reasoning_effort is applied only where the model can actually use it.
+ _ANTHROPIC_THINKING_MARKERS = (
+     "claude-opus-4",
+     "claude-sonnet-4",
+     "claude-sonnet-5",
+     "claude-3-7-sonnet",
++    "claude-haiku-4",
+ )
+ 
+ 
+diff --git a/vendor/strix/strix/report/anthropic_pricing.py b/vendor/strix/strix/report/anthropic_pricing.py
+index 69918a52..d3487870 100644
+--- a/vendor/strix/strix/report/anthropic_pricing.py
++++ b/vendor/strix/strix/report/anthropic_pricing.py
+@@ -62,7 +62,8 @@ def _match_prices(model: str) -> tuple[float, float, float, float] | None:
+ def _int(value: Any) -> int:
+     try:
+         return max(0, int(value or 0))
+-    except (TypeError, ValueError):
++    except (TypeError, ValueError, OverflowError):
++        # OverflowError guards int(float('inf')); real provider token counts are always finite.
+         return 0
+ 
+ 
+diff --git a/vendor/strix/tests_vigil/test_anthropic_pricing.py b/vendor/strix/tests_vigil/test_anthropic_pricing.py
+index f4ac1ebd..d1bc523c 100644
+--- a/vendor/strix/tests_vigil/test_anthropic_pricing.py
++++ b/vendor/strix/tests_vigil/test_anthropic_pricing.py
+@@ -71,6 +71,16 @@ def test_no_tokens_returns_none():
+     assert ap.estimate_anthropic_cost("claude-opus-4-8", {"prompt_tokens": 0, "completion_tokens": 0}) is None
+ 
+ 
++def test_pathological_token_counts_do_not_crash():
++    # int(float('inf')) would raise OverflowError; _int must absorb it (red-pen P8 finding 2).
++    cost = ap.estimate_anthropic_cost(
++        "claude-opus-4-8", {"prompt_tokens": float("inf"), "completion_tokens": 10}
++    )
++    assert isinstance(cost, float)  # bounded number, never a crash
++    # negatives absorbed to zero → no tokens → None, not an exception
++    assert ap.estimate_anthropic_cost("claude-opus-4-8", {"prompt_tokens": -5, "completion_tokens": -1}) is None
++
++
+ def test_is_anthropic_model():
+     assert ap.is_anthropic_model("anthropic/claude-opus-4-8")
+     assert ap.is_anthropic_model("claude-3-5-sonnet")
+diff --git a/vendor/strix/tests_vigil/test_reasoning_thinking.py b/vendor/strix/tests_vigil/test_reasoning_thinking.py
+index 9616896a..4b4248f8 100644
+--- a/vendor/strix/tests_vigil/test_reasoning_thinking.py
++++ b/vendor/strix/tests_vigil/test_reasoning_thinking.py
+@@ -17,9 +17,11 @@ def test_anthropic_thinking_families_recognised():
+     assert f("claude-sonnet-5")
+     assert f("claude-sonnet-4")
+     assert f("claude-3-7-sonnet")
++    assert f("claude-haiku-4-5")                     # Haiku 4.5 DOES support extended thinking
++    assert f("anthropic/claude-haiku-4-5-20251001")
+     # families WITHOUT extended thinking must not be misreported
+     assert not f("claude-3-5-sonnet")
+-    assert not f("claude-3-5-haiku")
++    assert not f("claude-3-5-haiku")                 # Haiku 3.5: no extended thinking
+     assert not f("claude-3-haiku")
+     assert not f("gpt-4o")
+     assert not f("")

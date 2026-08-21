@@ -1,0 +1,589 @@
+From adef3ec607461c0ee5cab6e08f499f8beb43ff1d Mon Sep 17 00:00:00 2001
+Subject: [strix-patch 001] P0: Strix sovereign subtraction + Claude default (no phone-home, no OpenRouter attribution)
+X-VIGIL-Commit: adef3ec607461c0ee5cab6e08f499f8beb43ff1d
+X-VIGIL-Date: 2026-07-19T22:21:39-04:00
+
+diff --git a/vendor/strix/NOTICE b/vendor/strix/NOTICE
+new file mode 100644
+index 00000000..8b03e09d
+--- /dev/null
++++ b/vendor/strix/NOTICE
+@@ -0,0 +1,10 @@
++Strix (https://github.com/usestrix/strix) — Copyright (c) Strix, licensed under Apache-2.0 (see LICENSE).
++
++This copy is vendored into the VIGIL monorepo and MODIFIED from upstream. Modifications so far:
++  - Telemetry: the upstream phone-home modules strix/telemetry/{posthog,scarf}.py (which POSTed
++    scan/finding/skill events to us.i.posthog.com and strix.gateway.scarf.sh) are DELETED and replaced
++    by strix/telemetry/sink.py, a local-only sink with no network transport. Default telemetry = OFF.
++  - Removed the OpenRouter attribution headers (HTTP-Referer/X-Title) from strix/config/models.py.
++  - Default model set to anthropic/claude-opus-4-8 (Claude-everywhere migration).
++Further VIGIL modifications (governance gates, oracle-confirmation, Claude-native runtime) are tracked
++in the monorepo git history under vendor/strix/.
+diff --git a/vendor/strix/strix/config/models.py b/vendor/strix/strix/config/models.py
+index 0ce107f5..9d04b267 100644
+--- a/vendor/strix/strix/config/models.py
++++ b/vendor/strix/strix/config/models.py
+@@ -118,7 +118,6 @@ def configure_sdk_model_defaults(settings: Settings) -> None:
+     llm = settings.llm
+     set_tracing_disabled(True)
+     _configure_litellm_compatibility()
+-    _configure_openrouter_attribution(llm.model)
+     if llm.api_key:
+         set_default_openai_key(llm.api_key, use_for_tracing=False)
+         _configure_litellm_default("api_key", llm.api_key)
+@@ -165,29 +164,6 @@ def _configure_litellm_compatibility() -> None:
+     _register_litellm_cost_callback()
+ 
+ 
+-_OPENROUTER_ATTRIBUTION_HEADERS = {
+-    "HTTP-Referer": "https://strix.ai",
+-    "X-Title": "Strix",
+-    "X-OpenRouter-Categories": "cli-agent",
+-}
+-
+-
+-def _configure_openrouter_attribution(model_name: str | None) -> None:
+-    import litellm
+-
+-    current: object = litellm.headers
+-    existing: dict[str, str] = current if isinstance(current, dict) else {}
+-    if not model_name or "openrouter/" not in model_name.strip().lower():
+-        if any(key in existing for key in _OPENROUTER_ATTRIBUTION_HEADERS):
+-            remaining = {
+-                k: v for k, v in existing.items() if k not in _OPENROUTER_ATTRIBUTION_HEADERS
+-            }
+-            litellm.headers = remaining or None  # type: ignore[assignment]
+-        return
+-
+-    litellm.headers = {**existing, **_OPENROUTER_ATTRIBUTION_HEADERS}  # type: ignore[assignment]
+-
+-
+ def _register_litellm_cost_callback() -> None:
+     import litellm
+ 
+diff --git a/vendor/strix/strix/config/settings.py b/vendor/strix/strix/config/settings.py
+index 84339218..ec667d57 100644
+--- a/vendor/strix/strix/config/settings.py
++++ b/vendor/strix/strix/config/settings.py
+@@ -20,7 +20,7 @@ _BASE_CONFIG = SettingsConfigDict(
+ class LlmSettings(BaseSettings):
+     model_config = _BASE_CONFIG
+ 
+-    model: str | None = Field(default=None, alias="STRIX_LLM")
++    model: str | None = Field(default="anthropic/claude-opus-4-8", alias="STRIX_LLM")
+     api_key: str | None = Field(
+         default=None,
+         validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY"),
+@@ -63,7 +63,9 @@ class RuntimeSettings(BaseSettings):
+ class TelemetrySettings(BaseSettings):
+     model_config = _BASE_CONFIG
+ 
+-    enabled: bool = Field(default=True, alias="STRIX_TELEMETRY")
++    # VIGIL sovereign default: OFF. The upstream phone-home transports (posthog/scarf) are deleted; the
++    # remaining local sink honors this flag and never leaves the host regardless.
++    enabled: bool = Field(default=False, alias="STRIX_TELEMETRY")
+ 
+ 
+ class IntegrationSettings(BaseSettings):
+diff --git a/vendor/strix/strix/interface/main.py b/vendor/strix/strix/interface/main.py
+index 2403200d..e0b4bb76 100644
+--- a/vendor/strix/strix/interface/main.py
++++ b/vendor/strix/strix/interface/main.py
+@@ -53,7 +53,7 @@ from strix.interface.utils import (
+ )
+ from strix.report.state import get_global_report_state
+ from strix.report.writer import read_run_record, write_run_record
+-from strix.telemetry import posthog, scarf
++from strix.telemetry import sink as telemetry
+ from strix.telemetry.logging import configure_dependency_logging
+ 
+ 
+@@ -912,8 +912,7 @@ def main() -> None:
+         "interactive": not args.non_interactive,
+         "has_instructions": bool(args.instruction),
+     }
+-    posthog.start(**_telemetry_start_kwargs)
+-    scarf.start(**_telemetry_start_kwargs)
++    telemetry.start(**_telemetry_start_kwargs)
+ 
+     exit_reason = "user_exit"
+     try:
+@@ -925,8 +924,7 @@ def main() -> None:
+         exit_reason = "interrupted"
+     except Exception:
+         exit_reason = "error"
+-        posthog.error("unhandled_exception")
+-        scarf.error("unhandled_exception")
++        telemetry.error("unhandled_exception")
+         raise
+     finally:
+         report_state = get_global_report_state()
+@@ -936,8 +934,7 @@ def main() -> None:
+                 "stopped",
+             )
+             report_state.cleanup(status=status)
+-            posthog.end(report_state, exit_reason=exit_reason)
+-            scarf.end(report_state, exit_reason=exit_reason)
++            telemetry.end(report_state, exit_reason=exit_reason)
+ 
+     results_path = run_dir_for(args.run_name)
+     display_completion_message(args, results_path)
+diff --git a/vendor/strix/strix/report/state.py b/vendor/strix/strix/report/state.py
+index 217b266d..14f71bbc 100644
+--- a/vendor/strix/strix/report/state.py
++++ b/vendor/strix/strix/report/state.py
+@@ -19,7 +19,7 @@ from strix.report.writer import (
+     write_run_record,
+     write_vulnerabilities,
+ )
+-from strix.telemetry import posthog, scarf
++from strix.telemetry import sink as telemetry
+ 
+ 
+ logger = logging.getLogger(__name__)
+@@ -135,8 +135,7 @@ class ReportState:
+         self._sarif_repo_ctx: dict[str, Any] | None = None
+         self._sarif_repo_ctx_ready: bool = False
+ 
+-        self.posthog_scan_ended_sent: bool = False
+-        self.scarf_scan_ended_sent: bool = False
++        self.scan_ended_sent: bool = False
+         self.scan_ended_exit_reason: str | None = None
+ 
+     def get_run_dir(self) -> Path:
+@@ -287,8 +286,7 @@ class ReportState:
+ 
+         self.vulnerability_reports.append(report)
+         logger.info(f"Added vulnerability report: {report_id} - {title}")
+-        posthog.finding(severity, cwe=cwe, is_cve=bool(cve))
+-        scarf.finding(severity, cwe=cwe, is_cve=bool(cve))
++        telemetry.finding(severity, cwe=cwe, is_cve=bool(cve))
+ 
+         if self.vulnerability_found_callback:
+             self.vulnerability_found_callback(report)
+@@ -347,8 +345,7 @@ class ReportState:
+ 
+         logger.info("Updated scan final fields")
+         self.save_run_data(mark_complete=True)
+-        posthog.end(self, exit_reason="finished_by_tool")
+-        scarf.end(self, exit_reason="finished_by_tool")
++        telemetry.end(self, exit_reason="finished_by_tool")
+ 
+     def set_scan_config(self, config: dict[str, Any]) -> None:
+         self.scan_config = config
+diff --git a/vendor/strix/strix/skills/__init__.py b/vendor/strix/strix/skills/__init__.py
+index 31ac3059..4789c971 100644
+--- a/vendor/strix/strix/skills/__init__.py
++++ b/vendor/strix/strix/skills/__init__.py
+@@ -5,7 +5,7 @@ from collections import Counter
+ from collections.abc import Iterator
+ from pathlib import Path
+ 
+-from strix.telemetry import posthog, scarf
++from strix.telemetry import sink as telemetry
+ from strix.utils.resource_paths import get_strix_resource_path
+ 
+ 
+@@ -185,8 +185,7 @@ def _track_skill_loaded(skill_name: str, file_path: Path) -> None:
+         skill_name = "custom"
+ 
+     def _send() -> None:
+-        posthog.skill_loaded(skill_name)
+-        scarf.skill_loaded(skill_name)
++        telemetry.skill_loaded(skill_name)
+ 
+     threading.Thread(target=_send, daemon=True).start()
+ 
+diff --git a/vendor/strix/strix/telemetry/__init__.py b/vendor/strix/strix/telemetry/__init__.py
+index b9ca597e..ee087a55 100644
+--- a/vendor/strix/strix/telemetry/__init__.py
++++ b/vendor/strix/strix/telemetry/__init__.py
+@@ -1,7 +1,6 @@
+-from . import posthog, scarf
++from . import sink
+ 
+ 
+ __all__ = [
+-    "posthog",
+-    "scarf",
++    "sink",
+ ]
+diff --git a/vendor/strix/strix/telemetry/posthog.py b/vendor/strix/strix/telemetry/posthog.py
+deleted file mode 100644
+index e2da6282..00000000
+--- a/vendor/strix/strix/telemetry/posthog.py
++++ /dev/null
+@@ -1,147 +0,0 @@
+-import json
+-import logging
+-import urllib.request
+-from datetime import datetime
+-from typing import TYPE_CHECKING, Any
+-
+-from strix.config import load_settings
+-from strix.telemetry._common import (
+-    SESSION_ID,
+-    base_props,
+-    is_first_run,
+-)
+-
+-
+-if TYPE_CHECKING:
+-    from strix.report.state import ReportState
+-
+-
+-logger = logging.getLogger(__name__)
+-
+-_POSTHOG_PUBLIC_API_KEY = "phc_7rO3XRuNT5sgSKAl6HDIrWdSGh1COzxw0vxVIAR6vVZ"
+-_POSTHOG_HOST = "https://us.i.posthog.com"
+-
+-
+-def _is_enabled() -> bool:
+-    return load_settings().telemetry.enabled
+-
+-
+-def _send(event: str, properties: dict[str, Any]) -> bool:
+-    if not _is_enabled():
+-        logger.debug("posthog disabled; skipping event %s", event)
+-        return False
+-    try:
+-        payload = {
+-            "api_key": _POSTHOG_PUBLIC_API_KEY,
+-            "event": event,
+-            "distinct_id": SESSION_ID,
+-            "properties": properties,
+-        }
+-        req = urllib.request.Request(  # noqa: S310
+-            f"{_POSTHOG_HOST}/capture/",
+-            data=json.dumps(payload).encode(),
+-            headers={"Content-Type": "application/json"},
+-        )
+-        with urllib.request.urlopen(req, timeout=10):  # noqa: S310  # nosec B310
+-            pass
+-    except Exception:  # noqa: BLE001
+-        logger.debug("posthog send failed for event %s", event, exc_info=True)
+-        return False
+-    else:
+-        logger.debug("posthog event sent: %s", event)
+-        return True
+-
+-
+-def start(
+-    model: str | None,
+-    scan_mode: str | None,
+-    is_whitebox: bool,
+-    interactive: bool,
+-    has_instructions: bool,
+-) -> None:
+-    _send(
+-        "scan_started",
+-        {
+-            **base_props(),
+-            "model": model or "unknown",
+-            "scan_mode": scan_mode or "unknown",
+-            "scan_type": "whitebox" if is_whitebox else "blackbox",
+-            "interactive": interactive,
+-            "has_instructions": has_instructions,
+-            "first_run": is_first_run(),
+-        },
+-    )
+-
+-
+-def finding(severity: str, cwe: str | None = None, is_cve: bool = False) -> None:
+-    _send(
+-        "finding_reported",
+-        {
+-            **base_props(),
+-            "severity": severity.lower(),
+-            "cwe": (cwe or "").strip().lower() or "unknown",
+-            "is_cve": is_cve,
+-        },
+-    )
+-
+-
+-def skill_loaded(skill_name: str) -> None:
+-    _send(
+-        "skill_loaded",
+-        {
+-            **base_props(),
+-            "skill": skill_name,
+-        },
+-    )
+-
+-
+-def end(report_state: "ReportState", exit_reason: str = "completed") -> None:
+-    if report_state.posthog_scan_ended_sent:
+-        return
+-    if report_state.scan_ended_exit_reason is None:
+-        report_state.scan_ended_exit_reason = exit_reason
+-
+-    vulnerabilities_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+-    for v in report_state.vulnerability_reports:
+-        sev = v.get("severity", "info").lower()
+-        if sev in vulnerabilities_counts:
+-            vulnerabilities_counts[sev] += 1
+-
+-    duration = 0.0
+-    try:
+-        start = datetime.fromisoformat(report_state.start_time.replace("Z", "+00:00"))
+-        end_iso = report_state.end_time or datetime.now(start.tzinfo).isoformat()
+-        duration = (datetime.fromisoformat(end_iso.replace("Z", "+00:00")) - start).total_seconds()
+-    except (ValueError, TypeError, AttributeError):
+-        pass
+-
+-    llm_props: dict[str, int | float] = {}
+-    try:
+-        usage = report_state.get_total_llm_usage()
+-        if isinstance(usage, dict):
+-            llm_props = {
+-                "llm_requests": int(usage.get("requests") or 0),
+-                "llm_input_tokens": int(usage.get("input_tokens") or 0),
+-                "llm_output_tokens": int(usage.get("output_tokens") or 0),
+-                "llm_tokens": int(usage.get("total_tokens") or 0),
+-                "llm_cost": float(usage.get("cost") or 0.0),
+-            }
+-    except (TypeError, ValueError, AttributeError):
+-        pass
+-
+-    report_state.posthog_scan_ended_sent = _send(
+-        "scan_ended",
+-        {
+-            **base_props(),
+-            "exit_reason": report_state.scan_ended_exit_reason,
+-            "duration_seconds": round(duration),
+-            "vulnerabilities_total": len(report_state.vulnerability_reports),
+-            **{f"vulnerabilities_{k}": v for k, v in vulnerabilities_counts.items()},
+-            **llm_props,
+-        },
+-    )
+-
+-
+-def error(error_type: str) -> None:
+-    props = {**base_props(), "error_type": error_type}
+-    _send("error", props)
+diff --git a/vendor/strix/strix/telemetry/scarf.py b/vendor/strix/strix/telemetry/scarf.py
+deleted file mode 100644
+index c0c62964..00000000
+--- a/vendor/strix/strix/telemetry/scarf.py
++++ /dev/null
+@@ -1,158 +0,0 @@
+-from __future__ import annotations
+-
+-import logging
+-import urllib.parse
+-import urllib.request
+-from datetime import datetime
+-from typing import TYPE_CHECKING, Any
+-
+-from strix.config import load_settings
+-from strix.telemetry._common import (
+-    SESSION_ID,
+-    base_props,
+-    get_version,
+-    is_first_run,
+-)
+-
+-
+-if TYPE_CHECKING:
+-    from strix.report.state import ReportState
+-
+-
+-logger = logging.getLogger(__name__)
+-
+-_SCARF_ENDPOINT = "https://strix.gateway.scarf.sh"
+-
+-
+-def _is_enabled() -> bool:
+-    return load_settings().telemetry.enabled
+-
+-
+-def _send(event: str, properties: dict[str, Any]) -> bool:
+-    if not _is_enabled():
+-        logger.debug("scarf disabled; skipping event %s", event)
+-        return False
+-    try:
+-        props = dict(properties)
+-        version = str(props.pop("strix_version", get_version()) or "unknown")
+-        path = f"/{urllib.parse.quote(event, safe='')}/{urllib.parse.quote(version, safe='')}"
+-        query = urllib.parse.urlencode(
+-            {k: ("" if v is None else str(v)) for k, v in props.items()},
+-        )
+-        url = f"{_SCARF_ENDPOINT}{path}"
+-        if query:
+-            url = f"{url}?{query}"
+-        req = urllib.request.Request(url, method="POST")  # noqa: S310
+-        with urllib.request.urlopen(req, timeout=10):  # noqa: S310  # nosec B310
+-            pass
+-    except Exception:  # noqa: BLE001
+-        logger.debug("scarf send failed for event %s", event, exc_info=True)
+-        return False
+-    else:
+-        logger.debug("scarf event sent: %s", event)
+-        return True
+-
+-
+-def start(
+-    model: str | None,
+-    scan_mode: str | None,
+-    is_whitebox: bool,
+-    interactive: bool,
+-    has_instructions: bool,
+-) -> None:
+-    _send(
+-        "scan_started",
+-        {
+-            **base_props(),
+-            "session": SESSION_ID,
+-            "model": model or "unknown",
+-            "scan_mode": scan_mode or "unknown",
+-            "scan_type": "whitebox" if is_whitebox else "blackbox",
+-            "interactive": interactive,
+-            "has_instructions": has_instructions,
+-            "first_run": is_first_run(),
+-        },
+-    )
+-
+-
+-def finding(severity: str, cwe: str | None = None, is_cve: bool = False) -> None:
+-    _send(
+-        "finding_reported",
+-        {
+-            **base_props(),
+-            "session": SESSION_ID,
+-            "severity": severity.lower(),
+-            "cwe": (cwe or "").strip().lower() or "unknown",
+-            "is_cve": is_cve,
+-        },
+-    )
+-
+-
+-def skill_loaded(skill_name: str) -> None:
+-    _send(
+-        "skill_loaded",
+-        {
+-            **base_props(),
+-            "session": SESSION_ID,
+-            "skill": skill_name,
+-        },
+-    )
+-
+-
+-def end(report_state: ReportState, exit_reason: str = "completed") -> None:
+-    if report_state.scarf_scan_ended_sent:
+-        return
+-    if report_state.scan_ended_exit_reason is None:
+-        report_state.scan_ended_exit_reason = exit_reason
+-
+-    vulnerabilities_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+-    for v in report_state.vulnerability_reports:
+-        sev = v.get("severity", "info").lower()
+-        if sev in vulnerabilities_counts:
+-            vulnerabilities_counts[sev] += 1
+-
+-    duration = 0.0
+-    try:
+-        scan_start = datetime.fromisoformat(report_state.start_time.replace("Z", "+00:00"))
+-        end_iso = report_state.end_time or datetime.now(scan_start.tzinfo).isoformat()
+-        duration = (
+-            datetime.fromisoformat(end_iso.replace("Z", "+00:00")) - scan_start
+-        ).total_seconds()
+-    except (ValueError, TypeError, AttributeError):
+-        pass
+-
+-    llm_props: dict[str, int | float] = {}
+-    try:
+-        usage = report_state.get_total_llm_usage()
+-        if isinstance(usage, dict):
+-            llm_props = {
+-                "llm_requests": int(usage.get("requests") or 0),
+-                "llm_input_tokens": int(usage.get("input_tokens") or 0),
+-                "llm_output_tokens": int(usage.get("output_tokens") or 0),
+-                "llm_tokens": int(usage.get("total_tokens") or 0),
+-                "llm_cost": float(usage.get("cost") or 0.0),
+-            }
+-    except (TypeError, ValueError, AttributeError):
+-        pass
+-
+-    report_state.scarf_scan_ended_sent = _send(
+-        "scan_ended",
+-        {
+-            **base_props(),
+-            "session": SESSION_ID,
+-            "exit_reason": report_state.scan_ended_exit_reason,
+-            "duration_seconds": round(duration),
+-            "vulnerabilities_total": len(report_state.vulnerability_reports),
+-            **{f"vulnerabilities_{k}": v for k, v in vulnerabilities_counts.items()},
+-            **llm_props,
+-        },
+-    )
+-
+-
+-def error(error_type: str) -> None:
+-    props: dict[str, Any] = {
+-        **base_props(),
+-        "session": SESSION_ID,
+-        "error_type": error_type,
+-    }
+-    _send("error", props)
+diff --git a/vendor/strix/strix/telemetry/sink.py b/vendor/strix/strix/telemetry/sink.py
+new file mode 100644
+index 00000000..cdeec2e2
+--- /dev/null
++++ b/vendor/strix/strix/telemetry/sink.py
+@@ -0,0 +1,56 @@
++"""Local-only telemetry sink (VIGIL sovereign build).
++
++Replaces the upstream `posthog`/`scarf` modules, which POSTed scan/finding/skill events to
++`us.i.posthog.com` and `strix.gateway.scarf.sh`. A sovereign, air-gappable security tool MUST NOT phone
++home — least of all with offensive activity (the upstream `finding` event carried severity + CWE). This
++sink keeps the same event surface (`start`/`finding`/`skill_loaded`/`end`/`error`) but records every event
++to the LOCAL logger only; there is no network transport anywhere in this module, by construction. If
++aggregate run metrics are wanted they are already captured in the run's local `ReportState`/usage ledger.
++"""
++from __future__ import annotations
++
++import logging
++from typing import TYPE_CHECKING, Any
++
++from ._common import SESSION_ID, base_props
++
++if TYPE_CHECKING:
++    from strix.report.state import ReportState
++
++logger = logging.getLogger("strix.telemetry")
++
++
++def _record(event: str, properties: dict[str, Any]) -> None:
++    """The one sink for every telemetry event: a structured DEBUG log line, local only."""
++    logger.debug("telemetry.%s session=%s %s", event, SESSION_ID, {**base_props(), **properties})
++
++
++def start(**properties: Any) -> None:
++    _record("scan_started", properties)
++
++
++def finding(severity: str, cwe: str | None = None, is_cve: bool = False) -> None:
++    _record("finding_reported", {"severity": severity, "cwe": cwe, "is_cve": is_cve})
++
++
++def skill_loaded(skill_name: str) -> None:
++    _record("skill_loaded", {"skill": skill_name})
++
++
++def end(report_state: "ReportState", exit_reason: str = "completed") -> None:
++    # send-once guard (state.py resolves both the finished-by-tool and the main-loop end paths)
++    if getattr(report_state, "scan_ended_sent", False):
++        return
++    report_state.scan_ended_sent = True
++    counts = getattr(report_state, "severity_counts", None)
++    props: dict[str, Any] = {"exit_reason": exit_reason}
++    if callable(counts):
++        try:
++            props["severity_counts"] = counts()
++        except Exception:  # noqa: BLE001 — telemetry must never break a run
++            logger.debug("telemetry.end severity_counts failed", exc_info=True)
++    _record("scan_ended", props)
++
++
++def error(error_type: str) -> None:
++    _record("error", {"error_type": error_type})

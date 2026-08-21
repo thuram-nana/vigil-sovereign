@@ -1,0 +1,483 @@
+From 8d49b457f6af57aef2735e14bd9625bd19b7060f Mon Sep 17 00:00:00 2001
+Subject: [strix-patch 003] P8: Claude runtime hardening (budget price table + reasoning + dedup)
+X-VIGIL-Commit: 8d49b457f6af57aef2735e14bd9625bd19b7060f
+X-VIGIL-Date: 2026-07-20T08:27:59-04:00
+
+diff --git a/vendor/strix/strix/config/models.py b/vendor/strix/strix/config/models.py
+index 9d04b267..2150086b 100644
+--- a/vendor/strix/strix/config/models.py
++++ b/vendor/strix/strix/config/models.py
+@@ -206,7 +206,29 @@ def model_supports_reasoning(model_name: str) -> bool:
+     entry = litellm.model_cost.get(name)
+     if entry is None and "/" in name:
+         entry = litellm.model_cost.get(name.rsplit("/", 1)[1])
+-    return bool(entry and entry.get("supports_reasoning"))
++    if entry and entry.get("supports_reasoning"):
++        return True
++    # VIGIL: LiteLLM's cost map may not yet list a newer Claude model, which would silently DROP
++    # reasoning_effort for a model that DOES support extended thinking. Recognise the known
++    # Anthropic thinking-capable families so reasoning is still applied on the anthropic/ route.
++    return _anthropic_supports_thinking(name)
++
++
++# Claude extended-thinking families (Opus 4.x, Sonnet 4.x/5, Sonnet 3.7). Haiku and <=3.5 Sonnet
++# do not support extended thinking, so they are deliberately excluded.
++_ANTHROPIC_THINKING_MARKERS = (
++    "claude-opus-4",
++    "claude-sonnet-4",
++    "claude-sonnet-5",
++    "claude-3-7-sonnet",
++)
++
++
++def _anthropic_supports_thinking(name: str) -> bool:
++    n = name.strip().lower()
++    if "claude" not in n and "anthropic" not in n:
++        return False
++    return any(marker in n for marker in _ANTHROPIC_THINKING_MARKERS)
+ 
+ 
+ def is_recommended_or_frontier_model(model_name: str) -> bool:
+diff --git a/vendor/strix/strix/report/anthropic_pricing.py b/vendor/strix/strix/report/anthropic_pricing.py
+new file mode 100644
+index 00000000..69918a52
+--- /dev/null
++++ b/vendor/strix/strix/report/anthropic_pricing.py
+@@ -0,0 +1,121 @@
++"""
++VIGIL Anthropic price table — the fallback that keeps the budget governor armed on Claude.
++
++Strix stops a scan when accumulated LLM cost reaches ``max_budget_usd``. That cost comes from
++LiteLLM's reported ``response_cost``/cost map. LiteLLM may not know a newly-released Claude model
++(e.g. ``claude-opus-4-8``) and then reports **$0** — which silently DISARMS the budget governor:
++a $0 spend never trips the cap, so an autonomous scan runs unbounded. This table gives a
++best-effort per-token cost so the accumulated cost is nonzero and the budget still enforces.
++
++Precedence: real provider-reported cost (LiteLLM ``response_cost`` / ``usage.cost``) always wins;
++this table is consulted ONLY when every provider path yields nothing (see
++``report.state._estimate_response_cost``). Prices are USD per token, from Anthropic's published
++per-million rates / 1e6; update as Anthropic revises pricing. Being an estimate, a slightly stale
++rate still fixes the disarm (cost becomes nonzero) — the goal is a *bounded* autonomous scan.
++"""
++
++from __future__ import annotations
++
++from typing import Any
++
++_M = 1_000_000.0
++
++# (input, output, cache_read, cache_write) — USD per MILLION tokens.
++_PRICES_PER_M: dict[str, tuple[float, float, float, float]] = {
++    "claude-opus-4": (15.0, 75.0, 1.50, 18.75),
++    "claude-opus-3": (15.0, 75.0, 1.50, 18.75),
++    "claude-3-opus": (15.0, 75.0, 1.50, 18.75),
++    "claude-sonnet-5": (3.0, 15.0, 0.30, 3.75),
++    "claude-sonnet-4": (3.0, 15.0, 0.30, 3.75),
++    "claude-3-7-sonnet": (3.0, 15.0, 0.30, 3.75),
++    "claude-3-5-sonnet": (3.0, 15.0, 0.30, 3.75),
++    "claude-haiku-4": (1.0, 5.0, 0.10, 1.25),
++    "claude-3-5-haiku": (0.80, 4.0, 0.08, 1.0),
++    "claude-3-haiku": (0.25, 1.25, 0.03, 0.30),
++}
++
++
++def is_anthropic_model(model: str | None) -> bool:
++    if not model:
++        return False
++    name = model.strip().lower()
++    return "anthropic" in name or "claude" in name
++
++
++def _match_prices(model: str) -> tuple[float, float, float, float] | None:
++    name = model.strip().lower()
++    if "/" in name:
++        name = name.rsplit("/", 1)[-1]
++    # longest key first, so "claude-3-5-sonnet" wins over a generic "sonnet" family match
++    for key in sorted(_PRICES_PER_M, key=len, reverse=True):
++        if key in name:
++            return _PRICES_PER_M[key]
++    if "opus" in name:
++        return _PRICES_PER_M["claude-opus-4"]
++    if "sonnet" in name:
++        return _PRICES_PER_M["claude-sonnet-5"]
++    if "haiku" in name:
++        return _PRICES_PER_M["claude-haiku-4"]
++    return None
++
++
++def _int(value: Any) -> int:
++    try:
++        return max(0, int(value or 0))
++    except (TypeError, ValueError):
++        return 0
++
++
++def _cache_read_tokens(usage: dict[str, Any]) -> int:
++    details = usage.get("prompt_tokens_details")
++    if isinstance(details, dict):
++        v = details.get("cached_tokens") or details.get("cache_read_input_tokens")
++        if v:
++            return _int(v)
++    return _int(usage.get("cache_read_input_tokens"))
++
++
++def _cache_write_tokens(usage: dict[str, Any]) -> int:
++    details = usage.get("prompt_tokens_details")
++    if isinstance(details, dict):
++        v = details.get("cache_creation_input_tokens") or details.get("cache_write_input_tokens")
++        if v:
++            return _int(v)
++    return _int(usage.get("cache_creation_input_tokens"))
++
++
++def estimate_anthropic_cost(model: str | None, usage_payload: dict[str, Any]) -> float | None:
++    """Best-effort USD cost for an Anthropic model from token counts.
++
++    Returns None if the model is not Anthropic, has no price entry, or carries no token counts.
++    Cache-read/write tokens (from ``*_tokens_details`` or the Anthropic-native fields) are priced
++    at their own rates, and cached tokens are subtracted from the fresh-input count so they are
++    not double-charged.
++    """
++    if not is_anthropic_model(model):
++        return None
++    prices = _match_prices(model or "")
++    if prices is None:
++        return None
++    in_price, out_price, cache_read_price, cache_write_price = prices
++
++    prompt = _int(usage_payload.get("prompt_tokens"))
++    completion = _int(usage_payload.get("completion_tokens"))
++    if not prompt and not completion:
++        total = _int(usage_payload.get("total_tokens"))
++        if not total:
++            return None
++        cost = total * in_price / _M   # no split available — price the lot at the input rate
++        return cost if cost > 0 else None
++
++    cache_read = _cache_read_tokens(usage_payload)
++    cache_write = _cache_write_tokens(usage_payload)
++    fresh_input = max(0, prompt - cache_read - cache_write)
++
++    cost = (
++        fresh_input * in_price
++        + completion * out_price
++        + cache_read * cache_read_price
++        + cache_write * cache_write_price
++    ) / _M
++    return cost if cost > 0 else None
+diff --git a/vendor/strix/strix/report/dedupe.py b/vendor/strix/strix/report/dedupe.py
+index c2970d95..bff7bcfe 100644
+--- a/vendor/strix/strix/report/dedupe.py
++++ b/vendor/strix/strix/report/dedupe.py
+@@ -258,14 +258,81 @@ def _parse_dedupe_response(content: str) -> dict[str, Any]:
+ 
+ 
+ def _extract_text(response: ModelResponse) -> str:
++    # 1) OpenAI Responses shape: output -> ResponseOutputMessage -> content chunks with .text
+     parts: list[str] = []
+-    for item in response.output:
++    for item in getattr(response, "output", None) or []:
+         if not isinstance(item, ResponseOutputMessage):
+             continue
+-        for chunk in item.content:
++        for chunk in getattr(item, "content", None) or []:
+             text = getattr(chunk, "text", None)
+             if text:
+                 parts.append(text)
++    if parts:
++        return "".join(parts)
++
++    # The Responses shape yielded nothing. On the Claude/LiteLLM route the SDK can hand back a
++    # chat-completions-shaped response, so a Responses-only extractor silently returns "" and the
++    # LLM-judge dedup no-ops. Fall through progressively robust shapes.
++
++    # 2) SDK convenience aggregate, if present.
++    agg = getattr(response, "output_text", None)
++    if isinstance(agg, str) and agg.strip():
++        return agg
++
++    # 3) chat-completions shape: choices[].message.content (str, or Anthropic content blocks).
++    chat = _extract_chat_completions_text(response)
++    if chat:
++        return chat
++
++    # 4) Last resort: any output item exposing a str .text or .content (duck-typed).
++    for item in getattr(response, "output", None) or []:
++        t = getattr(item, "text", None)
++        if isinstance(t, str) and t:
++            parts.append(t)
++            continue
++        content = getattr(item, "content", None)
++        if isinstance(content, str) and content:
++            parts.append(content)
++    return "".join(parts)
++
++
++def _blocks_to_text(content: Any) -> str:
++    """Text from a chat-completions ``message.content`` that is a str or a list of content blocks
++    (``{"type": "text", "text": ...}`` or objects with ``.text``)."""
++    if isinstance(content, str):
++        return content
++    if isinstance(content, list):
++        out: list[str] = []
++        for block in content:
++            if isinstance(block, dict):
++                text = block.get("text")
++            else:
++                text = getattr(block, "text", None)
++            if isinstance(text, str) and text:
++                out.append(text)
++        return "".join(out)
++    return ""
++
++
++def _extract_chat_completions_text(response: Any) -> str:
++    choices = getattr(response, "choices", None)
++    if choices is None and isinstance(response, dict):
++        choices = response.get("choices")
++    if not choices:
++        return ""
++    parts: list[str] = []
++    for choice in choices:
++        message = getattr(choice, "message", None)
++        if message is None and isinstance(choice, dict):
++            message = choice.get("message")
++        if message is None:
++            continue
++        content = getattr(message, "content", None)
++        if content is None and isinstance(message, dict):
++            content = message.get("content")
++        text = _blocks_to_text(content)
++        if text:
++            parts.append(text)
+     return "".join(parts)
+ 
+ 
+diff --git a/vendor/strix/strix/report/state.py b/vendor/strix/strix/report/state.py
+index 14f71bbc..0b63d0dd 100644
+--- a/vendor/strix/strix/report/state.py
++++ b/vendor/strix/strix/report/state.py
+@@ -623,6 +623,16 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
+             continue
+         if isinstance(value, int | float) and value > 0:
+             return float(value)
++
++    # VIGIL: LiteLLM's cost map may not know a newer Claude model, returning nothing above and
++    # silently DISARMING the budget governor (a $0 spend never trips the cap). Fall back to the
++    # Anthropic price table so the accumulated cost is nonzero and the budget still enforces.
++    # Every real provider-reported cost path (handled by the callers above) takes precedence.
++    from .anthropic_pricing import estimate_anthropic_cost
++
++    fallback = estimate_anthropic_cost(model, usage_payload)
++    if fallback is not None and fallback > 0:
++        return fallback
+     return None
+ 
+ 
+diff --git a/vendor/strix/tests_vigil/conftest.py b/vendor/strix/tests_vigil/conftest.py
+new file mode 100644
+index 00000000..fa88f9da
+--- /dev/null
++++ b/vendor/strix/tests_vigil/conftest.py
+@@ -0,0 +1,8 @@
++"""Put the vendored Strix package on the path for the VIGIL-added tests."""
++
++import pathlib
++import sys
++
++_STRIX_ROOT = pathlib.Path(__file__).resolve().parent.parent  # vendor/strix
++if str(_STRIX_ROOT) not in sys.path:
++    sys.path.insert(0, str(_STRIX_ROOT))
+diff --git a/vendor/strix/tests_vigil/test_anthropic_pricing.py b/vendor/strix/tests_vigil/test_anthropic_pricing.py
+new file mode 100644
+index 00000000..f4ac1ebd
+--- /dev/null
++++ b/vendor/strix/tests_vigil/test_anthropic_pricing.py
+@@ -0,0 +1,78 @@
++"""VIGIL Anthropic price table — the budget-disarm fix (P8).
++
++Loaded directly from the file so it runs without Strix's heavy runtime deps: the module under
++test imports only ``typing``.
++"""
++
++from __future__ import annotations
++
++import importlib.util
++import pathlib
++
++import pytest
++
++_MOD = pathlib.Path(__file__).resolve().parents[1] / "strix" / "report" / "anthropic_pricing.py"
++_spec = importlib.util.spec_from_file_location("vigil_anthropic_pricing", _MOD)
++ap = importlib.util.module_from_spec(_spec)
++_spec.loader.exec_module(ap)
++
++
++def test_opus_cost_is_positive_and_uses_the_right_rate():
++    # 1,000,000 input + 1,000,000 output at Opus rates ($15 + $75 per M) = $90.
++    cost = ap.estimate_anthropic_cost(
++        "anthropic/claude-opus-4-8",
++        {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000, "total_tokens": 2_000_000},
++    )
++    assert cost == pytest.approx(90.0)
++
++
++def test_the_disarm_scenario_yields_nonzero_cost():
++    # The exact bug: a newer Claude model LiteLLM doesn't know. The table must still cost it.
++    cost = ap.estimate_anthropic_cost(
++        "anthropic/claude-opus-4-8",
++        {"prompt_tokens": 5000, "completion_tokens": 2000, "total_tokens": 7000},
++    )
++    assert cost is not None and cost > 0
++
++
++def test_cache_tokens_priced_separately_and_not_double_charged():
++    # 10k prompt of which 8k are cache reads → 2k fresh input @15/M + 8k cache-read @1.5/M.
++    cost = ap.estimate_anthropic_cost(
++        "claude-opus-4-8",
++        {
++            "prompt_tokens": 10_000,
++            "completion_tokens": 0,
++            "prompt_tokens_details": {"cached_tokens": 8_000},
++        },
++    )
++    expected = (2_000 * 15.0 + 8_000 * 1.5) / 1_000_000
++    assert cost == pytest.approx(expected)
++
++
++def test_sonnet_and_haiku_have_distinct_rates():
++    u = {"prompt_tokens": 1_000_000, "completion_tokens": 0}
++    assert ap.estimate_anthropic_cost("claude-sonnet-5", u) == pytest.approx(3.0)
++    assert ap.estimate_anthropic_cost("claude-haiku-4-5", u) == pytest.approx(1.0)
++
++
++def test_total_only_usage_still_costs():
++    cost = ap.estimate_anthropic_cost("claude-opus-4-8", {"total_tokens": 1_000_000})
++    assert cost == pytest.approx(15.0)  # priced at the input rate when no split is available
++
++
++def test_non_anthropic_returns_none():
++    assert ap.estimate_anthropic_cost("openai/gpt-4o", {"prompt_tokens": 1000}) is None
++    assert ap.estimate_anthropic_cost("", {"prompt_tokens": 1000}) is None
++    assert ap.estimate_anthropic_cost(None, {"prompt_tokens": 1000}) is None
++
++
++def test_no_tokens_returns_none():
++    assert ap.estimate_anthropic_cost("claude-opus-4-8", {}) is None
++    assert ap.estimate_anthropic_cost("claude-opus-4-8", {"prompt_tokens": 0, "completion_tokens": 0}) is None
++
++
++def test_is_anthropic_model():
++    assert ap.is_anthropic_model("anthropic/claude-opus-4-8")
++    assert ap.is_anthropic_model("claude-3-5-sonnet")
++    assert not ap.is_anthropic_model("openai/gpt-4o")
++    assert not ap.is_anthropic_model(None)
+diff --git a/vendor/strix/tests_vigil/test_dedupe_extract.py b/vendor/strix/tests_vigil/test_dedupe_extract.py
+new file mode 100644
+index 00000000..9d3699a0
+--- /dev/null
++++ b/vendor/strix/tests_vigil/test_dedupe_extract.py
+@@ -0,0 +1,55 @@
++"""dedupe text extraction falls back to the chat-completions/Claude shape (P8).
++
++Skipped where Strix's report deps (openai-agents/openai) are not installed.
++"""
++
++from __future__ import annotations
++
++import pytest
++
++dedupe = pytest.importorskip("strix.report.dedupe", reason="strix/openai-agents deps not installed")
++
++
++class _Msg:
++    def __init__(self, content):
++        self.content = content
++
++
++class _Choice:
++    def __init__(self, content):
++        self.message = _Msg(content)
++
++
++class _ChatResp:
++    """A chat-completions-shaped response (what the Claude/LiteLLM route can hand back)."""
++
++    def __init__(self, content, output=None):
++        self.choices = [_Choice(content)]
++        self.output = output or []
++
++
++def test_extracts_plain_string_content_on_claude_shape():
++    assert dedupe._extract_text(_ChatResp("hello from claude")) == "hello from claude"
++
++
++def test_extracts_anthropic_content_blocks():
++    resp = _ChatResp([{"type": "text", "text": "block one"}, {"type": "text", "text": " block two"}])
++    assert dedupe._extract_text(resp) == "block one block two"
++
++
++def test_empty_responses_output_falls_through_to_choices():
++    # the exact regression: output has no ResponseOutputMessage → must NOT return ""
++    assert dedupe._extract_text(_ChatResp("fallback text", output=[])) == "fallback text"
++
++
++def test_blocks_to_text_helper():
++    assert dedupe._blocks_to_text("plain") == "plain"
++    assert dedupe._blocks_to_text([{"type": "text", "text": "a"}, {"text": "b"}]) == "ab"
++    assert dedupe._blocks_to_text(None) == ""
++    assert dedupe._blocks_to_text(123) == ""
++
++
++def test_dict_shaped_response():
++    # some routes hand back a plain dict
++    resp = {"choices": [{"message": {"content": "dict content"}}]}
++    assert dedupe._extract_chat_completions_text(resp) == "dict content"
+diff --git a/vendor/strix/tests_vigil/test_reasoning_thinking.py b/vendor/strix/tests_vigil/test_reasoning_thinking.py
+new file mode 100644
+index 00000000..9616896a
+--- /dev/null
++++ b/vendor/strix/tests_vigil/test_reasoning_thinking.py
+@@ -0,0 +1,42 @@
++"""reasoning_effort is not silently dropped for a newer Claude model (P8).
++
++Skipped where Strix's config deps (litellm) are not installed.
++"""
++
++from __future__ import annotations
++
++import pytest
++
++models = pytest.importorskip("strix.config.models", reason="strix/litellm deps not installed")
++
++
++def test_anthropic_thinking_families_recognised():
++    f = models._anthropic_supports_thinking
++    assert f("claude-opus-4-8")
++    assert f("anthropic/claude-opus-4-20250514")
++    assert f("claude-sonnet-5")
++    assert f("claude-sonnet-4")
++    assert f("claude-3-7-sonnet")
++    # families WITHOUT extended thinking must not be misreported
++    assert not f("claude-3-5-sonnet")
++    assert not f("claude-3-5-haiku")
++    assert not f("claude-3-haiku")
++    assert not f("gpt-4o")
++    assert not f("")
++
++
++def test_reasoning_not_dropped_when_litellm_is_ignorant(monkeypatch):
++    import litellm
++    # simulate LiteLLM's cost map not knowing the newer Claude model — the disarm precondition
++    monkeypatch.setattr(litellm, "model_cost", {}, raising=False)
++    assert models.model_supports_reasoning("anthropic/claude-opus-4-8") is True
++    # a non-thinking Claude is still correctly treated as non-reasoning
++    assert models.model_supports_reasoning("anthropic/claude-3-5-haiku") is False
++
++
++def test_litellm_known_reasoning_flag_still_respected(monkeypatch):
++    import litellm
++    monkeypatch.setattr(
++        litellm, "model_cost", {"some/model": {"supports_reasoning": True}}, raising=False
++    )
++    assert models.model_supports_reasoning("some/model") is True

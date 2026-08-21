@@ -1,0 +1,25 @@
+From 5f730b5d7bda9843d7baf76702cd9216a68c0550 Mon Sep 17 00:00:00 2001
+Subject: [strix-patch 009] A14: supply-chain hardening — digest-pinned images, hash-locked deps, SBOM, blocking CVE gate
+X-VIGIL-Commit: 5f730b5d7bda9843d7baf76702cd9216a68c0550
+X-VIGIL-Date: 2026-08-12T17:31:43-04:00
+
+diff --git a/vendor/strix/containers/Dockerfile b/vendor/strix/containers/Dockerfile
+index 4c54ddc2..7ed45d54 100644
+--- a/vendor/strix/containers/Dockerfile
++++ b/vendor/strix/containers/Dockerfile
+@@ -1,4 +1,14 @@
+-FROM kalilinux/kali-rolling:latest
++# A14 (supply chain): digest-pinned. `kali-rolling:latest` is a ROLLING tag on a distro that
++# retags continuously, so this build was previously non-reproducible by construction — two builds
++# a day apart could ship different toolchains into the sandbox that executes offensive actions.
++# The digest makes the base content-addressed: it either matches or the pull fails.
++#
++# NOTE this file is a VIGIL fork of the upstream Strix container (it COPYs strix/tools/proxy/
++# caido_api.py, adds agent-browser + Caido). Only the FROM line is changed here; upstream
++# authorship of the rest is unchanged. Re-pin with:
++#   bash infra/supply-chain/resolve-image-digests.sh   (see docs/SUPPLY-CHAIN.md)
++# kalilinux/kali-rolling:latest, resolved 2026-08-12.
++FROM kalilinux/kali-rolling:latest@sha256:f49124869e4eee549315879c3bd7ef92f23b8753fec7544537bcec1493277096
+ 
+ LABEL description="AI Agent Penetration Testing Environment with Comprehensive Automated Tools"
+ 
