@@ -345,6 +345,7 @@ jobs:
             VIGIL_REQUIRE_FRONTIER_CHECK=1 \
             PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
               docs/tests/test_out_of_scope_is_honest.py \
+              integration/tests/test_tool_intake.py \
               integration/tests/test_oracle_adapter.py \
               integration/tests/test_external_tool_runner.py \
               integration/tests/test_conformance.py \

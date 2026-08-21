@@ -11,6 +11,14 @@ import json
 
 import pytest
 
+# The derivation delegates to framework's parser registry, so these tests need the offense engine. They
+# SKIP in the sovereign leg and RUN in the offense leg, where framework is importable — this file is
+# listed in the offense-leg run-list in .github/workflows/ci.yml, which the
+# test_ci_framework_tests_run_in_offense_leg guard enforces. Without that entry an importorskip file
+# never runs anywhere, which is the silent-skip failure this repo already had to fix once.
+pytest.importorskip("framework.v2.imports.parsers",
+                    reason="offense engine (framework) not importable in this leg")
+
 from vigil_integration.agent.react import intake_result
 from vigil_integration.agent.state import OutputAnalysis
 from vigil_integration.live.tool_intake import analysis_from_tool_output
