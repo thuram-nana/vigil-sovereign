@@ -14,8 +14,8 @@ import json
 
 import pytest
 
-from strix.runtime.caido_bootstrap import (
-    _configure_vigil_upstream,
+from strix.runtime.vigil_upstream import (
+    configure_vigil_upstream as _configure_vigil_upstream,
     _upstream_mutation_body,
 )
 
