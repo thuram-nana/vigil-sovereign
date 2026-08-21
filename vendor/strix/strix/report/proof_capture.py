@@ -97,10 +97,10 @@ async def capture_for_report(
 ) -> Optional[dict]:
     """Best-effort: build the ``_vigil_capture`` for a finding from Caido-captured traffic. NEVER raises.
 
-    Preference order for the exploit exchange: an explicitly-cited Caido request id (``explicit_ids[0]``),
-    else the most recent request whose endpoint/method matches the report. A second explicit id is used as a
-    benign control. Returns ``None`` (⇒ the finding stays a plain report / LEAD) when Caido is unavailable,
-    nothing matches, or no response was captured."""
+    The exploit exchange is the one the agent CAUSALLY cited: ``explicit_ids[0]`` (a second id is a
+    benign control). There is no retrospective substring correlation — without a cited id the capture is
+    refused so the finding stays a LEAD (see :func:`_resolve_ids`). Returns ``None`` (⇒ the finding stays
+    a plain report / LEAD) when no id is cited, Caido is unavailable, or no response was captured."""
     bug_class = str(report.get("finding_class") or report.get("bug_class") or "").strip()
     if not bug_class:
         return None
@@ -125,40 +125,19 @@ async def capture_for_report(
 
 
 async def _resolve_ids(report: dict, caido: Any, explicit_ids: "list[str] | None") -> tuple[Optional[str], Optional[str]]:
-    if explicit_ids:
-        ids = [str(x) for x in explicit_ids if str(x).strip()]
-        return (ids[0] if ids else None), (ids[1] if len(ids) > 1 else None)
-    # auto-correlate: the most recent captured request matching this finding's endpoint (+ method).
-    endpoint = str(report.get("endpoint") or "").strip()
-    method = str(report.get("method") or "").strip().upper()
-    if not endpoint:
+    """Resolve (exploit_id, control_id) from the request ids the agent CAUSALLY cited — not retrospectively.
+
+    A proof exchange must be the exchange the agent actually sent (``repeat_request`` / ``replay_send_raw``
+    both hand the exact request + session id back to their caller), NOT "whatever request Caido most
+    recently recorded whose path happens to contain this endpoint substring". That old auto-correlation — a
+    path-substring HTTPQL filter, newest-first, limit one — selected an exchange with no payload match, no
+    parameter match, no time window and no link to the agent's own action: a target that merely returns a
+    datastore stack trace on any malformed ``?id=`` could be attributed a signed FACT off an unrelated
+    request, and a Caido "seed" row (created with no response) could even be adjudicated. It is removed.
+    Without an explicitly cited id the capture is refused (returns ``(None, None)``) so the finding stays a
+    LEAD — VIGIL earns the FACT only by independently re-driving the cited exchange (S7). ``report`` /
+    ``caido`` are kept in the signature for the S7 re-drive wiring and API stability."""
+    if not explicit_ids:
         return None, None
-    hql = f'req.path.cont:"{_hql_escape(endpoint)}"'
-    if method:
-        hql = f'{hql} and req.method.eq:"{method}"'
-    listing = await caido.list_requests(httpql_filter=hql, first=1, sort_by="timestamp", sort_order="desc")
-    rid = _first_request_id(listing)
-    return rid, None
-
-
-def _hql_escape(s: str) -> str:
-    return s.replace("\\", "\\\\").replace('"', '\\"')[:512]
-
-
-def _first_request_id(listing: Any) -> Optional[str]:
-    """Pull the first request id out of a Caido list result, tolerating dict / model / edge shapes."""
-    try:
-        items = listing
-        for attr in ("edges", "nodes", "items", "requests"):
-            got = getattr(items, attr, None) if not isinstance(items, dict) else items.get(attr)
-            if got:
-                items = got
-                break
-        if isinstance(items, (list, tuple)) and items:
-            first = items[0]
-            node = getattr(first, "node", None) or (first.get("node") if isinstance(first, dict) else None) or first
-            rid = getattr(node, "id", None) or (node.get("id") if isinstance(node, dict) else None)
-            return str(rid) if rid else None
-    except Exception:  # noqa: BLE001
-        return None
-    return None
+    ids = [str(x) for x in explicit_ids if str(x).strip()]
+    return (ids[0] if ids else None), (ids[1] if len(ids) > 1 else None)
