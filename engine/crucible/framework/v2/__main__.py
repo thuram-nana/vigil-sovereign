@@ -163,6 +163,15 @@ def _evidence(argv: list[str]) -> int:
     return evidence_cli.main(argv)
 
 
+def _erase_evidence(argv: list[str]) -> int:
+    # W16-8 right-to-erasure: crypto-shred an engagement's at-rest credential-bearing evidence
+    # WITHOUT breaking the append-only spine (destroy the per-engagement key; append a signed
+    # tombstone; never delete/rewrite a row). LAZY import — agents/ is untouched until this
+    # subcommand runs.
+    from .agents import evidence_erasure
+    return evidence_erasure.main(argv)
+
+
 def _mcp(argv: list[str]) -> int:
     from .mcp import cli as mcp_cli
     return mcp_cli.main(argv)
@@ -256,6 +265,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "capabilities": _capabilities,
     "aegis": _aegis,
     "evidence": _evidence,
+    "erase-evidence": _erase_evidence,
     "report": _report,
     "attack-paths": _attack_paths,
     "collaborator": _collaborator,
