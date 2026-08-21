@@ -455,3 +455,80 @@ def test_a_helper_that_raises_still_degrades_to_the_stricter_name(monkeypatch):
     assert llm_egress_refusal(None) is None
     monkeypatch.setenv(_TIER_ENV, "AIR_GAPPED")
     assert llm_egress_refusal(None) is not None
+
+
+# --- W10-2: the RE-RESOLVED tier reaches a real CHILD PROCESS, which then refuses the cloud call ------
+#
+# The tests above prove the tier gates egress IN-PROCESS. This one closes the deployment loop the issue
+# names: `PlaneControl` (uiproxy) re-resolves the tier on an offense-plane restart and spawns the children
+# with it, and the child — a genuine subprocess, exactly like the offense console/api under `vigil up` —
+# then REFUSES a cloud-model backend at construction. It runs in the OFFENSE leg because the child imports
+# `framework.v2.kernel.sovereignty`. It is the criterion-3 negative control: with the re-resolved tier set
+# to AIR_GAPPED a child refuses `anthropic`, and with PERMISSIVE the very same child permits it — so the
+# refusal is caused by the tier that reached the process, not by anything unconditional.
+
+_CHILD_PROBE = r"""
+import os, sys
+# `_child_env` strips PYTHONPATH from a spawned child (the boot children are launched via absolute venv
+# bins that already have `framework` installed); in the test the child re-adds the paths it needs.
+sys.path[:0] = sys.argv[1:]
+from framework.v2.kernel import sovereignty as S
+tier = os.environ.get("CRUCIBLE_SOVEREIGNTY_TIER", "<unset>")
+try:
+    S.current().assert_permitted("anthropic")
+    verdict = "PERMITTED"
+except S.SovereigntyViolation:
+    verdict = "REFUSED"
+sys.stdout.write("TIER=%s VERDICT=%s\n" % (tier, verdict))
+sys.stdout.flush()
+"""
+
+
+def _child_verdict_after_reresolve_to(tmp_path, tier: str) -> str:
+    """Drive `PlaneControl.start_offense` with a resolver that returns ``tier``, spawn a REAL child that
+    asks the sovereignty policy whether a cloud backend may be built, and return its ``TIER=.. VERDICT=..``
+    line. Proves the RE-RESOLVED tier actually reached the child process (not just the UI)."""
+    import sys as _sys
+    from pathlib import Path
+
+    from vigil_integration import uiproxy
+
+    repo = Path(__file__).resolve().parents[2]
+    probe = tmp_path / "probe.py"
+    probe.write_text(_CHILD_PROBE, encoding="utf-8")
+    log = tmp_path / f"child-{tier}.log"
+
+    # a free port so start_offense treats the backend as "down" and actually spawns it
+    s = __import__("socket").socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    argv = [_sys.executable, str(probe), str(repo / "engine" / "crucible"),
+            str(repo / "packages" / "core" / "vigil_core")]
+
+    def _resolver():
+        # the operator's CURRENT tier, re-read at restart — the boot snapshot (below) is deliberately the
+        # OPPOSITE, so a stale snapshot would give the wrong verdict.
+        return True, {"CRUCIBLE_SOVEREIGNTY_TIER": tier}
+
+    boot_snapshot = {"CRUCIBLE_SOVEREIGNTY_TIER": ("PERMISSIVE" if tier == "AIR_GAPPED" else "AIR_GAPPED")}
+    specs = [("offense-console", argv, log, {}, "127.0.0.1", port)]
+    pc = uiproxy.PlaneControl(specs, env_resolver=_resolver, dynamic_env=boot_snapshot)
+    res = pc.start_offense()
+    assert res["result"] == "started", res
+    child = pc._children["offense-console"]
+    child.wait(timeout=120)
+    return log.read_text(encoding="utf-8").strip()
+
+
+def test_reresolved_air_gapped_tier_makes_a_real_child_refuse_a_cloud_call(tmp_path):
+    """AIR_GAPPED re-resolved on restart → the child refuses `anthropic`; PERMISSIVE → the same child
+    permits it. The pair is the mutation control (criterion 3/6). Note the boot snapshot is the OPPOSITE
+    tier in each case, so a pre-fix snapshot-respawn would yield the wrong verdict — this fails on a tree
+    without the re-resolve fix."""
+    air = _child_verdict_after_reresolve_to(tmp_path, "AIR_GAPPED")
+    assert air == "TIER=AIR_GAPPED VERDICT=REFUSED", air
+
+    perm = _child_verdict_after_reresolve_to(tmp_path, "PERMISSIVE")
+    assert perm == "TIER=PERMISSIVE VERDICT=PERMITTED", perm

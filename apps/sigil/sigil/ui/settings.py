@@ -350,7 +350,11 @@ CONFIG_META = {
                    "TRUSTED_CLOUD adds Anthropic ZDR (also needs the zero-data-retention toggle below); "
                    "PERMISSIVE allows everything. Blank = leave it to the offense process environment, "
                    "which defaults to PERMISSIVE. A tier exported in the shell that launches `vigil up` "
-                   "takes precedence over the value stored here."},
+                   "takes precedence over the value stored here. The offense engine receives the tier when "
+                   "it STARTS, so a change here takes effect the next time the offense plane starts — restart "
+                   "it from the Status panel (Stop, then Start), or run `vigil up`. The Governance screen's "
+                   "tier pill shows the tier actually in force; if it disagrees with this setting, the pill "
+                   "is the truth until the plane restarts."},
     "CRUCIBLE_ANTHROPIC_ZDR": {"group": "offense", "type": "bool", "default": "",
         "label": "Anthropic zero-data-retention", "plane": "offense",
         "purpose": "Attest that the Anthropic API key is on a zero-data-retention contract. Routes Claude "

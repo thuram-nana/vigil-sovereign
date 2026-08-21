@@ -3970,6 +3970,10 @@
           f.warn ? h("div.set-status.off", { style: { color: "var(--warn,#d9a441)", fontWeight: "600", margin: "4px 0 8px" } },
             [V.icon("info"), h("span", null, f.warn)]) : null,
           h("div.row", { style: { display: "flex", gap: "8px", alignItems: "center" } }, [input, save]),
+          // W10-2 — the sovereignty tier is delivered to the offense children at spawn; if the running
+          // engine is enforcing a DIFFERENT tier than Settings request, say so here (the Governance pill
+          // is the truthful one) so the operator knows the change needs an offense-plane restart to apply.
+          f.env === "CRUCIBLE_SOVEREIGNTY_TIER" ? h("div#sov-tier-disagree", null, []) : null,
         ]);
       });
       sections.push(h("div", { style: { marginTop: "16px" } }, [
@@ -3978,6 +3982,39 @@
       ]));
     });
     V.mount(host, sections);
+    // After the card is mounted, compare the CONFIGURED sovereignty tier against the tier the running
+    // offense engine is actually enforcing (the Governance pill), and surface any disagreement.
+    var tierField = null;
+    groups.forEach(function (g) {
+      (g.fields || []).forEach(function (f) { if (f.env === "CRUCIBLE_SOVEREIGNTY_TIER") tierField = f; });
+    });
+    if (tierField) surfaceSovereigntyTierDisagreement((tierField.value || "").trim() || "PERMISSIVE");
+  }
+
+  // W10-2 — Settings ↔ Governance-pill disagreement. The sovereignty tier reaches the keyless offense
+  // children in their environment when they START; changing it in Settings updates the sovereign store,
+  // not an already-running child. So the tier the engine is ENFORCING (read from the offense governance
+  // posture — the Governance pill) can lag what Settings request until the offense plane is restarted. When
+  // they differ, warn here and name the pill as the truth. The offense plane can be restarted from the
+  // Status panel (Stop → Start) — a fresh `vigil up` is no longer required (PlaneControl re-resolves the
+  // tier on restart), but it works too.
+  function surfaceSovereigntyTierDisagreement(configured) {
+    var box = V.$("#sov-tier-disagree"); if (!box) return;
+    V.getJSON(OFF("/api/governance")).then(function (d) {
+      var effective = d && d.sovereignty && d.sovereignty.tier;
+      if (!effective || effective === configured) return;   // offense offline, or they agree → no banner
+      V.mount(box, h("div.set-status.off", {
+        style: { color: "var(--warn,#d9a441)", fontWeight: "600", margin: "6px 0 2px",
+                 flexDirection: "column", alignItems: "stretch" } }, [
+        h("div", null, [V.icon("info"), h("span", null,
+          "The offense engine is enforcing tier " + effective + " right now — the Governance pill, the tier "
+          + "actually in force — but Settings request " + configured + ".")]),
+        h("div", { style: { marginTop: "4px", fontWeight: "400" } },
+          "The offense children receive the tier when they start, so your change applies the next time the "
+          + "offense plane starts. Restart it from the Status panel (Stop, then Start) — or run `vigil up`. "
+          + "Until then the Governance pill is the truth."),
+      ]));
+    }).catch(function () { /* offense plane offline — nothing to compare, no banner */ });
   }
 
   // Reasoning-effort control: how hard current-generation models think (output_config.effort). "Model
