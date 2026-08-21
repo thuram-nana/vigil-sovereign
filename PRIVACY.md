@@ -41,10 +41,19 @@ deletion:
   python3 -m framework.v2 erase-evidence --engagement <slug> --reason "<request ref>" --yes
   ```
 
-- after the key is destroyed the sealed ciphertext — on disk, **in any off-host backup copy**, or
-  embedded in a spine payload — is cryptographically unrecoverable, while every append-only row is
-  byte-for-byte unchanged and the audit chain still verifies. A signed tombstone is appended to the
-  spine recording that (and when) erasure happened.
+- after the key is destroyed, any **sealed** ciphertext — on disk, or **in any off-host backup copy of
+  the ciphertext** — is cryptographically unrecoverable, while every append-only row is byte-for-byte
+  unchanged and the audit chain still verifies. A signed tombstone is appended to the spine recording
+  that (and when) erasure happened.
+
+> **Honest scope (what is and is not sealed today).** The on-disk evidence archive is sealed at erasure
+> and crypto-shredded. The sealing primitive (`crypto_shred.seal_text`) can also seal a credential
+> excerpt destined for the append-only spine (`ResultPayload.body_excerpt`,
+> `ObservationPayload.raw_excerpt`), **but seal-at-capture is not yet wired into the live executor**
+> (staged as a follow-up with the reporter/redaction work). Until it is, excerpts already written to the
+> spine are stored in plaintext and are **not** made unrecoverable by crypto-shredding — do not rely on
+> erasing them. The DEK keystore (`framework/v2/.evidence-keys/`) **must never be replicated to the same
+> off-host location as the ciphertext**, or a backup could resurrect a shredded key.
 
 Erasure is **irreversible** and **per-engagement**: it cannot be undone, and it affects only the
 named engagement. The command is destructive and default-denies without `--yes`.

@@ -12,11 +12,14 @@ THE MECHANISM — crypto-shredding. Credential-bearing evidence is SEALED under 
 Data Encryption Key (DEK). The DEK is held OUTSIDE the append-only spine, in a shreddable
 keystore (``paths.evidence_keys_dir``). Erasure = destroy the DEK. Afterwards:
 
-  * the ciphertext left behind — on disk, in an off-host backup, or embedded as a sealed
-    excerpt inside an append-only spine payload — is cryptographically UNRECOVERABLE, and
+  * any SEALED ciphertext left behind — on disk, or in an off-host backup of the CIPHERTEXT (never
+    the key) — is cryptographically UNRECOVERABLE. NB: sealing a spine-payload excerpt is SUPPORTED
+    (``seal_text``) but seal-at-capture is NOT yet wired into the live executor, so credential
+    excerpts already written to the append-only spine are stored in PLAINTEXT and are not erasable by
+    this mechanism (documented in PRIVACY.md "Honest scope"; wiring is a staged follow-up); and
   * every append-only row is byte-for-byte UNCHANGED and the spine hash-chain
-    (``agents/spine_chain``) still verifies, because the chain digest covers the CIPHERTEXT
-    that was stored, which erasure never touches.
+    (``agents/spine_chain``) still verifies, because the chain digest covers the bytes that were
+    stored, which erasure never touches.
 
 So tamper-evidence SURVIVES erasure: nothing is deleted or rewritten in the spine; only a key
 that lives elsewhere is destroyed.
