@@ -121,6 +121,7 @@ class HttpRepeaterTool:
                 # raises EngagementRefused when an authority IS provisioned but NO trust root is
                 # discoverable — which `run` catches and fails the replay CLOSED rather than build an
                 # unpinned executor that would apply the authority unsigned.
+                from ..agents.egress_guard import build_engagement_allowlist
                 from ..engage import _engage_authority_trust_root
                 ex = HttpExecutor(
                     engagement_slug=slug,
@@ -131,6 +132,12 @@ class HttpRepeaterTool:
                     request_budget=self._request_budget,
                     timeout_seconds=self._timeout_seconds,
                     dry_run=bool(getattr(ctx, "dry_run", False)),
+                    # W10-1 (#473): install the runtime egress allowlist on this replay's
+                    # target-traffic path (from the engagement's charter scope). Under sovereign
+                    # mode a non-allowlisted host is refused before bytes leave the box; under
+                    # permissive it passes through. The scope gate on args['target'] remains the
+                    # always-on control — this is the belt-and-braces backstop behind it.
+                    egress_allowlist=build_engagement_allowlist(slug=slug),
                 )
             self._executors[slug] = ex
         return ex

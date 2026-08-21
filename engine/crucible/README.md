@@ -1208,8 +1208,16 @@ commands produce and check bundles; the spine chain provides the anchoring.
   5. POSTURE RATE-LIMIT        Pacing + jitter by posture: TEST (gentle) / AUDIT / EMULATE. Protects
       │                        production from a request storm.
       ▼
-  6. EGRESS ALLOWLIST          When set, a sovereign transport refuses any non-allowlisted host BEFORE
-      │                        bytes leave the box — the last line against exfil / off-scope pivots.
+  6. EGRESS ALLOWLIST          Installed on every `engage`/repeater executor, built from the charter
+      │                        scope (W10-1). UNDER SOVEREIGN MODE the transport refuses any non-
+      │                        allowlisted host BEFORE bytes leave the box — the last line against
+      │                        exfil / off-scope pivots. Under PERMISSIVE mode it passes through, so
+      │                        the two gates that ALWAYS hold for target traffic are the protected-
+      │                        domain floor (refused unconditionally, both in the scope gate and in
+      │                        the transport, on every tier) and gate 2, the signed charter scope
+      │                        (reached unconditionally on every request). The allowlist is the
+      │                        sovereign-mode belt-and-braces backstop behind those two — narrower in
+      │                        reach than they are, not a substitute for them.
       ▼
    issue → archive request+response to evidence/ → structured (redacted) log event
 ```
@@ -1244,8 +1252,13 @@ not a crash.** The system preserves that it *chose not to act.*
   scoped and gated identically, never an accidental blind spot.
 - **Sovereignty** (`kernel/sovereignty.py`) — the four‑tier LLM‑egress model (§9.11), the *data*
   counterpart to the *action* gates: it controls where your reasoning data may go.
-- **Egress guard** (`agents/egress_guard.py`) — the runtime transport that enforces the allowlist; recon
-  collector hosts are asserted disjoint from the target scope.
+- **Egress guard** (`agents/egress_guard.py`) — the runtime transport that enforces the allowlist. Wired
+  onto every `engage`/repeater executor (W10-1) so gate 6 is installed on the real target-traffic path,
+  not just available. Recon collector hosts are asserted *disjoint* from the target scope
+  (`build_engagement_allowlist` drops any overlap), and the general tool invoker
+  (`agents/tools/invoker.py`) checks the same allowlist **unconditionally** — no transport, no tier check —
+  for any tool that declares egress hosts. The transport's per-request refusal is tier-gated (sovereign
+  mode); the protected-domain floor inside it is not.
 
 Self‑improvement (`improve/`, §9.15) is **authorise‑not‑apply**: it never self‑mutates offensive code.
 
