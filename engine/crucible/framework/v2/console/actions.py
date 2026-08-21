@@ -761,9 +761,16 @@ def retry_run(run_id: str) -> dict:
         # run under a sovereign tier cannot be repointed off-host by ANY channel — sibling alias, the JSON config
         # file, the persist auto-write, or a default (env beats them all) (PERMISSIVE ⇒ byte-identical).
         _alias_extra, env_remove = _strix_child_alias_guard(strix_env)
+        # S2: re-assert the sandbox gate on RETRY too — otherwise a retried run re-opens the hole the
+        # launch path closes (the same reason W0-7 re-asserts the sovereignty gate here).
+        _sbx_env, _sbx_refusal, _sbx_banner = _strix_sandbox_gate()
+        if _sbx_refusal:
+            return {"ok": False, "error": _sbx_refusal}
+        if _sbx_banner:
+            print(_sbx_banner, file=sys.stderr)
         env_extra = {"VIGIL_PROOF_RUN_DIR": new_rd, "VIGIL_ENGAGEMENT": slug,
                      "VIGIL_BASE_DIR": os.environ.get("VIGIL_BASE_DIR") or ".vigil-live",
-                     **strix_env, **_alias_extra}
+                     **_sbx_env, **strix_env, **_alias_extra}
     _spawn_background(new_id, rd, new_cmd, new_meta, capture_report=capture_report,
                       env_extra=env_extra, env_remove=env_remove)
     return {"ok": True, "run_id": new_id, "resumed": resume, "parent": run_id}
@@ -1241,6 +1248,30 @@ def _strix_sovereignty_refusal(strix_llm_env: dict) -> str:
         return (f"the sovereignty policy could not be evaluated ({type(e).__name__}); refusing the Strix "
                 f"codebase run rather than risk egressing the source. Pick a local model, or set the tier.")
     return ""
+
+
+def _strix_sandbox_gate() -> "tuple[dict, str, str]":
+    """S2 — refuse to spawn Strix unless its sandbox can be PINNED to VIGIL's gated network.
+
+    Returns ``(env_extra, refusal, banner)``. ``env_extra`` carries STRIX_DOCKER_SANDBOX_NETWORK, which the
+    vendored runtime reads to choose the container's network; nothing set it before, so every sandbox was
+    created on Docker's default bridge with a route to the operator LAN, the internet and the cloud
+    metadata endpoint — the gateway, its internal network and the nftables backstop were all built and
+    unreferenced. A non-empty ``refusal`` must abort the launch; a non-empty ``banner`` is the loud line for
+    an operator who explicitly accepted ungated egress.
+
+    Fail-closed: if the pre-flight cannot even be loaded, that is a refusal, not a bypass.
+    """
+    try:
+        from vigil_integration.strix_sandbox import preflight, warning_banner
+    except Exception as exc:  # noqa: BLE001 — cannot verify ⇒ refuse; never proceed ungated by accident
+        return {}, (f"the Strix sandbox egress pre-flight could not be loaded "
+                    f"({type(exc).__name__}: {exc}); refusing to start an agent whose traffic cannot be "
+                    f"confined to the signed scope"), ""
+    result = preflight()
+    if not result.ok:
+        return {}, str(result.refusal or "the Strix sandbox could not be pinned to the gated network"), ""
+    return dict(result.env), "", warning_banner(result)
 
 
 def _strix_child_alias_guard(strix_llm_env: dict) -> "tuple[dict, list[str]]":
@@ -1745,10 +1776,16 @@ def launch_assessment(body: dict) -> dict:
         # — a stray ambient sibling, the JSON config file, the persist auto-write, or a default — can repoint the
         # child off-host (env is highest precedence in load_settings) (PERMISSIVE ⇒ ({},[]) ⇒ byte-identical).
         _alias_extra, _alias_remove = _strix_child_alias_guard(strix_llm_env)
+        # S2: the sandbox must join VIGIL's gated network, or the agent does not start.
+        _sbx_env, _sbx_refusal, _sbx_banner = _strix_sandbox_gate()
+        if _sbx_refusal:
+            return {"ok": False, "error": _sbx_refusal}
+        if _sbx_banner:
+            print(_sbx_banner, file=sys.stderr)
         _spawn_background(run_id, rd, cmd, meta, capture_report=False,
                           env_extra={"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug,
                                      "VIGIL_BASE_DIR": os.environ.get("VIGIL_BASE_DIR") or ".vigil-live",
-                                     **strix_llm_env, **_alias_extra},
+                                     **_sbx_env, **strix_llm_env, **_alias_extra},
                           env_remove=_alias_remove)
         return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "progress",
                 **unapplied}

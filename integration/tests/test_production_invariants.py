@@ -39,10 +39,9 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 
 # The scoreboard, as a committed constant. A silent change to what we claim is itself a failure.
-MET = {1, 3, 5, 7, 9, 10, 11}
-UNMET = {2, 4, 6, 8, 12}
+MET = {1, 2, 3, 5, 7, 9, 10, 11}
+UNMET = {4, 6, 8, 12}
 _CLOSED_BY = {
-    2: "S2/S3 — wire strix_env() + the nftables backstop onto the default launch path",
     4: "S4 — WARDEN default-deny: an unregistered Strix tool must not classify A0",
     6: "S6/S7 — causal capture + a VIGIL-owned re-drive before any FACT",
     8: "S6 — capture the exploit REQUEST bytes into the evidence envelope",
@@ -109,27 +108,51 @@ def test_inv01_negative_control_the_gate_is_actually_wired_into_the_runner():
 # 2. No network traffic outside signed scope.                                       UNMET
 # =========================================================================================
 
-@pytest.mark.xfail(strict=True, reason=f"UNMET — {_CLOSED_BY[2]}")
 def test_inv02_the_strix_sandbox_is_pinned_to_a_gated_network():
-    """The sandbox must be created on VIGIL's isolated network, not Docker's default bridge.
+    """Every Strix spawn must pre-flight the gated topology and pin the sandbox onto it.
 
-    ``vendor/strix/strix/runtime/docker_client.py`` READS ``STRIX_DOCKER_SANDBOX_NETWORK`` and
-    ``gateway/vigil_gateway/docker.py::strix_env()`` PRODUCES it — but nothing in VIGIL calls that producer
-    or sets that variable, so ``_apply_sandbox_network`` is a no-op and the container keeps a default route.
+    Previously ``strix_env()`` had no caller and nothing wrote ``STRIX_DOCKER_SANDBOX_NETWORK``, so
+    ``_apply_sandbox_network`` was a no-op and the container kept a default route. S2 added a pre-flight
+    that refuses unless the gateway is running and the network exists, and merges the pin into the child
+    environment.
+
+    NOTE ON THIS PROBE. It first asserted merely that some file contained an assignment to the env var.
+    That was the wrong measurement: the fix routes the value through ``strix_env()``, so the probe would
+    have stayed red after the gap closed — a scoreboard that lies in the safe direction is still a
+    scoreboard that lies. It now asserts the behaviour: a caller exists, and both spawn sites gate on it.
     """
-    writers = []
-    for path in _REPO.rglob("*.py"):
-        rel = path.relative_to(_REPO).as_posix()
-        if rel.startswith(("vendor/", ".git/")) or "/tests/" in rel or rel.startswith("integration/tests/"):
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if "STRIX_DOCKER_SANDBOX_NETWORK" in text and re.search(
-                r"(env\[[\"']STRIX_DOCKER_SANDBOX_NETWORK|STRIX_DOCKER_SANDBOX_NETWORK[\"']?\s*[:=]\s*[^=\s])", text):
-            writers.append(rel)
-    assert writers, (
-        "no VIGIL code sets STRIX_DOCKER_SANDBOX_NETWORK, so the Strix sandbox runs on Docker's default "
-        "bridge with a route to the operator LAN, the internet and 169.254.169.254"
+    from vigil_integration.strix_sandbox import preflight
+
+    class _Healthy:
+        sandbox_network = "vigil_sandbox"
+
+        def container_state(self, name="vigil-gateway"):
+            return "running"
+
+        def network_exists(self, name=None):
+            return True
+
+        def strix_env(self):
+            return {"STRIX_DOCKER_SANDBOX_NETWORK": self.sandbox_network}
+
+    class _Down(_Healthy):
+        def container_state(self, name="vigil-gateway"):
+            return "exited"
+
+    pinned = preflight(networking=_Healthy())
+    assert pinned.ok and pinned.gated and pinned.env.get("STRIX_DOCKER_SANDBOX_NETWORK"), (
+        "a healthy gateway topology must pin the sandbox to the gated network"
     )
+    assert not preflight(networking=_Down()).ok, (
+        "with the gateway down the launch must be REFUSED, not silently run on the default bridge"
+    )
+
+    actions = "engine/crucible/framework/v2/console/actions.py"
+    for site in ("launch_assessment", "retry_run"):
+        code = _fn_code(actions, site)
+        assert "_strix_sandbox_gate()" in code and "**_sbx_env" in code, (
+            f"{site} can still spawn Strix without pinning the sandbox to the gated network"
+        )
 
 
 def test_inv02_negative_control_the_consumer_and_producer_both_exist():
