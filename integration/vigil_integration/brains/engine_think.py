@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..agent.state import ActionType, LLMDecision, ToolCall
-from .hexstrike_brain import HexstrikeBrain, TargetType, proposal_document
+from .hexstrike_brain import HexstrikeBrain, TargetType, parse_objective, proposal_document
 
 
 class BrainThink:
@@ -37,11 +37,13 @@ class BrainThink:
     engine. What is persisted is EXACTLY the chain the engine drives — never a re-run or a fabrication."""
 
     def __init__(self, brain: Optional[HexstrikeBrain] = None, *, target: str = "",
-                 objective: str = "comprehensive", observations: Optional[dict[str, Any]] = None,
+                 objective: "str | None" = None, observations: Optional[dict[str, Any]] = None,
                  posture: str = "live", proposal_out: "str | os.PathLike | None" = None) -> None:
         self._brain = brain or HexstrikeBrain()
         self._target = target
-        self._objective = objective
+        # Normalise ONCE, here: an unknown objective raises at construction rather than silently planning
+        # something other than its label, and the persisted proposal records the objective actually used.
+        self._objective = parse_objective(objective).value
         self._obs = dict(observations or {})
         self._posture = posture
         # OPT-IN persistence: explicit arg wins; else the run dir the console already hands a spawned run.

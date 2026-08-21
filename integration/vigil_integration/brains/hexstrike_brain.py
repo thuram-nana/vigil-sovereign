@@ -102,6 +102,50 @@ _EVASION_TOKENS = re.compile(
 )
 
 
+class Objective(str, Enum):
+    """What the planner is being asked to do — a CLOSED set, because the label must equal the behaviour.
+
+    Only the objectives the planner ACTUALLY implements are members. ``create_attack_chain`` branches on
+    exactly one distinction — whether the vulnerability-assessment playbook is appended to the target-type
+    playbook — so there are exactly two. Adding ``cloud``/``source``/``api``/``network`` members that all
+    fall through to the same plan would re-create, in a new form, the very defect this enum fixes: a chain
+    labelled one thing and built as another. Those objectives are planner work, not enum work.
+
+    (Target TYPE already selects the cloud/api/network playbook — see ``create_attack_chain``'s
+    ``pattern_key``. The objective is orthogonal: it says how thorough to be, not what kind of target.)
+    """
+
+    QUICK = "quick"
+    COMPREHENSIVE = "comprehensive"
+
+
+DEFAULT_OBJECTIVE = Objective.COMPREHENSIVE
+
+
+def parse_objective(value: "str | Objective | None", *,
+                    default: Objective = DEFAULT_OBJECTIVE) -> Objective:
+    """Normalise an objective, and REFUSE an unknown one rather than silently planning something else.
+
+    The defect this exists to kill: ``--objective`` defaulted to ``""``; ``create_attack_chain`` tested
+    ``objective == "comprehensive"``; so the shipped default silently produced the SHORT plan while the
+    chain, the docs and the persisted proposal all called it "comprehensive". Anything unrecognised now
+    raises instead of quietly degrading, and an empty value resolves to the documented default.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if isinstance(value, Objective):
+        return value
+    try:
+        return Objective(str(value).strip().lower())
+    except ValueError:
+        accepted = ", ".join(o.value for o in Objective)
+        raise ValueError(
+            f"unknown brain objective {value!r} — accepted: {accepted}. "
+            "(The free-text ENGAGEMENT goal is a different flag: --objective. The planner objective is "
+            "--brain-objective.)"
+        ) from None
+
+
 class DriftError(Exception):
     """A proposed action carried an evasion/offense-drift knob — fail-closed."""
 
@@ -306,10 +350,12 @@ class HexstrikeBrain:
         return round(min(1.0, 0.25 * signals), 3)
 
     # ---- selection + optimization (propose-only; NO stealth objective — adapts :971 / :1003) ----
-    def select_optimal_tools(self, profile: TargetProfile, objective: str = "comprehensive") -> list[str]:
+    def select_optimal_tools(self, profile: TargetProfile,
+                             objective: "str | Objective | None" = None) -> list[str]:
+        obj = parse_objective(objective)
         table = self.tool_effectiveness.get(profile.target_type.value, self.tool_effectiveness[TargetType.UNKNOWN.value])
         ranked = sorted(table.items(), key=lambda kv: kv[1], reverse=True)
-        if objective == "quick":
+        if obj is Objective.QUICK:
             chosen = [t for t, _ in ranked[:3]]
         else:  # "comprehensive" — the only other objective; there is deliberately NO "stealth" objective
             chosen = [t for t, e in ranked if e >= 0.7]
@@ -349,31 +395,55 @@ class HexstrikeBrain:
             params = {"output_format": "json"}
         else:
             params = {}
+        # Carry the playbook's OWN curated params (katana depth/js_crawl, sslscan port, gobuster mode...).
+        # They were passed in as `context` and then dropped for every tool without a `ctx.get` branch, so a
+        # step's declared parameters silently never reached the proposal. The per-tool block above still
+        # WINS on a key collision (it is the drift-reviewed source of truth); ctx only fills the rest. Both
+        # sources are in-repo and curated — never operator or model input — and the merged result is still
+        # scanned by _assert_drift_free below, so this cannot smuggle an evasion knob.
+        params = {**{k: v for k, v in ctx.items() if k != "ports"}, **params}
         if first_port and tool in ("nmap", "rustscan"):
             params.setdefault("ports", str(first_port))
         self._assert_drift_free(tool, params)
         return params
 
-    def create_attack_chain(self, profile: TargetProfile, objective: str = "comprehensive") -> AttackChain:
-        """Pick a curated playbook by target type + optimize each step's params (propose-only)."""
+    def create_attack_chain(self, profile: TargetProfile,
+                            objective: "str | Objective | None" = None) -> AttackChain:
+        """Pick a curated playbook by target type + optimize each step's params (propose-only).
+
+        The chain records the NORMALISED objective, so the label on the plan is always the objective the
+        plan was actually built from — never a caller's unnormalised string.
+        """
+        obj = parse_objective(objective)
         pattern_key = {
             TargetType.WEB_APPLICATION: "web_reconnaissance",
             TargetType.API_ENDPOINT: "api_testing",
             TargetType.NETWORK_HOST: "network_discovery",
             TargetType.CLOUD_SERVICE: "cloud_assessment",
         }.get(profile.target_type, "web_reconnaissance")
-        if objective == "comprehensive" and profile.target_type in (TargetType.WEB_APPLICATION, TargetType.API_ENDPOINT):
+        if obj is Objective.COMPREHENSIVE and profile.target_type in (TargetType.WEB_APPLICATION, TargetType.API_ENDPOINT):
             steps_src = self.attack_patterns[pattern_key] + self.attack_patterns["vulnerability_assessment"]
         else:
             steps_src = self.attack_patterns[pattern_key]
         table = self.tool_effectiveness.get(profile.target_type.value, {})
-        chain = AttackChain(target=profile.target, objective=objective)
-        for i, step in enumerate(sorted(steps_src, key=lambda s: s["priority"]), 1):
+        chain = AttackChain(target=profile.target, objective=obj.value)
+        seen: set[str] = set()
+        # Priority is the position in the EMITTED chain, not the index of the source row: a skipped row
+        # (non-curated tool, or a duplicate across the two concatenated playbooks) must not leave a gap in
+        # the 1..N ordering the proposal contract promises. Deriving it from len(chain.steps) keeps the
+        # sequence contiguous no matter how many rows are skipped.
+        for step in sorted(steps_src, key=lambda s: s["priority"]):
             tool = step["tool"]
             if tool not in _TOOL_DANGER:
                 continue  # never carry a non-curated (exploit/poisoning) tool
+            if tool in seen:
+                # A comprehensive chain concatenates two playbooks, so a tool listed in BOTH (nuclei is in
+                # web_reconnaissance AND vulnerability_assessment) was emitted twice with identical params —
+                # the same scan proposed, gated and run twice. Keep the FIRST (higher-priority) occurrence.
+                continue
+            seen.add(tool)
             params = self.optimize_parameters(tool, profile, step.get("params"))
-            chain.steps.append(AttackStep(tool=tool, priority=i, params=params,
+            chain.steps.append(AttackStep(tool=tool, priority=len(chain.steps) + 1, params=params,
                                           danger=_TOOL_DANGER[tool], effectiveness=table.get(tool, 0.5)))
         # CMS-specific add-on (recon/assessment only) — a WordPress target earns a wpscan step.
         if (profile.cms_type or "").lower() == "wordpress" and not any(s.tool == "wpscan" for s in chain.steps):
@@ -384,7 +454,8 @@ class HexstrikeBrain:
         chain.calculate_success_probability(profile.confidence_score or 0.5)
         return chain
 
-    def propose(self, profile: TargetProfile, objective: str = "comprehensive") -> list[dict]:
+    def propose(self, profile: TargetProfile,
+                objective: "str | Objective | None" = None) -> list[dict]:
         """The propose-only output: an ordered list of {tool, params, priority, danger, effectiveness}
         LEADs. Nothing here is authorized or a fact — the AgentBody submits each to the gate + runner."""
         return [s.to_dict() for s in self.create_attack_chain(profile, objective).steps]

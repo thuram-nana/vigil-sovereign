@@ -118,7 +118,12 @@ def _cmd_engage(args: argparse.Namespace) -> int:
     if str(getattr(args, "brain", "") or "").strip().lower() == "hexstrike":
         from .brains.engine_think import BrainThink
         from .brains.hexstrike_brain import HexstrikeBrain
-        brain = BrainThink(HexstrikeBrain(), target=args.url, objective=args.objective)
+        # The planner objective is --brain-objective (a closed enum), NOT --objective. --objective is the
+        # engagement's free-text goal, which is recorded with the run and does not steer it; feeding it to
+        # the planner meant one flag carried two incompatible meanings, and its "" default silently built
+        # the SHORT plan while labelling it comprehensive.
+        brain = BrainThink(HexstrikeBrain(), target=args.url,
+                           objective=getattr(args, "brain_objective", None))
     # GAP-1 — the per-session model sovereignty pick. --backend (LOCAL) and --model (CLOUD) are mutually
     # exclusive: a local backend routes think through the loopback-enforced provider with no cloud failover,
     # so simultaneously naming a cloud model string is contradictory. Fail-closed on the contradiction rather
@@ -2481,7 +2486,14 @@ def build_parser() -> argparse.ArgumentParser:
     pe = sub.add_parser("engage", help="run an engagement against an owner-authorized target (loopback or remote)")
     pe.add_argument("url")
     pe.add_argument("--slug", default="loopback")
-    pe.add_argument("--objective", default="")
+    pe.add_argument("--objective", default="",
+                    help="free-text goal RECORDED with the engagement for your own record; it does not "
+                         "steer the run. To choose how thorough the --brain planner is, use "
+                         "--brain-objective.")
+    pe.add_argument("--brain-objective", default="comprehensive", choices=("quick", "comprehensive"),
+                    help="how thorough the --brain planner's proposed chain is (default: comprehensive). "
+                         "Only meaningful with --brain. Distinct from --objective, which is the "
+                         "engagement's recorded free-text goal.")
     pe.add_argument("--scope", default="127.0.0.1",
                     help="comma-separated LITERAL hosts / *.wildcards the engagement is authorized for (no "
                          "CIDR); signed into the CRUCIBLE authority and enforced end-to-end. PREFER literal "
