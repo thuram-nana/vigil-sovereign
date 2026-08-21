@@ -39,12 +39,9 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 
 # The scoreboard, as a committed constant. A silent change to what we claim is itself a failure.
-MET = {1, 2, 3, 4, 5, 7, 9, 10, 11}
-UNMET = {6, 8, 12}
+MET = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
+UNMET = {12}
 _CLOSED_BY = {
-    6: "S7 closed the WEB column (VIGIL re-drives); the captured-bytes error-signature path must ALSO stop "
-       "minting a FACT from response bytes VIGIL did not send — gate it to LEAD until the request is bound (inv8)",
-    8: "S6 — capture the exploit REQUEST bytes into the evidence envelope",
     12: "S9 — a typed verification_degraded state instead of six silent swallows",
 }
 
@@ -242,21 +239,21 @@ def test_inv05_negative_control_admission_can_produce_a_verdict():
 # 6. No FACT without VIGIL-owned verification.                                        MET
 # =========================================================================================
 
-@pytest.mark.xfail(strict=True, reason=f"UNMET — {_CLOSED_BY[6]}")
 def test_inv06_no_minted_fact_rests_on_bytes_vigil_did_not_send():
-    """UNMET. S7 closed the WEB column — a web finding reaches a FACT ONLY by VIGIL re-sending its own gated
-    probe (pinned, behaviourally, by ``test_inv06_web_column_...`` below and proven live in
-    ``test_web_redrive_proof_sink.py``). But the invariant is not yet fully ENFORCED: the captured-bytes
-    error-signature branch of ``build_report_mint.mint`` still calls ``mint_proof`` over Caido RESPONSE bytes
-    and returns ``is_fact=True`` — binding no request (inv8) and involving no VIGIL send — reachable via
-    ``capture_for_report(report, explicit_ids=[...])``. It is dead in production only because the reporter
-    omits ``explicit_ids`` — a wiring accident, not a gate. The invariant closes when that path is itself
-    gated: it must not mint a FACT until the exploit REQUEST is bound (checks ``request_bytes_ref``, inv8) or
-    the exchange is independently re-driven. This probe fails until that gate exists."""
+    """MET. Every FACT path is now VIGIL-owned. Two closures:
+
+      * WEB column (S7): a web finding reaches a FACT ONLY by VIGIL re-sending its own gated probe (pinned
+        behaviourally by ``test_inv06_web_column_...`` below; proven live in ``test_web_redrive_proof_sink``).
+      * ERROR-SIGNATURE column (this slice): ``build_report_mint`` REFUSES a FACT for an error-signature
+        capture that binds no exploit REQUEST (the ``request_bytes_ref`` gate below) — so a certificate can
+        no longer rest on a RESPONSE with no record of what was sent; the finding stays a LEAD until the
+        request is bound (which ``proof_capture`` now does, inv 8). Behaviour is proven in
+        ``test_proof_run.test_error_signature_without_a_bound_request_stays_a_lead`` (response-only → LEAD)
+        and ``..._with_a_bound_request_can_mint`` (request-bound → FACT)."""
     mint_code = _fn_code("integration/vigil_integration/proof/run.py", "build_report_mint")
     assert "request_bytes_ref" in mint_code, (
-        "the captured-bytes mint still returns a FACT from response-only bytes — it does not gate on the "
-        "exploit REQUEST being bound, so a FACT can rest on bytes VIGIL did not send"
+        "the captured-bytes mint no longer gates on the exploit REQUEST being bound — a FACT could rest on "
+        "response-only bytes VIGIL did not send"
     )
 
 
@@ -322,17 +319,16 @@ def test_inv07_negative_control_body_derived_branches_are_never_clean_capable():
 
 
 # =========================================================================================
-# 8. Every FACT binds request, response, artifacts, oracle version and evidence branch. UNMET
+# 8. Every FACT binds request, response, artifacts, oracle version and evidence branch.  MET
 # =========================================================================================
 
-@pytest.mark.xfail(strict=True, reason=f"UNMET — {_CLOSED_BY[8]}")
 def test_inv08_the_evidence_envelope_binds_the_request_that_produced_the_response():
-    """``CapturedExchange.request_bytes_ref`` exists and the Strix capture never fills it.
-
-    A certificate on that path therefore binds one response body and no record of what was sent.
-    """
+    """MET: ``proof_capture`` now fetches the exploit REQUEST bytes (``_request_bytes`` reads
+    ``result.request.raw``) and binds them as ``request_bytes_ref`` on the mutated exchange, so the
+    certificate records what was SENT, not only the response. The mint refuses a FACT when that binding is
+    absent (inv 6), so an unbound response can never be certified."""
     capture = _src("vendor/strix/strix/report/proof_capture.py")
-    assert re.search(r"request_bytes_ref\s*=\s*[^\"']", capture) or 'part="request"' in capture, (
+    assert "_request_bytes" in capture and "request_bytes_ref" in capture, (
         "the capture never fetches or binds the exploit REQUEST bytes"
     )
 

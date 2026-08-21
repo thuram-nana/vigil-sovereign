@@ -48,8 +48,11 @@ class _Resp:
 
 
 class _Fetched:
-    def __init__(self, raw):
+    def __init__(self, raw, request_raw=None):
         self.response = _Resp(raw)
+        # ``get_request_with_client`` fetches request_raw + response_raw together, so a real fetched object
+        # carries BOTH halves; the capture binds the request bytes (inv 8).
+        self.request = _Resp(request_raw) if request_raw is not None else None
 
 
 class _FakeCaido:
@@ -73,9 +76,10 @@ class _FakeCaido:
         return {"status": status, "body": body}
 
 
-def test_capture_for_report_uses_an_explicit_request_id():
+def test_capture_for_report_uses_an_explicit_request_id_and_binds_the_request():
     raw = b"HTTP/1.1 500 Internal Server Error\r\n\r\nYou have an error in your SQL syntax"
-    caido = _FakeCaido(by_id={"req-7": _Fetched(raw)})
+    req = b"POST /login HTTP/1.1\r\nHost: t\r\n\r\nid=1' OR '1'='1"
+    caido = _FakeCaido(by_id={"req-7": _Fetched(raw, request_raw=req)})
     cap = asyncio.run(pc.capture_for_report(
         {"finding_class": "sql injection", "endpoint": "/login", "method": "POST"},
         caido=caido, explicit_ids=["req-7"]))
@@ -83,6 +87,21 @@ def test_capture_for_report_uses_an_explicit_request_id():
     assert cap["exchanges"][0]["channel"] == "error_signature"
     assert b"SQL syntax" in cap["blobs"]["resp"]
     assert cap["exchanges"][0]["status"] == 500
+    # inv 8: the exploit REQUEST bytes are bound, not just the response
+    assert cap["exchanges"][0]["request_bytes_ref"] == "req"
+    assert cap["blobs"]["req"] == req
+
+
+def test_capture_without_recoverable_request_bytes_binds_no_request():
+    """When the fetched exchange carries no request half, the capture is still built (best-effort) but binds
+    NO request — so the mint declines a FACT (proof.run's inv-6/8 gate) and the finding stays a LEAD."""
+    raw = b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"
+    caido = _FakeCaido(by_id={"req-7": _Fetched(raw)})  # request_raw=None → no .request
+    cap = asyncio.run(pc.capture_for_report(
+        {"finding_class": "sqli", "endpoint": "/x"}, caido=caido, explicit_ids=["req-7"]))
+    assert cap is not None
+    assert "request_bytes_ref" not in cap["exchanges"][0]
+    assert "req" not in cap["blobs"]
 
 
 def test_capture_for_report_refuses_without_a_cited_request_id():

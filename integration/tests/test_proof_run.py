@@ -86,3 +86,35 @@ def test_sink_denies_dangerous_poc_and_persists_no_proof(tmp_path):
     out = sink(_report("evil", poc="rm -rf / --no-preserve-root"))   # destructive → content-gate DENY
     assert out.gate == "deny"
     assert read_proofs(tmp_path) == []                          # a denied PoC never becomes a persisted proof
+
+
+# ---- INV 6/8 gate: an error-signature FACT must bind the exploit REQUEST -----------------------------
+
+def _errsig_capture(*, with_request: bool):
+    """An error-signature capture whose RESPONSE carries a datastore error the oracle fires on. With
+    ``with_request`` it also binds the exploit REQUEST bytes (inv 8); without, it is response-only."""
+    ex = {"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
+          "status": 500, "bug_class": "error_based_sqli"}
+    blobs = {"resp": b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"}
+    if with_request:
+        ex["request_bytes_ref"] = "req"
+        blobs["req"] = b"GET /items?id=1%27 HTTP/1.1\r\nHost: t\r\n\r\n"
+    return {"exchanges": [ex], "blobs": blobs}
+
+
+def test_error_signature_without_a_bound_request_stays_a_lead(tmp_path):
+    """INV 6/8: a datastore-error RESPONSE with no bound request must NOT mint a FACT — the certificate
+    would record a response with no record of what was sent, which VIGIL cannot attribute. The mint declines
+    (returns None → the finding stays a LEAD) BEFORE minting."""
+    mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="acme")
+    res = mint({"id": "e1", "bug_class": "error_based_sqli", CAPTURE_KEY: _errsig_capture(with_request=False)})
+    assert res is None, "an error-signature capture with no bound request minted instead of staying a LEAD"
+
+
+def test_error_signature_with_a_bound_request_can_mint(tmp_path):
+    """The gate lets a request-bound error-signature capture through — the certificate then binds request +
+    response (inv 8). Reverting the request binding turns this into the LEAD above."""
+    mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="acme")
+    res = mint({"id": "e2", "bug_class": "error_based_sqli", CAPTURE_KEY: _errsig_capture(with_request=True)})
+    assert res is not None, "the gate blocked a request-bound error-signature capture from minting"
+    assert getattr(res, "is_fact", False), "a request-bound datastore-error capture did not mint a FACT"

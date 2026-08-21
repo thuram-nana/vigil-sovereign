@@ -37,21 +37,32 @@ def build_error_signature_capture(
     exploit_body: "bytes | str | None",
     exploit_status: Optional[int] = None,
     control_body: "bytes | str | None" = None,
+    exploit_request: "bytes | str | None" = None,
 ) -> Optional[dict]:
     """Build the plain-dict ``_vigil_capture`` for an error-signature proof from already-fetched bytes.
 
     Pure + synchronous (trivially unit-testable). Returns ``None`` when there is no usable exploit body or no
-    bug_class — an honest "nothing to prove", never a guessed capture."""
+    bug_class — an honest "nothing to prove", never a guessed capture.
+
+    ``exploit_request`` are the raw REQUEST bytes the agent actually sent (inv 8): when present they are
+    bound as ``request_bytes_ref`` on the mutated exchange so the certificate records WHAT produced the
+    response, not only the response. Without them the mint declines a FACT (see ``proof.run``): a response
+    alone, with no record of the request, is not something VIGIL can attribute — it stays a LEAD."""
     if not str(bug_class or "").strip():
         return None
     ex_bytes = _as_bytes(exploit_body)
     if not ex_bytes:
         return None
-    exchanges: list[dict] = [{
+    mutated: dict = {
         "channel": _ERROR_SIGNATURE, "role": "mutated",
         "response_bytes_ref": "resp", "status": exploit_status, "bug_class": bug_class,
-    }]
+    }
     blobs: dict[str, bytes] = {"resp": ex_bytes}
+    req_bytes = _as_bytes(exploit_request)
+    if req_bytes:
+        mutated["request_bytes_ref"] = "req"     # bind the exploit REQUEST (inv 8)
+        blobs["req"] = req_bytes
+    exchanges: list[dict] = [mutated]
     ctrl_bytes = _as_bytes(control_body)
     if ctrl_bytes:
         exchanges.append({"channel": _ERROR_SIGNATURE, "role": "control",
@@ -66,6 +77,18 @@ def _as_bytes(v: "bytes | str | None") -> "bytes | None":
     if isinstance(v, str):
         return v.encode("utf-8") or None
     return None
+
+
+def _request_bytes(fetched: Any) -> "bytes | None":
+    """The raw exploit REQUEST bytes from a Caido ``view_request`` result — what the agent actually SENT
+    (``result.request.raw``; ``get_request_with_client`` fetches request_raw + response_raw together, and
+    ``repeat_request`` reads the same ``result.request.raw``). Returns ``None`` when absent, so a capture
+    that could not recover the request simply carries no request binding (⇒ the mint declines a FACT)."""
+    req = getattr(fetched, "request", None)
+    raw = getattr(req, "raw", None) if req is not None else None
+    if raw is None:
+        return None
+    return _as_bytes(raw if isinstance(raw, (bytes, bytearray)) else str(raw))
 
 
 def _response_body(fetched: Any, parse: Any) -> tuple["bytes | None", Optional[int]]:
@@ -110,16 +133,20 @@ async def capture_for_report(
         exploit_id, control_id = await _resolve_ids(report, caido, explicit_ids)
         if not exploit_id:
             return None
+        # One fetch returns BOTH raw halves (``get_request_with_client`` sets request_raw+response_raw), so
+        # the exploit REQUEST bytes come from the SAME object as the response — no extra round-trip.
         exploit = await caido.view_request(exploit_id, part="response")
         body, status = _response_body(exploit, caido.parse_raw_response)
         if not body:
             return None
+        request_bytes = _request_bytes(exploit)
         control_body = None
         if control_id:
             control = await caido.view_request(control_id, part="response")
             control_body, _ = _response_body(control, caido.parse_raw_response)
         return build_error_signature_capture(
-            bug_class=bug_class, exploit_body=body, exploit_status=status, control_body=control_body)
+            bug_class=bug_class, exploit_body=body, exploit_status=status, control_body=control_body,
+            exploit_request=request_bytes)
     except Exception:  # noqa: BLE001 — capture is best-effort; a failure just means no proof (an honest LEAD)
         return None
 

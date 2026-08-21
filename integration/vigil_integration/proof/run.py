@@ -342,6 +342,16 @@ def build_report_mint(
         except Exception:  # noqa: BLE001 — a malformed/hostile capture drops the mint (stays a LEAD), never raises
             return None
 
+        # INV 6/8 gate: an error-signature FACT rests on a datastore error in the RESPONSE, but a FACT must
+        # ALSO bind the exploit REQUEST that provoked it (inv 8). Without a bound ``request_bytes_ref`` the
+        # certificate would record a response with NO record of what was sent — a claim VIGIL cannot
+        # attribute — so the finding stays a LEAD (no mint). Once ``proof_capture`` binds the request bytes
+        # this passes. Other channels (a ``request_payload`` proof, a process-execution proof) bind their own
+        # causal artifact and are unaffected — the gate is scoped to the response-only error-signature case.
+        if any(getattr(ex, "channel", "") == "error_signature" and getattr(ex, "role", "") == "mutated"
+               and not (getattr(ex, "request_bytes_ref", "") or "") for ex in exchanges):
+            return None
+
         def _resolve(ref: str) -> "bytes | None":
             b = blobs.get(ref)
             if isinstance(b, (bytes, bytearray)):

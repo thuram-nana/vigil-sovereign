@@ -95,8 +95,10 @@ def test_env_activation_chain_end_to_end(fake_strix_state, tmp_path, monkeypatch
     report = {"id": "errsqli-live", "cwe": "CWE-89", "title": "SQL injection",
               "poc_script_code": "print('benign')",
               CAPTURE_KEY: {"exchanges": [{"channel": "error_signature", "role": "mutated",
-                                           "response_bytes_ref": "resp", "bug_class": "error_based_sqli"}],
-                            "blobs": {"resp": b"HTTP/1.1 500\r\n\r\nYou have an error in your SQL syntax near ''"}}}
+                                           "response_bytes_ref": "resp", "request_bytes_ref": "req",
+                                           "bug_class": "error_based_sqli"}],
+                            "blobs": {"resp": b"HTTP/1.1 500\r\n\r\nYou have an error in your SQL syntax near ''",
+                                      "req": b"GET /items?id=1%27 HTTP/1.1\r\nHost: t\r\n\r\n"}}}
     out = fake_strix_state.proof_sink(report)
     assert out.minted, "the env-installed sink must mint the reproducing capture"
     assert read_reverifiable(tmp_path)["active_findings"], "the run dir must hold re-verifiable material"
