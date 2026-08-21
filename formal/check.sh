@@ -43,17 +43,35 @@ resolve_jar() {
     echo "$CACHE"; return 0
   fi
   echo "  [tlc] fetching pinned tla2tools -> $CACHE" >&2
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL -o "$CACHE" "$TLA_URL"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$CACHE" "$TLA_URL"
-  else
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
     echo "  [tlc] FATAL: no curl/wget and TLA2TOOLS_JAR unset" >&2; exit 3
   fi
-  if ! echo "${TLA_SHA256}  $CACHE" | sha256sum -c - >/dev/null 2>&1; then
-    echo "  [tlc] FATAL: tla2tools.jar sha256 mismatch (expected ${TLA_SHA256})" >&2
-    rm -f "$CACHE"; exit 3
-  fi
+  # The GitHub release download 302-redirects to a CDN (objects.githubusercontent.com) that intermittently
+  # serves a truncated body or a transient error page — producing a sha256 MISMATCH on that one run while
+  # the pin itself is correct (the same pin verifies on the very next run). A single-shot fetch turns that
+  # transient into a red check. Retry up to N times with backoff, RE-VERIFYING the sha256 after each attempt
+  # and keeping only a byte-exact match. This does NOT weaken the pin: a genuinely changed/wrong artifact
+  # mismatches on every attempt and still FATALs fail-closed after the last one.
+  attempts="${TLA2TOOLS_FETCH_ATTEMPTS:-4}"
+  n=1
+  while :; do
+    rm -f "$CACHE"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL --retry 2 --connect-timeout 20 --max-time 180 -o "$CACHE" "$TLA_URL" || true
+    else
+      wget -q --timeout=180 -O "$CACHE" "$TLA_URL" || true
+    fi
+    if echo "${TLA_SHA256}  $CACHE" | sha256sum -c - >/dev/null 2>&1; then
+      break
+    fi
+    if [[ "$n" -ge "$attempts" ]]; then
+      echo "  [tlc] FATAL: tla2tools.jar sha256 mismatch after ${attempts} attempts (expected ${TLA_SHA256})" >&2
+      rm -f "$CACHE"; exit 3
+    fi
+    echo "  [tlc] fetch attempt ${n}/${attempts} did not match the pin — retrying in $((n*2))s" >&2
+    sleep "$((n*2))"
+    n="$((n+1))"
+  done
   echo "$CACHE"
 }
 
