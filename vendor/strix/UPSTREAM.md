@@ -1,0 +1,51 @@
+# Strix — vendored upstream provenance and the VIGIL patch series
+
+| | |
+|---|---|
+| **Upstream** | https://github.com/usestrix/strix |
+| **Licence** | Apache-2.0 (see `LICENSE`; attribution retained in `NOTICE`) |
+| **Upstream commit** | `230324d2b80a5a27506f85fc521845d8464b04c0` |
+| **Base import commit** | `d26ef7a6665bc96808ed30ecadb1f67a192c59c9` (`git subtree`, 227 files, pristine) |
+
+## The invariant
+
+> `vendor/strix` **==** the pristine upstream import at the base commit, **plus** the patch series in
+> `docs/strix-patches/`, applied in order.
+
+This is verified byte-for-byte: applying the 18 patches to the base import reproduces all 236 tracked
+files with zero mismatches. `integration/tests/test_strix_patch_series.py` enforces it in CI, so a change
+to `vendor/strix` that is not recorded in the series fails the build.
+
+**Why this exists.** VIGIL modifies its vendored copy of Strix (governance gates, proof capture, egress
+hardening, telemetry excision). Before this series those modifications were recorded only in monorepo git
+history — honest, but not rebasable and not reviewable on an upstream upgrade. The series makes every
+deviation an explicit, reviewable artifact.
+
+## Upgrading Strix
+
+1. Import the new upstream at a new base commit (subtree pull), on a branch.
+2. Re-apply `docs/strix-patches/*.patch` in numeric order; resolve conflicts per patch.
+3. Regenerate the series and manifests: `python3 tools/vendoring/regen_strix_series.py`.
+4. Re-run the guard: `pytest integration/tests/test_strix_patch_series.py`.
+5. Review each patch that needed a conflict resolution — that is the point of the series.
+
+## The series
+
+The 27 files below are every deviation from upstream. Patches are named `NNN-<slug>.patch` and carry the
+originating commit in an `X-VIGIL-Commit:` header.
+
+| # | Patch | What it changes |
+|---|---|---|
+| 001 | `p0-strix-sovereign-subtraction` | **Removes the phone-home**: deletes `telemetry/{posthog,scarf}.py`, replaces with a local-only `telemetry/sink.py`; drops the OpenRouter attribution headers; Claude default model |
+| 002 | `p6-host-side-hard-egress-gate` | FATAL-1 egress hardening; drops `NET_ADMIN` from the sandbox |
+| 003–004 | `p8-claude-runtime-hardening` | Budget price table, reasoning/thinking, dedup; Haiku-4.5 thinking + inf-token guard |
+| 005–006 | `proof-studio` | `report/proof_capture.py` + the Caido capture → oracle-confirmed proof hook in `report/state.py`, `tools/reporting/tool.py` |
+| 007–008, 010 | `warden-gate-the-strix-shell` | WARDEN gate on the shell; per-action owner approval; **fail CLOSED when the gate cannot be wired** |
+| 009 | `a14-supply-chain` | Digest-pinned images, hash-locked deps |
+| 011 | `tooling-and-infra` | Sandbox image build fixes |
+| 012–016 | `w6c-progress-stream` | Surfaces WARDEN blocks + Strix activity; replayable run record; stream cursor |
+| 017 | `w16-10-budget-governor` | Anthropic price table for flagship codenames |
+| 018 | `w3-9-vendored-high-backlog` | `uv.lock` — clears the known-HIGH CVE backlog |
+
+`docs/strix-patches/series.json` carries the machine-checked record: per-patch digests, the deviation set,
+and sha256 manifests of both the base import and the current tree.

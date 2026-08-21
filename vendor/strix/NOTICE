@@ -6,5 +6,8 @@ This copy is vendored into the VIGIL monorepo and MODIFIED from upstream. Modifi
     by strix/telemetry/sink.py, a local-only sink with no network transport. Default telemetry = OFF.
   - Removed the OpenRouter attribution headers (HTTP-Referer/X-Title) from strix/config/models.py.
   - Default model set to anthropic/claude-opus-4-8 (Claude-everywhere migration).
-Further VIGIL modifications (governance gates, oracle-confirmation, Claude-native runtime) are tracked
-in the monorepo git history under vendor/strix/.
+Further VIGIL modifications (governance gates, oracle-confirmation, Claude-native runtime, egress
+hardening) are recorded as an explicit, rebasable PATCH SERIES in docs/strix-patches/ and indexed by
+vendor/strix/UPSTREAM.md. The invariant "vendor/strix == pristine upstream import + the series, in order"
+is verified byte-for-byte and enforced in CI by integration/tests/test_strix_patch_series.py, so a change
+to the vendored tree that is not recorded in the series fails the build.
