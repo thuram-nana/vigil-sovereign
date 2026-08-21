@@ -99,6 +99,19 @@ def load_witnessed_envelope(data: str) -> tuple[WitnessedCheckpoint, str]:
     except (ValueError, TypeError) as e:
         raise AnchorError(f"corrupt witnessed-checkpoint envelope: {e}") from e
     _require(isinstance(obj, dict), "witnessed-checkpoint envelope is not a JSON object")
+    # REFUSE-NEWER (W5-3 #447): this integration-plane reader is byte-compatible with the sovereign
+    # ``spine.witness`` envelope, so it must apply the SAME ceiling — else a schema>1 envelope (written by a
+    # newer build) is parsed as v1 here: any checkpoint delta silently mislabelled a signature-mismatch
+    # "not a usable anchor", any additive envelope field dropped-and-accepted (a silent downgrade on the
+    # verify/reprove path). Fail closed with the honest "upgrade" message instead. An uncoercible schema is
+    # itself too-new (fail closed). Kept inline — the integration plane must not import the sovereign guard.
+    try:
+        _env_schema = int(obj.get("schema", 1))
+    except (TypeError, ValueError):
+        _env_schema = _ENVELOPE_SCHEMA + 1
+    _require(_env_schema <= _ENVELOPE_SCHEMA,
+             f"witnessed-checkpoint envelope schema {obj.get('schema')!r} is newer than this build "
+             f"understands (max {_ENVELOPE_SCHEMA}) — upgrade VIGIL to read it")
     scope = obj.get("scope")
     cp_raw = obj.get("checkpoint")
     sigs_raw = obj.get("witness_signatures")
