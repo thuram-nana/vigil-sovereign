@@ -34,6 +34,18 @@ from .content_gate import ContentVerdict, screen_poc_content
 CAPTURE_KEY = "_vigil_capture"
 
 
+def _web_redrivable(report: Any) -> bool:
+    """True when this report maps to a web class VIGIL can re-drive for a FACT with its own gated probes —
+    so the mint runs even without an attached ``_vigil_capture``. Delegates to ``run._web_redrive_class`` (the
+    single source of truth), imported function-locally to break the run⇄sink import cycle. Fail-closed: any
+    import/lookup error ⇒ not web-re-drivable (the report simply needs a capture as before)."""
+    try:
+        from .run import _web_redrive_class  # noqa: PLC0415 — function-local: breaks the run⇄sink cycle
+        return _web_redrive_class(report) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @dataclass(frozen=True)
 class SinkResult:
     """What the sink decided about one report. ``gate`` is ``"allow"``/``"deny"``; ``minted`` is True only
@@ -105,7 +117,11 @@ class ProofSink:
                                   reason=verdict.reason)
 
             minted = False
-            if self._mint is not None and report.get(CAPTURE_KEY) is not None:
+            # Mint when the report carries an executor capture (error-signature bytes), OR when it is a
+            # web-re-drivable class (S7): those reach the mint WITHOUT a capture because the VIGIL-owned web
+            # re-drive crafts its OWN gated traffic against the endpoint. A mint error (or a re-drive that
+            # observed nothing / found the target safe) leaves the finding a LEAD — never propagates.
+            if self._mint is not None and (report.get(CAPTURE_KEY) is not None or _web_redrivable(report)):
                 try:
                     result = self._mint(report)
                     minted = bool(getattr(result, "is_fact", False))

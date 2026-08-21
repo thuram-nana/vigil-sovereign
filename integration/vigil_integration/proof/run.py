@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -196,6 +197,116 @@ def _persist_reverifiable(run_dir: str | os.PathLike, finding: dict, action_id: 
         pass
 
 
+# ======================================================================================================
+# S7 — the web-column VIGIL-owned live re-drive.
+#
+# A Strix finding is a PROPOSAL. For the web classes VIGIL can re-drive with its OWN crafted, gated probes
+# (open_redirect / cors / host_header_injection), we do not adjudicate the bytes Strix recorded — we RE-SEND
+# our own canary against the finding's endpoint through ``live.web_redrive`` and mint a signed FACT only
+# over that fresh, VIGIL-produced capture (operator decision 2: LEAD until VIGIL re-drives into an already
+# fact-capable branch; those web branches are already registered + fact-capable). This needs NO producer
+# request bytes — web_redrive injects its own canary — so it is independent of the request-byte capture
+# (invariant 8). The dominant auto-capture class (error_based_sqli) is NOT web-re-drivable and stays a LEAD
+# on this path; its live re-drive is a separate slice.
+# ======================================================================================================
+
+# A TIGHT CWE allow-list — never a fuzzy "web" hint. Over-matching would re-drive an endpoint the finding
+# did not implicate (worst case a wasted gated GET, since the oracle must still fire — but keep it precise).
+_WEB_CWE_TO_CLASS = {
+    "cwe-601": "open_redirect",       # URL redirection to untrusted site
+    "cwe-942": "cors",                # permissive cross-domain policy
+    "cwe-1385": "cors",               # missing origin validation in cross-origin resource sharing
+    "cwe-644": "host_header_injection",  # improper neutralization of HTTP headers (Host)
+}
+
+
+def _web_redrive_class(report: dict) -> "str | None":
+    """The ``web_redrive.WEB_FACT_CLASSES`` class this report maps to, or ``None``.
+
+    Conservative by design: an EXACT ``bug_class`` / ``finding_class`` match, else a tight CWE allow-list.
+    ``None`` ⇒ this report is not web-re-drivable — it falls through to the captured-bytes mint, or stays a
+    LEAD. This is the SINGLE source of truth for "is this report web-re-drivable" (``sink._web_redrivable``
+    calls it), so the sink gate and the mint path can never disagree about which reports take the web path."""
+    if not hasattr(report, "get"):
+        return None
+    from ..live.web_redrive import WEB_FACT_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2 posture)
+    for key in ("bug_class", "finding_class"):
+        v = str(report.get(key) or "").strip().lower()
+        if v in WEB_FACT_CLASSES:
+            return v
+    m = re.search(r"cwe-\d+", str(report.get("cwe") or "").strip().lower())
+    if m and m.group(0) in _WEB_CWE_TO_CLASS:
+        return _WEB_CWE_TO_CLASS[m.group(0)]
+    return None
+
+
+class _WebMintResult:
+    """The mint callback's return for a web re-drive. The sink reads ONLY ``.is_fact``; the rest is retained
+    for the persisted record. ``is_fact`` is True IFF VIGIL independently confirmed the CLAIMED class."""
+
+    __slots__ = ("is_fact", "facts", "family_verdict")
+
+    def __init__(self, *, is_fact: bool, facts: list, family_verdict: str) -> None:
+        self.is_fact = is_fact
+        self.facts = facts
+        self.family_verdict = family_verdict
+
+
+def _persist_web_redrive(run_dir: "str | os.PathLike", report: dict, wclass: str, wr: Any) -> None:
+    """Best-effort record of a web re-drive for the Proof-Studio screen. Mirrors the proofs/ location of
+    ``_persist_record``; a hiccup here must NEVER un-mint (the signed cert already exists in ``wr.facts``).
+    Uniform C1/reverifiable export for web facts is a named residual, not this slice."""
+    d = Path(run_dir) / "proofs"
+    d.mkdir(parents=True, exist_ok=True)
+    ref = str(_finding_from_report(report)["check_id"])
+    rec = {
+        "kind": "web_redrive",
+        "finding_ref": ref,
+        "claimed_class": wclass,
+        "url": getattr(wr, "url", ""),
+        "claimed_family_verdict": wr.family_verdict(wclass),
+        "family_verdicts": wr.family_verdicts(),
+        "n_facts": len(wr.facts),
+        "fact_refs": [getattr(f, "finding_ref", "") for f in wr.facts],
+        "refused": bool(getattr(wr, "refused", False)),
+        "notes": list(getattr(wr, "notes", []) or []),
+    }
+    (d / f"webredrive-{hashlib.sha256(ref.encode('utf-8')).hexdigest()[:16]}.json").write_text(
+        json.dumps(rec, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _web_redrive_mint(report: dict, wclass: str, *, run_dir: "str | os.PathLike",
+                      signers: "list[tuple[str, str]]", engagement_slug: str) -> "Any | None":
+    """Re-drive the finding's ``endpoint`` with VIGIL's OWN gated web probes; return a result whose
+    ``.is_fact`` is True ONLY when VIGIL independently confirmed the CLAIMED class over its own live capture.
+
+    A missing endpoint, a gate refusal (out-of-scope / kill-switch / no ACTIVE_RECON), no established
+    channel, or an oracle non-fire all yield ``is_fact=False`` → the finding stays a LEAD. web_redrive
+    re-injects its OWN canary rather than the producer's exact value, so a vuln that only fires on a
+    specific producer-supplied parameter value not present in ``endpoint`` reproduces as an honest
+    LEAD/INCONCLUSIVE, never a CLEAN claim of safety. Never raises: any failure drops the mint to a LEAD."""
+    url = str(report.get("endpoint") or "").strip()
+    if not url:
+        return None  # nothing to re-drive → LEAD
+    try:
+        from ..live.web_redrive import web_redrive  # noqa: PLC0415 — pulls framework at CALL time (offense)
+        # ``engagement_slug`` is BOTH the gate-authorization slug and the certificate-binding slug: the
+        # bootstrap provisions the run's authority under ``engagement_slug``, so the two scopes are identical
+        # by construction (a future deployment needing distinct slugs is deferred).
+        wr = web_redrive(url, slug=engagement_slug, engagement_slug=engagement_slug, signers=signers)
+    except Exception:  # noqa: BLE001 — a re-drive failure drops the mint (LEAD), never raises into Strix
+        return None
+    # Tie the mint to the CLAIM: FACT only if the class Strix claimed was independently confirmed. Sibling
+    # web classes web_redrive also probes stay in ``wr.facts`` (signed, persisted) but do NOT relabel THIS
+    # finding — that would attribute a certificate for class Y to a finding claiming class X.
+    claimed = wr.family_verdict(wclass)
+    try:
+        _persist_web_redrive(run_dir, report, wclass, wr)
+    except Exception:  # noqa: BLE001 — persistence is best-effort; a signed FACT is never un-minted
+        pass
+    return _WebMintResult(is_fact=(claimed == "FACT"), facts=list(wr.facts), family_verdict=claimed)
+
+
 def build_report_mint(
     *,
     run_dir: str | os.PathLike,
@@ -210,6 +321,15 @@ def build_report_mint(
     ``None`` if the capture is unusable — the finding then stays a plain Strix report / LEAD)."""
 
     def mint(report: dict) -> Any:
+        # S7: a web-re-drivable finding is verified by traffic VIGIL ITSELF sends — its own gated, crafted
+        # probes against the finding's endpoint — never the producer's recorded bytes. This is the
+        # VIGIL-owned re-drive that lets a Strix web finding reach a FACT. Anything else (incl. the dominant
+        # error_based_sqli captured-bytes class) falls through to the error-signature mint below / stays a LEAD.
+        wclass = _web_redrive_class(report)
+        if wclass is not None:
+            return _web_redrive_mint(report, wclass, run_dir=run_dir, signers=signers,
+                                     engagement_slug=engagement_slug)
+
         from framework.v2.evidence.poc import CapturedExchange     # lazy — FATAL-2
 
         capture = report.get(CAPTURE_KEY) or {}
