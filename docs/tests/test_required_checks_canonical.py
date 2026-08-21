@@ -225,20 +225,26 @@ def parse_jobs(text: str) -> list[tuple[str, str | None]]:
     if start is None:
         return []
     jobs: list[tuple[str, str | None]] = []
+    cur_key: str | None = None
     cur_name: str | None = None
     cur_if: str | None = None
 
     def flush():
-        nonlocal cur_name, cur_if
-        if cur_name is not None:
-            jobs.append((cur_name, cur_if))
-        cur_name, cur_if = None, None
+        nonlocal cur_key, cur_name, cur_if
+        # A job with NO `name:` still ships as a status check — GitHub defaults its check context to the job
+        # KEY (id). Fall back to the key so a nameless job can never be silently dropped from the accounting
+        # (a dropped job is invisible to the reverse-drift guard = fail-open). RED-PEN #397.
+        if cur_key is not None:
+            jobs.append((cur_name if cur_name is not None else cur_key, cur_if))
+        cur_key, cur_name, cur_if = None, None, None
 
     for ln in lines[start:]:
         if re.match(r"^\S", ln):  # left the jobs: block
             break
-        if re.match(r"^  [A-Za-z0-9_-]+:\s*$", ln):  # a job key (two-space indent, nothing after colon)
+        m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", ln)  # a job key (two-space indent, nothing after colon)
+        if m:
             flush()
+            cur_key = m.group(1)
             continue
         nm = re.match(r"^    name:\s*(.+?)\s*$", ln)  # four-space indent -> job-level, not a step
         if nm and cur_name is None:
@@ -616,3 +622,16 @@ def test_negative_control_thin_advisory_reason_rejected():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_parse_jobs_falls_back_to_the_job_id_for_a_nameless_job():
+    """RED-PEN #397: a job with no `name:` still ships as a status check (GitHub defaults the context to the
+    job id). parse_jobs must surface it — dropping it makes it invisible to the reverse-drift accounting."""
+    wf = ("on:\n  pull_request:\n    branches: [main]\n"
+          "jobs:\n"
+          "  sneaky-unnamed:\n    runs-on: ubuntu-latest\n"
+          "  named-one:\n    name: I have a name\n    runs-on: ubuntu-latest\n")
+    got = parse_jobs(wf)
+    names = [n for (n, _if) in got]
+    assert "sneaky-unnamed" in names, "a nameless job was dropped — it would ship as an unguarded check"
+    assert "I have a name" in names
