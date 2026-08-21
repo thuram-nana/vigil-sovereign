@@ -563,11 +563,23 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # Persist the PINNED tla2tools.jar across runs. When the GitHub release CDN
+      # (objects.githubusercontent.com) has an incident — as it did 2026-08-21, reddening F1 on main and
+      # every PR for ~40m — a warm cache lets check.sh short-circuit WITHOUT any network fetch. The key is
+      # derived from check.sh (which carries the sha256 pin), so a pin change busts the cache; and check.sh
+      # re-verifies sha256 on whatever it restores, so a stale/wrong cached jar is rejected and re-fetched —
+      # the supply-chain pin stays authoritative regardless of the cache.
+      - name: Cache the pinned tla2tools.jar
+        uses: actions/cache@v4
+        with:
+          path: formal/.tla2tools.jar
+          key: tla2tools-${{ hashFiles('formal/check.sh') }}
       - name: TLC model-check the four core invariants + their mutants
         run: |
           if [ -f formal/check.sh ]; then
-            # check.sh fetches a PINNED, sha256-verified tla2tools.jar (GitHub runners have net),
-            # model-checks each faithful spec (must hold) AND each mutant (must be caught).
+            # check.sh uses a PINNED, sha256-verified tla2tools.jar: a warm cache short-circuits; a cache
+            # miss fetches from the release CDN (with a bounded, sha-re-verifying retry loop for transient
+            # truncation), then the post-job cache save persists it for the next run.
             bash formal/check.sh
           else
             # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
