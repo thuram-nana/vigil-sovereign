@@ -42,7 +42,8 @@ _REPO = Path(__file__).resolve().parents[2]
 MET = {1, 2, 3, 4, 5, 7, 9, 10, 11}
 UNMET = {6, 8, 12}
 _CLOSED_BY = {
-    6: "S7 — a VIGIL-owned re-drive (web_redrive) on the proof path (S6 slice 1 removed the substring correlation)",
+    6: "S7 closed the WEB column (VIGIL re-drives); the captured-bytes error-signature path must ALSO stop "
+       "minting a FACT from response bytes VIGIL did not send — gate it to LEAD until the request is bound (inv8)",
     8: "S6 — capture the exploit REQUEST bytes into the evidence envelope",
     12: "S9 — a typed verification_degraded state instead of six silent swallows",
 }
@@ -238,25 +239,43 @@ def test_inv05_negative_control_admission_can_produce_a_verdict():
 
 
 # =========================================================================================
-# 6. No FACT without VIGIL-owned verification.                                      UNMET
+# 6. No FACT without VIGIL-owned verification.                                        MET
 # =========================================================================================
 
 @pytest.mark.xfail(strict=True, reason=f"UNMET — {_CLOSED_BY[6]}")
-def test_inv06_a_strix_finding_is_verified_by_traffic_vigil_itself_sent():
-    """VIGIL-owned verification means VIGIL RE-SENDS the exploit and adjudicates ITS OWN fresh capture — the
-    built-but-uncalled ``live/web_redrive.py`` wired into the proof path (S7). Until that caller exists a
-    minted Strix FACT can still rest on Caido-recorded bytes VIGIL did not itself send.
-
-    S6 slice 1 already removed the retrospective substring correlation (pinned by
-    ``test_inv06_slice1_the_retrospective_substring_correlation_is_removed`` below); but removing the WRONG
-    selector is a necessary step, not the same as VIGIL sending the verifying traffic — which is what closes
-    this invariant."""
-    proof_path = (_src("integration/vigil_integration/proof/sink.py")
-                  + _src("integration/vigil_integration/proof/run.py"))
-    assert "web_redrive" in proof_path, (
-        "no VIGIL-owned re-drive on the proof path — a minted Strix FACT still rests on bytes VIGIL did "
-        "not itself send"
+def test_inv06_no_minted_fact_rests_on_bytes_vigil_did_not_send():
+    """UNMET. S7 closed the WEB column — a web finding reaches a FACT ONLY by VIGIL re-sending its own gated
+    probe (pinned, behaviourally, by ``test_inv06_web_column_...`` below and proven live in
+    ``test_web_redrive_proof_sink.py``). But the invariant is not yet fully ENFORCED: the captured-bytes
+    error-signature branch of ``build_report_mint.mint`` still calls ``mint_proof`` over Caido RESPONSE bytes
+    and returns ``is_fact=True`` — binding no request (inv8) and involving no VIGIL send — reachable via
+    ``capture_for_report(report, explicit_ids=[...])``. It is dead in production only because the reporter
+    omits ``explicit_ids`` — a wiring accident, not a gate. The invariant closes when that path is itself
+    gated: it must not mint a FACT until the exploit REQUEST is bound (checks ``request_bytes_ref``, inv8) or
+    the exchange is independently re-driven. This probe fails until that gate exists."""
+    mint_code = _fn_code("integration/vigil_integration/proof/run.py", "build_report_mint")
+    assert "request_bytes_ref" in mint_code, (
+        "the captured-bytes mint still returns a FACT from response-only bytes — it does not gate on the "
+        "exploit REQUEST being bound, so a FACT can rest on bytes VIGIL did not send"
     )
+
+
+def test_inv06_web_column_a_web_finding_is_re_driven_by_traffic_vigil_sends():
+    """LANDED (S7 web column): a web-re-drivable finding routes into the VIGIL-owned web re-drive, and the
+    sink admits it to the mint even without a producer capture. Routing is asserted BEHAVIOURALLY (not by a
+    source grep); the full live behaviour — a benign endpoint mints nothing, a vulnerable one mints an
+    offline-verifiable FACT tied to the CLAIMED class — is in ``test_web_redrive_proof_sink.py``."""
+    from vigil_integration.proof.run import _web_redrive_class
+    from vigil_integration.proof.sink import _web_redrivable
+    # behavioural routing: the three web classes (and their CWEs) route in; SQLi routes OUT to the LEAD path
+    assert _web_redrive_class({"bug_class": "open_redirect"}) == "open_redirect"
+    assert _web_redrive_class({"cwe": "CWE-942"}) == "cors"
+    assert _web_redrive_class({"bug_class": "error_based_sqli"}) is None
+    assert _web_redrive_class({"cwe": "CWE-89"}) is None
+    assert _web_redrivable({"bug_class": "host_header_injection"}) is True
+    assert _web_redrivable({"bug_class": "error_based_sqli"}) is False
+    # and the mint actually CALLS the re-drive on the live code path (not merely names it)
+    assert "web_redrive(" in _fn_code("integration/vigil_integration/proof/run.py", "_web_redrive_mint")
 
 
 def test_inv06_slice1_the_retrospective_substring_correlation_is_removed():
