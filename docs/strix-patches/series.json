@@ -245,6 +245,7 @@
   "vendor/strix/strix/report/state.py",
   "vendor/strix/strix/runtime/caido_bootstrap.py",
   "vendor/strix/strix/runtime/docker_client.py",
+  "vendor/strix/strix/runtime/vigil_upstream.py",
   "vendor/strix/strix/skills/__init__.py",
   "vendor/strix/strix/telemetry/__init__.py",
   "vendor/strix/strix/telemetry/posthog.py",
@@ -382,6 +383,12 @@
    "file": "020-s3-forward-the-sandbox-s-traffic-through-the-vig.patch",
    "sha256": "b3ec69d3ef09dc4ae5882daeca84d2ff9deb08576f84cf51c3bea1352b6ffdc8",
    "subject": "S3: forward the sandbox's traffic through the VIGIL gateway (the other half of the S2 pin)"
+  },
+  {
+   "commit": "d0aa4b189f0ecdc4e7c8b5d734e93593629877af",
+   "file": "021-s3-keep-the-egress-wiring-sdk-free-so-its-tests.patch",
+   "sha256": "7a14353032cd7e3f6bf170902b860efe4d91d8120fee9546aa70443c4fc3de7a",
+   "subject": "S3: keep the egress wiring SDK-free so its tests actually RUN in the required P8 job"
   }
  ],
  "schema": 1,
@@ -491,10 +498,11 @@
   "vendor/strix/strix/report/writer.py": "b8ff04c3dbcb6b1c3b1759ef796761b09fa872fe5274f2338e93008f3e675205",
   "vendor/strix/strix/runtime/__init__.py": "ac8999103459c5bb68ad82e1adaa6be8a30ccbb779393da8768340b60a76786b",
   "vendor/strix/strix/runtime/backends.py": "005d62b552bb494800d00ef16232499f4baa23b5e8371ff7f88168a6a0da0f04",
-  "vendor/strix/strix/runtime/caido_bootstrap.py": "e2a0c5b49195705c0095086e5ffde581033d6a4dcb2e32f03cf2cbcb0838738d",
+  "vendor/strix/strix/runtime/caido_bootstrap.py": "e8e03b8cdf0ee2760161d72ba173fa8aca5dbda0fa203b8a50bd4cfa293c00c6",
   "vendor/strix/strix/runtime/docker_client.py": "874f20e07f660021844e163e6fb931585a9c3c83ae53204349c788961ad2e903",
   "vendor/strix/strix/runtime/local_dir_staging.py": "4f8bc84226fb42cf816376e1706cecbe72dd633c69bf4a39eb2489f84b7fdabc",
   "vendor/strix/strix/runtime/session_manager.py": "b40dfb64ff65d40b10a41e47968e54b0713776e4e68bf8a427def811d434a5a2",
+  "vendor/strix/strix/runtime/vigil_upstream.py": "8b83cd8f6fb3f11969e7883ee9fe9f0f86f49c0836de88c2d24fb2d7368cb42d",
   "vendor/strix/strix/skills/README.md": "0f9834d74d33d20a1985189a2dc7e090c090cd4ea3111522fdfdc359c7540177",
   "vendor/strix/strix/skills/__init__.py": "9402336b992269e3668a11cd863b177718bd66af9455e003cf07c329bd8a7f0a",
   "vendor/strix/strix/skills/cloud/.gitkeep": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -622,7 +630,7 @@
   "vendor/strix/tests_vigil/test_proof_capture.py": "2f29a56a184579c449668905ddc21ce57b2cc808671e3a88e744f770674b7230",
   "vendor/strix/tests_vigil/test_reasoning_thinking.py": "56365c986fa3bb04ca250e45f7f2b126732a1c0c4b827d224ea44c75d9d515b0",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
-  "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "db8a9a49ab804998142e06cee1c666833167357f99baef107f832abaf43284f1",
+  "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "e3de57c3f4a12ac48f08815597d3c70ee959867bc52b4642470b341052ff55c1",
   "vendor/strix/uv.lock": "ef01a512cf243a9b7084e4724a89c52ef8567e6a144057219e72940280716a26"
  },
  "upstream_commit": "230324d2b80a5a27506f85fc521845d8464b04c0",
