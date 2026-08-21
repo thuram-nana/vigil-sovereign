@@ -31,6 +31,7 @@ import ast
 import gzip
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import threading
@@ -115,6 +116,18 @@ class _AuthHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(html)))
             self.end_headers()
             self.wfile.write(html)
+            return
+        # Model the sovereign OIDC RP's login-initiation: a 302 to the IdP that sets an HttpOnly session-
+        # binding cookie scoped to the RP's OWN path space (Path=/api/oidc) — the backend is unaware the
+        # proxy mounts it under /sovereign. The proxy MUST remount that cookie's Path so the browser returns
+        # it on the proxied callback (W17-2 #536). Any tag (only the sovereign route reaches this path).
+        if parts.path == "/api/oidc/login":
+            self.send_response(302)
+            self.send_header("Location", "https://idp.example/authorize?state=abc")
+            self.send_header("Set-Cookie",
+                             "sigil_oidc_sid=SIDVALUE; Path=/api/oidc; Max-Age=600; HttpOnly; SameSite=Lax")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
         if parts.path == "/api/whoami" and getattr(srv, "tag", "") == "cockpit":
             tok = self.headers.get("X-SIGIL-Token") or (parse_qs(parts.query).get("token") or [""])[0]
@@ -334,6 +347,94 @@ def test_login_bootstrap_is_reachable_without_auth(proxy):
 def test_a_non_bootstrap_sovereign_route_still_requires_auth(proxy):
     port = proxy["port"]
     assert _req(port, "GET", "/sovereign/api/settings", headers={})[0] == 401
+
+
+# ==================================================================================================
+# 5b) W17-2 (#536) — the THREE bootstrap routes that were BUILT-BUT-UNREACHABLE (PoP challenge + OIDC
+#     login/callback) now reach the sovereign WITHOUT proxy auth; the forward list stays an EXACT-MATCH
+#     allowlist (no widening); and the OIDC session cookie is remounted into the browser's proxied path.
+# ==================================================================================================
+def _req_headers(port, method, path, *, headers=None, body=None):
+    """Like _req but also returns the response headers (need Set-Cookie / Location for the OIDC checks)."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=6)
+    try:
+        conn.request(method, path, body=body, headers=headers or {})
+        r = conn.getresponse()
+        data = r.read().decode("utf-8", "replace")
+        return r.status, dict(r.getheaders()), data
+    finally:
+        conn.close()
+
+
+def test_pop_challenge_is_reachable_without_auth(proxy):
+    """The S3 proof-of-possession challenge mint must be forwarded token-free — a caller that holds only its
+    private key has no bearer yet. BEFORE this fix the proxy 401'd it, so keypair-PoP login was unreachable
+    through `vigil up`. (Fails on a tree without the fix: the route was not in _UNAUTH_FORWARD → 401.)"""
+    port, cockpit = proxy["port"], proxy["cockpit"]
+    st, _ = _req(port, "POST", "/sovereign/api/login/challenge",
+                 headers={"Content-Type": "application/json"}, body=b"{}")
+    assert st == 200
+    assert any(r["path"] == "/api/login/challenge" for r in cockpit.records), \
+        "the PoP challenge mint must reach the sovereign plane without a bearer"
+
+
+def test_oidc_login_reachable_without_auth_and_cookie_is_remounted(proxy):
+    """/api/oidc/login must be forwarded token-free (302 → IdP), AND the session-binding cookie the RP scopes
+    to its own path (Path=/api/oidc) must be REMOUNTED to /sovereign/api/oidc — otherwise the browser never
+    returns it on the proxied callback and OIDC login fails-closed end-to-end through `vigil up`."""
+    port, cockpit = proxy["port"], proxy["cockpit"]
+    st, hdrs, _ = _req_headers(port, "GET", "/sovereign/api/oidc/login")
+    assert st == 302
+    assert any(r["path"] == "/api/oidc/login" for r in cockpit.records)
+    setck = hdrs.get("Set-Cookie", "")
+    assert "sigil_oidc_sid=SIDVALUE" in setck                              # the cookie value is preserved
+    assert "Path=/sovereign/api/oidc" in setck, f"cookie path not remounted for the mount: {setck!r}"
+    # the bare (unmounted) path must NOT survive — strip the remounted form, then assert no naked Path=/api/oidc
+    assert "Path=/api/oidc" not in setck.replace("Path=/sovereign/api/oidc", "")
+    assert "HttpOnly" in setck and "SameSite=Lax" in setck                 # every other attribute preserved
+
+
+def test_oidc_callback_is_reachable_without_auth(proxy):
+    """The IdP's return leg (/api/oidc/callback) must be forwarded token-free — it bootstraps a session for a
+    caller that has no bearer yet. Before the fix it was 401'd → SSO login could never complete."""
+    port, cockpit = proxy["port"], proxy["cockpit"]
+    st, _ = _req(port, "GET", "/sovereign/api/oidc/callback?code=c&state=s")
+    assert st == 200
+    assert any(r["path"].startswith("/api/oidc/callback") for r in cockpit.records)
+
+
+def test_forward_list_is_exactly_the_sovereign_bootstrap_set(proxy):
+    """NEGATIVE CONTROL + STRUCTURAL, in one assertion: the proxy's unauth forward list equals the
+    sovereign's OWN BOOTSTRAP_PATHS (each under /sovereign) EXACTLY — no more (a wider list opens the proxy),
+    no less (a missing one ships a login route unreachable). BOOTSTRAP_PATHS is parsed from the sovereign
+    SOURCE (read, not imported — the offense interpreter must not co-load sigil, FATAL-2). This is the guard
+    that a FUTURE bootstrap route cannot ship unreachable AND that this fix did not silently widen the gate.
+    Fails on a tree without the fix (the old forward list held only whoami + login)."""
+    server_src = (_REPO / "apps/sigil/sigil/ui/server.py").read_text(encoding="utf-8")
+    m = re.search(r"BOOTSTRAP_PATHS\s*=\s*frozenset\(\{(.*?)\}\)", server_src, re.S)
+    assert m, "could not find BOOTSTRAP_PATHS in the sovereign server source"
+    boot = set(re.findall(r'"([^"]+)"', m.group(1)))
+    assert boot, "BOOTSTRAP_PATHS parsed empty"
+    expected = {uiproxy.SOVEREIGN_BASE + p for p in boot}
+    forward = set(uiproxy._UNAUTH_FORWARD)
+    assert forward == expected, (
+        "the proxy unauth forward list must equal the sovereign bootstrap set exactly:\n"
+        f"  in forward, not a bootstrap route (WIDENS the gate): {forward - expected}\n"
+        f"  a bootstrap route not forwarded (UNREACHABLE):       {expected - forward}")
+
+
+def test_a_near_miss_of_a_bootstrap_route_still_requires_auth(proxy):
+    """NEGATIVE CONTROL that the forward is an EXACT-MATCH allowlist, not a prefix that opened the subtree: a
+    path that merely resembles a bootstrap route (an extra segment or a suffix) is NOT forwarded — it hits
+    the per-user gate, 401s without a bearer, and never reaches the backend. Proves the gate is not a no-op."""
+    port, cockpit = proxy["port"], proxy["cockpit"]
+    before = len(cockpit.records)
+    for near in ("/sovereign/api/login/challenger",   # a suffix of /api/login/challenge
+                 "/sovereign/api/oidc/login/evil",    # an extra segment under /api/oidc/login
+                 "/sovereign/api/oidc/callbackX",      # a suffix of /api/oidc/callback
+                 "/sovereign/api/oidc/logout"):        # a sibling that is NOT a bootstrap route
+        assert _req(port, "GET", near)[0] == 401, f"{near} must require auth (exact-match allowlist)"
+    assert len(cockpit.records) == before, "no near-miss route may reach the backend unauthenticated"
 
 
 # ==================================================================================================

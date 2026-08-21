@@ -126,9 +126,26 @@ _CSRF_HEADER = "X-Requested-With"
 # resolves to None → 401, the request is NEVER forwarded.
 # ==================================================================================================
 _WHOAMI_PATH = "/api/whoami"
-# Bootstrap routes that reach the sovereign plane WITHOUT proxy auth: the login-state probe and the login
-# endpoint (verifying the token you present is their whole purpose). Everything else past these is gated.
-_UNAUTH_FORWARD = frozenset({SOVEREIGN_BASE + "/api/whoami", SOVEREIGN_BASE + "/api/login"})
+# Bootstrap routes that reach the sovereign plane WITHOUT proxy auth: their whole purpose is to establish a
+# session for a caller that holds NO bearer yet, so a proxy-auth gate in front of them would make login
+# impossible — the classic "built but unreachable" defect (W17-2 #536: PoP-challenge + OIDC login/callback
+# were merged, but the 401 here fired before they were reached, so keypair-PoP and SSO login were
+# unreachable through `vigil up`). The set is EXACTLY the sovereign's own pre-auth routes (its
+# BOOTSTRAP_PATHS): the login-state probe (`/api/whoami`), the login verifier (`/api/login`), the S3
+# proof-of-possession challenge mint (`/api/login/challenge`), and the OIDC RP's login-initiation +
+# callback (`/api/oidc/login`, `/api/oidc/callback`). Everything else past these is gated. A structural
+# test (test_uiproxy_peruser_auth) cross-checks this set against the sovereign's BOOTSTRAP_PATHS constant so
+# the two can never drift: a future bootstrap route added to the sovereign but not here would ship
+# UNREACHABLE, and a route added here that is NOT a real bootstrap route would silently WIDEN the
+# unauthenticated surface — the test fails on either.
+_BOOTSTRAP_ROUTES = (
+    "/api/whoami",
+    "/api/login",
+    "/api/login/challenge",
+    "/api/oidc/login",
+    "/api/oidc/callback",
+)
+_UNAUTH_FORWARD = frozenset(SOVEREIGN_BASE + p for p in _BOOTSTRAP_ROUTES)
 # The permission a MUTATING offense request / an offense-plane lifecycle action requires — an operator+
 # capability. Offense reads/SSE need only an authenticated principal (viewer+). This is a COARSE proxy-side
 # floor (read vs. run) over the offense plane, which does not itself do per-action RBAC; the sovereign plane
@@ -156,6 +173,31 @@ _VIGIL_HDR_PREFIX = "x-vigil-"
 
 def _is_vigil_identity_header(name: str) -> bool:
     return name.lower().replace("_", "-").startswith(_VIGIL_HDR_PREFIX)
+
+
+def _remount_setcookie_path(setcookie: str, mount: str) -> str:
+    """Prefix a relayed ``Set-Cookie``'s absolute ``Path`` attribute with the plane mount, so a cookie the
+    backend scopes to ITS OWN path space is scoped to the path the BROWSER actually talks to. The proxy
+    serves each backend under ``<mount>/…`` and STRIPS the prefix on the way in (see ``route()``), so a
+    backend is unaware it is mounted: the sovereign OIDC RP sets its session-binding cookie ``Path=/api/oidc``
+    (correct for a direct ``sigil serve``), but through ``vigil up`` the browser's callback request is
+    ``/sovereign/api/oidc/callback`` — whose path does NOT start with ``/api/oidc`` — so the browser would
+    never return the cookie and the callback's session-bound-state check would fail-closed, breaking OIDC
+    login end-to-end (W17-2 #536). Remounting to ``/sovereign/api/oidc`` fixes it while keeping the direct-
+    serve path byte-identical (no mount ⇒ no rewrite). Only an ABSOLUTE path (``Path=/…``) is remounted; a
+    pathless or relative cookie is left untouched. Attribute match is case-insensitive; the cookie value and
+    every other attribute (Domain, Max-Age, HttpOnly, SameSite, …) are preserved verbatim."""
+    if not mount:
+        return setcookie
+    parts = setcookie.split(";")
+    for i, seg in enumerate(parts):
+        key, sep, val = seg.partition("=")
+        if sep and key.strip().lower() == "path":
+            path_val = val.strip()
+            if path_val.startswith("/"):
+                parts[i] = f"{key}={mount}{path_val}"   # `key` keeps the backend's leading space + casing
+            break
+    return ";".join(parts)
 # Short-TTL cache of sha256(bearer) → resolved principal (or None). Bounds whoami round-trips under SSE /
 # polling; a revocation is visible after at most _AUTH_TTL_S (documented residual). A rejected bearer is
 # cached briefly too, to blunt a guessing flood without pinning a wrong answer for long.
@@ -996,6 +1038,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _with_query(upstream_path: str, query: str) -> str:
         return f"{upstream_path}?{query}" if query else upstream_path
 
+    def _relay_mount(self) -> str:
+        """The plane mount prefix for THIS request (``/sovereign`` / ``/offense``), or ``""`` for a
+        non-plane request. Used to remount a relayed ``Set-Cookie`` Path into the browser's path space so a
+        backend cookie (e.g. the OIDC session-binding cookie) is returned on the proxied path."""
+        p = urlsplit(self.path).path
+        if p == SOVEREIGN_BASE or p.startswith(SOVEREIGN_BASE + "/"):
+            return SOVEREIGN_BASE
+        if p == OFFENSE_BASE or p.startswith(OFFENSE_BASE + "/"):
+            return OFFENSE_BASE
+        return ""
+
     def _sub_token_query(self, query: str) -> str:
         """Replace ``?token=`` (the SSE / download credential carrier) with the offense console credential,
         preserving every other query parameter. If there is no ``token`` param, the query is returned
@@ -1348,10 +1401,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         # normal path — identity (or SSE). Stream (SSE / no-token) or stream-redact (non-SSE cleartext).
         self.send_response_only(resp.status, resp.reason or "")
+        mount = self._relay_mount()
         for key, value in resp.getheaders():
             lk = key.lower()
             if lk in _HOP_BY_HOP:
                 continue
+            if lk == "set-cookie":                       # remount a backend cookie into the browser's path
+                value = _remount_setcookie_path(value, mount)
             self.send_header(key, value)
         # frame the response by closing the connection: this streams SSE and length-less/chunked
         # bodies without buffering, and sidesteps every keep-alive framing edge case on proxied bytes.
@@ -1380,10 +1436,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         under redaction) and the stale Content-Encoding/Content-Length dropped. Used by both buffered
         redaction paths (the compressed-decode path and the cleartext-HTML scrub path)."""
         self.send_response_only(resp.status, resp.reason or "")
+        mount = self._relay_mount()
         for key, value in resp.getheaders():
             lk = key.lower()
             if lk in _HOP_BY_HOP or lk in ("content-encoding", "content-length"):
                 continue            # drop the stale encoding/length — we send the redacted cleartext
+            if lk == "set-cookie":                       # remount a backend cookie into the browser's path
+                value = _remount_setcookie_path(value, mount)
             self.send_header(key, value)
         self.send_header("Content-Length", str(len(prepared)))
         self.send_header("Connection", "close")

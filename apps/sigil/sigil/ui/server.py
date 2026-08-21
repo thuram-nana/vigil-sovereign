@@ -58,6 +58,24 @@ _CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors
 # so the registry stays complete and the two can never drift.
 _LOGIN_POP_DOMAIN_TAG = DOMAIN_TAGS["login-pop"]
 
+# BOOTSTRAP (pre-auth) ROUTES — the token-OPTIONAL endpoints whose whole purpose is to establish a session
+# for a caller that holds NO bearer yet: the login-state probe, the bearer/PoP/password login verifier, the
+# S3 proof-of-possession challenge mint, and the OIDC RP's login-initiation + callback. Each is dispatched
+# in do_GET/do_POST BEFORE the `self._principal()` 401 gate. This is the SINGLE SOURCE OF TRUTH for that
+# set: the `vigil up` reverse proxy MUST forward exactly these without proxy auth
+# (integration/vigil_integration/uiproxy.py::_UNAUTH_FORWARD) or the feature ships unreachable — the W17-2
+# (#536) "built but unreachable" defect. A structural test cross-checks the two sets so a new bootstrap
+# route cannot ship unreachable, and the proxy's forward list cannot silently widen past these.
+# (The OIDC pair is only *registered* when SIGIL_OIDC_ENABLED is on; it is still a bootstrap route, and the
+# proxy forwarding it while OIDC is off simply reaches the sovereign's fall-through 404 — never a 401.)
+BOOTSTRAP_PATHS = frozenset({
+    "/api/whoami",
+    "/api/login",
+    "/api/login/challenge",
+    "/api/oidc/login",
+    "/api/oidc/callback",
+})
+
 
 class UIServer(ThreadingHTTPServer):
     daemon_threads = True
@@ -307,9 +325,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _whoami(self):
         """The current principal from the presented token (token-optional). {authenticated:false} for an
-        anonymous/invalid caller so the SPA can render its login gate without a 401 round-trip."""
+        anonymous/invalid caller so the SPA can render its login gate without a 401 round-trip. `oidc` tells
+        the (unauthenticated) login gate whether to offer the SSO button — the OIDC routes are unregistered
+        (404) when it is false, so a button that always showed would dead-end; it carries no secret and is a
+        pure boolean, safe to expose to an anonymous caller. Whoami is itself a bootstrap route (BOOTSTRAP_
+        PATHS), so this signal is reachable pre-login through `vigil up`."""
         p = self._principal()
-        self._json(self._principal_json(p) if p is not None else {"authenticated": False})
+        base = self._principal_json(p) if p is not None else {"authenticated": False}
+        self._json({**base, "oidc": oidc_enabled()})
 
     def _accounts(self):
         """The owner's Users & Roles list — username/role/state/issued_at only. cred_hash/salt never leave

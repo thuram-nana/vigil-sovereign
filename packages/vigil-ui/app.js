@@ -239,10 +239,44 @@
   }
 
   // ---- login gate + principal load (Claim 6) ---------------------------------
+  // Whether the sovereign has the OIDC RP turned ON — learned from the (token-optional) /api/whoami, which
+  // is a bootstrap route so this reaches the login gate BEFORE a session exists. Drives whether the login
+  // gate offers the SSO button (the OIDC routes are unregistered when this is false, so a button that always
+  // showed would dead-end). W17-2 (#536).
+  var _oidcEnabled = false;
   function loadPrincipal(cb) {
     V.getJSON(SOV("/api/whoami"))
-      .then(function (p) { V.setPrincipal(p); if (cb) cb(p, true); })
+      .then(function (p) { _oidcEnabled = !!(p && p.oidc); V.setPrincipal(p); if (cb) cb(p, true); })
       .catch(function () { V.setPrincipal(null); if (cb) cb(null, false); });   // plane offline → don't gate
+  }
+
+  // SSO: hand the browser to the sovereign's /api/oidc/login, which 302s to the operator's IdP. A TOP-LEVEL
+  // navigation (not a fetch) is required so the IdP can drive its own login page and set the session-binding
+  // cookie; the IdP returns the browser to redirect_uri (configured to THIS app's origin), where boot()'s
+  // completeOidcReturn() finishes the exchange and adopts the minted bearer. Both /api/oidc/login and the
+  // callback are proxy-bootstrap routes (reachable without a bearer through `vigil up`).
+  function ssoSignIn() { window.location.assign(SOV("/api/oidc/login")); }
+
+  // If this page load is the IdP's return leg (redirect_uri carries ?code&state), finish the OIDC login:
+  // the callback (sent WITH same-origin credentials so the session-binding cookie rides along) verifies the
+  // id_token + owner-signed mapping and mints a fresh session bearer, which we adopt into the per-user
+  // session. code/state are single-use + sensitive, so they are stripped from the address bar immediately.
+  // Calls cb(true) on a completed SSO login, cb(false) otherwise (incl. "this was not an SSO return").
+  function completeOidcReturn(cb) {
+    var qs;
+    try { qs = new URLSearchParams(location.search || ""); } catch (e) { cb(false); return; }
+    var code = qs.get("code"), state = qs.get("state");
+    if (!code || !state) { cb(false); return; }
+    try { history.replaceState(null, "", location.pathname + location.hash); } catch (e) {}
+    V.getJSON(SOV("/api/oidc/callback") + "?code=" + encodeURIComponent(code) + "&state=" + encodeURIComponent(state))
+      .then(function (r) {
+        if (r && r.authenticated && r.bearer) {
+          V.setSessionToken(r.bearer); V.setPrincipal(r);
+          V.toast("Signed in as " + r.username + " (" + r.role + ") via SSO.");
+          cb(true);
+        } else { V.toast("SSO sign-in did not complete.", true); cb(false); }
+      })
+      .catch(function (e) { V.toast((e && (e.data && e.data.error || e.message)) || "SSO sign-in failed.", true); cb(false); });
   }
   function renderLoginGate(screen) {
     if (!screen) return;
@@ -271,6 +305,15 @@
     }
     input.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); submit(); } });
     totpInput.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+    // SSO card — shown ONLY when the sovereign reports the OIDC RP is enabled (whoami.oidc). The button is a
+    // top-level navigation to the sovereign's /api/oidc/login (a bootstrap route reachable without a bearer
+    // through `vigil up`); the IdP returns to this app, where completeOidcReturn() adopts the minted bearer.
+    var ssoCard = _oidcEnabled ? V.card("Single sign-on (SSO)", null, [
+      h("div.hint", null, "Sign in with your organisation's identity provider. Your VIGIL role still comes "
+        + "from an owner-signed account — SSO establishes who you are, never what you may do."),
+      h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } },
+        [h("button.btn.primary", { onClick: ssoSignIn }, [V.icon("key"), "Sign in with SSO"])]),
+    ]) : null;
     V.mount(screen, h("div.wrap", null, [
       h("div.screen-head", null, [h("h1", null, "Sign in to VIGIL"),
         h("span.sub", null, "Multi-user access control (Claim 6). The owner uses the token printed by `vigil up`.")]),
@@ -281,6 +324,7 @@
         h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } },
           [input, totpInput, h("button.btn.primary", { onClick: submit }, [V.icon("key"), "Sign in"])]),
       ]),
+      ssoCard,
     ]));
   }
 
@@ -8871,11 +8915,15 @@
     route();
     // Claim 6: learn WHO is signed in (owner token → owner; a per-user bearer → that principal; neither →
     // the login gate). Re-render the nav (role gating) + topbar (current-user chip) once whoami answers.
-    loadPrincipal(function (p, ok) {
-      refreshTopbar();
-      renderNav();
-      if (ok && p && !p.authenticated) { renderLoginGate(V.$("#screen")); return; }
-      route();                    // authenticated (owner or per-user), or the plane is offline
+    // W17-2: if this load is an OIDC/SSO return (redirect_uri carried ?code&state), FINISH that login first
+    // — it adopts the minted bearer, so the whoami below then resolves as the signed-in principal.
+    completeOidcReturn(function () {
+      loadPrincipal(function (p, ok) {
+        refreshTopbar();
+        renderNav();
+        if (ok && p && !p.authenticated) { renderLoginGate(V.$("#screen")); return; }
+        route();                  // authenticated (owner, per-user, or just-completed SSO), or plane offline
+      });
     });
     refreshKeysBadge();           // surface any failing API key in the top bar from first paint
     startSigilHud();              // S2: persistent SIGIL voice/gesture nav channel (survives route changes)
