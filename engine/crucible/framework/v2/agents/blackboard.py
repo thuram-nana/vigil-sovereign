@@ -40,6 +40,13 @@ _log = v2log.get_logger(__name__)
 
 _SCHEMA_SQL = Path(__file__).parent / "schema.sql"
 
+# Highest ``bb_schema_meta`` version this build understands. REFUSE-NEWER (W5-3, #447): a store stamped with
+# a version ABOVE this is refused, never silently opened as the old shape — its events.kind CHECK, its
+# append-only triggers, or its column set may have changed meaning. Mirrors ``memory.migrate`` (whose
+# ``apply`` already raises ``SchemaMismatch`` when ``current > _CURRENT_VERSION``); the blackboard was the
+# sibling that migrated UP but never refused a version it was too old to understand.
+_MAX_BB_SCHEMA = 2
+
 
 def blackboard_path() -> Path:
     return paths.v2_root() / ".blackboard" / "store.sqlite"
@@ -111,6 +118,20 @@ class Blackboard:
     # ---- migrations ----
 
     def _migrate(self) -> None:
+        # REFUSE-NEWER (W5-3, #447): if this store already carries a schema version NEWER than this build
+        # understands, refuse it fail-closed — never run our DDL over it or open it as the old shape. The
+        # stored version is read BEFORE any executescript, so a future store is never half-touched, and only
+        # when ``bb_schema_meta`` already exists (a fresh DB has no version yet -> nothing to refuse). Mirrors
+        # ``memory.migrate.apply``'s ``current > _CURRENT_VERSION`` refusal.
+        has_meta = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bb_schema_meta'").fetchone()
+        if has_meta is not None:
+            vrow = self._conn.execute(
+                "SELECT value FROM bb_schema_meta WHERE key = 'version'").fetchone()
+            if vrow is not None and int(vrow["value"]) > _MAX_BB_SCHEMA:
+                raise BlackboardError(
+                    f"blackboard DB schema v{int(vrow['value'])} is newer than this build understands "
+                    f"(max v{_MAX_BB_SCHEMA}) — upgrade CRUCIBLE; refusing to open (never silently downgraded)")
         self._conn.executescript(_SCHEMA_SQL.read_text(encoding="utf-8"))
         self._conn.commit()
         # A v1 store predates the S5 `agent_message` kind, whose CHECK is baked into the events table at

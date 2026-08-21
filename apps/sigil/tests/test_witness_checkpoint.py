@@ -200,6 +200,33 @@ def test_malformed_envelope_fails_closed():
             W.load_witnessed(bad)
 
 
+def test_newer_envelope_schema_refused(tmp_path):
+    # W5-3 (#447): a witnessed-checkpoint envelope stamped NEWER than this build understands is refused
+    # fail-closed, never down-read as v1. Negative control: the SAME envelope at the current schema loads
+    # (every genuine-extension test above round-trips a schema-1 envelope), so this is not a blanket refusal.
+    e2, h2 = _chain(2)
+    env = json.loads(W.dump_witnessed(_emit(h2, tmp_path / "tip"), scope=SCOPE))
+    assert env["schema"] == W._ENVELOPE_SCHEMA               # the writer stamps the current schema...
+    W.load_witnessed(json.dumps(env))                        # ...and the current schema loads (control)
+    env["schema"] = W._MAX_ENVELOPE_SCHEMA + 1               # a newer writer's envelope
+    with pytest.raises(W.WitnessError, match="newer than this build understands"):
+        W.load_witnessed(json.dumps(env))
+
+
+def test_newer_roster_schema_refused(tmp_path):
+    # W5-3 (#447): a witness roster stamped NEWER than this build understands is refused with an HONEST
+    # "upgrade sigil" message BEFORE the signature check — not mislabelled a tamper. Negative control:
+    # the current-schema roster round-trips (test_roster_roundtrip_and_wrong_owner_key_fails).
+    p = tmp_path / "roster.json"
+    W.set_roster([{"key_id": "owner", "public_key_b64": OWNER.public_key_b64}],
+                 threshold=1, path=p, owner_key=OWNER, scope=SCOPE)
+    obj = json.loads(p.read_text())
+    obj["core"]["schema"] = W._MAX_ROSTER_SCHEMA + 1
+    p.write_text(json.dumps(obj))
+    with pytest.raises(W.WitnessError, match="newer than this build understands"):
+        W.load_roster(p, owner_pub=OWNER.public_key_b64, scope=SCOPE)
+
+
 def test_independent_cosign_reaches_conditional_prevention(tmp_path):
     """The cosign shuttle (honest stand-in for the deferred live transport): an INDEPENDENT witness co-signs
     on its own box, the operator configures a 2-of-2 roster, and verify then labels CONDITIONAL prevention."""

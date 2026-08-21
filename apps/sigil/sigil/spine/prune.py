@@ -219,7 +219,7 @@ def snapshot_payload(store, K: int, *, prior: Optional[dict] = None,
     # the prior snapshot's OWN seq is only known once it has been appended (Slice E stamps it back into the
     # payload); a not-yet-committed prior (e.g. the fold-of-fold computation) carries none -> -1.
     prior_snapshot_seq = int(prior.get("snapshot_seq", -1)) if prior else -1
-    prior_folded = SnapshotState.model_validate(prior["folded_state"]) if prior else None
+    prior_folded = SnapshotState.from_folded(prior["folded_state"]) if prior else None  # W5-3: refuse-newer
 
     # delta = the records pruned THIS round: [k_prev .. K-1], read from the segments being archived now.
     delta: list[SpineRecord] = []

@@ -47,11 +47,13 @@ from typing import Any
 from vigil_core.sealing import SealError, seal, unseal
 
 from .reuse import KeyPair, canonical_json, sha256_hex, sign, verify_one
+from .spine.schema_guard import SchemaTooNew, refuse_newer
 
 _MAGIC = b"SGLBK1\x00"
 # schema 2 additionally records the WARDEN permission-kernel set ("warden": [rels…]); schema 1 (no warden
 # block) is still read on restore (back-compat) — the file table is authenticated the same way either way.
 _SCHEMA = 2
+_MAX_BACKUP_SCHEMA = _SCHEMA   # refuse-newer gate (W5-3): a backup schema above this is "upgrade sigil"
 # scrypt work factors — n=2^16 (64 MiB) is a strong interactive KDF; salt is per-backup, stored in the header.
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2 ** 16, 8, 1
 _SCRYPT_MAXMEM = 132 * _SCRYPT_N * _SCRYPT_R          # headroom over scrypt's 128*n*r working set
@@ -308,6 +310,16 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
         raise
     except Exception as e:  # noqa: BLE001 — malformed key/sig → fail-closed
         raise BackupError(f"backup manifest signature is malformed: {e}") from e
+
+    # REFUSE-NEWER (W5-3, #447): the manifest schema is now AUTHENTICATED (the signature just verified), so
+    # trust it and refuse a backup whose schema is newer than this build understands — a newer writer may
+    # re-shape the file table / secret-wrapping / a new capture unit, and restoring it as the old shape would
+    # silently drop or misread that state. Checked BEFORE any file is decoded or written, so a too-new backup
+    # never touches ``new_home``. (A schema-1 backup carries no "schema" key -> default 1, still accepted.)
+    try:
+        refuse_newer(manifest.get("schema", 1), _MAX_BACKUP_SCHEMA, artifact="backup")
+    except SchemaTooNew as e:
+        raise BackupError(str(e)) from e
 
     files = body.get("files")
     hashes = manifest.get("file_sha256")

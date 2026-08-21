@@ -71,9 +71,12 @@ from ..reuse import (
     verify_one,
 )
 from .atomicio import atomic_write_text
+from .schema_guard import SchemaTooNew, refuse_newer
 
 _ENVELOPE_SCHEMA = 1
 _ROSTER_SCHEMA = 1
+_MAX_ENVELOPE_SCHEMA = _ENVELOPE_SCHEMA   # refuse-newer gate (W5-3): a witness envelope above this is
+_MAX_ROSTER_SCHEMA = _ROSTER_SCHEMA       # "upgrade sigil"; a newer roster/envelope is refused, not down-read
 # Domain tag for the owner signature over the witness ROSTER — distinct from the head/floor/checkpoint
 # domains so a roster signature can never be replayed as any of those.
 _ROSTER_DOMAIN = b"sigil-witness-roster-v1\x00"
@@ -112,6 +115,14 @@ def load_witnessed(data: str) -> tuple[WitnessedCheckpoint, str]:
     except (ValueError, TypeError) as e:
         raise WitnessError(f"corrupt witnessed-checkpoint envelope: {e}") from e
     _require(isinstance(obj, dict), "witnessed-checkpoint envelope is not a JSON object")
+    # REFUSE-NEWER (W5-3, #447): an envelope whose schema is newer than this build understands may carry a
+    # checkpoint field this build silently drops on the field-by-field read below (e.g. a future signed
+    # boundary), so re-verifying it as v1 could pass a checkpoint that a newer verifier would reject —
+    # refuse fail-closed. A v1 (or pre-schema) envelope defaults to 1 and is accepted.
+    try:
+        refuse_newer(obj.get("schema", 1), _MAX_ENVELOPE_SCHEMA, artifact="witnessed-checkpoint envelope")
+    except SchemaTooNew as e:
+        raise WitnessError(str(e)) from e
     scope = obj.get("scope")
     cp_raw = obj.get("checkpoint")
     sigs_raw = obj.get("witness_signatures")
@@ -163,6 +174,13 @@ def load_roster(path: Path, *, owner_pub: str, scope: str) -> dict | None:
     _require(isinstance(obj, dict), "witness roster is not a JSON object")
     core, sig = obj.get("core"), obj.get("sig")
     _require(isinstance(core, dict) and isinstance(sig, str), "witness roster is missing its signed core")
+    # REFUSE-NEWER (W5-3, #447): a roster whose schema is newer than this build understands is refused with
+    # an HONEST "upgrade sigil" message BEFORE the signature check. (_roster_core canonicalises with THIS
+    # build's _ROSTER_SCHEMA, so a newer roster would otherwise fail sig-verify and be mislabelled "tamper".)
+    try:
+        refuse_newer(core.get("schema", 1), _MAX_ROSTER_SCHEMA, artifact="witness roster")
+    except SchemaTooNew as e:
+        raise WitnessError(str(e)) from e
     _require(core.get("scope") == scope, f"witness roster is for scope {core.get('scope')!r}, not {scope!r}")
     auths = core.get("authorizers")
     thr = core.get("threshold")
