@@ -58,9 +58,16 @@ We do **not** delete or rewrite anything on the append-only spine. Instead:
    destroyed key, algorithm, file count, timestamp, operator reason). If governance signers are
    supplied it re-anchors the spine head over the post-erasure log.
 
-After a shred, the ciphertext left behind — on disk, in an off-host backup copy, or embedded as a
-sealed excerpt in an append-only spine payload — is cryptographically unrecoverable, while every
-append-only row is byte-for-byte unchanged and the spine hash-chain still verifies.
+After a shred, any SEALED ciphertext left behind — on disk, or in an off-host backup of the ciphertext
+(never the key) — is cryptographically unrecoverable, while every append-only row is byte-for-byte
+unchanged and the spine hash-chain still verifies.
+
+**Honest scope (shipped default).** The on-disk evidence archive is sealed-at-erasure and shredded. The
+seal primitive (`seal_text`) can also seal a spine-payload excerpt (`ResultPayload.body_excerpt` /
+`ObservationPayload.raw_excerpt`), but **seal-at-capture is not yet wired into the live executor**, so
+excerpts already written to the append-only spine are stored in PLAINTEXT and are NOT erasable by this
+mechanism today — wiring seal-at-capture is a staged follow-up. The DEK keystore must never be replicated
+to the same off-host location as the ciphertext, or a backup could resurrect a shredded key.
 
 ### Why crypto-shredding (over the alternatives)
 
@@ -102,8 +109,10 @@ append-only row is byte-for-byte unchanged and the spine hash-chain still verifi
 `engine/crucible/framework/v2/agents/tests/test_evidence_erasure.py` (runs in the required
 **CRUCIBLE core** CI job, which executes the whole `framework/v2` tree):
 
-- credential material is unrecoverable after erasure (on disk *and* via a sealed spine excerpt) while
-  `verify_spine_chain` still passes and the erased rows' digests are unchanged;
+- credential material is unrecoverable after erasure of the on-disk sealed archive, and a spine excerpt
+  sealed via `seal_text` is unrecoverable once the DEK is shredded, while `verify_spine_chain` still
+  passes and the erased rows' digests are unchanged (NB: seal-at-capture for live spine excerpts is not
+  yet wired — see "Honest scope" above);
 - **negative control:** after erasure the append-only triggers still refuse DELETE/UPDATE, and the
   count only grows by the one tombstone (records cannot be removed or rewritten by the mechanism);
 - **negative control:** the shred is per-engagement (a sibling engagement stays fully recoverable);
