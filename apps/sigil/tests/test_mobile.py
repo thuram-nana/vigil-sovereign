@@ -123,7 +123,7 @@ def test_forged_and_revoked_device_cannot_approve():
 def test_device_approval_target_seq_binding_no_replay():
     s = _store()
     _Emitter(s).run(Tier.A2, kind="draft")                    # harmless, seq 0
-    _Emitter(s).run(Tier.A3, kind="wire")                     # dangerous, seq 1
+    _Emitter(s).run(Tier.A3, kind="operation")                     # dangerous, seq 1
     pend = pending(s, OP)
     harmless, dangerous = pend[0].seq, pend[1].seq
     device = generate_keypair()
