@@ -13,6 +13,10 @@ WHAT THIS MODULE DOES. One pre-flight the Strix launch path calls before spawnin
   * the gateway container is ``running``  (not merely present, not "compose exited 0")
   * the engagement's sandbox network exists
   * on success it returns the env that PINS the sandbox to that network — the producer finally has a caller
+  * ...AND the gateway proxy's coordinates, so the in-sandbox Caido can forward through it (S3). Pinning
+    alone would ISOLATE the agent: the sandbox network is created ``--internal``, which installs no route
+    out (measured: a container on it cannot reach 1.1.1.1:443 or 8.8.8.8:53, while the same probe on a
+    default bridge reaches both). Without an upstream, Caido would have nowhere to send the request.
   * on failure it REFUSES, so a run cannot silently degrade from gated to ungated egress
 
 FAIL-CLOSED, WITH ONE LOUD DOOR. Refusing by default would strand an operator whose gateway is not up, so
@@ -20,9 +24,16 @@ this mirrors the escape hatch ``vigil up --services`` already established (W0-6)
 ``--allow-ungated-egress`` / ``VIGIL_ALLOW_UNGATED_STRIX_EGRESS`` continues with a prominent warning and
 records that the run accepted ungated egress. The default is refusal; the override is never silent.
 
-HONEST BOUND. Pinning the network is necessary, not sufficient. It puts the sandbox on the gated topology;
-it does not by itself prove every packet is filtered — the L3/L4 nftables backstop and the Caido upstream
-are S3. What this closes is the specific hole where the sandbox never joined the gated network at all.
+WHAT PINNING ACTUALLY BUYS (measured, not assumed). The sandbox network is created ``--internal``, so
+Docker installs NO route out of it. A container on such a network could reach neither 1.1.1.1:443 nor
+8.8.8.8:53 in a live check, while the identical probe on a default bridge reached both. Pinning is
+therefore genuine L3 deny-default egress, not merely "joins a network" — the only reachable peer is the
+gateway on the same network.
+
+HONEST BOUND. Deny-default is not the same as filtered-and-audited. Once traffic is forwarded to the
+gateway it is subject to the gateway's own scope authorization; the L3/L4 nftables backstop that hardens
+the gateway's egress leg, and the bypass battery that proves the boundary empirically, are the remainder
+of S3.
 
 Plane: integration. Imports ``vigil_gateway`` (which VIGIL owns) and the standard library only — no
 ``sigil`` import, so the two-env boundary is untouched.
@@ -105,8 +116,32 @@ def preflight(*, allow_ungated: Optional[bool] = None, networking: Any = None) -
             f"Create it with `vigil services up`.",
             overridden=overridden, gateway_state=state, network=network, network_present=False)
 
-    return SandboxPreflight(ok=True, env=dict(networking.strix_env()), gateway_state=state,
+    env = dict(networking.strix_env())
+    env.update(_proxy_env(networking))
+    return SandboxPreflight(ok=True, env=env, gateway_state=state,
                             network=network, network_present=True, overridden=False)
+
+
+def _proxy_env(networking: Any) -> dict[str, str]:
+    """The gateway proxy coordinates the in-sandbox Caido needs in order to forward through it.
+
+    The host is the gateway's PINNED address on the sandbox network (it binds only that interface, never
+    0.0.0.0), so this is the one peer an ``--internal`` sandbox can reach. The token is the Basic
+    proxy-auth secret; when the deployment sets none, the gateway does not demand client auth and we pass
+    nothing rather than inventing a credential.
+    """
+    try:
+        host = str(networking.sandbox_gateway_ip())
+    except Exception:  # noqa: BLE001 — a missing helper must not block a gated launch
+        return {}
+    out = {
+        "VIGIL_GATEWAY_PROXY_HOST": host,
+        "VIGIL_GATEWAY_PROXY_PORT": str(os.environ.get("VIGIL_GATEWAY_PROXY_PORT", "") or "48081"),
+    }
+    token = str(os.environ.get("VIGIL_GATEWAY_PROXY_TOKEN", "") or "").strip()
+    if token:
+        out["VIGIL_GATEWAY_PROXY_TOKEN"] = token
+    return out
 
 
 def _refuse(reason: str, *, overridden: bool, gateway_state: str = "unknown",

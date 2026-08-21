@@ -40,6 +40,9 @@ class _FakeNet:
     def strix_env(self):
         return {"STRIX_DOCKER_SANDBOX_NETWORK": self.sandbox_network}
 
+    def sandbox_gateway_ip(self):
+        return "172.31.240.2"
+
 
 def _fn_code(module_rel: str, func_name: str) -> str:
     """A function's code with its docstring removed — a wiring probe must never match prose."""
@@ -64,7 +67,7 @@ def _no_ambient_override(monkeypatch):
 def test_a_running_gateway_and_present_network_pin_the_sandbox():
     result = preflight(networking=_FakeNet())
     assert result.ok and result.gated, "a healthy topology must produce a GATED verdict"
-    assert result.env == {"STRIX_DOCKER_SANDBOX_NETWORK": "vigil_sandbox"}, (
+    assert result.env["STRIX_DOCKER_SANDBOX_NETWORK"] == "vigil_sandbox", (
         "the pin env is what makes the vendored runtime join the gated network"
     )
     assert warning_banner(result) == "", "the gated path must print no ungated warning"
@@ -162,3 +165,29 @@ def test_negative_control_the_producer_and_consumer_are_the_real_seam():
     assert "def strix_env" in gw
     runtime = (_REPO / "vendor/strix/strix/runtime/docker_client.py").read_text(encoding="utf-8")
     assert "STRIX_DOCKER_SANDBOX_NETWORK" in runtime, "the vendored runtime is what reads the pin"
+
+
+# --- S3: the gated sandbox must also be told how to reach OUT through the gateway ---------------------
+
+def test_a_gated_run_carries_the_gateway_proxy_coordinates():
+    """Pinning alone ISOLATES the agent: the sandbox network is --internal, so the gateway is the only
+    reachable peer. Without these coordinates Caido has nowhere to forward and the agent reaches nothing.
+    """
+    env = preflight(networking=_FakeNet()).env
+    assert env.get("VIGIL_GATEWAY_PROXY_HOST") == "172.31.240.2", (
+        "the child must learn the gateway's pinned sandbox-network address"
+    )
+    assert env.get("VIGIL_GATEWAY_PROXY_PORT"), "the child must learn the gateway proxy port"
+
+
+def test_the_proxy_token_is_passed_only_when_the_deployment_sets_one(monkeypatch):
+    """The gateway demands client auth only when a token is configured; inventing one would fail."""
+    monkeypatch.delenv("VIGIL_GATEWAY_PROXY_TOKEN", raising=False)
+    assert "VIGIL_GATEWAY_PROXY_TOKEN" not in preflight(networking=_FakeNet()).env
+    monkeypatch.setenv("VIGIL_GATEWAY_PROXY_TOKEN", "s3cr3t")
+    assert preflight(networking=_FakeNet()).env.get("VIGIL_GATEWAY_PROXY_TOKEN") == "s3cr3t"
+
+
+def test_a_refused_run_carries_no_proxy_coordinates_either():
+    """Negative control: a refusal must hand back nothing an caller could mistake for a working route."""
+    assert preflight(networking=_FakeNet(state="exited")).env == {}
