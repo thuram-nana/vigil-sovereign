@@ -1,6 +1,6 @@
-From d0aa4b189f0ecdc4e7c8b5d734e93593629877af Mon Sep 17 00:00:00 2001
+From 1cbd5662d2af06f18af564560e3fbc7941697cbe Mon Sep 17 00:00:00 2001
 Subject: [strix-patch 021] S3: keep the egress wiring SDK-free so its tests actually RUN in the required P8 job
-X-VIGIL-Commit: d0aa4b189f0ecdc4e7c8b5d734e93593629877af
+X-VIGIL-Commit: 1cbd5662d2af06f18af564560e3fbc7941697cbe
 X-VIGIL-Date: 2026-08-21T05:22:57-04:00
 
 diff --git a/vendor/strix/strix/runtime/caido_bootstrap.py b/vendor/strix/strix/runtime/caido_bootstrap.py

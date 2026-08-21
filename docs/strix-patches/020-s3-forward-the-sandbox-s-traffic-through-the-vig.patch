@@ -1,6 +1,6 @@
-From a12bbfb04786854ca219406bb6ffc04feed2b792 Mon Sep 17 00:00:00 2001
+From 86643811762a7f22ffbe0d788de74dd546cc0e21 Mon Sep 17 00:00:00 2001
 Subject: [strix-patch 020] S3: forward the sandbox's traffic through the VIGIL gateway (the other half of the S2 pin)
-X-VIGIL-Commit: a12bbfb04786854ca219406bb6ffc04feed2b792
+X-VIGIL-Commit: 86643811762a7f22ffbe0d788de74dd546cc0e21
 X-VIGIL-Date: 2026-08-21T04:59:00-04:00
 
 diff --git a/vendor/strix/strix/runtime/caido_bootstrap.py b/vendor/strix/strix/runtime/caido_bootstrap.py
