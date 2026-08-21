@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from .agents.egress_guard import build_engagement_allowlist
 from .agents.http_executor import HttpExecutor, PromptCallback, parse_posture, stdin_prompt_with_timeout
 from .agents.scope_gate import validate_action
 from .authority.killswitch import KillSwitch
@@ -879,6 +880,13 @@ def run_engagement(
             trust_root=_engage_authority_trust_root(slug),
             request_budget=request_budget,
             prompt_callback=prompt_callback or stdin_prompt_with_timeout,
+            # W10-1 (#473): install the runtime egress allowlist on the target-traffic path
+            # (built from THIS engagement's charter scope). Under sovereign mode the transport
+            # refuses any non-allowlisted host before bytes leave the box — the belt-and-braces
+            # backstop behind the always-on scope gate; under permissive it passes through
+            # (byte-identical). Without this the "6th gate" was never installed on any real
+            # caller and the README's egress claim was false for target traffic.
+            egress_allowlist=build_engagement_allowlist(slug=slug),
         )
         # Opt-in access-control pack: an explicit config wins; otherwise build one from the CLI
         # refs/victim-headers, wrapping the GATED executor as the victim identity so the second
@@ -1225,6 +1233,8 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
                 trust_root=discover_trust_root,
                 request_budget=max(1, int(getattr(args, "autonomous_budget", 8))),
                 prompt_callback=prompt_callback_from_args(args) or stdin_prompt_with_timeout,
+                # W10-1 (#473): same target-traffic egress allowlist as the scan executor.
+                egress_allowlist=build_engagement_allowlist(slug=args.slug),
             )
             discover_send = discover_ex.gated_fetch
         except Exception:
