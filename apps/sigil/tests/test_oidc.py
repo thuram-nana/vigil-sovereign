@@ -595,6 +595,87 @@ def test_config_from_settings_rejects_symmetric_and_missing(monkeypatch):
         _oidc.OidcConfig.from_settings({**base, "jwks_uri": ""})                 # missing endpoint refused
 
 
+# =============================== W17-2 (#536): reachable through `vigil up` =====================
+def _send(port: int, method: str, path: str, body: "bytes | None" = None):
+    """Like _raw but can carry a POST body (needed to probe the POST-only bootstrap routes)."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    h = {"Host": f"127.0.0.1:{port}"}
+    if body is not None:
+        h["Content-Type"] = "application/json"
+    conn.request(method, path, body=body, headers=h)
+    r = conn.getresponse()
+    raw = r.read()
+    status, loc = r.status, r.getheader("Location")
+    conn.close()
+    doc = json.loads(raw) if raw and r.getheader("Content-Type", "").startswith("application/json") else None
+    return status, doc, loc
+
+
+def test_whoami_advertises_oidc_enabled_to_the_login_gate(monkeypatch):
+    """W17-2: the (token-optional, bootstrap) /api/whoami tells the anonymous login gate whether to offer the
+    SSO button. With the RP ON it reports oidc:true; the flag carries no secret and is reachable before any
+    session exists (so the gate can decide what to render)."""
+    idp = MockIdP()
+    _enable_oidc(monkeypatch, idp, enabled=True)
+    s, port, _ = _serve(idp)
+    try:
+        st, doc, _ = _raw(port, "GET", "/api/whoami")           # NO token — the anonymous probe
+        assert st == 200 and doc["authenticated"] is False
+        assert doc.get("oidc") is True
+    finally:
+        s.shutdown()
+
+
+def test_whoami_oidc_flag_is_false_when_the_rp_is_off(monkeypatch):
+    """NEGATIVE CONTROL for the flag: with the RP OFF the OIDC routes are unregistered, so the gate must NOT
+    show the SSO button — whoami reports oidc:false (a button that always showed would dead-end on a 404)."""
+    idp = MockIdP()
+    _enable_oidc(monkeypatch, idp, enabled=False)
+    s, port, _ = _serve(idp)
+    try:
+        st, doc, _ = _raw(port, "GET", "/api/whoami")
+        assert st == 200 and doc.get("oidc") is False
+        # and the RP really is inactive: /api/oidc/login is unregistered, so it never drives a 302 redirect
+        # (it falls through to the auth gate). The point is that no SSO flow can start when the RP is off.
+        assert _send(port, "GET", "/api/oidc/login")[0] != 302
+    finally:
+        s.shutdown()
+
+
+def test_bootstrap_paths_are_all_pre_auth_and_the_gate_is_enforced(monkeypatch):
+    """The proxy forwards exactly server.BOOTSTRAP_PATHS without proxy auth (test_uiproxy_peruser_auth pins
+    that). Here we prove each listed path is GENUINELY pre-auth: with NO bearer it reaches its own handler
+    (never the missing-token 401), and it is registered (not 404). The NEGATIVE CONTROL: a normal authed
+    route (/api/settings) with no token IS refused with that exact missing-token 401 — so the gate is real,
+    not a no-op, and BOOTSTRAP_PATHS cannot list a route that is actually token-gated."""
+    from sigil.ui.server import BOOTSTRAP_PATHS
+    idp = MockIdP()
+    _enable_oidc(monkeypatch, idp, enabled=True)             # so the OIDC pair is registered
+    s, port, _ = _serve(idp)
+    try:
+        # negative control — the auth gate IS enforced on a non-bootstrap route
+        st, doc, _ = _raw(port, "GET", "/api/settings")
+        assert st == 401 and doc and "missing/invalid token" in (doc.get("error") or "")
+        # the method + (query/body) each bootstrap route actually answers, with NO bearer presented
+        plan = {
+            "/api/whoami": ("GET", "/api/whoami", None),
+            "/api/login": ("POST", "/api/login", b"{}"),
+            "/api/login/challenge": ("POST", "/api/login/challenge", b"{}"),
+            "/api/oidc/login": ("GET", "/api/oidc/login", None),
+            "/api/oidc/callback": ("GET", "/api/oidc/callback?code=x&state=y", None),
+        }
+        assert set(plan) == set(BOOTSTRAP_PATHS), \
+            "the pre-auth probe plan must cover exactly BOOTSTRAP_PATHS (a new one must be probed too)"
+        for path in sorted(BOOTSTRAP_PATHS):
+            method, url, body = plan[path]
+            st, doc, _ = _send(port, method, url, body)
+            assert st != 404, f"{path} is not registered — it would ship unreachable: {st}"
+            err = (doc or {}).get("error", "") if isinstance(doc, dict) else ""
+            assert "missing/invalid token" not in err, f"{path} is token-gated, not pre-auth: {st} {err!r}"
+    finally:
+        s.shutdown()
+
+
 # ================================================================== FATAL-2
 def test_fatal2_oidc_module_is_offense_free():
     from sigil.reuse import assert_no_offense

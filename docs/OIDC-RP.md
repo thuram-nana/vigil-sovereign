@@ -74,8 +74,8 @@ Two bindings make the RP safe to drive a browser session (both REQUIRED, enforce
   (`second_factor_required`) — OIDC establishes the first factor only; that account uses the interactive
   `/api/login` path for its second factor. This is a deliberate, honest bound, not a bypass.
 - The callback returns the minted bearer as JSON (`{ok, authenticated, username, role, bearer}`), the same
-  shape as the S3/S4 logins. This slice ships the security core (id_token verification + owner-signed
-  mapping); it does **not** auto-adopt the bearer into a browser session.
+  shape as the S3/S4 logins. The `vigil up` command UI adopts that bearer into its per-user session (see
+  **Reachable through `vigil up`** below); a page hitting the callback directly still receives the JSON.
 - **The `/api/oidc/login` state ledger is token-free** (it must be — it bootstraps a login for a caller
   with no bearer). It is bounded: capped at `max_outstanding` and self-healing via a per-mint TTL sweep, so
   a stale entry cannot accumulate. A direct client on the private tunnel could still *transiently* fill the
@@ -93,9 +93,34 @@ session-bound `state` section above):
 2. **PKCE (`code_challenge`/`code_verifier`, S256)** is minted at login (verifier held server-side, bound to
    `state`) and sent at token exchange — closing authorization-code injection/interception.
 
-The callback refuses a missing/mismatched session cookie and a blank/absent PKCE verifier. This is the
-security core a UI landing page can build on; the callback still returns the bearer as JSON (auto-adopting it
-into a browser cookie session remains a separate UI concern).
+The callback refuses a missing/mismatched session cookie and a blank/absent PKCE verifier.
+
+## Reachable through `vigil up` (SSO wired end-to-end — W17-2 / #536)
+
+The RP is no longer built-but-unreachable. Three things wire it into the served product:
+
+1. **The reverse proxy forwards the bootstrap routes without proxy auth.** `/api/oidc/login`,
+   `/api/oidc/callback` (and the S3 PoP `/api/login/challenge`) join `/api/whoami` + `/api/login` in the
+   proxy's `_UNAUTH_FORWARD` allowlist (`integration/vigil_integration/uiproxy.py`). Their whole purpose is
+   to establish a session for a caller with no bearer yet, so a proxy-auth gate in front of them made login
+   impossible. The allowlist is an **exact match** of the sovereign's own `BOOTSTRAP_PATHS` — a structural
+   test pins the two equal, so a new bootstrap route cannot ship unreachable and the gate cannot widen.
+2. **The session-binding cookie is remounted for the mount prefix.** The RP scopes its `sigil_oidc_sid`
+   cookie `Path=/api/oidc` (correct for a direct `sigil serve`). The proxy serves the sovereign under
+   `/sovereign`, so it rewrites the relayed `Set-Cookie` Path to `/sovereign/api/oidc` — otherwise the
+   browser would never return the cookie on the proxied callback and the session-bound-`state` check would
+   fail-closed, breaking SSO end-to-end. A direct (unmounted) serve is byte-identical (no rewrite).
+3. **The login gate offers an SSO button and adopts the bearer.** The command UI's login gate shows a
+   **Sign in with SSO** button whenever the sovereign reports the RP is on (a boolean `oidc` on the
+   token-optional `/api/whoami`). The button is a top-level navigation to `/api/oidc/login`; the IdP returns
+   the browser to `redirect_uri` (configured to the app's origin), where the app finishes the exchange by
+   fetching the callback **with same-origin credentials** (so the session cookie rides along) and adopts the
+   minted bearer into its per-user session (`sessionStorage`, the same carrier as bearer/PoP login). The
+   single-use `code`/`state` are stripped from the address bar immediately.
+
+Everything the callback already enforced still holds: the `state`↔session-cookie binding, PKCE, the
+id_token verification, and the **role-from-an-owner-signed-account-never-from-a-claim** mapping. SSO
+establishes *who* you are; it never decides *what* you may do.
 
 ## Configuration (only read when enabled)
 

@@ -129,7 +129,7 @@ adds an export/rotation surface. Delegation reuses the one authority with no new
 | route | requirement |
 |---|---|
 | static bundle (`/`, `style.css`, `app.js`, …) | none (carries no secret) |
-| `GET /sovereign/api/whoami`, `POST /sovereign/api/login` | none (login bootstrap) |
+| `/sovereign/api/whoami`, `/sovereign/api/login`, `/sovereign/api/login/challenge`, `/sovereign/api/oidc/login`, `/sovereign/api/oidc/callback` | none (login bootstrap — exactly the sovereign's `BOOTSTRAP_PATHS`; W17-2/#536) |
 | every other `/sovereign/*` | authenticated (viewer+); user's **own** bearer forwarded → `role_can` |
 | `/offense/*` reads (GET/HEAD/SSE) | authenticated (viewer+) |
 | `/offense/*` mutations (POST/PUT/PATCH/DELETE) | `run_engagement` (operator+) |
@@ -247,8 +247,10 @@ here with the exact bound each carries — delivered, not soft-pedalled, and not
   bound to a single-use `state`, and the verified identity is mapped to an owner-signed `governor.account`
   grant — **role from the grant, never a claim**; a verified identity with no owner-signed account is refused.
   **Honest bounds:** OIDC targets an operator-run IdP on the private tunnel (a public cloud IdP breaks the
-  air-gap), and a UI landing page that adopts the returned bearer **still needs `state`-binding + PKCE** (see
-  Deferred below, `docs/OIDC-RP.md`).
+  air-gap). `state`-browser-binding + PKCE (S256) are now **built and required** (W16-6/#512), and the
+  browser SSO landing is **wired end-to-end through `vigil up`** (W17-2/#536): the proxy forwards the OIDC
+  login/callback bootstrap routes, remounts the session cookie for the mount prefix, and the login gate's
+  **Sign in with SSO** button adopts the minted bearer (`docs/OIDC-RP.md`).
 - **Hard-prune accounts fold (S2, #381).** `SnapshotState` now carries an account seed (per-username LWW
   state + high-water + cred), `_fold` seeds from the committed snapshot before folding the live window
   (mirrored across `resolve()` and `accounts()`), and `spine/prune.py::stranded_active_accounts` fails a prune
@@ -260,7 +262,10 @@ here with the exact bound each carries — delivered, not soft-pedalled, and not
   enforcement at the enumerated load-bearing actions + a demonstrated per-button gate (Safety → Release).
   Comprehensive per-button gating on every screen is not done; the **server is the enforcement of record**
   (every mutation is re-checked and 403s).
-- **OIDC UI session-adoption (PKCE + state-browser-binding).** The OIDC RP (S5) stops at returning the
-  verified bearer as JSON. Before any browser landing page may **auto-adopt** that bearer into a session,
-  `state`-browser-binding + PKCE (S256) are **required** (`docs/OIDC-RP.md`, "Required follow-on") — **not
-  built**. Until then OIDC login is an API-level identity proof, not a wired browser SSO landing.
+- ~~**OIDC UI session-adoption (PKCE + state-browser-binding).**~~ **DONE.** `state`-browser-binding + PKCE
+  (S256) landed in W16-6/#512, and the browser SSO landing is wired end-to-end in W17-2/#536 (proxy
+  bootstrap-forward + cookie remount + SSO button that adopts the minted bearer). See the OIDC bullet above
+  and `docs/OIDC-RP.md` ("Reachable through `vigil up`"). Residual: a **browser-native keypair-PoP signer**
+  (import an Ed25519 key + sign the challenge in-page) is not built — PoP is reachable through the product
+  for a key-holding client (the `/api/login/challenge` bootstrap route is now forwarded), but the login
+  gate itself offers bearer + SSO, not in-browser signing.
