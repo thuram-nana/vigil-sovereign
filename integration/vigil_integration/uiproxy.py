@@ -65,7 +65,7 @@ import time
 import zlib
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Optional
+from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from . import dispatch
@@ -1874,6 +1874,101 @@ def _terminate(pid: int, *, grace: float = 5.0) -> bool:
     return True
 
 
+# --- containment of the systemd user unit that would otherwise RESTORE the whole stack -------------
+#
+# `vigil up` is normally kept alive by the `vigil-command.service` USER unit, which sets
+# `Restart=always` / `RestartSec=5`. A bare pid-kill of the orchestrator is therefore NOT containment:
+# systemd sees the MainPID exit unexpectedly and revives the entire stack within ~RestartSec. To
+# actually contain, `vigil down` (and `vigil panic`) must:
+#   * DISABLE the unit  → the next boot does not restore it, and
+#   * STOP it via systemctl → a CLEAN stop, which (unlike a raw kill) does NOT trigger `Restart=`.
+# This is the W10-5 (#477) fix. When `vigil up` was started BY HAND (no unit installed), or systemd is
+# unreachable, containment is a no-op and the pid-kill below is the whole story.
+_SERVICE_UNIT = "vigil-command.service"
+
+
+def _systemctl(*args: str, timeout: float = 30.0,
+               run: Callable[..., Any] = subprocess.run) -> tuple[int, str, str]:
+    """Run `systemctl --user <args>` capturing output. Returns ``(rc, stdout, stderr)``.
+
+    ``rc == 127`` means the user manager / systemctl is unreachable (no systemd to contain — the caller
+    treats this as "nothing to do", never as a failure of containment)."""
+    try:
+        cp = run(["systemctl", "--user", *args],
+                 capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return 127, "", "systemctl not found"
+    except subprocess.TimeoutExpired:
+        return 124, "", "systemctl timed out"
+    except Exception as exc:  # noqa: BLE001 — any spawn failure ⇒ no user manager to contain
+        return 1, "", str(exc)
+    return int(cp.returncode), (cp.stdout or ""), (cp.stderr or "")
+
+
+def _unit_is_known(*, run: Callable[..., Any] = subprocess.run) -> bool:
+    """True iff systemd's user manager KNOWS `vigil-command.service` (installed + loadable). `cat` exits
+    0 for a known unit and non-zero (and 127 when there is no user manager at all) otherwise."""
+    rc, _out, _err = _systemctl("cat", _SERVICE_UNIT, run=run)
+    return rc == 0
+
+
+def _unit_is_active(*, run: Callable[..., Any] = subprocess.run) -> bool:
+    """True iff the unit is up (or a restart is already in flight). `is-active` prints the load state;
+    ``activating``/``reloading`` are the exact states a `Restart=` flap sits in, so they count as "up"."""
+    _rc, out, _err = _systemctl("is-active", _SERVICE_UNIT, run=run)
+    return out.strip() in ("active", "activating", "reloading")
+
+
+def _running_as_execstop(env: Optional[dict] = None) -> bool:
+    """True iff THIS process is its own unit's ExecStop=/ExecStopPost= command. systemd injects
+    ``$SERVICE_RESULT`` (and ``$EXIT_CODE``/``$EXIT_STATUS``) into those processes ONLY — never into a
+    manually-run terminal, and never into ExecStart. In that context we must NOT call `systemctl stop`:
+    systemd is already stopping us (a recursive stop would deadlock against TimeoutStopSec), and a clean
+    systemctl stop does not trigger `Restart=` anyway."""
+    e = os.environ if env is None else env
+    return "SERVICE_RESULT" in e
+
+
+def _contain_service_unit(*, mask: bool = False,
+                          run: Callable[..., Any] = subprocess.run,
+                          env: Optional[dict] = None) -> list[str]:
+    """Stop-and-disable the `vigil-command.service` user unit so it cannot restore the stack, returning
+    a list of human-readable action strings (empty ⇒ no unit to contain).
+
+    Order and rationale:
+      1. If systemd does not know the unit (started by hand / no user manager), return [] — the caller's
+         pid-kill is the entire containment.
+      2. `disable` — removes the boot-time restore. Idempotent, never recurses; always safe.
+      3. `mask` (panic only) — the strongest form: even a manual `systemctl start` is refused until a
+         deliberate `unmask`.
+      4. `stop` — ONLY when the unit is up AND we are not our own ExecStop. A clean systemctl stop does
+         not trigger `Restart=`; skipping it under ExecStop avoids a recursive-stop deadlock (systemd is
+         already stopping us there, so `Restart=` will not fire regardless)."""
+    if not _unit_is_known(run=run):
+        return []
+    actions: list[str] = []
+
+    rc, _out, err = _systemctl("disable", _SERVICE_UNIT, run=run)
+    actions.append(
+        f"disabled {_SERVICE_UNIT} (systemd will not restore it at boot)" if rc == 0
+        else f"WARNING: could not disable {_SERVICE_UNIT}: {(err.strip() or rc)}")
+
+    if mask:
+        rc, _out, err = _systemctl("mask", _SERVICE_UNIT, run=run)
+        actions.append(
+            f"masked {_SERVICE_UNIT} (a manual start is refused until `systemctl --user unmask`)"
+            if rc == 0 else f"WARNING: could not mask {_SERVICE_UNIT}: {(err.strip() or rc)}")
+
+    if _running_as_execstop(env):
+        actions.append(f"under ExecStop — systemd is completing the stop of {_SERVICE_UNIT}")
+    elif _unit_is_active(run=run):
+        rc, _out, err = _systemctl("stop", _SERVICE_UNIT, run=run)
+        actions.append(
+            f"stopped {_SERVICE_UNIT} (clean stop — Restart= does not fire)" if rc == 0
+            else f"WARNING: could not stop {_SERVICE_UNIT}: {(err.strip() or rc)}")
+    return actions
+
+
 def _run_up_proxy_only(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool,
                        authority: str, scheme: str, origin: str, want_browser: bool,
                        src_dir: Optional[Path], sovereign_addr: str,
@@ -2327,20 +2422,22 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     return 0
 
 
-def run_down(*, base_dir: str) -> int:
-    """Stop a running `vigil up`: terminate the backend children + the orchestrator recorded in
-    ``.vigil-live/ui/pids``. Idempotent — a missing/empty pids file is a clean no-op."""
+def _kill_tracked_pids(base_dir: str, *, label: str = "vigil down") -> tuple[int, int]:
+    """Terminate the backend children + orchestrator recorded in ``.vigil-live/ui/pids``.
+
+    Returns ``(stopped, rc)`` where ``rc`` is 0 on success, 1 if the pids file exists but is unreadable.
+    Idempotent — a missing/empty pids file is a clean no-op. Children are stopped first, orchestrator
+    last (so the orchestrator's own cleanup does not race ours)."""
     p = _pids_path(Path(base_dir))
     if not p.exists():
-        print(f"vigil down: nothing to stop (no {p}).")
-        return 0
+        print(f"{label}: no tracked pids ({p}).")
+        return 0, 0
     try:
         entries = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        print(f"vigil down: could not read {p}: {exc}", file=sys.stderr)
-        return 1
+        print(f"{label}: could not read {p}: {exc}", file=sys.stderr)
+        return 0, 1
     stopped = 0
-    # children first, orchestrator last (so its own cleanup does not race ours).
     entries = sorted(entries, key=lambda e: e.get("name") == "orchestrator")
     for e in entries:
         pid = int(e.get("pid", 0) or 0)
@@ -2352,5 +2449,46 @@ def run_down(*, base_dir: str) -> int:
         p.unlink()
     except FileNotFoundError:
         pass
-    print(f"vigil down: stopped {stopped} process(es).")
+    return stopped, 0
+
+
+def run_down(*, base_dir: str, run: Callable[..., Any] = subprocess.run) -> int:
+    """CONTAIN a running `vigil up`. Two parts, in this order (W10-5, #477):
+
+      1. Stop-and-disable the `vigil-command.service` user unit if systemd is keeping it alive — a bare
+         pid-kill would otherwise be undone by `Restart=always` within ~RestartSec. A clean systemctl
+         stop does not trigger `Restart=`; disabling stops the next boot from restoring it. No-op when
+         `vigil up` was started by hand / there is no user manager.
+      2. Terminate the backend children + orchestrator tracked in ``.vigil-live/ui/pids``. Under a
+         managed unit step 1 already took them down (KillMode=control-group); this is the mop-up, and it
+         is the WHOLE containment when there is no unit.
+
+    Idempotent — a missing pids file and an absent unit are both clean no-ops."""
+    contained = _contain_service_unit(mask=False, run=run)
+    for action in contained:
+        print(f"  {action}")
+    stopped, rc = _kill_tracked_pids(base_dir, label="vigil down")
+    if rc:
+        return rc
+    tail = "the service unit is disabled + stopped" if contained else "no systemd unit to contain"
+    print(f"vigil down: stopped {stopped} process(es); {tail}.")
+    return 0
+
+
+def run_panic(*, base_dir: str, run: Callable[..., Any] = subprocess.run) -> int:
+    """The process-and-unit half of `vigil panic` — a real HARD-STOP of the running surface (W10-5).
+
+    Panic is stricter than `down`: it MASKS the unit (so even a manual `systemctl start` is refused
+    until a deliberate `unmask`) as well as stopping and disabling it, then kills every tracked pid.
+    The gate-level half — tripping every engagement's kill-switch so any surviving or later-launched
+    gated action is DENIED — is applied by the caller (`_cmd_panic`) BEFORE this runs, because that half
+    needs the offense engine and this module is deliberately framework-free.
+
+    Idempotent and always fail-safe: it does as much containment as it can and reports what it did."""
+    contained = _contain_service_unit(mask=True, run=run)
+    for action in contained:
+        print(f"  {action}")
+    stopped, _rc = _kill_tracked_pids(base_dir, label="vigil panic")
+    tail = "the service unit is masked + stopped" if contained else "no systemd unit to contain"
+    print(f"vigil panic: killed {stopped} tracked process(es); {tail}.")
     return 0

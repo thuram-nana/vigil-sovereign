@@ -427,6 +427,7 @@ jobs:
               integration/tests/test_backup_push_transport.py \
               integration/tests/test_backup_recovery_drill.py \
               integration/tests/test_livefire_harness_per_action_approval.py \
+              integration/tests/test_panic.py \
               integration/tests/test_mesh_cicd_posture.py -q
           else
             # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
