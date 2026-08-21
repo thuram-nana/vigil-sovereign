@@ -1,0 +1,96 @@
+From eb3c0d338383f2101e72c5f345c87f1ea7310573 Mon Sep 17 00:00:00 2001
+Subject: [strix-patch 015] W6c: scope the cursor to replay — the live tail keeps neither cost nor counter
+X-VIGIL-Commit: eb3c0d338383f2101e72c5f345c87f1ea7310573
+X-VIGIL-Date: 2026-08-15T11:19:14-04:00
+
+diff --git a/vendor/strix/tests_vigil/test_vigil_graph_progress.py b/vendor/strix/tests_vigil/test_vigil_graph_progress.py
+index 1df19ef6..2b9425a2 100644
+--- a/vendor/strix/tests_vigil/test_vigil_graph_progress.py
++++ b/vendor/strix/tests_vigil/test_vigil_graph_progress.py
+@@ -25,11 +25,20 @@ def _load_agents():
+     ``strix.core.sessions`` (``session_write_lock``), and that module imports the openai-agents SDK at
+     top level — so stub it. This keeps the test running EVERYWHERE rather than skipping wherever the SDK
+     is absent (a skipped test would leave the bridge's only coverage decorative)."""
++    installed = False
+     if "strix.core.sessions" not in sys.modules:
+         stub = types.ModuleType("strix.core.sessions")
+         stub.session_write_lock = contextlib.nullcontext
+         sys.modules["strix.core.sessions"] = stub
+-    import strix.core.agents as mod
++        installed = True
++    try:
++        import strix.core.agents as mod
++    finally:
++        # Remove the stub again: it defines ONLY session_write_lock, while strix.core.{inputs,runner,
++        # execution} import other names from that module — leaving it in sys.modules would silently
++        # break any future test in this process that imports one of them.
++        if installed:
++            sys.modules.pop("strix.core.sessions", None)
+     return mod
+ 
+ 
+@@ -70,23 +79,52 @@ def test_bare_checkout_is_a_silent_noop_and_the_import_is_attempted_once(monkeyp
+     assert agents._vigil_last_graph is None
+ 
+ 
+-def test_emits_only_on_change(monkeypatch, tmp_path):
+-    pytest.importorskip("vigil_integration.progress")
+-    monkeypatch.setenv("VIGIL_PROOF_RUN_DIR", str(tmp_path))
+-
++@pytest.fixture()
++def emitted(monkeypatch):
++    """A FAKE ``vigil_integration.progress`` so these tests run WHEREVER the suite runs.
++
++    They exercise STRIX-side logic — emit-on-change and the None guard — while the real writer is
++    covered by ``integration/tests/test_progress_bridge.py``. Requiring the real package here made both
++    tests skip permanently in CI (the strix job never puts `integration` on the path), which is how two
++    mutants survived: dropping the dedup, and emitting on a failed snapshot."""
++    calls = []
++    pkg = types.ModuleType("vigil_integration")
++    pkg.__path__ = []
++    mod = types.ModuleType("vigil_integration.progress")
++
++    def _append(event, **_kw):
++        calls.append(dict(event))
++        return True
++
++    def _graph(snap):
++        if not snap or not isinstance(snap, dict):
++            return None
++        statuses = snap.get("statuses") or {}
++        if not isinstance(statuses, dict):
++            return None
++        counts: dict[str, int] = {}
++        for st in statuses.values():
++            counts[str(st)] = counts.get(str(st), 0) + 1
++        return {"event": "strix.graph", "agents": len(statuses), "statuses": counts}
++
++    mod.append_progress = _append
++    mod.strix_graph_event = _graph
++    monkeypatch.setitem(sys.modules, "vigil_integration", pkg)
++    monkeypatch.setitem(sys.modules, "vigil_integration.progress", mod)
++    return calls
++
++
++def test_emits_only_on_change(emitted):
+     same = {"statuses": {"a1": "running", "a2": "running"}}
+     for _ in range(25):
+         agents._vigil_emit_graph_progress(same)
+     agents._vigil_emit_graph_progress({"statuses": {"a1": "completed", "a2": "running"}})
+-
+-    raw = (tmp_path / "progress.jsonl").read_text(encoding="utf-8").splitlines()
+-    assert len(raw) == 2, f"expected one line per DISTINCT histogram, got {len(raw)}"
+-    assert all('"event":"strix.graph"' in line for line in raw)
++    assert len(emitted) == 2, f"expected one emit per DISTINCT histogram, got {len(emitted)}"
++    assert emitted[0]["statuses"] == {"running": 2}
++    assert emitted[1]["statuses"] == {"completed": 1, "running": 1}
+ 
+ 
+-def test_a_failed_snapshot_never_reaches_the_bridge(monkeypatch, tmp_path):
+-    pytest.importorskip("vigil_integration.progress")
+-    monkeypatch.setenv("VIGIL_PROOF_RUN_DIR", str(tmp_path))
++def test_a_failed_snapshot_never_reaches_the_bridge(emitted):
+     agents._vigil_emit_graph_progress(None)      # _maybe_snapshot passes None when snapshot() failed
+     agents._vigil_emit_graph_progress({})
+-    assert not (tmp_path / "progress.jsonl").exists()
++    assert emitted == []

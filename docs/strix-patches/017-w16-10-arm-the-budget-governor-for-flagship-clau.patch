@@ -1,0 +1,197 @@
+From fd595899999b0977b302733b00d3a2b58bb6b0d1 Mon Sep 17 00:00:00 2001
+Subject: [strix-patch 017] W16-10: arm the budget governor for flagship Claude codenames (#516)
+X-VIGIL-Commit: fd595899999b0977b302733b00d3a2b58bb6b0d1
+X-VIGIL-Date: 2026-08-18T19:10:32-04:00
+
+diff --git a/vendor/strix/strix/report/anthropic_pricing.py b/vendor/strix/strix/report/anthropic_pricing.py
+index d3487870..9b209c77 100644
+--- a/vendor/strix/strix/report/anthropic_pricing.py
++++ b/vendor/strix/strix/report/anthropic_pricing.py
+@@ -20,8 +20,22 @@ from typing import Any
+ 
+ _M = 1_000_000.0
+ 
+-# (input, output, cache_read, cache_write) — USD per MILLION tokens.
++# Flagship (Opus-tier) per-MILLION-token rate: (input, output, cache_read, cache_write). Used both as
++# the price of the top-tier codename models (fable / mythos) and as the SAFE catch-all for any Claude
++# model that matches no family below — over-estimating a spend cap trips it EARLY (safe), while the bug
++# this guards against is UNDER-estimating to $0 and never tripping.
++_FLAGSHIP_PER_M: tuple[float, float, float, float] = (15.0, 75.0, 1.50, 18.75)
++
++# (input, output, cache_read, cache_write) — USD per MILLION tokens. Data-driven and easy to update:
++# add a row when Anthropic ships/renames a model, or revises a rate. Substring-matched (see
++# ``_match_prices``), so a dated/suffixed id (``claude-opus-4-8``, ``claude-sonnet-4-6``) resolves to
++# its family here without needing its own row.
+ _PRICES_PER_M: dict[str, tuple[float, float, float, float]] = {
++    # Top-tier codename models (no opus/sonnet/haiku token in the name, so they need explicit rows or
++    # they fall through to $0 and DISARM the budget governor). Priced at the flagship (Opus) tier as a
++    # best-effort estimate until a published rate is known.
++    "claude-fable-5": _FLAGSHIP_PER_M,
++    "claude-mythos-5": _FLAGSHIP_PER_M,
+     "claude-opus-4": (15.0, 75.0, 1.50, 18.75),
+     "claude-opus-3": (15.0, 75.0, 1.50, 18.75),
+     "claude-3-opus": (15.0, 75.0, 1.50, 18.75),
+@@ -56,7 +70,12 @@ def _match_prices(model: str) -> tuple[float, float, float, float] | None:
+         return _PRICES_PER_M["claude-sonnet-5"]
+     if "haiku" in name:
+         return _PRICES_PER_M["claude-haiku-4"]
+-    return None
++    # SAFE catch-all: a Claude model matching no family (a new/renamed flagship codename) must still
++    # accrue a NONZERO cost, or the budget governor silently disarms and the scan spends unbounded.
++    # Callers only reach here for an Anthropic model (``estimate_anthropic_cost`` gates on
++    # ``is_anthropic_model``), and a real provider-reported cost always takes precedence upstream, so
++    # the worst case of over-pricing an unknown model is that the operator's budget trips a little early.
++    return _FLAGSHIP_PER_M
+ 
+ 
+ def _int(value: Any) -> int:
+@@ -88,10 +107,12 @@ def _cache_write_tokens(usage: dict[str, Any]) -> int:
+ def estimate_anthropic_cost(model: str | None, usage_payload: dict[str, Any]) -> float | None:
+     """Best-effort USD cost for an Anthropic model from token counts.
+ 
+-    Returns None if the model is not Anthropic, has no price entry, or carries no token counts.
+-    Cache-read/write tokens (from ``*_tokens_details`` or the Anthropic-native fields) are priced
+-    at their own rates, and cached tokens are subtracted from the fresh-input count so they are
+-    not double-charged.
++    Returns None only if the model is not Anthropic or carries no token counts. Every Anthropic model
++    resolves to a price — a known family's rate, or the flagship catch-all for an unrecognized
++    codename — so a Claude model with real token usage never estimates to $0 (which would disarm the
++    budget governor). Cache-read/write tokens (from ``*_tokens_details`` or the Anthropic-native
++    fields) are priced at their own rates, and cached tokens are subtracted from the fresh-input count
++    so they are not double-charged.
+     """
+     if not is_anthropic_model(model):
+         return None
+diff --git a/vendor/strix/tests/test_budget_price_table.py b/vendor/strix/tests/test_budget_price_table.py
+new file mode 100644
+index 00000000..9f24a98b
+--- /dev/null
++++ b/vendor/strix/tests/test_budget_price_table.py
+@@ -0,0 +1,127 @@
++"""The Anthropic price table keeps the budget governor ARMED on Claude.
++
++Strix stops a scan when accumulated LLM cost reaches ``max_budget_usd``. That cost comes from
++LiteLLM's reported cost; when LiteLLM does not know a model it reports nothing, and the Anthropic
++price table (``report.anthropic_pricing``) is the fallback that keeps the cost nonzero. If a Claude
++model the operator actually selects is MISSING from that table, the fallback returns ``None``, the
++accumulated cost stays ``$0``, and the ``max_budget_usd`` governor silently DISARMS — an
++unbounded-spend footgun. These tests pin: every referenced Claude model (including the flagship
++codenames ``claude-fable-5`` / ``claude-mythos-5`` and any future codename) resolves to a nonzero
++cost, and a run that exceeds the budget on such a model actually TRIPS the governor.
++"""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++from agents.usage import Usage
++from strix.core.hooks import BudgetExceededError, ReportUsageHooks
++from strix.report.anthropic_pricing import estimate_anthropic_cost
++from strix.report.state import (
++    ReportState,
++    litellm_cost_callback,
++    set_global_report_state,
++)
++
++
++if TYPE_CHECKING:
++    from pathlib import Path
++
++
++# A million input + a million output tokens: enough that any real per-token rate is well over a $1 cap.
++_BIG_USAGE = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000, "total_tokens": 2_000_000}
++# A tiny call: a few hundred tokens, cents of cost — must stay UNDER a $1 cap (the negative control).
++_TINY_USAGE = {"prompt_tokens": 200, "completion_tokens": 100, "total_tokens": 300}
++
++
++@pytest.fixture
++def report_state(tmp_path: "Path", monkeypatch: pytest.MonkeyPatch) -> ReportState:
++    monkeypatch.chdir(tmp_path)
++    state = ReportState(run_name="budget-test")
++    set_global_report_state(state)
++    return state
++
++
++# --------------------------------------------------------------------------------------------------
++# The table itself: every Claude model the code references — and any unknown codename — is priced.
++# --------------------------------------------------------------------------------------------------
++@pytest.mark.parametrize(
++    "model",
++    [
++        "anthropic/claude-fable-5",   # flagship codename in RECOMMENDED_MODEL_NAMES (no opus/sonnet/haiku token)
++        "claude-fable-5",
++        "anthropic/claude-mythos-5",  # referenced in the CRUCIBLE kernel model list
++        "claude-opus-4-8",            # the Strix default backend
++        "anthropic/claude-sonnet-4-6",
++        "claude-haiku-4-5",
++        "claude-nova-9",              # a codename NOT in the table — must still price (safe catch-all)
++    ],
++)
++def test_every_referenced_claude_model_is_priced(model: str) -> None:
++    cost = estimate_anthropic_cost(model, _BIG_USAGE)
++    assert cost is not None and cost > 0, f"{model!r} must accrue a nonzero cost, got {cost!r}"
++
++
++def test_non_anthropic_model_is_not_priced() -> None:
++    # The Claude catch-all must NOT over-reach: a non-Anthropic model returns None so the callback
++    # leaves cost accounting to LiteLLM / the provider (no fabricated Anthropic price for gpt-*).
++    assert estimate_anthropic_cost("openai/gpt-4o-mini", _BIG_USAGE) is None
++    assert estimate_anthropic_cost("gemini/gemini-3.1-pro-preview", _BIG_USAGE) is None
++
++
++# --------------------------------------------------------------------------------------------------
++# End-to-end: the callback + governor. When LiteLLM does not know the model, only the price-table
++# fallback can supply cost — and it must arm the governor.
++# --------------------------------------------------------------------------------------------------
++def _record_via_callback(model: str, usage_payload: dict) -> None:
++    """Drive the real LiteLLM success-callback with LiteLLM's own cost map unavailable, so the only
++    possible cost source is the Anthropic price-table fallback."""
++    kwargs = {
++        "response_cost": None,
++        "model": model,
++        "litellm_params": {"custom_llm_provider": "anthropic"},
++    }
++    response = {"usage": usage_payload, "model": model}
++    with patch("litellm.completion_cost", side_effect=ValueError(f"unknown model {model}")):
++        litellm_cost_callback(kwargs, response)
++
++
++async def _run_governor(model: str, usage_payload: dict, budget: float) -> None:
++    hooks = ReportUsageHooks(model=model, max_budget_usd=budget)
++    ctx = MagicMock()
++    ctx.context = {"agent_id": "root"}
++    agent = MagicMock()
++    agent.name = "root"
++    response = MagicMock()
++    response.usage = Usage(
++        requests=1,
++        input_tokens=usage_payload["prompt_tokens"],
++        output_tokens=usage_payload["completion_tokens"],
++        total_tokens=usage_payload["total_tokens"],
++    )
++    await hooks.on_llm_end(ctx, agent, response)
++
++
++@pytest.mark.asyncio
++async def test_governor_trips_on_flagship_codename_over_budget(report_state: ReportState) -> None:
++    # The exact disarm: a recommended flagship codename LiteLLM does not know. Without the price-table
++    # entry the accumulated cost is $0 and this run would never stop.
++    model = "anthropic/claude-fable-5"
++    _record_via_callback(model, _BIG_USAGE)
++    assert report_state.get_total_llm_cost() > 1.0, "price table must accrue real cost from tokens"
++    with pytest.raises(BudgetExceededError):
++        await _run_governor(model, _BIG_USAGE, budget=1.0)
++
++
++@pytest.mark.asyncio
++async def test_governor_does_not_trip_on_cheap_flagship_run(report_state: ReportState) -> None:
++    # Negative control: the SAME (armed) model with a tiny call stays under a generous budget, so the
++    # governor does not false-trip a cheap run. Cost is nonzero (armed) but well under the cap.
++    model = "anthropic/claude-fable-5"
++    _record_via_callback(model, _TINY_USAGE)
++    cost = report_state.get_total_llm_cost()
++    assert 0.0 < cost < 5.0
++    await _run_governor(model, _TINY_USAGE, budget=5.0)  # must NOT raise
