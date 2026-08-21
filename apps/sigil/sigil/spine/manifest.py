@@ -22,9 +22,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..reuse.chain import _GENESIS_PREV
 from .atomicio import atomic_write_text
+from .schema_guard import refuse_newer
 
 SEGMENT_STEM = "seg-"
 _SCHEMA_VERSION = 1
+_MAX_MANIFEST_SCHEMA = _SCHEMA_VERSION   # refuse-newer gate (W5-3): a manifest schema above this is "upgrade sigil"
 
 
 def segment_filename(seg_id: int, codec: str = "none") -> str:
@@ -131,7 +133,13 @@ def read_manifest(layout: SpineLayout) -> Manifest | None:
     mp = layout.manifest_path
     if not mp.exists():
         return None
-    return Manifest.model_validate_json(mp.read_text(encoding="utf-8"))
+    m = Manifest.model_validate_json(mp.read_text(encoding="utf-8"))
+    # REFUSE-NEWER (W5-3): the model keeps ``extra="ignore"`` so a same-schema writer may add a field, but a
+    # SCHEMA BUMP means the writer changed segment/linearization semantics this build cannot honour — refuse
+    # it fail-closed rather than silently linearize a v(N+1) manifest as v1 (the "silently treats v2 as v1"
+    # defect). A read failure is already fail-closed (raises); this raise joins it.
+    refuse_newer(m.schema_version, _MAX_MANIFEST_SCHEMA, artifact="segment manifest")
+    return m
 
 
 def write_manifest(layout: SpineLayout, manifest: Manifest) -> None:

@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import config
+from ..spine.schema_guard import SchemaTooNew, refuse_newer
 from .authn import signed_payload, verify_signed
 from .identity import owner_pubkey
 
@@ -51,6 +52,8 @@ _log = logging.getLogger(__name__)
 # floor.json) so a spine reset (`sigil ingest --reset`, which rmtrees spine/) never touches it.
 MANIFEST_NAME = "security.manifest.json"
 _MANIFEST_SCHEMA = 1
+_MAX_KERNEL_MANIFEST_SCHEMA = _MANIFEST_SCHEMA   # refuse-newer gate (W5-3): a kernel-manifest schema above
+#                                                  this is "upgrade sigil" — never certified against v1 rules
 # The authenticated core fields (order-independent; canonicalized before signing / verifying).
 _CORE_FIELDS = ("schema_version", "kernel_sha256", "scope", "owner_key_id")
 
@@ -146,7 +149,7 @@ def write_manifest(manifest: dict) -> None:
 @dataclass(frozen=True)
 class KernelVerdict:
     ok: bool         # True → safe to execute the resolved binary (verified / unpinned / nothing to run)
-    status: str      # "verified" | "unpinned" | "unresolved" | "forged" | "unreadable" | "mismatch"
+    status: str      # "verified" | "unpinned" | "unresolved" | "forged" | "unreadable" | "mismatch" | "too_new"
     detail: str
 
 
@@ -174,6 +177,15 @@ def verify_kernel_bin(resolved: Optional[str]) -> KernelVerdict:
         return KernelVerdict(False, "forged",
                              "security manifest present but its owner signature is absent/invalid — "
                              "refusing to run the kernel (fail-closed)")
+    # REFUSE-NEWER (W5-3, #447): the schema is now AUTHENTICATED (owner signature just verified over the
+    # core fields, schema_version among them). A manifest whose schema is newer than this build understands
+    # may pin a DIFFERENT security-bearing field (or reinterpret kernel_sha256/scope), so certifying it
+    # against v1 rules would be a silent downgrade — refuse fail-closed, exactly like a forged/corrupt one.
+    try:
+        refuse_newer(manifest.get("schema_version", 1), _MAX_KERNEL_MANIFEST_SCHEMA,
+                     artifact="kernel security manifest")
+    except SchemaTooNew as e:
+        return KernelVerdict(False, "too_new", str(e))
     pinned = manifest.get("kernel_sha256")
     if not isinstance(pinned, str) or len(pinned) != 64:
         return KernelVerdict(False, "forged", "security manifest is missing a valid kernel_sha256")

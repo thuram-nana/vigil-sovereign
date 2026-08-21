@@ -49,7 +49,9 @@ from pydantic import BaseModel, ConfigDict
 from ..config import HEAD_PATH
 from ..reuse import SignedChainHead
 from .models import SpineRecord
+from .schema_guard import refuse_newer
 
+_MAX_SNAPSHOT_SCHEMA = 1   # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil"
 
 
 class SnapshotState(BaseModel):
@@ -171,6 +173,19 @@ class SnapshotState(BaseModel):
     def empty(cls) -> "SnapshotState":
         return cls()
 
+    @classmethod
+    def from_folded(cls, folded: dict) -> "SnapshotState":
+        """Validate a persisted ``folded_state`` dict, REFUSING a schema version newer than this build
+        understands (W5-3, #447). ``extra="forbid"`` already rejects an UNKNOWN field a newer writer added,
+        but a newer writer that DROPS a fold row this build carries would parse clean — every missing field
+        defaulting to its empty identity, which is precisely the "hard prune silently resets an anti-replay
+        high-water" failure this state's own docstring warns about. So gate on ``schema_version`` and fail
+        CLOSED. Both the production load path and the prune-time seed re-load route through here so neither
+        can silently down-read a future snapshot."""
+        st = cls.model_validate(folded)
+        refuse_newer(st.schema_version, _MAX_SNAPSHOT_SCHEMA, artifact="snapshot state")
+        return st
+
     # ---- load (production) -----------------------------------------------------------------------------
     @classmethod
     def load(cls, store) -> "SnapshotState":
@@ -190,7 +205,7 @@ class SnapshotState(BaseModel):
         folded = rec.payload.get("folded_state")
         if not isinstance(folded, dict):
             raise SnapshotError(f"snapshot record {snapshot_seq} carries no folded_state")
-        st = cls.model_validate(folded)
+        st = cls.from_folded(folded)                        # W5-3: refuse a snapshot newer than we understand
         if st.base_seq != base_seq or st.snapshot_seq != snapshot_seq:
             raise SnapshotError(f"snapshot record {snapshot_seq} base/seq disagree with the signed head")
         return st

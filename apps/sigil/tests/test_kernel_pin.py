@@ -110,6 +110,22 @@ def test_forged_manifest_core_tamper_fails_closed(home, tmp_path):
     assert v.ok is False and v.status == "forged"
 
 
+def test_manifest_newer_schema_refused(home, tmp_path):
+    # W5-3 (#447): a manifest whose schema is NEWER than this build understands is refused fail-closed —
+    # even though its owner signature is VALID (a legitimately-newer build signed it). Certifying it under
+    # v1 rules would silently ignore a field a newer writer may add. Negative control: the current-schema
+    # manifest verifies (test_pin_roundtrip_verifies) — so this gate is not simply refusing every manifest.
+    kb = _make_bin(tmp_path / "sigil-kernel", b"real-kernel-content")
+    digest = integrity.sha256_file(kb)
+    core = {"schema_version": integrity._MANIFEST_SCHEMA + 1, "kernel_sha256": digest,
+            "scope": "sigil", "owner_key_id": "owner"}
+    integrity.write_manifest(integrity.signed_payload(core, OWNER))   # a REAL owner signature over v(N+1)
+    assert integrity._manifest_authentic(integrity.load_manifest()) is True   # signature is valid...
+    v = integrity.verify_kernel_bin(kb)                                        # ...yet the schema is refused
+    assert v.ok is False and v.status == "too_new"
+    assert "newer than this build understands" in v.detail
+
+
 def test_manifest_signed_by_wrong_key_fails_closed(home, tmp_path):
     kb = _make_bin(tmp_path / "sigil-kernel", b"good")
     _pin(home, kb, owner=generate_keypair())          # signed by an IMPOSTER, not the trust anchor

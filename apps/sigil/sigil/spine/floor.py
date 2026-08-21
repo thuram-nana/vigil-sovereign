@@ -52,8 +52,11 @@ from ..reuse import SignedChainHead, canonical_json, sign, verify_one
 from ..reuse.canonical import evidence_signing_bytes, sha256_hex
 from ..reuse.chain import _head_payload
 from .atomicio import atomic_write_text
+from .schema_guard import refuse_newer
 
 _log = logging.getLogger(__name__)
+
+_MAX_FLOOR_SCHEMA = 1   # refuse-newer gate (W5-3): a floor schema above this is "upgrade sigil" (fail-closed)
 
 try:
     import fcntl
@@ -168,6 +171,11 @@ def load_floor(path: Optional[Path] = None) -> Optional[Floor]:
     if not p.exists():
         return None
     fl = Floor.model_validate_json(p.read_text(encoding="utf-8"))
+    # REFUSE-NEWER (W5-3): a floor whose schema is newer than this build understands must NOT be loaded as
+    # the old shape — a newer writer may reinterpret a monotonic field (entry_count/base_*), and mis-reading
+    # it could let a stale head slip the anti-rollback guard. Fail CLOSED, exactly like a corrupt/wrong-scope
+    # floor: the verify-path callers already catch and certify NOTHING on a load raise.
+    refuse_newer(fl.schema_version, _MAX_FLOOR_SCHEMA, artifact="anti-rollback floor")
     if fl.scope != SCOPE:
         # A floor for a DIFFERENT scope must not silently govern this spine (a swapped-in / cross-store
         # floor). Suspicious -> raise, so the read path fails CLOSED exactly like a corrupt floor.

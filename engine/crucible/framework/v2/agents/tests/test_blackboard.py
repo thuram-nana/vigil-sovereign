@@ -20,7 +20,7 @@ import pytest
 
 from framework.v2.agents import models
 from framework.v2.agents.blackboard import (
-    Blackboard, BlackboardError, open_blackboard,
+    Blackboard, BlackboardError, _MAX_BB_SCHEMA, open_blackboard,
 )
 
 
@@ -329,3 +329,41 @@ def test_parent_id_links(bb: Blackboard) -> None:
     )
     row = bb.get(hyp)
     assert row is not None and row.parent_id == obs
+
+
+# ---------------------------------------------------------------------------
+# refuse-newer (W5-3, #447): a store stamped NEWER than this build understands
+# is refused fail-closed, never silently opened as the old shape.
+# ---------------------------------------------------------------------------
+
+
+def test_blackboard_refuses_newer_schema(tmp_path: Path) -> None:
+    db = tmp_path / "future.sqlite"
+    # create a normal (current) store, then stamp a future schema version into it out-of-band, as a
+    # newer writer would. Re-opening MUST refuse it before running any DDL over it.
+    b = open_blackboard(db_path=db)
+    b.close()
+    con = sqlite3.connect(db)
+    con.execute(
+        "UPDATE bb_schema_meta SET value = ? WHERE key = 'version'",
+        (str(_MAX_BB_SCHEMA + 1),),
+    )
+    con.commit()
+    con.close()
+    with pytest.raises(BlackboardError, match="newer than this build understands"):
+        open_blackboard(db_path=db)
+
+
+def test_blackboard_accepts_current_schema(tmp_path: Path) -> None:
+    # negative control: a store at exactly the max understood version re-opens cleanly (the gate is not
+    # simply refusing every store). A fresh DB is stamped at _MAX_BB_SCHEMA by schema.sql.
+    db = tmp_path / "current.sqlite"
+    open_blackboard(db_path=db).close()
+    b = open_blackboard(db_path=db)                       # re-open at the current version: no raise
+    try:
+        row = b._conn.execute(
+            "SELECT value FROM bb_schema_meta WHERE key = 'version'"
+        ).fetchone()
+        assert int(row["value"]) == _MAX_BB_SCHEMA
+    finally:
+        b.close()
