@@ -340,6 +340,9 @@ temp/
 framework/v2/.memory/
 framework/v2/.dryrun/
 framework/v2/.blackboard/
+framework/v2/.evidence-keys/
+# ^ W16-8 crypto-shred DEK keystore: per-engagement data-encryption keys held OUTSIDE
+#   the append-only spine so erasure can destroy them. NEVER commit these.
 framework/v2/.intake-authorizations.txt
 framework/v2/.crucible-v2.log
 # Entitlement material (Pillar 2): trust root, signed grant, revocation

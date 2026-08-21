@@ -381,6 +381,42 @@ def evidence_dir(slug: str, action_id: str) -> Path:
     return _write_target_dir(slug) / "evidence" / action_id
 
 
+def evidence_archive_dir(slug: str) -> Path:
+    """The per-engagement evidence ARCHIVE ROOT — the parent of every per-action
+    ``evidence/<action_id>`` dir. This is the on-disk credential sink (raw
+    Authorization/Cookie request lines + response bodies) that the W16-8 crypto-shred
+    erasure operates over. Re-rooted under the ephemeral write base in a ZDR session
+    exactly like ``evidence_dir``."""
+    return _write_target_dir(slug) / "evidence"
+
+
+# ---------------------------------------------------------------------------
+# W16-8 — crypto-shredding keystore (right-to-erasure for append-only evidence).
+#
+# The event spine is append-only by DB trigger, so credential-bearing evidence
+# written at-rest cannot be DELETED without breaking the append-only / tamper-
+# evidence guarantee. The decision (ADR knowledge/decisions/0008) is to
+# CRYPTO-SHRED: evidence is sealed under a per-engagement Data Encryption Key
+# (DEK) that lives HERE — OUTSIDE the append-only spine — in a shreddable
+# keystore. Erasure destroys the DEK; the ciphertext left behind (on disk, in
+# backups, in a spine payload) becomes cryptographically unrecoverable while
+# every append-only row and the spine hash-chain stay byte-for-byte unchanged.
+#
+# This directory therefore MUST be independently deletable and owner-only, and
+# is NOT ephemeral-rerooted: a DEK has to survive the capturing session so an
+# operator erasure request weeks later can still find and destroy it. Override
+# with CRUCIBLE_EVIDENCE_KEYS_DIR to hold DEKs on a separate mount / HSM-fronted
+# path away from the ciphertext they protect.
+# ---------------------------------------------------------------------------
+
+
+def evidence_keys_dir() -> Path:
+    override = os.environ.get("CRUCIBLE_EVIDENCE_KEYS_DIR")
+    if override:
+        return Path(override).expanduser()
+    return v2_root() / ".evidence-keys"
+
+
 def crucible_v2_log(slug: str) -> Path:
     return _write_target_dir(slug) / ".crucible-v2.log"
 
