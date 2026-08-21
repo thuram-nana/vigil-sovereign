@@ -21,10 +21,16 @@ from __future__ import annotations
 
 from ..reuse import digest_payload
 from ..reuse.chain import _entry_hash
+from .models import KINDS
 
 
 def verify_record(record) -> tuple[bool, str]:
-    """(ok, reason) for a single SpineRecord — binding + entry-hash derivation. Fail-closed."""
+    """(ok, reason) for a single SpineRecord — kind vocabulary + binding + entry-hash derivation.
+    Fail-closed. The kind check (W5-1) restates the sovereign mirror of the offense SQL
+    `CHECK(kind IN (...))` on this per-atom read seam, so the live tail / UI re-verify a record's kind
+    is in-vocabulary the same way the whole-log `SpineStore.verify()` does."""
+    if record.kind not in KINDS:
+        return False, f"unknown kind {record.kind!r} at seq {record.seq}: not in the enforced KINDS vocabulary"
     content = {
         "scope": record.scope, "kind": record.kind, "source": record.source, "actor": record.actor,
         "payload": record.payload, "parent_id": record.parent_id, "supersedes_id": record.supersedes_id,

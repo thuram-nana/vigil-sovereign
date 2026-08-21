@@ -517,7 +517,7 @@ def test_device_replay_does_not_restore_approval_authority():
     _mesh_replay(s, captured)                        # attacker re-arms the revoked phone
 
     q = ApprovalQueue(s, owner_key=OWNER, trusted_pubkey_b64=OWNER_PUB)
-    target = s.append(kind="wire", source="agent", actor="ENVOY",
+    target = s.append(kind="operation", source="agent", actor="ENVOY",
                       payload={"tier": "A3", "decision": "queued"})
     rec = s.get(DeviceApprover(s, device_key=device).approve(target))
     assert verify_approval(rec, OWNER_PUB, extra_pubkeys=authorized_devices(s, OWNER_PUB)) is False, \

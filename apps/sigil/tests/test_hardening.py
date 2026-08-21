@@ -94,7 +94,7 @@ def test_a3_never_auto_even_when_promoted():
     s = _store()
     t = _Emitter(s)
     PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "wire", issued_at=_iss())
-    assert t.run(Tier.A3, kind="wire").queued, "A3 has no promotion path — always queues"
+    assert t.run(Tier.A3, kind="operation").queued, "A3 has no promotion path — always queues"
 
 
 def test_forged_promotion_grants_nothing():
@@ -131,7 +131,7 @@ def test_self_audit_reconstructs_including_denials():
     s = _store()
     t = _Emitter(s)
     KillSwitch(s, owner_key=OWNER).engage()
-    t.run(Tier.A3, kind="wire")                       # DENIED under the kill switch
+    t.run(Tier.A3, kind="operation")                       # DENIED under the kill switch
     KillSwitch(s, owner_key=OWNER).release(issued_at=_iss())
     t.run(Tier.A1, kind="event")                      # auto
     rows = self_audit(s, agent="TESTER")
@@ -156,7 +156,7 @@ def test_approval_signed_and_supersedes_the_queue():
 def test_forged_approval_leaves_item_pending():
     from sigil.agents.approvals import pending
     s = _store()
-    _Emitter(s).run(Tier.A3, kind="wire")
+    _Emitter(s).run(Tier.A3, kind="operation")
     tgt = pending(s, OWNER_PUB)[0].seq
     # a completely forged, unsigned approval superseding the queued A3
     s.append(kind="event", source="governor", actor="OWNER", supersedes_id=tgt,
@@ -169,7 +169,7 @@ def test_replayed_approval_does_not_resolve_another_item():
     from sigil.agents.approvals import ApprovalQueue, pending
     s = _store()
     _Emitter(s).run(Tier.A2, kind="draft")            # harmless
-    _Emitter(s).run(Tier.A3, kind="wire")             # dangerous
+    _Emitter(s).run(Tier.A3, kind="operation")             # dangerous
     pend = pending(s, OWNER_PUB)
     harmless, dangerous = pend[0].seq, pend[1].seq
     approved = ApprovalQueue(s, owner_key=OWNER, trusted_pubkey_b64=OWNER_PUB).approve(harmless)
@@ -184,7 +184,7 @@ def test_replayed_approval_does_not_resolve_another_item():
 def test_a3_approval_requires_the_trusted_owner_key():
     from sigil.agents.approvals import ApprovalError, ApprovalQueue, pending
     s = _store()
-    _Emitter(s).run(Tier.A3, kind="wire")
+    _Emitter(s).run(Tier.A3, kind="operation")
     tgt = pending(s, OWNER_PUB)[0].seq
     attacker = generate_keypair()
     q = ApprovalQueue(s, owner_key=attacker, trusted_pubkey_b64=OWNER_PUB)   # wrong signing key

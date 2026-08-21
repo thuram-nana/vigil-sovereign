@@ -32,7 +32,7 @@ from .manifest import (
     segment_filename,
     write_manifest,
 )
-from .models import SpineRecord, now_iso
+from .models import KINDS, KNOWN_SCHEMA_VERSIONS, SCHEMA_VERSION, SpineRecord, now_iso
 
 try:
     import fcntl  # POSIX advisory file lock — cross-PROCESS append serialization
@@ -747,8 +747,22 @@ class SpineStore:
     def append(
         self, *, kind: str, source: str, actor: str, payload: dict[str, Any],
         parent_id: int | None = None, supersedes_id: int | None = None,
-        ts: str | None = None,
+        ts: str | None = None, schema_version: int = SCHEMA_VERSION,
     ) -> int:
+        # W5-1 write-path enforcement (layer 1 of the sovereign mirror of the offense blackboard's
+        # Python `if kind not in ALL_EVENT_KINDS` + SQL `CHECK(kind IN (...))`). BOTH checks fail CLOSED —
+        # a record with an out-of-vocabulary kind or an unknown schema version is REFUSED before any lock
+        # is taken or byte written, so nothing junk ever reaches the immutable chain. Enforced here, at the
+        # ONE write path, an unfiltered future caller (e.g. an LLM-emitted `cand.kind`) cannot inject an
+        # arbitrary kind onto the spine. layer 2 = `verify()` re-checks `kind` on read (see below).
+        if kind not in KINDS:
+            raise SpineError(
+                f"refusing to append record with unknown kind {kind!r} (not in the enforced KINDS "
+                f"vocabulary); add it to sigil.spine.models.KINDS before writing this kind")
+        if schema_version not in KNOWN_SCHEMA_VERSIONS:
+            raise SpineError(
+                f"refusing to append record with unknown schema_version {schema_version!r} "
+                f"(known: {sorted(KNOWN_SCHEMA_VERSIONS)}) — upgrade sigil before writing this version")
         # Serialize the whole read-tip → write so concurrent writers (threaded bridge server, gesture
         # daemon) can't both fork off a stale tip and break the chain. The in-process RLock is keyed on
         # the STABLE `self.path` (unchanged), so the check-then-append gate `envelope.consume` builds on
@@ -797,9 +811,13 @@ class SpineStore:
                     entry = (append_entry([pred], cert_digest) if pred is not None
                              else build_chain([cert_digest])[0])
                     # entry.seq == seq by construction (append_entry([pred]).seq == pred.seq+1; genesis == 0).
+                    # `schema_version` sits OUTSIDE `content` (like `seq`/`ts`/the chain fields), so it is not
+                    # part of `cert_digest` — that is what keeps the change additive and legacy records' chain
+                    # byte-identical (W5-1). Stamped on every new record; `KNOWN_SCHEMA_VERSIONS`-validated above.
                     record = {
                         "seq": entry.seq, **content, "ts": ts or now_iso(),
                         "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,
+                        "schema_version": schema_version,
                     }
                     line = json.dumps(record, ensure_ascii=False) + "\n"
                     offset = clean_end                      # after any truncate, EOF == clean_end (where the line lands)
@@ -999,9 +1017,16 @@ class SpineStore:
         successor to cascade into) or forward-cascades a fork produces a self-consistent chain that
         passes here. Resistance to a recompute-capable writer is the owner-SIGNED head's job
         (`checkpoint.verify_checkpoint`, Ed25519 + monotonic last_seq). Use this for corruption/
-        naive-tamper detection; use the signed head for tamper-EVIDENCE."""
+        naive-tamper detection; use the signed head for tamper-EVIDENCE.
+
+        W5-1 also enforces the `kind` VOCABULARY on this read/integrity path (layer 2 of the sovereign
+        mirror of the offense SQL `CHECK(kind IN (...))`): a record whose `kind` is not in the enforced
+        `KINDS` set fails verify. `kind` is inside the digested content, so a hand-edited kind ALSO breaks
+        the binding check — this is a defence-in-depth restatement of the same invariant on read."""
         entries: list[ChainEntry] = []
         for r in self.iter_records():
+            if r.kind not in KINDS:
+                return False, f"unknown kind {r.kind!r} at seq {r.seq}: not in the enforced KINDS vocabulary"
             content = {
                 "scope": r.scope, "kind": r.kind, "source": r.source, "actor": r.actor,
                 "payload": r.payload, "parent_id": r.parent_id, "supersedes_id": r.supersedes_id,
