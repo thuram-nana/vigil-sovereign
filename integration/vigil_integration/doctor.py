@@ -204,10 +204,11 @@ def _probe_llm_backend() -> dict:
 # ── Security-posture probes (W9-4a) ───────────────────────────────────────────────────────────────────
 # One honest line PER security control showing its CURRENT state, so an operator (and a reviewer) sees at a
 # glance which controls are ON vs OFF-by-default. These probes are INFORMATIONAL: none of them calls
-# `_issue()`, so the posture block NEVER changes `vigil doctor`'s exit code or existing behaviour (the
-# refuse-to-start PRODUCTION gate is a separate later slice, W9-4b). Every probe reads REAL on-disk / env
-# state — never an optimistic default — and fails SOFT to "UNKNOWN": a missing/unreadable control is
-# reported, never a crash.
+# `_issue()`, so the posture BLOCK itself never changes `vigil doctor`'s exit code. The opt-in refuse-to-
+# start PRODUCTION gate (W9-4b) is a SEPARATE block below (`evaluate_production_gate`) that reuses these
+# same probes and DOES flip the exit code — but only when VIGIL_POSTURE=production. Every probe reads REAL
+# on-disk / env state — never an optimistic default — and fails SOFT to "UNKNOWN": a missing/unreadable
+# control is reported, never a crash.
 #
 # FATAL-2 (the two-env boundary): `doctor` is the OFFENSE/integration plane. It NEVER imports `sigil` or the
 # `framework`. The one SOVEREIGN-plane control (vault / secrets-at-rest) is read WITHOUT importing sigil — by
@@ -446,6 +447,115 @@ def _collect_posture(repo: Path, services: dict) -> list:
     ]
 
 
+# ── PRODUCTION posture gate (W9-4b) ───────────────────────────────────────────────────────────────────
+# The opt-in REFUSE-TO-START gate. When VIGIL_POSTURE=production (or `prod`; case-insensitive), a start path
+# (`vigil up` / `vigil engage`) refuses to run unless ALL FIVE production preconditions hold: the vault is
+# SEALED, the sovereignty tier is non-PERMISSIVE, entitlement enforcement is ACTIVE, the backup/reprove
+# timers are ON, and a signed charter + EngagementAuthority is PRESENT. It reads the exact SAME on-disk/env
+# posture probes `vigil doctor` renders (no new state, no new import — the FATAL-2 boundary holds).
+#
+# ADDITIVE + OPT-IN: with VIGIL_POSTURE unset (or any non-production value) the gate is INERT — it never
+# blocks, so behaviour is byte-identical to before. FAIL-CLOSED: any control NOT in its required good-state
+# — UNKNOWN included — is UNMET; a control we cannot read is never treated as satisfied. The egress-gate
+# control is DELIBERATELY excluded from the five: a loopback engagement legitimately needs no docker gateway,
+# so requiring it would refuse the documented loopback quickstart.
+
+_PRODUCTION_POSTURE_ENV = "VIGIL_POSTURE"
+_PRODUCTION_POSTURE_VALUES = ("production", "prod")   # mirror of build_envs.sh lock_missing_or_die's parse
+
+# control -> (required good-states, one-line requirement text used in the operator refusal). The order is
+# the plan's five conditions; each `required` set is the state(s) `doctor`'s probe reports when the control
+# is actually ENGAGED (see the _posture_* probes above).
+_PRODUCTION_GATE: tuple = (
+    ("vault", {"SEALED"},
+     "secrets must be SEALED at rest — run `sigil vault provision` (keys rest as plaintext until then)"),
+    ("sovereignty", {"AIR_GAPPED", "SOVEREIGN_CLOUD", "TRUSTED_CLOUD"},
+     ("the sovereignty tier must be raised OFF PERMISSIVE — set CRUCIBLE_SOVEREIGNTY_TIER "
+      "(AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD)")),
+    ("entitlement", {"ACTIVE"},
+     ("capability-entitlement enforcement must be ACTIVE — provision the trust root, or set "
+      "CRUCIBLE_ENTITLEMENT_ENFORCED=1")),
+    ("backups", {"ON"},
+     ("the backup/reprove timers must be ENABLED — install + `systemctl --user enable --now` the "
+      "infra/systemd/*.timer units")),
+    ("charter", {"PRESENT"},
+     ("a signed charter + EngagementAuthority must be PRESENT — provision one under targets/ and pin it "
+      "with VIGIL_ENGAGEMENT")),
+)
+
+
+def production_posture() -> "str | None":
+    """The raw VIGIL_POSTURE value IFF it selects the production gate (case-insensitive `production` / `prod`),
+    else None. The SINGLE source of truth for 'is the refuse-to-start gate armed?' — every caller keys on
+    this so the arming rule can never drift between the CLI start paths and the doctor report."""
+    raw = os.environ.get(_PRODUCTION_POSTURE_ENV, "").strip()
+    return raw if raw.lower() in _PRODUCTION_POSTURE_VALUES else None
+
+
+def evaluate_production_gate(repo_root, posture: "list | None" = None) -> dict:
+    """Evaluate the five PRODUCTION preconditions from the same posture probes `vigil doctor` renders.
+
+    Returns a JSON-safe dict:
+      {armed, posture, controls:[{control,state,detail,required,requirement,met}], unmet:[...same...], ok}
+    `armed` is True IFF VIGIL_POSTURE selects production. When NOT armed the gate is inert: `ok` is True and
+    `unmet` is empty regardless of state, so a start path can gate unconditionally on `not result['ok']`
+    and be byte-identical to before when the posture is unset. FAIL-CLOSED: a probe that errors, or reports
+    any state outside its required good-set (UNKNOWN included), is UNMET. Never raises.
+
+    `posture` (optional) is a precomputed `_collect_posture(...)` list — passed by `collect()` so the shared
+    doctor report does not re-run the probes (notably the systemctl calls). When None, the five probes run
+    here (the CLI start-path helper's case)."""
+    repo = Path(repo_root)
+    posture_raw = production_posture()
+    by_control: dict = {}
+    if posture is not None:
+        by_control = {str(p.get("control")): (str(p.get("state", "UNKNOWN")), str(p.get("detail", "")))
+                      for p in posture if isinstance(p, dict)}
+    probes = {
+        "vault": _posture_vault,
+        "sovereignty": _posture_sovereignty,
+        "entitlement": lambda: _posture_entitlement(repo),
+        "backups": lambda: _posture_backups(repo),
+        "charter": lambda: _posture_charter(repo),
+    }
+    controls: list = []
+    unmet: list = []
+    for control, required, requirement in _PRODUCTION_GATE:
+        if control in by_control:
+            state, detail = by_control[control]
+        else:
+            try:
+                state, detail = probes[control]()
+            except Exception as exc:  # noqa: BLE001 — FAIL CLOSED: an unreadable control is UNMET, not a crash
+                state, detail = "UNKNOWN", f"probe error: {type(exc).__name__}: {exc}"
+        met = state in required
+        entry = {"control": control, "state": state, "detail": detail,
+                 "required": sorted(required), "requirement": requirement, "met": met}
+        controls.append(entry)
+        if not met:
+            unmet.append(entry)
+    armed = posture_raw is not None
+    ok = (not armed) or (not unmet)
+    return {"armed": armed, "posture": posture_raw, "controls": controls,
+            "unmet": (unmet if armed else []), "ok": ok}
+
+
+def production_gate_message(result: dict, action: str = "start") -> str:
+    """The operator-facing refusal: ONE line per UNMET precondition naming the failing control, its current
+    state, and how to satisfy it. Called only when `result['ok']` is False (armed + at least one unmet)."""
+    unmet = result.get("unmet", [])
+    lines = [
+        (f"vigil {action}: REFUSED (fail-closed) — VIGIL_POSTURE={result.get('posture')} selects the "
+         f"PRODUCTION security posture, and {len(unmet)} precondition(s) are not met:"),
+    ]
+    for e in unmet:
+        lines.append(f"  ✗ {e['control']}: {e['state']} — {e['requirement']}")
+        lines.append(f"      now: {e['detail']}")
+    lines.append("  Satisfy every precondition above, or unset VIGIL_POSTURE for a non-production run. "
+                 "`vigil doctor` shows the current state of each control.")
+    return "\n".join(lines)
+
+
 def collect(repo_root) -> dict:
     """Assemble the health report as a plain dict (JSON-safe). Never raises — every probe fails soft."""
     repo = Path(repo_root)
@@ -545,11 +655,25 @@ def collect(repo_root) -> dict:
               f"cloud model / set CRUCIBLE_LLM_BACKEND.")
 
     # 8) Security posture (W9-4a) — one honest line PER security control showing its CURRENT state (ON vs
-    #    OFF-by-default). INFORMATIONAL: `_collect_posture` calls NEITHER `_issue()` nor `_note()`, so it
-    #    changes neither the exit code nor any existing report field (the refuse-to-start production gate is
-    #    W9-4b). FATAL-2: the sovereign vault + framework entitlement are read from DISK — neither sigil nor
-    #    framework is imported. `services` is passed so egress-gate reuses the already-collected gateway state.
+    #    OFF-by-default). INFORMATIONAL: `_collect_posture` calls NEITHER `_issue()` nor `_note()`, so this
+    #    block changes neither the exit code nor any existing report field (the refuse-to-start production
+    #    gate is step 9 below, and fires only under VIGIL_POSTURE=production). FATAL-2: the sovereign vault +
+    #    framework entitlement are read from DISK — neither sigil nor framework is imported. `services` is
+    #    passed so egress-gate reuses the already-collected gateway state.
     report["posture"] = _collect_posture(repo, services)
+
+    # 9) PRODUCTION posture gate (W9-4b) — the opt-in refuse-to-start gate, surfaced here so `vigil doctor`
+    #    doubles as the production preflight. INERT unless VIGIL_POSTURE=production: when NOT armed the whole
+    #    block is skipped, so the report is byte-identical to before (the additive, default-safe contract).
+    #    When armed, each UNMET precondition is a HARD `_issue()` — it blocks a `vigil up` / `vigil engage`
+    #    start, exactly what `_issue` means — so `ok` flips and the failing control is named. Reuses the
+    #    already-collected posture (no re-probe). No new import: same on-disk/env reads, FATAL-2 intact.
+    gate = evaluate_production_gate(repo, posture=report["posture"])
+    if gate["armed"]:
+        report["production_gate"] = gate
+        for e in gate["unmet"]:
+            _issue(f"PRODUCTION posture (VIGIL_POSTURE={gate['posture']}): {e['control']} is {e['state']} — "
+                   f"{e['requirement']} (refuses `vigil up` / `vigil engage` until satisfied)")
     return report
 
 
@@ -618,6 +742,27 @@ def render(report: dict) -> str:
             seg = f"  {mark}{(control + ':'):<{width + 1}} {state}"
             if detail:
                 seg += f"  — {detail}"
+            lines.append(seg)
+    gate = report.get("production_gate")
+    if gate:
+        # W9-4b: shown ONLY when VIGIL_POSTURE=production (else the field is absent). Unlike the
+        # informational block above, an unmet precondition here IS a hard failure — it also appears in
+        # "Action needed" and flips the exit code, because it refuses `vigil up` / `vigil engage`.
+        posture_val = gate.get("posture")
+        if gate.get("ok"):
+            lines.append(f"\nPRODUCTION posture gate (VIGIL_POSTURE={posture_val}) — all five preconditions "
+                         "met; `vigil up` / `vigil engage` may start:")
+        else:
+            n = len(gate.get("unmet", []))
+            lines.append(f"\nPRODUCTION posture gate (VIGIL_POSTURE={posture_val}) — REFUSES to start: "
+                         f"{n} precondition(s) unmet (each blocks `vigil up` / `vigil engage`):")
+        gwidth = max((len(str(c.get("control", ""))) for c in gate.get("controls", [])), default=0)
+        for c in gate.get("controls", []):
+            control, state = str(c.get("control", "?")), str(c.get("state", "?"))
+            mark = "OK " if c.get("met") else "!! "
+            seg = f"  {mark}{(control + ':'):<{gwidth + 1}} {state}"
+            if not c.get("met"):
+                seg += f"  — {c.get('requirement', '')}"
             lines.append(seg)
     issues = report.get("issues", [])
     if issues:

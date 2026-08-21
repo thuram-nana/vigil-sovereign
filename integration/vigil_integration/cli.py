@@ -101,6 +101,12 @@ def _cmd_engage_instruct(args: argparse.Namespace) -> int:
 
 
 def _cmd_engage(args: argparse.Namespace) -> int:
+    # W9-4b: the opt-in refuse-to-start PRODUCTION gate. Checked FIRST — before the engine wiring is even
+    # imported — so a refused production run neither loads the engine nor sends any traffic. INERT unless
+    # VIGIL_POSTURE=production, so a normal engage is byte-identical to before.
+    _gate = _enforce_production_gate("engage")
+    if _gate is not None:
+        return _gate
     from .live.think_claude import ReplayThinker
     from .live.wiring import EngineConfig, build_engine
 
@@ -1823,12 +1829,35 @@ def _cmd_session_dossier(args: argparse.Namespace) -> int:
     return 0
 
 
+def _enforce_production_gate(action: str) -> "int | None":
+    """W9-4b — the opt-in refuse-to-start PRODUCTION gate. When VIGIL_POSTURE=production (or `prod`), a start
+    path (`vigil up` / `vigil engage`) REFUSES to run unless all five production preconditions hold (vault
+    SEALED, sovereignty non-PERMISSIVE, entitlement ACTIVE, backups ON, charter PRESENT). Prints ONE line per
+    unmet precondition naming the failing control and returns 2. INERT otherwise — returns None so the caller
+    proceeds byte-identically to before (the additive, opt-in contract). EXEC-ONLY: `doctor` is pure-stdlib
+    (no framework/strix/sigil), so this stays on the boundary-safe path both start verbs already run on."""
+    import pathlib
+    from . import doctor as _doctor
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    result = _doctor.evaluate_production_gate(repo)
+    if result["ok"]:
+        return None
+    print(_doctor.production_gate_message(result, action=action), file=sys.stderr)
+    return 2
+
+
 def _cmd_up(args: argparse.Namespace) -> int:
     """`vigil up` — bring the WHOLE unified UI up at ONE origin and federate the two trust planes
     behind a self-contained reverse proxy. EXEC-ONLY: it spawns the three backends (sigil cockpit,
     crucible console, crucible api) as separate OS processes in their OWN venvs (via dispatch) and
     serves the bundle itself — it imports NO framework/strix/sigil, so the two trust domains are never
     co-loaded in one interpreter. Binds loopback (or a private/tunnel IP); refuses a public bind."""
+    # W9-4b: refuse to start when VIGIL_POSTURE=production and any production precondition is unmet. INERT
+    # (returns None, falls through) when the posture is not production — behaviour unchanged. Runs BEFORE any
+    # docker bring-up / process spawn so a refused production run touches nothing.
+    _gate = _enforce_production_gate("up")
+    if _gate is not None:
+        return _gate
     if getattr(args, "services", False):
         # Optional docker preflight: create the egress-gateway + root services (qdrant) if none exist
         # (idempotent). Both helpers are pure-stdlib, so this stays on the boundary-safe path. The two legs

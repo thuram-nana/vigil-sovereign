@@ -647,7 +647,19 @@ Security posture (informational — off-by-default controls; does NOT affect the
   .. charter:     ABSENT  — no active VIGIL_ENGAGEMENT and no chartered engagement under targets/
 ```
 
-Each line reads the **real** on-disk / environment state — never an optimistic default — and a control it cannot read reports `UNKNOWN` rather than guessing. The block is **informational**: it never changes `vigil doctor`'s exit code (a refuse-to-start production gate is a separate, later change). `vigil doctor` itself imports no `framework`/`strix`/`sigil`; the one sovereign-plane line (`vault`) is read from disk, so the two trust planes never co-load to produce it.
+Each line reads the **real** on-disk / environment state — never an optimistic default — and a control it cannot read reports `UNKNOWN` rather than guessing. The block itself is **informational**: it never changes `vigil doctor`'s exit code. `vigil doctor` itself imports no `framework`/`strix`/`sigil`; the one sovereign-plane line (`vault`) is read from disk, so the two trust planes never co-load to produce it.
+
+#### The opt-in `PRODUCTION` posture — refuse to start when misconfigured
+
+For a real deployment the safe-by-default posture is the *wrong* default: you want the machine to **refuse to run** when a control it depends on is off. Set `VIGIL_POSTURE=production` (or `prod`) and a start path — `vigil up` or `vigil engage` — **refuses to start** unless **all five** of these production preconditions hold:
+
+- **`vault`** is `SEALED` (secrets sealed at rest, not plaintext),
+- **`sovereignty`** is non-`PERMISSIVE` (the tier gates cloud LLM egress),
+- **`entitlement`** enforcement is `ACTIVE` (gated capabilities fail closed),
+- **`backups`** timers are `ON` (backup / reprove / HA are actually running),
+- **`charter`** is `PRESENT` (a signed charter + `EngagementAuthority`).
+
+The gate is **additive and opt-in**: with `VIGIL_POSTURE` unset (or any non-production value) it is **inert** — behaviour is byte-identical to a fresh checkout, so nothing already deployed breaks. It is **fail-closed**: any precondition not in its required state — `UNKNOWN` included — refuses the start, with **one line per unmet precondition** naming the failing control and how to satisfy it. (The `egress-gate` control is deliberately *not* one of the five — a loopback engagement legitimately needs no docker gateway.) When armed, `vigil doctor` doubles as the production preflight: it prints a **`PRODUCTION posture gate`** block and exits non-zero while any precondition is unmet.
 
 ### 1. Start the controlled target
 
