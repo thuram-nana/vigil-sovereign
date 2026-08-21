@@ -45,6 +45,7 @@ from pydantic import BaseModel, Field
 from ..agent.react import apply_intake, authorize_edge, intake_result
 from ..agent.state import ActionType, AgentState, Finding, LLMDecision, Phase
 from ..agent.targets import extract_target
+from .tool_intake import analysis_from_tool_output
 
 # The governed LOCAL terminal tool name (mirrors executor._TERMINAL_TOOL — kept as a local literal so engine
 # imports nothing from executor). A terminal command inspects HOST state; its output is advisory, never
@@ -424,7 +425,15 @@ class VigilEngine:
                 "surface": (extract_target(getattr(decision.tool, "tool_args", None)) if decision.tool else ""),
                 "summary": f"tool output captured: {len(raw)} byte(s)"}, parent_id=_tc_id)
             oracle = self._oracle_with_redrive(decision, exec_res)
-            intake = intake_result(raw, decision.output_analysis, oracle=oracle,
+            # H8: a deterministic planner (BrainThink) sets no output_analysis — it has no LLM — so the
+            # executed tool's bytes were parsed by nothing and every run reported 0 facts AND 0 leads.
+            # When the decision carries no analysis, derive PROPOSALS from the tool's own structured
+            # output. LEAD-only by construction: exploit_succeeded=False keeps the oracle unfired here, and
+            # react._finding_from_claim hard-codes status="lead". An LLM-supplied analysis always wins.
+            _analysis = decision.output_analysis
+            if _analysis is None and decision.tool is not None:
+                _analysis = analysis_from_tool_output(decision.tool.tool_name, raw)
+            intake = intake_result(raw, _analysis, oracle=oracle,
                                    source=(decision.tool.tool_name if decision.tool else ""))
             apply_intake(state, intake)
             report.facts.extend(intake.facts)
