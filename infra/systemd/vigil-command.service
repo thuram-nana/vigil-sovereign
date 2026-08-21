@@ -30,13 +30,27 @@
 #
 # CHECK:   systemctl --user status vigil-command
 # LOGS:    journalctl --user -u vigil-command -f        (and .vigil-live/ui/logs/)
-# STOP:    systemctl --user stop vigil-command
+# STOP:    vigil down     — CONTAINMENT, not a pause. It stops the backends AND `systemctl --user
+#          disable`s this unit + stops it cleanly, so `Restart=always` does not revive the stack and a
+#          reboot does not restore it. To bring it back: `systemctl --user enable --now vigil-command`.
+#          (`systemctl --user stop vigil-command` runs `vigil down` as ExecStop, so it contains too.)
+# PANIC:   vigil panic    — emergency HARD-STOP: trips every engagement's kill-switch (gate-level DENY)
+#          then MASKS this unit. Un-mask with `systemctl --user unmask vigil-command` when it is safe.
+#          See docs/runbooks/PANIC-AND-CONTAINMENT.md.
 
 [Unit]
 Description=VIGIL COMMAND — the unified interface, both planes behind one loopback origin
 Documentation=file:/home/kali/vigil/docs/screenshots/README.md
 After=network-online.target
 Wants=network-online.target
+
+# Ten restarts in five minutes means it is failing for a reason restarting will not fix. Stop, and
+# leave the failure visible in the status output rather than hiding it behind an endless loop.
+# These MUST live in [Unit]: systemd reads StartLimit* here. Placed in [Service] (where they sat until
+# W10-5, #477) they are SILENTLY IGNORED — the burst limit never engages and a crash-looping unit
+# restarts forever, so `vigil down` alone could never keep the stack contained.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -59,10 +73,6 @@ TimeoutStopSec=25
 
 Restart=always
 RestartSec=5
-# Ten restarts in five minutes means it is failing for a reason restarting will not fix. Stop, and
-# leave the failure visible in the status output rather than hiding it behind an endless loop.
-StartLimitIntervalSec=300
-StartLimitBurst=10
 
 [Install]
 WantedBy=default.target

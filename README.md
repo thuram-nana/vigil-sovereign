@@ -705,7 +705,10 @@ co-load) and serves a no-build static bundle.
 ```bash
 . .venv-offense/bin/activate
 vigil up                      # → http://127.0.0.1:8770/?token=… (opens a browser on a loopback bind)
-# vigil down                  # stop everything (reaps the backends tracked in the pids file)
+# vigil down                  # CONTAIN: stop+disable the systemd unit (so Restart=always can't revive it)
+#                             #          AND reap the backends tracked in the pids file
+# vigil panic                 # EMERGENCY HARD-STOP: trip every engagement's kill-switch (gate-level DENY)
+#                             #          then mask+stop the unit and kill the offense processes
 ```
 
 - **One origin, two planes.** The proxy binds **127.0.0.1:8770** (loopback, or a private/tunnel IP — a

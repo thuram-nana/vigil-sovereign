@@ -2036,10 +2036,66 @@ def _cmd_telemetry(args: argparse.Namespace) -> int:
 
 
 def _cmd_down(args: argparse.Namespace) -> int:
-    """`vigil down` — stop a running `vigil up` (terminate the backends + proxy tracked in the pids
-    file). EXEC-ONLY: imports NO framework/strix/sigil."""
+    """`vigil down` — CONTAIN a running `vigil up`: stop-and-disable the `vigil-command` systemd user
+    unit (so `Restart=always` cannot restore it) and terminate the backends + proxy tracked in the pids
+    file. EXEC-ONLY: imports NO framework/strix/sigil (containment is subprocess `systemctl` only)."""
     from .uiproxy import run_down
     return run_down(base_dir=args.base_dir)
+
+
+def _trip_all_killswitches(*, reason: str) -> list[str]:
+    """Trip the persistent, fail-closed kill-switch for EVERY engagement the offense engine knows, so
+    every gated action is refused engine-wide (persistently, across restarts) until an operator
+    deliberately clears each one. Slugs are enumerated from the offense authority directory.
+
+    The `framework` import is function-local (the offense engine): this verb runs offense-side and never
+    crosses into the sovereign core, so the two-env boundary holds. Returns the slugs actually tripped."""
+    from framework.v2.authority.killswitch import KillSwitch
+    from framework.v2.common import paths
+
+    slugs: set[str] = set()
+    adir = paths.authority_dir()
+    if adir.is_dir():
+        for f in adir.glob("*.authority.json"):
+            slugs.add(f.name[: -len(".authority.json")])
+        for f in adir.glob("*.halt"):                      # a slug that is ALREADY halted is re-affirmed
+            slugs.add(f.name[: -len(".halt")])
+    tripped: list[str] = []
+    for slug in sorted(slugs):
+        try:
+            KillSwitch(slug).trip(reason)                  # idempotent: the first reason is preserved
+            tripped.append(slug)
+        except Exception as exc:  # noqa: BLE001 — one bad slug must never stop the rest of the panic
+            print(f"  WARNING: could not trip kill-switch for {slug!r}: {exc}", file=sys.stderr)
+    return tripped
+
+
+def _cmd_panic(args: argparse.Namespace) -> int:
+    """`vigil panic` — the emergency HARD-STOP (W10-5, #477). In order:
+
+      1. Trip EVERY engagement's kill-switch (the gate-level stop): any in-flight or later-launched
+         gated offense action is DENIED, persistently and fail-closed — even a process we do not track.
+         This runs FIRST so a racing engagement is refused before we start killing anything.
+      2. Kill the tracked offense processes and MASK + stop + disable the `vigil-command` unit so
+         nothing restores the surface.
+
+    Clearing is deliberately a separate operator act (a kill-switch clear, and `systemctl --user unmask`
+    for the unit). See docs/runbooks/PANIC-AND-CONTAINMENT.md."""
+    try:
+        tripped = _trip_all_killswitches(reason=(args.reason or "vigil panic"))
+        print(f"vigil panic: tripped {len(tripped)} kill-switch(es): "
+              f"{', '.join(tripped) if tripped else '(no engagements found — gate already clear)'}")
+    except Exception as exc:  # noqa: BLE001 — a broken engine import must NOT block the process hard-stop
+        print(f"vigil panic: WARNING — could not trip kill-switches ({type(exc).__name__}: {exc}); "
+              f"proceeding to kill processes + mask the unit anyway.", file=sys.stderr)
+    # The process/unit containment runs REGARDLESS of the kill-switch outcome — a hard-stop must never be
+    # blocked by an engine-side failure.
+    from .uiproxy import run_panic
+    rc = run_panic(base_dir=args.base_dir)
+    print("vigil panic: hard-stop complete. The kill-switches stay tripped until you CLEAR each one, "
+          "and the unit stays masked until `systemctl --user unmask vigil-command.service`. "
+          "See docs/runbooks/PANIC-AND-CONTAINMENT.md.")
+    return rc
 
 
 def _cmd_knowledge(args: argparse.Namespace) -> int:
@@ -3072,10 +3128,20 @@ def build_parser() -> argparse.ArgumentParser:
     ptel.add_argument("--once", action="store_true", help="write one snapshot and exit")
     ptel.set_defaults(func=_cmd_telemetry)
 
-    pdn = sub.add_parser("down", help="stop a running `vigil up` (backends + proxy)")
+    pdn = sub.add_parser("down", help="CONTAIN a running `vigil up`: stop+disable the systemd unit so it "
+                                      "does not restore, then kill the backends + proxy")
     pdn.add_argument("--base-dir", default=".vigil-live",
                      help="engagement home holding the ui/pids file written by `vigil up`")
     pdn.set_defaults(func=_cmd_down)
+
+    ppan = sub.add_parser("panic", help="EMERGENCY HARD-STOP: trip every engagement's kill-switch (gate-"
+                                        "level DENY, persistent) then mask+stop the unit and kill the "
+                                        "offense processes. Clearing is a deliberate operator act.")
+    ppan.add_argument("--base-dir", default=".vigil-live",
+                      help="engagement home holding the ui/pids file written by `vigil up`")
+    ppan.add_argument("--reason", default="",
+                      help="reason recorded in every kill-switch (default: 'vigil panic')")
+    ppan.set_defaults(func=_cmd_panic)
 
     pk = sub.add_parser("knowledge", help="operator-gated sync of the living knowledge/ folder to git "
                                           "(regenerate + secret-scan + commit; push is separate). NB: the "
