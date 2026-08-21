@@ -2000,6 +2000,32 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if report.get("ok") else 1
 
 
+def _cmd_verify_integrity(args: argparse.Namespace) -> int:
+    """`vigil verify-integrity` (W6-7) — continuously verify the property the product exists to guarantee:
+    the spine hash-chain / attestation. One audit by default (chain integrity, signed-head freshness, the
+    anti-rollback floor, clock skew, vault/key state, disk); `--watch` runs it on a cadence and raises an
+    alarm on any integrity failure. Exits non-zero on a violation. EXEC-ONLY + boundary-safe: reads inert
+    on-disk bytes and imports only `vigil_core` — never framework/strix/sigil."""
+    from . import integrity_verifier as _iv
+    home = (Path(args.home).expanduser() if args.home
+            else Path(os.path.expanduser(os.environ.get("SIGIL_HOME", "~/.sigil"))))
+    sink = _iv.AlarmSink(log_path=_iv._default_alarm_log(home))
+    if args.watch:
+        summary = _iv.run_integrity_monitor(home, cycles=args.cycles, interval=args.interval, sink=sink)
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0 if summary.get("last_ok") else 1
+    report = _iv.run_integrity_once(home, sink=sink)
+    if getattr(args, "json", False):
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"integrity audit of {report.home} — {'OK' if report.ok else 'FAILED'}")
+        for c in report.checks:
+            mark = {"ok": "OK ", "fail": "!! ", "warn": ".. ", "absent": "-- ",
+                    "unknown": "?? "}.get(c.status, "?? ")
+            print(f"  {mark}{c.check}: {c.status} — {c.detail}")
+    return 0 if report.ok else 1
+
+
 def _cmd_telemetry(args: argparse.Namespace) -> int:
     """`vigil telemetry --out <path> [--interval N] [--once]` — the G2 live assurance/metrics collector: a
     read-only, one-way projection of the signed spine into a fact/lead/refusal/tool snapshot. Started for the
@@ -3024,6 +3050,18 @@ def build_parser() -> argparse.ArgumentParser:
                                "services up`). Exits non-zero on a hard prerequisite gap.")
     pdoc.add_argument("--json", action="store_true", help="emit the raw report as JSON")
     pdoc.set_defaults(func=_cmd_doctor)
+
+    pvi = sub.add_parser("verify-integrity",
+                         help="continuously verify the spine hash-chain integrity property (chain, "
+                              "signed-head freshness, anti-rollback floor, clock skew). One audit by "
+                              "default; --watch runs it on a cadence and alarms on failure. Exits non-zero "
+                              "on any integrity violation.")
+    pvi.add_argument("--home", default=None, help="spine home to verify (default: $SIGIL_HOME or ~/.sigil)")
+    pvi.add_argument("--watch", action="store_true", help="run periodically instead of once")
+    pvi.add_argument("--cycles", type=int, default=0, help="with --watch: cycles (0 = forever)")
+    pvi.add_argument("--interval", type=float, default=300.0, help="with --watch: seconds between cycles")
+    pvi.add_argument("--json", action="store_true", help="emit the report as JSON")
+    pvi.set_defaults(func=_cmd_verify_integrity)
 
     ptel = sub.add_parser("telemetry",
                           help="live assurance/metrics collector over the signed spine (G2): write a "

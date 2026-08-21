@@ -1,0 +1,59 @@
+# VIGIL continuous INTEGRITY VERIFIER — systemd USER service (oneshot)
+# =====================================================================
+# W6-7. Runs `vigil verify-integrity --once`: ONE audit of the property the
+# product exists to guarantee — the spine hash-chain / attestation. It checks
+# chain integrity, signed-head freshness, the anti-rollback floor, clock skew,
+# vault/key state and disk headroom over the sovereign spine home, writes a
+# heartbeat, and RAISES AN ALARM (integrity-alarms.jsonl + stderr/journal) on
+# any integrity violation. The paired timer (vigil-integrity.timer) fires this
+# on a cadence, so the property is verified CONTINUOUSLY, not only when a human
+# runs `vigil verify` by hand. The heartbeat lets a dead-man check (in
+# `vigil doctor` / the /readyz endpoint) alarm if THIS unit stops running.
+#
+# The verifier is READ-ONLY and boundary-safe: it reads inert on-disk bytes
+# (spine.jsonl / head.json / floor.json) and imports only vigil_core — never
+# the offense engine or sigil. It reaches no target and mutates no spine.
+#
+# Manual run / logs:
+#     systemctl --user start vigil-integrity.service
+#     journalctl --user -u vigil-integrity -e
+#
+# INSTALL (paired with the timer):
+#   mkdir -p ~/.config/systemd/user ~/.config/vigil
+#   cp infra/systemd/vigil-integrity.{service,timer} ~/.config/systemd/user/
+#   cp infra/systemd/vigil-integrity.env.example      ~/.config/vigil/integrity.env
+#   $EDITOR ~/.config/vigil/integrity.env             # set SIGIL_HOME if non-default
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-integrity.timer
+
+[Unit]
+Description=VIGIL continuous integrity verifier (one audit: chain, head, floor, clock; alarm on break)
+Documentation=file:%h/vigil/docs/OBSERVABILITY.md
+
+[Service]
+Type=oneshot
+
+# Optional config: SIGIL_HOME (the sovereign spine home to verify) and any
+# VIGIL_INTEGRITY_* thresholds. The unit runs even with no env file (defaults apply).
+EnvironmentFile=-%h/.config/vigil/integrity.env
+Environment=PYTHONUNBUFFERED=1
+
+WorkingDirectory=%h/vigil
+# The offense venv's console script (vigil = vigil_integration.cli:main). `--once` is fixed here (the timer
+# owns the cadence). Exits non-zero on an integrity violation, which the journal + OnFailure surfaces.
+ExecStart=%h/vigil/.venv-offense/bin/vigil verify-integrity --once
+
+# --- hardening -------------------------------------------------------------
+# It reads the spine home and writes only its heartbeat/alarm-log/high-water under SIGIL_HOME. NO network is
+# needed (nothing is re-driven against a target), so PrivateNetwork is safe to lock down.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOTE: if SIGIL_HOME is set to a non-default path in integrity.env, add it to ReadWritePaths above.

@@ -10,17 +10,48 @@ Routes:
   GET /posture            -> the bundle.json a verifier consumes ({"posture": {certificate, signature}})
   GET /posture/trust-root -> the out-of-band fingerprint pin (text)
   GET /posture/how-to     -> HOW-TO-VERIFY.md (text)
-  GET /healthz            -> {"ok": true}
+  GET /healthz            -> {"ok": true}                 (liveness — the process is up)
+  GET /readyz             -> {"ok": bool, "checks": [...]} (readiness — the SPINE INTEGRITY property holds)
 Any other path -> 404; any non-GET -> 405. Nothing is writable.
+
+/readyz (W6-7) is the readiness input: it runs the boundary-safe integrity verifier over the sovereign
+spine home (chain integrity, signed-head freshness, anti-rollback floor, clock skew) AND the dead-man check
+that the scheduled verifier is running, and returns HTTP 503 when the integrity property is VIOLATED — so a
+load balancer / orchestrator drains a node whose spine has broken, rather than serving from it.
 """
 
 from __future__ import annotations
 
+import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 from ..witness_service import bind_ok
+
+
+def _resolve_sigil_home() -> Path:
+    """SIGIL_HOME — the sovereign spine home (env override, else ~/.sigil). Read WITHOUT importing sigil."""
+    return Path(os.path.expanduser(os.environ.get("SIGIL_HOME", "~/.sigil")))
+
+
+def default_readyz() -> tuple[bool, dict]:
+    """Run the integrity verifier over the sovereign spine home + the dead-man heartbeat check. Returns
+    ``(ready, body)`` — ``ready`` False on any integrity FAILURE. Never raises (a verifier crash → not
+    ready, with the error surfaced, fail-CLOSED)."""
+    try:
+        from .. import integrity_verifier as iv
+        home = _resolve_sigil_home()
+        report = iv.verify_integrity(home)
+        stale, hb_detail = iv.heartbeat_is_stale(iv._default_heartbeat_path(home))
+        body = {"ok": report.ok, "home": report.home, "heartbeat_stale": stale,
+                "heartbeat_detail": hb_detail,
+                "checks": [{"check": c.check, "status": c.status, "detail": c.detail}
+                           for c in report.checks]}
+        return report.ok, body
+    except Exception as exc:  # noqa: BLE001 — a readiness probe that cannot run is NOT ready (fail-closed)
+        return False, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 # The default port the read-only posture endpoint binds. DELIBERATELY off 8787: that is the offense
 # console's fixed port (``uiproxy.CONSOLE_PORT``), and the two must be able to run AT THE SAME TIME — you
@@ -34,7 +65,9 @@ class PostureEndpointError(Exception):
     """Refused to serve (e.g. a public bind) — fail-closed."""
 
 
-def _make_handler(bundle_dir: Path):
+def _make_handler(bundle_dir: Path, readyz_provider: Optional[Callable[[], tuple[bool, dict]]] = None):
+    provider = readyz_provider or default_readyz
+
     class _Handler(BaseHTTPRequestHandler):
         timeout = 10
 
@@ -66,6 +99,13 @@ def _make_handler(bundle_dir: Path):
                 self._file("HOW-TO-VERIFY.md", "text/markdown; charset=utf-8", b"")
             elif path == "/healthz":
                 self._send(200, b'{"ok":true}')
+            elif path == "/readyz":
+                try:
+                    ready, body = provider()
+                except Exception as exc:  # noqa: BLE001 — a failing readiness probe is NOT ready (fail-closed)
+                    ready, body = False, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                payload = json.dumps(body, sort_keys=True).encode("utf-8")
+                self._send(200 if ready else 503, payload)
             else:
                 self._send(404, b'{"error":"not found"}')
 
@@ -80,14 +120,17 @@ def _make_handler(bundle_dir: Path):
     return _Handler
 
 
-def serve_posture(host: str, port: int, bundle_dir: str | Path, *, allow_public: bool = False):
+def serve_posture(host: str, port: int, bundle_dir: str | Path, *, allow_public: bool = False,
+                  readyz_provider: Optional[Callable[[], tuple[bool, dict]]] = None):
     """Build (do not start) a read-only posture server. `bind_ok` refuses a public/unspecified bind
-    unless `allow_public` is explicitly set (never in production)."""
+    unless `allow_public` is explicitly set (never in production). `readyz_provider` overrides the default
+    integrity-verifier readiness probe (injectable for tests)."""
     if not allow_public and not bind_ok(host):
         raise PostureEndpointError(
             f"refusing to bind a public/unspecified address {host!r} — the posture endpoint is read-only "
             f"and loopback/tunnel-bound only")
-    return ThreadingHTTPServer((host, int(port)), _make_handler(Path(bundle_dir).expanduser()))
+    return ThreadingHTTPServer((host, int(port)),
+                               _make_handler(Path(bundle_dir).expanduser(), readyz_provider))
 
 
 def run_posture_endpoint_forever(host: str, port: int, bundle_dir: str | Path) -> None:

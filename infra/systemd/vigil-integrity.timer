@@ -1,0 +1,36 @@
+# VIGIL continuous integrity-verifier timer — fires the oneshot on a cadence.
+# =====================================================================
+# THIS is the "continuous" in "continuously verify the integrity property":
+# it fires vigil-integrity.service on a schedule, so the spine hash-chain is
+# re-verified and a fresh heartbeat is written on every cadence. A tamper, a
+# stale/replayed head, a rolled-back floor or a skewed clock is then caught
+# WITHIN one cadence instead of sitting undetected until the next manual run.
+#
+# Enable with:
+#   systemctl --user enable --now vigil-integrity.timer
+#   systemctl --user list-timers 'vigil-*'     # confirm next run
+#
+# DEAD-MAN: the verifier writes a heartbeat each run. If this timer stops
+# firing, the heartbeat goes stale and `vigil doctor` / the /readyz endpoint
+# alarm on the missing heartbeat — so the verifier's OWN failure to run is
+# itself detected. Keep the cadence tighter than
+# VIGIL_INTEGRITY_MAX_HEARTBEAT_STALENESS_S (default 3600s) or the dead-man
+# will false-alarm between runs.
+
+[Unit]
+Description=Cadence trigger for the VIGIL continuous integrity verifier
+Documentation=file:%h/vigil/docs/OBSERVABILITY.md
+
+[Timer]
+# Every 15 minutes, at a small offset so it does not stampede with other jobs.
+# Tighten for fresher assurance; keep it well under the heartbeat-staleness bound.
+OnCalendar=*-*-* *:00/15:30
+# If the machine was asleep/off at the scheduled time, run once on the next
+# wake instead of skipping the window entirely.
+Persistent=true
+# Smear the start by up to 60s so many hosts do not fire simultaneously.
+RandomizedDelaySec=60
+Unit=vigil-integrity.service
+
+[Install]
+WantedBy=timers.target
