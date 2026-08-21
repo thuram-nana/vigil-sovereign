@@ -330,42 +330,153 @@ def _strix_base_dir() -> str:
     return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
 
 
+# The external egress endpoint the vendored ``web_search`` tool posts to — a FIXED host
+# (``vendor/strix/strix/tools/web_search/tool.py``: ``url = "https://api.perplexity.ai/chat/completions"``).
+# Naming it in the label tells the owner WHERE the query egresses, not merely that it does.
+_WEB_SEARCH_DESTINATION = "strix:web_search:api.perplexity.ai:443"
+
+
+def _has_control_chars(s: str) -> bool:
+    return any(ord(c) < 0x20 or ord(c) == 0x7f for c in s)
+
+
+def _canonical_destination(url: str) -> "Optional[str]":
+    """The CANONICAL network destination ``scheme://host:port`` for a URL, or None if it has no usable host
+    or is malformed. This is the address an owner is actually authorizing traffic to — deliberately NOT the
+    raw attacker-controlled URL, which can (a) spoof the visible host
+    (``https://trusted.example@evil.example/`` connects to ``evil.example``), and (b) smuggle secrets
+    (``user:pass@``, session tokens / signed params in the query). So:
+
+      * userinfo, path, query and fragment are DROPPED (host-spoofing + secret-leakage surface);
+      * the host is lowercased, trailing-dot stripped, IDNA/punycode-normalized (a Unicode homograph shows
+        as ``xn--…``), numeric IP encodings (decimal ``2130706433`` / hex ``0x7f000001``) collapsed to the
+        canonical address, IPv6 bracketed;
+      * control characters anywhere ⇒ refuse (return None);
+      * a malformed port ⇒ refuse; a missing port ⇒ the scheme's default.
+
+    urllib does the heavy lifting (``.hostname`` already strips userinfo + lowercases + de-brackets IPv6);
+    this adds the normalizations urllib does not."""
+    import ipaddress
+    import re as _re
+    from urllib.parse import urlsplit
+
+    raw = (url or "").strip()
+    if not raw or _has_control_chars(raw):
+        return None
+    try:
+        u = urlsplit(raw)
+        host = u.hostname          # lowercased, userinfo removed, IPv6 de-bracketed
+        port = u.port              # raises ValueError on a malformed port
+    except ValueError:
+        return None
+    if not host:
+        return None
+    host = host.rstrip(".")
+    if not host:
+        return None
+    if _re.fullmatch(r"0x[0-9a-fA-F]+|[0-9]+", host):   # numeric IP encoding → canonical
+        try:
+            host = str(ipaddress.ip_address(int(host, 0)))
+        except ValueError:
+            pass
+    else:                                               # IDNA/punycode → ascii so homographs can't hide
+        try:
+            host = host.encode("idna").decode("ascii")
+        except Exception:  # noqa: BLE001 — not IDNA-encodable (IP, invalid) ⇒ keep the lowercased host
+            pass
+    try:
+        is_v6 = isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address)
+    except ValueError:
+        is_v6 = ":" in host
+    disp = f"[{host}]" if is_v6 else host
+    if len(disp) > 255:
+        disp = disp[:255] + "…(truncated)"
+    scheme = (u.scheme or "").lower()
+    if port is None:
+        port = {"http": 80, "https": 443, "ws": 80, "wss": 443}.get(scheme)
+    if scheme and port is not None:
+        return f"{scheme}://{disp}:{port}"
+    if scheme:
+        return f"{scheme}://{disp}"
+    return disp
+
+
+def _sanitize_label_token(s: str, *, cap: int = 128) -> str:
+    """A short, control-char-free, length-capped token safe to place in a human-facing approval label."""
+    t = str(s).strip()
+    if _has_control_chars(t):
+        return "invalid"
+    return t if len(t) <= cap else t[:cap] + "…(truncated)"
+
+
+def _header_host_override(headers: Any) -> "Optional[str]":
+    """A ``Host`` header the replay overrides (case-insensitive), sanitized — else None. A replay can keep the
+    original CONNECTION destination while changing the virtual host, and those are different security
+    properties, so the owner must see the override when it is present."""
+    if not isinstance(headers, dict):
+        return None
+    for k, v in headers.items():
+        if isinstance(k, str) and k.strip().lower() == "host" and isinstance(v, str) and v.strip():
+            return _sanitize_label_token(v)
+    return None
+
+
 def _strix_target(tool_name: str, args: Any = None) -> str:
     """The approval-binding target label an owner SEES before signing a queued Strix call.
 
     The single-use nonce already binds each queued invocation independently (the action_digest covers the
     full ``args``), so this label is not what makes a token unforgeable. What it fixes is a DIFFERENT gap:
     for the network tools the label used to be the constant ``"strix:exec"`` — so an owner asked to approve
-    a ``repeat_request`` saw "exec" and a bare request-id, blind to which HOST the attacker-modified traffic
-    would hit. W16-5 added ``repeat_request`` (attacker-modified traffic to a URL) to the gated set, which
-    made the old "Strix's tools have NO network target" justification false. This resolves the real
-    destination into the label so the owner authorizes a specific host, not a sentinel.
+    a ``repeat_request`` saw "exec", blind to which HOST the attacker-modified traffic would hit. W16-5 added
+    ``repeat_request`` (attacker-modified traffic to a URL) to the gated set, which made the old "Strix's
+    tools have NO network target" justification false. This resolves a CANONICAL destination into the label
+    so the owner authorizes a specific host — not a sentinel, and not the raw spoofable/secret-bearing URL.
 
-    * ``repeat_request`` — sends a modified copy of a captured request. The destination is
-      ``modifications.url`` when the agent overrides it, else the host of the referenced captured request
-      (which is NOT in the args — only the ``request_id`` is), so bind to the overridden URL if present,
-      else to the specific ``request_id`` the owner can inspect with ``view_request``. Never a constant.
-    * ``web_search`` — external egress (a Perplexity lookup); its destination is that service, not the
-      engagement target. Label it as such so it is never confused with target traffic. The query is in
-      ``args`` and stays bound there.
+    * ``repeat_request`` — sends a modified copy of a captured request. The connection destination is the
+      canonical ``scheme://host:port`` of ``modifications.url`` when the agent overrides it (secrets and
+      host-spoofing stripped by :func:`_canonical_destination`); a ``Host`` header override is surfaced
+      separately (``;host=…``) since it can differ from the connection destination. When there is no url
+      override the true destination lives in the referenced captured request, which is NOT in the args —
+      only ``request_id`` is — so the label carries ``req=<id>`` (inspectable via ``view_request``). Fully
+      resolving that id to its captured host+port and binding the request snapshot (with a pre-replay
+      recheck to close the check/replay gap) needs Caido access at gate time and is the S6/S7 follow-up;
+      until then this is a partial, honestly-labelled measure, not full destination resolution.
+    * ``web_search`` — external egress to the fixed ``api.perplexity.ai:443`` (named, so it is never
+      confused with engagement traffic). The query stays bound in ``args``.
     * ``exec_command`` / ``write_stdin`` — the command string IS the payload and is bound via ``args``;
       they have no single network destination, so the local sentinel remains honest for them.
+
+    NOTE this is defense-in-depth on the AUTHORISATION path — it is not, and cannot be, a substitute for
+    forcing Strix's actual traffic through VIGIL's scope-enforcing egress (S2/S3). A human label never
+    enforces scope; the gateway does.
     """
     name = str(tool_name or "").strip()
     if name == "repeat_request":
-        if isinstance(args, dict):
-            mods = args.get("modifications")
-            if isinstance(mods, dict):
-                url = mods.get("url")
-                if isinstance(url, str) and url.strip():
-                    return f"strix:repeat_request:{url.strip()}"
-            rid = args.get("request_id")
-            if isinstance(rid, (str, int)) and str(rid).strip():
-                return f"strix:repeat_request:req={str(rid).strip()}"
-        return "strix:repeat_request"
+        return _repeat_request_target(args)
     if name == "web_search":
-        return "strix:web_search"
+        return _WEB_SEARCH_DESTINATION
     return "strix:exec"
+
+
+def _repeat_request_target(args: Any) -> str:
+    if not isinstance(args, dict):
+        return "strix:repeat_request"
+    mods = args.get("modifications")
+    mods = mods if isinstance(mods, dict) else {}
+    url = mods.get("url")
+    if isinstance(url, str) and url.strip():
+        canon = _canonical_destination(url)
+        label = f"strix:repeat_request:{canon}" if canon else "strix:repeat_request:unparseable-url"
+    else:
+        rid = args.get("request_id")
+        if isinstance(rid, (str, int)) and str(rid).strip():
+            label = f"strix:repeat_request:req={_sanitize_label_token(str(rid))}"
+        else:
+            return "strix:repeat_request"
+    host_override = _header_host_override(mods.get("headers"))
+    if host_override:
+        label += f";host={host_override}"
+    return label
 
 
 def _strix_args(raw_arguments: Any) -> Any:
