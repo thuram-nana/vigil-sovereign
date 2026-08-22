@@ -1,14 +1,27 @@
-"""engine_think — drive the production live engine's `think` seam with the propose-only hexstrike brain.
+"""engine_think — a THIN think-seam adapter that drives the production live engine with the ONE canonical
+hexstrike agent body.
 
-`BrainThink` is a `ThinkFn` (`Callable[[AgentState], LLMDecision]`): on first call it builds a TargetProfile
-and the brain's ordered attack chain, then emits ONE `USE_TOOL` LLMDecision per call (a non-authoritative
-proposal), and `COMPLETE` when the chain is exhausted. Wire it via `EngineConfig.brain`; the engine's gate
-+ governed executor + oracle are UNCHANGED, so this is the red-pen's "one gated executor" — the brain only
-proposes, the conjunctive gate authorizes (offense tools QUEUE for owner approval), and the oracle confirms.
-Nothing self-authorizes; a proposal is a LEAD until the oracle fires.
+`BrainThink` is a `ThinkFn` (`Callable[[AgentState], LLMDecision]`) that adapts the pluggable
+`HexstrikeAgentBody` (``brains.hexstrike_body``) — the single canonical body — to the live engine's
+``think`` seam. On first call it hands the body a normalized ``Observation`` and asks it to ``plan``: the
+body builds the ``TargetProfile`` and the ordered attack chain. BrainThink then emits ONE `USE_TOOL`
+LLMDecision per proposed step (a non-authoritative proposal) and `COMPLETE` when the chain is exhausted.
 
-Import-clean: only `agent.state` (pydantic models, no framework/strix) + the stdlib brain — so wiring it
-pulls no offense engine.
+H1 CONVERGENCE. BrainThink no longer re-implements the profile+chain construction — that logic lives in
+ONE place, ``HexstrikeAgentBody.plan``. This makes the body the PRODUCTION proposal source (it had zero
+production callers before) while BrainThink keeps only the three responsibilities that belong to the
+engine seam: (1) objective normalization at construction (fail-closed on an unknown label); (2)
+``danger_floor`` — the raise-only classifier the engine's gate consults; and (3) proposal PERSISTENCE for
+the console panel. The engine's gate + governed executor + oracle + signed ExecRecord + approval broker are
+UNCHANGED — the brain proposes, the conjunctive gate authorizes (offense tools QUEUE for owner approval),
+and the oracle confirms. Nothing self-authorizes; a proposal is a LEAD until the oracle fires.
+
+Import-clean (FATAL-2): module scope imports only `agent.state` (pydantic models, no framework/strix) +
+the stdlib brain, so importing this module pulls no offense engine and it loads in the sovereign leg. The
+canonical body — which imports the lightweight ``framework.v2.agent_body.interface`` — is imported
+FUNCTION-LOCALLY (only when a run actually drives the seam, which happens only in the offense leg where
+framework is on the path). Constructing a BrainThink, reading ``danger_floor`` and the normalized objective
+therefore need no framework.
 """
 
 from __future__ import annotations
@@ -19,7 +32,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..agent.state import ActionType, LLMDecision, ToolCall
-from .hexstrike_brain import HexstrikeBrain, TargetType, parse_objective, proposal_document
+from .hexstrike_brain import HexstrikeBrain, parse_objective, proposal_document
 
 
 class BrainThink:
@@ -43,12 +56,17 @@ class BrainThink:
         self._target = target
         # Normalise ONCE, here: an unknown objective raises at construction rather than silently planning
         # something other than its label, and the persisted proposal records the objective actually used.
+        # (parse_objective is stdlib — this keeps construction framework-free for the sovereign leg.)
         self._objective = parse_objective(objective).value
         self._obs = dict(observations or {})
         self._posture = posture
         # OPT-IN persistence: explicit arg wins; else the run dir the console already hands a spawned run.
         _out = proposal_out if proposal_out is not None else os.environ.get("VIGIL_PROOF_RUN_DIR")
         self._proposal_out: "str | None" = str(_out) if _out else None
+        # The ONE canonical body this seam adapts — constructed LAZILY on first drive (it imports the
+        # framework agent-body interface, available only in the offense leg; construction, danger_floor and
+        # the normalized objective must stay framework-free for the sovereign leg).
+        self._body: Optional[Any] = None
         self._steps: Optional[list] = None
         self._i = 0
 
@@ -80,14 +98,24 @@ class BrainThink:
 
         return _classify
 
-    def _profile(self, state: Any):
+    def _ensure_body(self):
+        """Construct the ONE canonical body lazily. Import is FUNCTION-LOCAL (FATAL-2): ``hexstrike_body``
+        imports the framework agent-body interface, so touching it at module scope would break the sovereign
+        leg — but a run is only ever driven in the offense leg, where framework is on the path."""
+        if self._body is None:
+            from .hexstrike_body import HexstrikeAgentBody  # noqa: PLC0415 (FATAL-2: framework at module scope)
+            self._body = HexstrikeAgentBody(brain=self._brain, objective=self._objective,
+                                            posture=self._posture)
+        return self._body
+
+    def _observation(self, state: Any):
+        """Normalize the engine's AgentState + the caller's charter/sensor seeds into the body's read-only
+        ``Observation``. Target resolution is unchanged: the explicit ``target``, else the engagement's
+        free-text objective. Import is function-local for the same FATAL-2 reason as the body."""
+        from framework.v2.agent_body.interface import Observation  # noqa: PLC0415 (FATAL-2)
         target = self._target or getattr(state, "objective", "") or ""
-        tt = self._obs.get("target_type")
-        return self._brain.analyze_target(
-            target, target_type=TargetType(tt) if tt else None,
-            ip_addresses=self._obs.get("ip_addresses"), open_ports=self._obs.get("open_ports"),
-            services=self._obs.get("services"), technologies=self._obs.get("technologies") or [],
-            cms_type=self._obs.get("cms_type"), cloud_provider=self._obs.get("cloud_provider"))
+        # explicit target wins over any stray key in the seed observations
+        return Observation(state={**self._obs, "target": target})
 
     def _persist(self, profile: Any, steps: list) -> None:
         """Write the proposed chain to ``<run_dir>/brain-proposal.json`` (opt-in, atomic, fail-soft). This
@@ -108,8 +136,9 @@ class BrainThink:
 
     def __call__(self, state: Any) -> LLMDecision:
         if self._steps is None:
-            profile = self._profile(state)
-            self._steps = list(self._brain.create_attack_chain(profile, self._objective).steps)
+            # Delegate profile + chain construction to the ONE canonical body — this seam no longer
+            # re-implements it (H1). What is persisted is EXACTLY the chain the body handed back.
+            profile, self._steps = self._ensure_body().plan(self._observation(state))
             self._persist(profile, self._steps)
         if self._i >= len(self._steps):
             return LLMDecision(action=ActionType.COMPLETE,

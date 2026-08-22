@@ -3,7 +3,17 @@
 `HexstrikeAgentBody` implements the `agent_body.AgentBody` contract (think -> propose -> gate -> execute
 -> learn) and inherits `run_cycle`'s STRUCTURAL guarantee that `execute` is unreachable unless the gate
 authorized the action. It turns the propose-only `HexstrikeBrain` into a gated actor with NO relaxed
-invariant, wired end-to-end to the real gate + the R4 gated external-tool runner + the oracle:
+invariant, wired end-to-end to the real gate + the R4 gated external-tool runner + the oracle.
+
+H1 — THE CANONICAL BODY. This is now the PRODUCTION proposal source, not a parallel scaffold: the
+`vigil engage --brain hexstrike` path drives the live engine through `engine_think.BrainThink`, a thin
+think-seam adapter that delegates its profile+chain construction to this body's `plan` (see
+`docs/BRAIN-SLOT-INTEGRATION.md` step 6). The profile-from-observations + ordered-chain logic lives in ONE
+place — here — instead of being re-implemented at the engine seam. (Residual: this body's OWN
+gate/execute/learn + runner-owned oracle re-drive remain a second, tested execution model; production
+execution still flows through the live engine's governed executor + signed ExecRecord. Converging the two
+EXECUTE paths onto a single gated executor is the remaining H1 work — this slice converges the PROPOSE
+half.) The contract:
 
   * think    — build a TargetProfile from VIGIL OBSERVATIONS (sensor/oracle context), not URL guesses;
                resolve the scannable host from the charter-provided IPs/target. No network.
@@ -40,7 +50,14 @@ from framework.v2.agent_body.interface import (
     Thought,
 )
 
-from .hexstrike_brain import HexstrikeBrain, TargetType, ToolDanger
+from .hexstrike_brain import (
+    AttackStep,
+    HexstrikeBrain,
+    TargetProfile,
+    TargetType,
+    ToolDanger,
+    parse_objective,
+)
 
 # brain tool name -> the runner-owned oracle-mapped ToolSpec builder. ONLY these can mint a FACT (via the
 # runner's own independent re-drive); every other tool stays a LEAD. Adding a tool = adding a ToolSpec +
@@ -74,7 +91,11 @@ class HexstrikeAgentBody(AgentBody):
         executor: Optional[Callable[[ProposedAction, GateDecision], ActionOutcome]] = None,
     ) -> None:
         self._brain = brain or HexstrikeBrain()
-        self._objective = objective
+        # Normalise ONCE, here: an unknown objective raises at construction rather than silently planning
+        # something other than its label (parse_objective is stdlib — no framework/offense dependency). This
+        # is the same guarantee the engine_think adapter used to own alone; carrying it into the canonical
+        # body keeps the plan's label equal to the plan it built for EVERY caller of this one implementation.
+        self._objective = parse_objective(objective).value
         self._posture = posture
         self._runner = runner
         self._gate_fn = gate_fn or self._warden_gate
@@ -102,10 +123,32 @@ class HexstrikeAgentBody(AgentBody):
                        detail={"target": self._profile.target, "host": self._host,
                                "risk": self._profile.risk_level})
 
+    # ---- plan (the ONE canonical brain-driving step) ---------------------------------------------
+    def _build_chain(self) -> list[AttackStep]:
+        """The single place the ordered attack chain is built from the current profile (a list of LEADs).
+        Both this body's own ``propose`` loop and the ``engine_think.BrainThink`` think-seam adapter that
+        drives the production live engine consume it — so ONE implementation decides what the brain
+        proposes and in what order (H1 convergence)."""
+        if self._profile is None:
+            return []
+        return list(self._brain.create_attack_chain(self._profile, self._objective).steps)
+
+    def plan(self, observation: Observation) -> tuple[TargetProfile, list[AttackStep]]:
+        """Build the ``TargetProfile`` from the normalized VIGIL Observation and the ordered ``AttackStep``
+        chain, and return both (steps carry NO authority — each is a LEAD the gate/oracle later adjudicate).
+
+        This is the production entry point that makes ``HexstrikeAgentBody`` the canonical body: the
+        ``vigil engage --brain hexstrike`` path drives the live engine through ``engine_think.BrainThink``,
+        which now delegates its profile+chain construction here rather than re-implementing it. The chain is
+        also cached into this body's ``propose`` queue, so a subsequent ``run_cycle`` reuses the exact plan."""
+        self.think(observation)                 # sets self._profile / self._host (no network)
+        self._queue = self._build_chain()
+        return self._profile, list(self._queue)
+
     # ---- propose (one step per cycle; a LEAD) ----------------------------------------------------
     def propose(self, thought: Thought) -> Optional[ProposedAction]:
         if not self._queue and self._profile is not None:
-            self._queue = list(self._brain.create_attack_chain(self._profile, self._objective).steps)
+            self._queue = self._build_chain()
         if not self._queue:
             return None
         step = self._queue.pop(0)
