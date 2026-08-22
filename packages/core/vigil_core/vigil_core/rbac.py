@@ -82,6 +82,7 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/codebase/edit": _RUN,
     "/api/codebase/apply": _RUN,
     "/api/codebase/test": _RUN,
+    "/api/launch/preview": _RUN,
     "/api/launch/assessment": _RUN,
     "/api/launch/cloud": _RUN,
     "/api/replay": _RUN,
