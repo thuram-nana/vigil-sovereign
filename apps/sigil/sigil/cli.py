@@ -1027,9 +1027,10 @@ def cmd_floor(a) -> None:
             sys.exit(1)
         fl = load_floor()
         W, config, roster_path, _tip, owner_pub = _witness_ctx()
+        import time as _time
         try:
             wc = FW.emit_floor_witness(head, fl, [Witness(config.OWNER_KEY_ID, kp.private_key_b64)],
-                                       retain_path=Path(a.retain), scope=config.SCOPE)
+                                       retain_path=Path(a.retain), scope=config.SCOPE, now=int(_time.time()))
         except (FW.FloorWitnessError, Exception) as e:  # noqa: BLE001 — surface any emit failure, never fake
             print(f"!! floor witness failed: {e}", file=sys.stderr)
             sys.exit(1)
@@ -1056,8 +1057,9 @@ def cmd_floor(a) -> None:
         fl = load_floor()
         W, config, roster_path, _tip, owner_pub = _witness_ctx()
         _r, tr = _witness_trust_root(W, config, roster_path, owner_pub)
+        import time as _time
         ok, msg, _label = FW.verify_floor_against_witnessed(head, fl, sources, scope=config.SCOPE,
-                                                            trust_root=tr)
+                                                            trust_root=tr, now=_time.time())
         print(("floor anti-rollback OK: " if ok else "floor anti-rollback FAIL: ") + msg)
         if ok:
             # HONEST NUDGE: this is the LIGHT height/fork-at-height anchor. It proves no rollback below the
@@ -1092,8 +1094,10 @@ def cmd_floor(a) -> None:
         # binds/extension-proves it against the witnessed checkpoint, so it needs the passive's live chain
         # AND the owner trust root (distinct from the witness quorum `tr`). See HA-PROFILE.md §3.
         owner_tr = W.witness_trust_root(None, owner_pub=owner_pub, owner_key_id=config.OWNER_KEY_ID)
+        import time as _time
         verdict = guard.evaluate_promotion(head, data, scope=config.SCOPE, trust_root=tr,
-                                           owner_trust_root=owner_tr, entries=SpineStore().entries())
+                                           owner_trust_root=owner_tr, entries=SpineStore().entries(),
+                                           now=_time.time())
         for line in verdict.lines():
             print(line, file=(sys.stdout if verdict.activate else sys.stderr))
         sys.exit(verdict.exit_code)
@@ -1315,13 +1319,15 @@ def cmd_checkpoint(a) -> None:
         if kp is None:
             print("!! no owner key to co-sign with — run `sigil sign` first", file=sys.stderr)
             sys.exit(1)
+        import time as _time
+        _now = int(_time.time())            # W7-5: stamp the anchor's emission timestamp (fail-closed staleness)
         try:
             wc = W.emit_checkpoint(head, [Witness(config.OWNER_KEY_ID, kp.private_key_b64)],
-                                   tip_path=tip_path, scope=config.SCOPE)
+                                   tip_path=tip_path, scope=config.SCOPE, now=_now)
         except W.WitnessError as e:
             print(f"!! emit failed: {e}", file=sys.stderr)
             sys.exit(1)
-        env = W.dump_witnessed(wc, scope=config.SCOPE)
+        env = W.dump_witnessed(wc, scope=config.SCOPE, emitted_at=_now)
         if a.out == "-":
             print(env)
         else:

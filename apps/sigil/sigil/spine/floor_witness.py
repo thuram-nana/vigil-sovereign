@@ -57,13 +57,17 @@ def _assert_floor_matches_head(floor: Optional[Floor], head) -> None:
 
 
 def emit_floor_witness(head, floor: Optional[Floor], witnesses: "list[Witness]", *,
-                       retain_path, scope: str):
+                       retain_path, scope: str, now=None):
     """Emit + persist a witnessed checkpoint of the just-advanced floor's head, off-box at ``retain_path``.
     Asserts floor⇔head coherence first (see :func:`_assert_floor_matches_head`). Returns the
     :class:`WitnessedCheckpoint`. ``retain_path`` is a path the verifier RETAINS OFF-BOX — a copy kept only
-    inside ``SIGIL_HOME`` is rolled back with the spine and adds nothing over the local floor."""
+    inside ``SIGIL_HOME`` is rolled back with the spine and adds nothing over the local floor.
+
+    W7-5 (#463): ``now`` (unix seconds) stamps the anchor's emission timestamp so the HA failover guard can
+    REFUSE a STALE anchor. A SCHEDULED emitter passes ``now``; a caller that passes none keeps the legacy
+    un-timestamped envelope (the freshness gate then treats it as un-dated → fail-closed)."""
     _assert_floor_matches_head(floor, head)
-    return WA.emit_witnessed(head, witnesses, retain_path=retain_path, scope=scope)
+    return WA.emit_witnessed(head, witnesses, retain_path=retain_path, scope=scope, now=now)
 
 
 def _anchor_floor(floor: Optional[Floor], retained) -> tuple[bool, str]:
@@ -96,7 +100,8 @@ def _anchor_floor(floor: Optional[Floor], retained) -> tuple[bool, str]:
 
 
 def verify_floor_against_witnessed(head, floor: Optional[Floor], sources: Iterable[str], *,
-                                   scope: str, trust_root) -> tuple[bool, str, str]:
+                                   scope: str, trust_root, now=None,
+                                   warn_after_s=None, refuse_after_s=None) -> tuple[bool, str, str]:
     """Anchor the LOCAL head + floor against the HIGHEST retained witnessed checkpoint. Returns
     ``(ok, message, guarantee_label)``. Fail-closed:
 
@@ -110,12 +115,20 @@ def verify_floor_against_witnessed(head, floor: Optional[Floor], sources: Iterab
     off-box copy means exactly today's local-only guarantee, neither widened nor narrowed."""
     label = WA.guarantee_label(trust_root)
     try:
-        retained = WA.select_highest_witnessed(sources, scope=scope, trust_root=trust_root)
+        picked = WA.select_highest_witnessed_with_age(sources, scope=scope, trust_root=trust_root)
     except WA.AnchorError as e:
         return False, f"CANNOT VERIFY (refused): {e}", label
-    if retained is None:
+    if picked is None:
         return True, "no retained witnessed checkpoint supplied — off-box anchor skipped (local-only)", label
+    retained, emitted_at = picked
     ck = retained.checkpoint
+    # W7-5 (#463): enforce FRESHNESS on the anchor we will rely on (the highest). An anchor older than the
+    # refusal bound (or un-dated / future-dated past the skew tolerance) → REFUSE (fail-closed) — the scheduled
+    # off-box emitter has stopped. Enforced only when ``now`` is supplied (the CLI path supplies it).
+    if now is not None:
+        fv = WA.freshness_verdict(emitted_at, now=now, warn_after_s=warn_after_s, refuse_after_s=refuse_after_s)
+        if fv.refuse:
+            return False, f"STALE ANCHOR (refused): {fv.detail}", label
     ok_h, why_h = WA.anchor_head(head, retained=ck)
     if not ok_h:
         return False, why_h, label

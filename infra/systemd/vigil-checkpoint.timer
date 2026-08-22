@@ -1,0 +1,32 @@
+# VIGIL scheduled off-box witnessed-checkpoint timer — fires the emit oneshot on a cadence.
+# =====================================================================
+# W7-5 (#463). THIS is the "scheduled" in "schedule the off-box witnessed checkpoint": it fires
+# vigil-checkpoint.service on a schedule so the off-box anti-rollback anchor is refreshed on every cadence
+# instead of whenever a human last ran `vigil floor witness`/`sigil checkpoint emit` by hand. A stale anchor
+# silently widens the rollback window; keeping this timer enabled keeps the anchor fresh.
+#
+# PRODUCTION posture: enable this timer.
+#   systemctl --user enable --now vigil-checkpoint.timer
+#   systemctl --user list-timers 'vigil-*'     # confirm next run
+#
+# DEAD-MAN: each fire writes an emitter heartbeat. If this timer stops firing, the heartbeat goes stale and
+# the emitter's own silence is detectable; keep the cadence WELL UNDER VIGIL_ANCHOR_REFUSE_AFTER_S (default
+# 24h) — and ideally under VIGIL_ANCHOR_WARN_AFTER_S (default 6h) — so a single missed run does not push the
+# anchor into the guard's refusal window.
+
+[Unit]
+Description=Cadence trigger for the VIGIL scheduled off-box witnessed-checkpoint emitter
+Documentation=file:%h/vigil/docs/architecture/HA-PROFILE.md
+
+[Timer]
+# Every 15 minutes, at a small offset so it does not stampede with the other VIGIL jobs. This is FAR under
+# the default 6h warn / 24h refuse bounds, so a healthy system never trips staleness.
+OnCalendar=*-*-* *:07/15:00
+# If the machine was asleep/off at the scheduled time, run once on the next wake instead of skipping.
+Persistent=true
+# Smear the start by up to 60s so a fleet does not fire simultaneously.
+RandomizedDelaySec=60
+Unit=vigil-checkpoint.service
+
+[Install]
+WantedBy=timers.target

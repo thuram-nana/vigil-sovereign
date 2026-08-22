@@ -80,3 +80,43 @@ All thresholds are env-overridable with fail-closed defaults — see
 - **A real notifier** (email / webhook / pager) for the alarm callbacks is W8-1 (#467); the alarm sink ships
   the durable log + the callback seam.
 - **Claims-registry registration** of this behaviour is W0-3 (#398); the registry does not exist yet.
+
+---
+
+## Scheduled off-box witnessed checkpoint + stale-anchor refusal (W7-5, #463)
+
+The witnessed checkpoint is the off-box anchor the HA anti-rollback / failover interlock depends on
+(`docs/architecture/HA-PROFILE.md` §3). Before W7-5 it was emitted **by hand**; a months-old anchor still
+passed the guard, silently widening the rollback window to the operator's last manual run. W7-5 schedules the
+emit and makes the guard **fail on a stale anchor**.
+
+**Scheduled emitter.** Each emit stamps an unsigned `emitted_at` timestamp into the envelope (top-level
+metadata — it does *not* change the checkpoint's signed identity, so the anchor still verifies and stays
+byte-compatible across the sovereign and offense planes). Two timers ship and are enabled in the production
+posture:
+
+- **`apps/sigil/deploy/systemd/sigil-checkpoint.{service,timer}`** — `sigil checkpoint emit --out <off-box>`
+  (owner-signed), every 15 min.
+- **`infra/systemd/vigil-checkpoint.{service,timer}`** — `vigil floor witness --watch` (offense
+  governance-signed), every 15 min.
+
+Each cycle refreshes `emitted_at` **even on an idle spine** (a liveness touch, so the anchor is never more
+than one cadence old), writes a **dead-man heartbeat** (`<retain>.emit-heartbeat.json`), and — before
+refreshing — **alarms** (`<retain>.emit-alarms.jsonl` + journal) if the anchor was already stale: `warning`
+while it is still usable, `critical` once past the refusal bound, and `error` if the emit itself fails. If the
+timer stops firing, the heartbeat goes stale (`witnessed_anchor.emit_heartbeat_is_stale`).
+
+**Stale-anchor refusal (fail-closed).** `sigil floor promote-passive` / `tools/ha/spine_failover_guard.py`,
+`sigil floor verify-witnessed`, and `vigil floor verify-witnessed` **REFUSE (exit 2)** an anchor older than
+`VIGIL_ANCHOR_REFUSE_AFTER_S` (default 24h), one carrying **no** `emitted_at` (un-datable), or one dated in the
+**future** past a 5-min skew tolerance. `VIGIL_ANCHOR_WARN_AFTER_S` (default 6h) is the earlier *warning*
+bound. Keep the timer cadence well under the warn bound (the shipped timers fire every 15 min). Bounds are
+plane-neutral (`vigil_integration.witnessed_anchor.freshness_verdict`), so the offense and sovereign guards
+cannot drift.
+
+**Honest scope.** `emitted_at` is a fail-closed *operational-drift* signal (it catches a stopped emitter). It
+is **not** a tamper control: a same-host owner/governance key-holder who could forward-date it already defeats
+the local floor (the irreducible all-keys limit in HA-PROFILE §4). The anchor's signature + the anti-rollback
+consistency checks remain the tamper controls. **Claims-registry registration** of this behaviour is W0-3
+(#398), which does not exist yet — the claim is stated in `docs/decisions/W7-5-scheduled-witnessed-checkpoint-freshness.md`
+ready to fold in when it lands.

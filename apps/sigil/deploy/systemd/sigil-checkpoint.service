@@ -1,0 +1,55 @@
+# SIGIL scheduled off-box WITNESSED-CHECKPOINT emitter — systemd USER service (oneshot)
+# =====================================================================
+# W7-5 (#463). Runs `sigil checkpoint emit --out $SIGIL_CHECKPOINT_OUT`: it summarises the current
+# owner-signed spine head into an owner-witnessed checkpoint and writes it to an OFF-BOX path. This is the
+# anchor the HA active-passive FAILOVER GUARD (`sigil floor promote-passive`, tools/ha/spine_failover_guard.py)
+# refuses to promote below — and, since W7-5, refuses when it is STALE. The paired timer
+# (sigil-checkpoint.timer) fires this on a cadence so the anchor is refreshed CONTINUOUSLY instead of only
+# when a human runs it by hand (docs/architecture/HA-PROFILE.md §3.1 said "periodically" — this makes it so).
+#
+# ┌───────────────────────────────────────────────────────────────────┐
+# │  SIGIL_CHECKPOINT_OUT MUST be an OFF-BOX path (mounted second      │
+# │  disk / USB / remote or tunnel mount). A copy kept on the active   │
+# │  host is rolled back WITH the spine and is worthless as an anchor. │
+# └───────────────────────────────────────────────────────────────────┘
+#
+# INSTALL (paired with the timer — PRODUCTION posture enables the timer):
+#   cp deploy/systemd/sigil-checkpoint.{service,timer} ~/.config/systemd/user/
+#   $EDITOR ~/.sigil/bridge.env       # set SIGIL_CHECKPOINT_OUT to an off-box path
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now sigil-checkpoint.timer
+#
+# Manual run / logs:
+#   systemctl --user start sigil-checkpoint.service
+#   journalctl --user -u sigil-checkpoint -e
+
+[Unit]
+Description=SIGIL scheduled off-box witnessed-checkpoint emitter (HA anti-rollback anchor)
+Documentation=file:%h/vigil/docs/architecture/HA-PROFILE.md
+
+[Service]
+Type=oneshot
+
+EnvironmentFile=-%h/.sigil/bridge.env
+Environment=SIGIL_LOG_LEVEL=INFO
+# Default OUT (override in bridge.env to an OFF-BOX path in production).
+Environment=SIGIL_CHECKPOINT_OUT=%h/.sigil/checkpoint.witnessed.json
+
+WorkingDirectory=%h/.sigil
+ExecStart=%h/.sigil/venv/bin/sigil checkpoint emit --out ${SIGIL_CHECKPOINT_OUT}
+# Alternative if the `sigil` console script is not installed:
+# ExecStart=%h/.sigil/venv/bin/python -m sigil checkpoint emit --out ${SIGIL_CHECKPOINT_OUT}
+
+# --- hardening (same posture as consolidate) -------------------------------
+# It reads the spine head + owner key and writes the off-box checkpoint + its local tip; nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Add the off-box OUT directory here if it is outside ~/.sigil.
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOTE: if SIGIL_CHECKPOINT_OUT is a network/tunnel mount, add its mount point to ReadWritePaths.

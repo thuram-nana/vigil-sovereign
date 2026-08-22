@@ -1281,9 +1281,27 @@ def _cmd_floor_witness(args: argparse.Namespace) -> int:
             print("!! `vigil floor witness` needs --retain <path> (the OFF-BOX path a verifier keeps)",
                   file=sys.stderr)
             return 2
+        import time as _time
+        retain_path = Path(args.retain)
+
+        def _emit(now):
+            # W7-5: RE-READ head + high-water each cycle (the spine advances between emits), so a scheduled
+            # emitter always witnesses the CURRENT head and pushes a FRESH off-box anchor.
+            h = SignedChainHead.model_validate_json(head_p.read_text(encoding="utf-8"))
+            w = load_highwater(hw_p)
+            return FW.emit_highwater_witness(h, w, [FW.offense_governance_witness(gov)],
+                                             retain_path=retain_path, scope=args.scope, now=now)
+
+        if getattr(args, "watch", False):
+            hb = Path(args.heartbeat) if args.heartbeat else None
+            summary = WA.run_checkpoint_monitor(_emit, retain_path=retain_path, cycles=args.cycles,
+                                                interval=args.interval, heartbeat_path=hb)
+            print(f"offense witnessed-checkpoint scheduler: {summary['emits']} emit(s), "
+                  f"{summary['errors']} error(s) over {summary['cycles_run']} cycle(s) -> {retain_path}")
+            print(f"guarantee: {FW.offense_guarantee_label(trust_root)}")
+            return 0 if summary["errors"] == 0 else 1
         try:
-            wc = FW.emit_highwater_witness(head, hw, [FW.offense_governance_witness(gov)],
-                                           retain_path=Path(args.retain), scope=args.scope)
+            wc = _emit(int(_time.time()))
         except (FW.OffenseFloorWitnessError, WA.AnchorError) as e:
             print(f"!! offense floor witness failed: {e}", file=sys.stderr)
             return 1
@@ -1297,9 +1315,10 @@ def _cmd_floor_witness(args: argparse.Namespace) -> int:
         print("!! `vigil floor verify-witnessed` needs --external <path> (repeatable) — the OFF-BOX "
               "retained witnessed checkpoint(s)", file=sys.stderr)
         return 2
+    import time as _time
     sources = [sys.stdin.read() if x == "-" else Path(x).read_text() for x in args.external]
     ok, msg, _label = FW.verify_highwater_against_witnessed(head, hw, sources, scope=args.scope,
-                                                            trust_root=trust_root)
+                                                            trust_root=trust_root, now=_time.time())
     print(("offense floor anti-rollback OK: " if ok else "offense floor anti-rollback FAIL: ") + msg)
     if ok:
         # HONEST NUDGE: this is the LIGHT height/fork-at-height anchor. It proves no rollback below the
@@ -2931,6 +2950,17 @@ def build_parser() -> argparse.ArgumentParser:
     pfw.add_argument("--external", action="append", default=[],
                      help="(verify-witnessed) an OFF-BOX retained witnessed checkpoint (path or '-'); "
                           "repeatable — the HIGHEST valid one anchors")
+    pfw.add_argument("--watch", action="store_true",
+                     help="(witness, W7-5) run the emitter on a CADENCE instead of once — re-emits + re-pushes "
+                          "the off-box anchor each cycle so it never goes stale; alarms if it does. This is "
+                          "what the vigil-checkpoint.timer runs (`--watch --cycles 1`).")
+    pfw.add_argument("--interval", type=float, default=900.0,
+                     help="(witness --watch) seconds between emit cycles (default 900 = 15 min)")
+    pfw.add_argument("--cycles", type=int, default=0,
+                     help="(witness --watch) number of cycles (0 = forever; the timer passes 1)")
+    pfw.add_argument("--heartbeat", default="",
+                     help="(witness --watch) path for the emitter dead-man heartbeat (default: alongside "
+                          "--retain)")
     pfw.set_defaults(func=_cmd_floor_witness)
     pw.set_defaults(func=_cmd_witness)
 

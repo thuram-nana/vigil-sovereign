@@ -82,14 +82,18 @@ def _assert_highwater_matches_head(hw: Optional[dict], head) -> None:
 
 
 def emit_highwater_witness(head, hw: Optional[dict], witnesses: "list[Witness]", *,
-                           retain_path, scope: str):
+                           retain_path, scope: str, now=None):
     """Emit + persist a witnessed checkpoint of the just-advanced high-water floor's head, off-box at
     ``retain_path``. Asserts high-water⇔head coherence first. ``witnesses`` are GOVERNANCE-keyed
     :class:`transparency.Witness` objects (build via :func:`offense_governance_witness`). Returns the
     :class:`WitnessedCheckpoint`. ``retain_path`` is a path the verifier RETAINS OFF-BOX — a copy kept only
-    under ``--base-dir`` is rolled back with the spine and adds nothing over the local floor."""
+    under ``--base-dir`` is rolled back with the spine and adds nothing over the local floor.
+
+    W7-5 (#463): ``now`` (unix seconds) stamps the anchor's emission timestamp so a verifier can REFUSE a
+    STALE anchor. A SCHEDULED emitter passes ``now`` (the CLI/timer path does); a caller that passes none
+    keeps the legacy un-timestamped envelope (a freshness gate then treats it as un-dated → fail-closed)."""
     _assert_highwater_matches_head(hw, head)
-    return WA.emit_witnessed(head, witnesses, retain_path=retain_path, scope=scope)
+    return WA.emit_witnessed(head, witnesses, retain_path=retain_path, scope=scope, now=now)
 
 
 def _anchor_highwater(hw: Optional[dict], retained) -> tuple[bool, str]:
@@ -123,13 +127,18 @@ def offense_guarantee_label(trust_root: TrustRoot) -> str:
 
 
 def verify_highwater_against_witnessed(head, hw: Optional[dict], sources: Iterable[str], *,
-                                       scope: str, trust_root: TrustRoot) -> tuple[bool, str, str]:
+                                       scope: str, trust_root: TrustRoot, now=None,
+                                       warn_after_s=None, refuse_after_s=None) -> tuple[bool, str, str]:
     """Anchor the LOCAL head + high-water floor against the HIGHEST retained witnessed checkpoint. Returns
     ``(ok, message, guarantee_label)``. Fail-closed, mirroring the sovereign
     :func:`sigil.spine.floor_witness.verify_floor_against_witnessed`:
 
       * a supplied anchor that is malformed / wrong-scope / not signed by a trusted GOVERNANCE quorum →
         REFUSE (``select_highest_witnessed`` raises);
+      * W7-5 (#463): when ``now`` is given, the SELECTED (highest) anchor is checked for FRESHNESS — an
+        anchor older than the refusal bound (or un-dated, or future-dated past the skew tolerance) → REFUSE.
+        The scheduled off-box emitter has stopped and the rollback window is silently widening. ``now=None``
+        skips the freshness gate (a library/legacy caller keeps the pre-W7-5 behaviour);
       * the local HEAD rolled back below / forked at the retained height → REFUSE (``anchor_head``);
       * the local FLOOR rolled back / stripped below the retained height → REFUSE (:func:`_anchor_highwater`).
 
@@ -137,12 +146,17 @@ def verify_highwater_against_witnessed(head, hw: Optional[dict], sources: Iterab
     guarantee, unchanged."""
     label = offense_guarantee_label(trust_root)
     try:
-        retained = WA.select_highest_witnessed(sources, scope=scope, trust_root=trust_root)
+        picked = WA.select_highest_witnessed_with_age(sources, scope=scope, trust_root=trust_root)
     except WA.AnchorError as e:
         return False, f"CANNOT VERIFY (refused): {e}", label
-    if retained is None:
+    if picked is None:
         return True, "no retained witnessed checkpoint supplied — off-box anchor skipped (local-only)", label
+    retained, emitted_at = picked
     ck = retained.checkpoint
+    if now is not None:
+        fv = WA.freshness_verdict(emitted_at, now=now, warn_after_s=warn_after_s, refuse_after_s=refuse_after_s)
+        if fv.refuse:
+            return False, f"STALE ANCHOR (refused): {fv.detail}", label
     ok_h, why_h = WA.anchor_head(head, retained=ck)
     if not ok_h:
         return False, why_h, label
