@@ -1,6 +1,6 @@
-From 334f42a7916ebe87b41aa8b22be16408dba64f55 Mon Sep 17 00:00:00 2001
+From 81ce4c6cbcbde41d4da493a54d3c8ee299246c52 Mon Sep 17 00:00:00 2001
 Subject: [strix-patch 025] Strix+HexStrike sx-s5: harden the Strix runtime container (least-privilege + pinned image + reaper)
-X-VIGIL-Commit: 334f42a7916ebe87b41aa8b22be16408dba64f55
+X-VIGIL-Commit: 81ce4c6cbcbde41d4da493a54d3c8ee299246c52
 X-VIGIL-Date: 2026-08-22T03:05:19-04:00
 
 diff --git a/vendor/strix/strix/config/settings.py b/vendor/strix/strix/config/settings.py

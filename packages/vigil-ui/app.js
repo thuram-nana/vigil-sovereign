@@ -8910,12 +8910,49 @@
       PRF.data = d; drawProof(body);
     }).catch(function () { PRF.data = null; drawProof(body); });
   }
+  // inv 12 (S9): a degraded proof subsystem must NOT read like a clean run. Each typed disposition
+  // gets its own plain-language line so a degraded-with-zero-records run is VISIBLY different from an
+  // honest "nothing found". Keyed on d.disposition (never on d.pending, which conflated the four).
+  var PROOF_DEG_LABEL = {
+    proof_subsystem_unavailable: "The proof subsystem never came up on this run (bootstrap / gateway / Caido down). NO finding here could be verified — this is NOT a clean result.",
+    capture_failed: "Evidence capture failed for at least one finding, so it could not reach a FACT — this is NOT a clean result.",
+    redrive_failed: "A gated web re-drive could not RUN (gateway down / network crash / import error), so a finding could not be verified — this is NOT a clean result.",
+    mint_failed: "The proof mint crashed for at least one captured finding, so it could not reach a FACT — this is NOT a clean result."
+  };
+  function proofEmptyText(d) {
+    // Branch on the typed disposition, NEVER on d.pending — an empty proof list means four different
+    // things and each must read differently. The four degraded dispositions are never "nothing found".
+    switch (d.disposition) {
+      case "proof_subsystem_unavailable":
+      case "capture_failed":
+      case "redrive_failed":
+      case "mint_failed":
+        return "No proof records — but the proof subsystem DEGRADED on this run (" + String(d.disposition)
+          + "). This is NOT 'nothing found': the check could not be completed here, so the run is NOT clean.";
+      case "nothing_found":
+        return "no proofs yet for this run — Strix mints a proof when a reproduction is oracle-confirmed";
+      default:
+        return "no proofs for this run";
+    }
+  }
   function drawProof(body) {
     var d = PRF.data || {};
     if (PRF.loaded && !PRF.runs.length && activeEngagement()) {
       V.mount(body, scopedEmpty("proofs", "Nothing has run under this job yet — a reproduction an oracle confirms becomes a signed, replayable proof here.", [newAssessBtn()]));
       return;
     }
+    // inv 12 (S9): a DISTINCT, prominent banner whenever verification_degraded — it names the typed
+    // disposition and the rolled-up causes so an operator cannot mistake a down subsystem for clean.
+    var degradedBanner = d.verification_degraded ? h("div.card.verification-degraded", { role: "alert" }, [
+      h("div.card-h", null, [
+        h("h3", { style: { color: "var(--st-blocked)" } }, [V.icon("info"), " Verification degraded — this run is NOT clean"]),
+        h("span.pill.sm.danger", { style: { marginLeft: "auto" } }, String(d.disposition || "degraded"))]),
+      h("p", null, PROOF_DEG_LABEL[d.disposition]
+        || "The proof subsystem degraded on this run, so an empty proof list does NOT mean the target is clean."),
+      ((d.degraded_causes || []).length ? h("div.kv", null, [h("div.k", null, "Causes"),
+        h("div.v", null, (d.degraded_causes || []).map(function (c) {
+          return h("span.pill.sm.danger", null, String(c.kind) + " ×" + String(c.count || 1)); }))]) : null)
+    ]) : null;
     var picker = h("div.card", null, [h("label", { style: { marginRight: "8px" } }, "Run"),
       h("select", { onChange: function (e) { PRF.run = e.target.value; loadProof(body); } },
         [h("option", { value: "", selected: !PRF.run }, "— select a run —")].concat(
@@ -8982,11 +9019,9 @@
             : h("span.hint", null, "not spooled (only a FACT crosses)"))]),
         (p.reason ? h("div.hint", { style: { marginTop: "4px" } }, String(p.reason)) : null)]);
     });
-    V.mount(body, [picker, summary,
+    V.mount(body, [picker, degradedBanner, summary,
       (rows.length ? h("div", null, rows)
-        : h("div.card", null, [h("div.empty", null, d.pending
-            ? "no proofs yet for this run — Strix mints a proof when a reproduction is oracle-confirmed"
-            : "no proofs for this run")])),
+        : h("div.card", null, [h("div.empty", null, proofEmptyText(d))])),
       h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
   }
 

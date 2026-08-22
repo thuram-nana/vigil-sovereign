@@ -258,8 +258,16 @@ async def _do_create(  # noqa: PLR0912
                 proof_capture = await capture_for_report(
                     {"finding_class": (cwe or title or "web"), "endpoint": endpoint, "method": method,
                      "cwe": cwe, "title": title, "description": description})
-        except Exception:
+        except Exception as _cap_exc:
+            # inv 12 (S9): the proof_sink IS installed (this branch only runs then), so a capture
+            # was expected for this finding but building it FAILED (e.g. the capture/state import
+            # raised). Record a TYPED capture_failed cause — distinguishable from a clean target —
+            # rather than skipping silently.
             logger.debug("proof_capture skipped", exc_info=True)
+            from strix.report.degradation_hook import CAPTURE_FAILED
+            from strix.report.degradation_hook import record as _vigil_degrade
+
+            _vigil_degrade(CAPTURE_FAILED, "strix.reporting.create_vulnerability_report", _cap_exc)
 
         existing = report_state.get_existing_vulnerabilities()
         candidate = {

@@ -1,8 +1,9 @@
 """proof_capture — build the executor-captured exchange bundle a VIGIL proof is minted from (Proof Studio).
 
-This module is IMPORT-CLEAN: it imports only stdlib and (lazily, inside the async orchestrator) strix's own
-``tools.proxy.caido_api``. It NEVER imports ``vigil_integration`` or ``framework`` — the mint happens later,
-in the (offense-env) ``proof_sink`` hook. All this does is turn the raw request/response bytes Caido already
+This module is IMPORT-CLEAN of the integration package: it imports only stdlib, strix's own modules
+(``tools.proxy.caido_api`` lazily; the ``report.degradation_hook`` bridge in the capture-failure
+handler, inv 12), never ``framework``/``vigil_integration`` directly. The mint happens later, in the
+offense-env ``proof_sink`` hook. All this does is turn the raw request/response bytes Caido already
 captured into the plain-dict ``_vigil_capture`` structure the sink understands::
 
     {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
@@ -150,7 +151,15 @@ async def capture_for_report(
         return build_error_signature_capture(
             bug_class=bug_class, exploit_body=body, exploit_status=status, control_body=control_body,
             exploit_request=request_bytes)
-    except Exception:  # noqa: BLE001 — capture is best-effort; a failure just means no proof (an honest LEAD)
+    except Exception as exc:  # noqa: BLE001 — capture is best-effort; it never raises into Strix
+        # inv 12 (S9): a capture was genuinely ATTEMPTED (a bug_class was present, past the guard
+        # above) and it FAILED (e.g. Caido raised) — NOT the same as "nothing to capture". Record a
+        # TYPED capture_failed cause so the console distinguishes a failed capture from a clean
+        # target; the finding still stays a LEAD. No-op standalone; the bridge never raises.
+        from strix.report.degradation_hook import CAPTURE_FAILED
+        from strix.report.degradation_hook import record as _vigil_degrade
+
+        _vigil_degrade(CAPTURE_FAILED, "strix.proof_capture.capture_for_report", exc)
         return None
 
 

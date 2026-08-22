@@ -141,8 +141,14 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         from vigil_integration.proof.bootstrap import install_from_env
 
         install_from_env()
-    except Exception:  # noqa: BLE001 — never let proof wiring stop a scan
-        pass
+    except Exception as _proof_exc:  # noqa: BLE001 — never let proof wiring stop a scan
+        # inv 12 (S9): a VIGIL run (VIGIL_PROOF_RUN_DIR set) expected proofs but the proof-sink
+        # wiring failed to even install — record a TYPED proof_subsystem_unavailable cause so the
+        # console does not render this run's empty proof list as "clean". No-op standalone.
+        from strix.report.degradation_hook import PROOF_SUBSYSTEM_UNAVAILABLE
+        from strix.report.degradation_hook import record as _vigil_degrade
+
+        _vigil_degrade(PROOF_SUBSYSTEM_UNAVAILABLE, "strix.cli.install_from_env", _proof_exc)
 
     def create_live_status() -> Panel:
         status_text = Text()

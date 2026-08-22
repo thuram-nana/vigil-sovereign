@@ -62,7 +62,7 @@ def install(
     mint = build_report_mint(
         run_dir=run_dir, signers=signers, engagement_slug=engagement_slug,
         evidence_root=evidence_root, spool_dir=spool_dir, quarantine_dir=quarantine_dir)
-    sink = ProofSink(quarantine_dir=quarantine_dir, mint=mint)
+    sink = ProofSink(quarantine_dir=quarantine_dir, mint=mint, run_dir=run_dir)
     report_state.proof_sink = sink
     logger.info("Proof Studio sink installed for engagement=%s run_dir=%s", engagement_slug, run_dir)
     return sink
@@ -84,6 +84,14 @@ def install_from_env() -> Any:
             quarantine_dir=os.environ.get("VIGIL_PROOF_QUARANTINE") or None,
             base_dir=os.environ.get("VIGIL_BASE_DIR") or None,
         )
-    except Exception:  # noqa: BLE001 — a bootstrap failure must never stop Strix; it just means no proofs
+    except Exception as exc:  # noqa: BLE001 — a bootstrap failure must never stop Strix
+        # inv 12 (S9): the console EXPECTED proofs (VIGIL_PROOF_RUN_DIR is set) but the sink did not install
+        # — the gateway/Caido is down, the authority was unprovisionable, or framework failed to import. The
+        # subsystem is UNAVAILABLE for this whole run, so an empty proof list must NOT read as "clean". Record
+        # the typed cause so the console surfaces it instead of the single "no proofs" state.
         logger.warning("Proof Studio sink install skipped (non-fatal)", exc_info=True)
+        from .degradation import PROOF_SUBSYSTEM_UNAVAILABLE, record_degradation
+
+        record_degradation(run_dir, PROOF_SUBSYSTEM_UNAVAILABLE,
+                           where="proof.bootstrap.install_from_env", detail=type(exc).__name__)
         return None

@@ -28,6 +28,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .degradation import CAPTURE_FAILED, DEGRADED_NAME, REDRIVE_FAILED, record_degradation
 from .engine import mint_proof
 from .sink import CAPTURE_KEY
 
@@ -45,6 +46,17 @@ def _proofs_dir(run_dir: str | os.PathLike) -> Path:
     return d
 
 
+def _record_degraded(run_dir: "str | os.PathLike", kind: str, where: str, exc: BaseException) -> None:
+    """Record a TYPED proof-degradation cause (inv 12 / S9) for an EXECUTION failure swallowed inside the
+    mint callback — best-effort, NEVER raises into Strix. Only a RAISED failure reaches here; a legitimate
+    non-confirmation (missing endpoint / gate refusal / oracle non-fire) returns without calling this, so it
+    stays a plain LEAD and remains clean-eligible."""
+    try:
+        record_degradation(run_dir, kind, where=where, detail=type(exc).__name__)
+    except Exception:  # noqa: BLE001 — a degradation recorder must never raise into the scan path
+        pass
+
+
 def read_proofs(run_dir: str | os.PathLike) -> list[dict]:
     """Every persisted proof record for a run (plain JSON). Total on a missing dir / bad file."""
     d = Path(run_dir) / PROOFS_SUBDIR
@@ -52,7 +64,7 @@ def read_proofs(run_dir: str | os.PathLike) -> list[dict]:
         return []
     out: list[dict] = []
     for f in sorted(d.glob("*.json")):
-        if f.name == REVERIFIABLE_NAME:      # the C1 re-verifiable report is a sibling, not a proof record
+        if f.name in (REVERIFIABLE_NAME, DEGRADED_NAME):  # siblings, not proof records (C1 report / inv-12 manifest)
             continue
         try:
             rec = json.loads(f.read_text(encoding="utf-8"))
@@ -307,7 +319,12 @@ def _web_redrive_mint(report: dict, wclass: str, *, run_dir: "str | os.PathLike"
         # bootstrap provisions the run's authority under ``engagement_slug``, so the two scopes are identical
         # by construction (a future deployment needing distinct slugs is deferred).
         wr = web_redrive(url, slug=engagement_slug, engagement_slug=engagement_slug, signers=signers)
-    except Exception:  # noqa: BLE001 — a re-drive failure drops the mint (LEAD), never raises into Strix
+    except Exception as exc:  # noqa: BLE001 — a re-drive failure drops the mint (LEAD), never raises into Strix
+        # inv 12 (S9): the VIGIL-owned re-drive EXECUTION raised (gateway down / network crash / framework
+        # import error) — a re-drive we could not RUN, not a target we confirmed clean. Record the typed
+        # cause so the console distinguishes it from a genuine non-confirmation (which returns None WITHOUT
+        # raising below). Without this the swallow renders as disposition=nothing_found / clean=True.
+        _record_degraded(run_dir, REDRIVE_FAILED, "proof.run._web_redrive_mint", exc)
         return None
     # Tie the mint to the CLAIM: FACT only if the class Strix claimed was independently confirmed. Sibling
     # web classes web_redrive also probes stay in ``wr.facts`` (signed, persisted) but do NOT relabel THIS
@@ -352,7 +369,12 @@ def build_report_mint(
             return None
         try:
             exchanges = [CapturedExchange(**{k: v for k, v in ex.items() if k != "blob"}) for ex in ex_dicts]
-        except Exception:  # noqa: BLE001 — a malformed/hostile capture drops the mint (stays a LEAD), never raises
+        except Exception as exc:  # noqa: BLE001 — a malformed/hostile capture drops the mint (LEAD), never raises
+            # inv 12 (S9): building the executor exchanges from the attached capture RAISED — the capture was
+            # present but unusable, so this finding cannot reach a FACT and its absence must not read as clean.
+            # (An empty/absent capture returns None ABOVE without raising and stays a plain, clean-eligible
+            # LEAD; only this RAISED path degrades.)
+            _record_degraded(run_dir, CAPTURE_FAILED, "proof.run.mint.capture", exc)
             return None
 
         def _resolve(ref: str) -> "bytes | None":

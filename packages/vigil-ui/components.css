@@ -196,6 +196,9 @@ button { font: inherit; }
 @media (max-width: 720px) { .cols-2, .cols-3, .cols-4 { grid-template-columns: 1fr; } }
 .card { background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--r-3); padding: var(--sp-5); }
 .card.owner { border-top: 2px solid var(--owner-line); }
+/* inv 12 (S9): a degraded proof subsystem reads as a distinct alarm, never like a clean run. */
+.card.verification-degraded { border-color: color-mix(in srgb, var(--st-blocked) 55%, var(--border));
+  border-left: 3px solid var(--st-blocked); background: color-mix(in srgb, var(--st-blocked) 8%, var(--bg-1)); }
 .card > .card-h { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-4); }
 .card > .card-h h3 { font-size: var(--fs-lg); }
 .card > .card-h .label { margin: 0; }
