@@ -20,6 +20,7 @@ STDLIB + the console package only; runs inside the `CRUCIBLE core on vigil_core`
 """
 from __future__ import annotations
 
+import ast
 import re
 import threading
 import urllib.error
@@ -46,11 +47,47 @@ SERVER_SRC = Path(server.__file__).read_text(encoding="utf-8")
 
 # The GET read routes special-cased in ``do_GET`` (matched by name/prefix before the dispatch tables).
 # Kept here as an explicit list so a reviewer sees exactly what is enumerated beyond the three registries.
+# This hand-list is NO LONGER load-bearing on its own: ``test_special_get_routes_track_the_server_source``
+# below re-derives the special-cased set from the server SOURCE (parses ``do_GET``) and fails if this tuple
+# and the source ever disagree in EITHER direction — a new special-cased route drifting past the guard, or a
+# stale entry lingering after its route was removed. So a NEW ``do_GET`` route cannot be orphaned by omission.
 _SPECIAL_GET_ROUTES = (
     "/api/events", "/api/blackboard", "/api/chat/sessions", "/api/chat/session/",
     "/api/chat/hypotheses", "/api/chat/models", "/api/aegis/verdicts", "/api/dossier/",
     "/api/brain/decision",
 )
+
+
+def _do_get_route_literals(src: str) -> set[str]:
+    """Every ``/api/...`` path string literal that ``do_GET`` COMPARES against the request path, derived
+    from the server SOURCE (not the hand-list) so a new special-cased route cannot silently drift past the
+    orphan guard. We collect the string operands of ``path == "..."`` comparisons and of
+    ``path.startswith(...)`` / ``path.endswith(...)`` calls inside ``do_GET``, then keep only the ``/api/``
+    route shapes — dropping the bare ``/api/`` prefix (the token gate + the catch-all 404, not a route) and
+    non-route suffixes like ``.zip``."""
+    tree = ast.parse(src)
+    do_get = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "do_GET"),
+        None,
+    )
+    assert do_get is not None, "could not locate do_GET in the server source"
+    lits: set[str] = set()
+    for node in ast.walk(do_get):
+        consts: list[str] = []
+        if isinstance(node, ast.Compare):
+            for operand in (node.left, *node.comparators):
+                if isinstance(operand, ast.Constant) and isinstance(operand.value, str):
+                    consts.append(operand.value)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr in ("startswith", "endswith")):
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    consts.append(arg.value)
+        for v in consts:
+            if v.startswith("/api/") and v != "/api/":
+                lits.add(v)
+    return lits
 
 # Registered read routes that are DELIBERATELY not consumed by the shipped UI but are kept as a documented,
 # programmatic surface. Each entry needs a one-line reason. EMPTY today: after W17-14 every console read
@@ -92,6 +129,53 @@ def test_negative_control_the_checker_is_not_a_no_op():
     # …and documenting it (an allowlist entry) or wiring it (present in the UI text) clears it.
     assert _orphans([fake], APP_JS, {fake: "programmatic only"}) == []
     assert _orphans([fake], APP_JS + f'OFF("{fake}")', {}) == []
+
+
+# --------------------------------------------------------------------------------------------------
+# Drift proof — the special-GET-route set is DERIVED from the server source, not hand-trusted
+# --------------------------------------------------------------------------------------------------
+def test_special_get_routes_track_the_server_source():
+    # Every ``/api/`` route ``do_GET`` special-cases (parsed from the SOURCE) must be accounted for — either
+    # enumerated in ``_SPECIAL_GET_ROUTES`` or already a key in one of the dispatch registries. A NEW
+    # special-cased ``do_GET`` route added without registering it turns THIS test (and the CI job) red — the
+    # exact orphan shape W17-14 removed can no longer recur by omission.
+    compared = _do_get_route_literals(SERVER_SRC)
+    allowed = _registered_read_routes()  # _SPECIAL_GET_ROUTES ∪ the three dispatch registries
+    unregistered = sorted(compared - allowed)
+    assert unregistered == [], (
+        "do_GET special-cases these /api/ route(s) that are neither in _SPECIAL_GET_ROUTES nor a dispatch "
+        f"registry key — add each to _SPECIAL_GET_ROUTES (and wire/document it in the orphan guard): {unregistered}"
+    )
+    # …and the reverse: no stale hand-list entry that the source no longer compares (bidirectional sync).
+    stale = sorted(r for r in _SPECIAL_GET_ROUTES if r not in compared)
+    assert stale == [], (
+        f"_SPECIAL_GET_ROUTES lists route(s) do_GET no longer special-cases — remove them: {stale}"
+    )
+
+
+def test_route_derivation_catches_a_new_unregistered_do_GET_route():
+    # The negative control for the drift guard: a synthetic do_GET that special-cases a brand-new /api/ path
+    # MUST be surfaced by the source parser, and that path MUST NOT already be registered — otherwise the
+    # guard above could pass vacuously (a no-op parser would find nothing to flag).
+    fake_src = (
+        "class H:\n"
+        "    def do_GET(self):\n"
+        "        path = self.path\n"
+        "        if path == '/api/__w17_14_new_orphan__':\n"
+        "            return self._json({})\n"
+        "        if path.startswith('/api/__w17_14_new_prefix__/'):\n"
+        "            return self._json({})\n"
+        "        if path.startswith('/api/'):\n"
+        "            return self._json({}, status=404)\n"
+    )
+    lits = _do_get_route_literals(fake_src)
+    assert lits == {"/api/__w17_14_new_orphan__", "/api/__w17_14_new_prefix__/"}, lits
+    # the bare "/api/" prefix is correctly excluded (it is the catch-all, not a route)
+    assert "/api/" not in lits
+    # and neither synthetic route is registered, so the drift guard WOULD fail on this source
+    assert not (lits & _registered_read_routes())
+    # the real parser is not a no-op: it recovers exactly the shipped special-cased set
+    assert _do_get_route_literals(SERVER_SRC) == set(_SPECIAL_GET_ROUTES)
 
 
 # --------------------------------------------------------------------------------------------------
