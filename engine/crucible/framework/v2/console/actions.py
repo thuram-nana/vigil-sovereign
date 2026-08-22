@@ -810,7 +810,7 @@ def retry_run(run_id: str) -> dict:
         if _sbx_banner:
             print(_sbx_banner, file=sys.stderr)
         env_extra = {"VIGIL_PROOF_RUN_DIR": new_rd, "VIGIL_ENGAGEMENT": slug,
-                     "VIGIL_BASE_DIR": os.environ.get("VIGIL_BASE_DIR") or ".vigil-live",
+                     "VIGIL_BASE_DIR": _strix_runtime_base_dir(),
                      **_sbx_env, **strix_env, **_alias_extra}
     _spawn_background(new_id, rd, new_cmd, new_meta, capture_report=capture_report,
                       env_extra=env_extra, env_remove=env_remove)
@@ -1289,6 +1289,30 @@ def _strix_sovereignty_refusal(strix_llm_env: dict) -> str:
         return (f"the sovereignty policy could not be evaluated ({type(e).__name__}); refusing the Strix "
                 f"codebase run rather than risk egressing the source. Pick a local model, or set the tier.")
     return ""
+
+
+def _strix_runtime_bin() -> str:
+    """The Strix executable, located by the ONE authoritative runtime adapter (sx-s1) so the console and the
+    ``vigil strix`` CLI resolve the same binary from a single place. Falls back to the bare name only when
+    the integration package is not importable (the codebase branch's sandbox gate refuses in that case
+    anyway, before anything spawns)."""
+    try:
+        from vigil_integration.strix_runtime import resolve_strix_bin
+        return resolve_strix_bin()
+    except Exception:  # noqa: BLE001 — integration package absent ⇒ bare name (sandbox gate refuses first)
+        return "strix"
+
+
+def _strix_runtime_base_dir() -> str:
+    """The ABSOLUTE engagement base dir the spawned Strix child's WARDEN reads for the provisioned owner
+    authority, resolved by the ONE authoritative runtime adapter (sx-s1) — so a relative ``.vigil-live`` can
+    no longer be re-rooted to a child's CWD and hard-block every ``exec_command``. Falls back to the prior
+    convention only when the integration package is not importable."""
+    try:
+        from vigil_integration.strix_runtime import resolve_base_dir
+        return resolve_base_dir()
+    except Exception:  # noqa: BLE001 — integration package absent ⇒ prior (relative) convention
+        return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
 
 
 def _strix_sandbox_gate() -> "tuple[dict, str, str]":
@@ -1784,7 +1808,7 @@ def launch_assessment(body: dict) -> dict:
         if not ready:
             return {"error": f"a codebase run uses the Strix sandbox, which needs Docker — {why}. Start "
                              f"Docker and retry, or give a URL/infra target instead."}
-        strix = shutil.which("strix") or "strix"
+        strix = _strix_runtime_bin()
         unapplied = _unapplied("a codebase run (Strix chooses its own analysis passes over the source)",
                                "Capability packs belong to a web/API engagement; a codebase run takes none.")
         mount = bool(body.get("mount", False))
@@ -1825,7 +1849,7 @@ def launch_assessment(body: dict) -> dict:
             print(_sbx_banner, file=sys.stderr)
         _spawn_background(run_id, rd, cmd, meta, capture_report=False,
                           env_extra={"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug,
-                                     "VIGIL_BASE_DIR": os.environ.get("VIGIL_BASE_DIR") or ".vigil-live",
+                                     "VIGIL_BASE_DIR": _strix_runtime_base_dir(),
                                      **_sbx_env, **strix_llm_env, **_alias_extra},
                           env_remove=_alias_remove)
         return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "progress",

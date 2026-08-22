@@ -28,6 +28,18 @@ _ENV = {
     "gateway":  ("offense",  "vigil-gateway"),   # the host egress gate
 }
 
+# Verbs that must NOT reach their raw console-script directly — they route through a VIGIL-owned runtime
+# adapter run as ``python -m <module>`` in the verb's OWN venv, so the adapter performs the full pre-flight
+# (sandbox-network pin, model/sovereignty gate, ABSOLUTE VIGIL_BASE_DIR, proof-run dir) BEFORE it exec's the
+# real tool. ``strix`` is one: dispatching ``.venv-offense/bin/strix`` directly skipped every one of those
+# and, notably, left VIGIL_BASE_DIR unset so the agent's WARDEN gate hard-blocked every exec_command against
+# an authority provisioned elsewhere (sx-s1). This module stays PURE-STDLIB + EXEC-ONLY: it only builds an
+# argv for the child ``python -m`` — it imports NEITHER the adapter NOR any subsystem (the adapter, and the
+# framework/strix it needs, load ONLY inside the offense-plane child).
+_RUNTIME_MODULE = {
+    "strix": "vigil_integration.strix_runtime",
+}
+
 PASSTHROUGH_VERBS = frozenset(_ENV)
 
 
@@ -67,16 +79,34 @@ def resolve(verb: str) -> Path:
 def dispatch(verb: str, argv: list[str]) -> int:
     """EXEC `verb`'s console-script (in its own venv) with `argv`, inheriting stdio, and return its exit
     code. Never imports the subsystem — a separate OS process in the correct trust domain runs it."""
-    try:
-        path = resolve(verb)
-    except DispatchError as e:
-        print(f"vigil: {verb}: {e}", file=sys.stderr)
-        return 2
     env_name = _ENV[verb][0]
-    if not path.exists():
-        print(f"vigil: {verb}: the {env_name} environment is not built ({path} missing) — "
-              f"run envs/build_envs.sh, or set VIGIL_ROOT.", file=sys.stderr)
-        return 127
+    if verb in _RUNTIME_MODULE:
+        # Route through the VIGIL-owned runtime adapter: run it as `python -m <module>` in the verb's OWN
+        # venv (a separate process in the correct trust domain), so the adapter's full pre-flight runs
+        # BEFORE it exec's the real tool. Still exec-only here — we build an argv for the child python, we
+        # do NOT import the adapter (it, and the framework/strix it needs, load only inside that child).
+        try:
+            py = _repo_root() / f".venv-{env_name}" / "bin" / "python"
+        except DispatchError as e:
+            print(f"vigil: {verb}: {e}", file=sys.stderr)
+            return 2
+        if not py.exists():
+            print(f"vigil: {verb}: the {env_name} environment is not built ({py} missing) — "
+                  f"run envs/build_envs.sh, or set VIGIL_ROOT.", file=sys.stderr)
+            return 127
+        path = py
+        cmd = [str(py), "-m", _RUNTIME_MODULE[verb], *argv]
+    else:
+        try:
+            path = resolve(verb)
+        except DispatchError as e:
+            print(f"vigil: {verb}: {e}", file=sys.stderr)
+            return 2
+        if not path.exists():
+            print(f"vigil: {verb}: the {env_name} environment is not built ({path} missing) — "
+                  f"run envs/build_envs.sh, or set VIGIL_ROOT.", file=sys.stderr)
+            return 127
+        cmd = [str(path), *argv]
     # Present a CLEAN environment to the cross-venv child: strip PYTHONPATH / PYTHONHOME so a value from
     # the PARENT's invocation (e.g. an offense-side `PYTHONPATH=engine/crucible`) can NEVER inject the other
     # trust domain's modules into the child interpreter — so NO other-trust-domain module is reachable, and
@@ -94,7 +124,7 @@ def dispatch(verb: str, argv: list[str]) -> int:
     # crucible …) work; the child runs in its own venv → no co-loading of the two trust domains. `argv` is
     # a LIST (no shell), so subsystem args pass through verbatim with no shell-injection surface.
     try:
-        return subprocess.run([str(path), *argv], env=child_env).returncode
+        return subprocess.run(cmd, env=child_env).returncode
     except OSError as e:
         # the console-script exists but cannot be executed (e.g. a half-built venv whose shebang interpreter
         # is missing). Fail CLEAN + non-zero, never a raw traceback out of main().
