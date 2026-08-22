@@ -1264,28 +1264,103 @@ def cmd_budget(a) -> None:
 
 
 def cmd_doctor(a) -> None:
-    """Whole-install self-check: SIGIL_HOME writable, kernel present, Qdrant reachable, keyring, claude."""
+    """Whole-install self-check driven by the SHARED doctor check registry (W6-6).
+
+    `sigil doctor` and `vigil doctor` are no longer two disjoint self-checks: both build their report from
+    the ONE registry in `vigil_core.doctor` and honour the SAME exit rule (a failed REQUIRED check ⇒ a
+    non-zero exit; an advisory one — a missing optional dependency — never does). The sovereign-specific
+    checks (SIGIL_HOME, kernel, Qdrant, keyring, claude, the vault at-rest seal, the kernel-pin integrity)
+    stay here; the SHARED security-posture block and the opt-in production gate come from the ONE
+    implementation in `vigil_integration.doctor` (boundary-safe: it imports neither sigil nor framework).
+    `--json` emits the whole report machine-readably. FATAL-2: the offense engine is never imported."""
+    import json as _json
     import sys as _sys
 
+    from vigil_core.doctor import Check, overall_ok
+
     from .config import doctor, effective_config
-    print("SIGIL doctor — install self-check\n")
-    ok_all = True
+    as_json = bool(getattr(a, "json", False))
+    checks: "list[Check]" = []
+
+    # 1) the sovereign runtime self-checks. SIGIL_HOME writability is REQUIRED (nothing works without it);
+    #    the kernel binary / Qdrant / keyring / claude CLI are ADVISORY optional dependencies — a fresh
+    #    checkout runs without them, so their absence is reported but must NOT flip the exit code (this is
+    #    the reclassification that lets `make smoke` drop its `|| true` and honour the exit honestly).
+    _REQUIRED_SOVEREIGN = {"sigil_home_writable"}
     for name, ok, detail in doctor():
-        ok_all = ok_all and ok
-        print(f"  [{'OK' if ok else '!!'}] {name:16} {detail}")
-    # at-rest sealing status (audit G1). UNSEALED is a prominent WARNING, not a hard doctor failure —
-    # the box works either way; provisioning is the operator's one-time choice.
+        checks.append(Check(id=name, ok=ok, required=(name in _REQUIRED_SOVEREIGN), state=("OK" if ok else "FAIL"),
+                            detail=detail))
+    # at-rest sealing status (audit G1). UNSEALED is a prominent WARNING, not a hard doctor failure — the
+    # box works either way; provisioning is the operator's one-time choice — so it is ADVISORY.
     from .platform.vault import owner_vault
     _v = owner_vault()
-    print(f"  [{'OK' if _v.enabled() else '**'}] {'vault':16} {_v.status()}")
-    # kernel-binary integrity pin (audit G2). '**' unpinned is a WARNING (opt-in), '!!' is fail-closed
-    # (a swapped binary / forged manifest — the kernel will NOT run). Any config drift is advisory.
+    checks.append(Check(id="vault", ok=_v.enabled(), required=False,
+                        state=("SEALED" if _v.enabled() else "UNSEALED"), detail=_v.status()))
+    # kernel-binary integrity pin (audit G2). '**' unpinned is a WARNING (opt-in), '!!' is fail-closed (a
+    # swapped binary / forged manifest — the kernel will NOT run), so ONLY an active tamper ('!!') is a
+    # REQUIRED failure; '**' (unpinned) passes. Config drift is advisory.
     from .governor.integrity import config_drift, kernel_pin_status
     _mark, _detail = kernel_pin_status()
-    print(f"  [{_mark}] {'kernel_pin':16} {_detail}")
-    ok_all = ok_all and _mark != "!!"          # an active kernel tamper (!!) fails doctor; '**' (unpinned) does not
-    for _warn in config_drift():
+    checks.append(Check(id="kernel_pin", ok=(_mark != "!!"), required=True,
+                        state=("TAMPER" if _mark == "!!" else ("UNPINNED" if _mark == "**" else "OK")),
+                        detail=_detail))
+    drift = list(config_drift())
+
+    # 2) the SHARED security block — posture lines + the opt-in production gate — from the ONE
+    #    implementation both entry points use. The production gate is a REQUIRED check: when armed
+    #    (VIGIL_POSTURE=production) an unmet precondition flips the exit; when unset it is inert (ok True),
+    #    so the default run stays byte-identical.
+    from vigil_integration import doctor as _idoc
+    repo = _idoc.find_repo_root()
+    sec = _idoc.security_report(repo)
+    gate = sec["production_gate"]
+    checks.append(Check(id="production-posture", ok=bool(gate.get("ok", True)), required=True,
+                        state=(gate.get("posture") or "inert"),
+                        detail=("armed" if gate.get("armed") else "inert (VIGIL_POSTURE not production)")))
+
+    ok_all = overall_ok(checks)
+
+    if as_json:
+        print(_json.dumps({
+            "ok": ok_all,
+            "checks": [{"id": c.id, "ok": c.ok, "required": c.required, "state": c.state, "detail": c.detail}
+                       for c in checks],
+            "config_drift": drift,
+            "posture": sec["posture"],
+            "backup_timers": sec["backup_timers"],
+            "production_gate": gate,
+            "effective_config": effective_config(),
+        }, indent=2, default=str))
+        _sys.exit(0 if ok_all else 1)
+
+    print("SIGIL doctor — install self-check\n")
+    for c in checks:
+        if c.id == "production-posture":
+            continue
+        mark = "OK" if c.ok else ("!!" if c.required else "**")
+        print(f"  [{mark}] {c.id:16} {c.detail}")
+    for _warn in drift:
         print(f"  [**] {'config_drift':16} {_warn}")
+
+    # SHARED security-posture block — one honest line PER control (identical to `vigil doctor`'s).
+    posture = sec["posture"]
+    if posture:
+        _on = {"ON", "SEALED", "ACTIVE", "PRESENT", "DISABLED"}
+        print("\nSecurity posture (one line per control — shared with `vigil doctor`):")
+        width = max((len(str(p.get("control", ""))) for p in posture), default=0)
+        for p in posture:
+            control, state, detail = str(p.get("control", "?")), str(p.get("state", "?")), str(p.get("detail", ""))
+            m = "OK " if state in _on else ("?? " if state == "UNKNOWN" else ".. ")
+            print(f"  {m}{(control + ':'):<{width + 1}} {state}" + (f"  — {detail}" if detail else ""))
+    if gate.get("armed"):
+        if gate.get("ok"):
+            print(f"\nPRODUCTION posture gate (VIGIL_POSTURE={gate.get('posture')}) — all preconditions met.")
+        else:
+            n = len(gate.get("unmet", []))
+            print(f"\nPRODUCTION posture gate (VIGIL_POSTURE={gate.get('posture')}) — REFUSES: {n} unmet:")
+            for e in gate.get("unmet", []):
+                print(f"  !! {e['control']}: {e['state']} — {e['requirement']}")
+
     print("\neffective config (secrets redacted):")
     for k, v in effective_config().items():
         print(f"  {k:18} {v}")
@@ -1716,7 +1791,9 @@ def main(argv=None) -> None:
     configure_logging()                      # one structured-logging setup at startup (level from SIGIL_LOG_LEVEL)
     p = argparse.ArgumentParser(prog="sigil")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("doctor", help="self-check the install (SIGIL_HOME, kernel, Qdrant, keyring, claude)").set_defaults(fn=cmd_doctor)
+    pdoctor = sub.add_parser("doctor", help="self-check the install (SIGIL_HOME, kernel, Qdrant, keyring, claude) + the shared security posture")
+    pdoctor.add_argument("--json", action="store_true", help="emit the raw report as JSON")
+    pdoctor.set_defaults(fn=cmd_doctor)
     pvault = sub.add_parser("vault", help="at-rest sealing of the trust root (TPM-sealed KEK): status | provision")
     pvault.add_argument("vault_cmd", choices=["status", "provision"], nargs="?", default="status")
     pvault.set_defaults(fn=cmd_vault)
