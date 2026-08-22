@@ -17,7 +17,7 @@ import asyncio
 import logging
 import sys
 
-from .config import GatewayConfig
+from .config import GatewayConfig, firewall_from_env
 from .docker import SandboxNetworking
 
 
@@ -66,6 +66,20 @@ def main(argv: list[str] | None = None) -> int:
         SandboxNetworking().ensure_networks()
         print("networks ensured")
         return 0
+    # The L3/L4 firewall is pure packet policy — it needs NO charter scope (only the L7 proxy does), so
+    # these run without VIGIL_GATEWAY_CHARTER_SLUG. That is what lets the compose init service apply the
+    # backstop automatically at gateway bring-up, before Strix starts.
+    if args.command == "render-firewall":
+        print(firewall_from_env().render())
+        return 0
+    if args.command == "check-firewall":
+        firewall_from_env().check()
+        print("nft --check OK")
+        return 0
+    if args.command == "apply-firewall":
+        firewall_from_env().apply()
+        print("firewall applied")
+        return 0
 
     config = GatewayConfig.from_env()
 
@@ -76,18 +90,6 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_serve(config, host, port))
         except KeyboardInterrupt:
             return 0
-    if args.command == "render-firewall":
-        print(config.firewall().render())
-        return 0
-    if args.command == "check-firewall":
-        config.firewall().check()
-        print("nft --check OK")
-        return 0
-    if args.command == "apply-firewall":
-        config.firewall().apply()
-        print("firewall applied")
-        return 0
-
     parser.error(f"unknown command {args.command!r}")
     return 2
 

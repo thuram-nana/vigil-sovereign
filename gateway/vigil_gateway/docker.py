@@ -55,6 +55,14 @@ IMAGE_TAG_ENV = "VIGIL_GATEWAY_IMAGE_TAG"
 # still matches the current source — a check the Dockerfile/compose scanner cannot make on its own.
 PIN_RELPATH = os.path.join(".vigil-live", "gateway-image-pin.json")
 PIN_SCHEMA = "vigil-gateway-image-pin/1"
+
+# A DETERMINISTIC bridge interface name for the sandbox network (pinned via the docker driver-opt
+# `com.docker.network.bridge.name`, and passed to the firewall sidecar as VIGIL_GATEWAY_SANDBOX_IFACE).
+# Without it the bridge is `br-<random>`, unknowable ahead of time, so the auto-applied backstop could
+# only match by source-SUBNET — which is v4-only here and left IPv6 sandbox egress POLICY-ACCEPTED (it
+# bypassed the proxy). Matching by INTERFACE is family-agnostic (governs v4 AND v6) and spoof-proof
+# (NET_RAW can forge a source IP but not the arrival interface). Must be a valid iface name (<=15 chars).
+SANDBOX_BRIDGE = "vigil-sbx0"
 # Every docker call is timeout-bounded so a wedged daemon / pull / build can't pin the caller forever
 # (esp. the console request thread on `vigil services up` from the UI). Reads are quick; build/compose-up
 # may pull, so they get a generous bound.
@@ -159,6 +167,7 @@ class SandboxNetworking:
     egress_network: str = EGRESS_NETWORK
     sandbox_subnet: str = "172.31.240.0/24"
     proxy_port: int = 48081
+    sandbox_bridge: str = SANDBOX_BRIDGE   # deterministic bridge iface — governs v4+v6, spoof-proof
 
     def strix_env(self) -> dict[str, str]:
         """The env a caller must set so Strix pins the sandbox onto the locked-down net."""
@@ -222,6 +231,10 @@ networks:
   {self.sandbox_network}:
     name: {self.sandbox_network}
     internal: true              # Docker installs no route out — the deny-default boundary
+    driver_opts:
+      # Pin the bridge iface name so the firewall sidecar can govern by INTERFACE (family-agnostic:
+      # v4 AND v6) instead of a v4-only source-subnet match that leaves IPv6 egress policy-accepted.
+      com.docker.network.bridge.name: {self.sandbox_bridge}
     ipam:
       config:
         - subnet: {self.sandbox_subnet}
@@ -229,9 +242,52 @@ networks:
     name: {self.egress_network}
 
 services:
+  # The nftables L3/L4 BACKSTOP (S3) — a one-shot, PRIVILEGED sidecar that LOADS the host-side
+  # deny-default ruleset BEFORE the proxy (hence before Strix) comes up. It runs in the HOST network
+  # namespace with ONLY CAP_NET_ADMIN so `nft -f` lands in the authoritative netns, applies the ruleset,
+  # and EXITS. The proxy `depends_on` its CLEAN exit (below), so a backstop that cannot load FAILS the
+  # whole bring-up (`compose up --wait` returns non-zero) — the same fail-closed leg as W0-6, never a
+  # silent downgrade to the sandbox running without the backstop. `apply-firewall` needs no charter scope
+  # (the firewall is pure packet policy), so it runs from just these network coordinates. Rebuild the
+  # image (`docker build -t {gateway_image} gateway`) so it carries `nft`; `vigil services up` does this
+  # automatically only when the image is ABSENT.
+  #
+  # WHY user: "0" (root). The image's default user is the unprivileged `vigil` (uid 10001). For a NON-root
+  # process a capability added with `cap_add` sits only in the container's permitted/bounding set — it is
+  # NOT in the process's EFFECTIVE set (there are no file-capabilities on `nft`), so `nft -f` fails EPERM
+  # and the backstop CAN NEVER LOAD: a FAIL-OPEN (the sandbox could come up with egress ungoverned).
+  # Running the ONE-SHOT sidecar as root makes CapEff equal the container's cap set; with cap_drop [ALL] +
+  # cap_add [NET_ADMIN] that CapEff is exactly {{NET_ADMIN}} — every other capability is still dropped,
+  # no-new-privileges is set, and it applies the ruleset and exits. (The world-facing `vigil-gateway`
+  # proxy below keeps running as the unprivileged image default with cap_drop ALL.)
+  vigil-gateway-firewall:
+    image: {gateway_image}
+    container_name: vigil-gateway-firewall
+    user: "0"                   # root so cap_add NET_ADMIN is EFFECTIVE (non-root => EPERM => fail-OPEN)
+    network_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN               # the ONLY capability nft -f needs; nothing more (CapEff={{NET_ADMIN}})
+    security_opt:
+      - no-new-privileges:true
+    read_only: true             # rootfs immutable (parity with the proxy); nft -f - reads stdin, no scratch
+    restart: "no"               # one-shot: load the backstop, then exit 0
+    environment:
+      VIGIL_GATEWAY_GATEWAY_IP: "{bind_ip}"
+      VIGIL_GATEWAY_SANDBOX_SUBNET: "{self.sandbox_subnet}"
+      VIGIL_GATEWAY_PROXY_PORT: "{self.proxy_port}"
+      # Govern by INTERFACE, not source-subnet: family-agnostic (drops v4 AND v6 sandbox egress to the
+      # deny-default chain) and spoof-proof. A v4-only saddr match would leave IPv6 egress policy-accepted.
+      VIGIL_GATEWAY_SANDBOX_IFACE: "{self.sandbox_bridge}"
+    command: ["vigil-gateway", "apply-firewall"]
+
   vigil-gateway:
     image: {image_ref}
     container_name: vigil-gateway   # a deterministic name so `vigil services status/down` can find it
+    depends_on:
+      vigil-gateway-firewall:
+        condition: service_completed_successfully   # fail-closed: no proxy unless the backstop loaded
     networks:
       {self.sandbox_network}:
         ipv4_address: {bind_ip}   # pinned so the proxy can bind ONLY the sandbox interface
@@ -280,15 +336,45 @@ services:
         )
         return proc.returncode == 0
 
+    def _network_bridge_name(self, name: str) -> "str | None":
+        """The pinned bridge interface name of an existing docker network (its
+        ``com.docker.network.bridge.name`` driver-opt), or None if unset/uninspectable."""
+        proc = subprocess.run(
+            [self._docker_bin(), "network", "inspect", name,
+             "-f", '{{ index .Options "com.docker.network.bridge.name" }}'],
+            capture_output=True, text=True, timeout=READ_TIMEOUT,
+        )
+        if proc.returncode != 0:
+            return None
+        return proc.stdout.strip() or None
+
     def ensure_networks(self) -> None:
-        """Create the sandbox (internal) and egress networks if absent (idempotent)."""
+        """Create the sandbox (internal) and egress networks if absent (idempotent).
+
+        FAIL-CLOSED (sx-s3 MEDIUM): if the sandbox network already exists but was created WITHOUT the
+        pinned bridge name (e.g. by an older VIGIL, or by hand), silently reusing it would leave the
+        interface-governed backstop pointing at a bridge that does not exist — the deny-default jump then
+        matches nothing and the sandbox egress rides `policy accept` ungoverned. Rather than reuse such a
+        network, REFUSE with an actionable error (remove it so it can be recreated pinned)."""
         d = self._docker_bin()
         if not self._network_exists(self.sandbox_network):
             subprocess.run(
                 [d, "network", "create", "--internal",
+                 # pin the bridge iface name so the firewall backstop can govern by interface (v4+v6)
+                 "--opt", f"com.docker.network.bridge.name={self.sandbox_bridge}",
                  "--subnet", self.sandbox_subnet, self.sandbox_network],
                 check=True, capture_output=True, text=True, timeout=READ_TIMEOUT,
             )
+        else:
+            existing = self._network_bridge_name(self.sandbox_network)
+            if existing != self.sandbox_bridge:
+                raise RuntimeError(
+                    f"the existing docker network {self.sandbox_network!r} pins bridge "
+                    f"{existing!r}, not the required {self.sandbox_bridge!r}; the interface-governed "
+                    f"nftables backstop would match no traffic against a stale bridge name. Remove it "
+                    f"(`docker network rm {self.sandbox_network}`) so it is recreated with the pinned "
+                    f"bridge — refusing to reuse a mis-pinned sandbox network (fail closed)."
+                )
         if not self._network_exists(self.egress_network):
             subprocess.run(
                 [d, "network", "create", self.egress_network],

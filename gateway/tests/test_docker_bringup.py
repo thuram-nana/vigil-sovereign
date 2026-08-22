@@ -273,3 +273,188 @@ def test_docker_calls_are_timeout_bounded(monkeypatch, tmp_path):
     SandboxNetworking().compose_up("compose.yml", context_dir=ctx, pin_path=tmp_path / "pin.json")
     assert seen and all(t is not None and t > 0 for t in seen)   # NO unbounded docker call
     assert max(seen) >= 300                                       # build/compose gets a generous bound
+
+
+# ----------------------- S3 backstop: the privileged one-shot firewall sidecar ---------------------------
+# The gateway launch path now loads the nftables L3/L4 backstop automatically, before the proxy (hence
+# before Strix) comes up, via a one-shot PRIVILEGED sidecar — and the proxy fail-closes on its clean exit.
+
+def test_render_compose_emits_the_firewall_backstop_sidecar():
+    frag = SandboxNetworking().render_compose()
+    assert "vigil-gateway-firewall:" in frag, "the backstop is loaded by a dedicated one-shot sidecar"
+    sidecar = frag.split("vigil-gateway-firewall:")[1].split("\n  vigil-gateway:")[0]
+    # it runs apply-firewall in the HOST netns with ONLY CAP_NET_ADMIN, then exits
+    assert 'command: ["vigil-gateway", "apply-firewall"]' in sidecar
+    assert "network_mode: host" in sidecar
+    assert "NET_ADMIN" in sidecar and "- ALL" in sidecar           # cap_drop ALL, cap_add only NET_ADMIN
+    assert 'restart: "no"' in sidecar                              # one-shot
+    assert "no-new-privileges:true" in sidecar
+    # it is handed the network coordinates apply-firewall needs (and no charter slug — it needs none)
+    assert 'VIGIL_GATEWAY_GATEWAY_IP: "172.31.240.2"' in sidecar
+    assert 'VIGIL_GATEWAY_SANDBOX_SUBNET: "172.31.240.0/24"' in sidecar
+    # ...and the bridge IFACE, so govern() matches by interface (v4 AND v6). A v4-only source-subnet
+    # match left IPv6 sandbox egress policy-accepted (red-pen sx-s3 IPv6 bypass).
+    assert 'VIGIL_GATEWAY_SANDBOX_IFACE: "vigil-sbx0"' in sidecar
+    # the iface name is only deterministic because the sandbox network PINS the bridge name
+    net_block = frag.split("networks:")[1].split("\nservices:")[0]
+    assert "com.docker.network.bridge.name: vigil-sbx0" in net_block
+
+
+def test_the_proxy_fail_closes_on_the_backstop_completing():
+    """FAIL-CLOSED wiring: the proxy depends_on the firewall sidecar COMPLETING SUCCESSFULLY, so a
+    backstop that cannot load blocks the proxy too — `compose up --wait` then returns non-zero and the
+    W0-6 bring-up leg refuses, rather than silently running the sandbox without the backstop."""
+    frag = SandboxNetworking().render_compose()
+    gw = frag.split("\n  vigil-gateway:")[1]
+    assert "depends_on:" in gw
+    assert "vigil-gateway-firewall:" in gw
+    assert "condition: service_completed_successfully" in gw
+
+
+def test_committed_compose_carries_the_backstop_sidecar():
+    """The committed artifact (what `vigil up --services` actually runs) must carry the wiring, not just
+    render_compose — guards against the compose file drifting from the code that generates it."""
+    import pathlib
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    committed = (repo / "infra" / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "vigil-gateway-firewall:" in committed
+    assert 'command: ["vigil-gateway", "apply-firewall"]' in committed
+    assert "condition: service_completed_successfully" in committed
+    # the IPv6-governance wiring must be in the committed artifact too, not just render_compose()
+    assert 'VIGIL_GATEWAY_SANDBOX_IFACE: "vigil-sbx0"' in committed
+    assert "com.docker.network.bridge.name: vigil-sbx0" in committed
+
+
+# --------------- sx-s3 BLOCK: the sidecar runs as ROOT so cap_add NET_ADMIN is EFFECTIVE -----------------
+# The image's default user is the unprivileged `vigil` (uid 10001). For a NON-root process a capability
+# added with cap_add sits only in the container's permitted/bounding set — NOT in the EFFECTIVE set (there
+# are no file-capabilities on `nft`), so `nft -f` fails EPERM and the backstop can NEVER load: a FAIL-OPEN
+# (the sandbox could come up with egress ungoverned). The one-shot sidecar must therefore run as root
+# (user: "0"); with cap_drop ALL + cap_add NET_ADMIN its effective set is then exactly {NET_ADMIN}.
+
+def _firewall_sidecar_block(compose_text: str) -> str:
+    assert "vigil-gateway-firewall:" in compose_text, "no firewall sidecar in the compose text"
+    return compose_text.split("vigil-gateway-firewall:")[1].split("\n  vigil-gateway:")[0]
+
+
+def _assert_firewall_is_root_with_only_net_admin(block: str) -> None:
+    # runs as root so the added capability is EFFECTIVE — the crux of the sx-s3 fix. This assertion FAILS
+    # if `user: "0"` is removed, which is exactly the fail-open the red-pen caught.
+    assert 'user: "0"' in block, (
+        'the firewall sidecar MUST set user: "0" (root) — for the non-root image user, cap_add NET_ADMIN '
+        "is not in the effective set and `nft -f` fails EPERM, so the backstop can never load (fail-OPEN)"
+    )
+    # ...but still drops every other capability and adds ONLY NET_ADMIN (least privilege), and blocks
+    # privilege escalation — root + drop-all + add-one yields CapEff={NET_ADMIN}, never a blanket privileged.
+    assert "cap_drop:" in block and "- ALL" in block, "the sidecar must still cap_drop ALL"
+    assert "cap_add:" in block and "NET_ADMIN" in block, "the sidecar must cap_add exactly NET_ADMIN"
+    assert "no-new-privileges:true" in block, "the sidecar must forbid privilege escalation"
+    assert "privileged: true" not in block, "root + drop-all + add NET_ADMIN — never a blanket privileged"
+
+
+def test_render_compose_firewall_sidecar_runs_as_root_with_only_net_admin():
+    _assert_firewall_is_root_with_only_net_admin(
+        _firewall_sidecar_block(SandboxNetworking().render_compose()))
+
+
+def test_committed_compose_firewall_sidecar_runs_as_root_with_only_net_admin():
+    import pathlib
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    committed = (repo / "infra" / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    _assert_firewall_is_root_with_only_net_admin(_firewall_sidecar_block(committed))
+
+
+def _docker_usable() -> bool:
+    import shutil as _sh
+    if not _sh.which("docker"):
+        return False
+    try:
+        return subprocess.run(["docker", "info"], capture_output=True, timeout=20).returncode == 0
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _docker_usable(),
+                    reason="needs a working Docker daemon to prove the sidecar's caps against a real image")
+def test_apply_firewall_fails_as_nonroot_but_succeeds_as_root_in_a_real_container():
+    """The EMPIRICAL sx-s3 BLOCK proof — the CONTAINER path the deployment actually uses, not
+    root-in-userns. Build the gateway image and run `apply-firewall` with the sidecar's EXACT caps
+    (cap_drop ALL + cap_add NET_ADMIN): as the non-root user (uid 10001, the image default) it FAILS with
+    EPERM (the added cap is not effective — the fail-open), and as root (user "0", what the compose now
+    sets) it SUCCEEDS. Runs in the container's OWN net namespace (default bridge, NOT --network host) so
+    the ruleset loads into a throwaway netns and never touches the host firewall; SANDBOX_IFACE is left
+    unset so the ruleset matches by source-subnet (the pinned-iface fail-closed leg is tested separately).
+    Skips (never fails vacuously) if the image can't be built here (no base/registry/apt).
+    """
+    import pathlib
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    base = os.environ.get("VIGIL_GATEWAY_DOCKER_BASE", "python:3.11-slim")
+    tag = "vigil-gateway:pytest-sx-s3"
+    build = subprocess.run(
+        ["docker", "build", "--build-arg", f"PYTHON_BASE={base}", "-t", tag, str(repo / "gateway")],
+        capture_output=True, text=True, timeout=600)
+    if build.returncode != 0:
+        pytest.skip(f"could not build the gateway image here (no base/registry/apt): {build.stderr[-300:]}")
+    env = ["-e", "VIGIL_GATEWAY_GATEWAY_IP=172.31.240.2",
+           "-e", "VIGIL_GATEWAY_SANDBOX_SUBNET=172.31.240.0/24"]
+    caps = ["--cap-drop", "ALL", "--cap-add", "NET_ADMIN"]
+    try:
+        # (a) the deployment's non-root default user — MUST fail EPERM (proves user:"0" is load-bearing)
+        nonroot = subprocess.run(
+            ["docker", "run", "--rm", "--user", "10001", *caps, *env, tag, "apply-firewall"],
+            capture_output=True, text=True, timeout=120)
+        assert nonroot.returncode != 0, (
+            "apply-firewall UNEXPECTEDLY succeeded as a NON-root user — without user:\"0\" the compose "
+            "sidecar would silently fail-OPEN in production (backstop never loads)"
+        )
+        assert "not permitted" in (nonroot.stdout + nonroot.stderr).lower(), (nonroot.stdout + nonroot.stderr)[-400:]
+        # (b) root with the same drop-all + add-NET_ADMIN caps — MUST succeed (CapEff={NET_ADMIN})
+        root = subprocess.run(
+            ["docker", "run", "--rm", "--user", "0", *caps, *env, tag, "apply-firewall"],
+            capture_output=True, text=True, timeout=120)
+        assert root.returncode == 0, (
+            f"apply-firewall FAILED as root with cap_add NET_ADMIN — the fix does not hold: "
+            f"{(root.stdout + root.stderr)[-400:]}")
+        assert "firewall applied" in root.stdout, root.stdout[-400:]
+    finally:
+        subprocess.run(["docker", "image", "rm", "-f", tag], capture_output=True, text=True)
+
+
+# ------ sx-s3 MEDIUM: ensure_networks refuses a pre-existing sandbox net with a stale/absent bridge ------
+# If vigil_sandbox already exists but was NOT created with the pinned bridge name, silently reusing it
+# leaves the interface-governed backstop pointing at a bridge that does not exist (matches nothing).
+# ensure_networks() must refuse rather than reuse it.
+
+def test_ensure_networks_refuses_a_preexisting_sandbox_net_with_a_stale_bridge(monkeypatch):
+    def _run(args, capture_output=True, text=True, **kw):
+        sub = list(args[1:])
+        if sub[:2] == ["network", "inspect"] and "-f" in sub:
+            return SimpleNamespace(returncode=0, stdout="br-stale123\n", stderr="")   # WRONG pinned bridge
+        if sub[:2] == ["network", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")                # network exists
+        raise AssertionError(f"unexpected docker call (should refuse before creating): {sub}")
+    monkeypatch.setattr(dmod.shutil, "which", lambda n: "/usr/bin/docker")
+    monkeypatch.setattr(dmod.subprocess, "run", _run)
+    with pytest.raises(RuntimeError, match="bridge"):
+        SandboxNetworking().ensure_networks()
+
+
+def test_ensure_networks_accepts_a_correctly_pinned_sandbox_net(monkeypatch):
+    created: list[str] = []
+
+    def _run(args, capture_output=True, text=True, **kw):
+        sub = list(args[1:])
+        if sub[:2] == ["network", "inspect"] and "-f" in sub:
+            return SimpleNamespace(returncode=0, stdout="vigil-sbx0\n", stderr="")    # correct pinned bridge
+        if sub[:2] == ["network", "inspect"]:
+            present = sub[2] == SANDBOX_NETWORK                                        # egress absent
+            return SimpleNamespace(returncode=0 if present else 1, stdout="", stderr="")
+        if sub[:2] == ["network", "create"]:
+            created.append(sub[-1])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected docker call: {sub}")
+    monkeypatch.setattr(dmod.shutil, "which", lambda n: "/usr/bin/docker")
+    monkeypatch.setattr(dmod.subprocess, "run", _run)
+    SandboxNetworking().ensure_networks()                # must NOT raise
+    assert SANDBOX_NETWORK not in created                # correctly pinned + present → not recreated
+    assert EGRESS_NETWORK in created                     # egress was absent → created

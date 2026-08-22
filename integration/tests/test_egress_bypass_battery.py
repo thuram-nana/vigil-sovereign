@@ -18,6 +18,7 @@ failure mode this file exists to prevent.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import uuid
@@ -201,3 +202,171 @@ def test_the_battery_exercised_a_meaningful_number_of_routes(verdicts):
         f"only {len(exercised)} of {len(ROUTES)} escape routes were exercisable here ({exercised}); the "
         f"boundary proof is too thin to rely on. Run the battery where the control has real egress."
     )
+
+
+# =====================================================================================================
+# S3 remainder — the nftables BACKSTOP. The battery above proves the ``--internal`` pin blocks egress.
+# These prove the SECOND, independent layer — the host-side nftables ruleset the gateway bring-up now
+# loads automatically (the `vigil-gateway-firewall` compose sidecar). The sandbox is governed by INTERFACE
+# (family-agnostic: v4 AND v6), so the backstop blocks each bypass-battery route regardless of address
+# family — the netns test verifies this against the LOADED ruleset, and the routed-bridge battery below
+# drops each route (including v6, on a dual-stack bridge) that its positive control proved open. The
+# backstop catches arbitrary TCP/UDP that ignores the ``*_PROXY`` env, and is the boundary itself on a
+# host-bridge deployment where Docker installs no ``--internal`` deny-default.
+# =====================================================================================================
+def _netns_ok() -> bool:
+    if not (shutil.which("unshare") and shutil.which("nft")):
+        return False
+    try:
+        return subprocess.run(["unshare", "-rn", "true"], capture_output=True, timeout=10).returncode == 0
+    except Exception:
+        return False
+
+
+def _committed_sidecar_env() -> dict[str, str]:
+    """The env the committed compose `vigil-gateway-firewall` sidecar actually sets, parsed from the
+    artifact — so this test loads the SAME ruleset the automatic apply-firewall would, and a revert of the
+    IPv6-governance wiring (dropping the iface / pinned bridge) is caught here rather than assumed away."""
+    import pathlib
+    import re
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    committed = (repo / "infra" / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    sidecar = committed.split("vigil-gateway-firewall:")[1].split("\n  vigil-gateway:")[0]
+    env_block = sidecar.split("environment:")[1].split("command:")[0]
+    env: dict[str, str] = {}
+    for line in env_block.splitlines():
+        m = re.match(r'\s+(VIGIL_GATEWAY_[A-Z_]+):\s*"([^"]*)"\s*$', line)
+        if m:
+            env[m.group(1)] = m.group(2)
+    return env
+
+
+def test_the_launch_path_backstop_ruleset_loads_for_real_and_closes_every_route(monkeypatch, tmp_path):
+    """A REAL kernel load (rootless netns) of the EXACT ruleset the launch path applies — not a string
+    match — and every bypass-battery route maps to a rule in the LOADED ruleset: only the gateway proxy
+    and the gateway DNS are accepted exits, everything else (raw TCP, direct-IP HTTP, public DNS, a
+    subprocess doing the same) hits the catch-all drop, and metadata is hard-dropped.
+
+    IPv6 governance is verified structurally against the LOADED ruleset: the forward hook governs the
+    sandbox by INTERFACE (family-agnostic — v4 AND v6), and the deny-default egress chain accepts no v6
+    exit, so a v6 sandbox packet is jumped in and dropped. (Before the sx-s3 fix the sidecar matched by
+    v4 source-subnet only, leaving v6 riding the forward `policy accept`.) The packet-level v6 drop on a
+    routed interface needs root and lives in the docker battery below (skipped off a privileged runner).
+    """
+    if not _netns_ok():
+        pytest.skip("requires nft + rootless user/network namespaces (unshare -rn) to load a real ruleset")
+    from vigil_gateway.config import firewall_from_env
+
+    monkeypatch.delenv("VIGIL_GATEWAY_DNS_IP", raising=False)
+    monkeypatch.delenv("VIGIL_GATEWAY_SANDBOX_IFACE", raising=False)
+    # exactly the env the compose `vigil-gateway-firewall` sidecar sets (incl. the bridge iface) — so this
+    # loads the SAME ruleset the automatic apply-firewall would, not a bespoke one.
+    env = _committed_sidecar_env()
+    assert env.get("VIGIL_GATEWAY_SANDBOX_IFACE"), (
+        "the committed sidecar must set VIGIL_GATEWAY_SANDBOX_IFACE so the backstop governs v6 (sx-s3)"
+    )
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    iface = env["VIGIL_GATEWAY_SANDBOX_IFACE"]
+    gip = env["VIGIL_GATEWAY_GATEWAY_IP"]
+
+    ruleset = firewall_from_env().render()
+    path = tmp_path / "backstop.nft"
+    path.write_text(ruleset)
+    proc = subprocess.run(["unshare", "-rn", "bash", "-c", f"nft -f {path} && nft list ruleset"],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"the launch-path ruleset failed to load: {proc.stderr}"
+    loaded = proc.stdout
+
+    assert "chain sandbox_egress" in loaded, "the deny-default egress chain must be live"
+    # the ONLY accepted exits — raw TCP / direct-IP / subprocess routes have no other way out:
+    assert "tcp dport 48081 accept" in loaded
+    # public DNS route is closed: only the gateway resolver is an accepted DNS exit, never 8.8.8.8:
+    assert f"{gip} udp dport 53 accept" in loaded
+    assert "8.8.8.8" not in loaded and "1.1.1.1" not in loaded
+    # metadata / SSRF route hard-dropped, and the whole thing ends in a deny-default drop:
+    assert "169.254.0.0/16" in loaded
+    assert "drop" in loaded
+    # IPv6 route is GOVERNED, not tautologically "present": the forward hook jumps the sandbox by
+    # interface (covers v6), and the deny-default chain accepts no v6 exit — so a v6 packet is dropped.
+    fwd = loaded.split("chain forward")[1].split("}")[0]
+    assert f'iifname "{iface}" jump sandbox_egress' in fwd, (
+        "the loaded forward hook must govern the sandbox by interface (family-agnostic v4+v6), not a "
+        f"v4-only source-subnet match that lets v6 ride policy-accept:\n{fwd}"
+    )
+    assert "ip saddr" not in fwd  # no v4-only saddr jump that would miss v6
+    sbx = loaded.split("chain sandbox_egress")[1].split("chain output")[0]
+    assert not [ln for ln in sbx.splitlines()
+                if ln.strip().startswith("ip6 daddr") and ln.strip().endswith("accept")], (
+        "the deny-default chain must accept NO v6 exit — a jumped v6 packet must fall to the drop"
+    )
+
+
+def _root_docker_ok() -> bool:
+    return os.geteuid() == 0 and _docker_ok() and bool(shutil.which("nft"))
+
+
+@pytest.mark.skipif(not _root_docker_ok(),
+                    reason="the packet-level backstop battery needs root (to load host nftables affecting "
+                           "bridge traffic) + a working Docker daemon + nft")
+def test_the_nftables_backstop_drops_every_route_on_a_routed_bridge():
+    """The true empirical backstop proof: on an ORDINARY (routed) bridge — where Docker installs NO
+    deny-default — applying the host nftables backstop drops every escape route the control proved open,
+    while the identical probe on the same bridge WITHOUT the backstop escapes. This isolates the nftables
+    layer from the ``--internal`` pin: it is the boundary the host-bridge topology relies on, and the belt
+    over ``*_PROXY``-ignoring traffic in the internal topology.
+
+    The bridge is created DUAL-STACK (``--ipv6`` + a v6 subnet) and the backstop governs BOTH families
+    (v4 ``ip saddr`` + v6 ``ip6 saddr`` jumps), so the IPv6 route is a real positive-control-backed drop
+    assertion where the host has v6 egress — not skipped for want of a v6-capable bridge (sx-s3). Where the
+    host cannot route v6 even without the backstop, the control gates the v6 route out (non-vacuity), so
+    this never claims to have proven a v6 drop it did not exercise.
+    """
+    from vigil_gateway.nftables import GatewayFirewall
+
+    if subprocess.run(["docker", "image", "inspect", _IMAGE], capture_output=True).returncode != 0:
+        if subprocess.run(["docker", "pull", _IMAGE], capture_output=True, timeout=_TIMEOUT).returncode != 0:
+            pytest.skip(f"probe image {_IMAGE} unavailable — cannot run the backstop battery")
+
+    tag = uuid.uuid4().hex[:8]
+    net = f"vigil_bs_br_{tag}"
+    subnet = "172.29.71.0/24"
+    subnet6 = "fd00:29:71::/64"
+    subnets = [subnet]
+    # DUAL-STACK bridge so the v6 route is genuinely exercisable. Best-effort: a daemon without ipv6
+    # support falls back to a v4-only bridge (the v6 route then gates out on the control, as before).
+    v6 = subprocess.run(
+        ["docker", "network", "create", "--subnet", subnet, "--ipv6", "--subnet", subnet6, net],
+        capture_output=True, text=True, timeout=60)
+    if v6.returncode == 0:
+        subnets.append(subnet6)
+    else:
+        subprocess.run(["docker", "network", "create", "--subnet", subnet, net],
+                       capture_output=True, check=True, timeout=60)
+    # govern BOTH families the bridge carries (v4 always, v6 when the dual-stack create succeeded).
+    fw = GatewayFirewall(sandbox_subnets=subnets, gateway_ip="172.29.71.1", proxy_port=48081)
+    try:
+        # POSITIVE CONTROL: a routed bridge with NO backstop must escape, or the proof is vacuous.
+        control = _run_probe(net)
+        if not control.get("raw_tcp_public"):
+            pytest.skip("THE BACKSTOP WAS NOT PROVEN: the routed-bridge control could not reach the "
+                        "internet, so a drop cannot be distinguished from a broken probe.")
+        # apply the host backstop for this bridge's subnet(s), then re-probe: every route the control
+        # proved open must now be dropped.
+        fw.delete()
+        fw.apply()
+        gated = _run_probe(net)
+        for route in ROUTES:
+            if not control[route]:
+                continue  # only assert routes the control proved open on this host (non-vacuity)
+            assert gated[route] is False, (
+                f"ESCAPE: {route} survived the nftables backstop on a routed bridge — the host-side L3/L4 "
+                f"deny-default does not hold"
+            )
+        assert any(control[r] for r in ROUTES), "the control escaped by no route — see the internal battery"
+        assert not any(gated[r] for r in ROUTES), (
+            f"the backstop leaked: {[r for r in ROUTES if gated[r]]}"
+        )
+    finally:
+        fw.delete()
+        subprocess.run(["docker", "network", "rm", net], capture_output=True, timeout=60)

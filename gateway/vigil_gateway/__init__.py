@@ -17,7 +17,7 @@ direct egress, with NET_ADMIN dropped so the sandbox cannot rewrite its own fire
 from __future__ import annotations
 
 from . import denylist, docker, nftables, proxy, scope_source
-from .config import GatewayConfig, static_config
+from .config import GatewayConfig, firewall_from_env, static_config
 from .denylist import is_egress_denied, is_hard_denied
 from .docker import SandboxNetworking
 from .nftables import GatewayFirewall
@@ -41,5 +41,6 @@ __all__ = [
     "StaticScopeSource",
     "CharterScopeSource",
     "GatewayConfig",
+    "firewall_from_env",
     "static_config",
 ]

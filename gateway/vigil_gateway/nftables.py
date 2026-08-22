@@ -27,6 +27,7 @@ authoritative regardless.
 from __future__ import annotations
 
 import ipaddress
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -201,8 +202,39 @@ class GatewayFirewall:
             raise RuntimeError(f"nft --check rejected the ruleset: {proc.stderr.strip()}")
         return proc
 
+    def _require_sandbox_iface(self) -> None:
+        """FAIL-CLOSED (sx-s3 MEDIUM): when the ruleset governs the sandbox by INTERFACE, that interface
+        MUST exist in the netns we are loading into, or the deny-default jump matches no packets and the
+        sandbox rides the forward `policy accept` ungoverned — a silent fail-OPEN. The pinned docker bridge
+        (VIGIL_GATEWAY_SANDBOX_IFACE, e.g. ``vigil-sbx0``) is created when the ``vigil_sandbox`` network is
+        created, so at apply time (the one-shot sidecar runs after compose creates the networks) it must be
+        present. If it is absent — a mis-pinned bridge name, a pre-existing network with a different bridge,
+        or apply-firewall run before the network exists — REFUSE rather than load a ruleset that governs
+        nothing. (When sandbox_iface is unset the ruleset matches by source-subnet and this check is N/A.)
+        """
+        if not self.sandbox_iface:
+            return
+        if not os.path.isdir(f"/sys/class/net/{self.sandbox_iface}"):
+            raise RuntimeError(
+                f"the pinned sandbox bridge interface {self.sandbox_iface!r} does not exist "
+                f"(/sys/class/net/{self.sandbox_iface} is absent); refusing to load an interface-governed "
+                f"backstop that would match no sandbox traffic — fail closed. Ensure the vigil_sandbox "
+                f"network (which pins this bridge name) is created before apply-firewall runs."
+            )
+
     def apply(self) -> subprocess.CompletedProcess:
-        """Load the ruleset (`nft -f -`). Requires CAP_NET_ADMIN in the caller's netns."""
+        """Load the ruleset (`nft -f -`). Requires CAP_NET_ADMIN in the caller's netns.
+
+        IDEMPOTENT: the table is deleted first, so re-applying on every gateway bring-up re-loads a
+        clean ruleset instead of erroring with "File exists" on the already-present chains. delete() is
+        best-effort (it swallows "no such table"); a genuine privilege failure surfaces on the load below,
+        which is the authoritative "could we actually apply it?" check.
+
+        FAIL-CLOSED: if the ruleset governs by a pinned interface, that interface must exist first
+        (``_require_sandbox_iface``) — otherwise a backstop that matches no packets would report success.
+        """
+        self._require_sandbox_iface()
+        self.delete()
         proc = subprocess.run(
             [self._nft_bin(), "-f", "-"],
             input=self.render(),
