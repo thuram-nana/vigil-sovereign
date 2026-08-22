@@ -87,3 +87,56 @@ def test_known_offense_binary_cannot_escape_exclusion_by_relabeling():
         assert validate_manifest(ToolManifest(name=name, category="recon", excluded=False))
     # correctly excluded → clean
     assert validate_manifest(ToolManifest(name="sqlmap", category="exploitation", excluded=True)) == []
+
+
+# --- S8: the evidence-branch registry validator (the SAME ladder, validated sovereign-side) -----------
+
+from vigil_integration.live.tool_manifest import (  # noqa: E402
+    load_branch_registry,
+    validate_branch_registry,
+    validate_branch_row,
+)
+
+_BRANCHES = Path(__file__).resolve().parents[2] / "docs" / "capability-matrix" / "evidence-branches.json"
+
+
+def test_committed_evidence_branch_registry_passes_the_s8_column_validator():
+    """The shipped evidence-branch ladder is sound under the S8-column invariants (fact_capable ⇒
+    oracle_version, LEAD-only ⇒ none, control_requirements a non-empty list of non-empty strings). Runs in
+    the sovereign leg: tool_manifest is pure data + validation, no framework import."""
+    rows = load_branch_registry(_BRANCHES)
+    assert rows, "the evidence-branch registry is empty"
+    errs = validate_branch_registry(rows)
+    assert not errs, "evidence-branch S8-column violations:\n  " + "\n  ".join(errs)
+
+
+def test_branch_validator_rejects_the_new_column_overclaims():
+    ok_fact = {"id": "x.fact", "fact_capable": True, "oracle_version": "service_reachability",
+               "control_requirements": ["warden_scope_gate"]}
+    ok_lead = {"id": "x.lead", "fact_capable": False, "oracle_version": "",
+               "control_requirements": ["missing_redrive"]}
+    assert validate_branch_row(ok_fact) == []
+    assert validate_branch_row(ok_lead) == []
+    # fact_capable without a named oracle version
+    assert validate_branch_row({**ok_fact, "oracle_version": ""})
+    # a LEAD-only branch may not borrow an oracle version it does not mint under
+    assert validate_branch_row({**ok_lead, "oracle_version": "tls_weakness"})
+    # a branch that depends on no control at all
+    assert validate_branch_row({**ok_fact, "control_requirements": []})
+    # a mistyped control_requirements (not a list)
+    assert validate_branch_row({**ok_fact, "control_requirements": "warden_scope_gate"})
+
+
+def test_the_strix_candidate_families_are_lead_only_in_the_committed_registry():
+    """A Strix producer report is a LEAD, never a FACT, until VIGIL re-drives it (operator decision 2). The
+    seven candidate families ship fact_capable=false with a non-empty oracle_version forbidden."""
+    strix = {"strix.dom_execution", "strix.auth_outcome", "strix.source_to_sink",
+             "strix.service_reachability", "strix.tls_negotiation",
+             "strix.cloud_credential_confirmation", "strix.misconfiguration_artifact"}
+    by = {b["id"]: b for b in load_branch_registry(_BRANCHES)}
+    assert strix <= set(by), f"missing Strix families: {sorted(strix - set(by))}"
+    for bid in sorted(strix):
+        b = by[bid]
+        assert b["fact_capable"] is False, f"{bid}: must be LEAD-only"
+        assert b.get("oracle_version", "") == "", f"{bid}: LEAD-only branch must name no oracle_version"
+        assert validate_branch_row(b) == [], f"{bid}: fails the S8-column validator"
