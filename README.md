@@ -665,7 +665,24 @@ For a real deployment the safe-by-default posture is the *wrong* default: you wa
 
 The last one is **W10-7**. The cockpit's legacy embedded shared owner token always resolves to the owner — a deliberate fail-open so the operator physically at the host is never locked out. That is fine as a development convenience and **indefensible in a deployment someone else runs**, so it is a **named residual** that the production gate refuses to start around: set `SIGIL_LEGACY_OWNER_TOKEN=0` and provision per-user accounts (`sigil accounts create <user> <role>`, owner-signed offline — no HTTP token needed) that log in by proof-of-possession. Belt-and-suspenders: the sigil server **also refuses that shared token at runtime** whenever `VIGIL_POSTURE=production`, regardless of the toggle, so even a server started outside `vigil up` cannot honour it in production. (Registering this residual in the claims registry — [W0-3] #398 — is a follow-up: that registry is not yet built in this tree; the proving tests exist and run in required CI jobs today.)
 
-The gate is **additive and opt-in**: with `VIGIL_POSTURE` unset (or any non-production value) it is **inert** — behaviour is byte-identical to a fresh checkout, so nothing already deployed breaks. It is **fail-closed**: any precondition not in its required state — `UNKNOWN` included — refuses the start, with **one line per unmet precondition** naming the failing control and how to satisfy it. (The `egress-gate` control is deliberately *not* one of the five — a loopback engagement legitimately needs no docker gateway.) When armed, `vigil doctor` doubles as the production preflight: it prints a **`PRODUCTION posture gate`** block and exits non-zero while any precondition is unmet.
+The gate is **additive and opt-in**: with `VIGIL_POSTURE` unset (or any non-production value) it is **inert** — behaviour is byte-identical to a fresh checkout, so nothing already deployed breaks. It is **fail-closed**: any precondition not in its required state — `UNKNOWN` included — refuses the start, with **one line per unmet precondition** naming the failing control and how to satisfy it. (The `egress-gate` control is deliberately *not* one of the five — a loopback engagement legitimately needs no docker gateway.) When armed, `vigil doctor` doubles as the production preflight: it prints a **`PRODUCTION posture gate`** block and exits non-zero while any precondition is unmet. On a fully-misconfigured host that block reads:
+
+<!-- The block below is REGENERATED, not hand-authored: `vigil_core.doctor.render_readme_posture_block()`
+     renders it from REQUIRED_CONTROLS + evaluate() on a fixed misconfigured fixture, and the required CI
+     guard `test_readme_posture_block_is_ci_regenerated_from_the_registry`
+     (integration/tests/test_doctor_consolidation.py) fails the build if this README block drifts from it.
+     To change it, edit the registry in packages/core/vigil_core/vigil_core/doctor.py and re-run that test
+     to see the new canonical text. Do NOT edit the block by hand. -->
+
+```text
+PRODUCTION posture gate (VIGIL_POSTURE=production) — REFUSES to start: 6 precondition(s) unmet (each blocks `vigil up` / `vigil engage`):
+  !! vault:              UNPROVISIONED  — secrets must be SEALED at rest — run `sigil vault provision` (keys rest as plaintext until then)
+  !! sovereignty:        PERMISSIVE  — the sovereignty tier must be raised OFF PERMISSIVE — set CRUCIBLE_SOVEREIGNTY_TIER (AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD)
+  !! entitlement:        UNGOVERNED  — capability-entitlement enforcement must be ACTIVE — provision the trust root, or set CRUCIBLE_ENTITLEMENT_ENFORCED=1
+  !! backups:            OFF  — the backup/reprove timers must be ENABLED — install + `systemctl --user enable --now` the infra/systemd/*.timer units
+  !! charter:            ABSENT  — a signed charter + EngagementAuthority must be PRESENT — provision one under targets/ and pin it with VIGIL_ENGAGEMENT
+  !! legacy-owner-token: ENABLED  — the legacy embedded shared owner token must be DISABLED — set SIGIL_LEGACY_OWNER_TOKEN=0 so the cockpit requires per-user proof-of-possession auth (the fail-open shared token is refused; the sigil server also refuses it at runtime under this posture)
+```
 
 ### 1. Start the controlled target
 
