@@ -69,7 +69,9 @@ class ToolManifest:
 
 def validate_manifest(m: ToolManifest) -> list[str]:
     """Return a list of invariant violations (empty ⇒ valid). Fail-closed honesty rules:
-    excluded⇒not-fact_capable, fact_capable⇒oracle_family set, and enum membership."""
+    excluded⇒not-fact_capable, fact_capable⇒oracle_family set, enum membership, and — the H5 "never
+    silently missing" rule — every tool that is NOT fact_capable must carry a REASON in ``notes`` (why it is
+    LEAD-only / EXCLUDED / UNAVAILABLE), so an un-adapted catalogue tool cannot sit in the matrix unexplained."""
     errs: list[str] = []
     if not m.name:
         errs.append("empty tool name")
@@ -90,6 +92,11 @@ def validate_manifest(m: ToolManifest) -> list[str]:
         errs.append(f"{m.name}: fact_capable requires a non-empty oracle_family (a FACT needs an oracle re-drive)")
     if m.fact_capable and m.excluded:
         errs.append(f"{m.name}: cannot be both fact_capable and excluded")
+    # H5 CI sync-check: a catalogue tool NOT adapted to a FACT must render BLOCKED/UNAVAILABLE/LEAD-only WITH
+    # A REASON — never silently missing. A non-fact_capable row therefore MUST carry a non-empty notes reason.
+    if not m.fact_capable and not (m.notes or "").strip():
+        errs.append(f"{m.name}: a non-fact_capable tool MUST carry a REASON in notes (why it is "
+                    f"LEAD-only / EXCLUDED / UNAVAILABLE) — never silently missing")
     return errs
 
 

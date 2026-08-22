@@ -19,6 +19,51 @@
       "notes": "runner re-drives its own gated TCP handshake; service_reachable FACT. NPSL restricts commercial redistribution."
     },
     {
+      "name": "masscan",
+      "category": "active-assessment",
+      "license": "AGPL-3.0",
+      "install": "apt",
+      "privileges": "sometimes",
+      "network_effect": "scans-target",
+      "oracle_family": "SERVICE_REACHABILITY",
+      "fact_capable": true,
+      "claim_families": [
+        "network-reachability",
+        "service-identity"
+      ],
+      "notes": "H5 SERVICE_REACHABILITY reuse: runner re-drives its OWN gated TCP handshake per proposed port (the SAME service_reachability.tcp_handshake branch as nmap); the scanner is only a port PROPOSER and its output is never the FACT authority. Flags are built server-side from a strict ports schema. masscan sends raw SYN packets and normally needs root (privileges=sometimes)."
+    },
+    {
+      "name": "rustscan",
+      "category": "active-assessment",
+      "license": "GPL-3.0",
+      "install": "apt",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "SERVICE_REACHABILITY",
+      "fact_capable": true,
+      "claim_families": [
+        "network-reachability",
+        "service-identity"
+      ],
+      "notes": "H5 SERVICE_REACHABILITY reuse: runner re-drives its OWN gated TCP handshake per proposed port (the SAME service_reachability.tcp_handshake branch as nmap); the scanner is only a port PROPOSER and its output is never the FACT authority. Flags are built server-side from a strict ports schema. Built greppable (-g, --no-config) so it does not hand off to nmap and no user config can inject flags."
+    },
+    {
+      "name": "naabu",
+      "category": "active-assessment",
+      "license": "MIT",
+      "install": "go",
+      "privileges": "sometimes",
+      "network_effect": "scans-target",
+      "oracle_family": "SERVICE_REACHABILITY",
+      "fact_capable": true,
+      "claim_families": [
+        "network-reachability",
+        "service-identity"
+      ],
+      "notes": "H5 SERVICE_REACHABILITY reuse: runner re-drives its OWN gated TCP handshake per proposed port (the SAME service_reachability.tcp_handshake branch as nmap); the scanner is only a port PROPOSER and its output is never the FACT authority. Flags are built server-side from a strict ports schema. Run with -silent and -host so only results print and the target is a flag value, not a positional that could be read as a flag."
+    },
+    {
       "name": "sslscan",
       "category": "recon",
       "license": "GPL-3.0",

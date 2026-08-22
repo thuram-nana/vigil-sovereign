@@ -42,8 +42,11 @@ from vigil_integration.live.external_tool import (  # noqa: E402
     ScopeGate,
     ToolOutcome,
     ToolSpec,
+    masscan_service_scan,
+    naabu_service_scan,
     nmap_service_scan,
     run_external_tool,
+    rustscan_service_scan,
 )
 from vigil_integration.oracle_adapter import Outcome  # noqa: E402
 
@@ -704,3 +707,137 @@ def test_local_backend_refused_against_a_non_loopback_target(tmp_path: Path) -> 
                              backend=LocalSubprocessBackend(loopback_only=False), engagement_slug="alpha",
                              signers=SIGNERS)
     assert "loopback-only" not in res2.reason
+
+
+# ===================================================================================================
+# 7. H5 — the SERVICE_REACHABILITY reuse ToolSpecs (masscan / rustscan / naabu). Each REUSES the exact
+#    reachability re-drive nmap uses (redrives=() → the runner's own gated capture_handshake judged by the
+#    service_reachability.tcp_handshake branch): the tool is only a PROPOSER, the FACT is VIGIL's handshake.
+# ===================================================================================================
+def _h5_canned_stdout(tool: str, port: int, host: str = "127.0.0.1") -> str:
+    """The real-format stdout each tool emits for one open port — the parser input the runner sees."""
+    if tool == "masscan":
+        return f"Discovered open port {port}/tcp on {host}\n"
+    if tool == "rustscan":
+        return f"{host} -> [{port}]\n"
+    if tool == "naabu":
+        return f"{host}:{port}\n"
+    raise AssertionError(tool)
+
+
+_H5_SPECS = {
+    "masscan": masscan_service_scan,
+    "rustscan": rustscan_service_scan,
+    "naabu": naabu_service_scan,
+}
+
+
+def test_h5_specs_build_server_side_argv_carrying_only_the_authorized_target() -> None:
+    # every flag is server-side; the target appears exactly once and never as a bare positional flag.
+    m = masscan_service_scan(ports="1-100", rate=500).build_argv("10.0.0.5")
+    assert m == ["masscan", "-p", "1-100", "--rate", "500", "--wait", "0", "10.0.0.5"]
+    # a RANGE goes to rustscan's -r; a comma LIST goes to -p (never a mix); target is a flag VALUE (-a)
+    assert rustscan_service_scan(ports="1-1024").build_argv("10.0.0.5") == \
+        ["rustscan", "--no-config", "-g", "-a", "10.0.0.5", "-r", "1-1024"]
+    assert rustscan_service_scan(ports="80,443").build_argv("h")[-2:] == ["-p", "80,443"]
+    # naabu takes the target as the -host VALUE and -silent so only results print
+    assert naabu_service_scan(ports="80,443").build_argv("10.0.0.5") == \
+        ["naabu", "-silent", "-host", "10.0.0.5", "-p", "80,443"]
+
+
+def test_h5_specs_parse_open_ports_and_pin_the_host_to_the_authorized_target() -> None:
+    # SCOPE SAFETY: the parser pins host to the AUTHORIZED target, never a host the tool printed. Feed each
+    # parser output that names a DIFFERENT host — the proposal host must still be the authorized target.
+    mo = ToolOutcome(["masscan"], 0,
+                     "Discovered open port 22/tcp on 9.9.9.9\nDiscovered open port 443/tcp on 9.9.9.9\n"
+                     "Discovered open port 53/udp on 9.9.9.9\nDiscovered open port 22/tcp on 9.9.9.9\n", "", "x")
+    got = {(p.host, p.port, p.protocol) for p in masscan_service_scan().propose(mo, "target-host")}
+    assert got == {("target-host", 22, "tcp"), ("target-host", 443, "tcp"), ("target-host", 53, "udp")}
+    ro = ToolOutcome(["rustscan"], 0, "9.9.9.9 -> [22,80, 443]\n", "", "x")
+    assert {(p.host, p.port) for p in rustscan_service_scan().propose(ro, "target-host")} == \
+        {("target-host", 22), ("target-host", 80), ("target-host", 443)}
+    no = ToolOutcome(["naabu"], 0, "9.9.9.9:80\n9.9.9.9:443\n[2001:db8::1]:8080\n", "", "x")
+    assert {(p.host, p.port) for p in naabu_service_scan().propose(no, "target-host")} == \
+        {("target-host", 80), ("target-host", 443), ("target-host", 8080)}
+    # a closed/other row proposes nothing
+    assert masscan_service_scan().propose(ToolOutcome(["masscan"], 0, "no ports found\n", "", "x"), "t") == []
+
+
+def test_h5_specs_carry_no_redrives_so_they_reuse_the_legacy_reachability_redrive() -> None:
+    # The reuse property: no spec-carried re-drive ⇒ run_external_tool builds the service_reachable re-drive
+    # from its own capture_handshake (SERVICE_REACHABILITY — exactly nmap's path). danger is "recon".
+    for build in _H5_SPECS.values():
+        spec = build(ports="80")
+        assert spec.redrives == (), f"{spec.name} must reuse the legacy reachability re-drive, not carry its own"
+        assert spec.danger == "recon"
+
+
+def test_h5_specs_reject_an_invalid_ports_schema_fail_closed() -> None:
+    for build in _H5_SPECS.values():
+        for bad in ("1-2-3", "80;rm -rf", "$(id)", "-oX", "1-70000", "0", "", "80 443", "abc"):
+            with pytest.raises(ValueError):
+                build(ports=bad)
+    # rustscan additionally refuses a range+list MIX in one flag (it cannot express it)
+    with pytest.raises(ValueError):
+        rustscan_service_scan(ports="1-100,443")
+    # masscan additionally validates the rate (strict typed schema, no free-form string)
+    with pytest.raises(ValueError):
+        masscan_service_scan(rate=0)
+
+
+@pytest.mark.parametrize("tool", ["masscan", "rustscan", "naabu"])
+def test_h5_canned_output_mints_an_oracle_confirmed_reachability_fact(tool: str, tmp_path: Path) -> None:
+    """Each reuse tool, driven through the REAL gated runner with a canned real-format proposal of a REALLY
+    OPEN loopback port, mints exactly one signed FACT — because the runner re-proves the port with its OWN
+    gated handshake (capture_handshake, SERVICE_REACHABILITY). The FACT re-verifies offline."""
+    from framework.v2.evidence.certify import verify_certificate
+
+    _charter(tmp_path, "127.0.0.1")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    port = srv.getsockname()[1]
+    gate = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
+    backend = _CannedNmapBackend(_h5_canned_stdout(tool, port))
+    try:
+        res = run_external_tool(
+            _H5_SPECS[tool](ports=str(port)), "127.0.0.1",
+            scope_gate=gate, backend=backend, engagement_slug="alpha", signers=SIGNERS)
+    finally:
+        srv.close()
+    assert res.status == "ran", res.reason
+    assert any(p.port == port for p in res.proposed), f"{tool} did not propose {port}: {res.proposed}"
+    assert len(res.facts) == 1 and res.facts[0].is_fact, f"{tool}: expected 1 reachability FACT: {res.reason}"
+    fact = res.facts[0]
+    ver = verify_certificate(fact.signed, oracle_context=res.contexts[fact.finding_ref], trust_root=TRUST)
+    assert ver.ok is True, f"{tool} reachability FACT must verify offline: {ver}"
+
+
+@pytest.mark.parametrize("tool", ["masscan", "rustscan", "naabu"])
+def test_h5_proposed_but_closed_port_stays_a_lead_never_a_fact(tool: str, tmp_path: Path) -> None:
+    """NEGATIVE CONTROL: the tool PROPOSES an open port but NOTHING is listening → the runner's own gated
+    handshake refuses → the oracle does not fire → a labelled LEAD, never a fabricated FACT (crit-6)."""
+    _charter(tmp_path, "127.0.0.1")
+    tmp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tmp.bind(("127.0.0.1", 0))
+    closed_port = tmp.getsockname()[1]
+    tmp.close()  # now definitely closed
+    gate = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
+    backend = _CannedNmapBackend(_h5_canned_stdout(tool, closed_port))  # lies that it is open
+    res = run_external_tool(
+        _H5_SPECS[tool](ports=str(closed_port)), "127.0.0.1",
+        scope_gate=gate, backend=backend, engagement_slug="alpha", signers=SIGNERS)
+    assert res.status == "ran"
+    assert any(p.port == closed_port for p in res.proposed), f"{tool} must have PROPOSED the closed port"
+    assert res.facts == [] and len(res.leads) == 1 and not res.leads[0].is_fact, \
+        f"{tool}: a non-reproducing proposal must stay a LEAD, got facts={res.facts}"
+
+
+def test_h5_out_of_scope_target_is_refused_before_any_traffic(tmp_path: Path) -> None:
+    # the H5 tools inherit the runner's scope gate: an out-of-scope target refuses before the tool launches.
+    _charter(tmp_path, "127.0.0.1")
+    gate_out = ScopeGate(scope=StaticScopeSource(["10.99.99.99"]), loopback_allowed_if_scoped=True)
+    spy = _SpyBackend()
+    res = run_external_tool(masscan_service_scan(ports="80"), "127.0.0.1", scope_gate=gate_out,
+                            backend=spy, engagement_slug="alpha", signers=SIGNERS)
+    assert res.refused and spy.runs == [] and res.facts == []

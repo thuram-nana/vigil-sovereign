@@ -37,9 +37,42 @@ def test_fact_capable_tools_name_an_oracle_family_and_are_not_excluded():
 
 def test_the_only_fact_capable_tools_are_the_ones_with_a_shipped_re_drive():
     # Anti-overclaim: the matrix must not claim FACT-capability beyond what actually has a runner-owned
-    # re-drive today (nmap → SERVICE_REACHABILITY, sslscan → TLS_WEAKNESS). Growing this set is deliberate.
+    # re-drive today. nmap + masscan/rustscan/naabu → SERVICE_REACHABILITY (the H5 reuse; all four re-prove
+    # each proposed port with the runner's own gated handshake); sslscan → TLS_WEAKNESS. Growing this set is
+    # deliberate — each addition must PASS live.conformance.run_toolspec_conformance first.
     fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
-    assert fact == {"nmap", "sslscan"}, f"unexpected fact_capable set: {fact}"
+    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu"}, f"unexpected fact_capable set: {fact}"
+
+
+def test_h5_reachability_reuse_tools_are_present_and_service_reachability_fact_capable():
+    """H5: masscan/rustscan/naabu are adapted as SERVICE_REACHABILITY fact_capable tools (same oracle as
+    nmap). Each must be present, fact_capable, name the SERVICE_REACHABILITY family, be a non-excluded
+    active-assessment scanner, and carry a reason in notes."""
+    by = {m.name: m for m in load_manifests(_MATRIX)}
+    for name in ("masscan", "rustscan", "naabu"):
+        assert name in by, f"H5 reachability tool {name!r} missing from the capability matrix"
+        m = by[name]
+        assert m.fact_capable is True, f"{name}: expected fact_capable"
+        assert m.oracle_family == "SERVICE_REACHABILITY", f"{name}: expected SERVICE_REACHABILITY oracle"
+        assert m.excluded is False, f"{name}: a reachability scanner is not excluded"
+        assert m.category == "active-assessment", f"{name}: a port scanner actively probes (active-assessment)"
+        assert m.notes.strip(), f"{name}: a fact_capable tool still documents its re-drive in notes"
+
+
+def test_every_non_fact_capable_tool_carries_a_reason_never_silently_missing():
+    """H5 CI sync-check: a catalogue tool NOT adapted to a FACT must render BLOCKED/UNAVAILABLE/LEAD-only
+    WITH A REASON (never silently missing). The committed matrix must satisfy it, and the validator must
+    FLAG a non-fact_capable row whose notes are empty (both the LEAD-only and the EXCLUDED cases)."""
+    for m in load_manifests(_MATRIX):
+        if not m.fact_capable:
+            assert m.notes.strip(), f"{m.name}: a non-fact_capable tool has no REASON in notes"
+    assert any("REASON in notes" in e for e in
+               validate_manifest(ToolManifest(name="katana", category="recon", network_effect="connects-out")))
+    assert any("REASON in notes" in e for e in
+               validate_manifest(ToolManifest(name="metasploit", category="exploitation", excluded=True)))
+    # a reason present → that particular invariant is satisfied
+    assert not any("REASON in notes" in e for e in validate_manifest(
+        ToolManifest(name="katana", category="recon", network_effect="connects-out", notes="LEAD-only proposer")))
 
 
 def test_track_c_scanner_reports_stay_lead_only():
@@ -74,8 +107,9 @@ def test_validator_rejects_overclaims():
     # unknown category / network_effect / privileges
     assert validate_manifest(ToolManifest(name="x", category="bogus"))
     assert validate_manifest(ToolManifest(name="x", category="recon", network_effect="lasers"))
-    # a clean recon LEAD-only tool validates
-    assert validate_manifest(ToolManifest(name="httpx", category="recon", network_effect="connects-out")) == []
+    # a clean recon LEAD-only tool validates (a non-fact_capable tool must carry a REASON in notes — H5)
+    assert validate_manifest(ToolManifest(name="httpx", category="recon", network_effect="connects-out",
+                                          notes="LEAD-only URL proposer")) == []
 
 
 def test_known_offense_binary_cannot_escape_exclusion_by_relabeling():
@@ -85,8 +119,9 @@ def test_known_offense_binary_cannot_escape_exclusion_by_relabeling():
     assert any("known offense" in e for e in errs)
     for name in ("metasploit", "hydra", "responder", "hashcat"):
         assert validate_manifest(ToolManifest(name=name, category="recon", excluded=False))
-    # correctly excluded → clean
-    assert validate_manifest(ToolManifest(name="sqlmap", category="exploitation", excluded=True)) == []
+    # correctly excluded → clean (an excluded tool still carries a REASON in notes — H5 "never silently missing")
+    assert validate_manifest(ToolManifest(name="sqlmap", category="exploitation", excluded=True,
+                                          notes="EXCLUDED — SQLi exploitation")) == []
 
 
 # --- S8: the evidence-branch registry validator (the SAME ladder, validated sovereign-side) -----------

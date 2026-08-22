@@ -170,3 +170,90 @@ def test_fatal2_body_imports_no_offense_engine():
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=str(repo),
                        env={"PYTHONPATH": "integration:engine/crucible", "PATH": "/usr/bin:/bin"})
     assert r.returncode == 0, r.stdout + r.stderr and "clean" in r.stdout
+
+
+# ===================================================================================================
+# H5 — masscan / rustscan / naabu are oracle-mapped SERVICE_REACHABILITY tools reachable on the REAL body
+# path (the same runner path nmap uses). Each dispatches to its ToolSpec; the runner re-proves each port.
+# ===================================================================================================
+class _CannedBackend:
+    """Returns a fixed stdout for ANY argv — supplies a tool's real-format proposal with no binary present."""
+    name = "canned"
+
+    def __init__(self, stdout: str) -> None:
+        self._stdout = stdout
+
+    def available(self):
+        return True, "canned"
+
+    def run(self, argv, *, timeout=0):
+        from vigil_integration.live.external_tool import ToolOutcome
+        return ToolOutcome(list(argv), 0, self._stdout, "", self.name)
+
+
+def test_h5_reachability_tools_are_oracle_mapped_and_dispatch_to_the_runner():
+    """masscan/rustscan/naabu are oracle-mapped: with NO runner provisioned they reach the runner dispatch
+    (a DIFFERENT LEAD reason than an unmapped tool), proving the body routes each to its reachability
+    ToolSpec rather than rejecting it as unmapped."""
+    from vigil_integration.brains.hexstrike_body import _ORACLE_MAPPED_TOOLS
+
+    for tool in ("masscan", "rustscan", "naabu"):
+        assert tool in _ORACLE_MAPPED_TOOLS
+        body = HexstrikeAgentBody(runner=None)
+        out = body.execute(ProposedAction(kind=tool, target="127.0.0.1", params={"ports": "80"}),
+                           GateDecision(authorized=True))
+        assert "runner not provisioned" in out.blocked_reason, f"{tool} did not reach the runner dispatch: {out}"
+    # an unmapped tool is still rejected BEFORE dispatch (control)
+    unmapped = HexstrikeAgentBody(runner=None).execute(
+        ProposedAction(kind="whatweb", target="127.0.0.1", params={}), GateDecision(authorized=True))
+    assert "no oracle-mapped ToolSpec" in unmapped.blocked_reason
+
+
+def test_oracle_mapped_tools_all_have_a_spec_builder_no_drift():
+    """_ORACLE_MAPPED_TOOLS and _spec_for_kind stay in lock-step: every mapped tool builds a spec, and an
+    unmapped name builds None (so a mapped-but-unbuildable tool cannot silently reach the runner)."""
+    from vigil_integration.brains.hexstrike_body import _ORACLE_MAPPED_TOOLS, _spec_for_kind
+
+    for tool in _ORACLE_MAPPED_TOOLS:
+        params = {"port": 443} if tool == "sslscan" else {"ports": "80"}
+        spec = _spec_for_kind(tool, params)
+        assert spec is not None and spec.name in (tool, "tls_scan"), f"{tool}: no spec builder"
+    assert _spec_for_kind("whatweb", {}) is None
+
+
+def test_h5_invalid_ports_are_rejected_by_the_toolspec_schema_and_stay_a_lead(tmp_path: Path):
+    """A server-side ports value that fails the ToolSpec's STRICT schema keeps the action a LEAD (fail-closed)
+    — the body never runs an un-validated argv, and never crashes."""
+    _charter(tmp_path, "127.0.0.1")
+    deps = RunnerDeps(scope_gate=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+                      backend=_CannedBackend(""), engagement_slug="alpha", signers=SIGNERS)
+    body = HexstrikeAgentBody(posture="staging", runner=deps)
+    out = body.execute(ProposedAction(kind="masscan", target="127.0.0.1",
+                                      params={"ports": "$(id)", "danger": "recon"}),
+                       GateDecision(authorized=True))
+    assert out.executed is False and "rejected by the ToolSpec schema" in out.blocked_reason
+
+
+def test_h5_live_masscan_fact_through_the_body(tmp_path: Path):
+    """The reuse path end-to-end through the BODY: a canned masscan proposal of a REAL open loopback port,
+    dispatched by the body to masscan_service_scan, re-proven by the runner's own gated handshake → 1 FACT.
+    Hermetic (no masscan binary needed — the FACT is VIGIL's handshake, the tool is only the proposer)."""
+    _charter(tmp_path, "127.0.0.1")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    port = srv.getsockname()[1]
+    deps = RunnerDeps(scope_gate=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+                      backend=_CannedBackend(f"Discovered open port {port}/tcp on 127.0.0.1\n"),
+                      engagement_slug="alpha", signers=SIGNERS)
+    body = HexstrikeAgentBody(posture="staging", runner=deps)
+    try:
+        action = ProposedAction(kind="masscan", target="127.0.0.1",
+                                params={"ports": str(port), "danger": "recon"})
+        decision = body.gate(action)
+        assert decision.authorized is True  # recon + staging => auto
+        outcome = body.execute(action, decision)
+    finally:
+        srv.close()
+    assert outcome.executed is True and outcome.ok is True, outcome
+    assert outcome.detail.get("n_facts") == 1, f"expected 1 reachability FACT via masscan, got {outcome.detail}"

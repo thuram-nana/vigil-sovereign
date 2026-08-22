@@ -105,3 +105,19 @@ def test_source_carries_attribution_and_is_stdlib_only():
             assert not any(tok in s for tok in
                            ("framework", "vigil_core", "flask", "selenium", "mitmproxy", "psutil",
                             "angr", "aiohttp", "bs4", "requests", "mcp")), f"non-stdlib import: {s}"
+
+
+def test_network_discovery_proposes_the_h5_reachability_scanners():
+    """H5: masscan/rustscan/naabu are curated NETWORK_HOST reachability tools — the brain proposes all three
+    (RECON danger) for a network host, so the fact_capable ToolSpecs are actually reachable, not dead."""
+    b = HexstrikeBrain()
+    prof = b.analyze_target("10.0.0.5", target_type=TargetType.NETWORK_HOST, open_ports=[22, 80])
+    leads = b.propose(prof, "quick")
+    by = {l["tool"]: l for l in leads}
+    for tool in ("rustscan", "masscan", "naabu"):
+        assert tool in by, f"network_discovery must propose {tool!r}; got {sorted(by)}"
+        assert by[tool]["danger"] == ToolDanger.RECON.value, f"{tool} must be RECON"
+        # server-side ports param is present and a valid schema value (no evasion knobs enforced elsewhere)
+        assert "ports" in by[tool]["params"]
+    # clean contiguous 1..N priorities even after adding the two new steps
+    assert [l["priority"] for l in leads] == list(range(1, len(leads) + 1))
