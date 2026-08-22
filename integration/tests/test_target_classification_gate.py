@@ -177,7 +177,9 @@ def test_classifier_and_facade_import_is_two_env_clean():
         "assert hasattr(tc, 'classify_target') and hasattr(m, 'build_offense_bridge'); print('CLEAN')"
     )
     env = {
-        "PYTHONPATH": f"{repo / 'integration'}:{repo / 'gateway'}",
+        # include the repo's vigil_core so the probe uses the TREE-UNDER-TEST (CI pip-installs it from the
+        # branch; a local editable venv may point at a different checkout) — the FATAL-2 assertion is what matters.
+        "PYTHONPATH": f"{repo / 'integration'}:{repo / 'gateway'}:{repo / 'packages' / 'core' / 'vigil_core'}",
         "PATH": os.environ.get("PATH", ""),
     }
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env, timeout=60)

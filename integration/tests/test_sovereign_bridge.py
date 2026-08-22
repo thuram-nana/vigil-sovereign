@@ -320,7 +320,9 @@ def test_import_is_two_env_clean():
     # PYTHONPATH is ONLY the sovereign-safe seams (integration + gateway); engine/crucible is deliberately
     # absent so the only way framework could appear in sys.modules is if this module imported it — it must not.
     env = {
-        "PYTHONPATH": f"{_REPO / 'integration'}:{_REPO / 'gateway'}",
+        # + the repo's vigil_core (sovereign_bridge now imports vigil_core.target_classification): use the
+        # tree-under-test, not whatever an editable venv points at. The FATAL-2 assertion is the guarantee.
+        "PYTHONPATH": f"{_REPO / 'integration'}:{_REPO / 'gateway'}:{_REPO / 'packages' / 'core' / 'vigil_core'}",
         "PATH": __import__("os").environ.get("PATH", ""),
     }
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env, timeout=60)
