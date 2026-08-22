@@ -1,0 +1,294 @@
+{
+  "schema": "vigil-coverage-tiers/1",
+  "note": "SOURCE OF TRUTH for the evidence-tier breakdown quoted as the system's single most-cited honesty number. Keyed by OracleKind (engine/crucible/framework/v2/verify/models.py) — the detector-kind registry; the drift guard (docs/tests/test_coverage_tiers_drift.py) asserts this file lists EXACTLY the OracleKind members and that every evidence-branches.json oracle_version is one of them, so the tier vocabulary can never reference a detector the engine does not have or omit one it does. `tier` is a CLOSED vocabulary describing the STRONGEST evidence a detector kind has ever judged: `external` (real bytes from a third-party system on the internet), `own_infrastructure` (real infrastructure the system builds and destroys), `local` (real bytes over a real connection/process on the testing machine — crediting the in-process cloud simulator, the convention 05-weakness-types.md states it uses), `fixtures` (only hand-written evidence). Note fact-capability and tier are ORTHOGONAL: a branch may be fact_capable yet its detector tiered `fixtures` because no live/local exercise has run. Regenerate the doc blocks with `python3 docs/capability-matrix/gen_coverage_tiers.py`.",
+  "tiers": [
+    {
+      "id": "external",
+      "label": "Outside system",
+      "meaning": "Real bytes from a third-party system on the public internet."
+    },
+    {
+      "id": "own_infrastructure",
+      "label": "Own infrastructure",
+      "meaning": "Real bytes from infrastructure the system builds, uses and destroys."
+    },
+    {
+      "id": "local",
+      "label": "Real local process",
+      "meaning": "Real bytes over a real connection or process on the testing machine."
+    },
+    {
+      "id": "fixtures",
+      "label": "Fixtures only",
+      "meaning": "Only ever judged evidence a person wrote by hand."
+    }
+  ],
+  "detectors": [
+    {
+      "kind": "differential_response",
+      "name": "Response differencing",
+      "family": "core",
+      "tier": "external",
+      "evidence": "**Outside system** — a public vendor-run test site on the internet"
+    },
+    {
+      "kind": "achieved_state",
+      "name": "Achieved state",
+      "family": "core",
+      "tier": "external",
+      "evidence": "**Outside system** — the same run"
+    },
+    {
+      "kind": "secret_credential_validity",
+      "name": "Secret validity",
+      "family": "live capture",
+      "tier": "external",
+      "evidence": "**Outside system** — the real code-hosting provider (one of its two secret types)"
+    },
+    {
+      "kind": "k8s_workload_posture",
+      "name": "Anonymous role binding",
+      "family": "posture",
+      "tier": "own_infrastructure",
+      "evidence": "**Own infrastructure** — a real Kubernetes cluster the system creates and destroys"
+    },
+    {
+      "kind": "k8s_rbac_verb_grant",
+      "name": "Permission-rule verb grant",
+      "family": "live capture",
+      "tier": "own_infrastructure",
+      "evidence": "**Own infrastructure** — the same cluster"
+    },
+    {
+      "kind": "side_effect",
+      "name": "Marker reached a sink",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — the labelled test application over a real local connection"
+    },
+    {
+      "kind": "error_signature",
+      "name": "Error signature",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — the same application"
+    },
+    {
+      "kind": "evaluation",
+      "name": "Evaluation",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — the same application"
+    },
+    {
+      "kind": "reflection_context",
+      "name": "Executable-position reflection",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — the same application"
+    },
+    {
+      "kind": "oob_callback",
+      "name": "Out-of-band callback",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — a genuine callback round trip, which correctly does not fire against a wrong key or a fabricated contact"
+    },
+    {
+      "kind": "sanitizer_signal",
+      "name": "Memory-safety crash marker",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — a C program the system compiles itself and runs on a crashing input"
+    },
+    {
+      "kind": "dom_execution",
+      "name": "Browser execution",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — a real headless browser driven against a local page; the safely written twin produces nothing"
+    },
+    {
+      "kind": "service_reachability",
+      "name": "Connection handshake",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — a real local listener, and the real system port-scanning tool run through the gated runner"
+    },
+    {
+      "kind": "tls_weakness",
+      "name": "Encryption weakness",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — a real encrypted handshake"
+    },
+    {
+      "kind": "policy_path",
+      "name": "Permission path",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — the real cloud programming library against an in-process simulator (see the caveat below)"
+    },
+    {
+      "kind": "cloud_posture",
+      "name": "Cloud achieved state",
+      "family": "posture",
+      "tier": "local",
+      "evidence": "Real local process — the same simulator (see the caveat below)"
+    },
+    {
+      "kind": "active_exposure",
+      "name": "Anonymous fetch",
+      "family": "live capture",
+      "tier": "local",
+      "evidence": "Real local process — a real local server and a genuine credential-free request"
+    },
+    {
+      "kind": "sql_injection_breakout",
+      "name": "SQL break-out",
+      "family": "request-only",
+      "tier": "local",
+      "evidence": "Real local process — the in-line protective gateway over real local connections"
+    },
+    {
+      "kind": "timing",
+      "name": "Statistical timing test",
+      "family": "core",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "boolean_inference",
+      "name": "Statistical yes/no probing",
+      "family": "core",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "version_range",
+      "name": "Version range membership",
+      "family": "core",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "prompt_injection",
+      "name": "Prompt-injection differential",
+      "family": "defensive",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "system_prompt_disclosure",
+      "name": "Canary disclosure",
+      "family": "defensive",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "automated_access",
+      "name": "Honeypot fetch",
+      "family": "defensive",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "credential_stuffing",
+      "name": "Credential stuffing",
+      "family": "defensive",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "command_injection_breakout",
+      "name": "Command break-out",
+      "family": "request-only",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "nosql_injection_breakout",
+      "name": "NoSQL operator break-out",
+      "family": "request-only",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "k8s_posture",
+      "name": "Platform benchmark",
+      "family": "posture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "mesh_posture",
+      "name": "Service mesh configuration",
+      "family": "posture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "cicd_posture",
+      "name": "Pipeline configuration",
+      "family": "posture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "mobile_posture",
+      "name": "Mobile artefact",
+      "family": "posture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "email_auth_posture",
+      "name": "Email policy",
+      "family": "posture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "identity_posture",
+      "name": "Identity record",
+      "family": "posture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "sso_assertion_forgery",
+      "name": "Structural token forgery",
+      "family": "forgery",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "saml_structural_forgery",
+      "name": "Structural assertion forgery",
+      "family": "forgery",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "imds_credential_capture",
+      "name": "Metadata credential capture",
+      "family": "live capture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "gcp_sa_impersonation",
+      "name": "Service-identity impersonation",
+      "family": "live capture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "iam_escalation_primitive",
+      "name": "Escalation primitive",
+      "family": "live capture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only — and permanently so by design, as explained above"
+    }
+  ]
+}

@@ -986,7 +986,17 @@ Every one verified for this document on `main` @ `05b81e9f`.
 | **11 / 0 / 0** | Benchmark true positives / false positives / false negatives — re-run for this document, precision, recall and F1 all 1.000 |
 | **5** | Governance record types that gained an anti-replay high-water today |
 | **9** | Documents in the case file |
-| **3 / 2 / 12 / 21** | Detector kinds with external / own-infrastructure / local-socket / fixture-only evidence |
+| **3 / 2 / 13 / 20** | Detector kinds with external / own-infrastructure / local-socket / fixture-only evidence (the generated breakdown below is the source of truth) |
+
+<!-- BEGIN GENERATED coverage-tiers (source: docs/capability-matrix/coverage-tiers.json; regenerate: python3 docs/capability-matrix/gen_coverage_tiers.py) -->
+| Evidence tier | Detector kinds |
+|---|---|
+| Outside system — real bytes from a third-party system on the public internet | 3 |
+| Own infrastructure — real bytes from infrastructure the system builds, uses and destroys | 2 |
+| Real local process — real bytes over a real connection or process on the testing machine | 13 |
+| Fixtures only — only ever judged evidence a person wrote by hand | 20 |
+| **Total detector kinds** | **38** |
+<!-- END GENERATED coverage-tiers -->
 
 ---
 
