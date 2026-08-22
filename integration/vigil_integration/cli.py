@@ -2050,6 +2050,32 @@ def _cmd_verify_integrity(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def _cmd_alerts(args: argparse.Namespace) -> int:
+    """`vigil alerts` (W8-1) — heartbeat STALENESS ALARMS for every HA/scheduled unit. Enumerates the unit
+    registry and, for each watched unit, alarms when its heartbeat is absent (fail-closed), stale (the timer
+    stopped firing) or records a failed last run. Alerts are PUSH-based (webhook / exec from the env) with a
+    durable local log and a delivery DEAD-MAN. `--status` is read-only. Exits non-zero on any alarm. EXEC-ONLY
+    + boundary-safe: reads/writes inert on-disk JSON and imports only `vigil_core` — never framework/sigil."""
+    from . import unit_alerts as _ua
+    return _ua.cmd_alerts(state_dir=args.state_dir, watch=args.watch, cycles=args.cycles,
+                          interval=args.interval, status_only=args.status_only,
+                          require_push=args.require_push, as_json=getattr(args, "json", False))
+
+
+def _cmd_unit_heartbeat(args: argparse.Namespace) -> int:
+    """`vigil unit-heartbeat <unit> --result ${SERVICE_RESULT}` (W8-1) — the systemd ExecStopPost hook each
+    scheduled unit runs to record that it ran and whether it succeeded. Boundary-safe: writes one inert JSON
+    heartbeat; imports only `vigil_core`."""
+    from . import unit_alerts as _ua
+    ok: Optional[bool] = None
+    if getattr(args, "ok", False):
+        ok = True
+    elif getattr(args, "failed", False):
+        ok = False
+    return _ua.cmd_unit_heartbeat(args.unit, result=args.result or "", ok=ok, state_dir=args.state_dir,
+                                  detail=args.detail or "")
+
+
 def _cmd_telemetry(args: argparse.Namespace) -> int:
     """`vigil telemetry --out <path> [--interval N] [--once]` — the G2 live assurance/metrics collector: a
     read-only, one-way projection of the signed spine into a fact/lead/refusal/tool snapshot. Started for the
@@ -3176,6 +3202,38 @@ def build_parser() -> argparse.ArgumentParser:
     pvi.add_argument("--interval", type=float, default=300.0, help="with --watch: seconds between cycles")
     pvi.add_argument("--json", action="store_true", help="emit the report as JSON")
     pvi.set_defaults(func=_cmd_verify_integrity)
+
+    pal = sub.add_parser("alerts",
+                         help="heartbeat staleness alarms for every HA/scheduled unit (backup, off-host "
+                              "push, recovery drill, HA mirror-sync, integrity, posture, reprove). Absent or "
+                              "stale heartbeat => staleness alarm (fail-closed); a failed run => a failure "
+                              "alarm. Push-based (VIGIL_ALERT_WEBHOOK_URL / VIGIL_ALERT_EXEC) with a durable "
+                              "local log + delivery dead-man. --status is read-only; exits non-zero on alarm.")
+    pal.add_argument("--state-dir", default=None,
+                     help="heartbeat state dir (default: $VIGIL_ALERT_STATE_DIR or ~/.local/state/vigil/"
+                          "unit-heartbeats)")
+    pal.add_argument("--status", action="store_true", dest="status_only",
+                     help="read-only: print each unit's current status, fire no alarms")
+    pal.add_argument("--once", action="store_true", help="run exactly one cycle and exit (the default; the "
+                     "systemd oneshot the timer fires makes it explicit)")
+    pal.add_argument("--watch", action="store_true", help="run periodically instead of once")
+    pal.add_argument("--cycles", type=int, default=0, help="with --watch: cycles (0 = forever)")
+    pal.add_argument("--interval", type=float, default=300.0, help="with --watch: seconds between cycles")
+    pal.add_argument("--require-push", action="store_true",
+                     help="fail-closed: alarm if NO push destination is configured")
+    pal.add_argument("--json", action="store_true", help="emit the summary/status as JSON")
+    pal.set_defaults(func=_cmd_alerts)
+
+    puh = sub.add_parser("unit-heartbeat",
+                         help="record that a scheduled unit ran (systemd ExecStopPost hook). Reads "
+                              "$SERVICE_RESULT from the env (success => ok); the alerts monitor reads it.")
+    puh.add_argument("unit", help="the systemd unit id, e.g. vigil-backup.service (use %%n in the unit file)")
+    puh.add_argument("--result", default="", help="systemd $SERVICE_RESULT (success => ok)")
+    puh.add_argument("--ok", action="store_true", help="force ok (overrides --result)")
+    puh.add_argument("--failed", action="store_true", help="force failed (overrides --result)")
+    puh.add_argument("--detail", default="", help="optional free-text detail recorded in the heartbeat")
+    puh.add_argument("--state-dir", default=None, help="heartbeat state dir (see `vigil alerts --help`)")
+    puh.set_defaults(func=_cmd_unit_heartbeat)
 
     ptel = sub.add_parser("telemetry",
                           help="live assurance/metrics collector over the signed spine (G2): write a "
