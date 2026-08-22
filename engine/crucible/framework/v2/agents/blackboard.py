@@ -97,7 +97,7 @@ class Blackboard:
         self._conn = sqlite3.connect(self.path, detect_types=sqlite3.PARSE_DECLTYPES)
         paths.secure_existing(self.path)              # 0600 the spine DB (dir 0700 guards WAL sidecars)
         self._conn.row_factory = sqlite3.Row
-        self._integrity_check()                       # W16-STD-6(d): detect a torn store, fail LOUD not raw
+        self._integrity_check()                       # W16-STD-6(d): detect a torn store (quick_check), fail LOUD
         self._conn.execute("PRAGMA foreign_keys = ON")
         # X3: under WAL (set in schema.sql), synchronous=NORMAL drops the per-commit fsync
         # (durable across app crashes; only an OS/power crash can lose the last commit) — the
@@ -122,11 +122,15 @@ class Blackboard:
         """W16-STD-6(d): run ``PRAGMA integrity_check`` on open so a corrupt / torn / non-SQLite store is
         reported as a clear ``BlackboardError`` instead of surfacing later as a raw ``sqlite3.DatabaseError``
         traceback from deep inside a query. A pristine or freshly-created (empty) DB returns the single row
-        ``ok`` and passes silently. ``integrity_check`` itself raises ``DatabaseError`` when the file is not a
-        database at all (garbage header) — caught here and re-raised in the same clear shape. The check is
-        cheap for the small, per-engagement blackboard store."""
+        ``ok`` and passes silently. ``quick_check`` itself raises ``DatabaseError`` when the file is not a
+        database at all (garbage header) — caught here and re-raised in the same clear shape. We use
+        ``quick_check`` (not ``integrity_check``): open_blackboard() is called PER-REQUEST on console hot
+        paths, and a full ``integrity_check`` is O(db size) — it re-verifies every page + btree index, so a
+        long engagement's store would pay a growing scan on every open. ``quick_check`` skips the expensive
+        index cross-checks while still detecting a torn/truncated file, a bad header and page-level
+        corruption — the torn-store failure this guard exists to catch — at near-constant cost."""
         try:
-            rows = self._conn.execute("PRAGMA integrity_check").fetchall()
+            rows = self._conn.execute("PRAGMA quick_check").fetchall()
         except sqlite3.DatabaseError as exc:
             self._conn.close()
             raise BlackboardError(
