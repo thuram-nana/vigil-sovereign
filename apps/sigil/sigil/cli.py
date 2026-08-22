@@ -909,6 +909,51 @@ def cmd_spine(a) -> None:
             print(f"  seg-{s['id']:08d} {s['codec']:4} {where:24} {s['bytes']:>13,} bytes  {s['file']}")
 
 
+def cmd_upgrade(a) -> None:
+    """`sigil upgrade` — the automated, crash-safe data-migration verb (W5-5, #449):
+    verify(before) -> backup -> verify(backup) -> migrate -> verify(after) -> report, ROLLING BACK to the
+    verified backup on ANY failure. Fail-closed: never leaves a half-migrated store. `--check` only reports
+    whether a migration is needed (exit 3 if it is), touching nothing."""
+    from .spine.store import SpineError
+    from .spine.upgrade import UpgradeFailed, migration_needed, upgrade
+
+    store = SpineStore()
+    if getattr(a, "check", False):
+        needed, reason = migration_needed(store)
+        if needed:
+            print(f"upgrade REQUIRED: {reason}")
+            sys.exit(3)
+        print("up to date: the spine is migrated (or fresh) — no upgrade needed")
+        return
+
+    try:
+        rep = upgrade(store, backup=not getattr(a, "no_backup", False))
+    except UpgradeFailed as e:
+        print(f"upgrade FAILED: {e}", file=sys.stderr)
+        r = e.report
+        if r.get("rolled_back"):
+            verified = r.get("rollback_verified")
+            print(f"  ROLLED BACK to the verified backup: {r.get('backup')} "
+                  f"(restored store verifies: {verified})", file=sys.stderr)
+        else:
+            print("  no state was mutated (nothing to roll back)", file=sys.stderr)
+        sys.exit(2)
+    except SpineError as e:
+        # verify-before / backup-not-restorable: refused BEFORE any mutation (fail-closed).
+        print(f"upgrade REFUSED (no state changed): {e}", file=sys.stderr)
+        sys.exit(2)
+
+    print(f"  verify before : OK ({rep['count_before']} records)")
+    print(f"  backup        : {rep.get('backup', '(skipped)')}")
+    if rep.get("verify_backup"):
+        print(f"  backup verify : OK ({rep['verify_backup']['count']} records — restorable)")
+    print(f"  migrated      : {rep.get('migrated')} | sealed {rep.get('sealed')} | "
+          f"compacted {rep.get('compacted')} segment(s)")
+    print(f"  verify after  : OK ({rep['count_after']} records — every record preserved)")
+    print("  upgrade complete. Rollback (if ever needed): "
+          "`sigil restore` / re-extract the backup tar.gz over the spine dir.")
+
+
 def _load_failover_guard():
     """Load tools/ha/spine_failover_guard.py (sovereign-side) from the repo, so `sigil floor
     promote-passive` and the standalone guard share ONE implementation and cannot diverge. Loaded by
@@ -1590,6 +1635,15 @@ def main(argv=None) -> None:
                      help="(promote-passive) the OFF-BOX retained witnessed checkpoint the passive must not "
                           "roll back below (- for stdin)")
     pfl.set_defaults(fn=cmd_floor)
+    pup = sub.add_parser("upgrade",
+                         help="automated crash-safe data migration: backup -> verify -> migrate -> verify "
+                              "-> report, with ROLLBACK on any failure (W5-5)")
+    pup.add_argument("--check", action="store_true",
+                     help="only report whether a migration is needed (exit 3 if it is); mutate nothing")
+    pup.add_argument("--no-backup", dest="no_backup", action="store_true",
+                     help="skip the backup+rollback frame (disposable store only; still refuses a "
+                          "non-verifying spine)")
+    pup.set_defaults(fn=cmd_upgrade)
     psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact; convert; status; prune-plan; verify-archive")
     psp.add_argument("action", choices=["migrate", "rotate", "compact", "convert", "status",
                                         "prune-plan", "verify-archive"])
@@ -1646,7 +1700,30 @@ def main(argv=None) -> None:
     psc.add_argument("--subdomains", action="store_true", help="include subdomains of allowed domains")
     psc.set_defaults(fn=cmd_scrape)
     a = p.parse_args(argv)
+    _assert_store_operable_or_exit(a.cmd)
     a.fn(a)
+
+
+# Commands that DIAGNOSE or FIX a degraded store must run even when a migration is needed — otherwise the
+# gate would lock the operator out of the very tools that clear it. Everything else refuses to operate on an
+# un-migrated (legacy, pre-segment) store and names `sigil upgrade`.
+_MIGRATION_GATE_EXEMPT = frozenset({"upgrade", "spine", "doctor", "restore", "backup", "vault", "kernel"})
+
+
+def _assert_store_operable_or_exit(cmd: str) -> None:
+    """Fail-closed startup gate (W5-5, #449): refuse to run a normal command against a legacy (pre-segment)
+    spine that already holds data, naming the command that fixes it. Exempts the recovery/diagnostic
+    commands so the operator can always reach the fix. Never raises out of `main()` — prints and exits 3."""
+    if cmd in _MIGRATION_GATE_EXEMPT:
+        return
+    from .spine.upgrade import MigrationRequired, assert_operable
+    try:
+        assert_operable()
+    except MigrationRequired as e:
+        print(f"sigil: refusing to run `{cmd}` — {e}", file=sys.stderr)
+        sys.exit(3)
+    except Exception:  # noqa: BLE001 — a transient store-open error is the COMMAND's to surface, not the gate's
+        return
 
 
 if __name__ == "__main__":

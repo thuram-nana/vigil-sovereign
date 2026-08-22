@@ -42,6 +42,11 @@ One entry point over the whole fused system. NATIVE verbs (handled in-process, o
                                     would make one process hold both plane secrets (a FATAL-2 breach). Restore
                                     verifies each part's MANIFEST sha256 before invoking either leg and
                                     re-verifies the restored offense spine + evidence chain.
+  * ``vigil upgrade``             — automated, crash-safe data migration of the sovereign spine:
+                                    verify -> backup -> verify(backup) -> migrate -> verify -> report,
+                                    ROLLING BACK to the verified backup on ANY failure (never a half-migrated
+                                    store). EXECs ``.venv-sovereign/bin/sigil upgrade`` in its own venv; the
+                                    sovereign startup itself refuses to run degraded on an un-migrated store.
 
 SUBSYSTEM verbs (S1 control plane — forwarded to the subsystem's own console-script, EXEC'd in its OWN
 environment so the two trust domains are never co-loaded in one interpreter):
@@ -2043,6 +2048,22 @@ def _cmd_down(args: argparse.Namespace) -> int:
     return run_down(base_dir=args.base_dir)
 
 
+def _cmd_upgrade(args: argparse.Namespace) -> int:
+    """`vigil upgrade` (W5-5, #449) — run the automated, crash-safe SOVEREIGN data migration:
+    verify -> backup -> verify -> migrate -> verify -> report, ROLLING BACK to the verified backup on any
+    failure. The sovereign spine holds the owner key, so this NEVER runs in this offense process: it EXECs
+    ``.venv-sovereign/bin/sigil upgrade`` in its OWN venv (FATAL-2 — the two trust domains never co-load
+    here), passing ``--check`` / ``--no-backup`` through verbatim. Returns the sovereign leg's exit code
+    (0 ok; 3 = migration needed under --check; 2 = refused/failed-and-rolled-back)."""
+    from .dispatch import dispatch
+    forwarded: list[str] = ["upgrade"]
+    if getattr(args, "check", False):
+        forwarded.append("--check")
+    if getattr(args, "no_backup", False):
+        forwarded.append("--no-backup")
+    return dispatch("sigil", forwarded)
+
+
 def _trip_all_killswitches(*, reason: str) -> list[str]:
     """Trip the persistent, fail-closed kill-switch for EVERY engagement the offense engine knows, so
     every gated action is refused engine-wide (persistently, across restarts) until an operator
@@ -3133,6 +3154,16 @@ def build_parser() -> argparse.ArgumentParser:
     pdn.add_argument("--base-dir", default=".vigil-live",
                      help="engagement home holding the ui/pids file written by `vigil up`")
     pdn.set_defaults(func=_cmd_down)
+
+    pupg = sub.add_parser("upgrade", help="automated crash-safe data migration of the sovereign spine: "
+                                          "backup -> verify -> migrate -> verify -> report, with ROLLBACK "
+                                          "on any failure (runs `sigil upgrade` in the sovereign venv)")
+    pupg.add_argument("--check", action="store_true",
+                      help="only report whether a migration is needed (exit 3 if it is); mutate nothing")
+    pupg.add_argument("--no-backup", dest="no_backup", action="store_true",
+                      help="skip the backup+rollback frame (disposable store only; still refuses a "
+                           "non-verifying spine)")
+    pupg.set_defaults(func=_cmd_upgrade)
 
     ppan = sub.add_parser("panic", help="EMERGENCY HARD-STOP: trip every engagement's kill-switch (gate-"
                                         "level DENY, persistent) then mask+stop the unit and kill the "
