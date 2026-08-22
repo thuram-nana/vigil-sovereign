@@ -218,12 +218,16 @@ class ScanReport(BaseModel):
                                  be claimed for it (e.g. ``nosqli`` / ``ldap_injection`` /
                                  ``xpath_injection`` on a default, library-off run).
 
-        The exercised set is ``committed_check_classes`` — the classes the active point-check
-        roster actually committed to test on THIS run (post library/access-control selection),
-        captured deterministically at plan time. The corpus is derived from the registry
-        (``_corpus_bug_classes``), never hardcoded, so it tracks the library as it grows."""
+        The exercised set is derived from what the run ACTUALLY probed —
+        ``{p.bug_class for p in self.exercised_probes}`` (the per-(surface, point, check) probe
+        records the engine emitted), NOT ``committed_check_classes`` (the plan captured at PLAN
+        time, which lists every committed class whether or not a probe of it ever ran). A class
+        that was committed but never got a probe on the wire is therefore NOT counted exercised,
+        so its absence-of-finding stays ``inconclusive``, never a bounded ``clean``. The corpus
+        is derived from the registry (``_corpus_bug_classes``), never hardcoded, so it tracks
+        the library as it grows."""
         corpus = _corpus_bug_classes()
-        exercised = set(self.committed_check_classes)
+        exercised = {p.bug_class for p in self.exercised_probes}
         with_findings = {f.bug_class for f in self.active_findings}
         out: dict[str, str] = {}
         for c in sorted(corpus | exercised | with_findings):
@@ -241,13 +245,14 @@ class ScanReport(BaseModel):
         The corpus is the fixed point-check corpus (``_corpus_bug_classes`` — DEFAULT_CHECKS
         ∪ scanner.library), so ``corpus_classes`` is a stable denominator and
         ``classes_exercised`` + ``classes_inconclusive`` PARTITION it. A corpus class is
-        exercised when the run committed a check of it OR confirmed a finding of it; the rest
-        are inconclusive. ``clean_is_corpus_wide`` is True ONLY when nothing is inconclusive —
-        i.e. a CLEAN from this run really does cover the whole shipped corpus. On a default
-        (library-off) run it is False: most classes are inconclusive, so ``no findings`` here
-        is NOT a corpus-wide negative."""
+        exercised when the run actually PROBED it (a probe record of that class exists) OR
+        confirmed a finding of it; the rest are inconclusive. A class the plan committed but
+        never probed on the wire is inconclusive, NOT exercised. ``clean_is_corpus_wide`` is
+        True ONLY when nothing is inconclusive — i.e. a CLEAN from this run really does cover
+        the whole shipped corpus. On a default (library-off) run it is False: most classes are
+        inconclusive, so ``no findings`` here is NOT a corpus-wide negative."""
         corpus = _corpus_bug_classes()
-        exercised_or_found = set(self.committed_check_classes) | {
+        exercised_or_found = {p.bug_class for p in self.exercised_probes} | {
             f.bug_class for f in self.active_findings
         }
         exercised = sorted(c for c in corpus if c in exercised_or_found)
