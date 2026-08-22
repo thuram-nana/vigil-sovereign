@@ -284,8 +284,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             from ..dashboard import snapshot as _snapshot
             d = _snapshot(self.server.store())
-            dec = d.get("recent_decisions") or {}
-            refusals = sum(int(v) for k, v in dec.items() if str(k) in ("deny", "denied", "refused"))
+            # Feed the *_total counter from the CUMULATIVE spine projection (`refusals_total`), never the
+            # windowed `recent_decisions` — the latter slides with `lookback` and would make the counter go
+            # DOWN, violating counter monotonicity. The spine is append-only, so this only ever grows.
+            refusals = int(d.get("refusals_total") or 0)
             reg.update_domain_from_snapshot({"totals": {"refusals": refusals}})
         except Exception:  # noqa: BLE001 — a projection hiccup must not fail the scrape
             pass

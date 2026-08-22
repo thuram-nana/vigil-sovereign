@@ -46,6 +46,16 @@ def _series_present(text: str, name: str) -> bool:
     return any(re.match(rf"^{re.escape(name)}(\{{[^}}]*\}})?\s+\S+$", ln) for ln in text.splitlines())
 
 
+def _series_value(text: str, name: str) -> float:
+    """Sum every sample of the family `name` (ignoring labels) parsed out of the exposition text."""
+    total = 0.0
+    for ln in text.splitlines():
+        m = re.match(rf"^{re.escape(name)}(\{{[^}}]*\}})?\s+(\S+)$", ln)
+        if m:
+            total += float(m.group(2))
+    return total
+
+
 def test_metrics_is_unauthenticated_openmetrics_with_red_process_and_domain():
     srv, port = _serve()
     try:
@@ -75,5 +85,53 @@ def test_metrics_body_carries_no_token():
     try:
         _, _, body = _get(port, "/metrics")
         assert TOKEN not in body
+    finally:
+        srv.shutdown()
+
+
+def test_refusals_total_is_monotonic_across_scrapes_despite_the_windowed_dashboard():
+    """W6-3 #454 regression: `vigil_refusals_total` is a *_total COUNTER and MUST be monotonic. It was fed
+    from `dashboard.snapshot()['recent_decisions']`, a SLIDING `lookback`-windowed view, so once a DENY
+    aged out of the window the counter DROPPED — an illegal counter reset. The fix feeds it from the
+    CUMULATIVE `refusals_total` spine projection instead. This asserts: (a) a recorded DENY shows up, (b)
+    after enough later records push it out of the window the counter does NOT drop (the bug), and (c) a
+    fresh DENY still increases it."""
+    from sigil.dashboard import snapshot as _snapshot
+    from sigil.spine.store import SpineStore
+
+    path = tempfile.mktemp(suffix=".jsonl")
+    store = SpineStore(path)
+    store.append(kind="refusal", source="agent", actor="operator",
+                 payload={"decision": "denied", "governor": "kill-switch"})
+
+    srv = build_ui(token=TOKEN, port=0, spine_path=path)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    time.sleep(0.05)
+    port = srv.server_address[1]
+    try:
+        _, _, body1 = _get(port, "/metrics")
+        r1 = _series_value(body1, "vigil_refusals_total")
+        assert r1 == 1.0, f"the recorded DENY must be counted, got {r1}"
+
+        # Push the DENY out of the dashboard's sliding lookback window with later non-deny agent records.
+        for _ in range(305):
+            store.append(kind="message", source="agent", actor="operator",
+                         payload={"decision": "auto", "text": "OBSIDIAN-TEST filler"})
+        # Sanity: the WINDOWED view has indeed dropped the denial (this is exactly the non-monotonic source).
+        snap = _snapshot(store)
+        assert snap["recent_decisions"].get("denied", 0) == 0, "window should have slid past the DENY"
+        assert snap["refusals_total"] == 1, "the cumulative projection must still hold the DENY"
+
+        _, _, body2 = _get(port, "/metrics")
+        r2 = _series_value(body2, "vigil_refusals_total")
+        assert r2 >= r1, f"counter went DOWN ({r1} -> {r2}) — non-monotonic *_total"
+        assert r2 == 1.0, f"cumulative refusals should be unchanged at 1, got {r2}"
+
+        # A new DENY still moves the counter up.
+        store.append(kind="refusal", source="agent", actor="operator",
+                     payload={"decision": "refused", "requested": "OBSIDIAN-TEST"})
+        _, _, body3 = _get(port, "/metrics")
+        r3 = _series_value(body3, "vigil_refusals_total")
+        assert r3 == 2.0, f"a fresh DENY must increment the counter, got {r3}"
     finally:
         srv.shutdown()
