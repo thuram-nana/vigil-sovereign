@@ -7,7 +7,7 @@ Milestone: W13 — SOVEREIGN CONTROL PLANE (ANTIC programme) · Blocked by [W13-
 ## The claim (registered in the claims registry — [W0-3] #398, id `W13-5`)
 
 <!-- CLAIM:W13-5 -->
-> **Registered claim (W0-3 #398):** The offense executor validates a nine-field-bound, single-use, owner-signed capability token immediately before it launches a tool, and burns the token's nonce in the existing O_EXCL nonce ledger, so an authorization decision cannot be stale, replayed, or reused for a different operation by the time execution happens.
+> **Registered claim (W0-3 #398):** The offense external-tool executor (run_external_tool), WHEN a capability token is presented, validates it immediately before launching the tool — nine-field-bound (deployment/engagement/operation-hash/normalized target/tool/danger class/…), single-use, owner-signed — and burns its nonce in the existing O_EXCL nonce ledger, so a presented authorization cannot be stale, replayed, or reused for a different operation by the time execution happens. Enforcement is OPT-IN at this stage: a call with no token still runs (capability=None is not yet a refusal), and minting a token at the sovereign approval leg + threading it through every production caller — so a production deployment REQUIRES one on every run — is named follow-on work in the decision doc.
 
 ## Why this exists
 
@@ -78,3 +78,19 @@ its structural test `test_executor_consults_the_capability_boundary_before_runni
   caller) so that a production deployment REQUIRES a token on every run is follow-on work.
 - **Revocation propagation** is out of scope for this slice (the token is single-use + short-window; a
   short-TTL revocation set is the general mechanism, as `vigil_core.capability` already documents).
+
+## Follow-on (named residual, not yet closed)
+
+Enforcement is **opt-in** at this stage: the external-tool executor validates a capability token
+**when one is presented**, but a call with `capability=None` still runs (no token → no check). Closing
+the stale/replay/reuse window on **every real run** requires wiring the token through production, tracked
+as follow-on:
+
+- Mint the nine-field-bound token at the **sovereign approval leg** (where the operator authorizes the action).
+- Thread a `CapabilityCheck` through the production callers — `hexstrike_body._run_via_external_tool` and
+  `conformance.py` — so the executor always receives one.
+- Add a **production-posture flag** that makes `capability=None` itself a refusal, so a misconfigured
+  deployment fails closed rather than running unchecked.
+- Extend the boundary (or scope the claim) to the **terminal/subprocess executor** (`executor.py`
+  `execute_terminal`) so "no executor path runs without token validation" is literally backed, not just the
+  external-tool path this slice covers.

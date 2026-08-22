@@ -174,8 +174,8 @@
     },
     {
       "id": "W13-5",
-      "title": "Capability tokens are validated (single-use, nine-field bound) at the executor boundary",
-      "claim": "The offense executor validates a nine-field-bound, single-use, owner-signed capability token immediately before it launches a tool, and burns the token's nonce in the existing O_EXCL nonce ledger, so an authorization decision cannot be stale, replayed, or reused for a different operation by the time execution happens.",
+      "title": "A PRESENTED capability token is validated (single-use, nine-field bound) at the external-tool executor boundary",
+      "claim": "The offense external-tool executor (run_external_tool), WHEN a capability token is presented, validates it immediately before launching the tool \u2014 nine-field-bound (deployment/engagement/operation-hash/normalized target/tool/danger class/\u2026), single-use, owner-signed \u2014 and burns its nonce in the existing O_EXCL nonce ledger, so a presented authorization cannot be stale, replayed, or reused for a different operation by the time execution happens. Enforcement is OPT-IN at this stage: a call with no token still runs (capability=None is not yet a refusal), and minting a token at the sovereign approval leg + threading it through every production caller \u2014 so a production deployment REQUIRES one on every run \u2014 is named follow-on work in the decision doc.",
       "source": "docs/decisions/W13-5-executor-capability-token.md:9",
       "enforced_by": {"file": "integration/vigil_integration/live/external_tool.py", "symbol": "_capability_boundary_refusal"},
       "proved_by": {"file": "integration/tests/test_capability_token.py", "tests": ["test_a_valid_token_authorizes_exactly_once", "test_negative_control_replayed_token_is_refused", "test_negative_control_different_operation_hash_is_refused", "test_negative_control_token_past_expiry_is_refused", "test_negative_control_different_target_is_refused", "test_uses_the_existing_o_excl_nonce_ledger", "test_executor_consults_the_capability_boundary_before_running", "test_structural_check_is_not_a_no_op_negative_control"]},
