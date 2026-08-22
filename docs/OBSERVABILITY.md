@@ -200,3 +200,28 @@ See `infra/systemd/vigil-alerts.env.example`: `VIGIL_ALERT_WEBHOOK_URL`, `VIGIL_
 
 - **Claims-registry registration** of this behaviour is W0-3 (#398); that registry does not exist in the tree
   yet, so this section is the authoritative, code-true description until it does.
+
+---
+
+# OpenMetrics `/metrics` per plane (W6-3)
+
+Each plane server exposes a Prometheus/OpenMetrics endpoint at **`/metrics`**, rendered by the stdlib-only
+`vigil_core.metrics.MetricsRegistry` (no new dependency — neither hash lock changes). It carries:
+
+- **RED** — `vigil_requests_total` (by method + status class), `vigil_request_errors_total` (5xx / handler
+  crash), and the `vigil_request_duration_seconds` histogram (`_bucket`/`_sum`/`_count`).
+- **process** — `vigil_process_resident_memory_bytes`, `vigil_process_open_fds`,
+  `vigil_process_uptime_seconds`, `vigil_process_start_time_seconds` (read from `/proc/self` at scrape time).
+- **domain** — `vigil_facts_total`, `vigil_leads_total`, `vigil_refusals_total` (folded from the
+  business-counter JSON snapshot) and `vigil_gate_denials_total` (incremented on every authorization-gate
+  DENY). Every series is labelled `plane="sovereign"|"offense"`.
+
+**Exposure / auth posture.** `/metrics` is UNAUTHENTICATED and Host-ungated — the same probe posture as
+`/healthz`+`/readyz` — because each plane server binds loopback or a private (WireGuard/Tailscale) address
+only; a public serve goes behind the operator's TLS reverse proxy, which is where scrape-side authentication
+is applied. The body carries no token, path, or backend address. Registered as claim `W6-3` in
+`docs/claims/registry.json` ([W0-3] #398); see `docs/decisions/W6-3-openmetrics-exposition.md`.
+
+**Artifacts.** Example alert rules (`infra/observability/vigil-alerts.yml`) and a Grafana dashboard
+(`infra/observability/vigil-dashboard.json`) ship with the product — a starting point for [W8-1] #467
+alerting.

@@ -435,6 +435,131 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "opt-in-stated-as-default",
       "default": "off"
+    },
+    {
+      "id": "W6-3",
+      "title": "Each plane exposes a stdlib OpenMetrics /metrics with RED + process + domain counters",
+      "claim": "Each VIGIL plane server exposes a `/metrics` OpenMetrics endpoint — rendered by `vigil_core.metrics.MetricsRegistry` with ZERO new dependency (stdlib text-format exposition, so neither hash lock changes) — carrying RED request metrics (rate/errors/a duration histogram), process metrics (resident memory, open file descriptors, uptime), and the four domain counters facts/leads/refusals/gate-denials; the facts/leads/refusals counters are folded from the signed-spine business snapshot and `vigil_gate_denials_total` is incremented by `record_gate_verdict` on every authorization-gate DENY.",
+      "source": "docs/decisions/W6-3-openmetrics-exposition.md:38",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/metrics.py",
+        "symbol": "MetricsRegistry.render"
+      },
+      "proved_by": {
+        "file": "packages/core/vigil_core/tests/test_metrics.py",
+        "tests": [
+          "test_render_is_valid_openmetrics_with_red_process_and_domain",
+          "test_forced_gate_denial_increments_counter_and_fires_alert",
+          "test_update_domain_from_snapshot_is_total_on_garbage"
+        ]
+      },
+      "ci_job": "vigil_core — shared integrity substrate",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W8-4",
+      "title": "A stale passive mirror is refused promotion by the failover guard, not silently promoted",
+      "claim": "A passive whose off-box witnessed anchor is older than the freshness bound is refused promotion by the failover guard (STALE ANCHOR, exit 2) rather than silently promoted.",
+      "source": "docs/decisions/W8-4-mirror-sync-integration.md:30",
+      "enforced_by": {
+        "file": "tools/ha/spine_failover_guard.py",
+        "symbol": "evaluate_promotion"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_ha_mirror_sync.py",
+        "tests": [
+          "test_stale_mirror_anchor_is_refused_fresh_is_promoted",
+          "test_torn_delta_sync_is_detectably_incomplete_not_silently_partial",
+          "test_delta_mirror_sync_transfers_state_faithfully"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W17-14",
+      "title": "No orphaned console read route: every route is consumed or documented",
+      "claim": "Every registered console read route is consumed by the shipped unified UI or listed as a documented programmatic endpoint, and a new orphan turns the required CRUCIBLE core CI job red",
+      "source": "docs/decisions/W17-14-orphan-endpoint-guard.md:8",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/console/tests/test_orphan_route_guard_w17_14.py",
+        "symbol": "_orphans"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/console/tests/test_orphan_route_guard_w17_14.py",
+        "tests": [
+          "test_every_registered_read_route_is_consumed_or_documented",
+          "test_negative_control_the_checker_is_not_a_no_op",
+          "test_reports_data_dead_code_is_gone",
+          "test_attachments_list_provider_and_route_are_gone"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-3a",
+      "title": "authorize-destruction writes its single-use token with O_EXCL",
+      "claim": "`vigil authorize-destruction` writes the single-use signed authorization with `O_EXCL`, so a second authorize-destruction to the same path fails rather than overwriting the still-unspent token.",
+      "source": "docs/decisions/W16-STD-3a-destruction-single-use-oexcl.md:8",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/destruction_provision.py",
+        "symbol": "write_single_use_authorization"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_destruction_provision.py",
+        "tests": [
+          "test_write_single_use_authorization_first_write_succeeds",
+          "test_write_single_use_authorization_second_write_is_refused"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-3b",
+      "title": "the spine segment manifest supports owner-key signing (tamper-refused)",
+      "claim": "The spine segment manifest supports owner-key signing: when written with a signing key its `manifest_sig` is populated, and `read_manifest` refuses a manifest whose signature is missing or does not verify under the expected key.",
+      "source": "docs/decisions/W16-STD-3b-segment-manifest-signed.md:8",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/manifest.py",
+        "symbol": "read_manifest"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_spine_manifest_signature.py",
+        "tests": [
+          "test_write_signed_read_verified_roundtrip",
+          "test_read_refuses_edited_manifest_on_disk",
+          "test_read_refuses_unsigned_manifest_when_key_required"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-3c",
+      "title": "the RFC3161 time anchor is a capability; independence needs an external TSA",
+      "claim": "The RFC3161 time-anchor mechanism is built and tested, but the default `LocalTSA` is a self-signed local authority that establishes the MECHANISM only — a CAPABILITY, NOT time-anchor independence (the same host mints and pins). Genuine \"existed no-later-than T\" independence requires the operator-configured external `RemoteTSA` (a third-party RFC3161 URL) or a public calendar; a fully-independent external TSA is not wired by default, so this is a capability, not an independence FACT.",
+      "source": "docs/decisions/W16-STD-3c-time-anchor-tsa-capability.md:8",
+      "enforced_by": {
+        "file": "integration/vigil_integration/time_anchor.py",
+        "symbol": "LocalTSA"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_time_anchor.py",
+        "tests": [
+          "test_anchor_roundtrip_supersedes_median_and_gentime_is_real",
+          "test_remote_tsa_is_the_independence_path_and_is_present_but_offline"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
