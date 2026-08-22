@@ -111,6 +111,30 @@ def _fn_code(module_rel: str, func_name: str) -> str:
 # 1. No action without a valid engagement authority.                                  MET
 # =========================================================================================
 
+@pytest.fixture(autouse=True)
+def _no_vendored_strix_leak():
+    """The inv-12 behavioural probes pin ``<repo>/vendor/strix`` on ``sys.path`` and import
+    ``strix.report.*`` to exercise the ACTUAL vendored bridge (source-parsing alone can't prove a call
+    fires). Those modules are stdlib-clean and import fine in either leg, but they must NOT LEAK into the
+    shared pytest process: a later file's session-global import-clean assertion (``test_scitt``'s
+    ``test_import_clean_no_offense_modules``, the FATAL-2 boundary guard) scans ``sys.modules`` for any
+    ``strix.*``/``framework.*`` and would fail on this file's residue. Snapshot and restore ``sys.path`` +
+    drop any ``strix.*``/``framework.*`` a test newly imported, so each probe cleans up after itself."""
+    import sys
+
+    before_path = list(sys.path)
+    before_mods = frozenset(sys.modules)
+    try:
+        yield
+    finally:
+        for _m in [m for m in sys.modules
+                   if (m == "strix" or m.startswith("strix.")
+                       or m == "framework" or m.startswith("framework."))
+                   and m not in before_mods]:
+            del sys.modules[_m]
+        sys.path[:] = before_path
+
+
 def test_inv01_no_tool_runs_without_an_engagement_authority():
     from vigil_integration.live.external_tool import _preflight_gate_refusal
 
