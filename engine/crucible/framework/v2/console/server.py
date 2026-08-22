@@ -813,6 +813,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                                                      str(body.get("command", "") or "pytest -q"),
                                                      operator_present=True))
                 return
+            if path == "/api/launch/preview":
+                # W17-9: the PRE-Send preflight. Read-only — it spawns nothing and mints no run; it
+                # says WHICH engine the SAME body would route to and WHY, naming the unmet conjunct of
+                # the agentic engine's triple-conjunction gate (no session / remote target / `vigil`
+                # not on PATH) BEFORE the operator clicks Launch. No silent fall-through.
+                self._json(actions.engine_plan(body))
+                return
             if path == "/api/launch/assessment":
                 # The New-Assessment wizard's one action. It spawns only the SAME gated CLIs; it
                 # cannot relax scope (charter-signed, never an arg) or bypass a gate. A clean JSON

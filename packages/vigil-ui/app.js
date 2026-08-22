@@ -2005,7 +2005,10 @@
       tool: "", tools: [], apply_fixes: false, aegis_action: "detect",
       session_id: "", graph_backed: false, sessions: [],
       cloud_mode: "cloud", provider: "aws",
-      caps: null, profiles: null, profilesErr: false, kernel: null, launching: false };
+      caps: null, profiles: null, profilesErr: false, kernel: null, launching: false,
+      // W17-9: the server's PRE-Send engine plan — WHICH engine will run and WHY, naming the unmet
+      // conjunct of the agentic gate (no session / remote target / `vigil` not on PATH). Read-only.
+      enginePlan: null };
     // real capability catalog + backend/LLM status (never hardcoded)
     V.getJSON(OFF("/api/capabilities")).then(function (d) { W.caps = d; draw(); }).catch(function () { W.caps = { capabilities: [], scan_modes: [] }; });
     V.getJSON(OFF("/api/kernel")).then(function (d) { W.kernel = d; draw(); }).catch(function () { W.kernel = { backends: [] }; });
@@ -2053,6 +2056,25 @@
     function packsRun() {
       if (W.mode === "tool") return true;
       return !(wantsGraph() || (W.mode === "url" && isLoopback()));
+    }
+
+    // W17-9: the body the preflight scores — the SAME fields the launch payload sends, so the plan the
+    // operator reads cannot disagree with the engine the run picks. `agentic` mirrors the graph-backed
+    // opt-in the wizard offers today (loopback + session); `graph_backed` is the legacy alias the server
+    // also honours. Only the fields the routing/gate reads are included.
+    function planBody() {
+      return { mode: W.mode, target: W.target.trim(), slug: W.slug.trim(),
+        session_id: W.session_id, agentic: !!W.graph_backed, graph_backed: !!W.graph_backed,
+        cloud_mode: W.cloud_mode };
+    }
+    // Fetch the server's engine plan and re-render the summary in place. Read-only (`/api/launch/preview`
+    // spawns nothing). The `vigil`-on-PATH conjunct is a SERVER fact the page cannot know locally, so this
+    // is how the UI can name it BEFORE Send. Fire-and-forget; a failure leaves the last plan (or none).
+    function refreshPlan() {
+      if (W.mode === "cloud") { W.enginePlan = null; return; }
+      V.postJSON(OFF("/api/launch/preview"), planBody()).then(function (r) {
+        if (r && !r.error) { W.enginePlan = r; const s = V.$("#wiz-summary"); if (s) V.mount(s, summaryCard()); }
+      }).catch(function () { /* leave the prior plan; never block the wizard on a preflight */ });
     }
 
     function goto(n) { if (n > W.step && !stepValid(W.step)) { V.toast("Please complete this step first."); return; } set({ step: Math.max(1, Math.min(5, n)) }); }
@@ -2423,8 +2445,25 @@
       }
       put("Model", modelNeed().key ? "needed (the agent reads your source)"
         : (W.mode === "suite" ? "optional (advisory reasoning only)" : "not used (deterministic run)"));
+      // W17-9: state WHICH engine will run BEFORE Send, and — when the agentic engine was requested but a
+      // conjunct is unmet (no session / remote target / `vigil` not on PATH) — name that reason, so the
+      // operator is never surprised after the fact by a silent fall-through to the plain offense engine.
+      const engineRows = [];
+      if (W.mode !== "cloud" && W.enginePlan) {
+        const p = W.enginePlan;
+        engineRows.push(h("div.kv", null, [h("div.k", null, "Engine"),
+          h("div.v", null, p.engine_label || p.engine || "—")]));
+        if (p.agentic_requested && p.agentic_unmet) {
+          engineRows.push(h("div.legend", { style: { marginTop: "10px" } }, [V.icon("info"),
+            "Agentic engine will NOT run — " + (p.agentic_unmet_reason || p.why || "a condition is unmet")
+            + "."]));
+        } else if (p.why) {
+          engineRows.push(h("div.hint", { style: { marginTop: "6px" } }, p.why));
+        }
+      }
       return V.card("What will happen", "SUMMARY", h("div", null, [
         h("div.stack", { style: { gap: "8px" } }, rows),
+        engineRows.length ? h("div.stack", { style: { gap: "8px", marginTop: "12px" } }, engineRows) : null,
         h("div.legend", { style: { marginTop: "14px" } }, [V.icon("key"),
           "Offensive steps QUEUE for your approval — nothing fires automatically."]),
       ]), false);
@@ -2438,7 +2477,7 @@
       }));
     }
     function refreshFoot() { const f = V.$("#wiz-foot"); if (f) V.mount(f, footContent()); }
-    function updateSummary() { const s = V.$("#wiz-summary"); if (s) V.mount(s, summaryCard()); }
+    function updateSummary() { const s = V.$("#wiz-summary"); if (s) V.mount(s, summaryCard()); refreshPlan(); }
     function footContent() {
       const back = h("button.btn.ghost", { disabled: W.step === 1, onClick: function () { goto(W.step - 1); } }, "Back");
       const note = h("span.safenote", null, [V.icon("key"), "Steps queue for approval — nothing auto-fires"]);
@@ -2490,12 +2529,15 @@
         // records for itself); the wizard's is only what was asked for.
         setEngagement((r && r.slug) || body.slug || "");
         V.toast("Assessment launched — watching it live.");
-        // A graph-backed request falls back to the normal engine whenever `vigil`/Neo4j is missing. The
-        // server says which engine it actually spawned; silently keeping that to ourselves would leave
-        // the operator believing their run partitioned a knowledge graph that was never touched.
-        if (wantGraph && !(r && r.engine === "integration-graph")) {
-          V.toast("Graph-backed was requested but is unavailable here (it needs the `vigil` entrypoint and "
-            + "NEO4J_URI) — this ran on the normal engine. The run is still linked to the session.", true);
+        // A graph-backed request falls back to the normal engine whenever the `vigil` entrypoint is
+        // missing. The server tags the agentic run `engine:"integration"`; anything else (with an
+        // `engine_note` naming the fall-through) means the plain offense engine ran. Fix (W17-9): this
+        // used to compare against `"integration-graph"`, a value the server never returns, so the toast
+        // fired even when the agentic engine DID run — the false-fallback claim is gone.
+        if (wantGraph && !(r && r.engine === "integration")) {
+          V.toast((r && r.engine_note) ? r.engine_note
+            : ("Graph-backed was requested but is unavailable here (it needs the `vigil` entrypoint) — "
+               + "this ran on the normal engine. The run is still linked to the session."), true);
         }
         // Same rule for the capability packs: only the engage branch turns a pack into a flag, so a
         // loopback quick-scan / graph-backed / Strix / AEGIS run carries none of them. The server says so
@@ -2519,6 +2561,9 @@
           h("div.summary#wiz-summary", null, summaryCard()),
         ]),
       ]);
+      // W17-9: keep the pre-Send engine plan fresh as the operator moves through the wizard — the
+      // `vigil`-on-PATH conjunct is server-only, so the summary can only name it after this fetch.
+      if (W.mode && W.mode !== "cloud") refreshPlan();
     }
     draw();
   }
