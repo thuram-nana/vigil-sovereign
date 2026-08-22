@@ -1,6 +1,6 @@
-From 187324e5a51026c590dcaef3501be397e15d353e Mon Sep 17 00:00:00 2001
+From 8db697360f558c5290f1d0655e83ae1f6d558bc0 Mon Sep 17 00:00:00 2001
 Subject: [strix-patch 026] sx-inv12 (S9): surface proof degradation — verification_degraded is first-class (inv 12 MET)
-X-VIGIL-Commit: 187324e5a51026c590dcaef3501be397e15d353e
+X-VIGIL-Commit: 8db697360f558c5290f1d0655e83ae1f6d558bc0
 X-VIGIL-Date: 2026-08-22T06:04:16-04:00
 
 diff --git a/vendor/strix/strix/interface/cli.py b/vendor/strix/strix/interface/cli.py
