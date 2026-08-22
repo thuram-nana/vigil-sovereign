@@ -22,10 +22,17 @@ is inherited across ``fork``), and a non-blocking connect is refused on its ``EI
 attacked and both held.
 
 DEFAULT OFF, opt-in by environment, so an operator's ordinary host run is byte-identical unless they ask
-for the guard. Live-fire and CI turn it on.
+for the guard. Live-fire and CI turn it on. Under the PRODUCTION posture (``VIGIL_POSTURE=production`` /
+``prod``) it is NOT opt-in: :func:`_production_forced` forces ``require`` mode (fail closed) regardless of
+VIGIL_EGRESS_GUARD, and the W9-4b refuse-to-start production gate additionally refuses ``vigil up`` /
+``vigil engage`` when its binary is not built (W10-8) — so a production deployment cannot silently run
+tools with the syscall supervisor off. This is still the control described by the HONEST BOUNDs below: it
+refuses a tool's OWN non-loopback egress, it is NOT a containment boundary for hostile code, and it does
+not cover a 32-bit binary / ``sendmmsg`` / ``io_uring``.
 
   VIGIL_EGRESS_GUARD=1            wrap spawns when the guard binary is available
   VIGIL_EGRESS_GUARD=require      wrap, and REFUSE to spawn if the guard is unavailable (fail closed)
+                                  (VIGIL_POSTURE=production forces this mode)
   VIGIL_EGRESS_GUARD_FAIL=1       a blocked connect fails the run (guard exits 97) rather than only logging
   VIGIL_EGRESS_GUARD_BIN=<path>   explicit binary path (else the in-repo build is used)
   VIGIL_EGRESS_GUARD_LOG=<path>   append the guard's decisions here
@@ -134,8 +141,27 @@ def refuses_to_wrap(tool_argv: list) -> str | None:
     return None
 
 
+def _production_forced() -> bool:
+    """The PRODUCTION posture FORCES the supervisor on, in fail-closed `require` mode, regardless of
+    VIGIL_EGRESS_GUARD (W10-8). Outside production the guard stays opt-in via the env var — so a fresh /
+    non-production run is byte-identical unless the operator asks for it. Reads the ONE shared posture
+    parse (`vigil_core.posture`, pure stdlib, no cross-boundary import); a parse error fails safe to
+    'not forced' rather than crashing a spawn (the refuse-to-start production gate is the loud backstop)."""
+    try:
+        from vigil_core.posture import production_posture
+        return production_posture() is not None
+    except Exception:  # noqa: BLE001 — a posture-parse failure must never crash a tool spawn
+        return False
+
+
 def _mode() -> str:
-    return (os.environ.get("VIGIL_EGRESS_GUARD") or "").strip().lower()
+    m = (os.environ.get("VIGIL_EGRESS_GUARD") or "").strip().lower()
+    # Under the production posture the supervisor is not opt-in: force `require` (fail-closed) even when
+    # VIGIL_EGRESS_GUARD is unset or set to a weaker mode. A guard the operator can silently leave off in
+    # production is the class of "control that does not fire" this closes.
+    if _production_forced():
+        return "require"
+    return m
 
 
 def enabled() -> bool:

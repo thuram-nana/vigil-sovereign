@@ -616,6 +616,29 @@ def _posture_legacy_owner_token() -> "tuple[str, str]":
                        f"to require per-user PoP auth")
 
 
+def _posture_egress_supervisor() -> "tuple[str, str]":
+    """The seccomp connect/sendto/sendmsg egress supervisor (W10-8), read WITHOUT sending any traffic:
+    ARMED iff it is ENABLED (opt-in via VIGIL_EGRESS_GUARD, or FORCED on by the production posture) AND its
+    binary is present. Under the production gate it must be ARMED — production forces `require` mode, so a
+    missing binary is MISSING_BINARY (the guard would refuse every spawn) and OFF cannot occur. This is a
+    control against a tool's OWN non-loopback egress and a mis-built argv, NOT a containment boundary for
+    hostile code; it does not cover 32-bit binaries / sendmmsg / io_uring (its stated bound, in the docs).
+    Reads env + a filesystem existence check only — no traffic, no sigil/framework import (FATAL-2)."""
+    from vigil_integration.live import egress_guard as _eg
+    if not _eg.enabled():
+        return "OFF", ("the seccomp egress supervisor is not enabled — set VIGIL_EGRESS_GUARD=require, or "
+                       "run under VIGIL_POSTURE=production which forces it on")
+    binary = _eg.guard_binary()
+    if binary is None:
+        return "MISSING_BINARY", ("the supervisor is enabled but its binary is not built — run "
+                                  "`make -C tools/egress-guard` or set VIGIL_EGRESS_GUARD_BIN; under "
+                                  "`require`/production mode every guarded spawn is REFUSED (fail-closed) "
+                                  "until it exists")
+    mode = "require (fail-closed)" if _eg.required() else "enabled"
+    return "ARMED", (f"seccomp connect/sendto/sendmsg supervisor {mode} ({binary}); bound: refuses a "
+                     f"tool's own non-loopback egress, NOT a containment boundary for hostile code")
+
+
 def _collect_posture(repo: Path, services: dict) -> list:
     """The security-posture block: one honest line PER control, its CURRENT state read from real on-disk /
     env state (never an optimistic default). INFORMATIONAL — never flips `ok`. Every probe fails soft to
@@ -637,26 +660,30 @@ def _collect_posture(repo: Path, services: dict) -> list:
         _entry("entitlement", lambda: _posture_entitlement(repo)),
         _entry("backups", lambda: _posture_backups(repo)),
         _entry("charter", lambda: _posture_charter(repo)),
+        _entry("egress-supervisor", _posture_egress_supervisor),
     ]
 
 
 # ── PRODUCTION posture gate (W9-4b) ───────────────────────────────────────────────────────────────────
 # The opt-in REFUSE-TO-START gate. When VIGIL_POSTURE=production (or `prod`; case-insensitive), a start path
-# (`vigil up` / `vigil engage`) refuses to run unless ALL SIX production preconditions hold: the vault is
+# (`vigil up` / `vigil engage`) refuses to run unless ALL SEVEN production preconditions hold: the vault is
 # SEALED, the sovereignty tier is non-PERMISSIVE, entitlement enforcement is ACTIVE, the backup/reprove
-# timers are ON, a signed charter + EngagementAuthority is PRESENT, and the legacy embedded shared owner
-# token is DISABLED (per-user PoP auth required — W10-7). The first five read the exact SAME on-disk/env
-# posture probes `vigil doctor` renders; the sixth reads SIGIL_LEGACY_OWNER_TOKEN (no new state, no import
-# of sigil — the FATAL-2 boundary holds).
+# timers are ON, a signed charter + EngagementAuthority is PRESENT, the legacy embedded shared owner
+# token is DISABLED (per-user PoP auth required — W10-7), and the seccomp egress supervisor is ARMED (its
+# binary built, so production's forced `require` mode is fail-closed not spawn-refusing — W10-8). The first
+# five read the exact SAME on-disk/env posture probes `vigil doctor` renders; the sixth reads
+# SIGIL_LEGACY_OWNER_TOKEN and the seventh reads VIGIL_EGRESS_GUARD + the guard-binary path (no new state,
+# no import of sigil/framework — the FATAL-2 boundary holds).
 #
 # ADDITIVE + OPT-IN: with VIGIL_POSTURE unset (or any non-production value) the gate is INERT — it never
 # blocks, so behaviour is byte-identical to before. FAIL-CLOSED: any control NOT in its required good-state
 # — UNKNOWN included — is UNMET; a control we cannot read is never treated as satisfied. The egress-gate
-# control is DELIBERATELY excluded from the gate: a loopback engagement legitimately needs no docker gateway,
-# so requiring it would refuse the documented loopback quickstart.
+# control (the docker-gateway topology) is DELIBERATELY excluded from the gate: a loopback engagement
+# legitimately needs no docker gateway, so requiring it would refuse the documented loopback quickstart.
+# (This is distinct from egress-supervisor, the seccomp syscall guard, which IS a gate precondition.)
 
 # control -> (required good-states, one-line requirement text used in the operator refusal). The order is
-# the plan's five conditions plus W10-7's legacy-token; each `required` set is the state(s) `doctor` reports
+# the plan's five conditions plus W10-7's legacy-token and W10-8's egress-supervisor; each `required` set is the state(s) `doctor` reports
 # when the control is actually ENGAGED (see the _posture_* probes above). SHARED REGISTRY (W6-6): the spec
 # lives in `vigil_core.doctor` — the namespace-pure package BOTH trust planes import — so `vigil doctor`
 # and `sigil doctor` gate on the exact SAME controls and good-states. Imported here (keeping the historical
@@ -702,6 +729,7 @@ def evaluate_production_gate(repo_root, posture: "list | None" = None) -> dict:
         "backups": lambda: _posture_backups(repo),
         "charter": lambda: _posture_charter(repo),
         "legacy-owner-token": _posture_legacy_owner_token,
+        "egress-supervisor": _posture_egress_supervisor,
     }
     # Gather the current state of every registry control (reuse the precomputed posture where present, else
     # probe here — FAIL CLOSED: an unreadable control becomes UNKNOWN, never a crash), then hand the SHARED
