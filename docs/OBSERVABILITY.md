@@ -200,4 +200,3 @@ See `infra/systemd/vigil-alerts.env.example`: `VIGIL_ALERT_WEBHOOK_URL`, `VIGIL_
 
 - **Claims-registry registration** of this behaviour is W0-3 (#398); that registry does not exist in the tree
   yet, so this section is the authoritative, code-true description until it does.
-
