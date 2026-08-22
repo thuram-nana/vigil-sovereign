@@ -47,3 +47,31 @@ leaving restricted mode records the audit event but never silently re-arms the t
 AUTO-invoking `enforce_integrity_or_restrict` on every integrity-monitor tick and at process boot (so a
 production box lands in restricted mode with no operator in the loop) is named follow-on work and is pinned
 by an `xfail` in `integration/tests/test_restricted_mode.py`.
+
+## Red-pen fold (#499) — two safety-critical MEDIUMs
+
+Two MEDIUMs were folded after the first landing; both tighten the *safety* of the mode without adding a
+parallel policy engine (the same HARD CONSTRAINT still holds — the kill-switch/gate remains the only
+authority):
+
+* **`is_restricted()` reflects the LIVE gate, not a stale ledger snapshot.** The last transition is the
+  RECORD of intent; the kill-switch is the ENFORCEMENT. Reading the ledger alone let `is_restricted()`
+  report `restricted` after an operator had already CLEARED a kill-switch during recovery (which opens the
+  gate but records no LEAVE) — i.e. report restricted while the gate was OPEN. `is_restricted()` now also
+  consults the SAME live kill-switch the refusal path consults (`killswitches_all_tripped`, over the real
+  `KillSwitch` primitive): it is True only when the last transition is an ENTER **and** every known
+  engagement's gate is currently closed. Invariant: **reported-restricted implies the gate is closed.**
+  (`killswitches_all_tripped` is the read-side twin of `trip_all_killswitches`; its `framework` import is
+  function-local, FATAL-2, and injectable so the sovereign leg drives it without the offense install.)
+* **Each refusal is recorded ON THE CHAIN, per-refusal.** Previously only the enter/leave transition was
+  on the chain, so an audit could not show *which* actions were refused while restricted. `record_refusal`
+  now appends a `REFUSE` event to the SAME hash-chained ledger as the transitions, and `guarded_authorize`
+  wraps the EXISTING `authorize_action` to record each refusal the CLOSED gate makes (`denial_code ==
+  "halted"`) — the decision is still entirely the existing gate's; only the audit line is added. Because a
+  refusal sits on the same chain as the transitions, it cannot be excised to hide it without breaking the
+  chain. `REFUSE` events never change the mode (`current_state` skips them).
+
+Both are proven end-to-end against the REAL `KillSwitch`/gate in `test_restricted_mode_offense.py`
+(`test_is_restricted_false_once_the_real_gate_is_cleared`,
+`test_guarded_authorize_records_each_real_gate_refusal_on_the_chain`), with import-clean ledger-mechanics
+mirrors in `test_restricted_mode.py`.

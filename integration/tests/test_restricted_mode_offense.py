@@ -76,7 +76,8 @@ def test_mutating_action_refused_in_restricted_mode_via_the_existing_gate(tmp_pa
         trip_kwargs={"authority_dir": adir, "ks_path_for": ks_path_for},
     )
     assert t.action == rm.ENTER
-    assert rm.is_restricted(base) is True
+    # is_restricted reads the SAME live kill-switch the gate consults (not just the ledger snapshot).
+    assert rm.is_restricted(base, authority_dir=adir, ks_path_for=ks_path_for) is True
     assert ks.is_tripped() is True, "entering restricted mode must trip the existing kill-switch"
 
     # The mutating / target-touching action is now REFUSED — by the EXISTING authority gate, with the
@@ -114,3 +115,59 @@ def test_integrity_failure_trips_the_real_gate(tmp_path: Path):
 
     refused = authorize_action(_authority(), _mutating_request(), killswitch=ks, now=_NOW)
     assert refused.allowed is False and refused.denial_code == "halted"
+
+
+def test_is_restricted_false_once_the_real_gate_is_cleared(tmp_path: Path):
+    # MEDIUM #1, proven against the REAL KillSwitch: the ledger's last transition is ENTER, but an
+    # operator clears the kill-switch during recovery (opening the gate, recording no LEAVE). Reading the
+    # ledger alone would falsely report `restricted`; is_restricted consults the SAME live kill-switch the
+    # refusal path does, so once the gate is open it reports False. Reported-restricted ⇒ gate closed.
+    adir, ks_path_for = _setup_authority_dir(tmp_path)
+    ks = KillSwitch("eng", path=ks_path_for("eng"))
+    base = tmp_path / "home"
+
+    rm.enter_restricted_mode(
+        base_dir=base, trigger="emergency_stop",
+        trip_kwargs={"authority_dir": adir, "ks_path_for": ks_path_for},
+    )
+    assert ks.is_tripped() is True
+    # Gate CLOSED: reported restricted.
+    assert rm.is_restricted(base, authority_dir=adir, ks_path_for=ks_path_for) is True
+
+    # Operator clears the real kill-switch (recovery). No LEAVE is recorded — the ledger still says ENTER.
+    ks.clear(cleared_by="operator")
+    assert ks.is_tripped() is False
+    assert rm.current_state(base).entered is True, "the ledger still records ENTER — only the gate changed"
+
+    # The mutating action is now ALLOWED again by the EXISTING gate (the gate is genuinely open)...
+    assert authorize_action(_authority(), _mutating_request(), killswitch=ks, now=_NOW).allowed is True
+    # ...so is_restricted MUST NOT report restricted while the gate is open.
+    assert rm.is_restricted(base, authority_dir=adir, ks_path_for=ks_path_for) is False
+
+
+def test_guarded_authorize_records_each_real_gate_refusal_on_the_chain(tmp_path: Path):
+    # MEDIUM #2, end-to-end over the REAL gate: guarded_authorize consults the existing authorize_action
+    # and records EACH refusal (kill-switch tripped ⇒ `halted`) on the same hash chain as the transition.
+    adir, ks_path_for = _setup_authority_dir(tmp_path)
+    ks = KillSwitch("eng", path=ks_path_for("eng"))
+    base = tmp_path / "home"
+
+    rm.enter_restricted_mode(
+        base_dir=base, trigger="emergency_stop",
+        trip_kwargs={"authority_dir": adir, "ks_path_for": ks_path_for},
+    )
+
+    req = ActionRequest(target="https://app.example.com/x", action_kind="exploit", destructive=False)
+    decision = rm.guarded_authorize(_authority(), req, killswitch=ks, base_dir=base, now=_NOW)
+    assert decision.allowed is False and decision.denial_code == "halted"  # the EXISTING gate decided
+
+    refusals = [e for e in rm.read_transitions(base) if e.action == rm.REFUSE]
+    assert len(refusals) == 1, "the real-gate refusal must be recorded on the chain"
+    assert refusals[0].trigger == "halted" and "app.example.com/x" in refusals[0].reason
+
+    # NEGATIVE CONTROL (same run): once the gate is cleared, the same call is ALLOWED and records NO
+    # refusal — guarded_authorize records only what the existing gate actually refuses.
+    ks.clear(cleared_by="operator")
+    allowed = rm.guarded_authorize(_authority(), req, killswitch=ks, base_dir=base, now=_NOW)
+    assert allowed.allowed is True
+    assert len([e for e in rm.read_transitions(base) if e.action == rm.REFUSE]) == 1
