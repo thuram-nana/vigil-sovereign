@@ -178,3 +178,204 @@ def test_coverage_line_library_says_full_corpus() -> None:
     line = coverage_line(report)
     assert "full corpus" in line
     assert "NOT run" not in line
+
+
+# --------------------------------------------------------------------------- #
+# 4. the BOUNDED verdict — a default-run CLEAN is not a corpus-wide negative
+#    (W16-4 second slice, issue #509). A default run commits only the built-in
+#    seed roster; for every library-only bug class it committed NO check, so its
+#    per-class verdict is "inconclusive", never "clean". A target that IS
+#    vulnerable to such a class is therefore never reported CLEAN by a default run.
+# --------------------------------------------------------------------------- #
+
+import re  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from framework.v2.scanner.campaign import ScanReport, _corpus_bug_classes  # noqa: E402
+from framework.v2.scanner.engine import AuditFinding  # noqa: E402
+from framework.v2.scanner.library import split_checks  # noqa: E402
+
+
+def _library_only_point_classes() -> set[str]:
+    """The point-check bug classes the shipped library covers but the built-in seed
+    roster does NOT — derived from the registry, never hardcoded."""
+    point_lib, _request = split_checks(load_library())
+    return {c.bug_class for c in point_lib} - {c.bug_class for c in DEFAULT_CHECKS}
+
+
+def test_default_run_reports_library_only_class_inconclusive_not_clean() -> None:
+    """AC negative control: a target vulnerable to a library-only class (NoSQL injection)
+    is NOT reported CLEAN by a default run — its per-class verdict is `inconclusive`,
+    because the default roster committed no nosqli check at all."""
+    with _server(_WpApp) as base:
+        default = _run(base, use_library=False)
+        lib = _run(base, use_library=True)
+
+    # nosqli is genuinely in the corpus and library-only.
+    assert "nosqli" in _corpus_bug_classes()
+    assert "nosqli" in _library_only_point_classes()
+
+    # DEFAULT run: nosqli was never adjudicated -> inconclusive, never clean/finding.
+    assert default.verdict_by_class()["nosqli"] == "inconclusive"
+    # --library run over the SAME fixture DOES adjudicate nosqli (the WP echo endpoint is
+    # in fact nosqli-vulnerable, so it lands as a finding) — proving the default run's
+    # "inconclusive" was a real coverage gap the operator would otherwise read as safe.
+    assert lib.verdict_by_class()["nosqli"] != "inconclusive"
+
+
+def test_default_run_clean_is_not_corpus_wide() -> None:
+    """A default run leaves EVERY library-only point class inconclusive, so a CLEAN from it
+    is explicitly NOT corpus-wide. The exercised + inconclusive sets partition the corpus."""
+    with _server(_WpApp) as base:
+        report = _run(base, use_library=False)
+
+    cb = report.coverage_bounds()
+    corpus = _corpus_bug_classes()
+    assert cb["corpus_classes"] == len(corpus)
+    # partition: exercised + inconclusive cover the corpus with no overlap
+    assert set(cb["classes_exercised"]).isdisjoint(cb["classes_inconclusive"])
+    assert len(cb["classes_exercised"]) + len(cb["classes_inconclusive"]) == cb["corpus_classes"]
+    # a default run cannot claim a corpus-wide clean
+    assert cb["clean_is_corpus_wide"] is False
+    # and precisely the library-only point classes are the inconclusive set
+    assert set(cb["classes_inconclusive"]) == _library_only_point_classes()
+    for c in ("nosqli", "ldap_injection", "xpath_injection", "el_injection"):
+        assert report.verdict_by_class()[c] == "inconclusive"
+
+
+def test_library_run_shrinks_the_inconclusive_set() -> None:
+    """--library over a fingerprintable target exercises the library-only classes, so the
+    inconclusive set becomes a STRICT subset of the default run's."""
+    with _server(_WpApp) as base:
+        default = _run(base, use_library=False)
+        lib = _run(base, use_library=True)
+
+    d_inc = set(default.coverage_bounds()["classes_inconclusive"])
+    l_inc = set(lib.coverage_bounds()["classes_inconclusive"])
+    assert l_inc < d_inc, "the library must adjudicate classes the default run could not"
+    for c in ("nosqli", "ldap_injection", "xpath_injection"):
+        assert default.verdict_by_class()[c] == "inconclusive"
+        assert lib.verdict_by_class()[c] != "inconclusive"
+
+
+def test_verdict_gate_is_not_a_noop_flips_with_the_committed_roster() -> None:
+    """No-op-gate control (deterministic): the per-class verdict is driven by what the run
+    actually committed, not hardcoded. A class in the committed roster is `clean` (a bounded
+    negative); the SAME class absent is `inconclusive`; a confirmed finding of it is `finding`."""
+    assert {"nosqli", "boolean_sqli"} <= _corpus_bug_classes()
+
+    # default-shaped roster: boolean_sqli exercised, nosqli not
+    default = ScanReport(target="http://127.0.0.1/", committed_check_classes=["boolean_sqli"])
+    v = default.verdict_by_class()
+    assert v["boolean_sqli"] == "clean"        # exercised, no finding -> bounded negative
+    assert v["nosqli"] == "inconclusive"       # not exercised -> a CLEAN cannot be claimed
+
+    # add nosqli to the committed roster -> it FLIPS to clean (the gate is real, not a no-op)
+    withlib = ScanReport(target="http://127.0.0.1/",
+                         committed_check_classes=["boolean_sqli", "nosqli"])
+    assert withlib.verdict_by_class()["nosqli"] == "clean"
+
+    # a confirmed nosqli finding -> "finding" (the finding branch, over a real AuditFinding)
+    found = ScanReport(
+        target="http://127.0.0.1/", committed_check_classes=["nosqli"],
+        active_findings=[AuditFinding(
+            check_id="nosqli-op", bug_class="nosqli", insertion_point="query:q",
+            param="q", confidence=0.99, confirmed_by="differential")],
+    )
+    assert found.verdict_by_class()["nosqli"] == "finding"
+
+
+def test_json_report_carries_bounded_verdict() -> None:
+    """The machine report carries the per-class verdict + the bounded-verdict summary, and
+    they survive a JSON round-trip. The pre-existing `coverage` object is UNCHANGED (4 keys)."""
+    with _server(_WpApp) as base:
+        report = _run(base, use_library=False)
+    doc = build_report(report)
+
+    assert "verdict_by_class" in doc
+    assert "coverage_verdict" in doc
+    assert doc["verdict_by_class"]["nosqli"] == "inconclusive"
+    assert doc["coverage_verdict"]["clean_is_corpus_wide"] is False
+    assert "nosqli" in doc["coverage_verdict"]["classes_inconclusive"]
+
+    # the original coverage disclosure is untouched — additive change, no consumer breaks
+    assert set(doc["coverage"]) == {"built_in_run", "library_available", "library_run", "full_coverage"}
+
+    round_trip = json.loads(json.dumps(doc))
+    assert round_trip["coverage_verdict"]["clean_is_corpus_wide"] is False
+    assert round_trip["verdict_by_class"]["nosqli"] == "inconclusive"
+
+
+def test_coverage_line_states_bounded_verdict() -> None:
+    """The operator-facing text line states the bounded verdict: a default CLEAN is NOT
+    corpus-wide and names the inconclusive count; a --library run says a CLEAN IS corpus-wide."""
+    with _server(_WpApp) as base:
+        default = _run(base, use_library=False)
+        lib = _run(base, use_library=True)
+
+    d_line = coverage_line(default)
+    d_bounds = default.coverage_bounds()
+    assert "VERDICT BOUNDED" in d_line
+    assert "NOT corpus-wide" in d_line
+    assert "INCONCLUSIVE" in d_line
+    assert (f"adjudicated {len(d_bounds['classes_exercised'])}/"
+            f"{d_bounds['corpus_classes']} point-check bug classes") in d_line
+
+    l_line = coverage_line(lib)
+    assert "a CLEAN is corpus-wide" in l_line
+    assert "NOT corpus-wide" not in l_line
+
+
+def test_html_report_shows_bounded_verdict() -> None:
+    with _server(_WpApp) as base:
+        report = _run(base, use_library=False)
+    html_out = to_html(report)
+    assert "VERDICT BOUNDED" in html_out
+    assert "INCONCLUSIVE" in html_out
+    assert "NOT corpus-wide" in html_out
+
+
+# --------------------------------------------------------------------------- #
+# 5. doc-truth: the decision record (docs/decisions) is TRUE of the code.
+# --------------------------------------------------------------------------- #
+
+
+def _find_adr() -> Path:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        cand = parent / "docs" / "decisions" / "W16-4-default-check-corpus.md"
+        if cand.exists():
+            return cand
+    raise AssertionError("W16-4 decision record not found walking up from the test file")
+
+
+def test_adr_pins_the_default_check_corpus() -> None:
+    """The W16-4 decision record's stated corpus numbers MATCH the code at runtime — a
+    doc-truth guard so the record cannot silently drift from the shipped rosters. Stands in
+    for the [W0-3] #398 claims-registry registration (not yet landed), per the W5-1 precedent."""
+    adr = _find_adr().read_text(encoding="utf-8")
+    # flatten markdown soft-wrapping so an assertion is not brittle to where a line breaks
+    flat = re.sub(r"\s+", " ", adr)
+
+    # DEFAULT_CHECKS: 11 point checks across 10 bug classes
+    default_classes = len({c.bug_class for c in DEFAULT_CHECKS})
+    assert f"{len(DEFAULT_CHECKS)} point checks" in flat
+    assert f"{default_classes} bug classes" in flat
+
+    # the shipped library size, derived from the registry
+    available, classes = library_stats()
+    assert f"{available} entries across {classes} bug classes" in flat
+
+    # the point-check corpus size the disclosure bounds a CLEAN against
+    corpus = len(_corpus_bug_classes())
+    assert f"{corpus} distinct point-check classes" in flat
+
+    # every library-only point class the record names is genuinely library-only in the code
+    library_only = _library_only_point_classes()
+    for c in ("nosqli", "ldap_injection", "xpath_injection", "el_injection", "rce", "lfi"):
+        assert c in library_only
+        assert f"`{c}`" in adr, f"{c} not documented in the ADR"
+
+    # the record must state the core claim
+    assert "clean_is_corpus_wide" in adr
+    assert "#509" in adr

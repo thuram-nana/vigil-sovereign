@@ -288,6 +288,14 @@ def build_report(report: ScanReport, *, attack_paths: list | None = None,
         # library, run only under --library) actually contributed checks — so a machine
         # consumer/CI can tell a default seed-set scan from a full-corpus one.
         "coverage": report.coverage(),
+        # Coverage honesty (W16-4) — the BOUNDED verdict. `coverage` above states how many
+        # checks ran; this states what an absence of findings actually PROVES. `verdict_by_class`
+        # maps every corpus bug class to finding|clean|inconclusive, and `coverage_verdict`
+        # summarises it: on a default (library-off) run `clean_is_corpus_wide` is False and the
+        # library-only classes (nosqli/ldap_injection/xpath_injection/…) are inconclusive, so a
+        # machine consumer/CI can never read a default CLEAN as a corpus-wide negative.
+        "verdict_by_class": report.verdict_by_class(),
+        "coverage_verdict": report.coverage_bounds(),
         "fingerprint": sorted(report.fingerprint.tokens) if report.fingerprint else [],
         "discovered_endpoints": list(report.discovered_endpoints),
         "findings": [f.__dict__ for f in findings],
@@ -354,13 +362,22 @@ def to_html(report: ScanReport, *, grounding: list | None = None,
     doc = build_report(report, grounding=grounding, strict_evidence=strict_evidence)
     s = doc["summary"]
     _cov = doc["coverage"]
-    _cov_note = (
+    _cvd = doc["coverage_verdict"]
+    _cov_ran = (
         f"checks: configured {_cov['built_in_run']} built-in (DEFAULT_CHECKS)"
         + (f" + {_cov['library_run']} library (scanner.library) — full corpus"
            if _cov["full_coverage"]
            else f"; scanner.library ({_cov['library_available']} checks) NOT run — "
                 f"re-run with --library for full coverage (the TIMING oracle fires only "
                 f"with --library)")
+    )
+    _adj = f"adjudicated {len(_cvd['classes_exercised'])}/{_cvd['corpus_classes']} point-check bug classes"
+    _cov_note = (
+        f"{_cov_ran}. VERDICT: {_adj} — a CLEAN is corpus-wide"
+        if _cvd["clean_is_corpus_wide"]
+        else f"{_cov_ran}. VERDICT BOUNDED: {_adj}; a CLEAN here is NOT corpus-wide — "
+             f"{len(_cvd['classes_inconclusive'])} classes INCONCLUSIVE "
+             f"(e.g. {', '.join(_cvd['classes_inconclusive'][:3])})"
     )
     e = html.escape
     rows = "".join(
@@ -446,11 +463,26 @@ def coverage_line(report: ScanReport) -> str:
     the library size + class count are derived from the loaded registry (never hardcoded)."""
     from .library import library_stats
     cov = report.coverage()
+    bounds = report.coverage_bounds()
     available, classes = library_stats()
+    exercised = len(bounds["classes_exercised"])
+    corpus = bounds["corpus_classes"]
+    inconc = bounds["classes_inconclusive"]
+    # What actually ran.
     if cov["full_coverage"]:
-        return (f"checks: configured {cov['built_in_run']} built-in (DEFAULT_CHECKS) + "
-                f"{cov['library_run']} library (scanner.library / {classes} bug classes) "
-                f"— full corpus")
-    return (f"checks: configured {cov['built_in_run']} built-in (DEFAULT_CHECKS); scanner.library "
-            f"({available} checks / {classes} classes) NOT run — re-run with --library "
-            f"for full coverage; the TIMING oracle fires only with --library")
+        ran = (f"checks: configured {cov['built_in_run']} built-in (DEFAULT_CHECKS) + "
+               f"{cov['library_run']} library (scanner.library / {classes} bug classes) "
+               f"— full corpus")
+    else:
+        ran = (f"checks: configured {cov['built_in_run']} built-in (DEFAULT_CHECKS); scanner.library "
+               f"({available} checks / {classes} classes) NOT run — re-run with --library "
+               f"for full coverage; the TIMING oracle fires only with --library")
+    # The BOUNDED verdict — keyed on whether any corpus class is inconclusive, NOT merely on
+    # whether the library contributed checks. A fingerprint-scoped --library run that still
+    # left a class unexercised is honestly NOT corpus-wide.
+    if bounds["clean_is_corpus_wide"]:
+        return f"{ran}. VERDICT: adjudicated {exercised}/{corpus} point-check bug classes — a CLEAN is corpus-wide"
+    sample = ", ".join(inconc[:3])
+    more = f", +{len(inconc) - 3} more" if len(inconc) > 3 else ""
+    return (f"{ran}. VERDICT BOUNDED: adjudicated {exercised}/{corpus} point-check bug classes; "
+            f"a CLEAN here is NOT corpus-wide — {len(inconc)} classes INCONCLUSIVE ({sample}{more})")

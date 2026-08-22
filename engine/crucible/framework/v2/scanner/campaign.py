@@ -202,6 +202,80 @@ class ScanReport(BaseModel):
             "full_coverage": self.library_checks_run > 0,
         }
 
+    def verdict_by_class(self) -> dict[str, str]:
+        """A per-bug-class verdict that BOUNDS a CLEAN by what the run actually adjudicated.
+
+        The whole point of W16-4: the absence of a finding is only a negative for a bug class
+        this run had a check FOR. A default run commits the built-in seed roster
+        (``DEFAULT_CHECKS``, 10 point-check classes); the far larger declarative library
+        (``scanner.library``, 23 classes) runs ONLY under ``--library``. For every class in
+        the union corpus this returns exactly one of:
+
+          * ``"finding"``      — a confirmed active finding of that class exists;
+          * ``"clean"``        — the run COMMITTED a check of that class and none fired (a
+                                 real, bounded negative);
+          * ``"inconclusive"`` — the run committed NO check of that class, so a CLEAN cannot
+                                 be claimed for it (e.g. ``nosqli`` / ``ldap_injection`` /
+                                 ``xpath_injection`` on a default, library-off run).
+
+        The exercised set is ``committed_check_classes`` — the classes the active point-check
+        roster actually committed to test on THIS run (post library/access-control selection),
+        captured deterministically at plan time. The corpus is derived from the registry
+        (``_corpus_bug_classes``), never hardcoded, so it tracks the library as it grows."""
+        corpus = _corpus_bug_classes()
+        exercised = set(self.committed_check_classes)
+        with_findings = {f.bug_class for f in self.active_findings}
+        out: dict[str, str] = {}
+        for c in sorted(corpus | exercised | with_findings):
+            if c in with_findings:
+                out[c] = "finding"
+            elif c in exercised:
+                out[c] = "clean"
+            else:
+                out[c] = "inconclusive"
+        return out
+
+    def coverage_bounds(self) -> dict[str, object]:
+        """The bounded-verdict summary a CLEAN must be read against (W16-4).
+
+        The corpus is the fixed point-check corpus (``_corpus_bug_classes`` — DEFAULT_CHECKS
+        ∪ scanner.library), so ``corpus_classes`` is a stable denominator and
+        ``classes_exercised`` + ``classes_inconclusive`` PARTITION it. A corpus class is
+        exercised when the run committed a check of it OR confirmed a finding of it; the rest
+        are inconclusive. ``clean_is_corpus_wide`` is True ONLY when nothing is inconclusive —
+        i.e. a CLEAN from this run really does cover the whole shipped corpus. On a default
+        (library-off) run it is False: most classes are inconclusive, so ``no findings`` here
+        is NOT a corpus-wide negative."""
+        corpus = _corpus_bug_classes()
+        exercised_or_found = set(self.committed_check_classes) | {
+            f.bug_class for f in self.active_findings
+        }
+        exercised = sorted(c for c in corpus if c in exercised_or_found)
+        inconclusive = sorted(c for c in corpus if c not in exercised_or_found)
+        return {
+            "corpus_classes": len(corpus),
+            "classes_exercised": exercised,
+            "classes_inconclusive": inconclusive,
+            "clean_is_corpus_wide": not inconclusive,
+        }
+
+
+def _corpus_bug_classes() -> frozenset[str]:
+    """The POINT-check corpus: every bug class the built-in seed roster (``DEFAULT_CHECKS``)
+    OR the shipped declarative library's POINT checks (``scanner.library``) can adjudicate at
+    an insertion point. Derived from the loaded registry (memoized), never hardcoded, so a
+    CLEAN is always bounded against the corpus as it actually ships.
+
+    Point checks only: the exercised set is ``committed_check_classes`` (the point-check class
+    axis), so the corpus must be the same kind — otherwise a library REQUEST-level class
+    (``exposure`` / ``sensitive_exposure``, probed once per host, never at an insertion point)
+    would look permanently inconclusive. The always-on request-level roster (CORS / Host /
+    JWT / GraphQL + those exposure checks) is a separate set outside this disclosure."""
+    seed = {c.bug_class for c in DEFAULT_CHECKS}
+    point_lib, _request_lib = split_checks(load_library())
+    lib = {c.bug_class for c in point_lib}
+    return frozenset(seed | lib)
+
 
 class WebScanCampaign:
     """One-call autonomous scan: crawl → passive + active → report.
