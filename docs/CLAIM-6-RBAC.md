@@ -248,10 +248,13 @@ here with the exact bound each carries — delivered, not soft-pedalled, and not
   (`_hop_assertion_valid`, bound to principal+role+method+path+ts in a freshness window). **Honest bound:** a
   client holding the console token **directly** (no hop-signed role) is **owner-equivalent** by construction.
 - **Cryptographic per-user identities (S3, #382).** An owner can bind an Ed25519 `user_pubkey` to an account
-  (`enroll_pubkey`, owner-signed into the grant, byte-identical when absent); a user logs in by signing a
-  single-use server challenge (`/api/login/challenge` → PoP branch of `/api/login`; replay-guarded by an
-  O_EXCL single-use `ChallengeLedger`). **Honest bound:** keypair PoP is an **additional** login method — the
-  bearer stays the ongoing session carrier, and the trust root is still the **owner-signed grant**.
+  (`enroll_pubkey`, owner-signed into the grant, byte-identical when absent), via
+  `sigil accounts enroll-pubkey <user> --pubkey <b64>|--pubkey-file <path>` (W17-3/#537), the `enroll_pubkey`
+  action, or the **Enrol key** field on the Users & Roles screen — the private half never touches the host. A
+  user logs in by signing a single-use server challenge (`/api/login/challenge` → PoP branch of `/api/login`;
+  replay-guarded by an O_EXCL single-use `ChallengeLedger`). **Honest bound:** keypair PoP is an
+  **additional** login method — the bearer stays the ongoing session carrier, and the trust root is still the
+  **owner-signed grant**.
 - **MFA (TOTP) + optional password (S4, #387).** `governor/totp.py` (stdlib RFC-6238); the secret is shown
   once as an `otpauth://` provisioning URI and **sealed** via the owner vault before it is signed into the
   grant. On the login methods that bootstrap a **fresh session from a first factor** — PoP, password, OIDC —
@@ -260,9 +263,24 @@ here with the exact bound each carries — delivered, not soft-pedalled, and not
   itself a possession credential and the SPA login gate posts `{token}` only, so gating there would
   permanently brick UI login — a code-less bearer login is allowed, while a `{totp}` code that **is** supplied
   alongside the bearer is still validated (a wrong one is refused, so the gate is not a no-op). The owner
-  enrols via `sigil accounts enroll-totp <user>` (or the `enroll_totp` action) and **removes** a lost factor
-  via `sigil accounts disable-totp <user>` (the documented recovery path). `set_password` adds an *optional*
-  weaker salted-scrypt login; keypair PoP is the stronger path.
+  enrols via `sigil accounts enroll-totp <user>` (or the `enroll_totp` action / the Users-screen **Enrol
+  TOTP** button, which shows the provisioning URI once) and **removes** a lost factor via
+  `sigil accounts disable-totp <user>` (the documented recovery path). `set_password` adds an *optional*
+  weaker salted-scrypt login — set via `sigil accounts set-password <user>` (prompted, never on argv;
+  W17-3/#537), the `set_password` action, or the Users-screen **Set password** field; keypair PoP is the
+  stronger path.
+- **Login fix set — enrolment is reachable end-to-end (W17-3, #537).** W17-2 wired the login *gate* (the
+  TOTP field, the **Sign in with SSO** button, and the pre-auth bootstrap routes through `vigil up`); W17-3
+  completes the *enrolment* side so a fresh operator can go from "no accounts" to "logged in" without editing
+  the spine by hand. The three enrolment factors are bindable from **both** surfaces: the CLI
+  (`sigil accounts enroll-pubkey|enroll-totp|set-password <user>`) and the **Users & Roles** screen
+  (per-account **Enrol key / Enrol TOTP / Set password** controls that post the same owner-signed
+  `enroll_pubkey`/`enroll_totp`/`set_password` broker actions). Every enrolment action is **owner-only**
+  (`manage_users`), checked at the funnel **before** the owner key signs — an unauthenticated or non-owner
+  enrolment attempt is refused (`test_owner_only_actions_refuse_an_operator`/`_a_viewer`,
+  `test_w173_end_to_end_enrol_pubkey_and_password_then_login_over_http`). `/api/accounts` additionally reports
+  three **non-secret booleans** (`has_pubkey`/`has_totp`/`has_password`) so the UI shows which factors are
+  bound without ever exposing a key, sealed blob or hash.
 - **OIDC Relying Party — OFF by default (S5, #388).** `config.oidc_enabled()` defaults **off**; when off the
   routes are **not registered** (byte-identical, no egress). When on, the `id_token` is verified against JWKS
   (**asymmetric algs only**; `alg:none`/HS* never implemented) with iss/aud/exp/iat/nbf + a single-use `nonce`

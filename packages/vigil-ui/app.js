@@ -4300,12 +4300,13 @@
       h("div.screen-head", null, [h("h1", null, "Users & Roles"),
         h("span.sub", null, "Multi-user access control. Each account is an owner-signed grant; the owner key stays the sole signer.")]),
       ownerBanner("Owner plane — accounts are owner-signed on the server. A bearer token is shown ONCE at creation; only its salted hash is stored."),
-      h("div.set-status.off", { style: { color: "var(--warn,#d9a441)", fontWeight: "600", margin: "4px 0 12px" } },
+      h("div.hint", { style: { margin: "4px 0 12px" } },
         [V.icon("info"), h("span", null,
-          "Foundation scope: these accounts enforce per-user roles for the CLI (sigil accounts …) and the "
-          + "direct API. The vigil up command UI you are using is OWNER-ONLY — it embeds the owner token, so "
-          + "do NOT share this URL with a teammate expecting their role to constrain them in the browser; give "
-          + "them a bearer for the CLI/API. A per-user command-UI login is the next slice.")]),
+          "Each account enforces per-user roles across the CLI (sigil accounts …), the direct API, and — "
+          + "through vigil up — the browser login gate, which offers a bearer token, password + TOTP, or SSO "
+          + "sign-in (W17-2); each user carries their own bearer and their role constrains them in the "
+          + "browser. Enrol a teammate's login factors on their account below — a public key (strongest), a "
+          + "TOTP second factor, or a password — or from the CLI, then they sign in through the gate.")]),
       h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "16px" } }, [
         V.card("Create an account", "OWNER", h("div#users-create", null, usersCreateForm()), true),
         V.card("Accounts", "OWNER", h("div#users-list", null, h("div.empty", null, "Loading…")), true),
@@ -4370,10 +4371,73 @@
       settingsAct({ action: "revoke_account", username: a.username, reason: "revoke from Users & Roles" },
         "Account " + a.username + " revoked.", loadUsers);
     } }, [V.icon("x"), "Revoke"]);
+    // W17-3 enrolment: bind this account's login factors (owner-signed server-side). Non-secret boolean
+    // flags from /api/accounts drive the "enrolled" pills so the operator sees the true state. Hidden for a
+    // revoked account (the server refuses enrolment on one anyway — the UI does not offer a dead action).
+    var factorPills = h("span", { style: { display: "flex", gap: "6px", flexWrap: "wrap" } }, [
+      a.has_pubkey ? h("span.pill.sm.ok", null, "key") : null,
+      a.has_totp ? h("span.pill.sm.ok", null, "TOTP") : null,
+      a.has_password ? h("span.pill.sm", null, "password") : null,
+    ]);
     return h("div.approval", null, [
       h("div.ah", null, [V.icon("key"), h("span.t", null, a.username),
-        h("span.pill.sm", null, a.role), a.state === "revoked" ? h("span.pill.sm.danger", null, "revoked") : null]),
+        h("span.pill.sm", null, a.role), a.state === "revoked" ? h("span.pill.sm.danger", null, "revoked") : null,
+        factorPills]),
       h("div.acts", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } }, [role, assign, revoke]),
+      a.state === "revoked" ? null : usersEnrolBlock(a),
+    ]);
+  }
+  // Per-account login-factor enrolment (W17-3): a public key (strongest PoP login), a TOTP second factor,
+  // and an optional password. Each posts an owner-signed action to the SAME broker the CLI drives
+  // (enroll_pubkey / enroll_totp / set_password) and is owner-gated server-side (manage_users). TOTP hands
+  // back a provisioning URI ONCE — shown here for the operator to scan/relay, never stored.
+  function usersEnrolBlock(a) {
+    var out = h("div", null, "");
+    var pk = h("input.input.sm.mono", { placeholder: "base64 Ed25519 public key", autocomplete: "off",
+      spellcheck: "false" });
+    var enrollKey = h("button.btn.sm.owner", { onClick: function () {
+      var v = (pk.value || "").trim();
+      if (!v) { V.toast("Paste the account's base64 public key.", true); return; }
+      settingsAct({ action: "enroll_pubkey", username: a.username, user_pubkey: v,
+        reason: "enroll pubkey from Users & Roles" }, "Public key enrolled for " + a.username + ".",
+        function () { pk.value = ""; loadUsers(); });
+    } }, [V.icon("key"), "Enrol key"]);
+    var enrollTotp = h("button.btn.sm.owner", { onClick: function () {
+      settingsAct({ action: "enroll_totp", username: a.username, reason: "enroll TOTP from Users & Roles" },
+        "TOTP enrolled for " + a.username + " — scan the URI below now.", function (r) {
+        if (r && r.provisioning_uri) {
+          var uriBox = h("input.input.sm.mono", { value: r.provisioning_uri, readonly: true,
+            onClick: function (e) { e.target.select(); } });
+          V.mount(out, h("div.set-status.ok", { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+            h("div", null, [V.icon("check"), h("span", null, " Scan this otpauth URI into the authenticator "
+              + "NOW — shown once; the secret is sealed at rest and never recoverable from the spine:")]),
+            h("div.acts", { style: { marginTop: "8px", display: "flex", gap: "8px" } }, [uriBox,
+              h("button.btn.sm", { onClick: function () {
+                try { navigator.clipboard.writeText(r.provisioning_uri); V.toast("Copied."); }
+                catch (e) { uriBox.select(); } } }, "Copy")]),
+          ]));
+        }
+        loadUsers();
+      });
+    } }, [V.icon("bolt"), a.has_totp ? "Re-enrol TOTP" : "Enrol TOTP"]);
+    var pw = h("input.input.sm", { type: "password", placeholder: "new password (≥8 chars)",
+      autocomplete: "new-password" });
+    var setPw = h("button.btn.sm.owner", { onClick: function () {
+      var v = pw.value || "";
+      if (v.length < 8) { V.toast("Password must be at least 8 characters.", true); return; }
+      settingsAct({ action: "set_password", username: a.username, password: v,
+        reason: "set password from Users & Roles" }, "Password set for " + a.username + ".",
+        function () { pw.value = ""; loadUsers(); });
+    } }, [V.icon("key"), a.has_password ? "Reset password" : "Set password"]);
+    return h("div", { style: { marginTop: "10px", paddingTop: "10px", borderTop: "1px solid var(--line,#2a2a2a)" } }, [
+      h("div.hint", { style: { marginBottom: "8px" } }, "Login factors — a public key is the strongest "
+        + "(challenge/response; the private key never touches the host); TOTP is a second factor on "
+        + "password/PoP logins; a password is an optional weaker convenience."),
+      h("div.acts", { style: { display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" } },
+        [pk, enrollKey]),
+      h("div.acts", { style: { display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", marginTop: "8px" } },
+        [enrollTotp, pw, setPw]),
+      out,
     ]);
   }
 
