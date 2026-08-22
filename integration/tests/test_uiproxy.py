@@ -18,6 +18,7 @@ proves:
 """
 from __future__ import annotations
 
+import hashlib
 import http.client
 import http.server
 import json
@@ -879,6 +880,7 @@ def test_new_plane_routes_are_guarded_like_start(proxy):
     body runs — proving the guard is not bypassed for the routes this slice added."""
     base, _serve = proxy
     for method, path in [("POST", "/__vigil/plane/offense/stop"),
+                         ("POST", "/__vigil/plane/auth/purge"),   # W9-3 admin force-purge / edge-revoke
                          ("GET", "/__vigil/plane/version")]:
         req = urllib.request.Request(base + path, method=method,
                                      data=(b"{}" if method == "POST" else None))
@@ -1029,3 +1031,357 @@ def test_ha_proxy_manifest_uses_only_real_vigil_up_flags():
     assert ns.proxy_only is True
     assert ns.sovereign_addr == "vigil-sovereign:8733"
     assert ns.host == "$(POD_IP)"                   # the downward-API bind (RFC1918 at runtime)
+
+
+# ==================================================================================================
+# W9-3 — revocation immediate at the edge (#436)
+#
+# The defect this closes: the ≤30 s bearer cache had NO invalidation, so a revoked credential stayed
+# authorized until the cache TTL expired; and an SSE stream was authenticated ONLY at connect, so it
+# outlived revocation for as long as it stayed open. The fix: an edge revocation set consulted on every
+# decision (fail-closed), an admin force-purge endpoint that is itself owner-authorized, and periodic
+# re-authentication of long-lived streams. Tests below pin each acceptance criterion, include the
+# negative controls, and (the SSE + force-purge behavioural tests) FAIL on a tree without the fix.
+# ==================================================================================================
+
+# ---- unit: the edge revocation set ---------------------------------------------------------------
+def test_revocation_set_by_digest_and_username_and_failclosed_default():
+    rs = uiproxy._RevocationSet()
+    # default: nothing revoked → is_revoked False (absence means "consult the sovereign", not deny).
+    assert rs.is_revoked(digest="deadbeef") is False
+    assert rs.is_revoked(username="alice") is False
+    rs.revoke_digest("deadbeef")
+    assert rs.is_revoked(digest="deadbeef") is True
+    assert rs.is_revoked(digest="other") is False           # only the exact digest is revoked
+    assert rs.is_revoked(username="alice") is False          # a digest revoke is not a username revoke
+    rs.revoke_username("alice")
+    assert rs.is_revoked(username="alice") is True
+    assert rs.is_revoked(username="bob") is False            # TARGETED — bob is untouched
+    # either-key query: a hit on EITHER the digest or the username is a revoke.
+    assert rs.is_revoked(digest="other", username="alice") is True
+    assert rs.is_revoked(digest="deadbeef", username="bob") is True
+    # blank inputs never match (no accidental all-match on "").
+    assert rs.is_revoked(digest="", username="") is False
+
+
+def test_revocation_set_entry_expires_after_retention():
+    rs = uiproxy._RevocationSet(retention_s=0.15)
+    rs.revoke_username("carol")
+    assert rs.is_revoked(username="carol") is True
+    time.sleep(0.25)
+    # after retention the edge forgets — the sovereign whoami (which already denies a revoked account) is
+    # authoritative again; the edge set is an accelerator, not the record of truth.
+    assert rs.is_revoked(username="carol") is False
+
+
+def test_revocation_set_is_memory_bounded():
+    rs = uiproxy._RevocationSet(retention_s=3600.0, max_entries=64)
+    for i in range(500):
+        rs.revoke_digest(f"digest-{i:04d}")
+    assert len(rs._d) <= 64                                  # never grows without bound
+
+
+# ---- unit: cache invalidation --------------------------------------------------------------------
+def _princ(username):
+    return {"username": username, "role": "operator", "permissions": ["read", "run_engagement"]}
+
+
+def test_principal_cache_invalidate_one():
+    c = uiproxy._PrincipalCache()
+    c.put("k1", _princ("op"), 30.0)
+    assert c.get("k1") is not uiproxy._MISS
+    assert c.invalidate("k1") is True
+    assert c.get("k1") is uiproxy._MISS
+    assert c.invalidate("k1") is False                      # already gone
+
+
+def test_principal_cache_invalidate_username_is_targeted():
+    c = uiproxy._PrincipalCache()
+    c.put("k-op-1", _princ("op"), 30.0)
+    c.put("k-op-2", _princ("op"), 30.0)                     # a second live session for the same principal
+    c.put("k-vv", _princ("vv"), 30.0)
+    c.put("k-neg", None, 5.0)                               # a cached negative has no username
+    dropped = c.invalidate_username("op")
+    assert dropped == 2
+    assert c.get("k-op-1") is uiproxy._MISS
+    assert c.get("k-op-2") is uiproxy._MISS
+    assert c.get("k-vv") is not uiproxy._MISS               # NEGATIVE CONTROL: other user untouched
+    assert c.get("k-neg") is None                           # the negative is still a cached None, untouched
+    assert c.invalidate_username("") == 0                   # blank username is a no-op, never an all-match
+
+
+def test_principal_cache_purge_all():
+    c = uiproxy._PrincipalCache()
+    c.put("a", _princ("a"), 30.0)
+    c.put("b", _princ("b"), 30.0)
+    assert c.purge_all() == 2
+    assert c.get("a") is uiproxy._MISS and c.get("b") is uiproxy._MISS
+
+
+def test_env_float_failsoft():
+    import os
+    for bad in ("", "nope", "nan", "inf", "-inf", "0", "-5"):
+        os.environ["VIGIL_TEST_FLOAT"] = bad
+        assert uiproxy._env_float("VIGIL_TEST_FLOAT", 12.0) == 12.0, bad
+    os.environ["VIGIL_TEST_FLOAT"] = "7.5"
+    assert uiproxy._env_float("VIGIL_TEST_FLOAT", 12.0) == 7.5
+    os.environ.pop("VIGIL_TEST_FLOAT", None)
+    assert uiproxy._env_float("VIGIL_TEST_FLOAT_ABSENT", 3.0) == 3.0
+
+
+# ---- a mutable "sovereign" upstream whose account state can flip mid-flight -----------------------
+class _FlipState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.revoked_users: set[str] = set()   # usernames the sovereign has revoked
+        self.sse_ticks = 2000                  # long enough that a NON-terminating stream outlasts the test
+        self.sse_gap = 0.05
+
+    def revoke(self, username: str):
+        with self.lock:
+            self.revoked_users.add(username)
+
+    def is_revoked(self, username: str) -> bool:
+        with self.lock:
+            return username in self.revoked_users
+
+
+class _FlipHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):
+        pass
+
+    def _do(self):
+        p = urlsplit(self.path).path
+        st: _FlipState = self.server.flip  # type: ignore[attr-defined]
+        if p == "/api/whoami":
+            q = parse_qs(urlsplit(self.path).query)
+            tok = self.headers.get("X-SIGIL-Token") or (q.get("token") or [""])[0]
+            princ = _WHOAMI_PRINCIPALS.get(tok)
+            if princ is not None and st.is_revoked(str(princ.get("username"))):
+                princ = None                                # sovereign now denies a revoked account
+            raw = json.dumps(princ or {"authenticated": False}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+        if p == "/sse":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for i in range(st.sse_ticks):
+                try:
+                    self.wfile.write(f"data: tick-{i}\n\n".encode())
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return                                  # the proxy tore the stream down — stop
+                time.sleep(st.sse_gap)
+            return
+        raw = b"OK"                                         # a plain authenticated poll
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    do_GET = _do
+    do_POST = _do
+
+
+class _FlipServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+@pytest.fixture()
+def flip_proxy(tmp_path):
+    """A live proxy whose three backends all point at ONE mutable upstream that (a) serves /api/whoami
+    honouring a revoked-users set and (b) serves a long-lived /sse. Returns (base, httpd, flip)."""
+    up = _FlipServer(("127.0.0.1", 0), _FlipHandler)
+    up.flip = _FlipState()  # type: ignore[attr-defined]
+    threading.Thread(target=up.serve_forever, daemon=True).start()
+    up_port = up.server_address[1]
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "tokens.css").write_text(":root{--a:1}", encoding="utf-8")
+    (src / "components.css").write_text(".b{}", encoding="utf-8")
+    for j in uiproxy.BUNDLE_JS:
+        (src / j).write_text(f"/*{j}*/", encoding="utf-8")
+    (src / "index.html").write_text('<body data-token="__VIGIL_TOKEN__"></body>', encoding="utf-8")
+    serve = tmp_path / "serve"
+    uiproxy.assemble_serve_dir(src, serve, token="TESTTOKEN")
+
+    port = _free_port()
+    backends = {"sovereign": ("127.0.0.1", up_port), "console": ("127.0.0.1", up_port),
+                "api": ("127.0.0.1", up_port)}
+    httpd = uiproxy.make_proxy_server("127.0.0.1", port, serve, token=OWNER_TOKEN, backends=backends)
+    httpd.sse_reauth_interval = 0.3           # W9-3: re-auth an open stream ~3x/s so the test is quick
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{port}"
+    try:
+        yield base, httpd, up.flip  # type: ignore[attr-defined]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        up.shutdown()
+        up.server_close()
+
+
+def _plane_post(base, path, body_dict, token, *, csrf=True, extra=None):
+    data = json.dumps(body_dict).encode() if body_dict is not None else b""
+    req = urllib.request.Request(base + path, method="POST", data=data)
+    req.add_header("Content-Type", "application/json")
+    if csrf:
+        req.add_header("X-Requested-With", "XMLHttpRequest")
+    if token:
+        req.add_header("X-SIGIL-Token", token)
+    for k, v in (extra or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:  # type: ignore[attr-defined]
+        try:
+            return e.code, json.loads(e.read().decode())
+        except Exception:
+            return e.code, {}
+
+
+# ---- admin force-purge endpoint: authorization (criteria 4 + 6) ----------------------------------
+def test_force_purge_requires_manage_users_owner_only(flip_proxy):
+    base, _httpd, _flip = flip_proxy
+    # owner (has manage_users) → accepted.
+    status, body = _plane_post(base, uiproxy.PLANE_AUTH_PURGE_PATH, {"all": True}, OWNER_TOKEN)
+    assert status == 200 and body.get("ok") is True, (status, body)
+    # NEGATIVE CONTROLS: the gate is not a no-op.
+    for tok in (OP_BEARER, VIEWER_BEARER):                  # authenticated but NOT owner
+        status, body = _plane_post(base, uiproxy.PLANE_AUTH_PURGE_PATH, {"username": "op"}, tok)
+        assert status == 403, (tok, status, body)
+    status, _ = _plane_post(base, uiproxy.PLANE_AUTH_PURGE_PATH, {"username": "op"}, "")  # no token
+    assert status == 401
+    status, _ = _plane_post(base, uiproxy.PLANE_AUTH_PURGE_PATH, {"username": "op"},
+                            OWNER_TOKEN, csrf=False)        # missing SPA custom header → CSRF refusal
+    assert status == 403
+
+
+def test_force_purge_get_is_method_not_allowed(flip_proxy):
+    base, _httpd, _flip = flip_proxy
+    req = urllib.request.Request(base + uiproxy.PLANE_AUTH_PURGE_PATH, method="GET")
+    req.add_header("X-SIGIL-Token", OWNER_TOKEN)
+    req.add_header("X-Requested-With", "XMLHttpRequest")
+    try:
+        urllib.request.urlopen(req, timeout=5)  # noqa: S310
+        raise AssertionError("GET on the force-purge route should be 405")
+    except urllib.error.HTTPError as e:  # type: ignore[attr-defined]
+        assert e.code == 405
+
+
+def test_force_purge_empty_request_is_rejected(flip_proxy):
+    base, _httpd, _flip = flip_proxy
+    status, body = _plane_post(base, uiproxy.PLANE_AUTH_PURGE_PATH, {}, OWNER_TOKEN)
+    assert status == 400 and body.get("ok") is False        # nothing to do → refused, not a silent no-op
+
+
+# ---- criterion 1 + 3: revoke invalidates the cache entry immediately; others undisturbed ----------
+def test_revoke_takes_effect_on_the_very_next_decision_within_the_ttl_window(flip_proxy):
+    """FAILS WITHOUT THE FIX: on a tree without the edge revocation set + force-purge endpoint, the ≤30 s
+    cache keeps the revoked bearer authorized (the request stays 200 for the whole TTL window) and the
+    endpoint 404s. Here: cache op+vv, sovereign-revoke op, force-purge op, then WITHIN the TTL window op is
+    401 and vv is still 200 (the negative control — a per-user revoke is not a session-wide nuke)."""
+    base, _httpd, flip = flip_proxy
+    # 1) warm the edge cache with a positive for BOTH principals.
+    assert _get(base + "/offense/api/status", token=OP_BEARER)[0] == 200
+    assert _get(base + "/offense/api/status", token=VIEWER_BEARER)[0] == 200
+    # 2) the sovereign revokes op. The edge cache still holds op's positive (this is the pre-existing
+    #    bounded staleness) — a plain request is still served from cache, proving the cache is real.
+    flip.revoke("op")
+    assert _get(base + "/offense/api/status", token=OP_BEARER)[0] == 200, "cache should still hold op"
+    # 3) the revoke flow force-purges op at the edge (owner-authorized).
+    status, body = _plane_post(base, uiproxy.PLANE_AUTH_PURGE_PATH, {"username": "op"}, OWNER_TOKEN)
+    assert status == 200 and body.get("revoked_username") == "op", (status, body)
+    # 4) WITHIN the old TTL window, op's very next decision is refused — immediate at the edge.
+    st_op, _ = _get_status(base + "/offense/api/status", token=OP_BEARER)
+    assert st_op == 401, "revoked op must be refused immediately, not after the cache TTL"
+    # 5) NEGATIVE CONTROL: vv was never revoked → still authorized (not a session-wide kill).
+    assert _get(base + "/offense/api/status", token=VIEWER_BEARER)[0] == 200
+
+
+def test_force_purge_by_bearer_digest(flip_proxy):
+    base, _httpd, flip = flip_proxy
+    assert _get(base + "/offense/api/status", token=OP_BEARER)[0] == 200      # cache op
+    flip.revoke("op")
+    status, body = _plane_post(base, uiproxy.PLANE_AUTH_PURGE_PATH, {"bearer": OP_BEARER}, OWNER_TOKEN)
+    assert status == 200
+    # the full credential / digest is never echoed back.
+    assert OP_BEARER not in json.dumps(body)
+    assert hashlib.sha256(OP_BEARER.encode()).hexdigest() not in json.dumps(body)
+    st_op, _ = _get_status(base + "/offense/api/status", token=OP_BEARER)
+    assert st_op == 401
+
+
+# ---- criterion 2: an open SSE stream is terminated at the next re-auth interval after revocation ---
+def _get_status(url: str, token: str) -> tuple[int, str]:
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("X-SIGIL-Token", token)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:  # type: ignore[attr-defined]
+        return e.code, ""
+
+
+def test_open_sse_stream_is_torn_down_after_revocation(flip_proxy):
+    """FAILS WITHOUT THE FIX: a connect-only-authenticated stream never re-checks, so after revocation it
+    keeps delivering events for its whole lifetime — the stream would NOT end within the test window. With
+    the fix the relay re-authenticates every `sse_reauth_interval` and tears the stream down once the bearer
+    no longer resolves."""
+    base, _httpd, flip = flip_proxy
+    conn = http.client.HTTPConnection(base.removeprefix("http://"), timeout=10)
+    conn.request("GET", "/offense/sse", headers={"X-SIGIL-Token": OP_BEARER})
+    resp = conn.getresponse()
+    assert resp.getheader("Content-Type", "").startswith("text/event-stream")
+
+    # read a couple of live events to prove the stream is up, then revoke op mid-stream.
+    got = b""
+    while b"tick-" not in got:
+        got += resp.read1(4096)
+    flip.revoke("op")
+    revoked_at = time.monotonic()
+
+    ended_after = None
+    while time.monotonic() - revoked_at < 6.0:              # bound the wait; upstream emits for ~100 s
+        chunk = resp.read1(4096)
+        if not chunk:                                      # EOF → the proxy tore the stream down
+            ended_after = time.monotonic() - revoked_at
+            break
+    conn.close()
+    assert ended_after is not None, "stream never terminated after revocation (connect-only auth?)"
+    # terminated within a small multiple of the 0.3 s re-auth interval (allow for whoami latency).
+    assert ended_after < 4.0, f"stream took too long to tear down: {ended_after:.2f}s"
+
+
+def test_open_sse_stream_of_a_valid_user_is_not_torn_down_by_reauth(flip_proxy):
+    """NEGATIVE CONTROL for the SSE re-auth: a NON-revoked stream keeps flowing across several re-auth
+    intervals — the periodic re-check is not a blanket stream killer."""
+    base, _httpd, _flip = flip_proxy
+    conn = http.client.HTTPConnection(base.removeprefix("http://"), timeout=10)
+    conn.request("GET", "/offense/sse", headers={"X-SIGIL-Token": OP_BEARER})
+    resp = conn.getresponse()
+    assert resp.getheader("Content-Type", "").startswith("text/event-stream")
+    start = time.monotonic()
+    ticks = 0
+    # read across ~4 re-auth intervals (0.3 s each); a valid stream must keep delivering.
+    while time.monotonic() - start < 1.4:
+        chunk = resp.read1(4096)
+        if not chunk:
+            break
+        ticks += chunk.count(b"tick-")
+    conn.close()
+    assert ticks >= 5, f"a valid stream should keep flowing across re-auth intervals, got {ticks} ticks"

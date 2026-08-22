@@ -119,6 +119,10 @@ exactly the right root — and the proxy stays **pure stdlib** (`http.client`, n
 `whoami` is token-optional and read-only (no side effect): an owner token resolves to `OWNER_PRINCIPAL`, a
 per-user bearer to its Principal, anything else to `{authenticated:false}` → the proxy 401s. Results are
 cached by `sha256(bearer)` with a short TTL (30 s; 5 s for negatives) so SSE/polling do not stampede whoami.
+The cache is **not** a revocation-lag window (W9-3 / #436): an **edge revocation set** is consulted on every
+decision *before* the cache is trusted (fail-closed), the admin **force-purge** endpoint invalidates the
+cache entry on revoke, and long-lived SSE streams are **re-authenticated** periodically — so a revoke takes
+effect at the decision edge, not at cache expiry (see *Revocation is immediate at the edge* below).
 
 **Rejected alternative:** exporting an owner-signed accounts *snapshot* to the offense side and folding it
 there — also sound, but it duplicates the fold + per-username anti-replay logic in a second interpreter and
@@ -135,6 +139,7 @@ adds an export/rotation surface. Delegation reuses the one authority with no new
 | `/offense/*` mutations (POST/PUT/PATCH/DELETE) | `run_engagement` (operator+) |
 | `/__vigil/plane/status`, `/__vigil/plane/version` | authenticated (viewer+) |
 | `/__vigil/plane/offense/start`, `/stop` | `run_engagement` (operator+) |
+| `/__vigil/plane/auth/purge` (POST — admin force-purge / edge-revoke; W9-3/#436) | `manage_users` (**owner**) |
 
 ### Offense credential handling (the owner token never leaves the proxy)
 
@@ -201,8 +206,17 @@ cleartext and the owner credential is removed — or the relay is refused.**
   honest bound: enforcement rides that hop-assertion, so a client holding the offense **console token
   directly** (no hop-signed role) is **owner-equivalent** by construction — the gate protects the
   proxy-forwarded per-user path, not a direct console-token holder.
-- **Revocation lag:** a bearer stays valid for at most the auth-cache TTL (≤30 s) after revocation, and an
-  already-open SSE stream is authenticated only at connect.
+- **Revocation is immediate at the edge (W9-3 / #436).** An **edge revocation set** is consulted on every
+  decision *before* the bearer cache is trusted, fail-closed; the owner-only admin **force-purge** endpoint
+  (`POST /__vigil/plane/auth/purge`, gated on `manage_users`) revokes a username/credential and drops its
+  cache entry, so the very next decision is refused within the old TTL window — the sovereign
+  `sigil accounts revoke` stays the authority, this makes it bite at the edge now. A long-lived **SSE**
+  stream is **re-authenticated** at most every `_SSE_REAUTH_INTERVAL_S` (default 15 s, `VIGIL_SSE_REAUTH_INTERVAL_S`)
+  and torn down at the next interval once the bearer no longer resolves. *Residual:* if a revoke does **not**
+  call the force-purge endpoint, a bearer already cached at the proxy stays valid until its ≤30 s cache entry
+  expires, after which whoami — which already denies a revoked account — is re-consulted; and a same-named
+  account re-created on the sovereign becomes visible at the edge again only after the revocation-set
+  retention window (`_REVOCATION_RETENTION_S`).
 - **HA is active-passive, not synchronous multi-writer.** An active-passive failover profile *is* built
   (`docs/architecture/HA-PROFILE.md`, `infra/ha/`): the stateless `vigil up`/otel tier is active-active, and
   the single-writer sovereign spine gets an anti-rollback-safe failover gated by the **witnessed-floor

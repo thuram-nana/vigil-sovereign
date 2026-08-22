@@ -281,8 +281,13 @@ carry, never as unqualified wins. The genuine residuals follow.
 - **Single owner key / local accounts store are the residual trust roots.** A compromised owner key or a
   locally-writable accounts store is the pre-existing residual, unchanged by this claim — the deliberate
   admission-not-custody design (see [§3](#3-trust-model--admission-not-custody)).
-- **Revocation lag.** A revoked bearer stays valid for at most the auth-cache TTL (≤30 s), and an
-  already-open SSE stream is authenticated only at connect.
+- **Revocation is immediate at the edge (W9-3/#436).** An edge revocation set is consulted on every decision
+  before the bearer cache is trusted (fail-closed), the owner-only admin force-purge endpoint
+  (`POST /__vigil/plane/auth/purge`, gated on `manage_users`) drops the cache entry on revoke, and a
+  long-lived SSE stream is re-authenticated at most every ≤15 s and torn down at the next interval once the
+  bearer no longer resolves. *Residual:* absent an explicit edge force-purge, a bearer already cached at the
+  proxy stays valid until its ≤30 s cache entry expires (then whoami, which already denies a revoked account,
+  is re-consulted).
 - **The proxy is a loopback / private-VIP listener, not a hardened public gateway.** Front it with the
   operator's TLS edge. It is not designed to be exposed raw to the public internet.
 - **No per-screen permission on all ~30 screens.** Nav visibility + enforcement at the enumerated
