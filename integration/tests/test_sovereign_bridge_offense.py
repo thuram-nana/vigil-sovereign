@@ -16,6 +16,10 @@ gates" is true of the code and not a hollow abstraction:
 
 NEGATIVE CONTROLS live alongside each: the permissive/enforced-off counterpart ALLOWs, so every DENY is
 shown to come from the gate actually refusing, never from the facade being a no-op.
+
+W13-4 (#497) added a classification leg that is ON by default (UNKNOWN is never authorized). These W13-2
+tests each ISOLATE a single downstream leg, so they pass ``include_classification=False`` to keep the leg
+under test the decider; the classification leg has its own facade proofs in test_target_classification_gate.py.
 """
 
 from __future__ import annotations
@@ -76,7 +80,7 @@ def test_air_gapped_tier_denies_cloud_backend_through_the_facade(_clean_sovereig
     sov.set_policy(sov.SovereigntyPolicy(tier=sov.Tier.AIR_GAPPED))
 
     bridge = build_offense_bridge(
-        slug="acme", trust_root=object(), classify=lambda n: "A0",
+        slug="acme", trust_root=object(), classify=lambda n: "A0", include_classification=False,
         include_entitlement=False, base_gate=_allow_verdict,
     )
     req = AuthorizeRequest(tool_name="llm.chat", target_url="", backend="anthropic")
@@ -92,7 +96,7 @@ def test_permissive_tier_allows_the_same_backend_through_the_facade(_clean_sover
     sov.set_policy(sov.SovereigntyPolicy(tier=sov.Tier.PERMISSIVE))
 
     bridge = build_offense_bridge(
-        slug="acme", trust_root=object(), classify=lambda n: "A0",
+        slug="acme", trust_root=object(), classify=lambda n: "A0", include_classification=False,
         include_entitlement=False, base_gate=_allow_verdict,
     )
     d = bridge.authorize(AuthorizeRequest(tool_name="llm.chat", target_url="", backend="anthropic"))
@@ -113,7 +117,7 @@ def test_enforced_entitlement_denies_ungranted_capability_through_the_facade(
     _clean_entitlement.reset_policy()
 
     bridge = build_offense_bridge(
-        slug="acme", trust_root=object(), classify=lambda n: "A0", base_gate=_allow_verdict,
+        slug="acme", trust_root=object(), classify=lambda n: "A0", include_classification=False, base_gate=_allow_verdict,
     )
     d = bridge.authorize(AuthorizeRequest(
         tool_name="exploit.run", target_url="", backend="ollama",
@@ -138,7 +142,7 @@ def test_ungoverned_entitlement_allows_capability_through_the_facade(
     _clean_entitlement.reset_policy()
 
     bridge = build_offense_bridge(
-        slug="acme", trust_root=object(), classify=lambda n: "A0", base_gate=_allow_verdict,
+        slug="acme", trust_root=object(), classify=lambda n: "A0", include_classification=False, base_gate=_allow_verdict,
     )
     d = bridge.authorize(AuthorizeRequest(
         tool_name="exploit.run", target_url="", backend="ollama",
@@ -152,7 +156,7 @@ def test_entitlement_leg_with_no_capability_declared_fails_closed(_clean_soverei
     sov.set_policy(sov.SovereigntyPolicy(tier=sov.Tier.PERMISSIVE))
 
     bridge = build_offense_bridge(
-        slug="acme", trust_root=object(), classify=lambda n: "A0", base_gate=_allow_verdict,
+        slug="acme", trust_root=object(), classify=lambda n: "A0", include_classification=False, base_gate=_allow_verdict,
     )
     d = bridge.authorize(AuthorizeRequest(tool_name="exploit.run", target_url="", backend="ollama"))
     assert d.effect is Effect.DENY and d.denied_by == "entitlement"
@@ -190,7 +194,7 @@ def test_real_conjunctive_authority_denies_out_of_envelope_through_the_facade(mo
 
     # No base_gate injected → build_offense_bridge builds the REAL conjunctive gate over the stubbed authority.
     bridge = build_offense_bridge(
-        slug="acme", trust_root=tr, classify=lambda n: "A0", floor="A0", ceiling="A3",
+        slug="acme", trust_root=tr, classify=lambda n: "A0", include_classification=False, floor="A0", ceiling="A3",
         include_sovereignty=False, include_entitlement=False,
     )
     d = bridge.authorize(AuthorizeRequest(tool_name="http.get", target_url="https://acme.test"))
@@ -212,7 +216,7 @@ def test_real_conjunctive_authority_allows_in_envelope_auto_tool_through_the_fac
     _clean_sovereignty.set_policy(_clean_sovereignty.SovereigntyPolicy(tier=_clean_sovereignty.Tier.PERMISSIVE))
 
     bridge = build_offense_bridge(
-        slug="acme", trust_root=tr, classify=lambda n: "A0", floor="A0", ceiling="A3",
+        slug="acme", trust_root=tr, classify=lambda n: "A0", include_classification=False, floor="A0", ceiling="A3",
         include_sovereignty=False, include_entitlement=False,
     )
     d = bridge.authorize(AuthorizeRequest(tool_name="http.get", target_url="https://acme.test"))
@@ -222,7 +226,7 @@ def test_real_conjunctive_authority_allows_in_envelope_auto_tool_through_the_fac
 def test_offense_bridge_is_production_enforce_by_default(_clean_sovereignty):
     _clean_sovereignty.set_policy(_clean_sovereignty.SovereigntyPolicy(tier=_clean_sovereignty.Tier.PERMISSIVE))
     bridge = build_offense_bridge(
-        slug="acme", trust_root=object(), classify=lambda n: "A0",
+        slug="acme", trust_root=object(), classify=lambda n: "A0", include_classification=False,
         include_sovereignty=False, include_entitlement=False, base_gate=_allow_verdict,
     )
     assert bridge.mode is EnforcementMode.ENFORCE
