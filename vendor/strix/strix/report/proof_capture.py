@@ -116,6 +116,27 @@ def _response_body(fetched: Any, parse: Any) -> tuple["bytes | None", Optional[i
     return _as_bytes(raw if isinstance(raw, (bytes, bytearray)) else str(raw)), None
 
 
+def _record_capture_degraded(exc: BaseException) -> None:
+    """Record a TYPED capture_failed degradation WITHOUT triggering ``strix.report.__init__`` and WITHOUT
+    ever raising. A normal ``from strix.report.degradation_hook import ...`` runs the package __init__, which
+    eagerly imports ``dedupe`` -> ``strix.config`` -> ``pydantic_settings``; in a minimal env (missing that
+    dep) that turned this best-effort recorder into a raise that broke ``capture_for_report``'s never-raises
+    swallow contract. Load the stdlib-only ``degradation_hook`` module BY FILE (its own record() falls back
+    to a pure-stdlib manifest write when vigil_integration is absent), and swallow everything — a degradation
+    that cannot be recorded must never crash the reporting path."""
+    try:
+        import importlib.util
+        import pathlib
+
+        _dh_path = pathlib.Path(__file__).with_name("degradation_hook.py")
+        _spec = importlib.util.spec_from_file_location("_vigil_degradation_hook", _dh_path)
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
+        _mod.record(_mod.CAPTURE_FAILED, "strix.proof_capture.capture_for_report", exc)
+    except Exception:  # noqa: BLE001 — recording is best-effort; never raise into the swallow path
+        pass
+
+
 async def capture_for_report(
     report: dict,
     *,
@@ -156,10 +177,7 @@ async def capture_for_report(
         # above) and it FAILED (e.g. Caido raised) — NOT the same as "nothing to capture". Record a
         # TYPED capture_failed cause so the console distinguishes a failed capture from a clean
         # target; the finding still stays a LEAD. No-op standalone; the bridge never raises.
-        from strix.report.degradation_hook import CAPTURE_FAILED
-        from strix.report.degradation_hook import record as _vigil_degrade
-
-        _vigil_degrade(CAPTURE_FAILED, "strix.proof_capture.capture_for_report", exc)
+        _record_capture_degraded(exc)   # by-file, never raises (see helper) — honors the swallow contract
         return None
 
 
