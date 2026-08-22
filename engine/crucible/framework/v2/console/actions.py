@@ -252,8 +252,15 @@ ENGAGE_CAPABILITIES: tuple[dict[str, str], ...] = (
      "purpose": "Test BOLA/BFLA authorization with operator-supplied victim references."},
     {"id": "graphql-dos", "flag": "--graphql-dos", "tier": "T3", "label": "GraphQL DoS",
      "purpose": "Adversary-sim GraphQL complexity/depth probes (gated; bounded)."},
-    {"id": "arsenal", "flag": "--arsenal", "tier": "T3", "label": "Host arsenal",
-     "purpose": "Run host CLIs (nmap/nuclei/…) — each host-gated through the full authority stack."},
+    # HONEST: `--arsenal` is the opt-in ADVANCED WEB arsenal — raw-socket web modules only. It maps to
+    # engage.py `enable_arsenal`, whose campaign (scanner/campaign.py) fires HTTP request smuggling,
+    # cross-site WebSocket hijacking (CSWSH) and, with operator-supplied race targets, the single-packet
+    # race engine. It runs NO host CLIs (no nmap/nuclei/…). The prior "Run host CLIs (nmap/nuclei/…)" copy
+    # described a capability this flag does not have.
+    {"id": "arsenal", "flag": "--arsenal", "tier": "T3", "label": "Web arsenal (advanced)",
+     "purpose": "Advanced raw-socket WEB modules — HTTP request smuggling, cross-site WebSocket hijacking, "
+                "and (with operator-supplied race targets) single-packet race. No host binaries — each "
+                "module is host-gated fail-closed through the full authority stack."},
 )
 _CAP_BY_ID: dict[str, dict[str, str]] = {c["id"]: c for c in ENGAGE_CAPABILITIES}
 

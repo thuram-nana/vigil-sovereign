@@ -11,7 +11,9 @@ nothing from the scan/engage hot path.
 
 from __future__ import annotations
 
+import ast
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -1867,6 +1869,116 @@ _BRAIN_DECISION_DOCTRINE = (
 )
 
 
+# The propose-only brain this console surfaces, and where its identity is DERIVED FROM. The identity
+# block is NOT re-typed literals: it is parsed out of the brain's OWN source by a STATIC ``ast`` read, so
+# it crosses no import/exec boundary (FATAL-2: the console must not execute integration-layer code) yet a
+# rename of the class, a moved file, an edited "Design credit:" line, a lost ``propose`` method or a NEWLY
+# ADDED exploit/execute method all flow through to exactly what the panel shows. Fail-closed: if the source
+# cannot be located or parsed, the block reports an honest ``available: false`` rather than a stale claim.
+_BRAIN_MODULE_REL = "integration/vigil_integration/brains/hexstrike_brain.py"
+_BRAIN_CLASS = "HexstrikeBrain"
+# public-method name stems that CONTRADICT the propose-only / no-fact-authority doctrine: if any appear on
+# the class, ``propose_only`` derives to False (the claim stops being true), never a frozen True.
+_NON_PROPOSE_VERBS = ("execute", "exploit", "mint", "confirm", "detonate", "poison", "evade", "persist")
+
+
+def _find_brain_source() -> "Path | None":
+    """Locate the brain's source file WITHOUT importing it — walk up from the crucible root (which sits at
+    ``<repo>/engine/crucible``) looking for the integration-layer brain module. Injection point for tests."""
+    root = _safe(lambda: Path(paths.crucible_root()))
+    if root is None:
+        return None
+    for cand in [root, *root.parents]:
+        p = cand / _BRAIN_MODULE_REL
+        if _safe(lambda p=p: p.is_file(), default=False):
+            return p
+    return None
+
+
+def _extract_design_credit(module_doc: str) -> "str | None":
+    """The module docstring's ``Design credit:`` paragraph, whitespace-collapsed and de-RST'd — PARSED
+    from the source, never re-typed here, so the credit the panel shows is the credit the code carries."""
+    if not module_doc:
+        return None
+    m = re.search(r"Design credit:(.*?)(?:\n[ \t]*\n|\Z)", module_doc, re.DOTALL)
+    if not m:
+        return None
+    credit = re.sub(r"\s+", " ", m.group(1).replace("``", "")).strip()
+    return credit or None
+
+
+def _derive_brain_identity() -> dict[str, Any]:
+    """The installed brain's identity, DERIVED from its source by static parse — never frozen literals.
+
+    Extracts, from the brain module the console describes: the class name, the ``Design credit:`` line, the
+    module path (relative to the discovered repo root), and — from the class's own public method set — the
+    propose-only verdict (a ``propose`` method present AND no execute/exploit/mint/… method). Fail-closed to
+    ``available: false`` when the source is missing/unparseable, so the panel never shows a stale claim."""
+    src = _find_brain_source()
+    if src is None:
+        return {"name": None, "propose_only": None, "design_credit": None, "objectives": [],
+                "module": _BRAIN_MODULE_REL, "derived": True, "available": False,
+                "note": "brain source not found on this tree"}
+    text = _safe(lambda: src.read_text(encoding="utf-8"), default=None)
+    tree = _safe(lambda: ast.parse(text)) if text is not None else None
+    if tree is None:
+        return {"name": None, "propose_only": None, "design_credit": None, "objectives": [],
+                "module": _BRAIN_MODULE_REL, "derived": True, "available": False,
+                "note": "brain source not parseable"}
+    module_doc = ast.get_docstring(tree) or ""
+    # ``_find_brain_source`` located the file AT this relative path under a real repo ancestor, so the
+    # reported module path is the VERIFIED on-disk location of the source we actually parsed, not a guess.
+    module_rel = _BRAIN_MODULE_REL
+    credit = _extract_design_credit(module_doc)
+    objectives = _derive_objectives(tree)
+    cls = next((n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == _BRAIN_CLASS), None)
+    if cls is None:
+        return {"name": None, "propose_only": None, "design_credit": credit, "objectives": objectives,
+                "module": module_rel, "derived": True, "available": False,
+                "note": f"class {_BRAIN_CLASS} not found in brain source"}
+    public = [n.name for n in cls.body
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("_")]
+    has_propose = "propose" in public
+    offending = sorted({m for m in public for v in _NON_PROPOSE_VERBS if v in m})
+    return {
+        "name": cls.name,
+        "propose_only": bool(has_propose and not offending),
+        "design_credit": credit,
+        "objectives": objectives,
+        "module": module_rel,
+        "derived": True,
+        "available": True,
+        # what the propose-only verdict was computed from — visible so the claim is auditable, not asserted.
+        "propose_evidence": {"has_propose": has_propose, "offending_methods": offending},
+    }
+
+
+def _derive_objectives(tree: "ast.Module") -> list[dict[str, Any]]:
+    """The brain's CLOSED objective vocabulary, derived from the ``Objective`` str-Enum + ``DEFAULT_OBJECTIVE``
+    in the same source — so the UI's objective selector offers exactly what the planner implements, never a
+    hand-kept list that could drift from the enum. Empty on any parse miss (fail-closed)."""
+    name_to_value: dict[str, str] = {}   # e.g. {"COMPREHENSIVE": "comprehensive"} — from the enum itself
+    members: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "Objective":
+            for stmt in node.body:
+                # `NAME = "value"` enum members (skip the docstring and non-str assignments)
+                if isinstance(stmt, ast.Assign) and isinstance(getattr(stmt, "value", None), ast.Constant) \
+                        and isinstance(stmt.value.value, str):
+                    for tgt in stmt.targets:
+                        if isinstance(tgt, ast.Name):
+                            name_to_value[tgt.id] = stmt.value.value
+                            members.append(stmt.value.value)
+    default = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "DEFAULT_OBJECTIVE" for t in node.targets):
+            # `DEFAULT_OBJECTIVE = Objective.COMPREHENSIVE` → the member NAME; resolve its value via the enum map
+            if isinstance(node.value, ast.Attribute):
+                default = name_to_value.get(node.value.attr)
+    return [{"id": v, "default": (v == default)} for v in members]
+
+
 def brain_decision(run_id: "str | None" = None) -> dict[str, Any]:
     """Brain / Decision engine: the ACTIVE propose-only agent-body brain + its live proposal (if any).
 
@@ -1885,14 +1997,9 @@ def brain_decision(run_id: "str | None" = None) -> dict[str, Any]:
     Fail-closed on a bad id (``run_dir`` raises → ``_safe`` → empty state, never a 500). ``_safe`` throughout."""
     from . import actions
 
-    brain = {
-        "name": "HexstrikeBrain",
-        "propose_only": True,
-        "design_credit": ("hexstrike-ai (Muhammad Osama / 0x4m4), MIT — a clean-room, drift-free "
-                          "reimplementation of the deterministic decision model; evasion / exploit / "
-                          "credential-poisoning stages removed by construction, not stripped after the fact."),
-        "module": "integration/vigil_integration/brains/hexstrike_brain.py",
-    }
+    # DERIVED from the brain's own source (name, design credit, module path, propose-only verdict, objective
+    # vocabulary) — never frozen literals. See ``_derive_brain_identity``.
+    brain = _derive_brain_identity()
 
     proposal: dict[str, Any] = {"present": False, "note": (
         "No live proposal persisted for this view. A proposal is surfaced when a real "
