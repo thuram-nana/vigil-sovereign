@@ -125,7 +125,23 @@ class BrainThink:
         if not out:
             return
         try:
-            doc = proposal_document(profile, steps, objective=self._objective, posture=self._posture)
+            # H4b-B — annotate each proposed step with its CAPABILITY status (EXECUTABLE / BLOCKED /
+            # UNAVAILABLE + reason), so the panel shows WHY a proposed tool can or cannot run rather than
+            # the plan silently listing a step that never executes. The producer is `resolve()`; import is
+            # FUNCTION-LOCAL (FATAL-2: resolve co-loads the executor + a live host probe only in the offense
+            # leg where framework/gateway are on the path — engine_think module scope stays framework-free).
+            # FAIL-SOFT: a resolve() failure leaves the proposal persisted UNANNOTATED (capabilities=None ⇒
+            # proposal_document is byte-identical to before), so a probe/registry hiccup never sinks the
+            # panel's data path.
+            capabilities = None
+            try:
+                from ..live.capability_join import resolve  # noqa: PLC0415 (FATAL-2 / fail-soft)
+                rows = resolve(probe_host=True)
+                capabilities = {r.name: {"status": r.status, "reason": r.reason} for r in rows}
+            except Exception:
+                capabilities = None
+            doc = proposal_document(profile, steps, objective=self._objective, posture=self._posture,
+                                    capabilities=capabilities)
             d = Path(out)
             d.mkdir(parents=True, exist_ok=True)
             tmp = d / ".brain-proposal.json.tmp"
