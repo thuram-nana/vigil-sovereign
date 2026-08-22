@@ -72,6 +72,16 @@ class SpineRecord:
             schema_version=int(d.get("schema_version", LEGACY_SCHEMA_VERSION)),
         )
 
+    def typed_payload(self):
+        """W5-2 read-time upcaster: a typed, upcast view of this record's payload under its `kind`'s
+        payload-evolution contract (`sigil.spine.payload_contract`) — or `None` for a free-form
+        (unregistered) kind. A record written under an older `schema_version` that lacks a later-added field
+        reads back with the field at its default; an extra field a newer writer added round-trips. Import is
+        function-local so the pydantic leaf `payload_contract` never forces a models-module load and no
+        import cycle can form."""
+        from .payload_contract import upcast_payload
+        return upcast_payload(self.kind, self.payload)
+
     def text(self) -> str:
         """Best-effort human/searchable text of the record (for embedding + display)."""
         p = self.payload or {}
