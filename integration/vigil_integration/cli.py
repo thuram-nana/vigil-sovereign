@@ -1826,7 +1826,10 @@ def _cmd_session_dossier(args: argparse.Namespace) -> int:
         except ValueError:
             continue
 
-    live_dir = Path(os.environ.get("VIGIL_LIVE_DIR") or ".vigil-live")
+    # W16-STD-6(c): resolve to an ABSOLUTE path so a dossier built from a different CWD still reads the
+    # SAME session store (a relative ``.vigil-live`` used to follow the CWD around).
+    from .live.instructions import resolve_live_dir
+    live_dir = resolve_live_dir()
     chat_path = live_dir / "chats" / (sid + ".jsonl")
     chat_transcript = str(chat_path) if chat_path.is_file() else None
 

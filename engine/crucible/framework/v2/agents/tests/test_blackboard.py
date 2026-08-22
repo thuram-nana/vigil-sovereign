@@ -367,3 +367,44 @@ def test_blackboard_accepts_current_schema(tmp_path: Path) -> None:
         assert int(row["value"]) == _MAX_BB_SCHEMA
     finally:
         b.close()
+
+
+# --- W16-STD-6(d): SQLite corruption is DETECTED at open, not surfaced as a raw traceback later ------
+
+def test_corrupt_store_is_detected_with_a_clear_error(tmp_path):
+    """A torn / non-SQLite file is reported as a clear BlackboardError at open time.
+
+    Fails without the fix: no PRAGMA integrity_check ran, so a corrupt store opened 'successfully' and only
+    blew up later with a raw sqlite3.DatabaseError deep inside a query."""
+    bad = tmp_path / "store.sqlite"
+    bad.write_bytes(b"this is definitely not a sqlite database file, just garbage bytes" * 8)
+    with pytest.raises(BlackboardError) as ei:
+        Blackboard(db_path=bad)
+    msg = str(ei.value).lower()
+    assert "corrupt" in msg or "integrity" in msg or "not a database" in msg
+
+
+def test_partially_corrupt_page_is_detected(tmp_path):
+    """A store with a valid header but a clobbered page fails integrity_check (not just the 'not a db' case)."""
+    good = tmp_path / "ok.sqlite"
+    with Blackboard(db_path=good) as bb:            # make a real, valid store first
+        bb.engagement_id("eng")
+    # corrupt the interior: overwrite bytes AFTER the 100-byte header (leaves the magic intact, breaks a page)
+    raw = bytearray(good.read_bytes())
+    for i in range(200, min(len(raw), 4096)):
+        raw[i] = 0xFF
+    corrupt = tmp_path / "torn.sqlite"
+    corrupt.write_bytes(bytes(raw))
+    with pytest.raises(BlackboardError):
+        Blackboard(db_path=corrupt)
+
+
+def test_pristine_store_passes_integrity_check(tmp_path):
+    """NEGATIVE CONTROL: a fresh / valid store opens cleanly — the check is not a blanket reject (no-op guard
+    would fail here) and remains usable for a normal append."""
+    p = tmp_path / "fresh.sqlite"
+    with Blackboard(db_path=p) as bb:               # fresh file: integrity_check == 'ok'
+        eng = bb.engagement_id("eng")
+        assert eng >= 1
+    with Blackboard(db_path=p) as bb:               # reopen an existing, valid store: still clean
+        assert bb.engagement_id("eng") == eng

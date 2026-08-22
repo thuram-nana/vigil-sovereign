@@ -77,3 +77,38 @@ def test_queue_files_are_0600(tmp_path):
     f = tmp_path / "instructions" / "s.jsonl"
     assert stat.S_IMODE(f.stat().st_mode) == 0o600
     assert stat.S_IMODE((tmp_path / "instructions").stat().st_mode) == 0o700
+
+
+# --- W16-STD-6(c): VIGIL_LIVE_DIR / the queue base resolve to an ABSOLUTE path -----------------------
+
+def test_live_dir_default_is_cwd_independent(tmp_path, monkeypatch):
+    """With NO ``VIGIL_LIVE_DIR`` set, the DEFAULT store must resolve to the SAME absolute path no matter
+    which directory ``vigil`` runs from — it is anchored to the CRUCIBLE root, not the CWD.
+
+    Fails without the fix: ``_base`` used ``Path(... or '.vigil-live')`` directly, so the bare default
+    followed the CWD; an enqueue from one directory and the engagement in another silently diverged.
+    """
+    monkeypatch.delenv("VIGIL_LIVE_DIR", raising=False)
+
+    d1 = tmp_path / "aaa"; d1.mkdir()
+    d2 = tmp_path / "bbb"; d2.mkdir()
+
+    monkeypatch.chdir(d1)
+    p1 = I.resolve_live_dir()
+    monkeypatch.chdir(d2)
+    p2 = I.resolve_live_dir()
+
+    assert p1.is_absolute() and p2.is_absolute()
+    # NEGATIVE CONTROL / the exact silent-divergence the defect names: same store from either CWD.
+    assert p1 == p2, "the default .vigil-live must not follow the CWD"
+    assert d1 not in p1.parents and d2 not in p2.parents
+
+
+def test_live_dir_explicit_base_wins_and_is_absolute(tmp_path, monkeypatch):
+    """An explicit ``base`` still wins over the env, and is returned as an absolute path."""
+    monkeypatch.setenv("VIGIL_LIVE_DIR", "envstore")
+    monkeypatch.chdir(tmp_path)
+    got = I.resolve_live_dir(str(tmp_path / "explicitbase"))
+    assert got.is_absolute()
+    assert got.name == "explicitbase"
+    assert got == (tmp_path / "explicitbase").resolve()

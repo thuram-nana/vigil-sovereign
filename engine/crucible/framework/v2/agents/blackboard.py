@@ -97,6 +97,7 @@ class Blackboard:
         self._conn = sqlite3.connect(self.path, detect_types=sqlite3.PARSE_DECLTYPES)
         paths.secure_existing(self.path)              # 0600 the spine DB (dir 0700 guards WAL sidecars)
         self._conn.row_factory = sqlite3.Row
+        self._integrity_check()                       # W16-STD-6(d): detect a torn store, fail LOUD not raw
         self._conn.execute("PRAGMA foreign_keys = ON")
         # X3: under WAL (set in schema.sql), synchronous=NORMAL drops the per-commit fsync
         # (durable across app crashes; only an OS/power crash can lose the last commit) — the
@@ -114,6 +115,28 @@ class Blackboard:
 
     def close(self) -> None:
         self._conn.close()
+
+    # ---- integrity ----
+
+    def _integrity_check(self) -> None:
+        """W16-STD-6(d): run ``PRAGMA integrity_check`` on open so a corrupt / torn / non-SQLite store is
+        reported as a clear ``BlackboardError`` instead of surfacing later as a raw ``sqlite3.DatabaseError``
+        traceback from deep inside a query. A pristine or freshly-created (empty) DB returns the single row
+        ``ok`` and passes silently. ``integrity_check`` itself raises ``DatabaseError`` when the file is not a
+        database at all (garbage header) — caught here and re-raised in the same clear shape. The check is
+        cheap for the small, per-engagement blackboard store."""
+        try:
+            rows = self._conn.execute("PRAGMA integrity_check").fetchall()
+        except sqlite3.DatabaseError as exc:
+            self._conn.close()
+            raise BlackboardError(
+                f"blackboard store at {self.path} is corrupt or not a database: {exc}") from exc
+        results = [str(r[0]) for r in rows]
+        if results != ["ok"]:
+            self._conn.close()
+            detail = "; ".join(results[:10]) or "unknown corruption"
+            raise BlackboardError(
+                f"blackboard store at {self.path} failed integrity_check: {detail}")
 
     # ---- migrations ----
 
