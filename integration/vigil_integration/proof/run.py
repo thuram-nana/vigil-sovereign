@@ -185,6 +185,19 @@ def _persist_reverifiable(run_dir: str | os.PathLike, finding: dict, action_id: 
         "action_id": action_id,
         "oracle_context": ctx.model_dump(mode="json"),
     }
+    # W16-7 (AC5): STORE the signed certificate minted here, so `export_bundle` returns it BYTE-IDENTICAL
+    # instead of re-minting a fresh one at download time (which drops `res.signed` and re-signs). The stored
+    # certificate was signed over THIS finding's oracle_context (the `ctx` above), so the bundle's shipped
+    # reverifiable.json (which carries that same oracle_context) re-verifies against it. Best-effort: a
+    # serialization hiccup simply omits the stored cert and export falls back to a deterministic re-mint —
+    # it never un-mints the FACT. The blob is stripped from the bundle's own reverifiable.json (it is
+    # redundant with evidence-bundle.json) so the shipped report stays lean.
+    signed = getattr(res, "signed", None)
+    if signed is not None:
+        try:
+            entry["signed_certificate"] = signed.model_dump(mode="json")
+        except Exception:  # noqa: BLE001 — a non-serializable cert is dropped; export re-mints deterministically
+            pass
     doc = read_reverifiable(run_dir)
     findings = [f for f in doc["active_findings"] if f.get("check_id") != entry["check_id"]]
     findings.append(entry)

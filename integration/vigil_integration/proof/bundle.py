@@ -200,8 +200,10 @@ def export_bundle(
     ``{ok, bundle, certificates, verify_cmd}`` (``{ok: False, error}`` when there is nothing to export or a
     step fails). Signs with the run's STABLE governance authority (``base_dir`` seals the key) — the private
     key is only ever a Python argument, never argv/spine; only the PUBLIC trust root is written to disk."""
-    from framework.v2.evidence.certify import build_certificate, sign_certificate, trust_root_fingerprint  # lazy — FATAL-2
+    from framework.v2.evidence.certify import (  # lazy — FATAL-2
+        build_certificate, sign_certificate, trust_root_fingerprint, verify_certificate)
     from framework.v2.evidence.chain import build_chain, sign_head
+    from framework.v2.evidence.models import SignedEvidence
     from ..live.wiring import provision_authority
 
     doc = read_reverifiable(run_dir)
@@ -219,8 +221,38 @@ def export_bundle(
                                base_dir=(base_dir or str(run_dir)), vault=vault)
     evidence_root = Path(run_dir) / "evidence"
 
+    def _reuse_stored_cert(f: dict) -> "Any | None":
+        """Return the SignedEvidence stored at MINT time (:func:`proof.run._persist_reverifiable`) for this
+        finding, so the download returns the certificate BYTE-IDENTICAL to the one minted — but ONLY when it
+        is (a) well-formed, (b) keyed to this finding's ref, and (c) AUTHENTIC against THIS bundle's trust
+        root (i.e. signed by the same governance key `provision_authority` seals under ``base_dir``). A cert
+        signed by a different key (a legacy run whose mint used an ad-hoc keypair) fails the authenticity
+        check and is re-minted below under the bundle's own key — so this reuse never smuggles an unverifiable
+        certificate in, and it stays byte-identical only when it is genuinely re-mintable under the same key."""
+        stored = f.get("signed_certificate")
+        if not isinstance(stored, dict):
+            return None
+        try:
+            sc = SignedEvidence.model_validate(stored)
+        except Exception:  # noqa: BLE001 — a malformed stored cert simply re-mints
+            return None
+        if sc.certificate.finding_ref != _natural_ref(f):
+            return None            # a ref rewrite (collision disambiguation) → re-mint under the new ref
+        oc = f.get("oracle_context")
+        if not isinstance(oc, dict):
+            return None
+        try:
+            vr = verify_certificate(sc, oracle_context=oc, trust_root=prov.trust_root)
+        except Exception:  # noqa: BLE001
+            return None
+        return sc if getattr(vr, "authentic", False) else None
+
     signed_certs = []
     for i, f in enumerate(findings):
+        reused = _reuse_stored_cert(f)
+        if reused is not None:
+            signed_certs.append(reused)      # byte-identical to the certificate minted at scan time (AC5)
+            continue
         # CONFINE the (file-supplied, hence untrusted) action_id to a single path segment INSIDE the
         # evidence tree before probing/manifesting it — an absolute or ``..``-bearing id would otherwise make
         # build_certificate walk + hash files outside the tree. A rejected id simply drops artifacts (the
@@ -254,7 +286,11 @@ def export_bundle(
     # the authenticity anchor the verifier PINS out-of-band (the shipped trust-root.json is only a copy).
     fingerprint = trust_root_fingerprint(prov.trust_root)
     _secure_write(out / "TRUST-ROOT-FINGERPRINT.txt", fingerprint + "\n")
-    _secure_write(out / "reverifiable.json", json.dumps({"active_findings": findings}, sort_keys=True))
+    # The shipped reverifiable.json carries each finding's oracle_context (what the verifier re-fires); the
+    # stored `signed_certificate` blob is redundant with evidence-bundle.json, so drop it to keep the report
+    # lean and byte-reproducible (its presence would otherwise bloat the client-facing document).
+    ship_findings = [{k: v for k, v in f.items() if k != "signed_certificate"} for f in findings]
+    _secure_write(out / "reverifiable.json", json.dumps({"active_findings": ship_findings}, sort_keys=True))
     _secure_write(out / "README.md", _README)
     # Per-finding "how to verify + patch" companion — built from the signed certs' own how_to_verify note, so
     # a recipient sees each finding's surface + firing oracle + fix, not just the one bulk verify command.

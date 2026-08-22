@@ -329,6 +329,7 @@ jobs:
               --ignore=integration/tests/test_proof_bootstrap.py \
               --ignore=integration/tests/test_proof_bundle.py \
               --ignore=integration/tests/test_dossier.py \
+              --ignore=integration/tests/test_deliverable_chain.py \
               --ignore=integration/tests/test_session_dossier.py \
               --ignore=integration/tests/test_fix_oracle.py \
               --ignore=integration/tests/test_fix_ladder_matches_the_gate.py \
@@ -423,6 +424,7 @@ jobs:
               integration/tests/test_proof_bootstrap.py \
               integration/tests/test_proof_bundle.py \
               integration/tests/test_dossier.py \
+              integration/tests/test_deliverable_chain.py \
               integration/tests/test_session_dossier.py \
               integration/tests/test_fix_oracle.py \
               integration/tests/test_fix_ladder_matches_the_gate.py \
