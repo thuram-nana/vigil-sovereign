@@ -23,6 +23,10 @@ def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int 
     decisions: Counter = Counter()
     interrupts_today: Counter = Counter()
     actions_today: Counter = Counter()
+    # CUMULATIVE deny/refusal count over the WHOLE append-only spine (NOT the sliding `lookback` window).
+    # `recent_decisions` above is windowed and therefore non-monotonic; this total only ever grows, so it is
+    # the sound feed for the `vigil_refusals_total` OpenMetrics counter (W6-3 #454 monotonicity fix).
+    refusals_total = 0
     recent_events: list = []   # the "Recent activity" feed: a LIST of recent agent events (the UI renders
     #                          # this as an array — recent_by_agent/recent_decisions are COUNTER objects).
     last_checkpoint = -1
@@ -39,6 +43,8 @@ def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int 
                 actions_today[r.actor] += 1
                 if r.kind == "event":
                     interrupts_today[r.actor] += 1
+        if r.source == "agent" and str(r.payload.get("decision")) in ("deny", "denied", "refused"):
+            refusals_total += 1   # cumulative over the whole spine (monotonic; feeds vigil_refusals_total)
         if r.source == "agent" and r.seq > head - lookback:
             per_agent[r.actor] += 1
             decision = r.payload.get("decision")
@@ -62,7 +68,8 @@ def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int 
         "capabilities": CapabilityGate(store).state_all(),   # {"gesture": enabled|disabled, "voice": ...}
         "promotions": promotions,   # [{agent, scope}] currently granted (verified) — owner may revoke from the UI
         "recent_by_agent": dict(per_agent.most_common()),
-        "recent_decisions": dict(decisions),
+        "recent_decisions": dict(decisions),   # WINDOWED (last `lookback`) → non-monotonic; UI display only
+        "refusals_total": refusals_total,      # CUMULATIVE over the whole spine (monotonic; metrics feed)
         "recent_events": recent_events[-8:][::-1],   # the 8 most recent agent events, newest first (a LIST)
         "pending_approvals": [{"seq": r.seq, "tier": r.payload.get("tier"), "kind": r.kind,
                                "agent": r.actor, "subject": r.payload.get("subject")} for r in pend],
