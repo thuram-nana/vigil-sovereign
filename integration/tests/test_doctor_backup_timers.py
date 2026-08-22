@@ -211,9 +211,10 @@ def test_doctor_reports_each_timer_enabled_state_and_last_run(monkeypatch, tmp_p
 # --------------------------------------------------------------------------- PRODUCTION gate wiring (AC 3/5/6)
 
 def _all_other_controls_satisfied(monkeypatch, tmp_path) -> pathlib.Path:
-    """Provision the FOUR non-backup production preconditions (vault/sovereignty/entitlement/charter) so the
-    gate outcome is driven ONLY by the `backups` control, and lay down the backup timer unit FILES so the
-    probe can evaluate them. The caller sets the fake systemctl to choose the backups state."""
+    """Provision the FIVE non-backup production preconditions (vault/sovereignty/entitlement/charter/
+    legacy-owner-token) so the gate outcome is driven ONLY by the `backups` control, and lay down the backup
+    timer unit FILES so the probe can evaluate them. The caller sets the fake systemctl to choose the backups
+    state."""
     repo = _mk_units(tmp_path)
     # vault SEALED
     home = tmp_path / ".sigil"
@@ -235,6 +236,8 @@ def _all_other_controls_satisfied(monkeypatch, tmp_path) -> pathlib.Path:
     (auth / "acme.authority.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("CRUCIBLE_ROOT", str(cruc))
     monkeypatch.setenv("VIGIL_ENGAGEMENT", "acme")
+    # legacy-owner-token DISABLED (W10-7 control, added to the gate after this suite was written)
+    monkeypatch.setenv("SIGIL_LEGACY_OWNER_TOKEN", "0")
     _systemctl_present(monkeypatch)
     return repo
 

@@ -131,6 +131,8 @@ HA_UNITS: tuple[UnitSpec, ...] = (
              "signed posture re-proof series (every 30m)"),
     UnitSpec("vigil-reprove.service", "vigil-reprove.timer", 6 * 3600, 300,
              "continuous re-proof of confirmed findings (every 6h)"),
+    UnitSpec("vigil-checkpoint.service", "vigil-checkpoint.timer", 15 * 60, 60,
+             "scheduled off-box witnessed-checkpoint emitter — anti-rollback anchor (every 15m)"),
 )
 
 _BY_NAME = {u.unit: u for u in HA_UNITS}
