@@ -502,6 +502,20 @@ def _strix_args(raw_arguments: Any) -> Any:
 # The Strix arbitrary-execution chokepoint. EVERY CLI invocation the agent makes — nmap, ffuf, python3,
 # curl, agent-browser — flows through ``exec_command`` (``write_stdin`` streams input to a still-running
 # exec_command process). So gating THESE two names gates all arbitrary execution.
+#
+# ACCEPTED GAP (S4 item 4 — whole-shell approval, honestly labelled). An approved ``exec_command`` runs the
+# WHOLE command string — pipes, subshells, arbitrary binaries — with NO argv allowlist and NO per-binary
+# re-check. The CRUCIBLE path does the opposite: ``live/executor.py`` denies a tool with no typed argv
+# ``_BUILDERS`` entry, and ``terminal.run`` is confined to the read-only ``_TERMINAL_ALLOWLIST``. That
+# asymmetry is DELIBERATE and cannot be closed the CRUCIBLE way here: Strix is a general offensive agent
+# whose tool surface is unbounded by design (it MUST run nmap/ffuf/curl/python3/msf/…), so a fixed argv
+# allowlist would defeat its purpose, and a denylist of dangerous spellings is unsound (trivially evaded).
+# Strix's exec is contained instead by three OTHER controls: (1) this per-action, single-use, owner-signed
+# WARDEN approval — the owner reviews the EXACT command string (bound via ``_strix_args``) before it runs;
+# (2) the S2/S3 scope-enforcing egress gateway, which governs where its traffic may go; and (3) the S5
+# container hardening, which bounds what a compromised exec can reach. The exec approval target therefore
+# stays the honest LOCAL sentinel ``strix:exec`` (there is no single network destination to bind) — see
+# ``_strix_target`` — rather than a spoofable network-style label. Pinned by ``test_strix_exec_whole_shell_gap``.
 _STRIX_EXEC_TOOLS = frozenset({"exec_command", "write_stdin"})
 
 # The Strix tools that REACH THE NETWORK without going through ``exec_command`` — so a gate that only
