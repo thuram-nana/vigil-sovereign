@@ -173,6 +173,20 @@ jobs:
         working-directory: engine/crucible
         run: python3 -m framework.v2.tools.gen_sbom --check
 
+      # The two SBOMs above describe the Python DEPENDENCY closure. The Strix offense-agent
+      # runs targets inside a CONTAINER image (vigil/strix-sandbox:local, ~1000 deb packages plus
+      # a Go/npm/pip/pipx/binary toolchain) that had no SBOM at all (S5; Part III requires
+      # dependency AND container SBOMs). gen_image_sbom.py introspects the BUILT image and commits
+      # infra/supply-chain/sbom-strix-sandbox.cdx.json — committed, not per-run regenerated,
+      # because the 7GB image is not in git and cannot be rebuilt on a PR runner. --check is the
+      # OFFLINE drift guard: it ties the committed SBOM to the Dockerfile hash, the base-image
+      # FROM ref and the STRIX_IMAGE runtime ref, so a Dockerfile change that is not accompanied by
+      # a regenerated SBOM fails the build. Regenerate with `python3 infra/supply-chain/gen_image_sbom.py`
+      # (needs docker + the built image; see docs/SUPPLY-CHAIN.md § 3a).
+      - name: committed Strix sandbox image SBOM is present and current (offline drift guard)
+        if: always()
+        run: python3 infra/supply-chain/gen_image_sbom.py --check
+
       # Same implementation, different pair. env-sovereign and env-offense must never share an
       # interpreter (FATAL-2), so they cannot share a resolution either — hence two locks.
       - name: verify SOVEREIGN lock (vigil_core + apps/sigil) + SBOM cross-check
