@@ -254,7 +254,7 @@ class Vault:
 
     # --- KEK rotation (verify-then-swap, fail-closed) ---------------------------------------------
 
-    def rotate_kek(self, secret_files) -> dict:
+    def rotate_kek(self, secret_files, *, embedded_secrets) -> dict:
         """Rotate the TPM-sealed KEK: mint a FRESH KEK, seal it to the TPM, and RE-WRAP every secret file
         that rests under the KEK so each moves from old-KEK custody to new-KEK custody — WITHOUT touching
         the plaintext the files protect (the DEK bytes, the owner/WARDEN key bytes are unchanged, so the
@@ -263,12 +263,24 @@ class Vault:
         ``secret_files`` is ``[(path, context), ...]`` — every file sealed under this KEK (the owner private
         key, the spine DEK, the WARDEN kernel key, …), each with the AEAD ``context`` it was sealed under.
 
+        ``embedded_secrets`` (REQUIRED, keyword-only) is ``[(label, blob, context), ...]`` — every secret
+        sealed DIRECTLY under this KEK via :meth:`seal_secret` that rides INSIDE the immutable owner-signed
+        spine (account TOTP second factors, any other embedded seal), NOT a file on disk. Such a blob's
+        ciphertext is signed into the append-only chain, so it CANNOT be re-wrapped in place — re-wrapping
+        would change the ciphertext and thus every downstream ``cert_digest``/signature, which only the W9-1
+        re-genesis path can re-establish. Therefore this method FAILS CLOSED: if ANY embedded secret is
+        present and opens under the CURRENT KEK, the whole rotation is REFUSED (rotating would strip the only
+        key that can open it → permanent, silent loss, e.g. an MFA lockout). There is deliberately NO default
+        — a caller MUST make an explicit decision; pass ``embedded_secrets=[]`` only when it has PROVEN none
+        exist. (This detection is the fix for the red-pen BLOCK: enumerate + refuse, never a printed note.)
+
         Verify-then-swap, fail-closed (never leave data under a half-rotated key):
-          1. re-wrap every file IN MEMORY under the new KEK, PROVING each (new key opens to the exact
+          1. refuse if any ``embedded_secrets`` blob is live under the current KEK (see above);
+          2. re-wrap every file IN MEMORY under the new KEK, PROVING each (new key opens to the exact
              original; the OLD key no longer opens it — :func:`rotation.rewrap`);
-          2. seal the new KEK to the TPM at STAGED blob names and VERIFY it unseals back to the new KEK;
-          3. stage every re-wrapped file to ``<path>.rot`` and re-verify it opens under the new KEK;
-          4. COMMIT: snapshot the old KEK blobs to ``.prev`` (the crash-window read anchor), swap in the new
+          3. seal the new KEK to the TPM at STAGED blob names and VERIFY it unseals back to the new KEK;
+          4. stage every re-wrapped file to ``<path>.rot`` and re-verify it opens under the new KEK;
+          5. COMMIT: snapshot the old KEK blobs to ``.prev`` (the crash-window read anchor), swap in the new
              KEK, then swap each re-wrapped file into place, then drop ``.prev`` — after which the OLD KEK no
              longer decrypts anything.
         Any failure BEFORE the commit unlinks all staged artifacts and raises :class:`RotationError`, leaving
@@ -281,6 +293,9 @@ class Vault:
                 old_kek = self._kek()
             except VaultLocked as e:
                 raise RotationError(f"cannot rotate: the current KEK will not unseal ({e})") from e
+            # 1) FAIL-CLOSED on KEK-direct spine-embedded secrets: they cannot be re-wrapped in place (their
+            #    ciphertext is signed into the immutable spine), so rotating the KEK would orphan them forever.
+            self._refuse_if_embedded_secrets_would_orphan(old_kek, embedded_secrets)
             fresh = new_kek()
             if fresh == old_kek:  # astronomically unlikely; still fail-closed rather than a silent no-op
                 raise RotationError("fresh KEK collided with the current KEK — aborting")
@@ -338,6 +353,139 @@ class Vault:
                         pass
             self._prev_kek_cache = None
             return {"rotated": len(plan), "files": [str(p) for (p, _c, _b, _e) in plan]}
+
+    def _refuse_if_embedded_secrets_would_orphan(self, old_kek: bytes, embedded_secrets) -> None:
+        """Fail-closed guard (red-pen BLOCK): a KEK-direct secret that lives INSIDE the immutable owner-signed
+        spine (an :meth:`seal_secret` blob — e.g. an account TOTP second factor) cannot be re-wrapped in place,
+        so rotating the KEK out from under it would render it permanently unrecoverable. If ANY supplied
+        ``embedded_secrets`` blob is sealed AND opens under the current KEK, REFUSE the whole rotation and name
+        the offenders. A blob that is not sealed, or does not open under the current KEK, is not a live secret
+        this rotation would orphan and is skipped. Malformed input is refused (fail-closed)."""
+        orphaned: list[str] = []
+        for entry in embedded_secrets:
+            try:
+                label, blob, ctx = entry
+                b = bytes(blob)
+            except (TypeError, ValueError) as e:
+                raise RotationError(f"embedded-secret entry must be (label, blob, context) bytes: {e}") from e
+            if not is_sealed(b):
+                continue
+            try:
+                unseal(old_kek, b, context=bytes(ctx))
+            except SealError:
+                continue  # not openable under the current KEK — not a live secret this rotation would orphan
+            orphaned.append(str(label))
+        if orphaned:
+            raise RotationError(
+                f"refusing to rotate the KEK: {len(orphaned)} spine-embedded secret(s) are sealed DIRECTLY "
+                f"under it and cannot be re-wrapped in place (their ciphertext is signed into the immutable "
+                f"owner-signed spine) — rotating would PERMANENTLY orphan them (e.g. account TOTP second "
+                f"factors → silent MFA lockout, no recovery). Disable/re-enroll them, or re-key via the W9-1 "
+                f"re-genesis path. Offending secrets: [{', '.join(sorted(orphaned))}]")
+
+    # --- crash reconciliation (an interrupted commit must never leave the OLD KEK valid forever) --------
+
+    def rotation_incomplete(self) -> bool:
+        """True iff a ``.prev`` KEK anchor is present on disk — a KEK rotation swapped in the new KEK but was
+        interrupted before it retired the old one. Until reconciled the OLD KEK still decrypts (resurrection),
+        and some files may still rest under it. A cheap disk check for the doctor posture / boot reconciler."""
+        return ((self._dir / (_SEAL_PUB + ".prev")).exists()
+                and (self._dir / (_SEAL_PRIV + ".prev")).exists())
+
+    def reconcile_kek_rotation(self, secret_files, *, embedded_secrets=()) -> dict:
+        """Finish an interrupted KEK rotation (red-pen HIGH: an interrupted commit leaves the OLD KEK valid
+        forever, undetected). If a ``.prev`` anchor is present, re-wrap every secret FILE that still rests
+        under the OLD (``.prev``) KEK to the ACTIVE KEK — proving each — and only then DELETE ``.prev`` so the
+        old KEK can no longer decrypt anything. Called at boot / ``vigil up`` and re-runnable from the CLI.
+
+        Idempotent + fail-closed: no ``.prev`` → no-op; a file that cannot be re-wrapped/proven, or the
+        ``.prev`` KEK being unreadable while a file still needs it, ABORTS and leaves ``.prev`` in place (the
+        fallback stays, nothing is orphaned) rather than dropping the old key. Defence-in-depth: refuses to
+        retire ``.prev`` while any ``embedded_secrets`` blob still opens ONLY under it (rotate_kek already
+        refuses those pre-commit, so this can only bite a hand-corrupted state — still fail-closed)."""
+        if not self.rotation_incomplete():
+            return {"reconciled": 0, "status": "clean"}
+        with self._lock:
+            try:
+                active = self._kek()
+            except VaultLocked as e:
+                raise RotationError(f"cannot reconcile: the active KEK will not unseal ({e})") from e
+            reconciled: list[str] = []
+            for path, ctx in secret_files:
+                p = Path(path)
+                try:
+                    raw = p.read_bytes()
+                except OSError:
+                    continue
+                if not raw or not is_sealed(raw):
+                    continue
+                try:
+                    unseal(active, raw, context=ctx)
+                    continue  # already under the active KEK — nothing to do
+                except SealError:
+                    pass
+                prev = self._prev_kek()
+                if prev is None:
+                    raise RotationError(f"reconcile aborted: {p.name} is not under the active KEK and the "
+                                        f"`.prev` KEK is unreadable — keeping `.prev` (fail-closed)")
+                try:
+                    expected = unseal(prev, raw, context=ctx)
+                    new_blob = rewrap_or_seal(prev, active, raw, context=ctx)
+                except (SealError, RotationError) as e:
+                    raise RotationError(f"reconcile aborted re-wrapping {p.name} to the active KEK "
+                                        f"(keeping `.prev`): {e}") from e
+                staged = p.with_name(p.name + ".rot")
+                _atomic_write_bytes(staged, new_blob)
+                if not verify_opens_to(active, staged.read_bytes(), expected, context=ctx):
+                    try:
+                        staged.unlink()
+                    except OSError:
+                        pass
+                    raise RotationError(f"reconcile aborted: re-wrap of {p.name} did not verify under the "
+                                        f"active KEK (keeping `.prev`)")
+                os.replace(staged, p)
+                reconciled.append(str(p))
+            # Every file now opens under the active KEK. Before retiring `.prev`, refuse if any embedded secret
+            # still opens ONLY under it (would be orphaned by dropping the fallback).
+            self._refuse_if_embedded_orphaned_by_dropping_prev(active, embedded_secrets)
+            for name in (_SEAL_PUB, _SEAL_PRIV):
+                try:
+                    (self._dir / (name + ".prev")).unlink()
+                except OSError:
+                    pass
+            self._prev_kek_cache = None
+            return {"reconciled": len(reconciled), "files": reconciled, "status": "completed"}
+
+    def _refuse_if_embedded_orphaned_by_dropping_prev(self, active: bytes, embedded_secrets) -> None:
+        """Refuse to retire ``.prev`` if any embedded secret is sealed and opens ONLY under the ``.prev`` KEK
+        (not under the active KEK) — dropping ``.prev`` would orphan it. Fail-closed."""
+        prev = self._prev_kek()
+        if prev is None:
+            return
+        orphaned: list[str] = []
+        for entry in embedded_secrets:
+            try:
+                label, blob, ctx = entry
+                b, c = bytes(blob), bytes(ctx)
+            except (TypeError, ValueError) as e:
+                raise RotationError(f"embedded-secret entry must be (label, blob, context) bytes: {e}") from e
+            if not is_sealed(b):
+                continue
+            try:
+                unseal(active, b, context=c)
+                continue  # safe: already under the active KEK
+            except SealError:
+                pass
+            try:
+                unseal(prev, b, context=c)
+            except SealError:
+                continue  # opens under neither — not orphaned by dropping `.prev`
+            orphaned.append(str(label))
+        if orphaned:
+            raise RotationError(
+                f"reconcile aborted: {len(orphaned)} spine-embedded secret(s) open only under the `.prev` KEK "
+                f"— retiring it would orphan them (e.g. TOTP → MFA lockout). Keeping `.prev` (fail-closed). "
+                f"Offending secrets: [{', '.join(sorted(orphaned))}]")
 
     def _cleanup_rotation(self, staged_files, pub_rot: str, priv_rot: str) -> None:
         """Best-effort removal of every staged rotation artifact after a pre-commit failure — the originals

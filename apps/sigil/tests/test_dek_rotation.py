@@ -159,3 +159,109 @@ def test_rotate_spine_dek_refuses_unprovisioned_vault(tmp_path, monkeypatch):
     v = Vault(tmp_path / "vault", make_fake_tpm())   # NOT provisioned
     with pytest.raises(DekRotationError):
         rotate_spine_dek(config.SPINE_PATH, v)
+
+
+# --- red-pen W9-2 HIGH regression: DEK rotation crash anchor + reconciler --------------------------
+
+
+def test_rotate_spine_dek_uses_and_retires_a_crash_anchor(wired):
+    """A clean rotation must leave NO `.prev` anchor behind (it is dropped only after the spine is confirmed
+    swapped)."""
+    tmp, v = wired
+    old_dek = env.load_or_create_dek(v, create=True)
+    before = _chain([_record(old_dek, 0, "anchor-0")])
+    config.SPINE_PATH.write_text(json.dumps(before[0]) + "\n", encoding="utf-8")
+    rotate_spine_dek(config.SPINE_PATH, v)
+    assert not config.SPINE_DEK_PATH.with_name(config.SPINE_DEK_PATH.name + ".prev").exists()
+
+
+def test_dek_anchor_survives_a_power_loss_and_reconcile_recovers(wired, monkeypatch):
+    """Red-pen HIGH: power loss BETWEEN the DEK write and the spine swap must be recoverable. Without the
+    `.prev` crash anchor the old DEK is gone and the spine (still old-ciphertext) is unrecoverable. We
+    simulate the crash with a BaseException (uncaught → no rollback) on the spine swap, then prove the anchor
+    lets reconcile_spine_dek finish the rotation. Reverting the anchor snapshot makes recovery impossible."""
+    import sigil.spine.dek_rotation as dr
+    tmp, v = wired
+    old_dek = env.load_or_create_dek(v, create=True)
+    before = _chain([_record(old_dek, 0, "cs-0"), _record(old_dek, 1, "cs-1")])
+    config.SPINE_PATH.write_text("\n".join(json.dumps(r) for r in before) + "\n", encoding="utf-8")
+
+    real_awt = dr.atomic_write_text
+
+    def power_loss(*a, **k):  # simulate power loss on the SPINE swap (BaseException => uncaught, no rollback)
+        raise KeyboardInterrupt("simulated power loss during spine swap")
+
+    monkeypatch.setattr(dr, "atomic_write_text", power_loss)
+    dek_prev = config.SPINE_DEK_PATH.with_name(config.SPINE_DEK_PATH.name + ".prev")
+    with pytest.raises(KeyboardInterrupt):
+        dr.rotate_spine_dek(config.SPINE_PATH, v)
+
+    # crash state: the anchor is present, the DEK is already the NEW one, the spine is still old-ciphertext.
+    assert dek_prev.exists()
+    cur = env.load_or_create_dek(v, create=False)
+    assert cur != old_dek
+    recs = [json.loads(x) for x in config.SPINE_PATH.read_text().splitlines() if x.strip()]
+    with pytest.raises(env.SpinePayloadLocked):
+        env.open_payload(cur, recs[0]["payload"], scope="sigil", seq=0)   # new DEK can't read the old spine
+
+    monkeypatch.setattr(dr, "atomic_write_text", real_awt)
+    assert dr.dek_rotation_incomplete() is True
+    res = dr.reconcile_spine_dek(config.SPINE_PATH, v)
+    assert res["status"] == "completed"
+    assert dr.dek_rotation_incomplete() is False
+    after = [json.loads(x) for x in config.SPINE_PATH.read_text().splitlines() if x.strip()]
+    for r in after:
+        assert env.open_payload(cur, r["payload"], scope=r["scope"], seq=r["seq"])["text"].startswith("cs-")
+    assert not dek_prev.exists()
+
+
+def test_reconcile_dek_rolls_back_when_the_new_dek_never_landed(wired):
+    """Crash BEFORE the new DEK was written (anchor == current DEK) → nothing was committed → reconcile rolls
+    back cleanly (drops the anchor + any staged `.rot`), leaving the spine readable under the old DEK."""
+    import shutil
+
+    from sigil.spine.dek_rotation import reconcile_spine_dek
+    tmp, v = wired
+    old_dek = env.load_or_create_dek(v, create=True)
+    before = _chain([_record(old_dek, 0, "s0")])
+    config.SPINE_PATH.write_text(json.dumps(before[0]) + "\n", encoding="utf-8")
+    dek_path = config.SPINE_DEK_PATH
+    dek_prev = dek_path.with_name(dek_path.name + ".prev")
+    shutil.copyfile(dek_path, dek_prev)                       # anchor == current DEK (new never landed)
+    staged = config.SPINE_PATH.with_name(config.SPINE_PATH.name + ".rot")
+    staged.write_text("garbage", encoding="utf-8")
+
+    res = reconcile_spine_dek(config.SPINE_PATH, v)
+    assert res["status"] == "rolled-back"
+    assert not dek_prev.exists() and not staged.exists()
+    r = json.loads(config.SPINE_PATH.read_text().splitlines()[0])
+    assert env.open_payload(old_dek, r["payload"], scope="sigil", seq=0)["text"] == "s0"
+
+
+def test_reconcile_dek_completes_when_spine_already_swapped(wired):
+    """Crash AFTER the spine swap but before the anchor was dropped → the spine already opens under the new
+    (current) DEK → reconcile just retires the stale anchor (idempotent, no re-encryption)."""
+    import base64
+    import shutil
+
+    from sigil.spine.dek_rotation import reconcile_spine_dek, reencrypt_records
+    tmp, v = wired
+    old_dek = env.load_or_create_dek(v, create=True)
+    before = _chain([_record(old_dek, 0, "done-0"), _record(old_dek, 1, "done-1")])
+    config.SPINE_PATH.write_text("\n".join(json.dumps(r) for r in before) + "\n", encoding="utf-8")
+    dek_path = config.SPINE_DEK_PATH
+    dek_prev = dek_path.with_name(dek_path.name + ".prev")
+
+    # hand-build the "spine already swapped" state: anchor = OLD dek, current dek = NEW, spine = new-ciphertext.
+    shutil.copyfile(dek_path, dek_prev)                       # anchor holds the OLD sealed DEK
+    new_dek = os.urandom(32)
+    after = reencrypt_records(old_dek, new_dek, before)
+    v.write_text_secret(dek_path, base64.b64encode(new_dek).decode("ascii"), context=env._DEK_CONTEXT)
+    config.SPINE_PATH.write_text("\n".join(json.dumps(r) for r in after) + "\n", encoding="utf-8")
+
+    res = reconcile_spine_dek(config.SPINE_PATH, v)
+    assert res["status"] == "completed"
+    assert not dek_prev.exists()
+    cur = env.load_or_create_dek(v, create=False)
+    for r in [json.loads(x) for x in config.SPINE_PATH.read_text().splitlines() if x.strip()]:
+        assert env.open_payload(cur, r["payload"], scope=r["scope"], seq=r["seq"])["text"].startswith("done-")

@@ -1328,6 +1328,7 @@ def cmd_key(a) -> None:
     from .warden_key import (
         WARDEN_KEY_CONTEXT, WardenKeyError, rotate_warden_key, seal_warden_key, verify_warden_succession,
     )
+    from .warden_key import reconcile_warden_rotation
     v = owner_vault()
     verb = getattr(a, "key_cmd", "status")
 
@@ -1341,6 +1342,14 @@ def cmd_key(a) -> None:
             except OSError:
                 state = "ABSENT"
             print(f"  {label:<12} {state:<9} {path}")
+        try:
+            emb = _spine_embedded_secrets(config)
+            print(f"  embedded KEK-direct secrets (NOT KEK-rotatable in place): {len(emb)}"
+                  + (f" [{', '.join(lbl for lbl, _b, _c in emb)}]" if emb else ""))
+        except RotationError as e:
+            print(f"  embedded KEK-direct secrets: UNKNOWN — {e}")
+        if v.rotation_incomplete():
+            print("  !! KEK rotation INCOMPLETE (.prev present) — run `sigil key reconcile`")
         ok, why = verify_warden_succession(config.SIGIL_HOME)
         print(f"  warden succession: {'OK' if ok else 'BROKEN'} — {why}")
         return
@@ -1353,6 +1362,17 @@ def cmd_key(a) -> None:
         return
 
     try:
+        if verb == "reconcile":
+            files = [(p, c) for (_l, p, c) in _kek_sealed_files(config, OWNER_PRIV_CONTEXT, _env, WARDEN_KEY_CONTEXT)]
+            emb = _spine_embedded_secrets(config)
+            kres = v.reconcile_kek_rotation(files, embedded_secrets=emb)
+            print(f"KEK rotation reconcile: {kres['status']} ({kres['reconciled']} file(s) re-wrapped)")
+            from .spine.dek_rotation import reconcile_spine_dek
+            dres = reconcile_spine_dek(config.SPINE_PATH, v)
+            print(f"spine DEK reconcile: {dres['status']} ({dres['rotated']} record(s))")
+            wres = reconcile_warden_rotation(config.SIGIL_HOME, v)
+            print(f"WARDEN rotation reconcile: {wres['status']}")
+            return
         if verb == "rotate-warden":
             res = rotate_warden_key(config.SIGIL_HOME, v)
             print(f"WARDEN key rotated (succession seq {res['seq']}); new pub {res['new_pub'][:16]}…")
@@ -1361,10 +1381,9 @@ def cmd_key(a) -> None:
             print(f"spine DEK rotated: {res['rotated']} record(s) re-encrypted under a fresh DEK")
         elif verb == "rotate-kek":
             files = [(p, c) for (_l, p, c) in _kek_sealed_files(config, OWNER_PRIV_CONTEXT, _env, WARDEN_KEY_CONTEXT)]
-            res = v.rotate_kek(files)
+            emb = _spine_embedded_secrets(config)  # enumerate KEK-direct spine-embedded secrets (TOTP, …)
+            res = v.rotate_kek(files, embedded_secrets=emb)  # fail-closed if any embedded secret would orphan
             print(f"TPM KEK rotated: {res['rotated']} sealed file(s) re-wrapped under a fresh KEK")
-            print("  NOTE: secrets sealed DIRECTLY under the KEK and embedded in the immutable owner-signed "
-                  "spine (e.g. account TOTP secrets) are not files and are NOT re-wrapped here — see W9-1.")
     except (RotationError, DekRotationError, WardenKeyError) as e:
         print(f"!! rotation refused (fail-closed, nothing swapped): {e}", file=_sys.stderr)
         _sys.exit(1)
@@ -1380,6 +1399,40 @@ def _kek_sealed_files(config, owner_ctx, envmod, warden_ctx):
         ("warden.key", warden_home(config.SIGIL_HOME) / "warden.key", warden_ctx),
         ("secrets.kv", config.SIGIL_HOME / "secrets.sealed", b"sigil/secrets.kv"),
     ]
+
+
+def _spine_embedded_secrets(config):
+    """Every KEK-direct secret sealed via ``Vault.seal_secret`` and embedded in the immutable owner-signed
+    spine, as ``[(label, blob, context), …]`` — currently account TOTP second factors (S4). ``rotate_kek``
+    consumes this to FAIL CLOSED (red-pen BLOCK): such a blob's ciphertext is signed into the append-only
+    chain, so it cannot be re-wrapped in place, and rotating the KEK out from under it would permanently
+    orphan it.
+
+    FAIL-CLOSED: if the account feature is wired but the spine cannot be enumerated (a locked / tampered /
+    unverifiable head), this RAISES :class:`RotationError` so the rotation REFUSES rather than proceed blind
+    and orphan an unseen secret. Only a genuinely-absent account module (a minimal build with no such feature)
+    yields ``[]``. A malformed base64 blob is skipped (it is not a live openable secret)."""
+    import base64 as _b64
+
+    from vigil_core.rotation import RotationError
+    try:
+        from .governor.accounts import TOTP_SEAL_CONTEXT, AccountsRegistry
+    except ImportError:
+        return []  # account feature not present in this build → no embedded secrets exist
+    try:
+        accts = AccountsRegistry(SpineStore()).accounts()
+    except Exception as e:  # noqa: BLE001 — cannot prove absence → refuse the rotation (fail-closed)
+        raise RotationError(f"cannot enumerate spine-embedded secrets to prove none would be orphaned "
+                            f"({e}) — refusing the KEK rotation (fail-closed)") from e
+    out = []
+    for acct in accts:
+        if getattr(acct, "totp_secret", None):
+            try:
+                blob = _b64.b64decode(acct.totp_secret)
+            except (ValueError, TypeError):
+                continue
+            out.append((f"totp:{acct.username}", blob, TOTP_SEAL_CONTEXT))
+    return out
 
 
 def cmd_kernel(a) -> None:
@@ -1666,7 +1719,7 @@ def main(argv=None) -> None:
     pkern.set_defaults(fn=cmd_kernel)
     pkey = sub.add_parser("key", help="key lifecycle (audit W9-2): rotate the spine DEK / WARDEN key / TPM KEK; seal the WARDEN key")
     pkey.add_argument("key_cmd", nargs="?", default="status",
-                      choices=["status", "seal-warden", "rotate-warden", "rotate-dek", "rotate-kek"])
+                      choices=["status", "seal-warden", "rotate-warden", "rotate-dek", "rotate-kek", "reconcile"])
     pkey.set_defaults(fn=cmd_key)
     pbak = sub.add_parser("backup", help="portable, passphrase-encrypted off-box backup of the trust root + spine (audit G3)")
     pbak.add_argument("dest", help="destination file for the encrypted backup")

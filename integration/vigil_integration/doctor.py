@@ -381,8 +381,10 @@ def _file_seal_state(p: Path) -> str:
 def _posture_key_sealing() -> "tuple[str, str]":
     """The per-key at-rest sealing state (audit W9-2), read WITHOUT importing sigil (FATAL-2): the owner
     private key, the spine DEK, and the WARDEN kernel key. Reports one state PER key so an operator sees
-    exactly which trust-root keys rest sealed vs plaintext. Roll-up: SEALED iff every PRESENT key is sealed;
-    PLAINTEXT if any present key is plaintext (the defect W9-2 closes); ABSENT if none exist yet."""
+    exactly which trust-root keys rest sealed vs plaintext. Roll-up: an INCOMPLETE key rotation (a crash
+    anchor / journal left on disk) dominates — it must be reconciled before the old key is retired (red-pen
+    HIGH); else SEALED iff every PRESENT key is sealed; PLAINTEXT if any present key is plaintext (the defect
+    W9-2 closes); ABSENT if none exist yet."""
     home = _sigil_home()
     warden_home = Path(os.environ["SIGIL_WARDEN_HOME"]) if os.environ.get("SIGIL_WARDEN_HOME") else home / "warden"
     per = []
@@ -391,6 +393,18 @@ def _posture_key_sealing() -> "tuple[str, str]":
         per.append((label, _file_seal_state(p)))
     present = [(lbl, st) for (lbl, st) in per if st not in ("ABSENT", "UNREADABLE")]
     detail = ", ".join(f"{lbl}={st}" for lbl, st in per)
+    # INCOMPLETE-rotation anchors (pure disk read, no import): a `.prev` KEK/DEK anchor or a WARDEN rotation
+    # journal means a crash left a rotation half-finished — until reconciled the OLD key still decrypts.
+    incomplete = []
+    if (home / "vault" / (_VAULT_SEAL_PUB + ".prev")).exists() or (home / "vault" / (_VAULT_SEAL_PRIV + ".prev")).exists():
+        incomplete.append("KEK(.prev)")
+    if (home / "spine" / "keys" / "spine.dek.prev").exists():
+        incomplete.append("DEK(.prev)")
+    if (warden_home / "warden.rotation.pending").exists():
+        incomplete.append("WARDEN(pending)")
+    if incomplete:
+        return "INCOMPLETE", (f"a key rotation is INCOMPLETE ({', '.join(incomplete)}) — the old key is not "
+                              f"yet retired; run `sigil key reconcile` to finish it (fail-closed) [{detail}]")
     if not present:
         return "ABSENT", f"no trust-root key files present yet ({detail})"
     if any(st == "PLAINTEXT" for _lbl, st in present):

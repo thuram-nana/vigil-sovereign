@@ -72,7 +72,7 @@ def test_rotate_kek_new_reads_old_no_longer_decrypts(tmp_path):
 
     old_kek = load_kek(tmp_path / "vault", runner=make_fake_tpm())
 
-    res = v.rotate_kek([(owner, OWNER_CTX), (dek, DEK_CTX), (warden, WARDEN_CTX)])
+    res = v.rotate_kek([(owner, OWNER_CTX), (dek, DEK_CTX), (warden, WARDEN_CTX)], embedded_secrets=[])
     assert res["rotated"] == 3
 
     # A fresh vault instance (no cache) reads every secret — under the NEW KEK — to the exact original.
@@ -106,7 +106,7 @@ def test_rotate_kek_rolls_back_when_a_rewrap_cannot_be_proven(tmp_path):
     bad.write_bytes(bytes(corrupt))
 
     with pytest.raises(RotationError):
-        v.rotate_kek([(good, OWNER_CTX), (bad, OWNER_CTX)])
+        v.rotate_kek([(good, OWNER_CTX), (bad, OWNER_CTX)], embedded_secrets=[])
 
     # `good` is byte-identical and still opens under the ORIGINAL KEK — nothing was swapped.
     assert good.read_bytes() == good_before
@@ -168,4 +168,97 @@ def test_seal_file_leaves_plaintext_when_vault_disabled(tmp_path):
 def test_rotate_unprovisioned_vault_is_refused(tmp_path):
     v = Vault(tmp_path / "vault", make_fake_tpm())   # NOT provisioned
     with pytest.raises(RotationError):
-        v.rotate_kek([])
+        v.rotate_kek([], embedded_secrets=[])
+
+
+# --- red-pen W9-2 regression: KEK-direct spine-embedded secrets + crash reconciliation --------------
+
+TOTP_CTX = b"sigil/account.totp"
+
+
+def test_rotate_kek_refuses_when_a_kek_direct_embedded_secret_exists(tmp_path):
+    """Red-pen BLOCK: a secret sealed DIRECTLY under the KEK that rides INSIDE the immutable owner-signed
+    spine (e.g. an account TOTP second factor via Vault.seal_secret) cannot be re-wrapped in place, so
+    rotate_kek must DETECT it and FAIL CLOSED — never silently destroy it. Reverting the guard lets the
+    rotation proceed and the TOTP secret becomes permanently unrecoverable (this test then fails)."""
+    v = _provisioned(tmp_path)
+    owner = tmp_path / "owner.priv"
+    v.write_text_secret(owner, "OWNER-PRIV-B64", context=OWNER_CTX)
+    totp_blob = v.seal_secret(b"JBSWY3DPEHPK3PXP", context=TOTP_CTX)   # rides inside a signed spine grant
+    old_kek = load_kek(tmp_path / "vault", runner=make_fake_tpm())
+
+    with pytest.raises(RotationError) as ei:
+        v.rotate_kek([(owner, OWNER_CTX)], embedded_secrets=[("totp:alice", totp_blob, TOTP_CTX)])
+    assert "orphan" in str(ei.value).lower()
+
+    # nothing swapped: the active KEK is unchanged and the embedded TOTP secret still opens.
+    assert load_kek(tmp_path / "vault", runner=make_fake_tpm()) == old_kek
+    v2 = Vault(tmp_path / "vault", make_fake_tpm())
+    assert v2.unseal_secret(totp_blob, context=TOTP_CTX) == b"JBSWY3DPEHPK3PXP"
+    assert not (tmp_path / "vault" / (_SEAL_PUB + ".rot")).exists()
+    assert not (tmp_path / "vault" / (_SEAL_PUB + ".prev")).exists()
+
+
+def test_rotate_kek_requires_an_explicit_embedded_secrets_argument(tmp_path):
+    """embedded_secrets is keyword-REQUIRED (no default) so a caller can never accidentally rotate the KEK
+    without deciding about embedded secrets — a fail-closed API shape."""
+    v = _provisioned(tmp_path)
+    with pytest.raises(TypeError):
+        v.rotate_kek([])  # type: ignore[call-arg]
+
+
+def test_reconcile_finishes_interrupted_kek_commit_and_retires_old_key(tmp_path):
+    """Red-pen HIGH: an interrupted KEK commit leaves the OLD KEK valid forever (.prev lingering) with some
+    files still under it. reconcile_kek_rotation re-wraps the stragglers to the active KEK and drops .prev,
+    after which the old KEK no longer decrypts. Reverting the reconciler leaves .prev (test fails)."""
+    import shutil
+
+    from vigil_core.sealing import new_kek as mint
+    from vigil_core.sealing import seal as _seal
+    v = _provisioned(tmp_path)
+    vault_dir = tmp_path / "vault"
+    a, b = tmp_path / "a.key", tmp_path / "b.key"
+    v.write_text_secret(a, "AAA", context=OWNER_CTX)
+    v.write_text_secret(b, "BBB", context=OWNER_CTX)
+    old_kek = load_kek(vault_dir, runner=make_fake_tpm())
+
+    # hand-build the crash state: active KEK swapped to `fresh`, `.prev` = old, file `a` re-wrapped to fresh,
+    # file `b` STILL under the old KEK, `.prev` NOT yet dropped.
+    shutil.copyfile(vault_dir / _SEAL_PUB, vault_dir / (_SEAL_PUB + ".prev"))
+    shutil.copyfile(vault_dir / _SEAL_PRIV, vault_dir / (_SEAL_PRIV + ".prev"))
+    fresh = mint()
+    reseal_kek(vault_dir, fresh, runner=make_fake_tpm(), pub_name=_SEAL_PUB, priv_name=_SEAL_PRIV)
+    a.write_bytes(_seal(fresh, b"AAA", context=OWNER_CTX))
+
+    v2 = Vault(vault_dir, make_fake_tpm())
+    assert v2.rotation_incomplete() is True
+    res = v2.reconcile_kek_rotation([(a, OWNER_CTX), (b, OWNER_CTX)], embedded_secrets=[])
+    assert res["status"] == "completed"
+    assert v2.rotation_incomplete() is False
+
+    v3 = Vault(vault_dir, make_fake_tpm())
+    assert v3.read_text_secret(a, context=OWNER_CTX) == "AAA"
+    assert v3.read_text_secret(b, context=OWNER_CTX) == "BBB"      # straggler re-wrapped to the active KEK
+    with pytest.raises(Exception):
+        unseal(old_kek, b.read_bytes(), context=OWNER_CTX)         # the OLD KEK is retired
+    assert not (vault_dir / (_SEAL_PUB + ".prev")).exists()
+
+
+def test_reconcile_keeps_prev_if_an_embedded_secret_only_opens_under_it(tmp_path):
+    """Defence-in-depth (fail-closed): reconcile must refuse to retire `.prev` while an embedded secret opens
+    ONLY under it — dropping it would orphan the secret."""
+    import shutil
+
+    from vigil_core.sealing import new_kek as mint
+    v = _provisioned(tmp_path)
+    vault_dir = tmp_path / "vault"
+    totp_blob = v.seal_secret(b"SECRET-TOTP", context=TOTP_CTX)   # sealed under the OLD KEK
+    shutil.copyfile(vault_dir / _SEAL_PUB, vault_dir / (_SEAL_PUB + ".prev"))
+    shutil.copyfile(vault_dir / _SEAL_PRIV, vault_dir / (_SEAL_PRIV + ".prev"))
+    reseal_kek(vault_dir, mint(), runner=make_fake_tpm(), pub_name=_SEAL_PUB, priv_name=_SEAL_PRIV)
+
+    v2 = Vault(vault_dir, make_fake_tpm())
+    with pytest.raises(RotationError):
+        v2.reconcile_kek_rotation([], embedded_secrets=[("totp:alice", totp_blob, TOTP_CTX)])
+    assert v2.rotation_incomplete() is True   # `.prev` kept — the embedded secret is still openable under it
+    assert v2.unseal_secret(totp_blob, context=TOTP_CTX) == b"SECRET-TOTP"

@@ -60,3 +60,35 @@ def test_key_sealing_is_in_the_doctor_posture_block(tmp_path, monkeypatch):
     posture = doctor._collect_posture(Path.cwd(), {})
     controls = {p["control"] for p in posture}
     assert "key-sealing" in controls
+
+
+# --- red-pen W9-2 HIGH: an INCOMPLETE key rotation (a crash anchor / journal) must be surfaced --------
+
+
+def test_posture_flags_incomplete_kek_rotation(tmp_path, monkeypatch):
+    home = _sigil_home(tmp_path, monkeypatch)
+    (home / "spine" / "keys" / "owner.priv").write_bytes(_SEALED_HEADER)
+    (home / "vault").mkdir(parents=True, exist_ok=True)
+    (home / "vault" / "kek.tpm.pub.prev").write_bytes(b"old-pub")     # a lingering `.prev` KEK anchor
+    (home / "vault" / "kek.tpm.priv.prev").write_bytes(b"old-priv")
+    state, detail = doctor._posture_key_sealing()
+    assert state == "INCOMPLETE"
+    assert "KEK(.prev)" in detail and "sigil key reconcile" in detail
+
+
+def test_posture_flags_incomplete_dek_rotation(tmp_path, monkeypatch):
+    home = _sigil_home(tmp_path, monkeypatch)
+    (home / "spine" / "keys" / "owner.priv").write_bytes(_SEALED_HEADER)
+    (home / "spine" / "keys" / "spine.dek.prev").write_bytes(_SEALED_HEADER)   # a lingering DEK anchor
+    state, detail = doctor._posture_key_sealing()
+    assert state == "INCOMPLETE"
+    assert "DEK(.prev)" in detail
+
+
+def test_posture_flags_incomplete_warden_rotation(tmp_path, monkeypatch):
+    home = _sigil_home(tmp_path, monkeypatch)
+    (home / "warden" / "warden.key").write_bytes(_SEALED_HEADER)
+    (home / "warden" / "warden.rotation.pending").write_text("{}", encoding="utf-8")   # a dangling journal
+    state, detail = doctor._posture_key_sealing()
+    assert state == "INCOMPLETE"
+    assert "WARDEN(pending)" in detail
