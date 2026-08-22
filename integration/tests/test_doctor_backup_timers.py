@@ -24,6 +24,7 @@ imports only `vigil_integration.doctor`, so it runs in the required sovereign-le
 """
 from __future__ import annotations
 
+import os
 import pathlib
 from types import SimpleNamespace
 
@@ -238,6 +239,13 @@ def _all_other_controls_satisfied(monkeypatch, tmp_path) -> pathlib.Path:
     monkeypatch.setenv("VIGIL_ENGAGEMENT", "acme")
     # legacy-owner-token DISABLED (W10-7 control, added to the gate after this suite was written)
     monkeypatch.setenv("SIGIL_LEGACY_OWNER_TOKEN", "0")
+    # egress-supervisor ARMED (W10-8 control, added to the gate after this suite was written): a real
+    # executable so guard_binary() resolves deterministically, and require-mode so it is ENABLED.
+    guard = tmp_path / "egress_guard_bin"
+    guard.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    os.chmod(guard, 0o755)
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD", "require")
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD_BIN", str(guard))
     _systemctl_present(monkeypatch)
     return repo
 

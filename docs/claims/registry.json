@@ -414,6 +414,27 @@
       "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W10-8",
+      "title": "Seccomp egress supervisor is FORCED ON under the production posture (and its bound is stated)",
+      "claim": "The seccomp egress supervisor (`tools/egress-guard`, a connect/sendto/sendmsg seccomp user-notify filter) is off-by-default and opt-in outside production; under `VIGIL_POSTURE=production` (or `prod`, case-insensitive) it is FORCED on in `require` (fail-closed) mode regardless of `VIGIL_EGRESS_GUARD`, and the refuse-to-start production gate REFUSES `vigil up` / `vigil engage` unless its binary is built — the `egress-supervisor` precondition must be `ARMED`, and a MISSING_BINARY refuses the start. Its stated bound is documented next to where it is presented: it refuses a tool's OWN non-loopback egress and a mis-built argv, it is NOT a containment boundary for hostile code, and it does not cover a 32-bit binary, `sendmmsg`, or `io_uring` — so it is never presented as a complete egress control.",
+      "source": "docs/decisions/W10-8-egress-supervisor-production-gate.md:12",
+      "enforced_by": {
+        "file": "integration/vigil_integration/doctor.py",
+        "symbol": "_posture_egress_supervisor"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_doctor_production_gate.py",
+        "tests": [
+          "test_production_posture_forces_the_egress_supervisor_on",
+          "test_gate_refuses_when_egress_supervisor_binary_missing",
+          "test_wrap_argv_fails_closed_under_production_when_binary_missing"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "opt-in-stated-as-default",
+      "default": "off"
     }
   ]
 }

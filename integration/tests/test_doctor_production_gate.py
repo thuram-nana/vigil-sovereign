@@ -1,8 +1,8 @@
 """W9-4b — the opt-in refuse-to-start PRODUCTION posture gate.
 
 When ``VIGIL_POSTURE=production`` (or ``prod``), a start path (``vigil up`` / ``vigil engage``) REFUSES to
-run unless ALL SIX production preconditions hold, read from the SAME on-disk / env posture probes
-``vigil doctor`` renders (the first five) plus one env read (the sixth):
+run unless ALL SEVEN production preconditions hold, read from the SAME on-disk / env posture probes
+``vigil doctor`` renders (the first five) plus two env / filesystem reads (the sixth and seventh):
 
   1. vault SEALED (secrets sealed at rest, not plaintext)
   2. sovereignty tier non-PERMISSIVE
@@ -11,6 +11,9 @@ run unless ALL SIX production preconditions hold, read from the SAME on-disk / e
   5. a signed charter + EngagementAuthority PRESENT
   6. the legacy embedded shared owner token DISABLED (SIGIL_LEGACY_OWNER_TOKEN=0 ⇒ per-user PoP auth
      required; W10-7 — the sigil server also refuses that token at runtime under this posture)
+  7. the seccomp egress supervisor ARMED (W10-8 — production forces VIGIL_EGRESS_GUARD=require, so the
+     gate refuses unless the guard binary is built; the supervisor's stated bound is that it refuses a
+     tool's OWN non-loopback egress, NOT a containment boundary for hostile code)
 
 These tests prove:
 
@@ -30,6 +33,7 @@ runs in the required "integration two-env boundary (P5)" CI job (the sovereign l
 """
 from __future__ import annotations
 
+import os
 import pathlib
 from types import SimpleNamespace
 
@@ -37,8 +41,10 @@ import pytest
 
 from vigil_integration import cli as climod
 from vigil_integration import doctor as dmod
+from vigil_integration.live import egress_guard as egmod
 
-_CONTROLS = ["vault", "sovereignty", "entitlement", "backups", "charter", "legacy-owner-token"]
+_CONTROLS = ["vault", "sovereignty", "entitlement", "backups", "charter", "legacy-owner-token",
+             "egress-supervisor"]
 
 
 # ------------------------------------------------------------------ world builder: all five SATISFIED
@@ -108,6 +114,14 @@ def _all_satisfied(monkeypatch, tmp_path) -> pathlib.Path:
     monkeypatch.setenv("VIGIL_ENGAGEMENT", "acme")
     # (6) the legacy embedded shared owner token DISABLED — the operator opted into per-user PoP auth
     monkeypatch.setenv("SIGIL_LEGACY_OWNER_TOKEN", "0")
+    # (7) the seccomp egress supervisor ARMED (W10-8) — enabled AND its binary present. Point
+    #     VIGIL_EGRESS_GUARD_BIN at a real executable so guard_binary() resolves it deterministically,
+    #     independent of whether the in-repo build exists on this host / CI runner.
+    guard = tmp_path / "egress_guard_bin"
+    guard.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    os.chmod(guard, 0o755)
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD", "require")
+    monkeypatch.setenv("VIGIL_EGRESS_GUARD_BIN", str(guard))
     return repo
 
 
@@ -147,7 +161,8 @@ def test_gate_passes_when_all_satisfied(monkeypatch, tmp_path):
     # every control is individually met, and the states are the real engaged states (not a constant).
     states = {c["control"]: c["state"] for c in res["controls"]}
     assert states == {"vault": "SEALED", "sovereignty": "AIR_GAPPED", "entitlement": "ACTIVE",
-                      "backups": "ON", "charter": "PRESENT", "legacy-owner-token": "DISABLED"}
+                      "backups": "ON", "charter": "PRESENT", "legacy-owner-token": "DISABLED",
+                      "egress-supervisor": "ARMED"}
     assert all(c["met"] for c in res["controls"])
 
 
@@ -163,6 +178,10 @@ _BREAKERS = {
     "charter": lambda mp, tp: mp.setenv("VIGIL_ENGAGEMENT", "no-such-engagement"),
     # unset the opt-out ⇒ the legacy shared owner token is ENABLED again (its fail-open default)
     "legacy-owner-token": lambda mp, tp: mp.delenv("SIGIL_LEGACY_OWNER_TOKEN", raising=False),
+    # remove the guard binary ⇒ the (still-enabled) egress supervisor reports MISSING_BINARY. Patch
+    # guard_binary directly so it is missing DETERMINISTICALLY even on a runner where the in-repo build
+    # exists (the P5 job runs `make -C tools/egress-guard`).
+    "egress-supervisor": lambda mp, tp: mp.setattr(egmod, "guard_binary", lambda: None),
 }
 
 
@@ -360,3 +379,65 @@ def test_gate_accepts_the_disabled_legacy_token_and_ignores_it_out_of_production
     monkeypatch.delenv("SIGIL_LEGACY_OWNER_TOKEN", raising=False)
     res2 = dmod.evaluate_production_gate(repo)
     assert res2["armed"] is False and res2["ok"] is True and res2["unmet"] == []
+
+
+# ------------------------------------------------------------------ W10-8 — the seccomp egress supervisor
+
+def test_production_posture_forces_the_egress_supervisor_on(monkeypatch):
+    """W10-8: the supervisor is off-by-default and opt-in OUTSIDE production, but FORCED on in fail-closed
+    `require` mode under VIGIL_POSTURE=production regardless of VIGIL_EGRESS_GUARD.
+
+    THIS FAILS WITHOUT THE CHANGE — before this slice `enabled()`/`required()` read ONLY VIGIL_EGRESS_GUARD,
+    so with it unset the supervisor was off even in production."""
+    monkeypatch.delenv("VIGIL_EGRESS_GUARD", raising=False)
+    # NEGATIVE CONTROL: no production posture ⇒ the guard stays off (opt-in), byte-identical to before.
+    monkeypatch.delenv("VIGIL_POSTURE", raising=False)
+    assert egmod.enabled() is False and egmod.required() is False
+    # armed production ⇒ forced on, in require (fail-closed) mode, WITHOUT any VIGIL_EGRESS_GUARD set.
+    monkeypatch.setenv("VIGIL_POSTURE", "production")
+    assert egmod.enabled() is True and egmod.required() is True
+    # a non-production posture value does NOT force it (the opt-in default is preserved).
+    monkeypatch.setenv("VIGIL_POSTURE", "staging")
+    assert egmod.enabled() is False and egmod.required() is False
+
+
+def test_gate_refuses_when_egress_supervisor_binary_missing(monkeypatch, tmp_path):
+    """W10-8 fail-closed at the refuse-to-start gate: armed production + a MISSING guard binary ⇒ the
+    egress-supervisor precondition is MISSING_BINARY / UNMET and the gate REFUSES, naming the control.
+
+    THIS FAILS WITHOUT THE CHANGE — a tree with only the original six controls has no egress-supervisor
+    precondition, so an all-else-satisfied production world passes. NEGATIVE CONTROL: with the binary
+    present the same world is ARMED / met."""
+    repo = _all_satisfied(monkeypatch, tmp_path)             # binary present via VIGIL_EGRESS_GUARD_BIN
+    monkeypatch.setenv("VIGIL_POSTURE", "production")
+    # first prove the NEGATIVE CONTROL: the binary IS present ⇒ ARMED / met, gate ok.
+    ok_res = dmod.evaluate_production_gate(repo)
+    sup = next(c for c in ok_res["controls"] if c["control"] == "egress-supervisor")
+    assert sup["state"] == "ARMED" and sup["met"] is True and ok_res["ok"] is True
+    # now remove the binary deterministically ⇒ MISSING_BINARY, UNMET, refuse to start.
+    monkeypatch.setattr(egmod, "guard_binary", lambda: None)
+    res = dmod.evaluate_production_gate(repo)
+    assert res["ok"] is False
+    assert [e["control"] for e in res["unmet"]] == ["egress-supervisor"]
+    sup2 = next(c for c in res["controls"] if c["control"] == "egress-supervisor")
+    assert sup2["state"] == "MISSING_BINARY" and sup2["met"] is False
+    msg = dmod.production_gate_message(res, action="up")
+    assert "REFUSED" in msg and "egress-supervisor: MISSING_BINARY" in msg
+    assert "make -C tools/egress-guard" in msg
+
+
+def test_wrap_argv_fails_closed_under_production_when_binary_missing(monkeypatch):
+    """W10-8 fail-closed at the SPAWN: under production `wrap_argv` refuses to spawn (raises) rather than
+    running a tool UNGUARDED when the guard binary is absent — a guard the operator believes is on but is
+    not is worse than none. NEGATIVE CONTROL: outside production, with the guard not requested, the same
+    argv is returned UNCHANGED (no forced behaviour change on an ordinary run)."""
+    monkeypatch.delenv("VIGIL_EGRESS_GUARD", raising=False)
+    monkeypatch.setattr(egmod, "guard_binary", lambda: None)   # binary missing
+    argv = ["nuclei", "-u", "http://127.0.0.1"]
+    # non-production, guard not requested ⇒ argv unchanged (opt-in, byte-identical).
+    monkeypatch.delenv("VIGIL_POSTURE", raising=False)
+    assert egmod.wrap_argv(argv) == argv
+    # production forces require mode ⇒ a missing binary raises rather than spawning unguarded.
+    monkeypatch.setenv("VIGIL_POSTURE", "production")
+    with pytest.raises(egmod.EgressGuardUnavailable):
+        egmod.wrap_argv(argv)

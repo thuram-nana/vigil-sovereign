@@ -29,7 +29,8 @@ from typing import Iterable, Mapping, Optional
 from .posture import production_posture
 
 # ── the shared production-posture control registry ────────────────────────────────────────────────────
-# (control, good-states, requirement text). ORDER is the plan's five conditions plus W10-7's legacy-token.
+# (control, good-states, requirement text). ORDER is the plan's five conditions plus W10-7's legacy-token
+# and W10-8's egress-supervisor.
 # Each `good_states` set is exactly the state(s) a doctor's posture probe reports when the control is
 # actually ENGAGED. This is the SINGLE source of truth: `vigil_integration.doctor` imports it as
 # `_PRODUCTION_GATE`, and `sigil doctor` reads it to render + gate on the same controls — so the two entry
@@ -53,6 +54,11 @@ REQUIRED_CONTROLS: "tuple[tuple[str, frozenset, str], ...]" = (
      ("the legacy embedded shared owner token must be DISABLED — set SIGIL_LEGACY_OWNER_TOKEN=0 so the "
       "cockpit requires per-user proof-of-possession auth (the fail-open shared token is refused; the sigil "
       "server also refuses it at runtime under this posture)")),
+    ("egress-supervisor", frozenset({"ARMED"}),
+     ("the seccomp egress supervisor must be ARMED — build its binary (`make -C tools/egress-guard`) so "
+      "production forces it on (VIGIL_EGRESS_GUARD=require, fail-closed). It supervises "
+      "connect/sendto/sendmsg to refuse a tool's own non-loopback egress; it is NOT a containment "
+      "boundary for hostile code and does NOT cover 32-bit binaries, sendmmsg or io_uring (see docs)")),
 )
 
 
@@ -167,6 +173,7 @@ README_POSTURE_FIXTURE: "dict[str, str]" = {
     "backups": "OFF",
     "charter": "ABSENT",
     "legacy-owner-token": "ENABLED",
+    "egress-supervisor": "OFF",
 }
 
 

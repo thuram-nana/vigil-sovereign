@@ -654,18 +654,19 @@ Below the posture block, `vigil doctor` prints a **Backup / cadence timers** sec
 
 #### The opt-in `PRODUCTION` posture — refuse to start when misconfigured
 
-For a real deployment the safe-by-default posture is the *wrong* default: you want the machine to **refuse to run** when a control it depends on is off. Set `VIGIL_POSTURE=production` (or `prod`) and a start path — `vigil up` or `vigil engage` — **refuses to start** unless **all six** of these production preconditions hold:
+For a real deployment the safe-by-default posture is the *wrong* default: you want the machine to **refuse to run** when a control it depends on is off. Set `VIGIL_POSTURE=production` (or `prod`) and a start path — `vigil up` or `vigil engage` — **refuses to start** unless **all seven** of these production preconditions hold:
 
 - **`vault`** is `SEALED` (secrets sealed at rest, not plaintext),
 - **`sovereignty`** is non-`PERMISSIVE` (the tier gates cloud LLM egress),
 - **`entitlement`** enforcement is `ACTIVE` (gated capabilities fail closed),
 - **`backups`** timers are `ON` — a backup timer (`vigil-backup` or `vigil-backup-push`) **and** the recovery drill (`vigil-backup-drill`) are enabled **and** have a successful last run; a disabled **or** never-fired (`PENDING`) timer refuses the start (`bootstrap.sh --production` installs and enables them),
 - **`charter`** is `PRESENT` (a signed charter + `EngagementAuthority`),
-- **`legacy-owner-token`** is `DISABLED` (`SIGIL_LEGACY_OWNER_TOKEN=0`, so the cockpit requires per-user proof-of-possession auth).
+- **`legacy-owner-token`** is `DISABLED` (`SIGIL_LEGACY_OWNER_TOKEN=0`, so the cockpit requires per-user proof-of-possession auth),
+- **`egress-supervisor`** is `ARMED` (**W10-8**). The seccomp connect/sendto/sendmsg supervisor (`tools/egress-guard`) is off-by-default and opt-in outside production; under `VIGIL_POSTURE=production` it is **forced on in `require` (fail-closed) mode** regardless of `VIGIL_EGRESS_GUARD`, so the gate **refuses to start** unless its binary is built (`make -C tools/egress-guard`) — otherwise every guarded spawn would be refused. **Its stated bound:** it refuses a *tool's own* non-loopback egress and a mis-built argv; it is **not** a containment boundary for hostile code (that boundary is `sandbox_exec` / bwrap `--unshare-all`), and it does **not** cover a 32-bit (i386) binary, `sendmmsg`, or `io_uring` submissions. It is therefore never sold as a complete egress control — see `docs/decisions/W10-8-egress-supervisor-production-gate.md` and the `egress_guard.py` module docstring for the full HONEST BOUNDs.
 
 The last one is **W10-7**. The cockpit's legacy embedded shared owner token always resolves to the owner — a deliberate fail-open so the operator physically at the host is never locked out. That is fine as a development convenience and **indefensible in a deployment someone else runs**, so it is a **named residual** that the production gate refuses to start around: set `SIGIL_LEGACY_OWNER_TOKEN=0` and provision per-user accounts (`sigil accounts create <user> <role>`, owner-signed offline — no HTTP token needed) that log in by proof-of-possession. Belt-and-suspenders: the sigil server **also refuses that shared token at runtime** whenever `VIGIL_POSTURE=production`, regardless of the toggle, so even a server started outside `vigil up` cannot honour it in production. (Registering this residual in the claims registry — [W0-3] #398 — is a follow-up: that registry is not yet built in this tree; the proving tests exist and run in required CI jobs today.)
 
-The gate is **additive and opt-in**: with `VIGIL_POSTURE` unset (or any non-production value) it is **inert** — behaviour is byte-identical to a fresh checkout, so nothing already deployed breaks. It is **fail-closed**: any precondition not in its required state — `UNKNOWN` included — refuses the start, with **one line per unmet precondition** naming the failing control and how to satisfy it. (The `egress-gate` control is deliberately *not* one of the five — a loopback engagement legitimately needs no docker gateway.) When armed, `vigil doctor` doubles as the production preflight: it prints a **`PRODUCTION posture gate`** block and exits non-zero while any precondition is unmet. On a fully-misconfigured host that block reads:
+The gate is **additive and opt-in**: with `VIGIL_POSTURE` unset (or any non-production value) it is **inert** — behaviour is byte-identical to a fresh checkout, so nothing already deployed breaks. It is **fail-closed**: any precondition not in its required state — `UNKNOWN` included — refuses the start, with **one line per unmet precondition** naming the failing control and how to satisfy it. (The `egress-gate` control — the docker-gateway topology — is deliberately *not* one of the preconditions: a loopback engagement legitimately needs no docker gateway. That is distinct from `egress-supervisor`, the seccomp syscall guard above, which **is** a precondition.) When armed, `vigil doctor` doubles as the production preflight: it prints a **`PRODUCTION posture gate`** block and exits non-zero while any precondition is unmet. On a fully-misconfigured host that block reads:
 
 <!-- The block below is REGENERATED, not hand-authored: `vigil_core.doctor.render_readme_posture_block()`
      renders it from REQUIRED_CONTROLS + evaluate() on a fixed misconfigured fixture, and the required CI
@@ -675,13 +676,14 @@ The gate is **additive and opt-in**: with `VIGIL_POSTURE` unset (or any non-prod
      to see the new canonical text. Do NOT edit the block by hand. -->
 
 ```text
-PRODUCTION posture gate (VIGIL_POSTURE=production) — REFUSES to start: 6 precondition(s) unmet (each blocks `vigil up` / `vigil engage`):
+PRODUCTION posture gate (VIGIL_POSTURE=production) — REFUSES to start: 7 precondition(s) unmet (each blocks `vigil up` / `vigil engage`):
   !! vault:              UNPROVISIONED  — secrets must be SEALED at rest — run `sigil vault provision` (keys rest as plaintext until then)
   !! sovereignty:        PERMISSIVE  — the sovereignty tier must be raised OFF PERMISSIVE — set CRUCIBLE_SOVEREIGNTY_TIER (AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD)
   !! entitlement:        UNGOVERNED  — capability-entitlement enforcement must be ACTIVE — provision the trust root, or set CRUCIBLE_ENTITLEMENT_ENFORCED=1
   !! backups:            OFF  — the backup/reprove timers must be ENABLED — install + `systemctl --user enable --now` the infra/systemd/*.timer units
   !! charter:            ABSENT  — a signed charter + EngagementAuthority must be PRESENT — provision one under targets/ and pin it with VIGIL_ENGAGEMENT
   !! legacy-owner-token: ENABLED  — the legacy embedded shared owner token must be DISABLED — set SIGIL_LEGACY_OWNER_TOKEN=0 so the cockpit requires per-user proof-of-possession auth (the fail-open shared token is refused; the sigil server also refuses it at runtime under this posture)
+  !! egress-supervisor:  OFF  — the seccomp egress supervisor must be ARMED — build its binary (`make -C tools/egress-guard`) so production forces it on (VIGIL_EGRESS_GUARD=require, fail-closed). It supervises connect/sendto/sendmsg to refuse a tool's own non-loopback egress; it is NOT a containment boundary for hostile code and does NOT cover 32-bit binaries, sendmmsg or io_uring (see docs)
 ```
 
 ### 1. Start the controlled target
