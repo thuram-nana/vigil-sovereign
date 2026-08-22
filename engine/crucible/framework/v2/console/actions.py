@@ -1683,6 +1683,108 @@ def run_codebase_tests(chat_id: str, path: str, command: str = "pytest -q",
             "note": "a passing test is a LEAD — an oracle mints FACTs, not the test runner"}
 
 
+# W17-9: the agentic (integration `vigil engage`) engine runs ONLY under a TRIPLE conjunction plus a
+# resolvable `vigil` entrypoint — (agentic|graph_backed) AND session_id AND is_loopback AND _vigil_bin().
+# When any conjunct is unmet the launch SILENTLY fell through to the plain offense engine (the loopback
+# quick-scan or a remote engage); the operator learned which engine actually ran only from a post-launch
+# toast, or not at all when `vigil` was off PATH. `_agentic_unmet_reason` names the FIRST unmet conjunct
+# so the interface can state it BEFORE the operator clicks Send. Order is deliberate and total: a body
+# that has NOT opted in returns "not_requested" (no fall-through — the offense engine was the choice);
+# otherwise the conjuncts are checked no_session → remote_target → vigil_not_on_path, and "" means every
+# conjunct is met (the agentic engine WILL run). Pure/read-only: it mints no run, spawns nothing.
+_AGENTIC_UNMET_REASONS: dict = {
+    "not_requested": "the agentic engine was not requested — running the deterministic offense engine",
+    "no_session":    "the agentic engine needs a session to attach to (none was picked) — running the "
+                     "offense engine",
+    "remote_target": "the agentic engine is loopback-only (the target is not 127.0.0.1/localhost) — "
+                     "running the offense engine",
+    "vigil_not_on_path": "the agentic engine needs the `vigil` entrypoint on PATH (or $VIGIL_BIN); it "
+                         "did not resolve — running the offense engine",
+    "": "",
+}
+
+
+def _safe_session(session_id: str) -> str:
+    """The scrubbed session id, or ``""`` for an unsafe/blank one — the SAME scrub the launch path applies
+    (an unsafe id is dropped, never a traversal, never a raise), so the plan agrees with the run."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return ""
+    try:
+        from . import sessions
+        return sessions._safe_session_id(sid)
+    except Exception:  # noqa: BLE001 — unsafe → treated as no session (same as launch)
+        return ""
+
+
+def _agentic_unmet_reason(body: dict, *, is_loopback: bool) -> str:
+    """Which conjunct of the agentic gate is unmet for this URL-family body — one of the keys of
+    ``_AGENTIC_UNMET_REASONS``. ``""`` iff the agentic engine WILL run. Mirrors the launch predicate at the
+    `agentic|graph_backed AND session_id AND is_loopback` site EXACTLY, plus the `_vigil_bin()` resolve
+    that turns `_integration_engage_cmd` into None (its own silent fall-through)."""
+    if not bool(body.get("agentic") or body.get("graph_backed")):
+        return "not_requested"
+    if not _safe_session(body.get("session_id", "")):
+        return "no_session"
+    if not is_loopback:
+        return "remote_target"
+    if not _vigil_bin():
+        return "vigil_not_on_path"
+    return ""
+
+
+def engine_plan(body: dict) -> dict:
+    """W17-9 — the PRE-Send preflight: given the New-Assessment wizard body, say WHICH engine will run and
+    WHY, WITHOUT spawning anything. This is the honest surface for the agentic engine's triple-conjunction
+    gate: the launch path routes the SAME body, so the plan cannot disagree with the run. Returns
+    ``{engine, engine_label, why, agentic_requested, agentic_unmet, agentic_unmet_reason}`` — where
+    ``agentic_unmet`` is the machine key of the unmet conjunct ("" when the agentic engine will run) and
+    ``agentic_unmet_reason`` is its plain-language sentence. Never raises."""
+    mode = str(body.get("mode", "")).strip().lower()
+    if mode == "cloud":
+        return {"engine": "cloud", "engine_label": "cloud/Kubernetes posture engine",
+                "why": "a cloud/K8s posture attaches to its signed charter, not a session or the agentic "
+                       "engine.", "agentic_requested": False, "agentic_unmet": "not_requested",
+                "agentic_unmet_reason": ""}
+    if mode == "codebase":
+        return {"engine": "strix", "engine_label": "Strix codebase engine (Docker sandbox)",
+                "why": "a codebase target is analysed by Strix in its sandbox; the agentic web-engage "
+                       "engine does not apply.", "agentic_requested": False,
+                "agentic_unmet": "not_requested", "agentic_unmet_reason": ""}
+    if mode == "aegis":
+        return {"engine": "aegis", "engine_label": "AEGIS defensive engine",
+                "why": "a defensive detect/gateway run; the agentic offense engine does not apply.",
+                "agentic_requested": False, "agentic_unmet": "not_requested", "agentic_unmet_reason": ""}
+
+    # URL family (url / suite / tool). Resolve loopback exactly as the launch path does.
+    target = str(body.get("target", "")).strip()
+    host = (urlsplit(target).hostname or "").lower()
+    is_loopback = host in _LOOPBACK
+    requested = bool(body.get("agentic") or body.get("graph_backed"))
+    unmet = _agentic_unmet_reason(body, is_loopback=is_loopback)
+
+    if unmet == "":
+        graphed = bool(os.environ.get("NEO4J_URI"))
+        return {"engine": "integration", "engine_label": "agentic `vigil engage` engine (OODA loop)",
+                "why": "every condition is met: the run streams the live OODA loop with mid-run steering, "
+                       "`--resume`, the owner-signed approval broker, and fireteam"
+                       + (", partitioning this session's Neo4j graph." if graphed
+                          else " (graph-free — NEO4J_URI is not set)."),
+                "agentic_requested": True, "agentic_unmet": "", "agentic_unmet_reason": ""}
+
+    # The agentic engine will NOT run. Name which plain offense engine will, and the unmet conjunct.
+    if mode == "url" and is_loopback:
+        engine, label = "loopback-scan", "loopback quick-scan (`framework.v2 scan`)"
+    elif is_loopback:
+        engine, label = "engage", "gated `engage` engine (loopback)"
+    else:
+        engine, label = "engage", "gated `engage` engine (remote — needs a signed charter)"
+    return {"engine": engine, "engine_label": label,
+            "why": _AGENTIC_UNMET_REASONS[unmet],
+            "agentic_requested": requested, "agentic_unmet": unmet,
+            "agentic_unmet_reason": _AGENTIC_UNMET_REASONS[unmet]}
+
+
 def launch_assessment(body: dict) -> dict:
     """Route the New-Assessment wizard body to the SAME gated CLI a hand-run engagement uses and
     spawn it. Returns ``{run_id, status, mode, slug, stream}`` or ``{error}`` (a clean, fail-closed
@@ -1931,8 +2033,10 @@ def launch_assessment(body: dict) -> dict:
         meta = {**base, **unapplied, "slug": slug, "cmd": cmd, "stream": "progress", "status": "running"}
         _write_meta(run_id, **meta)
         _spawn_background(run_id, rd, cmd, meta, capture_report=True)
+        # W17-9: if the agentic engine was requested but fell through to here (e.g. `vigil` off PATH), the
+        # note in `base` is echoed to the CALLER too — the runtime response is no longer silent about it.
         return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "progress",
-                **unapplied}
+                **({"engine_note": base["engine_note"]} if base.get("engine_note") else {}), **unapplied}
 
     # url / suite / tool on a URL → the gated `engage` (mirrors onto the blackboard via --spine).
     slug = _slugify(body.get("slug") or host, fallback="engagement")
@@ -1957,7 +2061,10 @@ def launch_assessment(body: dict) -> dict:
             "stream": "blackboard", "status": "running"}
     _write_meta(run_id, **meta)
     _spawn_background(run_id, rd, cmd, meta, capture_report=False)
+    # W17-9: echo the agentic fall-through note (a loopback suite/tool that requested the agentic engine
+    # but resolved no `vigil`) to the caller — the runtime response names the engine that actually ran.
     return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "blackboard",
+            **({"engine_note": base["engine_note"]} if base.get("engine_note") else {}),
             "tools_applied": list(tools)}
 
 
