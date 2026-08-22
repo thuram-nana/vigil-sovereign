@@ -809,6 +809,47 @@ def evidence(run_id: str) -> dict[str, Any]:
     return _safe(_build, default={"run_id": run_id, "findings": [], "error": "could not re-verify"})
 
 
+_HTTP_EVIDENCE_PREVIEW_CAP = 8192      # bytes of each captured file decoded into the JSON preview
+
+
+def http_evidence(run_id: str) -> dict[str, Any]:
+    """W16-7: the raw per-action HTTP evidence (``request.http`` / ``response.http`` / ``response.body``) the
+    executor captured for a run — the exact bytes sent and received, the richest evidence the system produces
+    and, before this, read by NO route or screen. Read-only; sends no traffic. Path-safe (symlinks are never
+    followed — it reuses the dossier's confined walker). The preview is decoded + capped; the FULL bytes ship
+    in the tamper-evident dossier ZIP (``GET /api/dossier/<run>.zip``). Total: a bad run id raises ValueError
+    (→ 404 by the server); any read failure yields an empty exchange list, never a 500."""
+    from . import actions
+
+    rd = actions.run_dir(run_id)       # traversal-guarded; raises ValueError on a bad id
+    slug = _safe(lambda: str(json.loads((rd / "meta.json").read_text(encoding="utf-8")).get("slug") or ""),
+                 default="")
+
+    def _build() -> dict[str, Any]:
+        from ..report.dossier import _gather_http_evidence, _target_evidence_root  # framework-side, path-safe
+        entries, aids = _gather_http_evidence(rd, _target_evidence_root(slug))
+        by_aid: dict[str, dict] = {}
+        for arc, b in entries.items():
+            parts = arc.split("/")     # http-evidence/<action_id>/<name>
+            if len(parts) != 3:
+                continue
+            aid, name = parts[1], parts[2]
+            rec = by_aid.setdefault(aid, {"action_id": aid, "files": {}})
+            rec["files"][name] = {
+                "bytes": len(b),       # the (capped) size the dossier ships; the ZIP carries the same bytes
+                "preview": b[:_HTTP_EVIDENCE_PREVIEW_CAP].decode("utf-8", errors="replace"),
+                "truncated": len(b) > _HTTP_EVIDENCE_PREVIEW_CAP,
+            }
+        exchanges = [by_aid[a] for a in aids if a in by_aid]
+        return {"run_id": run_id, "exchanges": exchanges, "count": len(exchanges),
+                "doctrine": "The exact request/response the gated executor sent and received, captured "
+                            "verbatim (non-LLM bytes). The full capture ships in the dossier ZIP; this is a "
+                            "capped, read-only preview."}
+
+    return _safe(_build, default={"run_id": run_id, "exchanges": [], "count": 0,
+                                  "error": "could not read HTTP evidence"})
+
+
 _PROOF_DOCTRINE = (
     "A proof is a FACT only when a deterministic oracle FIRED over the executor-captured raw bytes of the "
     "reproduction — never over the model's PoC text. A LEAD is an honest 'not reproduced / not oracle-mapped'; "

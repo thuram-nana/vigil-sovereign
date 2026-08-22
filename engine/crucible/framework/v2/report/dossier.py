@@ -326,6 +326,72 @@ def _find_drift(run_dir: Path) -> Optional[bytes]:
 
 
 # --------------------------------------------------------------------------------------------------
+# raw HTTP evidence (W16-7) — the per-action request.http / response.http / response.body the executor
+# captures. Built-not-wired before this: written to disk and read by NO route, screen or dossier. The
+# dossier now ships it (path-safe, capped, symlink-free) as the richest evidence a run produces.
+# --------------------------------------------------------------------------------------------------
+
+_HTTP_EVIDENCE_NAMES = ("request.http", "response.http", "response.body")
+_HTTP_EVIDENCE_CAP = 512 * 1024        # per-file cap shipped into the archive (bounds a pathological body)
+
+
+def _target_evidence_root(engagement_slug: str) -> Optional[Path]:
+    """The engagement's on-disk evidence archive root ``targets/<slug>/evidence`` — where the GATED
+    executor writes raw HTTP captures. ``None`` when the slug is empty or the dir is absent. Lazy import of
+    ``common.paths`` (offense-side) so the module scope stays light. Total: any resolution failure → None."""
+    slug = "".join(c for c in str(engagement_slug or "").strip() if c.isalnum() or c in "-_.")
+    if not slug:
+        return None
+    try:
+        from ..common import paths  # noqa: PLC0415 — offense-side, resolves CRUCIBLE_ROOT
+        root = paths.evidence_archive_dir(slug)
+    except Exception:  # noqa: BLE001
+        return None
+    return root if (root.is_dir() and not root.is_symlink()) else None
+
+
+def _gather_http_evidence(run_dir: Path, extra_root: Optional[Path]) -> tuple[dict[str, bytes], list[str]]:
+    """Collect raw per-action HTTP evidence (``request.http`` / ``response.http`` / ``response.body``) keyed
+    by ``action_id``, from ``<run_dir>/evidence`` first and then an optional extra archive root (the
+    engagement's ``targets/<slug>/evidence``). Returns ``(entries, action_ids)`` where ``entries`` maps a
+    confined ``http-evidence/<action_id>/<name>`` arcname to its (capped) bytes.
+
+    Path-safe by construction: symlinked roots, per-action dirs and files are NEVER followed; only regular
+    files under regular per-action dirs are read; a per-action dir seen under the run dir is not re-read from
+    the archive root (run-dir wins). Each file is capped so a pathological body cannot balloon the archive."""
+    out: dict[str, bytes] = {}
+    aids: list[str] = []
+    roots = [run_dir / "evidence"]
+    if extra_root is not None:
+        roots.append(extra_root)
+    seen: set[str] = set()
+    for root in roots:
+        if not root.is_dir() or root.is_symlink():
+            continue
+        for aid_dir in sorted(x for x in root.iterdir() if x.is_dir() and not x.is_symlink()):
+            aid = aid_dir.name
+            if aid in seen:
+                continue
+            got = False
+            for name in _HTTP_EVIDENCE_NAMES:
+                fp = aid_dir / name
+                if fp.is_symlink() or not fp.is_file():
+                    continue
+                b = _read_bytes(fp)
+                if b is None:
+                    continue
+                arc = f"http-evidence/{aid}/{name}"
+                if not _is_safe_rel(arc):
+                    continue
+                out[arc] = b[:_HTTP_EVIDENCE_CAP]
+                got = True
+            if got:
+                seen.add(aid)
+                aids.append(aid)
+    return out, sorted(aids)
+
+
+# --------------------------------------------------------------------------------------------------
 # reports + exports — read pre-rendered, else render from a raw findings source with the renderers
 # --------------------------------------------------------------------------------------------------
 
@@ -574,7 +640,8 @@ def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
                   proof: dict, spine_names: list[str], has_drift: bool, has_log: bool,
                   signed: bool, fingerprint: str, generated_at: Optional[str],
                   included: list[str], has_terminal: bool = False,
-                  has_case_file: bool = False, label: str = "") -> str:
+                  has_case_file: bool = False, label: str = "",
+                  http_evidence_aids: Optional[list[str]] = None) -> str:
     """Build the self-contained index.html. Reflects EXACTLY what the run produced: FACTs from the
     reverifiable set, findings/remediation from the report export when present, and the REAL offline
     verify command for the embedded proof bundle. Never fabricates a fact, never overclaims a lead."""
@@ -718,6 +785,19 @@ def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
                  "governance signer was resolvable at build time, so there is a MANIFEST of hashes but no "
                  "signature over it. The hashes prove the entries were not altered relative to this MANIFEST; "
                  "they do NOT prove who produced it.</p>")
+
+    # raw HTTP evidence — the per-action request/response the executor captured (W16-7)
+    aids = list(http_evidence_aids or [])
+    if aids:
+        L.append("<h2>Raw HTTP evidence</h2>")
+        L.append(f"<p>The executor's captured request/response for {len(aids)} action(s) is embedded under "
+                 f"<code class='inl'>http-evidence/&lt;action_id&gt;/</code> — the exact bytes sent and "
+                 f"received (<code class='inl'>request.http</code>, <code class='inl'>response.http</code>, "
+                 f"<code class='inl'>response.body</code>), the richest evidence a run produces.</p>")
+        L.append("<div class='files'>")
+        for aid in aids:
+            L.append(f"<span><code class='inl'>http-evidence/{_e(aid)}/</code></span>")
+        L.append("</div>")
 
     # contents
     L.append("<h2>What is in this archive</h2>")
@@ -935,6 +1015,14 @@ def build_dossier(
     if proof.get("note"):
         notes.append(proof["note"])
 
+    # 3b) raw HTTP evidence (W16-7) — the per-action request/response the executor captured, which nothing
+    #     read before. Ship it (path-safe, capped) so the richest evidence a run produces is in the hand-off.
+    http_ev, http_ev_aids = _gather_http_evidence(run, _target_evidence_root(engagement_slug))
+    entries.update(http_ev)
+    if http_ev_aids:
+        notes.append(f"included raw HTTP evidence for {len(http_ev_aids)} captured action(s) "
+                     "(request.http / response.http / response.body)")
+
     # 4) scrubbed engagement log
     log_text, dropped = _scrub_log(run)
     has_log = log_text is not None
@@ -1017,7 +1105,8 @@ def build_dossier(
         engagement_slug=engagement_slug, facts=facts, reports=reports, proof=proof,
         spine_names=sorted(spine), has_drift=has_drift, has_log=has_log, has_terminal=has_terminal,
         signed=signed, fingerprint=fingerprint, generated_at=generated_at,
-        included=included_preview, has_case_file=bool(case_entries), label=human_label)
+        included=included_preview, has_case_file=bool(case_entries), label=human_label,
+        http_evidence_aids=http_ev_aids)
     entries["index.html"] = index_html.encode("utf-8")
 
     readme = _render_readme(

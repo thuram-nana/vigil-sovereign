@@ -3722,8 +3722,42 @@
       } else {
         cards = h("div.stack", null, findings.map(function (f) { return p3EvidenceCard(run, f); }));
       }
-      V.mount(host, [tiles, doctrine, cards]);
+      // W16-7: the raw per-action HTTP evidence the executor captured (request/response bytes) — loaded
+      // separately so a failure here never blanks the certificate view above.
+      const httpHost = h("div", { style: { marginTop: "18px" } });
+      p3HttpEvidence(httpHost, run);
+      V.mount(host, [tiles, doctrine, cards, httpHost]);
     });
+  }
+  // W16-7 — raw HTTP evidence panel: the exact request/response the gated executor sent and received,
+  // captured verbatim (non-LLM bytes). Read-only preview; the FULL capture ships in the dossier ZIP.
+  function p3HttpEvidence(host, run) {
+    V.getJSON(OFF("/api/http-evidence/" + encodeURIComponent(run.run_id))).then(function (ev) {
+      const ex = (ev && ev.exchanges) || [];
+      const title = h("h3", { style: { margin: "0 0 8px" } }, "Raw HTTP evidence");
+      if (!ex.length) {
+        V.mount(host, [title, h("div.empty", null,
+          "No raw HTTP capture for this run. The gated executor writes request.http / response.http / response.body per action; a loopback library scan records its findings without a per-action HTTP archive.")]);
+        return;
+      }
+      const doctrine = h("div.legend", { style: { marginBottom: "10px" } }, [V.icon("shield"),
+        (ev.doctrine || "The exact request/response the executor sent and received, captured verbatim.")]);
+      const cards = ex.map(function (x) {
+        const files = x.files || {};
+        const parts = ["request.http", "response.http", "response.body"].map(function (name) {
+          const f = files[name];
+          if (!f) return null;
+          return h("div", { style: { marginTop: "8px" } }, [
+            h("div.k", null, name + " (" + f.bytes + " bytes" + (f.truncated ? ", preview truncated" : "") + ")"),
+            h("pre.mono", { style: { maxHeight: "220px", overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all" } }, f.preview || ""),
+          ]);
+        }).filter(Boolean);
+        return h("div.card", null, [h("b.mono", null, x.action_id)].concat(parts));
+      });
+      V.mount(host, [title, doctrine, h("div.stack", null, cards),
+        h("p.muted", { style: { marginTop: "8px", fontSize: "var(--fs-xs)" } },
+          "This is a capped preview. The complete, tamper-evident capture is in the downloadable dossier ZIP.")]);
+    }).catch(function () { V.mount(host, ""); });
   }
   function p3EvidenceCard(run, f) {
     const state = p3EvidenceState(f);

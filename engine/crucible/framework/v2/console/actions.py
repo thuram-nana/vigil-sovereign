@@ -303,6 +303,43 @@ def _write_meta(run_id: str, *, ephemeral: bool = False, **fields) -> None:
         pass
 
 
+def _write_findings_json(rd: Path) -> bool:
+    """W16-7 (AC2): write ``<run_dir>/findings.json`` — the renderer-shape finding set the three human
+    reports (executive/technical/remediation) + SARIF actually render from — that a PRODUCTION run leaves
+    behind, so the deliverable no longer depends on the dossier silently re-adapting ``report.json`` at
+    download time. Derived DETERMINISTICALLY from the two artifacts the scan already wrote: the scanner
+    EXPORT ``report.json`` (``report.adapt`` translates it to the ``FindingPayload`` shape the renderers
+    accept) joined to the retained ``oracle_context`` in ``reverifiable.json`` (so a once-confirmed finding
+    keeps its proof rather than being demoted for want of the evidence). Fail-closed and total: a missing or
+    malformed source simply skips the write and returns False — it never crashes the scan supervisor. Returns
+    True iff a findings.json was written."""
+    from ..report.adapt import adapt_scan_export
+    try:
+        export_doc = json.loads((rd / "report.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(export_doc, dict):
+        return False
+    rev_docs: list = []
+    for name in ("reverifiable.json", "proofs/reverifiable.json"):
+        try:
+            rev_docs.append(json.loads((rd / name).read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+    try:
+        adapted = adapt_scan_export(export_doc, rev_docs)
+    except Exception:  # noqa: BLE001 — an adapter failure must never break the scan; the dossier can still adapt
+        return False
+    if not adapted.findings:
+        return False
+    try:
+        (rd / "findings.json").write_text(
+            json.dumps({"findings": adapted.findings}, sort_keys=True), encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
 def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
                 ephemeral: bool = False) -> dict:
     """Spawn a loopback `scan` subprocess that streams progress + saves its report.
@@ -368,6 +405,9 @@ def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
             return
         if proc.returncode == 0 and (out or "").strip():
             (rd / "report.json").write_text(out, encoding="utf-8")
+            # Write the renderer-shape findings.json this PRODUCTION run's reports render from (W16-7 AC2).
+            # Best-effort: the dossier can still adapt report.json on its own if this is skipped.
+            _write_findings_json(rd)
             _write_meta(run_id, **_base, status="done", pid=proc.pid,
                         rc=proc.returncode, finished=time.time())
         else:
@@ -501,6 +541,7 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
         ok = rc == 0
         if capture_report and ok and (out or "").strip():
             (rd / "report.json").write_text(out, encoding="utf-8")
+            _write_findings_json(rd)      # W16-7 (AC2): the reports' finding source, written in production
         else:
             (rd / "stdout.txt").write_text(out or "", encoding="utf-8")
         # A negative rc means the child was killed by a signal — the operator's Cancel (W4), not a genuine
@@ -3422,6 +3463,13 @@ def build_dossier(run_id: str) -> dict:
     # dossier records every governed terminal command too. Already redacted at source + re-scrubbed by the
     # compiler; covered by the dossier manifest+signature.
     argv = [vigil, "dossier", "--run-dir", str(rd), "--out", str(out), "--slug", slug]
+    # W16-7 (AC4): PIN the governance-key home to the console's STABLE live base, so `provision_authority`
+    # seals ONE trust root across every run instead of minting a fresh Ed25519 key inside each run dir. Only
+    # then does the dossier's signature establish ORIGIN (an operator an auditor can pin out-of-band once),
+    # not merely integrity — two runs from this install share a trust root, and a bundle from a different
+    # install does not verify against that pinned root. Without this flag `_sign_manifest`/`export_bundle`
+    # fall back to `base_dir or str(run_dir)` = the run dir, re-minting per run.
+    argv += ["--base-dir", _live_base()]
     # Carry the operator's HUMAN name for this run into the pack, so a downloaded case file is titled the
     # way the library shows it ("Ministry of Health — Q3 external review") rather than by a machine id that
     # means nothing to the person who opens it months later. The label is PRESENTATION metadata only: the
