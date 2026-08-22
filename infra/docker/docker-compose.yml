@@ -33,7 +33,7 @@ services:
   # whole bring-up (`compose up --wait` returns non-zero) — the same fail-closed leg as W0-6, never a
   # silent downgrade to the sandbox running without the backstop. `apply-firewall` needs no charter scope
   # (the firewall is pure packet policy), so it runs from just these network coordinates. Rebuild the
-  # image (`docker build -t vigil-gateway:latest gateway`) so it carries `nft`; `vigil services up` does this
+  # image (`docker build -t  gateway`) so it carries `nft`; `vigil services up` does this
   # automatically only when the image is ABSENT.
   #
   # WHY user: "0" (root). The image's default user is the unprivileged `vigil` (uid 10001). For a NON-root
@@ -45,7 +45,7 @@ services:
   # no-new-privileges is set, and it applies the ruleset and exits. (The world-facing `vigil-gateway`
   # proxy below keeps running as the unprivileged image default with cap_drop ALL.)
   vigil-gateway-firewall:
-    image: vigil-gateway:latest
+    image: 
     container_name: vigil-gateway-firewall
     user: "0"                   # root so cap_add NET_ADMIN is EFFECTIVE (non-root => EPERM => fail-OPEN)
     network_mode: host
