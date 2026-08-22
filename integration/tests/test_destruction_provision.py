@@ -186,6 +186,36 @@ def test_cli_full_ceremony_authorizes_via_patch_quorum(tmp_path, monkeypatch):
     assert _read_trust_root_ids(gen.trust_root_json) is not None
 
 
+# --- single-use write: O_EXCL, not O_TRUNC (W16-STD-3 (1)) ----------------------------------------
+
+def test_write_single_use_authorization_first_write_succeeds(tmp_path):
+    """NEGATIVE CONTROL: the FIRST legitimate write of a fresh single-use authorization succeeds and lands
+    the exact bytes at 0600 — the gate is not a no-op that refuses everything."""
+    from vigil_integration.live.destruction_provision import write_single_use_authorization
+
+    out = tmp_path / "auth" / "signed-authorization.json"
+    write_single_use_authorization(str(out), '{"authorization": {"nonce": "dn-1"}}')
+    assert out.read_text(encoding="utf-8") == '{"authorization": {"nonce": "dn-1"}}'
+    assert (out.stat().st_mode & 0o777) == 0o600
+
+
+def test_write_single_use_authorization_second_write_is_refused(tmp_path):
+    """The property O_TRUNC BREAKS: a SECOND authorize-destruction to the same path must FAIL (O_EXCL), not
+    silently overwrite the first single-use token. On a tree without the fix (O_TRUNC) this write would
+    succeed and clobber the original bytes — here it raises and leaves the original untouched."""
+    from vigil_integration.live.destruction_provision import (
+        AuthorizationExistsError,
+        write_single_use_authorization,
+    )
+
+    out = tmp_path / "signed-authorization.json"
+    write_single_use_authorization(str(out), "FIRST")
+    with pytest.raises(AuthorizationExistsError):
+        write_single_use_authorization(str(out), "SECOND-should-be-rejected")
+    # the original single-use token is intact — the reuse/clobber never happened
+    assert out.read_text(encoding="utf-8") == "FIRST"
+
+
 def test_provision_boundary_clean():
     import sys
     import vigil_integration.live.destruction_provision  # noqa: F401

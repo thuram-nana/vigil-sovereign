@@ -97,6 +97,37 @@ def sign_action(*, action_id: str, engagement_slug: str, target: str,
     }, sort_keys=True)
 
 
+class AuthorizationExistsError(Exception):
+    """A single-use signed-authorization file already exists at the target path — refusing to overwrite it.
+
+    The destructive-PR leg treats ``signed-authorization.json`` as a single-use token (one authorization →
+    one PR, enforced durably by the nonce ledger at spend time). A second ``authorize-destruction`` that
+    clobbered the file in place would silently replace a still-unspent token, or — worse under a TOCTOU —
+    let a caller re-mint over a slot another actor is about to spend. Creating the file O_EXCL makes the
+    second write FAIL LOUDLY instead (the same single-use-via-exclusive-create discipline as the LAP nonce
+    ledger)."""
+
+
+def write_single_use_authorization(path: str, doc: str) -> None:
+    """Write the single-use signed-authorization ``doc`` to ``path`` with ``O_CREAT | O_EXCL`` (owner-only
+    0600) so a SECOND authorize-destruction to the SAME path FAILS rather than silently overwriting the
+    prior single-use token. Raises :class:`AuthorizationExistsError` if the file already exists — the caller
+    must remove/rename the spent authorization to mint a fresh one, which keeps the single-use property the
+    destructive-PR leg depends on. stdlib only (import-clean)."""
+    import os
+    from pathlib import Path
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise AuthorizationExistsError(
+            f"a signed authorization already exists at {path} — refusing to overwrite a single-use token "
+            f"(remove it to mint a fresh one)") from exc
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(doc)
+
+
 def fresh_nonce() -> str:
     """A fresh, unguessable single-use nonce (stdlib ``secrets``; no wallclock/RNG-on-decision concern —
     this is provisioning, not the deterministic decision path)."""

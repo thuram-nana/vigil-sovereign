@@ -1385,7 +1385,14 @@ def _cmd_authorize_destruction(args: argparse.Namespace) -> int:
     import os
     import time
 
-    from .live.destruction_provision import default_paths, fresh_nonce, load_worker_key_file, sign_action
+    from .live.destruction_provision import (
+        AuthorizationExistsError,
+        default_paths,
+        fresh_nonce,
+        load_worker_key_file,
+        sign_action,
+        write_single_use_authorization,
+    )
     owner_priv = os.environ.get("VIGIL_DESTRUCTION_OWNER_KEY", "").strip()
     if not owner_priv:
         print("vigil authorize-destruction: no owner signing key — set VIGIL_DESTRUCTION_OWNER_KEY (paste it in "
@@ -1406,10 +1413,13 @@ def _cmd_authorize_destruction(args: argparse.Namespace) -> int:
         print(f"vigil authorize-destruction: {exc}", file=sys.stderr)
         return 2
     out = args.out or default_paths(args.base_dir)["signed"]
-    Path(out).parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)     # single-use auth → owner-only file
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(doc)
+    try:
+        # O_EXCL, not O_TRUNC: a SECOND authorize-destruction to the same path must FAIL rather than silently
+        # clobber a still-unspent single-use token (a TOCTOU/reuse hole — same class as the LAP nonce ledger).
+        write_single_use_authorization(out, doc)
+    except AuthorizationExistsError as exc:
+        print(f"vigil authorize-destruction: {exc}", file=sys.stderr)
+        return 2
     print(f"=== vigil authorize-destruction — action {args.action_id!r} ===")
     print(f"signed by : {', '.join(kid for kid, _ in signers)}")
     print(f"window    : {int(args.window_s)}s  (single-use; within the 900s dead-man's-switch)")
