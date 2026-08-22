@@ -424,6 +424,22 @@ def _posture_charter(repo: Path) -> "tuple[str, str]":
     return "ABSENT", "no active VIGIL_ENGAGEMENT and no chartered engagement under targets/"
 
 
+def _posture_legacy_owner_token() -> "tuple[str, str]":
+    """The sovereign-plane legacy embedded shared owner token (W10-7). The sigil cockpit maps its printed
+    shared session token to the OWNER principal — a deliberate fail-open so the operator physically at the
+    host is never locked out. DISABLED iff the operator has explicitly turned it off
+    (SIGIL_LEGACY_OWNER_TOKEN falsy); ENABLED (the default) otherwise. Read from env only — no import of
+    sigil (FATAL-2). Under the PRODUCTION gate it must be DISABLED; the sigil server ALSO refuses the token
+    at runtime under VIGIL_POSTURE=production (defense in depth), so the two enforce the same rule."""
+    from vigil_core.posture import LEGACY_OWNER_TOKEN_ENV, legacy_owner_token_disabled
+    if legacy_owner_token_disabled():
+        return "DISABLED", (f"{LEGACY_OWNER_TOKEN_ENV} is set falsy — the legacy shared owner token is "
+                            f"refused; per-user proof-of-possession auth is required")
+    return "ENABLED", (f"{LEGACY_OWNER_TOKEN_ENV} is unset — the legacy embedded shared owner token maps to "
+                       f"the owner principal (a fail-open dev convenience); set {LEGACY_OWNER_TOKEN_ENV}=0 "
+                       f"to require per-user PoP auth")
+
+
 def _collect_posture(repo: Path, services: dict) -> list:
     """The security-posture block: one honest line PER control, its CURRENT state read from real on-disk /
     env state (never an optimistic default). INFORMATIONAL — never flips `ok`. Every probe fails soft to
@@ -449,22 +465,21 @@ def _collect_posture(repo: Path, services: dict) -> list:
 
 # ── PRODUCTION posture gate (W9-4b) ───────────────────────────────────────────────────────────────────
 # The opt-in REFUSE-TO-START gate. When VIGIL_POSTURE=production (or `prod`; case-insensitive), a start path
-# (`vigil up` / `vigil engage`) refuses to run unless ALL FIVE production preconditions hold: the vault is
+# (`vigil up` / `vigil engage`) refuses to run unless ALL SIX production preconditions hold: the vault is
 # SEALED, the sovereignty tier is non-PERMISSIVE, entitlement enforcement is ACTIVE, the backup/reprove
-# timers are ON, and a signed charter + EngagementAuthority is PRESENT. It reads the exact SAME on-disk/env
-# posture probes `vigil doctor` renders (no new state, no new import — the FATAL-2 boundary holds).
+# timers are ON, a signed charter + EngagementAuthority is PRESENT, and the legacy embedded shared owner
+# token is DISABLED (per-user PoP auth required — W10-7). The first five read the exact SAME on-disk/env
+# posture probes `vigil doctor` renders; the sixth reads SIGIL_LEGACY_OWNER_TOKEN (no new state, no import
+# of sigil — the FATAL-2 boundary holds).
 #
 # ADDITIVE + OPT-IN: with VIGIL_POSTURE unset (or any non-production value) the gate is INERT — it never
 # blocks, so behaviour is byte-identical to before. FAIL-CLOSED: any control NOT in its required good-state
 # — UNKNOWN included — is UNMET; a control we cannot read is never treated as satisfied. The egress-gate
-# control is DELIBERATELY excluded from the five: a loopback engagement legitimately needs no docker gateway,
+# control is DELIBERATELY excluded from the gate: a loopback engagement legitimately needs no docker gateway,
 # so requiring it would refuse the documented loopback quickstart.
 
-_PRODUCTION_POSTURE_ENV = "VIGIL_POSTURE"
-_PRODUCTION_POSTURE_VALUES = ("production", "prod")   # mirror of build_envs.sh lock_missing_or_die's parse
-
 # control -> (required good-states, one-line requirement text used in the operator refusal). The order is
-# the plan's five conditions; each `required` set is the state(s) `doctor`'s probe reports when the control
+# the plan's five conditions plus W10-7's legacy-token; each `required` set is the state(s) `doctor` reports when the control
 # is actually ENGAGED (see the _posture_* probes above).
 _PRODUCTION_GATE: tuple = (
     ("vault", {"SEALED"},
@@ -481,19 +496,26 @@ _PRODUCTION_GATE: tuple = (
     ("charter", {"PRESENT"},
      ("a signed charter + EngagementAuthority must be PRESENT — provision one under targets/ and pin it "
       "with VIGIL_ENGAGEMENT")),
+    ("legacy-owner-token", {"DISABLED"},
+     ("the legacy embedded shared owner token must be DISABLED — set SIGIL_LEGACY_OWNER_TOKEN=0 so the "
+      "cockpit requires per-user proof-of-possession auth (the fail-open shared token is refused; the sigil "
+      "server also refuses it at runtime under this posture)")),
 )
 
 
 def production_posture() -> "str | None":
     """The raw VIGIL_POSTURE value IFF it selects the production gate (case-insensitive `production` / `prod`),
     else None. The SINGLE source of truth for 'is the refuse-to-start gate armed?' — every caller keys on
-    this so the arming rule can never drift between the CLI start paths and the doctor report."""
-    raw = os.environ.get(_PRODUCTION_POSTURE_ENV, "").strip()
-    return raw if raw.lower() in _PRODUCTION_POSTURE_VALUES else None
+    this so the arming rule can never drift between the CLI start paths and the doctor report. Delegates to
+    `vigil_core.posture` (the namespace-pure package BOTH trust planes import) so the sovereign sigil server
+    parses `VIGIL_POSTURE` identically — the offense gate and the running server can never disagree on what
+    'production' means (FATAL-2 safe: vigil_core imports nothing from framework/strix/sigil)."""
+    from vigil_core.posture import production_posture as _pp
+    return _pp()
 
 
 def evaluate_production_gate(repo_root, posture: "list | None" = None) -> dict:
-    """Evaluate the five PRODUCTION preconditions from the same posture probes `vigil doctor` renders.
+    """Evaluate the PRODUCTION preconditions from the same posture probes `vigil doctor` renders.
 
     Returns a JSON-safe dict:
       {armed, posture, controls:[{control,state,detail,required,requirement,met}], unmet:[...same...], ok}
@@ -503,8 +525,9 @@ def evaluate_production_gate(repo_root, posture: "list | None" = None) -> dict:
     any state outside its required good-set (UNKNOWN included), is UNMET. Never raises.
 
     `posture` (optional) is a precomputed `_collect_posture(...)` list — passed by `collect()` so the shared
-    doctor report does not re-run the probes (notably the systemctl calls). When None, the five probes run
-    here (the CLI start-path helper's case)."""
+    doctor report does not re-run the five informational probes (notably the systemctl calls). The sixth
+    control (legacy-owner-token) is not in that informational block, so it is always probed here — a cheap
+    env read. When `posture` is None, every control is probed here (the CLI start-path helper's case)."""
     repo = Path(repo_root)
     posture_raw = production_posture()
     by_control: dict = {}
@@ -517,6 +540,7 @@ def evaluate_production_gate(repo_root, posture: "list | None" = None) -> dict:
         "entitlement": lambda: _posture_entitlement(repo),
         "backups": lambda: _posture_backups(repo),
         "charter": lambda: _posture_charter(repo),
+        "legacy-owner-token": _posture_legacy_owner_token,
     }
     controls: list = []
     unmet: list = []
@@ -779,7 +803,7 @@ def render(report: dict) -> str:
         # "Action needed" and flips the exit code, because it refuses `vigil up` / `vigil engage`.
         posture_val = gate.get("posture")
         if gate.get("ok"):
-            lines.append(f"\nPRODUCTION posture gate (VIGIL_POSTURE={posture_val}) — all five preconditions "
+            lines.append(f"\nPRODUCTION posture gate (VIGIL_POSTURE={posture_val}) — all preconditions "
                          "met; `vigil up` / `vigil engage` may start:")
         else:
             n = len(gate.get("unmet", []))

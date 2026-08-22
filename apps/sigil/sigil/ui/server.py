@@ -38,6 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from vigil_core.posture import legacy_owner_token_grants_owner
 from vigil_core.spine_domains import DOMAIN_TAGS
 
 from ..bridge.daemon import bind_ok
@@ -144,17 +145,29 @@ class Handler(BaseHTTPRequestHandler):
     def _token_ok(self) -> bool:
         q = self._query()
         tok = self.headers.get("X-SIGIL-Token") or (q.get("token", [""])[0])
-        return bool(tok) and hmac.compare_digest(tok, self.server.token)
+        # W10-7: the legacy embedded shared owner token is a documented fail-open dev convenience. It is
+        # REFUSED under VIGIL_POSTURE=production (per-user proof-of-possession auth is required there), and
+        # can be opted out of outside production via SIGIL_LEGACY_OWNER_TOKEN=0. When it does not grant
+        # owner, the shared token authenticates NOTHING here — so `/api/ask` (the only caller, an owner-only
+        # KERNEL dispatch) is fail-closed under production, with no per-user path silently opened.
+        return (bool(tok) and legacy_owner_token_grants_owner()
+                and hmac.compare_digest(tok, self.server.token))
 
     def _principal_for_token(self, tok: str):
         """Map a presented token to its `accounts.Principal`, or None (fail-closed). FAIL-OPEN is restricted
         to the EXACT legacy shared owner token → OWNER_PRINCIPAL: the owner is physically at the host and
         must never be locked out. Any OTHER token is resolved through the owner-signed account fold; an
-        unknown/blank/wrong token → None (unchanged 401 semantics). This is the ONLY fail-open path."""
+        unknown/blank/wrong token → None (unchanged 401 semantics).
+
+        W10-7 — that fail-open path is GATED OUT of the production posture: under VIGIL_POSTURE=production the
+        shared owner token no longer resolves to OWNER (`legacy_owner_token_grants_owner()` is False), so it
+        falls through to the account fold like any other token and is refused (per-user PoP auth is required
+        there). Outside production it still works by default, and can be opted out of with
+        SIGIL_LEGACY_OWNER_TOKEN=0. This is the ONLY fail-open path, and now the only one gated by posture."""
         from ..governor.accounts import OWNER_PRINCIPAL, AccountsRegistry
         if not tok:
             return None
-        if hmac.compare_digest(tok, self.server.token):
+        if legacy_owner_token_grants_owner() and hmac.compare_digest(tok, self.server.token):
             return OWNER_PRINCIPAL
         try:
             return AccountsRegistry(self.server.store()).resolve(tok)

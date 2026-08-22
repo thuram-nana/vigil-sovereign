@@ -1,21 +1,23 @@
 """W9-4b — the opt-in refuse-to-start PRODUCTION posture gate.
 
 When ``VIGIL_POSTURE=production`` (or ``prod``), a start path (``vigil up`` / ``vigil engage``) REFUSES to
-run unless ALL FIVE production preconditions hold, read from the SAME on-disk / env posture probes
-``vigil doctor`` renders:
+run unless ALL SIX production preconditions hold, read from the SAME on-disk / env posture probes
+``vigil doctor`` renders (the first five) plus one env read (the sixth):
 
   1. vault SEALED (secrets sealed at rest, not plaintext)
   2. sovereignty tier non-PERMISSIVE
   3. entitlement enforcement ACTIVE
   4. backup / reprove timers ON
   5. a signed charter + EngagementAuthority PRESENT
+  6. the legacy embedded shared owner token DISABLED (SIGIL_LEGACY_OWNER_TOKEN=0 ⇒ per-user PoP auth
+     required; W10-7 — the sigil server also refuses that token at runtime under this posture)
 
 These tests prove:
 
 * the gate REFUSES on each of the five conditions INDEPENDENTLY, with a distinct error naming the failing
   control (AC 1);
 * the NEGATIVE CONTROL — all five satisfied ⇒ start succeeds, so the gate is not simply always-refusing
-  (AC 2, and it proves the five states are actually READ, not a constant);
+  (AC 2, and it proves the six states are actually READ, not a constant);
 * the default (VIGIL_POSTURE unset) path is byte-identical — the gate is INERT, the CLI helper returns
   None, and ``collect()`` grows no ``production_gate`` field (AC 3);
 * the WIRING at the real start paths: ``_cmd_up`` refuses (returns 2) and never calls ``run_up``, and
@@ -36,7 +38,7 @@ import pytest
 from vigil_integration import cli as climod
 from vigil_integration import doctor as dmod
 
-_CONTROLS = ["vault", "sovereignty", "entitlement", "backups", "charter"]
+_CONTROLS = ["vault", "sovereignty", "entitlement", "backups", "charter", "legacy-owner-token"]
 
 
 # ------------------------------------------------------------------ world builder: all five SATISFIED
@@ -82,6 +84,8 @@ def _all_satisfied(monkeypatch, tmp_path) -> pathlib.Path:
     (auth / "acme.authority.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("CRUCIBLE_ROOT", str(cruc))
     monkeypatch.setenv("VIGIL_ENGAGEMENT", "acme")
+    # (6) the legacy embedded shared owner token DISABLED — the operator opted into per-user PoP auth
+    monkeypatch.setenv("SIGIL_LEGACY_OWNER_TOKEN", "0")
     return repo
 
 
@@ -111,7 +115,7 @@ def test_posture_selector_matches_production_and_prod_case_insensitively(monkeyp
 
 # ------------------------------------------------------------------ AC 2 — negative control: all five ⇒ pass
 
-def test_gate_passes_when_all_five_satisfied(monkeypatch, tmp_path):
+def test_gate_passes_when_all_satisfied(monkeypatch, tmp_path):
     repo = _all_satisfied(monkeypatch, tmp_path)
     monkeypatch.setenv("VIGIL_POSTURE", "production")
     res = dmod.evaluate_production_gate(repo)
@@ -121,7 +125,7 @@ def test_gate_passes_when_all_five_satisfied(monkeypatch, tmp_path):
     # every control is individually met, and the states are the real engaged states (not a constant).
     states = {c["control"]: c["state"] for c in res["controls"]}
     assert states == {"vault": "SEALED", "sovereignty": "AIR_GAPPED", "entitlement": "ACTIVE",
-                      "backups": "ON", "charter": "PRESENT"}
+                      "backups": "ON", "charter": "PRESENT", "legacy-owner-token": "DISABLED"}
     assert all(c["met"] for c in res["controls"])
 
 
@@ -135,6 +139,8 @@ _BREAKERS = {
                                    mp.setenv("CRUCIBLE_ENTITLEMENT_DIR", str(_empty_dir(tp)))),
     "backups": lambda mp, tp: mp.setattr(dmod.subprocess, "run", _fake_systemctl(set())),
     "charter": lambda mp, tp: mp.setenv("VIGIL_ENGAGEMENT", "no-such-engagement"),
+    # unset the opt-out ⇒ the legacy shared owner token is ENABLED again (its fail-open default)
+    "legacy-owner-token": lambda mp, tp: mp.delenv("SIGIL_LEGACY_OWNER_TOKEN", raising=False),
 }
 
 
@@ -289,10 +295,46 @@ def test_collect_flips_ok_and_names_controls_when_armed_and_unmet(monkeypatch, t
 _REPO = pathlib.Path(dmod.__file__).resolve().parents[2]
 
 
-def test_readme_documents_the_production_gate_env_and_five_controls():
+def test_readme_documents_the_production_gate_env_and_controls():
     text = (_REPO / "README.md").read_text(encoding="utf-8")
     assert "VIGIL_POSTURE=production" in text, "README does not name the production-posture env selector"
     # the refuse-to-start behaviour + each of the five controls is described.
     assert "refuse" in text.lower()
     for control in _CONTROLS:
         assert control in text, f"README does not mention the {control!r} production precondition"
+
+
+
+# ------------------------------------------------------------------ W10-7 — the legacy-owner-token precondition
+
+def test_gate_refuses_when_legacy_shared_owner_token_is_enabled(monkeypatch, tmp_path):
+    """The W10-7 precondition, exercised on its own: with every OTHER control satisfied but the legacy
+    embedded shared owner token left at its fail-open default (SIGIL_LEGACY_OWNER_TOKEN unset), the
+    production gate REFUSES and names exactly `legacy-owner-token`. THIS FAILS WITHOUT THE CHANGE — on a
+    tree where the gate has only the original five controls, an all-else-satisfied world passes."""
+    repo = _all_satisfied(monkeypatch, tmp_path)
+    monkeypatch.delenv("SIGIL_LEGACY_OWNER_TOKEN", raising=False)   # fail-open default: the token is ENABLED
+    monkeypatch.setenv("VIGIL_POSTURE", "production")
+    res = dmod.evaluate_production_gate(repo)
+    assert res["ok"] is False
+    assert [e["control"] for e in res["unmet"]] == ["legacy-owner-token"]
+    tok = next(c for c in res["controls"] if c["control"] == "legacy-owner-token")
+    assert tok["state"] == "ENABLED" and tok["met"] is False
+    msg = dmod.production_gate_message(res, action="up")
+    assert "legacy-owner-token: ENABLED" in msg and "SIGIL_LEGACY_OWNER_TOKEN=0" in msg
+
+
+def test_gate_accepts_the_disabled_legacy_token_and_ignores_it_out_of_production(monkeypatch, tmp_path):
+    """NEGATIVE CONTROL for W10-7: disabling the token (SIGIL_LEGACY_OWNER_TOKEN=0) satisfies the control —
+    so the gate is not a no-op that always refuses — and OUTSIDE production the whole gate is inert
+    regardless of the token, so nothing already deployed is forced to change."""
+    repo = _all_satisfied(monkeypatch, tmp_path)              # already sets SIGIL_LEGACY_OWNER_TOKEN=0
+    monkeypatch.setenv("VIGIL_POSTURE", "production")
+    res = dmod.evaluate_production_gate(repo)
+    tok = next(c for c in res["controls"] if c["control"] == "legacy-owner-token")
+    assert tok["state"] == "DISABLED" and tok["met"] is True and res["ok"] is True
+    # out of production the gate is inert even with the token ENABLED (default): no forced change.
+    monkeypatch.delenv("VIGIL_POSTURE", raising=False)
+    monkeypatch.delenv("SIGIL_LEGACY_OWNER_TOKEN", raising=False)
+    res2 = dmod.evaluate_production_gate(repo)
+    assert res2["armed"] is False and res2["ok"] is True and res2["unmet"] == []

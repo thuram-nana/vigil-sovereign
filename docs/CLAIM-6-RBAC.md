@@ -27,7 +27,13 @@ and records the requesting principal for attribution.
   import), crypto via `reuse`/`vigil_core` only.
 - **Bootstrap lockout avoidance.** Fail-open is restricted to the **exact** legacy owner shared token
   (`server._principal_for_token`) → `OWNER_PRINCIPAL`; every other/unknown token is resolved through the
-  fold or refused (401).
+  fold or refused (401). **W10-7 — gated out of production:** under `VIGIL_POSTURE=production` that shared
+  token no longer resolves to owner (`vigil_core.posture.legacy_owner_token_grants_owner()` is `False`) —
+  it falls through to the fold and is refused, so per-user proof-of-possession auth is required; the same
+  applies to `_token_ok` (the `/api/ask` owner gate). It can also be opted out of outside production with
+  `SIGIL_LEGACY_OWNER_TOKEN=0`. Provision per-user accounts offline with `sigil accounts create` (owner-key
+  signed; no HTTP token needed). The refuse-to-start production gate (`vigil up` / `vigil engage`) also
+  refuses while the shared token is left enabled.
 
 ## Roles and permissions
 
@@ -117,7 +123,9 @@ returns the resolved Principal (`{authenticated, username, role, permissions}`).
 sovereign plane is the **authority** on the owner-signed accounts spine — trusting its resolution trusts
 exactly the right root — and the proxy stays **pure stdlib** (`http.client`, no cross-domain import).
 `whoami` is token-optional and read-only (no side effect): an owner token resolves to `OWNER_PRINCIPAL`, a
-per-user bearer to its Principal, anything else to `{authenticated:false}` → the proxy 401s. Results are
+per-user bearer to its Principal, anything else to `{authenticated:false}` → the proxy 401s. (Under
+`VIGIL_POSTURE=production` the legacy shared owner token does **not** resolve to `OWNER_PRINCIPAL` — W10-7 —
+so `whoami` reports `{authenticated:false}` for it and the login gate requires per-user PoP.) Results are
 cached by `sha256(bearer)` with a short TTL (30 s; 5 s for negatives) so SSE/polling do not stampede whoami.
 The cache is **not** a revocation-lag window (W9-3 / #436): an **edge revocation set** is consulted on every
 decision *before* the cache is trusted (fail-closed), the admin **force-purge** endpoint invalidates the
