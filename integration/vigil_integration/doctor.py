@@ -911,6 +911,38 @@ def collect(repo_root) -> dict:
     except Exception as exc:  # noqa: BLE001 — the integrity probe must never crash the report
         report["integrity"] = {"ok": None, "error": f"{type(exc).__name__}: {exc}", "checks": []}
         _note(f"the integrity verifier could not run: {exc}")
+
+    # 11) HA/timer unit alerts (W8-1) — the DEAD-MAN for every scheduled unit. Reads each unit's heartbeat
+    #     (written by its ExecStopPost hook) and surfaces any that are STALE/ABSENT (the timer stopped) or
+    #     whose last run FAILED, plus the alert-delivery dead-man. ADVISORY by default (the alert timer is
+    #     opt-in, like the integrity one — an operator who never enabled it should not see a hard failure),
+    #     so this block calls only _note() and never flips `ok`. FATAL-2: reads inert on-disk JSON, imports
+    #     only vigil_core. Function-local import keeps doctor's load path light.
+    try:
+        from . import unit_alerts as _ua
+        statuses = _ua.collect_statuses(_ua.default_state_dir())
+        report["unit_alerts"] = {
+            "state_dir": str(_ua.default_state_dir()),
+            "statuses": [st.to_dict() for st in statuses],
+        }
+        bad = [st for st in statuses if st.is_alarm]
+        # If NO unit has ever written a heartbeat, the alerting path is simply not enabled — one calm NOTE,
+        # not one per unit (mirrors the integrity dead-man's opt-in posture).
+        if bad and all(st.state == _ua.ABSENT for st in statuses):
+            _note("no scheduled-unit heartbeats found — the HA/timer staleness alerting is not enabled. "
+                  "Enable it: install the ExecStopPost hooks + `systemctl --user enable --now "
+                  "vigil-alerts.timer` (see infra/systemd/vigil-alerts.*).")
+        else:
+            for st in bad:
+                _note(f"scheduled unit {st.unit} is {st.state}: {st.detail}")
+        d_stale, d_detail = _ua.delivery_is_stale(_ua.default_state_dir())
+        report["unit_alerts"]["delivery_stale"] = d_stale
+        report["unit_alerts"]["delivery_detail"] = d_detail
+        if d_stale and any(st.is_alarm and st.state != _ua.ABSENT for st in statuses):
+            _note(f"alert delivery dead-man: {d_detail} — alarms may not be reaching anyone.")
+    except Exception as exc:  # noqa: BLE001 — the unit-alerts probe must never crash the report
+        report["unit_alerts"] = {"error": f"{type(exc).__name__}: {exc}", "statuses": []}
+        _note(f"the unit-alerts monitor could not run: {exc}")
     return report
 
 

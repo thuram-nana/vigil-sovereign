@@ -77,8 +77,10 @@ All thresholds are env-overridable with fail-closed defaults — see
 
 - **`/readyz` as a first-class endpoint on every server** is W6-1 (#452); today the readiness probe lives on
   the posture endpoint. The verifier exposes `default_readyz()` for #452 to reuse verbatim.
-- **A real notifier** (email / webhook / pager) for the alarm callbacks is W8-1 (#467); the alarm sink ships
-  the durable log + the callback seam.
+- **A real notifier** (webhook / exec such as email / pager) for the alarm callbacks landed in W8-1 (#467) —
+  see [HA / timer heartbeat staleness alarms](#ha--timer-heartbeat-staleness-alarms-w8-1) below. It reuses
+  this module's `Alarm` / `AlarmSink` primitives and adds the push transports, the per-unit heartbeats and the
+  delivery dead-man.
 - **Claims-registry registration** of this behaviour is W0-3 (#398); the registry does not exist yet.
 
 ---
@@ -120,3 +122,82 @@ the local floor (the irreducible all-keys limit in HA-PROFILE §4). The anchor's
 consistency checks remain the tamper controls. **Claims-registry registration** of this behaviour is W0-3
 (#398), which does not exist yet — the claim is stated in `docs/decisions/W7-5-scheduled-witnessed-checkpoint-freshness.md`
 ready to fold in when it lands.
+
+---
+
+# HA / timer heartbeat staleness alarms (W8-1)
+
+Until W8-1 nothing monitored the HA pair or any timer unit. A **backup**, an **off-host push**, a **recovery
+drill** or the **HA mirror-sync** could fail — or its timer could stop firing — for months, and the only way
+to notice was a human running `journalctl`. A silent HA gap is the worst kind: you learn the standby was never
+synced at the moment you need to fail over to it.
+
+W8-1 (`integration/vigil_integration/unit_alerts.py`, wired via `vigil alerts` / `vigil unit-heartbeat` +
+`infra/systemd/vigil-alerts.*`) gives every scheduled unit a heartbeat and a staleness monitor. Everything
+below is true of the code.
+
+## The monitored units
+
+The registry (`unit_alerts.HA_UNITS`) covers every scheduled unit, each with a cadence-derived staleness bound
+(`cadence × 1.5 + the timer's RandomizedDelaySec` — it fires after ~1.5 missed periods, so a single skipped
+run is caught without flapping on jitter; overridable per unit via
+`VIGIL_ALERT_MAX_STALENESS_<UNIT>`):
+
+| unit | timer | cadence | default staleness bound |
+|------|-------|---------|-------------------------|
+| `vigil-backup.service` | daily | 24h | ~36.5h |
+| `vigil-backup-push.service` | daily | 24h | ~36.5h |
+| `vigil-backup-drill.service` | weekly | 7d | ~10.6d |
+| `vigil-ha-mirror.service` | 15m | 15m | ~23.5m |
+| `vigil-integrity.service` | 15m | 15m | ~23.5m |
+| `vigil-posture.service` | 30m | 30m | ~45m |
+| `vigil-reprove.service` | 6h | 6h | ~9h |
+
+A guard test asserts **every** `infra/systemd/vigil-*.timer` (except the monitor's own) has a registry entry,
+so a new scheduled unit added without registration fails CI rather than going silently unmonitored.
+
+## How it works
+
+- **Each unit writes a heartbeat when it runs.** Every service file carries
+  `ExecStopPost=… vigil unit-heartbeat %n` plus `StateDirectory=vigil` and
+  `Environment=VIGIL_ALERT_STATE_DIR=%S/vigil/unit-heartbeats`. `ExecStopPost` runs on **both** success and
+  failure, and systemd exports `$SERVICE_RESULT` into its environment — so the heartbeat records whether the
+  run **succeeded**, and a unit that RAN and FAILED is distinguishable from one that never ran.
+- **`vigil alerts` classifies every watched unit** as `healthy` / `failed` / `stale` / `absent` and raises an
+  alarm for every non-healthy one. **Fail-closed:** an `absent` heartbeat (never ran / removed) or an
+  undated/unreadable one is a staleness alarm, never silently healthy. A clean, fresh fleet raises **nothing**
+  (the monitor is not a no-op). `vigil alerts --status` is a read-only view; `--watch` runs it on a cadence
+  (systemd: `vigil-alerts.timer`, every 10m — tighter than the shortest unit bound).
+- **Alerts are push-based.** `build_notifier_from_env` reads `VIGIL_ALERT_WEBHOOK_URL` (HTTP POST each alarm
+  as JSON) and/or `VIGIL_ALERT_EXEC` (a command fed the alarm JSON on stdin — e.g. `sendmail`, a pager CLI).
+  A non-2xx / non-zero exit / transport error is a delivery **failure**. Every alarm is **also** appended to a
+  durable local log, so a total push outage is still discoverable on the box.
+- **Alert delivery is itself dead-man'd.** A successful push advances an `alert-delivery-heartbeat.json`; a
+  delivery that fails on *every* target writes a distinct `alert-delivery-failed` marker to the local log; and
+  `delivery_is_stale(...)` — surfaced by `vigil alerts --status` and `vigil doctor` — fires when no alert has
+  been delivered within `VIGIL_ALERT_DELIVERY_MAX_STALENESS_S` (default 26h). So the failure of the alerting
+  path is observable, not silent.
+- **`vigil doctor`** grows an advisory *unit alerts* block: it names any stale/failed unit and the delivery
+  dead-man (a NOTE — the alert timer is opt-in, like the integrity one, so it never flips doctor's exit code).
+
+## Honest scope (do not overclaim)
+
+The **logic** — enumeration, per-unit cadence-derived staleness, fail-closed absent-is-an-alarm,
+exactly-one-alarm-per-bad-unit, push delivery with a local fallback, and the delivery dead-man — is exercised
+in CI (`integration/tests/test_unit_alerts.py`) with an **injected clock** and an **in-process fake
+transport**. What is **live-only** and cannot be exercised in CI: whether real systemd actually invokes the
+`ExecStopPost` hook on every unit, and whether a real webhook / `sendmail` endpoint accepts the push. Those
+are wired but their firing against real infrastructure is not asserted here. The monitor does **not**
+heartbeat-monitor itself (that would be circular); the monitor's own liveness is the delivery dead-man.
+
+## Configuration
+
+See `infra/systemd/vigil-alerts.env.example`: `VIGIL_ALERT_WEBHOOK_URL`, `VIGIL_ALERT_EXEC`,
+`VIGIL_ALERT_STATE_DIR`, per-unit `VIGIL_ALERT_MAX_STALENESS_<UNIT>`, and
+`VIGIL_ALERT_DELIVERY_MAX_STALENESS_S`.
+
+## Residual (blocked on other work)
+
+- **Claims-registry registration** of this behaviour is W0-3 (#398); that registry does not exist in the tree
+  yet, so this section is the authoritative, code-true description until it does.
+

@@ -43,6 +43,15 @@ WorkingDirectory=%h/vigil
 # word-split by systemd (leave it UNQUOTED in the env file) into the finding/target/base-dir flags.
 ExecStart=%h/vigil/.venv-offense/bin/vigil reprove --once $VIGIL_REPROVE_ARGS
 
+# --- W8-1 (#467): heartbeat + staleness alarm ------------------------------
+# Record that this unit RAN (and its SERVICE_RESULT) so `vigil alerts` (the vigil-alerts.timer monitor)
+# can raise a staleness alarm if this unit/timer stops firing, or a failure alarm if a run fails.
+# ExecStopPost runs on BOTH success and failure; systemd exports $SERVICE_RESULT into its environment.
+# StateDirectory=vigil makes the heartbeat dir writable even under ProtectSystem=strict / PrivateNetwork.
+StateDirectory=vigil
+Environment=VIGIL_ALERT_STATE_DIR=%S/vigil/unit-heartbeats
+ExecStopPost=%h/vigil/.venv-offense/bin/vigil unit-heartbeat %n
+
 # --- hardening (same posture as sigil-consolidate) -------------------------
 # It appends signed ticks + witnessed checkpoints under the engagement base dir, so it needs write access
 # to VIGIL_BASE_DIR and nothing else. NETWORK IS REQUIRED (the re-proof re-drives the live target), so

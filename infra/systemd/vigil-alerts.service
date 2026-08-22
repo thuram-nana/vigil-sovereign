@@ -1,0 +1,69 @@
+# VIGIL HA/timer STALENESS-ALARM monitor — systemd USER service (oneshot)
+# =====================================================================
+# W8-1 (#467). Runs `vigil alerts --once`: ONE pass over every scheduled unit's
+# heartbeat (see StateDirectory=vigil / VIGIL_ALERT_STATE_DIR, written by each
+# unit's ExecStopPost hook). It raises a STALENESS alarm for any unit whose
+# heartbeat is ABSENT (never ran / removed — fail-closed) or STALE (older than
+# its cadence-derived bound — the timer stopped firing), and a FAILURE alarm for
+# any unit whose last run failed. Alarms are PUSH-based: they go to the webhook /
+# exec destination configured in the env file, PLUS a durable local log, PLUS a
+# delivery heartbeat that a watchdog reads (so a total push outage is itself
+# discoverable — the dead-man). The paired timer (vigil-alerts.timer) fires this
+# on a cadence, so a backup / off-host push / recovery drill / HA mirror-sync
+# that quietly stopped becomes LOUD within one cadence instead of sitting
+# invisible until a human runs `journalctl`.
+#
+# This closes the "nothing monitors the HA pair or any timer" gap: without it, a
+# unit or timer failing for MONTHS was invisible.
+#
+# The monitor is READ-ONLY over the heartbeats and boundary-safe: it reads inert
+# on-disk JSON and imports only vigil_core — never the offense engine or sigil.
+#
+# Manual run / logs:
+#     systemctl --user start vigil-alerts.service
+#     journalctl --user -u vigil-alerts -e
+#     vigil alerts --status            # read-only view of every unit's state
+#
+# INSTALL (paired with the timer):
+#   mkdir -p ~/.config/systemd/user ~/.config/vigil
+#   cp infra/systemd/vigil-alerts.{service,timer} ~/.config/systemd/user/
+#   cp infra/systemd/vigil-alerts.env.example      ~/.config/vigil/alerts.env
+#   chmod 600 ~/.config/vigil/alerts.env
+#   $EDITOR ~/.config/vigil/alerts.env             # set a push destination (webhook / exec)
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-alerts.timer
+
+[Unit]
+Description=VIGIL HA/timer heartbeat staleness-alarm monitor (push-based; alarm on any stale/failed unit)
+Documentation=file:%h/vigil/docs/OBSERVABILITY.md
+
+[Service]
+Type=oneshot
+
+# Push destination + tuning. EnvironmentFile=- makes it optional (the monitor still runs, logging locally and
+# WARNing that no push destination is set). Keep this file 0600 — a webhook URL can be a bearer secret.
+EnvironmentFile=-%h/.config/vigil/alerts.env
+Environment=PYTHONUNBUFFERED=1
+# The SAME heartbeat state dir the monitored units write to (StateDirectory=vigil ⇒ %S/vigil). Keep this in
+# sync with the VIGIL_ALERT_STATE_DIR set in the monitored units.
+Environment=VIGIL_ALERT_STATE_DIR=%S/vigil/unit-heartbeats
+StateDirectory=vigil
+
+WorkingDirectory=%h/vigil
+# --require-push makes a missing push destination itself an alarm (fail-closed: "alerting with nowhere to send"
+# is a real gap). Drop --require-push if you deliberately run local-log-only.
+ExecStart=%h/vigil/.venv-offense/bin/vigil alerts --once --require-push
+
+# --- hardening -------------------------------------------------------------
+# The monitor reads local heartbeats and pushes an alarm to a configured destination, so — UNLIKE the
+# air-gapped verifier — it needs the NETWORK for the webhook/exec push (PrivateNetwork is NOT set). It opens
+# no listening port (only outbound). Everything else is locked down.
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOT set: PrivateNetwork (the push needs egress) and ProtectHome (hides the checkout + state dir).

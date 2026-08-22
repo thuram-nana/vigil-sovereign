@@ -50,6 +50,15 @@ WorkingDirectory=%h/vigil
 # BULK seed (restore of a signed `sigil backup`) is a manual step, not scheduled. Adjust the checkout path if it differs.
 ExecStart=%h/vigil/tools/ha/mirror-sync.sh delta
 
+# --- W8-1 (#467): heartbeat + staleness alarm ------------------------------
+# Record that this unit RAN (and its SERVICE_RESULT) so `vigil alerts` (the vigil-alerts.timer monitor)
+# can raise a staleness alarm if this unit/timer stops firing, or a failure alarm if a run fails.
+# ExecStopPost runs on BOTH success and failure; systemd exports $SERVICE_RESULT into its environment.
+# StateDirectory=vigil makes the heartbeat dir writable even under ProtectSystem=strict / PrivateNetwork.
+StateDirectory=vigil
+Environment=VIGIL_ALERT_STATE_DIR=%S/vigil/unit-heartbeats
+ExecStopPost=%h/vigil/.venv-offense/bin/vigil unit-heartbeat %n
+
 # --- hardening (mirrors vigil-backup-push.service) -------------------------
 # UNLIKE the AIR-GAPPED vigil-backup.service, the rsync delta reaches the active host, so the NETWORK is REQUIRED
 # (PrivateNetwork is NOT set) — exactly like vigil-backup-push.service. If VIGIL_ACTIVE_SIGIL is a LOCAL mount

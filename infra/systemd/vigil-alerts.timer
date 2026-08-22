@@ -1,0 +1,36 @@
+# VIGIL staleness-alarm monitor timer — fires the monitor on a cadence.
+# =====================================================================
+# W8-1 (#467). THIS is the "continuous" in continuous alerting: it fires
+# vigil-alerts.service on a schedule, so every scheduled unit's heartbeat is
+# re-checked and a stale/failed unit is alarmed WITHIN one cadence instead of
+# sitting undetected until a human runs `journalctl`.
+#
+# Enable with:
+#   systemctl --user enable --now vigil-alerts.timer
+#   systemctl --user list-timers 'vigil-*'     # confirm next run
+#
+# CADENCE CHOICE: keep this TIGHTER than the shortest monitored unit's staleness
+# bound (the 15-minute HA mirror / integrity units have a ~23.5-minute bound), so
+# the monitor actually observes a miss before the next legitimate run. 10 minutes
+# is a safe default.
+#
+# DELIVERY DEAD-MAN: the monitor advances an alert-delivery heartbeat on every
+# successful push. If THIS timer stops firing — or the push path stays down — that
+# delivery heartbeat goes stale, which `vigil alerts --status` / a watchdog reads:
+# the failure of the alerting path is itself observable, not silent.
+
+[Unit]
+Description=Cadence trigger for the VIGIL heartbeat staleness-alarm monitor
+Documentation=file:%h/vigil/docs/OBSERVABILITY.md
+
+[Timer]
+# Every 10 minutes — tighter than the shortest monitored staleness bound (~23.5m).
+OnCalendar=*-*-* *:00/10:15
+# If the machine was asleep/off at the scheduled time, run once on the next wake.
+Persistent=true
+# Small smear so a fleet does not all fire at once.
+RandomizedDelaySec=30
+Unit=vigil-alerts.service
+
+[Install]
+WantedBy=timers.target
