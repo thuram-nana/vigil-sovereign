@@ -159,7 +159,44 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded:
         raise PruneUnsafe(f"K={K} would strand active account(s) {stranded}: their only owner-signed grant "
                           f"sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    # (e) owner-key succession referential floor (W9-1 / issue #434): a rotation record that ESTABLISHES a key
+    # whose seq-window still covers a LIVE record (>= K) — including, always, the current key's open window —
+    # must NOT be pruned. Without the whole genesis->current chain present in the live window, post-prune
+    # reconstruction cannot bridge a live record back to the pinned genesis and the resolver FAILS CLOSED
+    # (DENY-all) — a self-inflicted governance lockout. Mirror the accounts floor: a non-empty result fails
+    # the prune CLOSED rather than silently breaking the succession chain.
+    stranded_keys = stranded_owner_key_records(store, K)
+    if stranded_keys:
+        raise PruneUnsafe(f"K={K} would prune owner-key-history rotation record(s) {stranded_keys} still "
+                          f"needed to chain the pinned genesis to the current key over the live tail; the "
+                          f"succession would be unreconstructable post-prune (lower K below the first "
+                          f"rotation, or re-genesis to abandon the old chain)")
     return archived
+
+
+def stranded_owner_key_records(store, K: int) -> list[int]:
+    """§7(e) — the owner-key-history rotation record seqs BELOW K that are still needed to reconstruct the
+    owner-key succession over the LIVE window [K..T]. Read-only. EMPTY in the happy path (no rotation, or the
+    prune boundary sits below the first rotation). Non-empty means the prune would sever the genesis->current
+    chain: the current key's window is open (`end == inf`) and thus always covers the live tail, so once any
+    rotation has happened the whole below-K chain must stay live — otherwise `key_history.key_resolver`
+    fail-closes and every fold DENY-alls (a self-inflicted governance lockout). A FORKED succession fails the
+    prune closed too (an ambiguous authority must be resolved by re-genesis before any prune)."""
+    from ..governor import key_history as _kh
+    from ..governor.identity import genesis_owner_pubkey, owner_pubkey
+    genesis = genesis_owner_pubkey() or owner_pubkey()
+    try:
+        succ = _kh.succession_from_store(store, genesis_pubkey=genesis)
+    except _kh.SuccessionError:
+        # An ambiguous/forked succession: refuse the prune by reporting every below-K owner-key record as
+        # stranded (the caller fails closed). Never prune under an unresolved owner authority.
+        return sorted(seq for seq, _p in _kh._history_from_records(store.iter_records()) if seq < K)
+    # An epoch whose window extends beyond K covers a live record; the current (open) epoch always does. When
+    # any epoch reaches the live tail, the ENTIRE chain from the pinned genesis is needed, so every rotation
+    # record that established a non-genesis epoch below K is stranded (the establishing record sits at start).
+    if not any(e.end > K for e in succ.epochs):
+        return []
+    return sorted(e.start for e in succ.epochs[1:] if e.start < K)
 
 
 def stranded_active_accounts(store, archived: list[Segment], K: int) -> list[str]:

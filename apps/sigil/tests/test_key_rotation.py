@@ -149,6 +149,69 @@ def test_forked_succession_is_fail_closed():
         kh.succession_from_store(store, genesis_pubkey=g.public_key_b64)
 
 
+def test_retired_key_fork_at_superseded_epoch_is_ignored():
+    """BLOCK regression (#434): a holder of a RETIRED key appends ONE validly cross-signed fork record
+    (prev=retired, new=attacker) at an ALREADY-SUPERSEDED epoch. The old UNBOUNDED fork detector raised
+    SuccessionError on it -> KeyResolver DENY-alls EVERY fold = total governance-lockout DoS. The fix bounds
+    fork detection to the LIVE boundary, so this stale fork is IGNORED, the chain still resolves to the real
+    current key, and the attacker key never enters a window. (Reverting the fix -> SuccessionError -> red.)"""
+    g, a, b, attacker = (generate_keypair() for _ in range(4))
+    store = _store()
+    _rotate_record(store, g, a, epoch=1, prev=g.public_key_b64)          # g -> a  (genesis superseded)
+    _rotate_record(store, a, b, epoch=2, prev=a.public_key_b64)          # a -> b  (a superseded; b is current)
+    # the retired-GENESIS-key holder forges a competing successor of g, appended LAST (largest seq):
+    _rotate_record(store, g, attacker, epoch=1, prev=g.public_key_b64)
+    succ = kh.succession_from_store(store, genesis_pubkey=g.public_key_b64)   # MUST NOT raise
+    assert succ.current == b.public_key_b64
+    assert attacker.public_key_b64 not in succ.pubkeys
+    # the real chain is intact and windowed exactly as if the fork record were never appended.
+    assert [e.pubkey for e in succ.epochs] == [g.public_key_b64, a.public_key_b64, b.public_key_b64]
+
+
+def test_fork_at_live_boundary_still_denies():
+    """(b) two successors at the SAME LIVE rotation boundary (the current key's holder cross-signs two
+    different successors — its FIRST successor is still the tip) is genuine current-owner ambiguity ->
+    SuccessionError, even after prior legitimate rotations. Contrast with the superseded-epoch fork above,
+    which is ignored: only the LIVE boundary denies."""
+    g, a, b1, b2 = (generate_keypair() for _ in range(4))
+    store = _store()
+    _rotate_record(store, g, a, epoch=1, prev=g.public_key_b64)          # g -> a  (settled)
+    _rotate_record(store, a, b1, epoch=2, prev=a.public_key_b64)         # a -> b1 (first successor of the tip)
+    _rotate_record(store, a, b2, epoch=2, prev=a.public_key_b64)         # a -> b2 (SECOND successor of the LIVE tip)
+    with pytest.raises(kh.SuccessionError):
+        kh.succession_from_store(store, genesis_pubkey=g.public_key_b64)
+
+
+def test_pruned_intermediate_link_fails_closed_never_genesis_open():
+    """(c) HIGH regression (#434): if an intermediate rotation record is missing (e.g. pruned), the walk
+    cannot bridge the pinned genesis to the current key. `key_resolver` MUST fail closed (DENY-all) — NOT
+    collapse to an open genesis window (which would re-validate the RETIRED genesis for the entire live tail
+    = FAIL-OPEN, and orphan every current-key grant). (Reverting the fix -> genesis re-opens -> red.)"""
+    g, a, b = (generate_keypair() for _ in range(3))
+    # live history is MISSING the g->a rotation (pruned): only a->b survives, referencing an unknown `prev`.
+    surviving = kh.cross_sign(a, b, epoch=2, prev_pubkey=a.public_key_b64, issued_at=_issue())
+    live = [{"kind": kh.KEY_HISTORY_KIND, "seq": 7, "payload": dict(surviving)}]
+
+    class _Stub:
+        def iter_records(self):
+            return list(live)
+
+        def change_token(self):     # uncached path -> no shared-cache contamination
+            return None
+
+    # anchor the walk on the pinned genesis g (via build_succession) and resolve under the trusted current b.
+    succ = kh.build_succession(kh._history_from_records(live), genesis_pubkey=g.public_key_b64)
+    assert succ.current == g.public_key_b64        # the walk cannot advance past the broken link
+    import unittest.mock as _mock
+    with _mock.patch("sigil.governor.identity.genesis_owner_pubkey", return_value=g.public_key_b64):
+        kh.clear_resolver_cache()
+        res = kh.key_resolver(_Stub(), current=b.public_key_b64)
+    # FAIL CLOSED: every lookup denies; the retired genesis is NOT re-validated for the live tail.
+    assert res.at(0) is None and res.at(7) is None and res.at(9999) is None
+    assert res.all_pubkeys == frozenset()
+    assert g.public_key_b64 not in res.all_pubkeys
+
+
 def test_resolver_no_history_is_single_current_window():
     """With no rotation, the resolver is byte-identical to the pre-W9-1 single-key behaviour."""
     cur = generate_keypair().public_key_b64
@@ -260,6 +323,62 @@ def test_forked_chain_fails_the_account_fold_closed(home):
     _rotate_record(store, incumbent, b, epoch=1, prev=incumbent.public_key_b64)   # FORK
     kh.clear_resolver_cache()
     assert AccountsRegistry(store).accounts() == [], "a forked owner-key succession must fail closed"
+
+
+def test_retired_key_fork_does_not_brick_the_account_fold(home):
+    """BLOCK regression at the FOLD surface (#434): after two legit rotations g->a->b, a holder of the
+    RETIRED genesis key forges a competing successor at the old epoch. Before the fix this raised
+    SuccessionError -> the RBAC fold DENY-alled (total lockout). After: the stale fork is ignored and every
+    pre-rotation grant STILL authenticates."""
+    store = SpineStore(str(home / "spine.jsonl"))
+    g = identity.ensure_owner_keypair()
+    identity.pin_genesis(g.public_key_b64)
+    AccountsRegistry(store).create("alice", "operator", bearer_token="alice-bearer-token-xyz",
+                                   issued_at=_issue())
+    a, b = generate_keypair(), generate_keypair()
+    _rotate_record(store, g, a, epoch=1, prev=g.public_key_b64)          # g -> a
+    _rotate_record(store, a, b, epoch=2, prev=a.public_key_b64)          # a -> b (b is the live key)
+    identity.set_owner_key(b)
+    kh.clear_resolver_cache()
+    assert AccountsRegistry(store).resolve("alice-bearer-token-xyz") is not None, "alice lost across rotations"
+    # the RETIRED genesis-key holder forges a fork at the superseded epoch, appended last:
+    attacker = generate_keypair()
+    _rotate_record(store, g, attacker, epoch=1, prev=g.public_key_b64)
+    kh.clear_resolver_cache()
+    # NOT bricked: the fold still authenticates alice, and the attacker key never becomes an owner authority.
+    assert AccountsRegistry(store).resolve("alice-bearer-token-xyz") is not None, "retired-key fork BRICKED the fold"
+    assert attacker.public_key_b64 not in kh.key_resolver(store, current=b.public_key_b64).all_pubkeys
+
+
+def test_prune_floor_refuses_to_strand_owner_key_succession(home):
+    """HIGH regression (#434): `check_prune_safe` refuses a boundary that would prune a rotation record still
+    needed to chain the pinned genesis to the current key over the LIVE tail (else the resolver fail-closes
+    post-prune = self-inflicted lockout) — while still allowing a prune BELOW the first rotation."""
+    from sigil.spine import prune
+    store = SpineStore(str(home / "spine.jsonl"))
+    store.migrate()
+    g = identity.ensure_owner_keypair()
+    identity.pin_genesis(g.public_key_b64)
+    for _ in range(5):                                          # seg 0: [0..5) plain events (prunable)
+        store.append(kind="event", source="t", actor="u", payload={"x": 0})
+    store.rotate()
+    for _ in range(4):                                          # seg 1: [5..10), rotation g->k1 at seq 9
+        store.append(kind="event", source="t", actor="u", payload={"x": 1})
+    k1 = generate_keypair()
+    _rotate_record(store, g, k1, epoch=1, prev=g.public_key_b64)
+    store.rotate()
+    for _ in range(5):                                          # seg 2: [10..15) live-era events under k1
+        store.append(kind="event", source="t", actor="u", payload={"x": 2})
+    store.rotate()
+    for _ in range(3):                                          # a live tail
+        store.append(kind="event", source="t", actor="u", payload={"x": 3})
+    identity.set_owner_key(k1)
+    kh.clear_resolver_cache()
+    # pruning BELOW the rotation (K=5) is fine — the whole succession chain stays live:
+    prune.check_prune_safe(store, 5)
+    # pruning THROUGH the rotation (K=10) would strand the g->k1 link the live tail still needs -> refuse:
+    with pytest.raises(prune.PruneUnsafe):
+        prune.check_prune_safe(store, 10)
 
 
 def test_re_genesis_abandons_continuity(home):
