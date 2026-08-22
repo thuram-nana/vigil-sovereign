@@ -6,8 +6,16 @@ NON-LOAD-BEARING: record order, count, and every tamper decision are re-derived 
 (via `verify_chain`/`classify_head`), never from the manifest's convenience fields. A doctored manifest
 therefore fails CLOSED — dropping/reordering an interior segment breaks `prev_hash`/seq contiguity, a
 dropped tail shortens `entries()` (the signed head's `n < entry_count` gate fires), a dropped front fails
-the genesis check. (A future signed-manifest tier would set `manifest_sig` — reserved `null` — because it
-would then attest pruned ranges; retain-all needs no such trust.)
+the genesis check. That byte-level fail-closed guarantee is the FLOOR and is unconditional.
+
+The signed-manifest tier (W16-STD-3) is defence-in-depth ON TOP of that floor: `write_manifest(...,
+private_key_b64=…)` sets `manifest_sig` to an Ed25519 signature over the canonical sig-nulled body (via the
+shared `vigil_core` signing — no new crypto), and `read_manifest(..., public_key_b64=…)` then REFUSES any
+edited or unsigned manifest before it is used. It is OPTIONAL: called without a key, both paths behave
+byte-identically to the historical unsigned manifest (retain-all does not depend on the signature for
+correctness — it catches a doctored manifest EARLIER, at read, rather than only downstream at chain
+re-derivation). Wiring a persisted per-store signing key so a running store signs its manifest BY DEFAULT is
+tracked separately (see the module's callers / W16 blocking-work).
 
 `SpineLayout` derives the whole on-disk layout from the spine data-file path a `SpineStore` is constructed
 with, so a store on a temp path is fully isolated. This module does no locking — the caller (`SpineStore`)
@@ -20,6 +28,7 @@ from pathlib import PurePosixPath, Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ..reuse import canonical_json, sign, verify_one
 from ..reuse.chain import _GENESIS_PREV
 from .atomicio import atomic_write_text
 from .schema_guard import refuse_newer
@@ -71,7 +80,8 @@ class Manifest(BaseModel):
     generation: int = Field(default=0, ge=0)     # monotonic epoch; ++ on EVERY swap — the unified change token
     scope: str = ""
     segments: list[Segment] = Field(default_factory=list)
-    manifest_sig: str | None = None              # reserved for the deferred signed-manifest tier
+    manifest_sig: str | None = None              # Ed25519 signature over the canonical body (sig field NULLED);
+    #                                              populated by sign_manifest / write_manifest(private_key_b64=…)
 
     def active(self) -> Segment | None:
         """The single unsealed (append) segment, if any. There is at most one."""
@@ -126,10 +136,48 @@ class SpineLayout:
         return f"{self.segments_dir.name}/{segment_filename(seg_id, codec)}"
 
 
-def read_manifest(layout: SpineLayout) -> Manifest | None:
+class ManifestSignatureError(Exception):
+    """A manifest was required to carry a valid signature and did not (missing, or does not verify under the
+    expected public key) — an edited/forged manifest is refused fail-closed."""
+
+
+def manifest_signing_bytes(manifest: Manifest) -> bytes:
+    """The canonical bytes signed by :func:`sign_manifest` — the manifest body with ``manifest_sig`` NULLED,
+    serialized deterministically. Nulling the signature field is what makes the signature a fixed point:
+    signer and verifier hash the identical body regardless of any prior signature value."""
+    body = manifest.model_copy(update={"manifest_sig": None})
+    return canonical_json(body.model_dump(mode="json"))
+
+
+def sign_manifest(manifest: Manifest, private_key_b64: str) -> Manifest:
+    """Return a copy of ``manifest`` with ``manifest_sig`` set to an Ed25519 signature over
+    :func:`manifest_signing_bytes` — reuses the shared ``vigil_core`` signing (no new crypto)."""
+    sig = sign(private_key_b64, manifest_signing_bytes(manifest))
+    return manifest.model_copy(update={"manifest_sig": sig})
+
+
+def verify_manifest(manifest: Manifest, public_key_b64: str) -> bool:
+    """True iff ``manifest`` carries a ``manifest_sig`` that verifies under ``public_key_b64`` over the
+    canonical (sig-nulled) body. False for a missing signature or any tamper (a changed field re-derives a
+    different body, so the retained signature no longer matches)."""
+    sig = manifest.manifest_sig
+    if not sig:
+        return False
+    try:
+        return verify_one(public_key_b64, manifest_signing_bytes(manifest), sig)
+    except Exception:  # noqa: BLE001 — a malformed signature/key is a verification FAILURE, not a crash
+        return False
+
+
+def read_manifest(layout: SpineLayout, *, public_key_b64: str | None = None) -> Manifest | None:
     """Load the manifest, or None if absent. A present-but-unparseable manifest RAISES (fail closed) —
     the atomic write path guarantees it is never torn, so a parse failure means genuine corruption, not a
-    partial write, and must never be silently treated as 'no manifest' (which would strand the segments)."""
+    partial write, and must never be silently treated as 'no manifest' (which would strand the segments).
+
+    When ``public_key_b64`` is supplied the signed-manifest tier is ENFORCED fail-closed: the manifest MUST
+    carry a ``manifest_sig`` that verifies under that key, else :class:`ManifestSignatureError` is raised — an
+    edited (or unsigned) manifest is refused. When it is omitted the manifest is read as before (unsigned,
+    non-load-bearing: tamper is still caught downstream by the byte-level chain re-derivation)."""
     mp = layout.manifest_path
     if not mp.exists():
         return None
@@ -139,11 +187,21 @@ def read_manifest(layout: SpineLayout) -> Manifest | None:
     # it fail-closed rather than silently linearize a v(N+1) manifest as v1 (the "silently treats v2 as v1"
     # defect). A read failure is already fail-closed (raises); this raise joins it.
     refuse_newer(m.schema_version, _MAX_MANIFEST_SCHEMA, artifact="segment manifest")
+    if public_key_b64 is not None and not verify_manifest(m, public_key_b64):
+        raise ManifestSignatureError(
+            "segment manifest signature missing or does not verify under the expected key — refusing a "
+            "tampered/unsigned manifest")
     return m
 
 
-def write_manifest(layout: SpineLayout, manifest: Manifest) -> None:
-    """Atomically publish the manifest (temp→fsync→os.replace→dir-fsync). THE cutover commit instant."""
+def write_manifest(layout: SpineLayout, manifest: Manifest, *, private_key_b64: str | None = None) -> None:
+    """Atomically publish the manifest (temp→fsync→os.replace→dir-fsync). THE cutover commit instant.
+
+    When ``private_key_b64`` is supplied the manifest is SIGNED before it is written (``manifest_sig`` is
+    populated), so a subsequent ``read_manifest(..., public_key_b64=…)`` verifies it and refuses any edit.
+    When it is omitted the manifest is written unsigned, byte-identical to the historical behaviour."""
+    if private_key_b64 is not None:
+        manifest = sign_manifest(manifest, private_key_b64)
     layout.manifest_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(layout.manifest_path, manifest.model_dump_json(), prefix=".manifest-")
 
