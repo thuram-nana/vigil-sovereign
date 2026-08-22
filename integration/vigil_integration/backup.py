@@ -9,8 +9,13 @@ only, and the remote's own security is the operator's responsibility.
 The offense plane had NO disaster-recovery path: its durable state under ``--base-dir`` (default ``.vigil-live``)
 — every ``{slug}.spine``, the persisted blackboard chain, the operator/spine/governance identity keys, the
 usage-attestation ledger, token budgets, attest anchors — plus the CRUCIBLE proof + engagement state under
-``crucible_root/.console/runs``, ``.blackboard/store.sqlite`` AND the ``targets/`` engagement tree (charters +
-per-action HTTP evidence — W7-2) was unprotected. A dead disk lost the lot, including client evidence.
+``crucible_root/.console/runs``, ``.blackboard/store.sqlite``, the ``targets/`` engagement tree (charters +
+per-action HTTP evidence — W7-2), AND the two TRUST-STATE units a functional recovery needs — the entitlement
+TRUST ROOT (``framework/v2/.entitlement``) and the DestructionAuthority (``framework/v2/.authority``, W7-2
+#460) — was unprotected. A dead disk lost the lot, including client evidence, and a restore that dropped the
+trust root came up fail-OPEN (no entitlement gate, no destruction m-of-n). The entitlement unit is captured at
+its DEFAULT in-tree location only; a ``CRUCIBLE_ENTITLEMENT_DIR`` override deliberately keeps it off the code
+tree (a separate secure mount) → a documented exclusion re-provisioned from that mount on restore.
 
 One capture is DELIBERATELY excluded: the W16-8 crypto-shred EVIDENCE KEYSTORE (the per-engagement DEKs,
 ``framework/v2/.evidence-keys`` or ``$CRUCIBLE_EVIDENCE_KEYS_DIR``). A right-to-erasure destroys a DEK so the
@@ -273,17 +278,36 @@ _CRUCIBLE_RUNS_UNIT = ".console/runs"                 # a whole SUBTREE unit
 # evidence archive (``targets/<slug>/evidence/**``). A restore without it produces an install that has lost
 # every client engagement + its evidence. A whole SUBTREE unit, replaced wholesale like the runs unit.
 _CRUCIBLE_TARGETS_UNIT = "targets"
+# W7-2 (#460): the two TRUST-STATE units a functional recovery needs — dropping either is a fail-OPEN posture
+# regression on restore (a recovered install could not re-establish its entitlement gate or its destruction
+# m-of-n and would run un-gated).
+#   * the entitlement TRUST ROOT (``framework/v2/.entitlement``): the authoriser public keys + threshold, the
+#     threshold-signed entitlement, and the signed revocation list — all PUBLIC/signed material, no private
+#     keys, so it travels safely under the passphrase seal;
+#   * the DestructionAuthority (``framework/v2/.authority``): the per-slug signed engagement authority (owner-
+#     bound m-of-n scope) AND the ``{slug}.halt`` kill-switch markers.
+# Both are captured + restored the SAME tier as ``targets/`` — whole SUBTREE units, replaced wholesale. Honest
+# scope of the wholesale replace: a ``--force`` restore whose backup lacks a kill-switch that currently exists
+# at the destination drops that ``.halt`` — the force-gate (a present authority unit refuses restore without
+# ``--force``) is what stops that being silent; a fresh-host DR restore has no pre-existing halt to lose.
+# The entitlement dir is captured ONLY at its DEFAULT in-tree location: a ``CRUCIBLE_ENTITLEMENT_DIR`` override
+# deliberately holds the trust root OFF the code tree (a separate secure / read-only / HSM-fronted mount), so
+# it is an EXPLICIT documented exclusion — re-provisioned from that mount (or a re-run of entitlement
+# provisioning) on the new host, never carried in this backup (see :func:`_iter_crucible_files`).
+_CRUCIBLE_ENTITLEMENT_UNIT = "framework/v2/.entitlement"
+_CRUCIBLE_AUTHORITY_UNIT = "framework/v2/.authority"
 # sqlite sidecars of the proof-db: swapping in a fresh, self-contained ``store.sqlite`` snapshot MUST drop the
 # OLD db's WAL/SHM/journal at the destination — an orphaned sidecar from the replaced db, applied to the new db
 # on next open, would corrupt it. They are never captured (the snapshot is already consistent + self-contained).
 _STORE_SQLITE_SIDECARS = ("store.sqlite-wal", "store.sqlite-shm", "store.sqlite-journal")
 
 
-def _evidence_keys_dir(croot: Path) -> Path:
+def _evidence_keys_dir(croot: Path | None = None) -> Path:
     """The W16-8 crypto-shred EVIDENCE KEYSTORE for this crucible root — the per-engagement DEKs that seal
     credential-bearing evidence. Resolved WITHOUT importing ``framework`` (FATAL-2: this module must never
     load the offense engine at import), mirroring ``framework.v2.common.paths.evidence_keys_dir`` EXACTLY —
     KEEP IN SYNC: ``$CRUCIBLE_EVIDENCE_KEYS_DIR`` override, else ``<croot>/framework/v2/.evidence-keys``.
+    ``croot`` may be ``None`` ONLY when the override is set (which is returned before ``croot`` is touched).
 
     This directory is NEVER packaged into the backup. W16-8 erasure destroys a DEK so the ciphertext left
     behind — on disk OR in an off-host backup — is cryptographically unrecoverable. If the backup ALSO carried
@@ -292,6 +316,8 @@ def _evidence_keys_dir(croot: Path) -> Path:
     override = os.environ.get("CRUCIBLE_EVIDENCE_KEYS_DIR")
     if override:
         return Path(override).expanduser()
+    if croot is None:
+        raise OffenseBackupError("evidence keystore dir needs a crucible_root when no override is set")
     return croot / "framework" / "v2" / ".evidence-keys"
 
 
@@ -347,34 +373,44 @@ def _crucible_units_present(croot: Path) -> list[str]:
         present.append(_CRUCIBLE_RUNS_UNIT)
     if _dir_is_nonempty(croot / _CRUCIBLE_TARGETS_UNIT):
         present.append(_CRUCIBLE_TARGETS_UNIT)
+    if _dir_is_nonempty(croot / _CRUCIBLE_ENTITLEMENT_UNIT):
+        present.append(_CRUCIBLE_ENTITLEMENT_UNIT)
+    if _dir_is_nonempty(croot / _CRUCIBLE_AUTHORITY_UNIT):
+        present.append(_CRUCIBLE_AUTHORITY_UNIT)
     return present
 
 
 def _atomic_swap_crucible_units(staged_croot: Path, dest_croot: Path) -> None:
-    """Swap ONLY the captured crucible units (the proof-db file, the runs subtree, and the targets engagement
-    subtree) from the staged tree onto ``dest_croot``, each atomically, leaving every un-captured file OUTSIDE
-    those units (the CRUCIBLE code, config, sibling ``.console``/``.blackboard`` entries) UNTOUCHED. Honest
-    scope: the ``.console/runs`` and ``targets`` subtrees are replaced WHOLESALE — a run/engagement created
-    AFTER the backup lives inside that unit and is therefore dropped (the intended DR-snapshot semantic), so
-    this bounds ``--force``'s blast radius to the captured units, not to "no un-captured data anywhere". The
-    units are swapped sequentially (a crash leaves each unit complete-old-or-complete-new, never torn),
-    matching the base-then-crucible sequential-swap limit."""
+    """Swap ONLY the captured crucible units (the proof-db file, the runs subtree, the targets engagement
+    subtree, the entitlement TRUST ROOT and the DestructionAuthority) from the staged tree onto ``dest_croot``,
+    each atomically, leaving every un-captured file OUTSIDE those units (the CRUCIBLE code, config, sibling
+    ``.console``/``.blackboard`` entries, the crypto-shred evidence keystore) UNTOUCHED. Honest scope: each
+    subtree is replaced WHOLESALE — a run/engagement/authority created AFTER the backup lives inside that unit
+    and is therefore dropped (the intended DR-snapshot semantic; for ``.authority`` this includes a kill-switch
+    the backup lacks, which is why the force-gate refuses a restore over a present authority unit), so this
+    bounds ``--force``'s blast radius to the captured units, not to "no un-captured data anywhere". The units
+    are swapped sequentially (a crash leaves each unit complete-old-or-complete-new, never torn), matching the
+    base-then-crucible sequential-swap limit."""
     staged_db = staged_croot / _CRUCIBLE_STORE_UNIT
     if staged_db.is_file():
         _atomic_swap_unit(staged_db, dest_croot / _CRUCIBLE_STORE_UNIT)
         for side in _STORE_SQLITE_SIDECARS:               # drop the replaced db's orphaned sidecars
             _drop_path(dest_croot / ".blackboard" / side)
-    for subtree in (_CRUCIBLE_RUNS_UNIT, _CRUCIBLE_TARGETS_UNIT):
+    for subtree in (_CRUCIBLE_RUNS_UNIT, _CRUCIBLE_TARGETS_UNIT, _CRUCIBLE_ENTITLEMENT_UNIT,
+                    _CRUCIBLE_AUTHORITY_UNIT):
         staged_unit = staged_croot / subtree
         if staged_unit.is_dir():
             _atomic_swap_unit(staged_unit, dest_croot / subtree)
 
 
-def _iter_base_files(base: Path):
+def _iter_base_files(base: Path, *, evidence_keys_dir: Path | None = None):
     """Yield ``(absolute_path, base-relative posix rel)`` for every packageable file under ``base_dir``.
     Skips: transient ``*.lock``; the TPM-sealed KEK ``vault/`` dir (machine-bound, re-provisioned on restore);
-    the socket/pid runtime dirs (``ui/pids/``, ``live-ui/``); symlinks (never followed/packaged); and the
-    three identity keys (re-wrapped separately as sealed-body secrets)."""
+    the socket/pid runtime dirs (``ui/pids/``, ``live-ui/``); symlinks (never followed/packaged); the
+    three identity keys (re-wrapped separately as sealed-body secrets); AND — the W16-8 co-location rule,
+    mirroring :func:`_iter_crucible_files` — anything under the crypto-shred EVIDENCE KEYSTORE when
+    ``evidence_keys_dir`` (a ``CRUCIBLE_EVIDENCE_KEYS_DIR`` override) relocates it UNDER ``base_dir``, so a DEK
+    never travels to the same place as the ciphertext it seals even from the base tree."""
     skip_names = {name for name, _ctx in _REWRAP_KEYS}
     for p in sorted(base.rglob("*")):
         if p.is_symlink() or not p.is_file():
@@ -385,6 +421,8 @@ def _iter_base_files(base: Path):
             continue
         if rel in skip_names:
             continue
+        if evidence_keys_dir is not None and _under(p, evidence_keys_dir):   # never package a DEK (W16-8)
+            continue
         yield p, rel
 
 
@@ -392,9 +430,16 @@ def _iter_crucible_files(croot: Path):
     """Yield ``(absolute_path, crucible-prefixed rel)`` for the CRUCIBLE-side durable proof + engagement state:
     ``.blackboard/store.sqlite``; the whole ``.console/runs/**`` subtree (reports, reverifiable findings, raw
     evidence bytes, AND any exported self-contained verifiable bundle — the superset needed so a restored FACT
-    re-verifies end-to-end); AND the ``targets/**`` engagement tree (W7-2 — charters, threat models, notes, and
-    the per-action HTTP evidence archive), so a restore recovers the client engagements + their evidence, not
-    just the proof db.
+    re-verifies end-to-end); the ``targets/**`` engagement tree (W7-2 — charters, threat models, notes, and
+    the per-action HTTP evidence archive), so a restore recovers the client engagements + their evidence;
+    AND (W7-2 #460) the two TRUST-STATE units a functional recovery needs — the entitlement TRUST ROOT
+    (``framework/v2/.entitlement`` — authoriser pubkeys + threshold, the signed entitlement, the revocation
+    list) and the DestructionAuthority (``framework/v2/.authority`` — the per-slug signed authority + the
+    ``{slug}.halt`` kill-switch), so a recovered install can re-establish its entitlement gate and its
+    destruction m-of-n rather than come up fail-OPEN. All are PUBLIC/signed material (no private keys), safe
+    under the passphrase seal. The entitlement unit is captured ONLY at its DEFAULT in-tree location; a
+    ``CRUCIBLE_ENTITLEMENT_DIR`` override holds the trust root off the code tree by design → documented
+    exclusion, re-provisioned from that mount on restore.
 
     Skips ``*.lock``, the derived ``dossier.zip``, non-regular files/symlinks, AND — the W16-8 rule — anything
     under the crypto-shred EVIDENCE KEYSTORE (:func:`_evidence_keys_dir`): the per-engagement DEKs never travel
@@ -406,7 +451,17 @@ def _iter_crucible_files(croot: Path):
     bb = croot / ".blackboard" / "store.sqlite"
     if bb.is_file() and not bb.is_symlink() and not _under(bb, keys_dir):
         yield bb, _CRUCIBLE_PREFIX + ".blackboard/store.sqlite"
-    for subtree in (croot / ".console" / "runs", croot / _CRUCIBLE_TARGETS_UNIT):
+    # The DestructionAuthority is always in-tree. The entitlement TRUST ROOT is captured ONLY at its DEFAULT
+    # in-tree location: a ``CRUCIBLE_ENTITLEMENT_DIR`` override deliberately keeps it off the code tree (a
+    # separate secure / read-only / HSM-fronted mount), so it is an EXPLICIT documented exclusion — re-provisioned
+    # from that mount (or a re-run of entitlement provisioning) on the new host, never carried in this backup.
+    subtrees = [croot / ".console" / "runs", croot / _CRUCIBLE_TARGETS_UNIT, croot / _CRUCIBLE_AUTHORITY_UNIT]
+    if os.environ.get("CRUCIBLE_ENTITLEMENT_DIR"):
+        _log.info("CRUCIBLE_ENTITLEMENT_DIR is set — the entitlement trust root is held off the crucible tree "
+                  "and is EXCLUDED from this backup by design; re-provision it from that mount on the new host")
+    else:
+        subtrees.append(croot / _CRUCIBLE_ENTITLEMENT_UNIT)
+    for subtree in subtrees:
         if not subtree.is_dir():
             continue
         for p in sorted(subtree.rglob("*")):
@@ -434,20 +489,23 @@ def create_offense_backup(dest, passphrase: str, *, base_dir, crucible_root=None
 
     file_blobs: dict[str, str] = {}
     file_hashes: dict[str, str] = {}
-    sources = list(_iter_base_files(base))
-    if crucible_root:
-        croot = Path(crucible_root)
-        crucible_sources = list(_iter_crucible_files(croot))
-        # W16-8 defence-in-depth: assert no packaged crucible file is a crypto-shred DEK. The iterator already
-        # skips the keystore; this is the belt-and-braces invariant so a future iterator change can never
-        # quietly co-locate a DEK with the ciphertext it seals (which would undo erasure-by-key-destruction).
-        keys_dir = _evidence_keys_dir(croot)
-        leaked = [rel for f, rel in crucible_sources if _under(f, keys_dir)]
+    croot = Path(crucible_root) if crucible_root else None
+    # The W16-8 crypto-shred keystore dir (honoring a ``CRUCIBLE_EVIDENCE_KEYS_DIR`` override). Used to (a) skip
+    # any keystore file that an override relocated UNDER ``base_dir`` OR a captured crucible tree, and (b) a
+    # belt-and-braces create-time leak assertion over EVERY packaged source — base AND crucible — so a future
+    # iterator change can never quietly co-locate a DEK with the ciphertext it seals (which would undo
+    # erasure-by-key-destruction). ``None`` only when there is no override and no crucible root (no keystore).
+    env_keys = os.environ.get("CRUCIBLE_EVIDENCE_KEYS_DIR")
+    keys_dir = _evidence_keys_dir(croot) if (env_keys or croot is not None) else None
+    sources = list(_iter_base_files(base, evidence_keys_dir=keys_dir))
+    if croot is not None:
+        sources += list(_iter_crucible_files(croot))
+    if keys_dir is not None:
+        leaked = [rel for f, rel in sources if _under(f, keys_dir)]
         if leaked:
             raise OffenseBackupError(
                 f"refusing to package crypto-shred evidence key(s) into the backup: {leaked} — the DEK must "
                 f"never travel to the same place as the ciphertext it seals (W16-8)")
-        sources += crucible_sources
     for f, rel in sources:
         # ``.blackboard/store.sqlite`` is captured as a CONSISTENT snapshot (online backup API); every other
         # file is an opaque raw byte copy. The snapshot bytes are what gets hashed + packaged, so the pre-write
@@ -559,10 +617,11 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
         ``new_base`` is REFUSED unless ``force=True``; with ``force`` it is whole-replaced (only stale /
         re-creatable state is dropped).
       * ``crucible_root`` is a strict SUBSET capture — the proof-db (``.blackboard/store.sqlite``), the runs
-        subtree (``.console/runs``) and the ``targets/`` engagement tree. Restore replaces ONLY those units;
-        every file OUTSIDE them under ``crucible_root`` (the CRUCIBLE code, config, sibling
-        ``.console``/``.blackboard`` entries, and the crypto-shred evidence keystore) is LEFT INTACT, even under
-        ``--force``. The force-gate here fires only when a captured proof unit already exists
+        subtree (``.console/runs``), the ``targets/`` engagement tree, the entitlement TRUST ROOT
+        (``framework/v2/.entitlement``) and the DestructionAuthority (``framework/v2/.authority``). Restore
+        replaces ONLY those units; every file OUTSIDE them under ``crucible_root`` (the CRUCIBLE code, config,
+        sibling ``.console``/``.blackboard`` entries, and the crypto-shred evidence keystore) is LEFT INTACT,
+        even under ``--force``. The force-gate here fires only when a captured proof unit already exists
         — never merely because the root is non-empty (it always is). This bounds ``--force``'s blast radius to
         the captured units — it never reaches the CRUCIBLE code or any sibling. Honest scope: the
         ``.console/runs`` unit is replaced WHOLESALE, so a run created AFTER the backup (which lives inside that
