@@ -45,12 +45,23 @@ import re
 import shutil
 import socket
 import subprocess
+import time
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol, Sequence, runtime_checkable
 
 from ..safety.hard_guardrail import is_hard_blocked, protected_guard_enabled
+from .capability_token import (
+    CapabilityAuthority,
+    CapabilityGrant,
+    CapabilityPolicy,
+    CapabilityRefused,
+    NonceLedger,
+    operation_hash,
+    require_capability_token,
+)
+from .capability_token import DEFAULT_POLICY as _CAP_DEFAULT_POLICY
 
 
 # ---------------------------------------------------------------------------
@@ -678,6 +689,70 @@ def _preflight_gate_refusal(engagement_slug: str) -> "str | None":
     return None
 
 
+@dataclass(frozen=True)
+class CapabilityCheck:
+    """The bundle the caller threads to :func:`run_external_tool` to enforce a nine-field-bound, single-use
+    CAPABILITY TOKEN at the executor boundary (W13-5). It carries the owner-signed ``token`` and the three
+    operation-identifying fields the executor cannot infer from the ``spec``/``target`` alone — the
+    ``deployment`` this run happens in, the WARDEN ``danger_class`` of the operation, and the
+    ``policy_digest`` of the policy being enforced under — plus the immutable deployment ``authority`` (the
+    pinned owner key), the EXISTING O_EXCL ``ledger`` the nonce is burned in, a trusted ``now`` clock, and
+    the dead-man's-switch ``policy``. The remaining bound fields (engagement, operation_hash, target, tool)
+    are derived by the executor from what it is ACTUALLY about to run, so the token is validated against the
+    real operation, not a caller-asserted description of it."""
+
+    token: Any
+    authority: CapabilityAuthority
+    ledger: NonceLedger
+    deployment: str
+    danger_class: str
+    policy_digest: str
+    now: Callable[[], float] = time.time
+    policy: CapabilityPolicy = _CAP_DEFAULT_POLICY
+
+
+def _capability_boundary_refusal(
+    capability: "CapabilityCheck | None", spec: "ToolSpec", target: str, engagement_slug: str
+) -> "str | None":
+    """The EXECUTOR-BOUNDARY capability check (W13-5), consulted on EVERY exec path immediately before the
+    tool runs. Returns a refusal reason, or ``None`` to proceed.
+
+    When a :class:`CapabilityCheck` is threaded, this builds the :class:`CapabilityGrant` describing the
+    EXACT operation the executor is about to run (deployment, engagement, an ``operation_hash`` over the
+    real argv, the normalized target, the tool, the danger class, and the enforced policy digest) and calls
+    :func:`require_capability_token`, which validates all nine bound fields against that operation and
+    ATOMICALLY burns the single-use nonce in the O_EXCL ledger. A stale, replayed, expired, or
+    different-operation token is refused here, so the authorization cannot go stale/replayed/reused between
+    the upstream decision and this act. A refused token NEVER burns a victim's nonce (the burn is after all
+    checks pass).
+
+    When ``capability is None`` no token is enforced (the upstream gate chain — pre-flight kill-switch +
+    entitlement, scope/egress — still governs, unchanged). Making a capability token MANDATORY for every
+    executor invocation (minting it at the sovereign approval leg and threading it through every caller) is
+    the stated residual — see docs/decisions/W13-5-executor-capability-token.md."""
+    if capability is None:
+        return None
+    try:
+        grant = CapabilityGrant(
+            deployment=str(capability.deployment),
+            engagement=str(engagement_slug),
+            operation_hash=operation_hash(spec.name, target, list(spec.build_argv(target))),
+            target=str(target),
+            tool=str(spec.name),
+            danger_class=str(capability.danger_class),
+            policy_digest=str(capability.policy_digest),
+        )
+        require_capability_token(
+            capability.token, grant, ledger=capability.ledger, authority=capability.authority,
+            now=float(capability.now()), policy=capability.policy,
+        )
+    except CapabilityRefused as e:
+        return f"capability token refused at executor boundary: {e}"
+    except Exception as e:  # noqa: BLE001 — any error building/validating the check REFUSES (fail-closed)
+        return f"capability boundary errored (fail-closed): {type(e).__name__}: {e}"
+    return None
+
+
 def _capture_tool_version(spec: "ToolSpec", backend: "ExecBackend", timeout: float) -> str:
     """Best-effort tool version via ``spec.version_argv`` through the SAME gated backend (no target). The
     parsed value is the producer's ASSERTED version (stamped + signed into the cert; NOT a proof of which
@@ -762,6 +837,7 @@ def run_external_tool(
     capture: Callable[..., dict] = _default_capture,
     timeout: float = _DEFAULT_TIMEOUT,
     freshness_ttl_seconds: int = 0,
+    capability: "CapabilityCheck | None" = None,
 ) -> RunnerResult:
     """Run ``spec`` against ``target`` through ``backend`` and mint a signed FACT for every proposed
     service the deterministic oracle CONFIRMS.
@@ -813,6 +889,16 @@ def run_external_tool(
     ok, why = backend.available()
     if not ok:
         raise BackendUnavailable(f"{backend.name} backend unavailable: {why}")
+
+    # W13-5 EXECUTOR BOUNDARY: validate the nine-field-bound, single-use capability token IMMEDIATELY
+    # before the tool runs, and burn its nonce, so the authorization cannot be stale/replayed/reused for
+    # a different operation by the time execution happens. Consulted on EVERY exec path (a None check is
+    # the no-token path governed by the upstream gate chain; see _capability_boundary_refusal).
+    cap_refusal = _capability_boundary_refusal(capability, spec, target, engagement_slug)
+    if cap_refusal is not None:
+        from .observation import refused_observation  # noqa: PLC0415
+        return RunnerResult("refused", cap_refusal, spec.name, target,
+                            observation=refused_observation(spec, target))
 
     outcome = backend.run(spec.build_argv(target), timeout=timeout)
 
