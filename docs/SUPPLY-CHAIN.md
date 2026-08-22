@@ -149,7 +149,10 @@ The **CI/test toolchain** (`pytest`, `pytest-asyncio`, `ruff`, `mypy`) is not pa
 tree, so it is kept out of both runtime locks; it has its own hash-locked subset,
 `infra/supply-chain/ci-tooling.lock.txt`, which the jobs also install under `--require-hashes`. It
 is generated with `uv pip compile --generate-hashes` (like `strix.lock`'s uv origin, unlike the two
-pip-compile runtime locks) and its input is `infra/supply-chain/ci-tooling.in`.
+pip-compile runtime locks) and its input is `infra/supply-chain/ci-tooling.in`. Every job that runs
+`pytest`/`ruff`/`mypy` — including the advisory `lint-config.yml` job — installs the toolchain from
+this lock under `--require-hashes`; none types `pip install "ruff==…" mypy pytest` inline, which
+would pin only `ruff` and resolve `mypy`+`pytest` fresh from PyPI on every run.
 
 | Lock | Covers | Generated with |
 |---|---|---|
@@ -160,7 +163,10 @@ require-hashes install, **records** the resolved versions (`pip freeze`) and **c
 the lock (`.github/scripts/compare_resolved_to_lock.py`) — a red build if the CI environment ever
 diverges from the lock. `integration/tests/test_supply_chain.py` (a required check, in both the A14
 gate and the `integration` job) asserts statically that **no** workflow installs a runtime range
-below a lock floor and that every runtime dependency is installed under `--require-hashes`.
+below a lock floor, that every runtime dependency is installed under `--require-hashes`, and — a
+separate class the runtime guards are blind to because the toolchain is in no runtime lock — that
+**no** workflow installs a ci-tooling-locked tool (`pytest`/`ruff`/`mypy`) inline without
+`--require-hashes` (`test_ci_installs_toolchain_only_under_require_hashes`).
 
 The only deliberately-unpinned CI install that remains is `strix-vigil`'s best-effort live-scan SDK
 (`openai-agents[litellm]`, `openai`): it is not part of the tested tree — the reasoning/dedup tests

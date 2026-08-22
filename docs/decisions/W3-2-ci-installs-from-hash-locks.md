@@ -32,7 +32,16 @@ This claim is TRUE of the code as of W3-2:
 - **The toolchain lock** — `infra/supply-chain/ci-tooling.lock.txt` (input `ci-tooling.in`) pins
   `pytest`/`pytest-asyncio`/`ruff`/`mypy` with hashes; the jobs install it under `--require-hashes`.
   Generated with `uv pip compile --generate-hashes` (like `strix.lock`'s uv origin) and proven to
-  install under `--require-hashes` by the A14 gate.
+  install under `--require-hashes` by the A14 gate. This includes the advisory `lint-config.yml`
+  job, which previously ran `pip install "ruff==0.15.12" mypy pytest` — pinning only `ruff` and
+  resolving `mypy`+`pytest` fresh from PyPI on every run — and now installs the ci-tooling lock under
+  `--require-hashes` like every other toolchain consumer.
+
+  Red-pen #425 caught this: the toolchain-below-lock class was **invisible** to the runtime-floor and
+  runtime-require-hashes guards, whose keys are the runtime locks. `pytest`/`mypy` are in neither
+  runtime lock, so an unpinned inline toolchain install slipped straight past both — a lock nothing
+  installs from is a document, one class over from the runtime gap. Closed here in both the wiring
+  (lint-config.yml) and the guard (a new toolchain-scoped test, below).
 - **Resolved-vs-lock recording** — after each require-hashes install the A14 gate dumps `pip freeze`
   and compares it to the lock (`.github/scripts/compare_resolved_to_lock.py`); a divergence is a red
   build. `--require-hashes` already forces resolved == locked, so this is the explicit assertion of
@@ -47,6 +56,12 @@ Pinned by `integration/tests/test_supply_chain.py` (§5), which runs in **two** 
 - `test_ci_installs_runtime_deps_only_under_require_hashes` — every runtime dependency in every
   workflow is installed under `--require-hashes`; negative control that an inline runtime install is
   flagged and a `--require-hashes` / first-party-editable install is not.
+- `test_ci_installs_toolchain_only_under_require_hashes` — **the #425 regression guard.** No
+  workflow installs a ci-tooling-locked tool (`pytest`/`ruff`/`mypy`, read from `ci-tooling.in` so it
+  tracks the lock) inline without `--require-hashes`. **FAILS on the pre-fix tree** (lint-config.yml's
+  inline `mypy pytest`); negative control that the exact pre-fix line `pip install "ruff==0.15.12"
+  mypy pytest` is flagged and the `--require-hashes` ci-tooling install is not. This is the class the
+  runtime guards could not see, now gated instead of invisible.
 - `test_ci_tooling_lock_is_used_under_require_hashes`, `test_ci_tooling_lock_agrees_with_runtime_locks_on_shared_packages`,
   `test_shared_runtime_versions_agree_across_locks` — the toolchain lock is committed, hash-pinned,
   covers pytest/ruff/mypy, is installed under `--require-hashes`, and neither it nor the two runtime
