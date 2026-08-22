@@ -12,6 +12,7 @@ go to `targets/<slug>/.crucible-v2.log`.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging as _stdlib_logging
 import os
@@ -22,26 +23,48 @@ import structlog
 
 from . import paths, redact
 
-# X2: an engagement log is rotated once when it exceeds this, bounding disk to
-# ~2x this size (the live file + a single .1 backup). Generous so the Ops Console
-# live-tail is never disrupted in a normal run.
-_LOG_MAX_BYTES = 64 * 1024 * 1024
+# W16-STD-6(a): an engagement log ROTATES with RETENTION when it exceeds the size
+# cap — it is NEVER truncated in place, so no audit history is silently discarded.
+# The live file is renamed to ``.1`` and the existing backups shift up
+# (``.1`` -> ``.2`` -> … -> ``.N``); only the record PAST the explicit, documented
+# retention window (``_LOG_BACKUP_COUNT`` backups) is pruned — and that pruning is
+# a stated policy, not a silent 128 MiB cliff. Disk is bounded to
+# ~``(_LOG_BACKUP_COUNT + 1) * _LOG_MAX_BYTES``. Both are read at rotation time so a
+# deployment can widen retention via ``VIGIL_LOG_MAX_BYTES`` /
+# ``VIGIL_LOG_BACKUP_COUNT`` (and tests can monkeypatch them). The cap is generous
+# so the Ops Console live-tail is never disrupted in a normal run.
+try:
+    _LOG_MAX_BYTES = max(1, int(os.environ.get("VIGIL_LOG_MAX_BYTES", str(64 * 1024 * 1024))))
+except (TypeError, ValueError):
+    _LOG_MAX_BYTES = 64 * 1024 * 1024
+try:
+    _LOG_BACKUP_COUNT = max(1, int(os.environ.get("VIGIL_LOG_BACKUP_COUNT", "16")))
+except (TypeError, ValueError):
+    _LOG_BACKUP_COUNT = 16
 
 # Log paths already permission-tightened this process, so the pre-existing-file
 # chmod (upgrade path) runs once per path, not per line.
 _SECURED_LOGS: set[str] = set()
 
 
-# Module-level mutable holder for the current engagement slug. We use a
-# module-level variable instead of contextvars because v2 today is
-# single-threaded; switching is rare and explicit.
-_BOUND_SLUG: str | None = None
+# W16-STD-6(b): the current engagement slug is held in a ContextVar, NOT a bare
+# module global. Two engagements running concurrently in the same process (each on
+# its own thread/context — the console's ThreadingHTTPServer, a worker pool) each
+# get their OWN bound slug, so their structured logs route to separate
+# ``targets/<slug>/.crucible-v2.log`` files instead of cross-logging into whichever
+# engagement bound last. A fresh thread starts from the default (ambient), which is
+# the correct fail-safe: an unbound context logs to the process-level file, never
+# into an unrelated engagement's audit trail.
+_BOUND_SLUG: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "vigil_engagement_slug", default=None
+)
 
 
 def _engagement_log_path() -> Path:
-    if _BOUND_SLUG is not None:
+    slug = _BOUND_SLUG.get()
+    if slug is not None:
         try:
-            return paths.crucible_v2_log(_BOUND_SLUG)
+            return paths.crucible_v2_log(slug)
         except Exception:
             pass  # fall through to ambient
     return paths.v2_root() / ".crucible-v2.log"
@@ -55,6 +78,36 @@ def _scrub(_logger: Any, _name: str, event_dict: Any) -> Any:
     return redact.scrub_log_event(dict(event_dict))
 
 
+def _rotate_with_retention(p: Path) -> None:
+    """Roll the over-cap log ``p`` into a numbered backup ring, RETAINING history
+    (W16-STD-6(a)). The oldest backup beyond the retention window is dropped FIRST
+    (an explicit, documented policy — never the old silent 128 MiB truncation), then
+    each surviving backup shifts up one (``.N-1`` -> ``.N`` … ``.1`` -> ``.2``), then
+    the live file becomes ``.1``. ``os.replace`` is atomic per step and preserves the
+    inode mode, so a pre-existing loose (0644) backup is re-tightened after each move.
+    Any per-file OSError is swallowed so a single stuck backup never blocks the
+    append hot path (the live file still rolls to ``.1``)."""
+    keep = _LOG_BACKUP_COUNT if _LOG_BACKUP_COUNT >= 1 else 1
+    oldest = p.with_suffix(p.suffix + f".{keep}")
+    try:
+        if oldest.exists():
+            oldest.unlink()                          # prune only PAST the retention window
+    except OSError:
+        pass
+    for k in range(keep - 1, 0, -1):
+        src = p.with_suffix(p.suffix + f".{k}")
+        dst = p.with_suffix(p.suffix + f".{k + 1}")
+        try:
+            if src.exists():
+                os.replace(src, dst)
+                paths.secure_existing(dst)
+        except OSError:
+            pass
+    rotated = p.with_suffix(p.suffix + ".1")
+    os.replace(p, rotated)
+    paths.secure_existing(rotated)
+
+
 def _append_capped(p: Path, line: str) -> None:
     """Append one line to the owner-only engagement log, rotating once if it has
     grown past the cap. The file is created 0600 with NO world-readable window (via
@@ -66,11 +119,7 @@ def _append_capped(p: Path, line: str) -> None:
     paths.secure_dir(p.parent)                       # ensure-exists; chmods only a dir it creates
     try:
         if p.exists() and p.stat().st_size >= _LOG_MAX_BYTES:
-            rotated = p.with_suffix(p.suffix + ".1")     # bounded: one .1 backup
-            os.replace(p, rotated)
-            # os.replace preserves the inode's mode, so a pre-X2 (0644) log stays
-            # world-readable as the backup — tighten the rotated file too.
-            paths.secure_existing(rotated)
+            _rotate_with_retention(p)
     except OSError:
         pass
     first_touch = str(p) not in _SECURED_LOGS
@@ -114,9 +163,10 @@ def configure(level: str = "INFO") -> None:
 
 
 def bind_engagement(slug: str | None) -> None:
-    """Route subsequent logs to this engagement's file. None resets to ambient."""
-    global _BOUND_SLUG
-    _BOUND_SLUG = slug
+    """Route subsequent logs from THIS context (thread/task) to this engagement's
+    file. None resets this context to ambient. The binding is per-context
+    (ContextVar), so concurrent engagements in the same process do not cross-log."""
+    _BOUND_SLUG.set(slug)
 
 
 def get_logger(name: str) -> Any:

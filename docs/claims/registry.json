@@ -182,6 +182,87 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W16-STD-6a",
+      "title": "Engagement log rotates with retention (no silent discard)",
+      "claim": "The engagement log rotates through a numbered backup ring and retains history up to an explicit retention window, rather than discarding it in place.",
+      "source": "docs/decisions/W16-STD-6-ops-defects.md:12",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/common/logging.py",
+        "symbol": "_rotate_with_retention"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/common/tests/test_logging_rotation.py",
+        "tests": [
+          "test_rotation_retains_history_across_multiple_backups",
+          "test_rotation_preserves_earlier_lines_that_old_code_discarded"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-6b",
+      "title": "Concurrent engagements do not cross-log (per-context slug)",
+      "claim": "The bound engagement slug is held per execution context, so two concurrent engagements in one process write to separate log files instead of cross-logging.",
+      "source": "docs/decisions/W16-STD-6-ops-defects.md:25",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/common/logging.py",
+        "symbol": "bind_engagement"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/common/tests/test_logging_rotation.py",
+        "tests": [
+          "test_concurrent_engagements_do_not_cross_log",
+          "test_unbound_context_routes_to_ambient_not_a_siblings_engagement"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-6c",
+      "title": "Live directory resolves absolute and CWD-independent",
+      "claim": "The default live directory resolves to an absolute path anchored to the CRUCIBLE root, so it is the same store regardless of the current working directory.",
+      "source": "docs/decisions/W16-STD-6-ops-defects.md:36",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/instructions.py",
+        "symbol": "resolve_live_dir"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_live_instructions.py",
+        "tests": [
+          "test_live_dir_default_is_cwd_independent",
+          "test_live_dir_explicit_base_wins_and_is_absolute"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-6d",
+      "title": "Blackboard SQLite corruption detected at open",
+      "claim": "The blackboard SQLite store runs an integrity check on open and raises a clear error when the store is corrupt or not a database.",
+      "source": "docs/decisions/W16-STD-6-ops-defects.md:47",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/agents/blackboard.py",
+        "symbol": "Blackboard._integrity_check"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/agents/tests/test_blackboard.py",
+        "tests": [
+          "test_corrupt_store_is_detected_with_a_clear_error",
+          "test_partially_corrupt_page_is_detected",
+          "test_pristine_store_passes_integrity_check"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

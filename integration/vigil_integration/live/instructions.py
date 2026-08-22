@@ -36,10 +36,58 @@ def _safe_slug(slug: str) -> str:
     return s
 
 
+def _crucible_root_freestanding() -> Path:
+    """The CRUCIBLE root (dir holding the ``CLAUDE.md`` sentinel), computed WITHOUT importing ``framework``
+    — so it resolves identically in the offense leg and the sovereign/integration leg (where ``framework``
+    is not importable). Honors ``$CRUCIBLE_ROOT`` (what ``vigil up``/bootstrap export, aligning both planes
+    on ONE tree), then walks UP from this module's location — never the CWD — for ``engine/crucible/CLAUDE.md``
+    or a bare ``CLAUDE.md``. Mirrors ``framework.v2.common.paths.crucible_root`` closely enough that the
+    console (which uses that) and this module land on the SAME default ``.vigil-live``."""
+    env = (os.environ.get("CRUCIBLE_ROOT") or "").strip()
+    if env:
+        p = Path(env).expanduser()
+        if (p / "CLAUDE.md").is_file():
+            try:
+                return p.resolve()
+            except OSError:
+                return p.absolute()
+    here = Path(__file__).resolve()
+    for parent in (here, *here.parents):
+        cand = parent / "engine" / "crucible" / "CLAUDE.md"
+        if cand.is_file():
+            return cand.parent
+        if (parent / "CLAUDE.md").is_file():
+            return parent
+    # last resort: the repo root inferred from this module's fixed position (…/integration/vigil_integration/live)
+    return here.parents[3] if len(here.parents) >= 4 else here.parent
+
+
+def resolve_live_dir(base: Optional[str] = None) -> Path:
+    """The operator-machine live base, resolved to an ABSOLUTE path (W16-STD-6(c)), mirroring the console's
+    ``console.sessions._live_dir`` so BOTH planes agree on ONE store.
+
+    Precedence: explicit ``base`` (the engagement's ``--base-dir``) > ``$VIGIL_LIVE_DIR`` > the
+    ``.vigil-live`` convention anchored to the CRUCIBLE ROOT. The bare ``.vigil-live`` default used to be
+    resolved against whatever CWD the process happened to have, so ``vigil`` invoked from a different
+    directory silently used a DIFFERENT store than the running engagement — an enqueue and the engagement
+    disagreed on WHERE the queue lived. Anchoring the DEFAULT to the crucible root makes it
+    CWD-INDEPENDENT (see ``_crucible_root_freestanding``); an explicit ``base``/env value is absolutized
+    once, at read time. Total: a pathological value never raises into a caller."""
+    explicit = base or (os.environ.get("VIGIL_LIVE_DIR") or "").strip()
+    if explicit:
+        p = Path(explicit).expanduser()
+    else:
+        p = _crucible_root_freestanding() / ".vigil-live"
+    try:
+        return p.resolve()
+    except OSError:
+        return p.absolute()
+
+
 def _base(base: Optional[str] = None) -> Path:
     # explicit `base` (the engagement's --base-dir) wins over the env, so an enqueue and the running
     # engagement always agree on WHERE the queue lives; default keeps standalone use working.
-    d = Path(base or os.environ.get("VIGIL_LIVE_DIR") or ".vigil-live") / "instructions"
+    d = resolve_live_dir(base) / "instructions"
     d.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(d, 0o700)          # operator free-text is not world-readable
