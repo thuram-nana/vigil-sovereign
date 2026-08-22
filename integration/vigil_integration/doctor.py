@@ -223,6 +223,18 @@ _STRIX_SANDBOX_NETWORK_ENV = "STRIX_DOCKER_SANDBOX_NETWORK"
 # the sealed-KEK blob filenames the sovereign vault provisions (mirror of vigil_core.kek._SEAL_PUB/_SEAL_PRIV)
 _VAULT_SEAL_PUB = "kek.tpm.pub"
 _VAULT_SEAL_PRIV = "kek.tpm.priv"
+# the AEAD seal magic + version a sealed file starts with (mirror of vigil_core.sealing._MAGIC/_VERSION) —
+# lets doctor tell a SEALED key file (ciphertext at rest) from a PLAINTEXT one WITHOUT importing vigil_core,
+# by reading the first bytes on disk (FATAL-2: pure disk read). A shape check, never a decrypt.
+_SEAL_MAGIC = b"VSL1"
+_SEAL_VERSION = 1
+# the trust-root key files W9-2 rotates + seals, relative to SIGIL_HOME (mirror of sigil.config paths +
+# warden_key.warden_home). Reported per-key so `vigil doctor` shows the sealing state of EACH.
+_W9_KEY_FILES = (
+    ("owner.priv", ("spine", "keys", "owner.priv")),
+    ("spine.dek", ("spine", "keys", "spine.dek")),
+    ("warden.key", ("warden", "warden.key")),
+)
 
 
 def _sigil_home() -> Path:
@@ -348,6 +360,47 @@ def _posture_vault() -> "tuple[str, str]":
                              f"seal to the plaintext {_display_path(home / 'sigil.env')}")
 
 
+def _file_seal_state(p: Path) -> str:
+    """The at-rest sealing state of ONE key file, from its first bytes on disk (FATAL-2: no import, no
+    decrypt): ``SEALED`` (starts with the AEAD magic+version), ``PLAINTEXT`` (present but not sealed),
+    ``ABSENT`` (no file), or ``UNREADABLE``. A ``$SIGIL_WARDEN_HOME`` override is honoured for warden.key."""
+    try:
+        with p.open("rb") as f:
+            head = f.read(len(_SEAL_MAGIC) + 1)
+    except FileNotFoundError:
+        return "ABSENT"
+    except OSError:
+        return "UNREADABLE"
+    if not head:
+        return "ABSENT"
+    if head[: len(_SEAL_MAGIC)] == _SEAL_MAGIC and len(head) > len(_SEAL_MAGIC) and head[len(_SEAL_MAGIC)] == _SEAL_VERSION:
+        return "SEALED"
+    return "PLAINTEXT"
+
+
+def _posture_key_sealing() -> "tuple[str, str]":
+    """The per-key at-rest sealing state (audit W9-2), read WITHOUT importing sigil (FATAL-2): the owner
+    private key, the spine DEK, and the WARDEN kernel key. Reports one state PER key so an operator sees
+    exactly which trust-root keys rest sealed vs plaintext. Roll-up: SEALED iff every PRESENT key is sealed;
+    PLAINTEXT if any present key is plaintext (the defect W9-2 closes); ABSENT if none exist yet."""
+    home = _sigil_home()
+    warden_home = Path(os.environ["SIGIL_WARDEN_HOME"]) if os.environ.get("SIGIL_WARDEN_HOME") else home / "warden"
+    per = []
+    for label, rel in _W9_KEY_FILES:
+        p = (warden_home / "warden.key") if label == "warden.key" else home.joinpath(*rel)
+        per.append((label, _file_seal_state(p)))
+    present = [(lbl, st) for (lbl, st) in per if st not in ("ABSENT", "UNREADABLE")]
+    detail = ", ".join(f"{lbl}={st}" for lbl, st in per)
+    if not present:
+        return "ABSENT", f"no trust-root key files present yet ({detail})"
+    if any(st == "PLAINTEXT" for _lbl, st in present):
+        return "PLAINTEXT", (f"a trust-root key rests PLAINTEXT ({detail}) — provision the vault and run "
+                             f"`sigil key rotate-kek` / `sigil key seal-warden` to seal keys at rest")
+    if all(st == "SEALED" for _lbl, st in present):
+        return "SEALED", f"every present trust-root key rests sealed ({detail})"
+    return "UNKNOWN", detail
+
+
 def _posture_backups(repo: Path) -> "tuple[str, str]":
     """Are the systemd backup/reprove/HA timers enabled? Enumerated from infra/systemd/*.timer and probed
     with `systemctl is-enabled`. ON iff at least one is enabled; OFF when none are (the default — the units
@@ -456,6 +509,7 @@ def _collect_posture(repo: Path, services: dict) -> list:
     return [
         _entry("egress-gate", lambda: _posture_egress(services)),
         _entry("vault", _posture_vault),
+        _entry("key-sealing", _posture_key_sealing),
         _entry("sovereignty", _posture_sovereignty),
         _entry("entitlement", lambda: _posture_entitlement(repo)),
         _entry("backups", lambda: _posture_backups(repo)),

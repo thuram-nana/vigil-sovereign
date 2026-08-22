@@ -35,6 +35,7 @@ from .models import AuthorizerKey, ChainEntry, Signature, SignedChainHead, Trust
 from .rbac import (
     OFFENSE_ACTION_PERM, PERMISSIONS, ROLES, offense_perm_for, offense_route_key, role_can,
 )
+from .rotation import RotationError, rewrap, rewrap_or_seal, verify_opens_to
 from .sealing import SealError, is_sealed, new_kek, seal, unseal
 from .vault import Vault, VaultLocked
 
@@ -50,6 +51,7 @@ __all__ = [
     "AuthorizerKey", "ChainEntry", "Signature", "SignedChainHead", "TrustRoot",
     "ROLES", "PERMISSIONS", "role_can", "OFFENSE_ACTION_PERM", "offense_perm_for", "offense_route_key",
     "seal", "unseal", "new_kek", "is_sealed", "SealError",
+    "RotationError", "rewrap", "rewrap_or_seal", "verify_opens_to",
     "Vault", "VaultLocked",
     "IdentityAttestation", "Capability", "Attenuation", "EffectiveCapability", "WielderProof",
     "CapabilityError", "sign_identity_attestation", "verify_identity_attestation", "identity_digest",
