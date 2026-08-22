@@ -14,17 +14,29 @@ durable write. Until this file, that claim had no test under the conditions it n
 This module puts the writer into each named exhaustion state and asserts it fails CLOSED — it raises and
 does NOT advance the append point, so a caller can never mistake the failed write for a persisted one —
 each paired with a negative control that the SAME operation succeeds when the resource is available (so
-the refusal is the condition, not a broken code path):
+the refusal is the condition, not a broken code path).
 
-  1. UNWRITABLE audit sink — the spine path's parent is a regular file, so ``open(path, "a")`` raises
-     ``ENOTDIR`` (uid-independent: it does not rely on filesystem permissions, which ``root`` bypasses).
-  2. DISK-FULL (``ENOSPC``) — the append write is monkeypatched to raise ``OSError(ENOSPC)``. This is the
-     test that PINS the "fail-closed on an unwritable audit" claim (registered in the W0-3 #398 registry).
-  3. FD EXHAUSTION (``RLIMIT_NOFILE``) — in a forked child we lower ``RLIMIT_NOFILE`` and exhaust the fd
-     table, so the append's ``open`` raises ``EMFILE``; the child reports whether the writer failed closed.
-  4. OOM (bounded ``MemoryError`` simulation) — the append write is monkeypatched to raise ``MemoryError``
-     (a deterministic stand-in for ``RLIMIT_AS``/OOM, which real setrlimit reproduces only flakily). The
-     writer must propagate it, never a silent success.
+Two states are exercised with a REAL kernel failure (1 uses the OS's own ``ENOTDIR``; 3 lowers a real
+``RLIMIT_NOFILE`` in a forked child until ``open`` genuinely returns ``EMFILE``). The other two are
+DETERMINISTIC FAULT-INJECTIONS of the *exact syscall failure* at the append site: the ``open(path, "a")``
+handle the writer uses is replaced with one whose ``write`` raises the precise error the named condition
+produces — ``OSError(ENOSPC)`` for disk-full, ``MemoryError`` for OOM. This is a deliberate,
+issue-sanctioned trade: a deterministic injection of the syscall's error is pinned in place of a real
+``ENOSPC``/``RLIMIT_AS`` (which reproduce only flakily and can kill the interpreter). To keep the
+injection honest, each injected test also asserts the injected write handle WAS actually invoked, so the
+test cannot pass unless the failure path was truly exercised (a raise from elsewhere would not satisfy it).
+
+  1. UNWRITABLE audit sink — the spine path's parent is a regular file, so ``open(path, "a")`` raises a
+     REAL ``ENOTDIR`` (uid-independent: it does not rely on filesystem permissions, which ``root`` bypasses).
+  2. DISK-FULL (``ENOSPC``) — deterministic fault-injection: the append's write handle raises the exact
+     ``OSError(ENOSPC)`` a full disk produces. Asserts the injected handle was reached. This is the test
+     that PINS the "fail-closed on an unwritable audit" claim (registered in the W0-3 #398 registry).
+  3. FD EXHAUSTION (``RLIMIT_NOFILE``) — in a forked child we lower a REAL ``RLIMIT_NOFILE`` and exhaust the
+     fd table, so the append's ``open`` raises a real ``EMFILE``; the child reports whether the writer
+     failed closed.
+  4. OOM (bounded ``MemoryError`` simulation) — deterministic fault-injection of ``RLIMIT_AS``/OOM: the
+     append's write handle raises ``MemoryError`` (real ``setrlimit(RLIMIT_AS)`` reproduces OOM only
+     flakily). Asserts the injected handle was reached. The writer must propagate it, never a silent success.
 
 FATAL-2 aware: imports only ``vigil_core`` + ``vigil_integration`` (checkpoint/state/spine); no ``sigil``
 and no ``framework``. Runs in the required ``integration two-env boundary (P5)`` CI job.
@@ -98,8 +110,13 @@ def test_unwritable_audit_sink_refuses_the_action(tmp_path):
 
 
 class _NoSpaceFile:
-    """A file-like whose write raises ENOSPC — a faithful, deterministic disk-full at the exact moment
-    the audit record is written to the sink."""
+    """A file-like whose write raises ENOSPC — a faithful, deterministic fault-injection of a full disk at
+    the exact moment the audit record is written to the sink. ``writes`` counts how many times ``write`` was
+    actually invoked, so a test can assert the injected failure path was truly reached (not a raise from
+    elsewhere)."""
+
+    def __init__(self):
+        self.writes = 0
 
     def __enter__(self):
         return self
@@ -108,6 +125,7 @@ class _NoSpaceFile:
         return False
 
     def write(self, *_a, **_k):
+        self.writes += 1
         raise OSError(errno.ENOSPC, "No space left on device")
 
     def flush(self):  # pragma: no cover — never reached; write raises first
@@ -118,9 +136,11 @@ class _NoSpaceFile:
 
 
 def test_disk_full_enospc_refuses_and_does_not_advance(tmp_path, monkeypatch):
-    """Simulate ENOSPC on the durable append: the writer must RAISE and must not advance the append
-    point (never a silent success). Negative control (same run): with the patch lifted, the SAME writer
-    on the SAME file persists the record, so the refusal is the disk-full condition, not a dead path.
+    """Deterministic fault-injection of ENOSPC at the durable append: the append handle's write raises the
+    exact OSError(ENOSPC) a full disk produces. The writer must RAISE and must not advance the append point
+    (never a silent success), and we assert the injected handle was actually written to so the failure path
+    was truly exercised. Negative control (same run): with the patch lifted, the SAME writer on the SAME
+    file persists the record, so the refusal is the disk-full condition, not a dead path.
 
     This is the test the claims registry (W0-3 #398) pins the 'fail-closed on an unwritable audit'
     claim to."""
@@ -128,16 +148,22 @@ def test_disk_full_enospc_refuses_and_does_not_advance(tmp_path, monkeypatch):
     spine = VigilCoreSpine(_kp(), spine_path)
 
     real_open = builtins.open
+    injected: list[_NoSpaceFile] = []
 
     def fake_open(file, mode="r", *a, **k):
         if os.fspath(file) == spine_path and "a" in mode:
-            return _NoSpaceFile()
+            fh = _NoSpaceFile()
+            injected.append(fh)
+            return fh
         return real_open(file, mode, *a, **k)
 
     monkeypatch.setattr(builtins, "open", fake_open)
     with pytest.raises(OSError) as ei:
         spine.write_state(_state(), seq=1)
     assert ei.value.errno == errno.ENOSPC
+    # the injected disk-full path was actually exercised — the writer opened the append handle and its
+    # write raised, so this test cannot pass on a raise from anywhere but the audit append itself.
+    assert injected and injected[0].writes == 1, "the injected ENOSPC append handle was never written to"
     _assert_failed_closed(spine)
 
     # negative control: disk-full lifted -> the identical append now succeeds durably.
@@ -241,9 +267,13 @@ def test_fd_exhaustion_rlimit_nofile_refuses(tmp_path):
 
 
 class _OOMFile:
-    """A file-like whose write raises MemoryError — a deterministic, bounded stand-in for an OOM /
+    """A file-like whose write raises MemoryError — a deterministic, bounded fault-injection of an OOM /
     RLIMIT_AS failure at the moment the audit record is written (real setrlimit(RLIMIT_AS) reproduces
-    OOM only flakily and can kill the interpreter unpredictably)."""
+    OOM only flakily and can kill the interpreter unpredictably). ``writes`` counts invocations so a test
+    can assert the injected failure path was truly reached."""
+
+    def __init__(self):
+        self.writes = 0
 
     def __enter__(self):
         return self
@@ -252,6 +282,7 @@ class _OOMFile:
         return False
 
     def write(self, *_a, **_k):
+        self.writes += 1
         raise MemoryError("cannot allocate memory for the audit append")
 
     def flush(self):  # pragma: no cover
@@ -262,22 +293,30 @@ class _OOMFile:
 
 
 def test_oom_memoryerror_on_append_refuses_and_does_not_advance(tmp_path, monkeypatch):
-    """A MemoryError raised while writing the audit record must PROPAGATE out of the writer (never a
-    silent success) and must not advance the append point. Negative control (same run): with memory
-    available the identical append persists."""
+    """Deterministic fault-injection of OOM/RLIMIT_AS at the durable append: the append handle's write
+    raises MemoryError, which must PROPAGATE out of the writer (never a silent success) and must not
+    advance the append point. We assert the injected handle was actually written to so the propagation
+    tested is the audit append's. Negative control (same run): with memory available the identical append
+    persists."""
     spine_path = str(tmp_path / "eng.spine")
     spine = VigilCoreSpine(_kp(), spine_path)
 
     real_open = builtins.open
+    injected: list[_OOMFile] = []
 
     def fake_open(file, mode="r", *a, **k):
         if os.fspath(file) == spine_path and "a" in mode:
-            return _OOMFile()
+            fh = _OOMFile()
+            injected.append(fh)
+            return fh
         return real_open(file, mode, *a, **k)
 
     monkeypatch.setattr(builtins, "open", fake_open)
     with pytest.raises(MemoryError):
         spine.write_state(_state(), seq=1)
+    # the injected OOM path was actually exercised — the writer opened the append handle and its write
+    # raised, so the propagation being tested is the audit append's, not an incidental allocation.
+    assert injected and injected[0].writes == 1, "the injected OOM append handle was never written to"
     _assert_failed_closed(spine)
 
     # negative control: memory available -> the identical append persists durably.
