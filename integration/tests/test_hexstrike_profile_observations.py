@@ -8,8 +8,12 @@ the real ``BrainThink`` seam:
   * a profile built from observations REFLECTS them (open ports, services, technologies, cms, cloud), and
   * an empty observation set yields HONEST UNKNOWNS — never a fabricated risk (the negative control).
 
-Import-clean (stdlib + the brain's own enums + the pydantic AgentState the seam already uses): no framework,
-no network — so it runs in the sovereign leg.
+Import-clean (stdlib + the brain's own enums + the pydantic AgentState the seam already uses): no framework
+at MODULE scope, no network — so the module imports and the FEED/SOURCE tests run in the sovereign leg,
+PROVING the brain modules are framework-free to import. The three tests that DRIVE the seam are different:
+post-H1 convergence, driving BrainThink lazily constructs the canonical HexstrikeAgentBody, which imports
+``framework.v2.agent_body.interface`` — so those three are skipped where framework is absent and run in the
+offense leg (this file is on the offense run-list).
 """
 from __future__ import annotations
 
@@ -17,6 +21,17 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import importlib.util
+
+# The FEED/SOURCE tests are framework-free and run in BOTH legs. The three tests that DRIVE the seam
+# (call BrainThink) lazily construct the canonical HexstrikeAgentBody, which imports
+# framework.v2.agent_body.interface (FATAL-2: offense leg only) — skip them where framework is absent
+# (the sovereign leg) and run them in the offense leg, where this file is on the run-list.
+_HAS_FRAMEWORK = importlib.util.find_spec("framework") is not None
+_needs_body = pytest.mark.skipif(
+    not _HAS_FRAMEWORK,
+    reason="drives BrainThink -> canonical HexstrikeAgentBody -> framework.v2.agent_body.interface "
+           "(offense leg only); the module-import + feed/source tests here stay sovereign-safe")
 
 from vigil_integration.brains.engine_think import BrainThink
 from vigil_integration.brains.hexstrike_brain import HexstrikeBrain, TargetType, TechnologyStack
@@ -101,6 +116,7 @@ def test_empty_observation_set_yields_honest_unknowns_not_fabricated_risk():
     assert prof.open_ports == [] and prof.services == {} and prof.technologies == []
 
 
+@_needs_body
 def test_empty_observations_do_not_change_the_proposed_chain():
     """The honest-unknown change must not alter what a plain --brain engage proposes: the chain is driven by
     target type + objective, so an empty (honest-unknown) profile proposes the SAME steps as before."""
@@ -123,6 +139,7 @@ def test_empty_observations_do_not_change_the_proposed_chain():
 
 # ---- the WIRING: observations flow through BrainThink into the persisted proposal ---------------
 
+@_needs_body
 def test_brainthink_persists_a_profile_that_reflects_the_observations(tmp_path):
     kw = reduce_to_profile_kwargs([
         make_observation("open_port", "443", "sensor:nmap", 0.9),
@@ -143,6 +160,7 @@ def test_brainthink_persists_a_profile_that_reflects_the_observations(tmp_path):
     assert prof["risk_level"] != "unknown"              # a real surface => a real risk
 
 
+@_needs_body
 def test_brainthink_empty_feed_persists_honest_unknowns(tmp_path):
     """The negative control at the persistence seam: the console panel must never read a fabricated risk."""
     run_dir = tmp_path / "run"
