@@ -32,9 +32,15 @@ jobs:
       # and built by pre-commit into their own isolated environments.
       - name: install pre-commit + the tools the local hooks invoke
         run: |
-          pip install -e packages/core/vigil_core \
-            "pydantic>=2.10,<3" structlog httpx requests PyYAML "cryptography>=42" packaging \
-            mypy yamllint pytest pre-commit
+          # W3-2: runtime deps from the committed HASH LOCK (== the shipped tree; CI once installed
+          # cryptography>=42 under a >=50 CVE floor); pytest+mypy from the pinned CI toolchain lock.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+          # yamllint + pre-commit orchestrate the hook run itself (not the tested tree); they are the
+          # only CI-only tools not in a committed lock — pre-commit fetches ruff/gitleaks into its own
+          # isolated envs, so pinning them here would not change what those hooks run.
+          pip install yamllint pre-commit
 
       # POSITIVE PATH — every hook must be green on the tree. This is the check a `--no-verify` commit
       # cannot escape.

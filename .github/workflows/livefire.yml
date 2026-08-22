@@ -69,9 +69,11 @@ jobs:
 
       - name: install the engine's python deps
         run: |
-          pip install -e packages/core/vigil_core \
-            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
-            "cryptography>=42" packaging
+          # W3-2: the engine's runtime deps come from the committed HASH LOCK so the live-fire runs
+          # against the same tree it ships (CI once installed cryptography>=42 under a >=50 CVE floor).
+          # vigil_core is first-party → editable --no-deps. No pytest here: this job drives the engine.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
 
       - name: build the egress guard
         run: make -C tools/egress-guard
@@ -161,9 +163,11 @@ jobs:
 
       - name: install the engine's python deps
         run: |
-          pip install -e packages/core/vigil_core \
-            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
-            "cryptography>=42" packaging
+          # W3-2: the engine's runtime deps come from the committed HASH LOCK so the live-fire runs
+          # against the same tree it ships (CI once installed cryptography>=42 under a >=50 CVE floor).
+          # vigil_core is first-party → editable --no-deps. No pytest here: this job drives the engine.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
 
       - name: build the egress guard
         run: make -C tools/egress-guard

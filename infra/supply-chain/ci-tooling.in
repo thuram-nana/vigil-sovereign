@@ -1,0 +1,29 @@
+# env-ci-tooling — the pinned CI/test TOOLCHAIN (source spec for the hash-locked subset).
+#
+# W3-2: CI must install from HASH-LOCKED files so the tested tree equals the locked tree. The
+# two runtime locks (framework/v2/requirements.lock.txt, sovereign.lock.txt) pin the RUNTIME
+# dependencies; this file pins the test *harness* that runs alongside them — pytest, its async
+# plugin, and the lint/type gates — which are deliberately NOT in either runtime lock (they are
+# CI-only and would drag test tooling into a shipped deployment). pytest-httpserver is NOT here:
+# it is a runtime-adjacent fixture already pinned in the offense framework lock, and the jobs
+# that need it install that lock anyway.
+#
+# The hash-pinned, fully-resolved output lives beside it at ci-tooling.lock.txt and is what
+# every CI test job installs:
+#
+#     pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+#
+# Generated with `uv pip compile --generate-hashes` (like strix.lock's uv origin, and unlike the
+# two pip-compile runtime locks) — the output is a plain hash-pinned requirements file pip installs
+# under --require-hashes. Regenerate from the repo root under Python 3.13:
+#
+#     uv pip compile --generate-hashes --no-header --no-annotate \
+#        --output-file=infra/supply-chain/ci-tooling.lock.txt infra/supply-chain/ci-tooling.in
+#
+# The "A14 supply-chain gate" proves it installs under --require-hashes;
+# integration/tests/test_supply_chain.py asserts it is fully hash-pinned and covers this input.
+# ruff is held at the version lint-config.yml already validates its rule behaviour against.
+pytest==8.4.2
+pytest-asyncio==1.4.0
+ruff==0.15.12
+mypy

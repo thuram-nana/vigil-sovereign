@@ -119,6 +119,53 @@ the tree and have no registry artifact to hash.
 5. `pip install --require-hashes -r <lock>` **actually succeeds** into a clean venv. A lock full
    of hashes that pip rejects is a document, not a control.
 
+### CI installs from the locks — the tested tree equals the locked tree (W3-2)
+
+A lock nothing installs from is a document, not a control. Every CI job that runs the code
+installs its **runtime** dependencies from a committed hash lock under `--require-hashes`, never as
+a floating range:
+
+```
+pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+pip install -e packages/core/vigil_core --no-deps
+```
+
+Before W3-2 six `ci.yml` jobs (plus `livefire.yml` and `pre-commit.yml`) installed
+`cryptography>=42` while the project floor was `>=50` for **CVE-2026-69247** — CI could resolve
+the vulnerable 42.x line and test against the version the repo claims to have left behind. The
+runtime installs now come from the lock, so the resolved version **is** the pinned version by
+construction, and `vigil_core` is installed `--no-deps` so its floors resolve to the already-locked
+versions rather than fresh from PyPI.
+
+Every job uses the **offense** framework lock for its third-party runtime subset — even the
+sovereign-side pure-Python jobs (`SIGIL governor`, `SIGIL lint`). That is deliberate: it is the
+light runtime closure (the sovereign lock drags in the `kuzu`/`onnxruntime`/`qdrant` ML stack those
+jobs do not need), it holds **only third-party packages** — no `framework`/`sigil` module, so
+FATAL-2 is untouched — and its shared-package versions are byte-identical to the sovereign lock
+(`test_shared_runtime_versions_agree_across_locks` fails if they ever diverge). The full sovereign
+environment is still exercised under `--require-hashes` by the A14 install proof.
+
+The **CI/test toolchain** (`pytest`, `pytest-asyncio`, `ruff`, `mypy`) is not part of the shipped
+tree, so it is kept out of both runtime locks; it has its own hash-locked subset,
+`infra/supply-chain/ci-tooling.lock.txt`, which the jobs also install under `--require-hashes`. It
+is generated with `uv pip compile --generate-hashes` (like `strix.lock`'s uv origin, unlike the two
+pip-compile runtime locks) and its input is `infra/supply-chain/ci-tooling.in`.
+
+| Lock | Covers | Generated with |
+|---|---|---|
+| `infra/supply-chain/ci-tooling.lock.txt` | CI/test toolchain — `pytest`, `pytest-asyncio`, `ruff`, `mypy` | `uv pip compile --generate-hashes` |
+
+The A14 gate proves the ci-tooling lock installs under `--require-hashes` and, after each runtime
+require-hashes install, **records** the resolved versions (`pip freeze`) and **compares** them to
+the lock (`.github/scripts/compare_resolved_to_lock.py`) — a red build if the CI environment ever
+diverges from the lock. `integration/tests/test_supply_chain.py` (a required check, in both the A14
+gate and the `integration` job) asserts statically that **no** workflow installs a runtime range
+below a lock floor and that every runtime dependency is installed under `--require-hashes`.
+
+The only deliberately-unpinned CI install that remains is `strix-vigil`'s best-effort live-scan SDK
+(`openai-agents[litellm]`, `openai`): it is not part of the tested tree — the reasoning/dedup tests
+`importorskip` it if it cannot resolve — and hash-locking it is [W3-6]'s `strix.lock` surface.
+
 ### Regenerating a lock
 
 Under **Python 3.13**, and **from that lock's canonical directory**. Both constraints are real:

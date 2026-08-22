@@ -23,8 +23,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: install vigil_core
-        run: pip install -e packages/core/vigil_core pytest
+      - name: install vigil_core (hash-locked runtime + pinned pytest) — W3-2
+        run: |
+          # W3-2: the RUNTIME tree comes from the committed HASH LOCK so the tested tree equals the
+          # shipped/locked tree (CI once installed cryptography>=42 under a >=50 CVE floor). The
+          # offense framework lock is the light third-party runtime closure — no framework/sigil
+          # package, so FATAL-2 is untouched — and its shared versions are byte-identical to the
+          # sovereign lock (asserted by integration/tests/test_supply_chain.py). vigil_core is
+          # first-party → editable --no-deps (its floors resolve to the already-locked versions,
+          # never fresh). pytest is pinned in the CI toolchain lock, not resolved at run time.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
       - name: migration-safety tests (v1 byte-identical signing, threshold, tamper)
         run: pytest packages/core/vigil_core/tests -q
 
@@ -40,7 +50,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install pytest
+      # W3-2: even a reads-only job installs its harness from the committed hash lock, so nothing
+      # in CI resolves a package fresh from PyPI.
+      - run: pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
       - name: every agent and named capability the code declares is explained to a reader
         run: pytest docs/tests -q
 
@@ -55,9 +67,12 @@ jobs:
           python-version: "3.13"
       - name: install engine deps + vigil_core
         run: |
-          pip install -e packages/core/vigil_core \
-            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
-            "cryptography>=42" packaging pytest pytest-httpserver pytest-asyncio
+          # W3-2: runtime from the committed HASH LOCK (== the shipped tree), pytest+asyncio from the
+          # pinned CI toolchain lock; vigil_core editable --no-deps. pytest-httpserver ships in the
+          # runtime lock. See the vigil_core step above / docs/SUPPLY-CHAIN.md §2 for the rationale.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
       - name: the whole engine v2 test tree (eval split to crucible-eval; every tests dir covered by construction)
         working-directory: engine/crucible
         env:
@@ -117,9 +132,12 @@ jobs:
           python-version: "3.13"
       - name: install engine deps + vigil_core
         run: |
-          pip install -e packages/core/vigil_core \
-            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
-            "cryptography>=42" packaging pytest pytest-httpserver pytest-asyncio
+          # W3-2: runtime from the committed HASH LOCK (== the shipped tree), pytest+asyncio from the
+          # pinned CI toolchain lock; vigil_core editable --no-deps. pytest-httpserver ships in the
+          # runtime lock. See the vigil_core step above / docs/SUPPLY-CHAIN.md §2 for the rationale.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
       - name: coverage guard — the eval suite must actually collect tests
         working-directory: engine/crucible
         env:
@@ -218,9 +236,11 @@ jobs:
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/apt-retry.sh" nftables
       - name: install deps (vigil_core + framework scope reuse)
         run: |
-          pip install -e packages/core/vigil_core \
-            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
-            "cryptography>=42" packaging pytest
+          # W3-2: runtime from the committed HASH LOCK (== the shipped tree); pytest from the pinned
+          # CI toolchain lock; vigil_core editable --no-deps. See docs/SUPPLY-CHAIN.md §2.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
       - name: gateway tests (denylist, proxy socket refusals, nft render + netns ruleset load)
         run: |
           if [ -d gateway/tests ]; then
@@ -242,9 +262,12 @@ jobs:
           python-version: "3.13"
       - name: install vigil_core + CRUCIBLE deps (for the oracle-adapter test)
         run: |
-          pip install -e packages/core/vigil_core \
-            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
-            "cryptography>=42" packaging pytest pytest-httpserver pytest-asyncio
+          # W3-2: runtime from the committed HASH LOCK (== the shipped tree), pytest+asyncio from the
+          # pinned CI toolchain lock; vigil_core editable --no-deps. pytest-httpserver ships in the
+          # runtime lock. See the vigil_core step above / docs/SUPPLY-CHAIN.md §2 for the rationale.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
           # NO best-effort `pip install -e apps/sigil` here, and that is the whole point of this slice.
           # That build (the Rust WARDEN kernel + the sovereign heavy stack — onnxruntime/kuzu/fastembed/
           # qdrant) is unreliable on a runner, and it used to be swallowed with
@@ -508,11 +531,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: install pytest + best-effort SDK (so reasoning/dedup tests run, not just skip)
+      - name: install pytest (hash-locked) + best-effort SDK (so reasoning/dedup tests run, not just skip)
         run: |
-          pip install pytest
+          # W3-2: the harness (pytest) is pinned in the committed CI toolchain lock.
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
           # openai-agents[litellm] + openai let the reasoning/dedup tests actually execute
-          # (red-pen P8 finding 3). Best-effort: if it can't resolve, those two importorskip.
+          # (red-pen P8 finding 3). Best-effort AND deliberately UNPINNED: this heavy live-scan SDK is
+          # not part of the tested tree — if it cannot resolve, those two tests importorskip and the
+          # job is honest about it. (Locking it is [W3-6]'s strix.lock surface, not this slice.)
           pip install "openai-agents[litellm]" openai || echo "SDK unavailable — reasoning/dedup tests will skip"
       - name: strix vigil tests (Anthropic price table + reasoning + dedup fallback)
         run: |
@@ -533,10 +559,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: install vigil_core + SIGIL deps (governor tests are pure-Python; no Rust kernel needed)
+      - name: install vigil_core + SIGIL deps (hash-locked) — W3-2 (governor tests are pure-Python)
         run: |
-          pip install -e packages/core/vigil_core \
-            "pydantic>=2.10,<3" structlog httpx requests PyYAML "cryptography>=42" packaging pytest
+          # W3-2: runtime third-party deps from the committed HASH LOCK, pytest from the pinned CI
+          # toolchain lock. The offense framework lock is used deliberately: it is the LIGHT runtime
+          # closure (the sovereign lock drags in the kuzu/onnxruntime/qdrant ML stack this pure-Python
+          # job does not need), it holds ONLY third-party packages — no framework/sigil, so FATAL-2 is
+          # untouched — and its shared versions are byte-identical to the sovereign lock (asserted by
+          # integration/tests/test_supply_chain.py::test_shared_runtime_versions_agree_across_locks),
+          # so the governor is tested against the same cryptography/pydantic it ships with.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
       - name: offense gate + hardening + finding receiver (P7 governance + P10 two-anchor ingest)
         env:
           SIGIL_HOME: /tmp/sigil-ci
@@ -589,11 +623,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: install ruff + mypy + sigil deps
+      - name: install ruff + mypy (hash-locked) + sigil deps — W3-2
         run: |
-          pip install -e packages/core/vigil_core \
-            "pydantic>=2.10,<3" structlog httpx requests PyYAML "cryptography>=42" packaging \
-            ruff mypy
+          # W3-2: runtime third-party deps from the committed HASH LOCK; ruff+mypy from the pinned CI
+          # toolchain lock (same lock the ruff/mypy versions are pinned in, so the lint behaviour that
+          # runs here is the validated one). See the governor step / docs/SUPPLY-CHAIN.md §2.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
       - name: ruff (BLOCKING — E9/F/B real bug classes)
         working-directory: apps/sigil
         run: ruff check sigil
