@@ -60,6 +60,7 @@ ROADMAP — the remaining ACTIVE sensors:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1072,6 +1073,106 @@ def _surface_inconclusive(sink: Any, task: FusionTask, res: Any) -> None:
         pass   # a spine write NEVER sinks the fusion pass
 
 
+# ---- the run-dir INCONCLUSIVE-COVERAGE artifact (FRAMEWORK-OWNED) -------------------------------
+#
+# The twin of the proof-degradation manifest — integration writes ``<run_dir>/proofs/_degraded.json``
+# (``vigil_integration.proof.degradation``) and the framework dossier reads it back with stdlib only
+# (``report.dossier._read_proof_degradation``). This is the SAME contract for a DISTINCT state and a
+# FRAMEWORK-OWNED file: ``fuse_sensors`` collects every fusion sensor that returned INCONCLUSIVE (a
+# missing prerequisite meant NOTHING was assessed) onto ``ctx.inconclusive_surfaces``; the run level
+# persists them here so the dossier's clean/verdict determination MUST consult a declared-but-unassessed
+# surface and can NEVER fold it into a silent CLEAN. STDLIB ONLY — no framework->integration import
+# (FATAL-2): the dossier reads it back with a plain ``json.loads``, exactly as it reads ``_degraded.json``.
+#
+# SCHEMA  <run_dir>/_inconclusive.json  ==  {"inconclusive": [
+#     {"sensor": "<sensor name>", "missing_prerequisite": "<prereq>", "count": <int>}, ...]}
+#   sorted by (sensor, missing_prerequisite) and deduped with a count — DETERMINISTIC (no wallclock/rng).
+
+INCONCLUSIVE_ARTIFACT = "_inconclusive.json"
+
+
+def _run_dir_from_env() -> str | None:
+    """The console-exported run dir (``$VIGIL_PROOF_RUN_DIR``) — the SAME handle the proof subsystem's
+    ``_degraded.json`` is located by (``vigil_integration.proof.degradation.record_from_env``). Absent it
+    there is no run to attach the artifact to, so nothing is written (a hand-run engage with no console)."""
+    rd = os.environ.get("VIGIL_PROOF_RUN_DIR")
+    return rd or None
+
+
+def _coerce_surface(item: Any) -> tuple[str, str]:
+    """Coerce one collected surface — a ``(sensor, missing_prerequisite)`` pair or a
+    ``{"sensor", "missing_prerequisite"}`` dict — to a normalized string pair. Never raises."""
+    try:
+        if isinstance(item, dict):
+            return (str(item.get("sensor") or "").strip(),
+                    str(item.get("missing_prerequisite") or "").strip())
+        sensor, missing = item
+        return (str(sensor or "").strip(), str(missing or "").strip())
+    except Exception:
+        return ("", "")
+
+
+def write_inconclusive_artifact(run_dir: Any, surfaces: Any) -> bool:
+    """Persist the fusion pass's INCONCLUSIVE surfaces to ``<run_dir>/_inconclusive.json`` (see the SCHEMA
+    above). Written ONLY when there is at least one genuine inconclusive surface — a fully-assessed run
+    (empty ``surfaces``) writes NOTHING, so its dossier renders byte-identically to before. Deterministic
+    (sorted + deduped, no wallclock/rng) and atomic (tmp + ``os.replace``, so a torn write never leaves a
+    half-manifest the fail-closed reader would still treat as coverage-incomplete). Best-effort/total: any
+    error returns False and never raises into the fusion/engage pass. Returns True iff the file was written."""
+    try:
+        from pathlib import Path
+        counts: dict[tuple[str, str], int] = {}
+        for item in surfaces or ():
+            sensor, missing = _coerce_surface(item)
+            if not sensor:
+                continue
+            counts[(sensor, missing)] = counts.get((sensor, missing), 0) + 1
+        if not counts:
+            return False   # no genuine inconclusive surface -> no artifact (byte-identical clean path)
+        rows = [{"sensor": s, "missing_prerequisite": m, "count": counts[(s, m)]}
+                for (s, m) in sorted(counts)]
+        d = Path(run_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / INCONCLUSIVE_ARTIFACT
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"inconclusive": rows}, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)         # atomic swap
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def _ctx_inconclusive_surfaces(ctx: Any) -> Any:
+    """Read the ``inconclusive_surfaces`` side-channel off a ctx that may be an object or a dict."""
+    if isinstance(ctx, dict):
+        return ctx.get("inconclusive_surfaces")
+    return getattr(ctx, "inconclusive_surfaces", None)
+
+
+def persist_inconclusive_surfaces(ctx: Any, *, run_dir: Any = None) -> bool:
+    """Persist ``ctx.inconclusive_surfaces`` (the side-channel ``fuse_sensors`` sets) to the run-dir
+    artifact so the dossier consumes it. ``run_dir`` resolves from the explicit arg, else a ``ctx.run_dir``
+    hook (tests / a caller that already holds the dir), else ``$VIGIL_PROOF_RUN_DIR``. No surfaces, or no
+    resolvable run dir, ⇒ no write (byte-identical). Never raises — a persist failure never sinks the run."""
+    try:
+        surfaces = _ctx_inconclusive_surfaces(ctx)
+        if not surfaces:
+            return False
+        rd = run_dir
+        if not rd:
+            rd = ctx.get("run_dir") if isinstance(ctx, dict) else getattr(ctx, "run_dir", None)
+        rd = rd or _run_dir_from_env()
+        if not rd:
+            return False
+        return write_inconclusive_artifact(rd, surfaces)
+    except Exception:
+        return False
+
+
 def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
     """Fuse the run's SAFE sensors into ``world`` and return the LEAD ``Observation``s minted.
 
@@ -1105,6 +1206,10 @@ def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
     exposure_connect = getattr(ctx, "exposure_connect", None)   # C3 anonymous-GET connector (None => real)
 
     minted: list[Observation] = []
+    # Collect each sensor that returned INCONCLUSIVE (a declared surface it could NOT assess). Exposed
+    # on ctx as a backward-compatible side-channel the run level persists to <run_dir>/_inconclusive.json,
+    # so a clean verdict/dossier MUST consult a not-assessed surface (never a silent CLEAN).
+    inconclusive_surfaces: list[tuple[str, str]] = []
     for i, task in enumerate(tasks):
         seq = base + i
         try:
@@ -1117,8 +1222,19 @@ def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
         # finding run is not inconclusive, so nothing is surfaced here for it.)
         if res.inconclusive:
             _surface_inconclusive(sink, task, res)
+            inconclusive_surfaces.append((task.sensor, res.missing_prerequisite))
         minted.extend(res.observations)
         # LEAD -> FACT, where an oracle re-fires over the sensor's OWN retained evidence.
         _reverify(world, task, res, seq=seq, slug=slug or "", connect=reach_connect,
                   tls_connect=tls_connect, exposure_connect=exposure_connect)
+    # Side-channel the not-assessed surfaces up to the run level (backward-compatible: a caller that
+    # never reads it is unaffected). The run level (_run_fusion / the autonomous seam) resolves the
+    # run dir and persists them; fuse_sensors itself stays a pure world-fold + collect.
+    try:
+        if isinstance(ctx, dict):
+            ctx["inconclusive_surfaces"] = inconclusive_surfaces
+        else:
+            setattr(ctx, "inconclusive_surfaces", inconclusive_surfaces)
+    except Exception:
+        pass   # a read-only/exotic ctx never sinks the fusion pass
     return minted

@@ -211,9 +211,15 @@ def launch_cloud(slug: str, mode: str, target: str, *, provider: str = "") -> di
     _append_progress(progress, {"event": "launch.fusion", "mode": mode, "slug": slug,
                                 "sensor": sensor, "provider": provider or None, "target": target})
 
+    # S9c: hand the FUSION child THIS run's dir ($VIGIL_PROOF_RUN_DIR — the SAME handle the proof
+    # subsystem uses) so its framework fusion writes <run_dir>/_inconclusive.json here when a sensor
+    # returned INCONCLUSIVE (a declared surface it could NOT assess). The dossier then consumes it and
+    # this run can NEVER be presented clean over an unassessed surface. Merge over the parent env.
+    child_env = {**os.environ, "VIGIL_PROOF_RUN_DIR": str(rd)}
+
     def _run() -> None:
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # noqa: S603
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, env=child_env)  # noqa: S603
             status = "done" if proc.returncode == 0 else "error"
             _append_progress(progress, {"event": "scan.done", "status": status, "rc": proc.returncode})
             _meta(status=status, rc=proc.returncode,

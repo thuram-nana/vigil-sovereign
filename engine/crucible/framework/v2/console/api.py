@@ -892,13 +892,21 @@ def proof_list(run_id: str) -> dict[str, Any]:
     # recorded degradation makes a FACT and a CLEAN reading impossible: ``verification_degraded`` is True and
     # ``disposition`` becomes the typed cause, so an empty proof list is no longer read as "nothing found".
     summary = _proof_degradation_summary(rd, n_records=len(recs))
+    # S9c: a fusion sensor may have declared a surface it could NOT assess (INCONCLUSIVE) — a DISTINCT
+    # coverage-incomplete state (the framework writes ``<run_dir>/_inconclusive.json``; read it here with
+    # STDLIB ONLY, never importing the framework writer). It makes a CLEAN reading impossible for the SAME
+    # reason a degradation does: an empty finding set over a surface we could not look at is not "nothing
+    # found". Kept a distinct field so the UI can name the unassessed surface (not conflated with a degrade).
+    incov = _sensor_inconclusive_summary(rd)
     return {"run_id": run_id, "proofs": recs, "total": len(recs),
             "facts": facts, "leads": leads, "denied": denied,
             "pending": len(recs) == 0,
             "verification_degraded": summary["verification_degraded"],
             "disposition": summary["disposition"],
             "degraded_causes": summary["degraded_causes"],
-            "clean": summary["clean"],
+            "coverage_incomplete": incov["coverage_incomplete"],
+            "inconclusive_surfaces": incov["surfaces"],
+            "clean": summary["clean"] and not incov["coverage_incomplete"],
             "doctrine": _PROOF_DOCTRINE}
 
 
@@ -944,6 +952,42 @@ def _proof_degradation_summary(run_dir: "Path", *, n_records: int) -> dict[str, 
         "disposition": disposition,
         "degraded_causes": [{"kind": k, "count": counts[k]} for k in _PROOF_DEGRADED_KINDS if k in counts],
         "clean": (not degraded) and n_records <= 0,
+    }
+
+
+def _sensor_inconclusive_summary(run_dir: "Path") -> dict[str, Any]:
+    """Read ``<run_dir>/_inconclusive.json`` (stdlib only; never trusts the producer) and derive whether a
+    declared surface went UNASSESSED (a fusion sensor returned INCONCLUSIVE — a missing prerequisite meant
+    NOTHING was assessed). A FRAMEWORK-OWNED artifact (``engage_fusion.write_inconclusive_artifact``), the
+    twin of ``proofs/_degraded.json`` but a DISTINCT state: while coverage is incomplete a CLEAN reading is
+    impossible (an empty finding set over a surface we could not look at is not "nothing found"). Fail-CLOSED:
+    the mere PRESENCE of a non-empty artifact we cannot parse still marks the run coverage-incomplete."""
+    surfaces: list[dict[str, Any]] = []
+    state = {"present": False, "parsed": False}
+
+    def _read() -> None:
+        path = run_dir / "_inconclusive.json"
+        if not path.is_file():
+            return
+        raw = path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return  # an empty file carries no coverage signal
+        state["present"] = True  # a non-empty artifact EXISTS — from here a parse failure fails CLOSED
+        doc = json.loads(raw)
+        state["parsed"] = True
+        rows = (doc.get("inconclusive") or []) if isinstance(doc, dict) else []
+        for r in rows:
+            if isinstance(r, dict) and r.get("sensor"):
+                surfaces.append({"sensor": str(r.get("sensor")),
+                                 "missing_prerequisite": str(r.get("missing_prerequisite", "")),
+                                 "count": int(r.get("count", 1) or 1)})
+
+    _safe(_read, default=None)
+    incomplete = bool(surfaces) or (state["present"] and not state["parsed"])
+    return {
+        "coverage_incomplete": incomplete,
+        "unparsed": state["present"] and not state["parsed"],
+        "surfaces": sorted(surfaces, key=lambda x: (x["sensor"], x["missing_prerequisite"])),
     }
 
 

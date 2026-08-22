@@ -592,6 +592,7 @@ h3 { font-size: 1.02rem; margin: 1.2rem 0 .3rem; }
 .banner.lead { background: #fbeecf; border: 1px solid #e0b354; color: #6b4e0a; }
 .banner.none { background: #f0f0f0; border: 1px solid #bbb; color: #333; }
 .banner.degraded { background: #fce4e4; border: 1px solid #d9534f; color: #7a1c1a; }
+.banner.inconclusive { background: #fdf0e0; border: 1px solid #d98a3d; color: #7a3d0a; }
 table { border-collapse: collapse; width: 100%; margin: .5rem 0; }
 th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #e2e2e2; vertical-align: top; }
 th { background: #f2f2f2; font-size: .82rem; text-transform: uppercase; letter-spacing: .03em; color: #555; }
@@ -616,6 +617,7 @@ code.inl { background: rgba(127,127,127,.16); padding: .05rem .35rem; border-rad
   .banner.lead { background: #3a2f12; border-color: #7d6320; color: #f0d79a; }
   .banner.none { background: #24262b; border-color: #444; color: #ccc; }
   .banner.degraded { background: #3a1414; border-color: #a3423f; color: #f2b5b3; }
+  .banner.inconclusive { background: #3a2a14; border-color: #a3763f; color: #f2d6b3; }
   .note { background: rgba(255,255,255,.05); border-left-color: #555; }
 }
 """.strip()
@@ -676,10 +678,55 @@ def _read_proof_degradation(run_dir: Path) -> dict:
     }
 
 
+# S9c: the FRAMEWORK-OWNED sensor-inconclusive artifact — the twin of proof degradation, a DISTINCT
+# "coverage-incomplete" state. A fusion sensor that returned INCONCLUSIVE (a declared surface it could NOT
+# assess — a missing cloud/K8s prerequisite) is written to ``<run_dir>/_inconclusive.json`` by the
+# FRAMEWORK (``engage_fusion.write_inconclusive_artifact``). Read it here with STDLIB ONLY — never trusting
+# the producer, never importing the framework's writer nor the integration package — so an unassessed
+# surface is folded into the SAME "NEVER reported clean" determination as proof degradation, but as its own
+# state that NAMES each sensor + missing prerequisite.
+
+
+def _read_sensor_inconclusive(run_dir: Path) -> dict:
+    """Read ``<run_dir>/_inconclusive.json`` (stdlib only; never trusts the producer) and derive whether a
+    declared surface went UNASSESSED (a fusion sensor returned INCONCLUSIVE — a missing prerequisite meant
+    NOTHING was assessed). A coverage-incomplete run is NEVER reported clean in the hand-off: an empty
+    finding/fact set over a surface we could not look at is not "nothing found". Fail-CLOSED — the mere
+    PRESENCE of a non-empty artifact we cannot parse still marks the run coverage-incomplete (a corrupt/
+    half-written manifest never falls back to the clean view). Distinct from proof degradation."""
+    surfaces: list[dict] = []
+    present = parsed = False
+    try:
+        path = run_dir / "_inconclusive.json"
+        if path.is_file():
+            raw = path.read_text(encoding="utf-8")
+            if raw.strip():
+                present = True
+                doc = json.loads(raw)
+                parsed = True
+                rows = (doc.get("inconclusive") or []) if isinstance(doc, dict) else []
+                for r in rows:
+                    if isinstance(r, dict) and r.get("sensor"):
+                        surfaces.append({
+                            "sensor": str(r.get("sensor")),
+                            "missing_prerequisite": str(r.get("missing_prerequisite", "")),
+                            "count": int(r.get("count", 1) or 1),
+                        })
+    except (OSError, ValueError):
+        pass  # a read/parse failure is handled by the fail-closed `present and not parsed` branch below
+    incomplete = bool(surfaces) or (present and not parsed)
+    return {
+        "coverage_incomplete": incomplete,
+        "unparsed": present and not parsed,
+        "surfaces": sorted(surfaces, key=lambda s: (s["sensor"], s["missing_prerequisite"])),
+    }
+
+
 def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
                   proof: dict, spine_names: list[str], has_drift: bool, has_log: bool,
                   signed: bool, fingerprint: str, generated_at: Optional[str],
                   degraded: Optional[dict] = None,
+                  inconclusive: Optional[dict] = None,
                   included: list[str], has_terminal: bool = False,
                   has_case_file: bool = False, label: str = "",
                   http_evidence_aids: Optional[list[str]] = None) -> str:
@@ -736,6 +783,28 @@ def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
                  f"check could not be completed. An empty proof list here does NOT mean the target is safe: "
                  f"treat the run as INCONCLUSIVE and re-run once the subsystem is healthy.</div>")
 
+    # S9c: INCONCLUSIVE COVERAGE — a DISTINCT state from proof-degradation and from a genuine clean. A
+    # fusion sensor declared a surface it could NOT assess (a missing cloud/K8s prerequisite), so a "0
+    # findings" run is NOT a clean negative here: it went unassessed. Surfaced UNCONDITIONALLY (a FACT
+    # being present must NOT suppress this notice — a partially-assessed run is still coverage-incomplete),
+    # NAMING each unassessed sensor + its missing prerequisite. Mirrors the "NEVER reported clean" doctrine
+    # of proof-degradation, but as its own banner.
+    if inconclusive and inconclusive.get("coverage_incomplete"):
+        _surfs = inconclusive.get("surfaces") or []
+        if _surfs:
+            named = "; ".join(
+                f"{_e(str(x.get('sensor')))} (missing prerequisite: "
+                f"{_e(str(x.get('missing_prerequisite') or 'unknown'))})" for x in _surfs)
+            L.append(f"<div class='banner inconclusive'>INCONCLUSIVE COVERAGE — this run is NOT clean. "
+                     f"A declared surface was NOT assessed: {named}. A missing prerequisite means the "
+                     f"sensor looked at NOTHING there, so an empty finding set does NOT mean that surface "
+                     f"is safe — provision the named prerequisite and re-run to assess it.</div>")
+        else:
+            # fail-closed: a present-but-unparseable _inconclusive.json still blocks the clean reading.
+            L.append("<div class='banner inconclusive'>INCONCLUSIVE COVERAGE — this run is NOT clean. The "
+                     "coverage record for this run's sensor fusion could not be parsed, so at least one "
+                     "declared surface may have gone unassessed. Treat the run as INCONCLUSIVE and re-run.</div>")
+
     if n_facts > 0:
         lead_txt = f"{n_leads} lead(s)" if n_leads is not None else "leads (see reports)"
         if proof.get("ok"):
@@ -746,8 +815,10 @@ def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
                      f"retained evidence when this dossier was built. NO offline proof bundle is embedded "
                      f"({_e(proof.get('note', 'no bundle was produced'))}), so a third party CANNOT "
                      f"re-verify them from this archive alone. Plus {_e(lead_txt)}{_e(lead_note)}.</div>")
-    elif degraded and degraded.get("verification_degraded"):
-        # already surfaced by the unconditional degraded banner above — no clean "none" banner for this run
+    elif (degraded and degraded.get("verification_degraded")) or \
+         (inconclusive and inconclusive.get("coverage_incomplete")):
+        # already surfaced by the unconditional degraded / inconclusive-coverage banner(s) above — this run
+        # is NOT clean, so no clean "none" banner is emitted for it.
         pass
     else:
         if n_leads and n_leads > 0:
@@ -1159,11 +1230,16 @@ def build_dossier(
 
     # inv 12 (S9): the proof subsystem may have DEGRADED — an empty proof list is then NOT "clean".
     degraded = _read_proof_degradation(run)
+    # S9c: a fusion sensor may have declared a surface it could NOT assess (INCONCLUSIVE) — a DISTINCT
+    # coverage-incomplete state the clean determination MUST also consult, so a "0 findings" run over an
+    # unassessed surface is NEVER rendered clean and each unassessed sensor + missing prerequisite is named.
+    inconclusive = _read_sensor_inconclusive(run)
 
     index_html = _render_index(
         engagement_slug=engagement_slug, facts=facts, reports=reports, proof=proof,
         spine_names=sorted(spine), has_drift=has_drift, has_log=has_log, has_terminal=has_terminal,
         signed=signed, fingerprint=fingerprint, generated_at=generated_at, degraded=degraded,
+        inconclusive=inconclusive,
         included=included_preview, has_case_file=bool(case_entries), label=human_label,
         http_evidence_aids=http_ev_aids)
     entries["index.html"] = index_html.encode("utf-8")
@@ -1217,6 +1293,9 @@ def build_dossier(
         # inv 12 (S9): a degraded proof subsystem is NEVER reported clean in the hand-off.
         "verification_degraded": bool(degraded.get("verification_degraded")),
         "proof_disposition": degraded.get("disposition", ""),
+        # S9c: an unassessed (INCONCLUSIVE) fusion surface is likewise NEVER reported clean, and is named.
+        "coverage_incomplete": bool(inconclusive.get("coverage_incomplete")),
+        "inconclusive_surfaces": inconclusive.get("surfaces", []),
         "notes": notes,
     }
 
