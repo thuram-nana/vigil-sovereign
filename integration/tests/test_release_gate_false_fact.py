@@ -144,11 +144,6 @@ def test_a_report_with_no_capture_at_all_mints_nothing(tmp_path):
 # =========================================================================================================
 # COLUMN 2 — CLASS LAUNDERING: a certificate must never rename the vulnerability class it describes (S6).
 # =========================================================================================================
-@pytest.mark.xfail(strict=True, reason=(
-    "S6 — 'Delete the CWE-90/CWE-91 → error_based_sqli relabel (run.py): map to the true class or refuse. A "
-    "certificate must never rename the vulnerability class it describes.' Today proof.run._oracle_bug_class "
-    "maps CWE-90 (LDAP injection) and CWE-91 (XPath injection) onto error_based_sqli, so an LDAP finding "
-    "mints a signed FACT certified as SQLi. Deleting the relabel flips this row to a real pass."))
 def test_a_class_is_never_laundered_into_a_different_class(tmp_path):
     """A Strix LDAP-injection finding (CWE-90), with a request-bound response carrying an LDAP error the
     generic error-signature oracle fires on, must NOT be certified as ``error_based_sqli``. Either the true
@@ -160,10 +155,10 @@ def test_a_class_is_never_laundered_into_a_different_class(tmp_path):
            "blobs": {"resp": b"HTTP/1.1 500\r\n\r\nInvalid DN syntax: LDAP: error code 34 - invalid DN",
                      "req": b"GET /dir?u=*)(uid=*) HTTP/1.1\r\nHost: t\r\n\r\n"}}
     res = mint({"id": "ldap-1", "cwe": "CWE-90", "finding_class": "ldap injection", CAPTURE_KEY: cap})
-    laundered = res is not None and getattr(res, "bug_class", "") == "error_based_sqli"
-    assert not laundered, (
-        "a CWE-90 LDAP-injection finding was certified as error_based_sqli — the certificate renamed the "
-        "vulnerability class (class laundering)"
+    assert res is not None and getattr(res, "status", "") == "fact", "a genuine LDAP error must still certify"
+    assert getattr(res, "bug_class", "") == "ldap_injection", (
+        "a CWE-90 LDAP-injection finding (LDAP error in the response) must certify as its TRUE class "
+        f"ldap_injection, never renamed to SQLi. got {getattr(res, 'bug_class', None)!r}"
     )
 
 
@@ -173,6 +168,63 @@ def test_negative_control_an_explicit_true_class_is_preserved():
     field the fix must respect."""
     assert _oracle_bug_class({"bug_class": "ldap_injection", "cwe": "CWE-90"}) == "ldap_injection"
     assert _oracle_bug_class({"bug_class": "xpath_injection", "cwe": "CWE-91"}) == "xpath_injection"
+
+
+def _errsig_cap(err_body: bytes):
+    """An error-signature capture: a request-bound 500 whose response carries `err_body`."""
+    return {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
+                           "request_bytes_ref": "req", "status": 500}],
+            "blobs": {"resp": b"HTTP/1.1 500\r\n\r\n" + err_body,
+                      "req": b"GET /x?u=1 HTTP/1.1\r\nHost: t\r\n\r\n"}}
+
+
+def test_the_certificate_class_follows_the_oracle_engine_not_the_claim(tmp_path):
+    """The load-bearing S6 property, in every direction: the signed class is the datastore/parser ENGINE the
+    deterministic oracle MATCHED, never the finding's self-report. A mis-CWE'd, mis-titled, or even
+    explicitly mis-declared finding cannot rename the class the evidence proves."""
+    mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="alpha")
+
+    # reverse mis-label: CWE-90 (LDAP) CLAIM but the response is a POSTGRES error -> the SQL evidence wins.
+    r = mint({"id": "rev", "cwe": "CWE-90", "finding_class": "ldap injection",
+              CAPTURE_KEY: _errsig_cap(b"PostgreSQL ERROR: syntax error at or near")})
+    assert r is not None and r.status == "fact" and r.bug_class == "error_based_sqli", (
+        f"a Postgres error must certify as error_based_sqli regardless of a CWE-90 claim; got {getattr(r,'bug_class',None)!r}")
+
+    # precedence laundering: CWE-90 whose TITLE mentions SQL, but the response is an LDAP error -> LDAP wins.
+    r = mint({"id": "prec", "cwe": "CWE-90", "finding_class": "ldap injection",
+              "title": "blind sql injection style extraction",
+              CAPTURE_KEY: _errsig_cap(b"Invalid DN syntax: LDAP: error code 34 - invalid DN")})
+    assert r is not None and r.status == "fact" and r.bug_class == "ldap_injection", (
+        f"an LDAP error must certify as ldap_injection even when the title says 'sql'; got {getattr(r,'bug_class',None)!r}")
+
+    # explicit mis-declared class: an explicit bug_class=error_based_sqli on an LDAP-error finding -> LDAP wins.
+    r = mint({"id": "expl", "cwe": "CWE-90", "bug_class": "error_based_sqli",
+              CAPTURE_KEY: _errsig_cap(b"javax.naming.directory LDAPException: bad filter")})
+    assert r is not None and r.status == "fact" and r.bug_class == "ldap_injection", (
+        f"the oracle's LDAP engine must override an explicit error_based_sqli claim; got {getattr(r,'bug_class',None)!r}")
+
+    # XPath, and the genuine SQL control (no regression).
+    r = mint({"id": "xp", "cwe": "CWE-91", "finding_class": "xpath injection",
+              CAPTURE_KEY: _errsig_cap(b"XPathException: Expression must evaluate to a node-set")})
+    assert r is not None and r.status == "fact" and r.bug_class == "xpath_injection", getattr(r, "bug_class", None)
+    r = mint({"id": "sql", "cwe": "CWE-89", "finding_class": "sql injection",
+              CAPTURE_KEY: _errsig_cap(b"You have an error in your SQL syntax")})
+    assert r is not None and r.status == "fact" and r.bug_class == "error_based_sqli", getattr(r, "bug_class", None)
+
+
+def test_engine_map_covers_every_oracle_engine_and_all_targets_known():
+    """Drift guard: every datastore/parser ENGINE the error-signature oracle can emit is mapped to a KNOWN
+    bug_class — so a newly-added error signature can never silently fall through to the producer's
+    (launderable) self-report, and no mapped class is one the verifier would demote as unknown."""
+    from vigil_integration.proof.run import _ERRSIG_ENGINE_TO_CLASS
+    from framework.v2.verify.oracles import _ERROR_SIGNATURES
+    from framework.v2.verify.verifier import is_known_bug_class, normalize_bug_class
+
+    engines = {engine for _pat, engine, _conf in _ERROR_SIGNATURES}
+    missing = engines - set(_ERRSIG_ENGINE_TO_CLASS)
+    assert not missing, f"error-signature engines with no bug_class mapping (would fall back to the claim): {missing}"
+    for engine, cls in _ERRSIG_ENGINE_TO_CLASS.items():
+        assert is_known_bug_class(normalize_bug_class(cls)), f"{engine} -> {cls!r} is not a known bug class"
 
 
 # =========================================================================================================
