@@ -1,0 +1,89 @@
+{
+  "$schema_note": "VIGIL claims registry (W0-3 #398). Machine-checked by docs/tests/test_claims_registry.py, which runs in the required 'the briefing explains every agent and capability' CI job. JSON, not YAML, on purpose: the briefing-completeness job installs only pytest, so PyYAML is unavailable and the guard parses this file with the stdlib json module. See docs/claims/README.md for the schema and how to register a claim.",
+  "registry_version": 1,
+  "failure_classes": {
+    "config-stated-as-code": "A claim about configuration stated as a claim about code (the enforcement is conditional on how the operator has set something, but is documented as unconditional).",
+    "opt-in-stated-as-default": "Enforcement that ships opt-in but is documented as a default that always holds.",
+    "display-manufactures-evidence": "A display/reporting bug that manufactures evidence of a capability the code does not actually grant.",
+    "n-a": "A straightforward, unconditional code-enforced claim not exemplifying one of the three drift classes."
+  },
+  "claims": [
+    {
+      "id": "W5-1",
+      "title": "Spine append enforces kind + schema_version vocabulary (fail-closed)",
+      "claim": "Every record appended to the sovereign SIGIL spine carries a schema_version and a kind drawn from an enforced vocabulary",
+      "source": "docs/decisions/W5-1-spine-kind-schema-enforcement.md:8",
+      "enforced_by": {"file": "apps/sigil/sigil/spine/store.py", "symbol": "SpineStore.append"},
+      "proved_by": {"file": "apps/sigil/tests/test_spine_kind_schema_enforcement.py", "tests": ["test_append_refuses_unknown_kind_and_writes_nothing", "test_append_refuses_unknown_schema_version", "test_append_accepts_every_declared_kind"]},
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W5-3",
+      "title": "Witnessed-checkpoint envelope reader refuses a newer schema (fail-closed)",
+      "claim": "The witnessed-checkpoint envelope reader refuses an envelope whose schema is newer than this build",
+      "source": "docs/decisions/W5-3-witness-envelope-refuse-newer.md:8",
+      "enforced_by": {"file": "integration/vigil_integration/witnessed_anchor.py", "symbol": "load_witnessed_envelope"},
+      "proved_by": {"file": "integration/tests/test_witness_envelope_refuse_newer.py", "tests": ["test_a_newer_envelope_schema_is_refused_with_an_upgrade_message", "test_an_uncoercible_schema_fails_closed"]},
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W9-4",
+      "title": "Production refuse-to-start gate is OPT-IN (inert unless VIGIL_POSTURE selects production)",
+      "claim": "The production refuse-to-start gate is OPT-IN: with VIGIL_POSTURE unset it is inert and never blocks a start",
+      "source": "docs/decisions/W9-4-production-refuse-to-start-gate.md:12",
+      "enforced_by": {"file": "integration/vigil_integration/doctor.py", "symbol": "evaluate_production_gate"},
+      "proved_by": {"file": "integration/tests/test_doctor_production_gate.py", "tests": ["test_gate_inert_when_posture_unset", "test_gate_refuses_each_condition_independently", "test_gate_fails_closed_when_a_control_is_unknown"]},
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "opt-in-stated-as-default",
+      "default": "off"
+    },
+    {
+      "id": "W10-1",
+      "title": "Runtime egress allowlist (gate 6) is installed on the real target-traffic path",
+      "claim": "the runtime egress allowlist (gate 6) is installed on the real engage/repeater target-traffic path, not merely available",
+      "source": "engine/crucible/README.md:1255",
+      "enforced_by": {"file": "engine/crucible/framework/v2/agents/egress_guard.py", "symbol": "build_engagement_allowlist"},
+      "proved_by": {"file": "docs/tests/test_w10_egress_allowlist_wired.py", "tests": ["test_readme_cited_code_facts_are_true_in_tree", "test_readme_gate6_describes_the_real_reach_and_the_two_always_on_gates"]},
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "config-stated-as-code",
+      "default": "on"
+    },
+    {
+      "id": "W16-8",
+      "title": "Right-to-erasure by crypto-shred (destroy the off-spine key)",
+      "claim": "destroying the per-engagement key held off the spine renders the sealed credential material cryptographically unrecoverable",
+      "source": "knowledge/decisions/0008-crypto-shred-erasure-for-append-only-evidence.md:42",
+      "enforced_by": {"file": "engine/crucible/framework/v2/common/crypto_shred.py", "symbol": "EvidenceKeyring.shred"},
+      "proved_by": {"file": "engine/crucible/framework/v2/agents/tests/test_evidence_erasure.py", "tests": ["test_erasure_makes_credential_unrecoverable_while_the_spine_chain_verifies", "test_append_only_guarantee_survives_the_erasure_mechanism"]},
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "n-a"
+    },
+    {
+      "id": "REM-LADDER",
+      "title": "The served remediation ladder shows the tier the WARDEN gate really assigns",
+      "claim": "the served remediation ladder shows the tier the WARDEN gate really assigns for each stage",
+      "source": "integration/tests/test_fix_ladder_matches_the_gate.py:3",
+      "enforced_by": {"file": "engine/crucible/framework/v2/console/api.py", "symbol": "_REMEDIATION_LADDER"},
+      "proved_by": {"file": "integration/tests/test_fix_ladder_matches_the_gate.py", "tests": ["test_every_gated_row_shows_the_tier_the_warden_gate_really_assigns", "test_the_live_gate_agrees__unattended_queues_and_the_apply_click_is_what_opens_it"]},
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "display-manufactures-evidence",
+      "default": "n-a"
+    },
+    {
+      "id": "REGISTRY-SELF",
+      "title": "Every registered claim resolves to a real enforcing symbol AND a real proving test",
+      "claim": "Every registered claim resolves to a real enforcing symbol and a real proving test, and the guard fails the build when a registered claim has no backing or when a doc claim marker has no registry entry.",
+      "source": "docs/claims/README.md:1",
+      "enforced_by": {"file": "docs/tests/test_claims_registry.py", "symbol": "validate_claim"},
+      "proved_by": {"file": "docs/tests/test_claims_registry.py", "tests": ["test_every_registered_claim_resolves_to_a_real_symbol", "test_every_registered_claim_has_a_real_proving_test", "test_doc_markers_and_registry_are_bijective"]},
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
+    }
+  ]
+}

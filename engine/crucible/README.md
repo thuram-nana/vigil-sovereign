@@ -1252,6 +1252,8 @@ not a crash.** The system preserves that it *chose not to act.*
   scoped and gated identically, never an accidental blind spot.
 - **Sovereignty** (`kernel/sovereignty.py`) — the four‑tier LLM‑egress model (§9.11), the *data*
   counterpart to the *action* gates: it controls where your reasoning data may go.
+<!-- CLAIM:W10-1 -->
+<!-- Registered claim (W0-3 #398): the runtime egress allowlist (gate 6) is installed on the real engage/repeater target-traffic path, not merely available; its per-request refusal is scoped to sovereign mode, and recon collector hosts are asserted disjoint from the target scope. -->
 - **Egress guard** (`agents/egress_guard.py`) — the runtime transport that enforces the allowlist. Wired
   onto every `engage`/repeater executor (W10-1) so gate 6 is installed on the real target-traffic path,
   not just available. Recon collector hosts are asserted *disjoint* from the target scope

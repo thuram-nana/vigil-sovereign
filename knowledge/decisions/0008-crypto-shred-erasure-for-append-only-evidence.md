@@ -39,6 +39,9 @@ retained material **unrecoverable**.
 
 ## Decision — crypto-shred with a per-engagement key held OFF the spine
 
+<!-- CLAIM:W16-8 -->
+> **Registered claim (W0-3 #398):** Right-to-erasure on the append-only evidence store is honoured by crypto-shredding: destroying the per-engagement key held off the spine renders the sealed credential material cryptographically unrecoverable while every append-only row is byte-for-byte unchanged and the spine hash-chain still verifies.
+
 We do **not** delete or rewrite anything on the append-only spine. Instead:
 
 1. **Seal, don't store-in-clear (for the append-only sink).** Credential-bearing material destined
@@ -101,8 +104,10 @@ to the same off-host location as the ciphertext, or a backup could resurrect a s
   taken *before* an erasure may still hold plaintext; the honest position is stated in `PRIVACY.md`.
 - **Data-protection commitments.** `PRIVACY.md` and `DATA-GROUND-TRUTH.md` state the real position
   (what is captured, where it lives, how erasure works, and the seal-at-capture residual). The Data
-  Processing Agreement (W14-2 #504) and the claims registry (W0-3 #398) are owned by their own issues;
-  this ADR is the source of truth they cite for the erasure mechanism.
+  Processing Agreement (W14-2 #504) is owned by its own issue; the claims registry (W0-3 #398) now
+  registers this claim (`docs/claims/registry.json`, id `W16-8`) and its guard pins it to the enforcing
+  symbol (`EvidenceKeyring.shred`) and its proving test. This ADR remains the source of truth they cite
+  for the erasure mechanism.
 
 ## How it is verified
 

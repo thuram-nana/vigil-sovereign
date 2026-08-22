@@ -1,5 +1,10 @@
 """The Fixes screen's served ladder must describe the GATE, not a nicer story about it.
 
+<!-- CLAIM:REM-LADDER -->
+Registered claim (W0-3 #398): the served remediation ladder shows the tier the WARDEN gate really assigns
+for each stage, so the Fixes screen cannot display an auto-eligible pill for a stage that in fact queues for
+owner approval (a display bug that would manufacture evidence of a capability the gate does not grant).
+
 ``framework.v2.console.api._REMEDIATION_LADDER`` is shipped to the command UI and rendered as the "gated fix
 ladder" on the Fixes screen, tier pill and all. It is prose in the OFFENSE tree; the thing it describes is the
 WARDEN gate in the SOVEREIGN tree. Nothing structural connects them, so the ladder once claimed tiers the gate
