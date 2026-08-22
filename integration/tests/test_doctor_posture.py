@@ -217,6 +217,7 @@ def test_collect_attaches_posture_without_changing_ok(tmp_path, monkeypatch):
     posture = report["posture"]
     assert isinstance(posture, list) and [p["control"] for p in posture] == [
         "egress-gate", "vault", "key-sealing", "sovereignty", "entitlement", "backups", "charter",
+        "egress-supervisor",
     ]
     # every entry is a JSON-safe {control, state, detail}
     assert all(set(p) == {"control", "state", "detail"} for p in posture)
@@ -233,7 +234,7 @@ def test_posture_probe_that_raises_yields_unknown_not_crash(monkeypatch, tmp_pat
     posture = dmod._collect_posture(tmp_path, {})
     vault = next(p for p in posture if p["control"] == "vault")
     assert vault["state"] == "UNKNOWN" and "RuntimeError" in vault["detail"]
-    assert len(posture) == 7                                  # the other six still produced
+    assert len(posture) == 8                                  # the other seven still produced
 
 
 # --------------------------------------------------------------------------- FATAL-2 boundary
@@ -256,7 +257,7 @@ def test_doctor_reads_posture_without_importing_sigil_or_framework(tmp_path):
     assert out.returncode == 0, f"probe failed: {out.stderr}"
     res = __import__("json").loads(out.stdout.strip().splitlines()[-1])
     assert res["leaked"] == [], f"doctor co-loaded a forbidden plane: {res['leaked']}"
-    assert res["controls"] == ["egress-gate", "vault", "key-sealing", "sovereignty", "entitlement", "backups", "charter"]
+    assert res["controls"] == ["egress-gate", "vault", "key-sealing", "sovereignty", "entitlement", "backups", "charter", "egress-supervisor"]
 
 
 # --------------------------------------------------------------------------- README-truth (derive, don't drift)
