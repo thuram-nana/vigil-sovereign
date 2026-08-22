@@ -549,7 +549,21 @@ def test_the_capability_matrix_does_not_outrun_the_branch_registry() -> None:
     assert any(b["fact_capable"] for b in branches), "registry claims no FACT-capable branch at all"
 
     fact_tools = {t["name"] for t in matrix["tools"] if t.get("fact_capable")}
-    assert fact_tools == {"nmap", "sslscan"}, f"unexpected fact_capable tool set: {fact_tools}"
+    # THE invariant: every fact_capable tool must map to a registered fact_capable branch family — the matrix
+    # may not claim a FACT the registry cannot mint. H5 added masscan/rustscan/naabu as PROPOSERS that emit
+    # open-port proposals with NO redrives, so the runner re-proves each port with its OWN gated
+    # capture_handshake judged by the fact_capable service_reachability.tcp_handshake branch — nmap's exact
+    # re-drive+oracle path — and each PASSES the full conformance battery (test_conformance.py). So the fact
+    # set grows to the SERVICE_REACHABILITY reuse tools WITHOUT outrunning the registry.
+    fact_families = {b["id"].split(".")[0] for b in branches if b["fact_capable"]}
+    for t in matrix["tools"]:
+        if t.get("fact_capable"):
+            fam = (t.get("oracle_family") or "").lower()
+            assert fam in fact_families, (
+                f"{t['name']} is marked fact_capable but its oracle_family {fam!r} has no fact_capable branch "
+                f"in the registry — the matrix outruns the registry")
+    assert fact_tools == {"nmap", "sslscan", "masscan", "rustscan", "naabu"}, (
+        f"unexpected fact_capable tool set: {fact_tools}")
 
     httpx = [t for t in matrix["tools"] if t["name"] == "httpx"]
     assert httpx, "the web proposer row must exist"
