@@ -47,6 +47,8 @@ def test_healthz_is_liveness_and_carries_no_secret(tmp_path):
 
 
 def test_readyz_200_when_tip_store_writable(tmp_path):
+    # /readyz is a READ-ONLY probe (it does not create the dir); the tip dir must already exist.
+    (tmp_path / "sub").mkdir()
     svc = WitnessService("w", generate_keypair(), producer_pubkeys=[_PRODUCER.public_key_b64],
                          clock=lambda: 1, tip_path=str(tmp_path / "sub" / "tip.json"))
     srv, port = _serve(svc)

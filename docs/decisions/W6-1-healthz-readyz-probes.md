@@ -17,7 +17,7 @@ None of them checked a dependency, and none was reachable by a credential-less p
 ## The claim (registered in the claims registry — [W0-3] #398, id `W6-1`)
 
 <!-- CLAIM:W6-1 -->
-> **Registered claim (W0-3 #398):** Every VIGIL HTTP server — the sovereign glass-cockpit UI, the WireGuard bridge, the offense Ops Console, the unified `vigil up` reverse proxy, and the AEGIS gateway — exposes an UNAUTHENTICATED, Host-ungated `/healthz` liveness route (the process answers, 200, no secret) and a `/readyz` readiness route that probes THAT server's real dependency and returns 503 when it is down, and 200 when it is up; the probe routes sit BEFORE every auth/Host gate so a credential-less k8s/LB probe can reach them, and their bodies carry no token, path, or backend address.
+> **Registered claim (W0-3 #398):** Every VIGIL HTTP server — the sovereign glass-cockpit UI, the WireGuard bridge, the offense Ops Console, the unified `vigil up` reverse proxy, the loopback external API, and the AEGIS gateway — exposes an UNAUTHENTICATED, Host-ungated `/healthz` liveness route (the process answers, 200, no secret) and a `/readyz` readiness route that probes THAT server's real dependency and returns 503 when it is down, and 200 when it is up; the probe routes sit BEFORE every auth/Host gate so a credential-less k8s/LB probe can reach them, and their bodies carry no token, path, or backend address.
 
 The per-server dependency each `/readyz` probes: the spine store for the cockpit and bridge, the writable
 working directory for the console, the sovereign backend for the reverse proxy, and the fixed upstream for
@@ -33,6 +33,7 @@ proved per-server by the sibling suites:
 | WireGuard bridge | `apps/sigil/sigil/bridge/server.py` | the sovereign spine store opens | `apps/sigil/tests/test_health_readyz.py` |
 | offense Ops Console | `engine/crucible/framework/v2/console/server.py` | the console working dir is writable | `engine/crucible/framework/v2/console/tests/test_health_readyz.py` |
 | unified reverse proxy | `integration/vigil_integration/uiproxy.py` | the sovereign backend is listening | `integration/tests/test_uiproxy_health_readyz.py` |
+| loopback external API | `engine/crucible/framework/v2/api/server.py` | the console working dir is writable | `engine/crucible/framework/v2/api/tests/test_health_readyz.py` |
 | AEGIS gateway | `engine/crucible/framework/v2/aegis/gateway.py` | the fixed upstream is reachable | `engine/crucible/framework/v2/aegis/tests/test_gateway_health_readyz.py` |
 | witness server | `integration/vigil_integration/witness_service.py` | the durable tip store is writable | `integration/tests/test_witness_health_readyz.py` |
 

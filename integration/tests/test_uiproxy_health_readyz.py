@@ -145,3 +145,28 @@ def test_probes_expose_no_secret(tmp_path):
             assert "traceback" not in low
     finally:
         httpd.shutdown(); httpd.server_close()
+
+
+def test_readyz_debounces_backend_connects_no_amplification(tmp_path, monkeypatch):
+    """An UNAUTHENTICATED /readyz must not let a caller amplify: many rapid probes collapse to at most one
+    live backend connect within the debounce TTL (`_READYZ_TTL`), so a probe flood cannot become a flood of
+    sovereign connects."""
+    uiproxy._readyz_cache.clear()
+    calls = {"n": 0}
+    real = uiproxy._listening
+
+    def _counting(host, port):
+        calls["n"] += 1
+        return real(host, port)
+
+    monkeypatch.setattr(uiproxy, "_listening", _counting)
+    sink, sov = _start_sink()
+    httpd, base = _build_proxy(_serve_dir(tmp_path), sov_port=sov)
+    try:
+        for _ in range(25):
+            st, _b = _get(base + "/readyz", host="kube-probe/1.0")
+            assert st == 200
+        assert calls["n"] == 1, f"expected 1 debounced backend connect, got {calls['n']}"
+    finally:
+        httpd.shutdown(); httpd.server_close(); sink.shutdown(); sink.server_close()
+        uiproxy._readyz_cache.clear()

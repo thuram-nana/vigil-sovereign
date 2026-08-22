@@ -290,14 +290,16 @@ class WitnessService:
     def ready(self) -> "tuple[bool, str]":
         """Readiness — the witness's REAL dependency is its ability to DURABLY persist the co-signed tip
         (A8): a witness that cannot write its tip must not co-sign, or a restart could equivocate. Returns
-        ``(ready, reason)``. When a ``tip_path`` is configured, the tip directory must exist and be writable
-        (probed cheaply, no write); an in-memory witness (no tip_path) has no durable dependency and is
-        ready. Fail-closed: any probe error is NOT ready. Reason is a short code — never a path/secret."""
+        ``(ready, reason)``. When a ``tip_path`` is configured, the tip directory must ALREADY exist and be
+        writable — this is a READ-ONLY probe (``is_dir`` + ``os.access``); it creates nothing, so an
+        unauthenticated /readyz caller cannot cause a filesystem write (``_persist_tip`` creates the dir
+        lazily on the first real co-sign). An in-memory witness (no tip_path) has no durable dependency and
+        is ready. Fail-closed: a missing/unwritable dir or any probe error is NOT ready. Reason is a short
+        code — never a path/secret."""
         if self._tip_path is None:
             return True, "in-memory"
         try:
             parent = self._tip_path.parent
-            parent.mkdir(parents=True, exist_ok=True)
             if not (parent.is_dir() and os.access(parent, os.W_OK)):
                 return False, "tip_dir_not_writable"
             return True, "tip_dir_writable"
