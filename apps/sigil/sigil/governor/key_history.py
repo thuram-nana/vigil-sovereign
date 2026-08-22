@@ -23,10 +23,16 @@ ACTUAL compromise of a still-current key, continuity is not worth preserving: us
 
 FAIL-CLOSED on a broken/forked succession: a record that is not validly cross-signed, or does not chain from
 the current tip, DOES NOT EXTEND the chain (it is ignored — so injecting garbage cannot advance or brick
-verification). But a genuine FORK — the incumbent cross-signing TWO different successors at the same epoch —
-is true authority ambiguity: `build_succession` raises `SuccessionError`, and every consumer treats that as
-DENY (trust nothing until a `re_genesis`). A fork can only be produced by the owner private-key holder, so it
-is not a denial-of-service vector for a non-key-holder.
+verification). A genuine FORK at the LIVE rotation boundary — two different, validly cross-signed successors
+of the CURRENT authority (the key whose first successor is still the tip; only the holder of that live/most-
+recent key can mint them) — is true current-owner ambiguity: `build_succession` raises `SuccessionError`, and
+every consumer treats that as DENY (trust nothing until a `re_genesis`). Fork detection is therefore BOUNDED
+to the live boundary: a competing successor for a key whose boundary is ALREADY SUPERSEDED (the chain rotated
+onward past it) — the record a holder of a RETIRED key could append at an old epoch — is IGNORED, NOT a global
+brick. Bounding it this way is what denies a retired-key holder a total-governance-lockout DoS; the earlier
+unbounded fork detector DID let such a holder brick every fold (fixed, issue #434). BROKEN chain (an
+intermediate rotation link is missing, e.g. pruned): `key_resolver` FAILS CLOSED (DENY-all) rather than
+collapsing to an open genesis window — it never re-validates a retired genesis for the live tail.
 
 RE-GENESIS (the compromise fallback): mint a brand-new genesis key and REPIN the genesis root to it. The
 succession walk then starts from the new root; every pre-re-genesis key falls out of every window, so every
@@ -191,10 +197,17 @@ def build_succession(history: list[tuple[int, dict]], *, genesis_pubkey: Optiona
 
     A `rotate` record EXTENDS the chain iff it is validly cross-signed, chains from the current tip
     (`prev_pubkey == tip`), and carries the strictly-next epoch. A validly cross-signed record whose
-    `prev_pubkey` is a key we ALREADY succeeded — to a DIFFERENT successor — is a FORK -> `SuccessionError`
-    (only the incumbent key-holder can produce one). Anything else (bad cross-sign, unrelated `prev`, wrong
-    epoch) is IGNORED and does not extend the chain. `re-genesis` markers never extend a walk (the pinned
-    genesis root is what resets trust); they are audit records only."""
+    `prev_pubkey` is a key we ALREADY succeeded — to a DIFFERENT successor — is a FORK **only when that key's
+    successor is STILL the live tip** (the chain has not rotated past it) -> `SuccessionError` (true current-
+    owner ambiguity). A competing successor for an already-SUPERSEDED key (its successor is no longer the tip)
+    is IGNORED — that is a retired-key holder's late fork at an old epoch and must never brick verification.
+    Anything else (bad cross-sign, unrelated `prev`, wrong epoch, duplicate replay) is IGNORED and does not
+    extend the chain. `re-genesis` markers never extend a walk (the pinned genesis root is what resets trust);
+    they are audit records only.
+
+    A BROKEN chain (an intermediate rotation link is missing, so the walk cannot reach the live tip) is
+    fail-closed at the resolver layer (`key_resolver`, which knows the trusted current key): it is NEVER
+    collapsed to an open genesis window."""
     genesis = (genesis_pubkey or "").strip()
     if not genesis:
         # No anchor at all -> an empty succession. Callers fall back to their single current key.
@@ -216,12 +229,20 @@ def build_succession(history: list[tuple[int, dict]], *, genesis_pubkey: Optiona
             epochs.append([ep, new, seq, _INF])
             succeeded[prev] = new
             tip, epoch = new, ep
-        elif prev in succeeded and succeeded[prev] != new:
+        elif prev in succeeded and succeeded[prev] != new and succeeded[prev] == tip:
+            # A SECOND validly cross-signed successor for `prev`, hands off to a DIFFERENT `new` — AND the
+            # successor we already took for `prev` is STILL the live tip (the chain has NOT rotated onward
+            # past it). That is a genuine CURRENT-authority ambiguity at the live rotation boundary (only the
+            # holder of the live/most-recent key can mint prev==the-key-that-owns-the-tip): fail closed.
             raise SuccessionError(
                 f"forked owner-key succession at epoch {ep}: key {prev[:12]}… was already succeeded to "
                 f"{succeeded[prev][:12]}… but a second validly cross-signed record hands off to {new[:12]}…")
-        # else: exact-duplicate replay of a taken succession, a wrong-epoch record, or a cross-sign from an
-        # unrelated key -> ignored (does not extend, is not a fork).
+        # else: IGNORED (does not extend, is not a global brick). This covers, crucially, a competing
+        # successor for a key whose boundary is ALREADY SUPERSEDED — `prev in succeeded` but
+        # `succeeded[prev] != tip`, i.e. the chain rotated ONWARD past `prev` — which is exactly a
+        # retired-key holder appending a late fork record at an old epoch. Bounding the fork raise to the LIVE
+        # boundary denies such a holder the total-governance-lockout DoS. Also ignored: exact-duplicate replay
+        # of a taken succession, a wrong-epoch record, or a cross-sign from an unrelated key.
     return Succession(genesis=genesis, current=tip,
                       epochs=tuple(Epoch(e[0], e[1], e[2], e[3]) for e in epochs))
 
@@ -299,9 +320,19 @@ def key_resolver(store, *, current: Optional[str]) -> KeyResolver:
         except SuccessionError:
             res = KeyResolver(None, current)           # forked -> fail-closed DENY-all
         else:
-            windows = ([(e.pubkey, e.start, e.end) for e in succ.epochs]
-                       if succ.epochs else ([(current, 0, _INF)] if current else []))
-            res = KeyResolver(windows, current)
+            if current and succ.current and succ.current != current:
+                # The succession walk from the pinned genesis does NOT terminate at the TRUSTED current owner
+                # key. The genesis->current chain is BROKEN — e.g. an intermediate rotation record was pruned
+                # or lost, so the live records that reference the current key can no longer be bridged back to
+                # the pinned root. FAIL CLOSED (DENY-all). We must NEVER collapse a broken chain to an open
+                # genesis window: that would (a) re-validate a RETIRED genesis key for the entire live tail
+                # (fail-OPEN) and (b) orphan every current-key grant. (`current` is the vault's trusted key,
+                # not an attacker-controllable spine payload, so this fail-closed is not itself a DoS vector.)
+                res = KeyResolver(None, current)
+            else:
+                windows = ([(e.pubkey, e.start, e.end) for e in succ.epochs]
+                           if succ.epochs else ([(current, 0, _INF)] if current else []))
+                res = KeyResolver(windows, current)
     if token is not None:
         if len(_RESOLVER_CACHE) >= _RESOLVER_CACHE_CAP:
             _RESOLVER_CACHE.clear()                    # simple bound; walks are cheap to recompute
