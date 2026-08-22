@@ -216,6 +216,62 @@ def test_the_pin_check_can_actually_fail() -> None:
         assert "something:local" not in all_refs, "a service with build: is built from the tree"
 
 
+def test_strix_runtime_image_default_is_scanned_and_pinnable() -> None:
+    """S5 — A14 must SEE the Strix runtime sandbox image.
+
+    That image is named in no Dockerfile and no compose `image:` — the agent pulls it from the
+    `STRIX_IMAGE` setting DEFAULT at launch. Before S5 the scanner never looked there, so a mutable
+    upstream tag as the default (the shipped value was `ghcr.io/usestrix/strix-sandbox:1.0.0`) was an
+    unpinned image the gate silently ignored. Assert the scanner now yields it, and that the committed
+    default is itself acceptable (first-party or digest-pinned).
+    """
+    pins = _load_image_pins()
+    runtime = [r for r in pins.collect(REPO_ROOT) if r.source == pins.STRIX_SETTINGS_REL]
+    assert runtime, (
+        "A14 does not see the Strix runtime image (STRIX_IMAGE default in "
+        f"{pins.STRIX_SETTINGS_REL}); a mutable tag there would be an unpinned image the gate never checks"
+    )
+    assert not pins.unpinned(runtime), (
+        "the committed Strix runtime image default is neither first-party nor digest-pinned: "
+        + ", ".join(r.ref for r in pins.unpinned(runtime))
+    )
+
+
+def test_strix_runtime_image_scan_can_actually_fail() -> None:
+    """NEGATIVE CONTROL for the runtime-image scanner: a mutable upstream tag is flagged, a first-party
+    override is exempt, and the parser reads the value out of a real `Field(...)` shape."""
+    pins = _load_image_pins()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        settings = root / pins.STRIX_SETTINGS_REL
+        settings.parent.mkdir(parents=True)
+
+        settings.write_text(
+            "    image: str = Field(\n"
+            '        default="ghcr.io/usestrix/strix-sandbox:1.0.0",\n'
+            '        alias="STRIX_IMAGE",\n'
+            "    )\n",
+            encoding="utf-8",
+        )
+        refs = pins.strix_runtime_image_refs(root)
+        assert [r.ref for r in refs] == ["ghcr.io/usestrix/strix-sandbox:1.0.0"], (
+            "the parser did not read the STRIX_IMAGE default out of a Field(...) call"
+        )
+        assert pins.unpinned(refs) == refs, "a mutable upstream runtime tag must be flagged as unpinned"
+
+        settings.write_text(
+            "    image: str = Field(\n"
+            '        default="vigil/strix-sandbox:local",\n'
+            '        alias="STRIX_IMAGE",\n'
+            "    )\n",
+            encoding="utf-8",
+        )
+        first_party = pins.strix_runtime_image_refs(root)
+        assert first_party and not pins.unpinned(first_party), (
+            "the first-party runtime image (built from this tree) must be exempt"
+        )
+
+
 # ======================================================================================
 # 2. Hash-locked dependencies
 # ======================================================================================

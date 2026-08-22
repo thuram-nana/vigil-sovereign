@@ -11,6 +11,7 @@ from agents.sandbox.entries import BaseEntry, LocalDir
 from agents.sandbox.manifest import Environment, Manifest
 
 from strix.config import load_settings
+from strix.runtime import sandbox_hardening
 from strix.runtime.backends import get_backend
 from strix.runtime.caido_bootstrap import bootstrap_caido
 from strix.runtime.local_dir_staging import stage_symlink_safe_dir
@@ -179,7 +180,36 @@ async def cleanup(scan_id: str) -> None:
 
     docker_client = getattr(client, "docker_client", None)
     if docker_client is not None:
+        # S5 defence-in-depth: while we still hold a live docker client, reap any container a
+        # SIBLING run stranded by being SIGKILLed. Best-effort; never raises.
+        sandbox_hardening.reap_orphan_containers(docker_client, log=logger)
         try:
             docker_client.close()
         except Exception:  # noqa: BLE001
             logger.debug("cleanup(%s): docker_client.close() raised", scan_id, exc_info=True)
+
+
+async def kill_run(scan_id: str) -> int:
+    """Container-level kill switch for ``scan_id`` — S5.
+
+    The console kill switch (``cancel_run``) signals only the HOST process pid; the detached
+    sandbox container it spawned keeps running ``tail -f /dev/null`` unless something removes it.
+    This force-removes the container(s) for the run directly (addressed by the
+    ``vigil.strix.session_id`` label), independent of any host pid, then drops the cached session so
+    a later reuse cannot hand back a dead handle. Returns the number removed. Never raises.
+
+    NOTE: this addresses the SAME-PROCESS kill (the CLI/console that spawned the run is still
+    alive). A run whose host process was hard-``SIGKILL``ed loses this in-memory cache with it; that
+    case is covered by :func:`sandbox_hardening.reap_orphan_containers`, which the NEXT launch runs.
+    """
+    bundle = _SESSION_CACHE.get(scan_id)
+    removed = 0
+    if bundle is not None:
+        client = bundle.get("client")
+        docker_client = getattr(client, "docker_client", None)
+        state = getattr(getattr(bundle.get("session"), "_inner", None), "state", None)
+        session_id = getattr(state, "session_id", None)
+        if docker_client is not None and session_id is not None:
+            removed = sandbox_hardening.kill_scan_container(docker_client, session_id, log=logger)
+    await cleanup(scan_id)
+    return removed
