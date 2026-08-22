@@ -80,15 +80,42 @@ def test_cli_exit_zero_when_posture_unset(monkeypatch, capsys):
     assert _run_doctor(monkeypatch, capsys, posture_env=None, gate_ok=False) == 0
 
 
-import pytest  # noqa: E402
+_REPO = pathlib.Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.xfail(reason="blocking_work (W6-6 residual): the README security-posture block is authored "
-                          "by hand, not REGENERATED from `security_report()` by a CI guard, so it can "
-                          "still rot; and the consolidated doctor is not yet an entry in "
-                          "docs/claims/registry.json. The core consolidation (one registry, both entry "
-                          "points, JSON, honoured exit, `make smoke` de-`|| true`d) is landed and proven "
-                          "above; the doc-regeneration generator + claims entry are a separate slice.",
-                   strict=True)
 def test_readme_posture_block_is_ci_regenerated_from_the_registry():
-    raise AssertionError("no CI generator regenerates the README posture block from security_report() yet")
+    """AC3 anti-rot guard (REQUIRED job P5): README.md must contain, VERBATIM, the canonical
+    PRODUCTION-posture-gate block regenerated from ``REQUIRED_CONTROLS`` + ``evaluate`` on a fixed
+    misconfigured fixture — the SAME formatter `vigil doctor` prints. If the registry changes (a control
+    added / removed / reordered, or a requirement-text edit) the rendered block changes and this fails
+    until README.md is regenerated, so the documented block can never drift from the code.
+
+    This FAILS WITHOUT the fix: before this slice the README block was hand-authored and no generator
+    existed, so `render_readme_posture_block` was undefined and no verbatim block was present."""
+    block = core_doctor.render_readme_posture_block()
+    readme = (_REPO / "README.md").read_text(encoding="utf-8")
+    assert block in readme, (
+        "README.md does not contain the canonical doctor posture block verbatim — regenerate it with "
+        "`vigil_core.doctor.render_readme_posture_block()`. Expected block:\n\n" + block)
+
+
+def test_readme_regenerated_block_is_the_doctors_own_output():
+    """The regenerated block is not a lookalike: it is exactly what `vigil doctor`'s renderer emits for
+    the same gate verdict — both go through the ONE shared ``render_gate_block`` formatter."""
+    gate = dict(core_doctor.evaluate(core_doctor.README_POSTURE_FIXTURE, armed=True))
+    gate["posture"] = "production"
+    assert core_doctor.render_readme_posture_block() == "\n".join(core_doctor.render_gate_block(gate))
+
+
+def test_readme_guard_would_catch_a_registry_change():
+    """NEGATIVE CONTROL: the guard is not a no-op — a registry edit (here, a mutated requirement string)
+    yields a block that is NOT in README.md, so the guard would fail. Proves it actually pins the text."""
+    fixture = dict(core_doctor.README_POSTURE_FIXTURE)
+    gate = dict(core_doctor.evaluate(fixture, armed=True))
+    gate["posture"] = "production"
+    controls = [dict(c) for c in gate["controls"]]
+    controls[0]["requirement"] = "MUTATED requirement text that is not in the README zzz"
+    gate["controls"] = controls
+    mutated = "\n".join(core_doctor.render_gate_block(gate))
+    readme = (_REPO / "README.md").read_text(encoding="utf-8")
+    assert mutated not in readme

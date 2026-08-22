@@ -662,6 +662,7 @@ def _collect_posture(repo: Path, services: dict) -> list:
 # and `sigil doctor` gate on the exact SAME controls and good-states. Imported here (keeping the historical
 # `_PRODUCTION_GATE` name) is a boundary-safe `vigil_core` import; FATAL-2 holds.
 from vigil_core.doctor import REQUIRED_CONTROLS as _PRODUCTION_GATE
+from vigil_core.doctor import render_gate_block as _render_gate_block
 
 
 def production_posture() -> "str | None":
@@ -1048,22 +1049,10 @@ def render(report: dict) -> str:
         # W9-4b: shown ONLY when VIGIL_POSTURE=production (else the field is absent). Unlike the
         # informational block above, an unmet precondition here IS a hard failure — it also appears in
         # "Action needed" and flips the exit code, because it refuses `vigil up` / `vigil engage`.
-        posture_val = gate.get("posture")
-        if gate.get("ok"):
-            lines.append(f"\nPRODUCTION posture gate (VIGIL_POSTURE={posture_val}) — all preconditions "
-                         "met; `vigil up` / `vigil engage` may start:")
-        else:
-            n = len(gate.get("unmet", []))
-            lines.append(f"\nPRODUCTION posture gate (VIGIL_POSTURE={posture_val}) — REFUSES to start: "
-                         f"{n} precondition(s) unmet (each blocks `vigil up` / `vigil engage`):")
-        gwidth = max((len(str(c.get("control", ""))) for c in gate.get("controls", [])), default=0)
-        for c in gate.get("controls", []):
-            control, state = str(c.get("control", "?")), str(c.get("state", "?"))
-            mark = "OK " if c.get("met") else "!! "
-            seg = f"  {mark}{(control + ':'):<{gwidth + 1}} {state}"
-            if not c.get("met"):
-                seg += f"  — {c.get('requirement', '')}"
-            lines.append(seg)
+        # THE shared formatter (W6-6 / AC3): the exact block the README-regeneration generator renders,
+        # so `vigil doctor`'s output and the README block can never drift. The blank separator is ours.
+        lines.append("")
+        lines.extend(_render_gate_block(gate))
     integ = report.get("integrity")
     if integ is not None:
         lines.append("\nSpine integrity (the property the product exists to guarantee):")

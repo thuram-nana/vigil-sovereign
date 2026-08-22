@@ -263,6 +263,28 @@
       "ci_job": "CRUCIBLE core on vigil_core",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W6-6",
+      "title": "vigil doctor and sigil doctor share ONE check registry (no drift; README block CI-regenerated)",
+      "claim": "`vigil doctor` and `sigil doctor` share ONE check registry in `vigil_core.doctor` \u2014 the same `REQUIRED_CONTROLS` production-posture spec, the same fail-closed, opt-in gate decision (`evaluate`), and the same exit roll-up (`overall_ok`) \u2014 so the two entry points can never drift on which controls are required, what counts as satisfied, or whether a failure flips the exit code; and the security-posture block documented in README.md is REGENERATED from that registry by a required CI guard, not authored by hand, so it cannot rot.",
+      "source": "docs/decisions/W6-6-doctor-consolidation.md:14",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/doctor.py",
+        "symbol": "REQUIRED_CONTROLS"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_doctor_consolidation.py",
+        "tests": [
+          "test_the_registry_is_the_shared_vigil_core_one",
+          "test_readme_posture_block_is_ci_regenerated_from_the_registry",
+          "test_readme_regenerated_block_is_the_doctors_own_output",
+          "test_cli_exit_nonzero_on_bad_posture_when_armed"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

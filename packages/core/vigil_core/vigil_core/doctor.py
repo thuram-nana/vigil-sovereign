@@ -123,3 +123,60 @@ def overall_ok(checks: "Iterable[Check]") -> bool:
     reported but does NOT fail the doctor, while a real required-control failure does. The one roll-up both
     entry points use, so 'stop discarding exit codes' means the same thing on both sides."""
     return all(c.ok for c in checks if c.required)
+
+
+# ── shared PRODUCTION-posture-gate block renderer (W6-6 / AC3) ─────────────────────────────────────────
+# ONE formatter for the "PRODUCTION posture gate" block, shared by the doctor's human output
+# (`vigil_integration.doctor.render`) and the README-regeneration generator below, so the block a
+# reviewer reads in README.md is byte-for-byte the block `vigil doctor` prints. Both come from
+# ``REQUIRED_CONTROLS`` via ``evaluate``, so neither can drift from the registry.
+def render_gate_block(gate: Mapping) -> "list[str]":
+    """Render an ``evaluate()`` verdict (== the ``production_gate`` field of ``security_report``) as the
+    list of text lines that make up the "PRODUCTION posture gate" block. Pure formatting; never raises.
+    The leading blank-line separator is the caller's to add."""
+    lines: list = []
+    posture_val = gate.get("posture")
+    controls = list(gate.get("controls", []))
+    if gate.get("ok"):
+        lines.append(f"PRODUCTION posture gate (VIGIL_POSTURE={posture_val}) — all preconditions "
+                     "met; `vigil up` / `vigil engage` may start:")
+    else:
+        n = len(gate.get("unmet", []))
+        lines.append(f"PRODUCTION posture gate (VIGIL_POSTURE={posture_val}) — REFUSES to start: "
+                     f"{n} precondition(s) unmet (each blocks `vigil up` / `vigil engage`):")
+    gwidth = max((len(str(c.get("control", ""))) for c in controls), default=0)
+    for c in controls:
+        control, state = str(c.get("control", "?")), str(c.get("state", "?"))
+        mark = "OK " if c.get("met") else "!! "
+        seg = f"  {mark}{(control + ':'):<{gwidth + 1}} {state}"
+        if not c.get("met"):
+            seg += f"  — {c.get('requirement', '')}"
+        lines.append(seg)
+    return lines
+
+
+# A FIXED, deterministic, fully-misconfigured control fixture: every REQUIRED control in a state OUTSIDE
+# its good-set, with no absolute paths or host-specific detail, so the rendered block is byte-stable and
+# can be embedded in README.md verbatim. A change to the registry (a control added / removed / reordered,
+# or its requirement text edited) changes the rendered block and breaks the CI guard until README.md is
+# regenerated — that is the anti-rot property AC3 requires.
+README_POSTURE_FIXTURE: "dict[str, str]" = {
+    "vault": "UNPROVISIONED",
+    "sovereignty": "PERMISSIVE",
+    "entitlement": "UNGOVERNED",
+    "backups": "OFF",
+    "charter": "ABSENT",
+    "legacy-owner-token": "ENABLED",
+}
+
+
+def render_readme_posture_block() -> str:
+    """Regenerate the canonical PRODUCTION-posture-gate block README.md must contain verbatim.
+
+    Deterministic: the misconfigured ``README_POSTURE_FIXTURE`` drives ``evaluate`` with the gate armed,
+    the ``posture`` label is FIXED to ``production`` (not read from the environment), and the text comes
+    from ``render_gate_block`` — the SAME formatter `vigil doctor` uses. Returns the block as one string
+    (no surrounding code fence, no trailing newline)."""
+    gate = dict(evaluate(README_POSTURE_FIXTURE, armed=True))
+    gate["posture"] = "production"
+    return "\n".join(render_gate_block(gate))
