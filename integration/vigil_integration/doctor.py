@@ -435,7 +435,7 @@ def _one_timer_status(systemctl: str, timer_name: str) -> dict:
     a crash. Returns {name, enabled: bool, last_run: str|None, last_ok: bool}."""
     enabled = False
     try:
-        r = subprocess.run([systemctl, "is-enabled", timer_name],
+        r = subprocess.run([systemctl, "--user", "is-enabled", timer_name],
                            capture_output=True, text=True, timeout=10)
         enabled = r.stdout.strip() == "enabled"
     except (OSError, subprocess.SubprocessError):
@@ -443,7 +443,7 @@ def _one_timer_status(systemctl: str, timer_name: str) -> dict:
     service = timer_name[: -len(".timer")] + ".service"
     ts = status = result = ""
     try:
-        r = subprocess.run([systemctl, "show", service,
+        r = subprocess.run([systemctl, "--user", "show", service,
                             "-p", "ExecMainExitTimestamp", "-p", "ExecMainStatus", "-p", "Result"],
                            capture_output=True, text=True, timeout=10)
         props: dict = {}
