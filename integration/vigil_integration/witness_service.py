@@ -287,6 +287,23 @@ class WitnessService:
     def public_key_b64(self) -> str:
         return self._keypair.public_key_b64
 
+    def ready(self) -> "tuple[bool, str]":
+        """Readiness — the witness's REAL dependency is its ability to DURABLY persist the co-signed tip
+        (A8): a witness that cannot write its tip must not co-sign, or a restart could equivocate. Returns
+        ``(ready, reason)``. When a ``tip_path`` is configured, the tip directory must exist and be writable
+        (probed cheaply, no write); an in-memory witness (no tip_path) has no durable dependency and is
+        ready. Fail-closed: any probe error is NOT ready. Reason is a short code — never a path/secret."""
+        if self._tip_path is None:
+            return True, "in-memory"
+        try:
+            parent = self._tip_path.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            if not (parent.is_dir() and os.access(parent, os.W_OK)):
+                return False, "tip_dir_not_writable"
+            return True, "tip_dir_writable"
+        except Exception:  # noqa: BLE001 — a tip store that will not open is NOT ready (fail-closed)
+            return False, "tip_dir_error"
+
     def authorize_producer(self, cp: Checkpoint, producer_sig_b64: str, *, scope: str = "") -> bool:
         """True iff ``producer_sig_b64`` is a valid signature by one of this witness's PINNED producer keys
         over :func:`producer_signing_bytes` ``(cp, scope)``. Called BEFORE :meth:`cosign` so an unsigned /
@@ -489,9 +506,20 @@ def _make_handler(service: WitnessService, *, read_timeout: float = _DEFAULT_REA
             return raw
 
         def do_GET(self):  # noqa: N802
-            if self.path.split("?", 1)[0] == "/pubkey":
+            path = self.path.split("?", 1)[0]
+            if path == "/pubkey":
                 self._json(200, {"key_id": service.key_id, "public_key_b64": service.public_key_b64})
-            elif self.path.split("?", 1)[0] == "/health":
+            elif path == "/healthz":
+                # Liveness — the process answers. UNAUTHENTICATED, carries no secret (not even the key_id).
+                self._json(200, {"ok": True})
+            elif path == "/readyz":
+                # Readiness — probes the witness's REAL dependency (durable tip persistence). 503 when it
+                # cannot write its tip, so an orchestrator drains a witness that could equivocate on restart.
+                ok, reason = service.ready()
+                self._json(200 if ok else 503,
+                           {"ok": ok, "checks": [{"name": "tip_store", "ok": ok, "reason": reason}]})
+            elif path == "/health":
+                # Legacy alias (kept for existing pollers): a constant-shaped liveness answer.
                 self._json(200, {"ok": True, "key_id": service.key_id})
             else:
                 self._json(404, {"error": "not_found"})

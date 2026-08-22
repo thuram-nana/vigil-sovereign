@@ -222,9 +222,34 @@ class Handler(BaseHTTPRequestHandler):
     def _deny(self, code=403, msg="forbidden"):
         self._json({"error": msg}, code)
 
+    # --- health / readiness (probe surface) -------------------------------------------------------
+    # UNAUTHENTICATED and Host-UNGATED by design: a k8s/LB liveness/readiness probe cannot present the
+    # session token nor the operator's Host, so these two routes sit BEFORE the principal gate and carry
+    # NO secret. `/healthz` is pure liveness (the process answers). `/readyz` checks the server's REAL
+    # dependency — the sovereign spine store — and returns 503 when it cannot be opened, so an orchestrator
+    # drains a cockpit whose spine home has broken rather than serving from it. Bodies carry no path,
+    # token, or account state (only a boolean + the exception TYPE name on failure).
+    def _healthz(self):
+        self._send(200, b'{"ok":true}')
+
+    def _readyz(self):
+        ok, name = True, ""
+        try:
+            self.server.store()          # opens the spine home + reads the tip (cheap, O(tail))
+        except Exception as exc:  # noqa: BLE001 — a spine that will not open is NOT ready (fail-closed)
+            ok, name = False, type(exc).__name__
+        body = {"ok": ok, "checks": [{"name": "spine", "ok": ok}]}
+        if not ok:
+            body["error"] = name         # exception TYPE only — never its message (which can hold a path)
+        self._send(200 if ok else 503, _json_bytes(body))
+
     # --- GET (read plane) -------------------------------------------------------------------------
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/healthz":
+            return self._healthz()
+        if path == "/readyz":
+            return self._readyz()
         if path in ("/", "/index.html"):
             return self._serve_index()
         if path.startswith("/static/"):

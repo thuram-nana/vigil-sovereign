@@ -253,9 +253,33 @@ class Handler(BaseHTTPRequestHandler):
                      getattr(self, "command", "?"), urlparse(self.path).path, code, msg)
         self._json({"error": msg}, code)
 
+    # --- health / readiness (probe surface) -------------------------------------------------------
+    # UNAUTHENTICATED and Host-UNGATED by design: a k8s/LB probe carries neither a device envelope nor the
+    # WG Host, so these two routes sit BEFORE the envelope/rebind gate and carry NO secret. `/healthz` is
+    # pure liveness. `/readyz` checks the bridge's REAL dependency — the sovereign spine store the daemon
+    # reads/receipts against — returning 503 when it cannot be opened. Bodies carry no path/secret (only a
+    # boolean + the exception TYPE name on failure).
+    def _healthz(self):
+        self._send(200, b'{"ok":true}')
+
+    def _readyz(self):
+        ok, name = True, ""
+        try:
+            self.server.store()          # opens the spine home + reads the tip (cheap, O(tail))
+        except Exception as exc:  # noqa: BLE001 — a spine that will not open is NOT ready (fail-closed)
+            ok, name = False, type(exc).__name__
+        body = {"ok": ok, "checks": [{"name": "spine", "ok": ok}]}
+        if not ok:
+            body["error"] = name         # exception TYPE only — never its message (which can hold a path)
+        self._send(200 if ok else 503, _json_bytes(body))
+
     # --- GET (read plane) -------------------------------------------------------------------------
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/healthz":
+            return self._healthz()
+        if path == "/readyz":
+            return self._readyz()
         if path in ("/", "/index.html"):
             return self._serve_index()
         if path.startswith("/static/"):

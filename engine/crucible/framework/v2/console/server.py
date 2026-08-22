@@ -395,9 +395,38 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return False
         return hmac.compare_digest(str(tok), str(expected))
 
+    def _healthz(self) -> None:
+        """Liveness — the process answers. UNAUTHENTICATED and Host-UNGATED (a k8s/LB probe presents
+        neither the session token nor the loopback Host), and carries NO secret."""
+        self._json({"ok": True})
+
+    def _readyz(self) -> None:
+        """Readiness — checks the console's REAL dependency: its writable working directory (where every
+        run/report/blackboard is persisted). Returns 503 when that store cannot be created/written, so an
+        orchestrator drains a console that cannot record an engagement. UNAUTHENTICATED and Host-UNGATED;
+        the body carries no path/token (only a boolean + the exception TYPE name on failure)."""
+        ok, name = True, ""
+        try:
+            d = actions.console_dir()               # creates + returns the console's .console working dir
+            if not os.access(d, os.W_OK):
+                ok, name = False, "not_writable"
+        except Exception as exc:  # noqa: BLE001 — a store that will not open is NOT ready (fail-closed)
+            ok, name = False, type(exc).__name__
+        body: dict = {"ok": ok, "checks": [{"name": "console_store", "ok": ok}]}
+        if not ok:
+            body["error"] = name                     # exception TYPE / short reason — never a path
+        self._json(body, status=200 if ok else 503)
+
     def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
         parts = urlsplit(self.path)
         path = parts.path
+        # Health/readiness probes are answered FIRST — before the Host and token gates — so a k8s/LB probe
+        # (which sends neither the loopback Host nor the session token) can reach them. They expose no
+        # sensitive state.
+        if path == "/healthz":
+            return self._healthz()
+        if path == "/readyz":
+            return self._readyz()
         # A9: DNS-rebinding defense for READ routes — a rebinding page (attacker.com re-resolving to
         # 127.0.0.1) sends its OWN Host, so a Host that does not name the loopback console (or an allowlisted
         # proxy domain) is refused before ANY status/runs/findings/event-stream/terminal/dossier data is read.

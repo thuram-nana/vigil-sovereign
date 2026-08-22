@@ -1122,7 +1122,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _handle(self):
         try:
             split = urlsplit(self.path)
-            # PROXY-LOCAL FIRST: plane control is answered by this process, BEFORE any attempt to route
+            # PROBE-SAFE FIRST: liveness/readiness are answered by THIS process, before plane control,
+            # routing, auth, or the Host/Origin gate — a k8s/LB probe presents no session token and no
+            # proxy Host, so the two probe routes must sit ahead of every gate and carry no secret.
+            if split.path == "/healthz":
+                self._healthz()
+                return
+            if split.path == "/readyz":
+                self._readyz()
+                return
+            # PROXY-LOCAL: plane control is answered by this process, BEFORE any attempt to route
             # or to serve a file. That ordering is the whole point — a backend that is down cannot answer
             # a request to start itself, and the interface is still being served here while it is down.
             if is_plane_path(split.path):
@@ -1517,6 +1526,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     or origin.rstrip("/") in allow_origins):
                 return False, f"Origin={origin!r}"
         return True, ""
+
+    def _healthz(self):
+        """Liveness — the proxy process answers. UNAUTHENTICATED, Host-UNGATED, no secret."""
+        self._plane_json({"ok": True})
+
+    def _readyz(self):
+        """Readiness — checks the proxy's REAL dependency: the sovereign backend it federates every
+        authenticated request to (per-user whoami lives there; without it the proxy can serve nothing but
+        the login shell). A LIVE port probe (no bytes sent), so it reflects the sovereign address in
+        `--proxy-only` too. 503 when the sovereign is not listening, so an orchestrator drains a replica
+        whose writer is gone. UNAUTHENTICATED, Host-UNGATED; the body carries no address/token."""
+        sov_host, sov_port = (getattr(self.server, "backends", None) or _default_backends())["sovereign"]
+        ok = _listening(sov_host, sov_port)
+        body = {"ok": ok, "checks": [{"name": "sovereign", "ok": ok}]}
+        self._plane_json(body, status=200 if ok else 503)
 
     def _plane_json(self, payload: dict, status: int = 200, *, drained: bool = False):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
