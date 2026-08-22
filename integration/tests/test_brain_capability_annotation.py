@@ -16,7 +16,9 @@ from __future__ import annotations
 import pytest
 
 # join() itself is pure stdlib, but computing the real builder set imports the executor, which imports the
-# gateway package; skip cleanly if it is not on the path (the offense-leg run-list puts it there).
+# gateway package; skip cleanly if it is not on the path. In CI this test runs in the P5 "integration
+# two-env boundary" leg, whose PYTHONPATH includes `gateway`, so vigil_gateway is importable and this test
+# is NOT skipped there (verified) -- it is not a framework/offense-leg test.
 pytest.importorskip("vigil_gateway")
 
 from vigil_integration.brains.hexstrike_brain import (

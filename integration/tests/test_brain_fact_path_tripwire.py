@@ -109,14 +109,33 @@ def test_brain_production_path_only_plans_never_executes_via_body(monkeypatch):
 def test_tool_intake_never_asserts_exploit_succeeded():
     """The brain path's tool output becomes LEADs via ``analysis_from_tool_output``; it hard-sets
     ``exploit_succeeded=False`` so the oracle is never fired from producer-supplied bytes. If this ever
-    returns True a FACT could be minted from a tool's say-so — update THIS canary tool-by-tool if intended."""
-    from vigil_integration.live.tool_intake import analysis_from_tool_output
+    returns True a FACT could be minted from a tool's say-so — update THIS canary tool-by-tool if intended.
 
-    analysis = analysis_from_tool_output("nuclei", NUCLEI)
-    assert analysis is not None and analysis.findings, "sample must parse or the guard is vacuous"
-    assert analysis.exploit_succeeded is False, (
+    Driven in a SUBPROCESS: the nuclei parser initializes global engine state that leaks into a later
+    live-engine ``engage()`` (a pre-existing order-fragility shared with the base ``test_tool_intake.py``).
+    Isolating the call keeps this tripwire from polluting any sibling test in any collection order."""
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import json, sys\n"
+        "from vigil_integration.live.tool_intake import analysis_from_tool_output\n"
+        "a = analysis_from_tool_output('nuclei', json.loads(sys.stdin.read()))\n"
+        "print('FINDINGS=' + repr(bool(a is not None and a.findings)))\n"
+        "print('EXPLOIT_SUCCEEDED=' + repr(a.exploit_succeeded))\n"
+    )
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+    proc = subprocess.run(
+        [sys.executable, "-c", code], input=json.dumps(NUCLEI),
+        capture_output=True, text=True, env=env, timeout=180,
+    )
+    assert proc.returncode == 0, ("intake subprocess failed", proc.stdout, proc.stderr)
+    assert "FINDINGS=True" in proc.stdout, ("sample must parse or the guard is vacuous", proc.stdout)
+    assert "EXPLOIT_SUCCEEDED=False" in proc.stdout, (
         "tool_intake asserted exploit_succeeded — that would fire the oracle from tool-supplied bytes and "
-        "mint a FACT on the brain path. Update THIS canary tool-by-tool if this is an intended enablement."
+        "mint a FACT on the brain path. Update THIS canary tool-by-tool if this is an intended enablement.",
+        proc.stdout,
     )
 
 

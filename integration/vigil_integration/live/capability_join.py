@@ -81,8 +81,10 @@ def _classify(*, proposable: bool, excluded: bool, typed_builder: bool,
     """The status rules, in precedence order. Refusal reasons beat availability reasons."""
     if excluded:
         return BLOCKED, (
-            f"{name} is an excluded class (offense / credential-access): VIGIL will not propose or run it, "
-            f"and it can never be fact-capable"
+            f"{name} is an excluded class (offense / credential-access): VIGIL never treats its output as a "
+            f"FACT (excluded ⇒ never fact-capable) and confirms this class with its own gated re-drive + "
+            f"oracle. A brain-proposed step for it is surfaced BLOCKED for the operator and is never "
+            f"auto-promoted"
         )
     if not proposable:
         return NOT_PROPOSABLE, (
