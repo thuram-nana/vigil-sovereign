@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterable
 
 # The catalogue classification (Phase-1 taxonomy). An unknown category fails validation (fail-closed).
 CATEGORIES = frozenset({
@@ -126,6 +127,49 @@ def validate_all(manifests: list[ToolManifest]) -> list[str]:
         if m.name in seen:
             errs.append(f"duplicate manifest name {m.name!r}")
         seen.add(m.name)
+    return errs
+
+
+def validate_capability_sync(proposable_tools: Iterable[str],
+                             manifests: list[ToolManifest]) -> list[str]:
+    """The H4 CROSS-REGISTRY sync invariant: every tool the PLANNER can propose must be RENDERED in the
+    capability matrix WITH A REASON — LEAD-only / UNAVAILABLE / BLOCKED / EXCLUDED — never silently absent.
+
+    ``validate_manifest`` (above) owns the per-row honesty rules — ``excluded ⇒ ¬fact_capable``,
+    ``fact_capable ⇒ oracle_family``, the ``_KNOWN_OFFENSE_BINARIES`` name backstop, and the "non-fact_capable
+    ⇒ a REASON in notes" rule. But a single row cannot see a tool the planner proposes that has NO row at
+    all, and that is exactly the silent-disappearance defect H4 fixes: the planner lists a tool, the executor
+    denies it fail-closed (no typed argv builder / excluded), and no committed surface says why. This
+    validator closes the gap by joining the planner's proposable set against the matrix rows.
+
+    ``proposable_tools`` is the planner's catalogue of names (the keys of the brain's ``_TOOL_DANGER`` map),
+    passed as DATA so this module stays vigil_core + stdlib only (no brain/framework import). A proposable
+    tool satisfies the invariant iff:
+
+      * it has a manifest row (never absent), AND
+      * that row carries a non-empty ``notes`` reason (so its BLOCKED/UNAVAILABLE/LEAD-only status is
+        explained). An excluded row already must carry a reason via ``validate_manifest``, so an
+        ``excluded``-with-reason tool passes here too — the "OR explicitly excluded-with-a-reason" branch.
+
+    Returns the list of violations (empty ⇒ every proposable tool is rendered, with a reason).
+    """
+    errs: list[str] = []
+    by_name = {m.name: m for m in manifests}
+    for name in sorted({str(t) for t in proposable_tools if str(t).strip()}):
+        m = by_name.get(name)
+        if m is None:
+            errs.append(
+                f"{name}: PLANNER-PROPOSABLE but ABSENT from the capability matrix — a planned tool must be "
+                f"rendered UNAVAILABLE/BLOCKED with a reason, never silently missing. Add a matrix row "
+                f"(excluded-with-reason, or LEAD-only with a reason in notes)."
+            )
+            continue
+        if not (m.notes or "").strip():
+            errs.append(
+                f"{name}: proposable AND in the matrix but rendered WITHOUT a reason (empty notes) — the "
+                f"status (BLOCKED / UNAVAILABLE / LEAD-only) must say why, so the tool is never silently "
+                f"missing from a plan."
+            )
     return errs
 
 

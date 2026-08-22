@@ -482,6 +482,259 @@
         "k8s-posture"
       ],
       "notes": "ACTIVE Kubernetes hunter (runs only under the WARDEN A2 floor on a live in-scope target). LEAD-only: its active-probe findings point at K8s posture but VIGIL does not trust the scanner's verdict; a FACT requires VIGIL's own live K8s-API capture (Track B) or a parsed primary artifact (RBAC manifest / kube-bench report). fact_capable stays false."
+    },
+    {
+      "name": "amass",
+      "category": "recon",
+      "license": "Apache-2.0",
+      "install": "go",
+      "privileges": "none",
+      "network_effect": "connects-out",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "subdomain"
+      ],
+      "notes": "LEAD-only subdomain enumerator (the brain's RECON class). A resolved subdomain becomes a FACT only via a per-host SERVICE_REACHABILITY re-drive (as for subfinder); bare enumeration is a LEAD. No typed argv builder in live.executor yet, so the executor denies it fail-closed \u2014 UNAVAILABLE until a ToolSpec is adapted. Rendered with a reason, never silently missing."
+    },
+    {
+      "name": "arjun",
+      "category": "active-assessment",
+      "license": "unknown",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "param-discovery"
+      ],
+      "notes": "LEAD-only HTTP parameter discovery: a discovered parameter is a hypothesis feeder for a later gated re-drive, never a FACT on its own. No typed argv builder yet \u2014 UNAVAILABLE until adapted (never silently missing)."
+    },
+    {
+      "name": "arp-scan",
+      "category": "recon",
+      "license": "GPL-3.0",
+      "install": "apt",
+      "privileges": "sometimes",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "network-discovery"
+      ],
+      "notes": "LEAD-only layer-2 host discovery (raw sockets \u2192 privileges=sometimes). A discovered host becomes a FACT only via a SERVICE_REACHABILITY re-drive; the ARP reply itself is a LEAD. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+    },
+    {
+      "name": "autorecon",
+      "category": "recon",
+      "license": "GPL-3.0",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "recon-orchestration"
+      ],
+      "notes": "LEAD-only recon ORCHESTRATOR (it drives other scanners). VIGIL owns orchestration, so a wrapped autorecon run is a LEAD feeder, never a FACT. No typed argv builder \u2014 UNAVAILABLE until adapted (orchestration would be re-expressed as native VIGIL steps, not a wrapped subprocess)."
+    },
+    {
+      "name": "dalfox",
+      "category": "active-assessment",
+      "license": "MIT",
+      "install": "go",
+      "privileges": "none",
+      "network_effect": "intrusive",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "xss"
+      ],
+      "notes": "LEAD-only XSS SCANNER (assessment, not an exploiter \u2014 not the exploitation category). VIGIL confirms XSS via its own gated payload re-drive + oracle, never dalfox's say-so; its report is a LEAD. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+    },
+    {
+      "name": "dirsearch",
+      "category": "active-assessment",
+      "license": "GPL-2.0",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "content-discovery"
+      ],
+      "notes": "LEAD-only content discovery (path brute). existence+anon-reach is FACT-capable only via a future ACTIVE_EXPOSURE re-drive; today a hit is a LEAD. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+    },
+    {
+      "name": "enum4linux-ng",
+      "category": "active-assessment",
+      "license": "GPL-3.0",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "smb-enum"
+      ],
+      "notes": "LEAD-only SMB/NetBIOS enumeration. A reachable share/user is confirmed only by a VIGIL-owned re-drive; the scanner report is a LEAD. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+    },
+    {
+      "name": "feroxbuster",
+      "category": "active-assessment",
+      "license": "MIT",
+      "install": "cargo",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "content-discovery"
+      ],
+      "notes": "LEAD-only content discovery (recursive path brute) \u2014 same authority ladder as gobuster/dirsearch: FACT-capable only via a future ACTIVE_EXPOSURE re-drive; a hit is a LEAD today. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+    },
+    {
+      "name": "ffuf",
+      "category": "active-assessment",
+      "license": "MIT",
+      "install": "go",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "content-discovery",
+        "fuzzing"
+      ],
+      "notes": "ADAPTED \u2014 a typed argv builder exists in live.executor (server-side argv, no model-supplied flags) \u2014 but LEAD-only: content-discovery/fuzzing hits are hypothesis feeders with no runner-owned oracle re-drive, so fact_capable stays false. Renders EXECUTABLE where installed, else UNAVAILABLE (presence not probed / not installed) \u2014 never silently missing."
+    },
+    {
+      "name": "gau",
+      "category": "recon",
+      "license": "MIT",
+      "install": "go",
+      "privileges": "none",
+      "network_effect": "connects-out",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "url-discovery"
+      ],
+      "notes": "LEAD-only URL discovery from third-party archives (Wayback/OTX/CommonCrawl) \u2014 a URL is a hypothesis feeder, never a FACT. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+    },
+    {
+      "name": "jaeles",
+      "category": "active-assessment",
+      "license": "unknown",
+      "install": "go",
+      "privileges": "none",
+      "network_effect": "intrusive",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "vuln-template-match"
+      ],
+      "notes": "LEAD-only templated web scanner \u2014 same ladder as nuclei: template matches are LEADs until each class gets a runner-owned oracle re-drive; ACTIVE (A2 floor \u2014 queues on live). No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+    },
+    {
+      "name": "nbtscan",
+      "category": "recon",
+      "license": "unknown",
+      "install": "apt",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "netbios-enum"
+      ],
+      "notes": "LEAD-only NetBIOS name scan. A responding host is confirmed only by a SERVICE_REACHABILITY re-drive; the scan output is a LEAD. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+    },
+    {
+      "name": "nikto",
+      "category": "active-assessment",
+      "license": "GPL-2.0",
+      "install": "apt",
+      "privileges": "none",
+      "network_effect": "intrusive",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "web-misconfig"
+      ],
+      "notes": "ADAPTED \u2014 a typed argv builder exists in live.executor \u2014 but LEAD-only: nikto's misconfiguration/vuln findings are its own say-so; VIGIL treats them as LEADs (a FACT needs a runner-owned re-drive + oracle), so fact_capable stays false. Renders EXECUTABLE where installed, else UNAVAILABLE (presence not probed / not installed) \u2014 never silently missing."
+    },
+    {
+      "name": "paramspider",
+      "category": "recon",
+      "license": "unknown",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "connects-out",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "param-discovery"
+      ],
+      "notes": "LEAD-only parameter mining from archived URLs (passive) \u2014 a discovered parameter is a hypothesis feeder, never a FACT. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+    },
+    {
+      "name": "smbmap",
+      "category": "active-assessment",
+      "license": "GPL-3.0",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "smb-enum"
+      ],
+      "notes": "LEAD-only SMB share enumeration. Reachable-share / permission claims are confirmed only by a VIGIL-owned re-drive; the scanner report is a LEAD. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+    },
+    {
+      "name": "waybackurls",
+      "category": "recon",
+      "license": "MIT",
+      "install": "go",
+      "privileges": "none",
+      "network_effect": "connects-out",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "url-discovery"
+      ],
+      "notes": "LEAD-only URL discovery from the Wayback Machine \u2014 a URL is a hypothesis feeder, never a FACT. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+    },
+    {
+      "name": "wpscan",
+      "category": "active-assessment",
+      "license": "unknown",
+      "install": "gem",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "wordpress-enum"
+      ],
+      "notes": "LEAD-only WordPress enumeration (WPScan Public Source License \u2014 non-commercial restrictions; license=unknown pending review). Version/plugin findings are LEADs until a runner-owned re-drive confirms them. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+    },
+    {
+      "name": "x8",
+      "category": "active-assessment",
+      "license": "unknown",
+      "install": "cargo",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "param-discovery"
+      ],
+      "notes": "LEAD-only hidden-parameter discovery \u2014 a discovered parameter is a hypothesis feeder, never a FACT. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
     }
   ]
 }
