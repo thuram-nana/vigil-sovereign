@@ -659,9 +659,25 @@ def _persist_env(key: str, value: str) -> None:
         pass
     if value != "":
         lines.append(f"{key}={value}")
-    fd = os.open(str(f), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + ("\n" if lines else ""))
+    # ATOMIC write (RED-PEN #474 MEDIUM): write a sibling temp file (0600) then os.replace() onto sigil.env,
+    # so a concurrent reader NEVER sees a truncated/empty file. The old O_TRUNC-in-place had a
+    # truncate-then-write window: a torn read during it returned an EMPTY export, and the offense-plane
+    # re-resolve (uiproxy) reads (resolved_ok=True, {}) as a deliberate tier-clear and silently RELAXES a
+    # strict sovereignty tier to PERMISSIVE. os.replace is atomic within a directory, closing that window.
+    body = "\n".join(lines) + ("\n" if lines else "")
+    tmp = f.with_name(f".{f.name}.tmp.{os.getpid()}")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(body)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(str(tmp), str(f))             # atomic within the dir; no reader observes a partial file
+    finally:
+        try:
+            os.unlink(str(tmp))                  # no-op if the replace already consumed it
+        except OSError:
+            pass
     if value == "":
         os.environ.pop(key, None)
     else:
