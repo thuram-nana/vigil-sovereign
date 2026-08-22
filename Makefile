@@ -99,8 +99,8 @@ smoke: ## run the boundary + core smoke checks (no pytest needed)
 	else \
 	  rm -rf $$T; echo "vigil native verb FAILED (offense venv / framework wiring)" >&2; exit 1; \
 	fi
-	@echo "self-check (informational — missing Claude/TPM/keyring are optional):"
-	SIGIL_HOME=$${SIGIL_HOME:-$$HOME/.sigil} .venv-sovereign/bin/sigil doctor || true
+	@echo "self-check (advisory deps — Claude/TPM/keyring — do NOT fail it; a REQUIRED control does):"
+	SIGIL_HOME=$${SIGIL_HOME:-$$HOME/.sigil} .venv-sovereign/bin/sigil doctor
 
 clean-services: ## stop services AND delete their data volumes (destructive)
 	docker compose down -v

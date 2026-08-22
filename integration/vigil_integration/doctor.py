@@ -656,28 +656,12 @@ def _collect_posture(repo: Path, services: dict) -> list:
 # so requiring it would refuse the documented loopback quickstart.
 
 # control -> (required good-states, one-line requirement text used in the operator refusal). The order is
-# the plan's five conditions plus W10-7's legacy-token; each `required` set is the state(s) `doctor` reports when the control
-# is actually ENGAGED (see the _posture_* probes above).
-_PRODUCTION_GATE: tuple = (
-    ("vault", {"SEALED"},
-     "secrets must be SEALED at rest — run `sigil vault provision` (keys rest as plaintext until then)"),
-    ("sovereignty", {"AIR_GAPPED", "SOVEREIGN_CLOUD", "TRUSTED_CLOUD"},
-     ("the sovereignty tier must be raised OFF PERMISSIVE — set CRUCIBLE_SOVEREIGNTY_TIER "
-      "(AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD)")),
-    ("entitlement", {"ACTIVE"},
-     ("capability-entitlement enforcement must be ACTIVE — provision the trust root, or set "
-      "CRUCIBLE_ENTITLEMENT_ENFORCED=1")),
-    ("backups", {"ON"},
-     ("the backup/reprove timers must be ENABLED — install + `systemctl --user enable --now` the "
-      "infra/systemd/*.timer units")),
-    ("charter", {"PRESENT"},
-     ("a signed charter + EngagementAuthority must be PRESENT — provision one under targets/ and pin it "
-      "with VIGIL_ENGAGEMENT")),
-    ("legacy-owner-token", {"DISABLED"},
-     ("the legacy embedded shared owner token must be DISABLED — set SIGIL_LEGACY_OWNER_TOKEN=0 so the "
-      "cockpit requires per-user proof-of-possession auth (the fail-open shared token is refused; the sigil "
-      "server also refuses it at runtime under this posture)")),
-)
+# the plan's five conditions plus W10-7's legacy-token; each `required` set is the state(s) `doctor` reports
+# when the control is actually ENGAGED (see the _posture_* probes above). SHARED REGISTRY (W6-6): the spec
+# lives in `vigil_core.doctor` — the namespace-pure package BOTH trust planes import — so `vigil doctor`
+# and `sigil doctor` gate on the exact SAME controls and good-states. Imported here (keeping the historical
+# `_PRODUCTION_GATE` name) is a boundary-safe `vigil_core` import; FATAL-2 holds.
+from vigil_core.doctor import REQUIRED_CONTROLS as _PRODUCTION_GATE
 
 
 def production_posture() -> "str | None":
@@ -706,7 +690,6 @@ def evaluate_production_gate(repo_root, posture: "list | None" = None) -> dict:
     control (legacy-owner-token) is not in that informational block, so it is always probed here — a cheap
     env read. When `posture` is None, every control is probed here (the CLI start-path helper's case)."""
     repo = Path(repo_root)
-    posture_raw = production_posture()
     by_control: dict = {}
     if posture is not None:
         by_control = {str(p.get("control")): (str(p.get("state", "UNKNOWN")), str(p.get("detail", "")))
@@ -719,26 +702,21 @@ def evaluate_production_gate(repo_root, posture: "list | None" = None) -> dict:
         "charter": lambda: _posture_charter(repo),
         "legacy-owner-token": _posture_legacy_owner_token,
     }
-    controls: list = []
-    unmet: list = []
-    for control, required, requirement in _PRODUCTION_GATE:
+    # Gather the current state of every registry control (reuse the precomputed posture where present, else
+    # probe here — FAIL CLOSED: an unreadable control becomes UNKNOWN, never a crash), then hand the SHARED
+    # registry decision to `vigil_core.doctor.evaluate` so the offense start-path gate and `sigil doctor`
+    # reach the identical verdict from the identical spec (W6-6). No new import crosses the boundary.
+    from vigil_core.doctor import evaluate as _evaluate
+    control_states: dict = {}
+    for control, _required, _requirement in _PRODUCTION_GATE:
         if control in by_control:
-            state, detail = by_control[control]
+            control_states[control] = by_control[control]
         else:
             try:
-                state, detail = probes[control]()
+                control_states[control] = probes[control]()
             except Exception as exc:  # noqa: BLE001 — FAIL CLOSED: an unreadable control is UNMET, not a crash
-                state, detail = "UNKNOWN", f"probe error: {type(exc).__name__}: {exc}"
-        met = state in required
-        entry = {"control": control, "state": state, "detail": detail,
-                 "required": sorted(required), "requirement": requirement, "met": met}
-        controls.append(entry)
-        if not met:
-            unmet.append(entry)
-    armed = posture_raw is not None
-    ok = (not armed) or (not unmet)
-    return {"armed": armed, "posture": posture_raw, "controls": controls,
-            "unmet": (unmet if armed else []), "ok": ok}
+                control_states[control] = ("UNKNOWN", f"probe error: {type(exc).__name__}: {exc}")
+    return _evaluate(control_states)
 
 
 def production_gate_message(result: dict, action: str = "start") -> str:
@@ -755,6 +733,41 @@ def production_gate_message(result: dict, action: str = "start") -> str:
     lines.append("  Satisfy every precondition above, or unset VIGIL_POSTURE for a non-production run. "
                  "`vigil doctor` shows the current state of each control.")
     return "\n".join(lines)
+
+
+def _gateway_services(repo: Path) -> dict:
+    """The docker gateway state the egress-gate posture control reads — a best-effort, function-local,
+    read-only probe (the same one `collect()` makes at step 5, minus the RootServices display). Empty when
+    docker is absent (⇒ egress-gate reports OFF, honestly). Never raises."""
+    services: dict = {}
+    if not shutil.which("docker"):
+        return services
+    try:
+        from vigil_gateway.docker import SandboxNetworking
+        gw = SandboxNetworking().status()
+        services["vigil-gateway"] = {"state": gw.get("gateway", "absent"),
+                                     "networks": gw.get("networks", {}), "image": gw.get("image")}
+    except Exception as exc:  # noqa: BLE001 — a probe must never crash the report
+        services["vigil-gateway"] = {"error": str(exc)}
+    return services
+
+
+def security_report(repo_root, services: "dict | None" = None) -> dict:
+    """The SHARED security block both doctors render: the per-control posture lines, the per-timer backup
+    breakdown, and the opt-in PRODUCTION posture gate. Returns
+    ``{posture:[...], backup_timers:[...], production_gate:{...}}``.
+
+    This is the ONE implementation of 'what is the security posture, and does it pass the production gate?'
+    — `collect()` (the `vigil doctor` entry point) and `sigil doctor` (the sovereign entry point) both call
+    it, so the two entry points can never drift on the posture block or the gate verdict (W6-6). FATAL-2:
+    pure on-disk / env / systemctl / docker reads; imports only `vigil_core` and the offense-free
+    `vigil_gateway` — never `sigil` or `framework`. Never raises."""
+    repo = Path(repo_root)
+    svc = _gateway_services(repo) if services is None else services
+    posture = _collect_posture(repo, svc)
+    return {"posture": posture,
+            "backup_timers": _backup_timers_report(repo),
+            "production_gate": evaluate_production_gate(repo, posture=posture)}
 
 
 def collect(repo_root) -> dict:
