@@ -253,7 +253,8 @@ def _verified_prune_boundary(store) -> tuple[int, int]:
 # modules import THIS module).
 # ======================================================================================================
 def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
-          base_seq: int, snapshot_seq: int, seed: Optional["SnapshotState"] = None) -> SnapshotState:
+          base_seq: int, snapshot_seq: int, seed: Optional["SnapshotState"] = None,
+          resolver=None) -> SnapshotState:
     """Fold `records` into a SnapshotState. With `seed` (a prior snapshot), the fold STARTS from the prior
     state — i.e. fold(prior, delta) — which is the multi-prune fold-of-fold: build(prior_folded, delta[K_prev
     ..K)) == build(empty, [0..K)) because every fold is associative. Without a seed, starts from the empty
@@ -317,6 +318,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     for r in records:
         p = r.payload
         sig = p.get("signal")
+        # W9-1: verify every owner-signed record under the owner key valid AT ITS SEQ when a succession
+        # `resolver` is supplied (the rotation-aware prune path); `tp` (the single current/anchor key)
+        # otherwise — byte-identical to the pre-W9-1 fold for an un-rotated spine.
+        vpk = resolver.at(r.seq) if resolver is not None else tp
         # --- nonce highwater (max; ALL devices) ---
         if sig == RECEIPT_SIGNAL:
             dev = p.get("device")
@@ -334,7 +339,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
             state = p.get("state")
             if state == "engaged":
                 ks_engaged = True
-            elif state == "released" and verify_signed(p, _KS_CORE, tp):
+            elif state == "released" and verify_signed(p, _KS_CORE, vpk):
                 issued = as_issued_at(p.get("issued_at"))
                 if issued > ks_issued:              # mirror _scan_engaged EXACTLY: stale/replayed ⇒ no effect
                     ks_issued = issued
@@ -345,7 +350,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
             state = p.get("state")
             if state == "disabled":
                 cap_latch[p.get("capability")] = False
-            elif state == "enabled" and verify_signed(p, _CAPLATCH_CORE, tp):
+            elif state == "enabled" and verify_signed(p, _CAPLATCH_CORE, vpk):
                 cap_key = p.get("capability")
                 issued = as_issued_at(p.get("issued_at"))
                 if issued > cap_issued.get(cap_key, NO_HIGHWATER):   # mirror _scan_enabled EXACTLY
@@ -360,7 +365,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         # --- mesh host capability (LWW verified + ANTI-REPLAY FRESH). NO isinstance guard — mirror the
         #     scan, which keys on p.get("host_id") unconditionally (a non-str key is preserved via the
         #     list-of-rows form). This ledger has NO safe direction, so freshness gates EVERY record. ---
-        if sig == CAP_SIGNAL and verify_signed(p, _CAP_CORE, tp):
+        if sig == CAP_SIGNAL and verify_signed(p, _CAP_CORE, vpk):
             hkey = p.get("host_id")
             at = as_issued_at(p.get("issued_at"))
             if at > cap_map_issued.get(hkey, NO_HIGHWATER):   # mirror capability_map EXACTLY
@@ -368,7 +373,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                 capability[hkey] = cap_descriptor(p)
         # --- mesh device authz (LWW verified + authorize ANTI-REPLAY FRESH; keep revoked) — no
         #     isinstance guard (mirror the scan) ---
-        if sig == DEV_SIGNAL and p.get("state") in ("authorized", "revoked") and verify_signed(p, _DEV_CORE, tp):
+        if sig == DEV_SIGNAL and p.get("state") in ("authorized", "revoked") and verify_signed(p, _DEV_CORE, vpk):
             dkey = p.get("device_pubkey")
             fresh = True
             if p["state"] == "authorized":        # mirror authorized_devices EXACTLY
@@ -381,7 +386,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         # --- promotion grants (LWW verified + grant ANTI-REPLAY FRESH; keep revoked) — no isinstance
         #     guard (mirror the scan) ---
         if sig == _PROMO_SIGNAL and p.get("state") in ("granted", "revoked") \
-                and verify_signed(p, _PROMO_CORE, tp):
+                and verify_signed(p, _PROMO_CORE, vpk):
             akey = (p.get("agent"), p.get("scope"))
             fresh = True
             if p["state"] == "granted":           # mirror PromotionPolicy._fold EXACTLY
@@ -399,7 +404,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
             ustate = p.get("state")
             if ustate == "revoked":
                 acct_state[p.get("username")] = "revoked"
-            elif ustate == "active" and verify_signed(p, _acct_core_fields(p), tp):
+            elif ustate == "active" and verify_signed(p, _acct_core_fields(p), vpk):
                 ukey = p.get("username")
                 at = as_issued_at(p.get("issued_at"))
                 if at > acct_issued.get(ukey, NO_HIGHWATER):   # mirror _fold: stale/replayed active ⇒ no effect

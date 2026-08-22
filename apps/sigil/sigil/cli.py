@@ -909,6 +909,81 @@ def cmd_owner_pubkey(a) -> None:
         print(pk)
 
 
+def cmd_key(a) -> None:
+    """Owner-key ROTATION as a signed, cross-signed key HISTORY (W9-1).
+
+      status     — print the succession chain: pinned genesis root → each epoch's key + seq window → tip,
+                   and whether the on-disk owner key matches the validated tip.
+      rotate     — cross-sign a fresh successor into the append-only key history, swap the at-rest key
+                   material to it, and re-anchor the head. Every pre-rotation head/grant keeps verifying.
+      re-genesis — the COMPROMISE fallback: mint a fresh genesis, REPIN the root, ABANDON continuity of all
+                   pre-re-genesis history. Requires an explicit acknowledgement flag.
+    """
+    import time
+
+    from .governor import key_history as kh
+    from .governor.identity import genesis_owner_pubkey, owner_pubkey
+    store = SpineStore()
+    sub = getattr(a, "key_cmd", "status")
+    if sub == "status":
+        genesis = genesis_owner_pubkey()
+        cur = owner_pubkey()
+        if not genesis:
+            print("owner key: none yet (run `sigil sign` to mint the owner identity)")
+            return
+        try:
+            succ = kh.succession_from_store(store, genesis_pubkey=genesis)
+        except kh.SuccessionError as e:
+            print(f"owner-key succession: FORKED / AMBIGUOUS — fail-closed DENY until re-genesis: {e}",
+                  file=sys.stderr)
+            sys.exit(2)
+        print(f"pinned genesis root : {succ.genesis}")
+        for e in succ.epochs:
+            end = "current" if e.end == float("inf") else f"< seq {int(e.end)}"
+            print(f"  epoch {e.epoch:>3}  seq [{e.start}, {end})  {e.pubkey}")
+        print(f"validated current   : {succ.current}")
+        if cur and cur != succ.current:
+            print(f"!! on-disk owner.pub ({cur}) is NOT the validated succession tip — tampered/inconsistent "
+                  f"key state (recover with `sigil key re-genesis`)", file=sys.stderr)
+            sys.exit(2)
+        print(f"epochs: {len(succ.epochs)}  (rotations so far: {len(succ.epochs) - 1})")
+        return
+    if sub == "rotate":
+        if not a.yes:
+            print("refusing: `sigil key rotate` mints a NEW owner key, cross-signs it into the key history, "
+                  "and re-anchors the head. Pre-rotation heads/grants keep verifying. Re-run with --yes.",
+                  file=sys.stderr)
+            sys.exit(2)
+        try:
+            new_kp, seq = kh.rotate(store, issued_at=time.time())
+        except (ValueError, kh.SuccessionError) as e:
+            print(f"!! rotation refused (fail-closed): {e}", file=sys.stderr)
+            sys.exit(2)
+        checkpoint(store)                                   # re-sign the head+floor under the NEW owner key
+        print(f"owner key ROTATED. succession record @ seq {seq}.")
+        print(f"new owner pubkey: {new_kp.public_key_b64}")
+        print("every pre-rotation head and grant still verifies (walked from the pinned genesis root).")
+        print("re-pin this new pubkey on any OUT-OF-BAND verifier that pins the CURRENT key, if it does not "
+              "walk the succession chain.")
+        return
+    if sub == "re-genesis":
+        if not (a.yes and a.i_understand):
+            print("refusing: `sigil key re-genesis` mints a FRESH genesis and DELIBERATELY ABANDONS "
+                  "verifiable continuity of ALL pre-re-genesis history (every prior head, grant and "
+                  "succession record stops being authenticated by the new root). Use ONLY for an actual key "
+                  "COMPROMISE. Re-run with --yes --i-understand-continuity-is-abandoned.", file=sys.stderr)
+            sys.exit(2)
+        new_kp, seq = kh.re_genesis(store, issued_at=time.time())
+        checkpoint(store)
+        print(f"owner key RE-GENESIS complete. marker record @ seq {seq}.")
+        print(f"new genesis owner pubkey: {new_kp.public_key_b64}")
+        print("ABANDONED: every pre-re-genesis head, grant and succession record is no longer authenticated "
+              "by the new root. Out-of-band verifiers MUST re-pin to this new genesis key.")
+        return
+    print(f"unknown key subcommand {sub!r}", file=sys.stderr)
+    sys.exit(2)
+
+
 def cmd_spine(a) -> None:
     """Segment-rotation ops. `migrate` moves the legacy single file into the segment layout (O(1), one-way,
     idempotent). `status` lists the segment set. Retain-all: no records are ever deleted."""
@@ -1692,6 +1767,14 @@ def main(argv=None) -> None:
     pop = sub.add_parser("owner-pubkey",
                          help="print the base64 owner PUBLIC key (read-only; for pinning the offense learn-drain)")
     pop.set_defaults(fn=cmd_owner_pubkey)
+    pkey = sub.add_parser("key", help="owner-key rotation via a signed cross-signed key history (W9-1): "
+                                      "status | rotate | re-genesis")
+    pkey.add_argument("key_cmd", choices=["status", "rotate", "re-genesis"], nargs="?", default="status")
+    pkey.add_argument("--yes", action="store_true", help="confirm a rotate / re-genesis")
+    pkey.add_argument("--i-understand-continuity-is-abandoned", dest="i_understand", action="store_true",
+                      help="re-genesis only: acknowledge that ALL pre-re-genesis history stops being "
+                           "authenticated by the new root")
+    pkey.set_defaults(fn=cmd_key)
     pfl = sub.add_parser("floor", help="durable external anti-rollback floor: status; reset (deliberate "
                                        "downward re-seed); witness (emit+retain off-box); verify-witnessed "
                                        "(anchor); promote-passive (HA failover interlock)")

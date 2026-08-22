@@ -177,9 +177,11 @@ def stranded_active_accounts(store, archived: list[Segment], K: int) -> list[str
     append is not counted, so this never lets such a record block prunes (no availability regression)."""
     from ..governor.accounts import SIGNAL as _ACCT_SIGNAL
     from ..governor.accounts import _core_fields as _acct_core_fields  # conditional user_pubkey core (S3)
+    from ..governor import key_history as _kh
     from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
     from ..governor.identity import owner_pubkey
     tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)   # W9-1: verify under the owner key valid at each seq
     below: list[SpineRecord] = []
     for seg in archived:
         below.extend(read_segment_records(store._layout.seg_path(seg)))
@@ -193,14 +195,14 @@ def stranded_active_accounts(store, archived: list[Segment], K: int) -> list[str
         u, rst = p.get("username"), p.get("state")
         if rst == "revoked":
             state[u] = "revoked"
-        elif rst == "active" and verify_signed(p, _acct_core_fields(p), tp):
+        elif rst == "active" and verify_signed(p, _acct_core_fields(p), resolver.at(r.seq)):
             at = as_issued_at(p.get("issued_at"))
             if at > issued.get(u, NO_HIGHWATER):
                 issued[u], state[u] = at, "active"
     active = {u for u, v in state.items() if v == "active"}
     # the seed the prune will actually persist, round-tripped through the on-disk (JSON) form.
     seed = SnapshotState.model_validate(
-        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1).model_dump())
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
     seed_state = seed.account_state_map()
     carried = {row[0] for row in seed.account_cred if seed_state.get(row[0]) == "active"}
     return sorted(str(u) for u in (active - carried))
@@ -211,8 +213,10 @@ def snapshot_payload(store, K: int, *, prior: Optional[dict] = None,
                      trusted_pubkey: Optional[str] = None) -> dict:
     """Compute the `kind="snapshot"` record payload committing the pruned prefix [0..K). `prior` is the
     previous snapshot's payload dict (None for the first prune). Pure computation — appends nothing."""
+    from ..governor import key_history as _kh
     from ..governor.identity import owner_pubkey
     tp = trusted_pubkey if trusted_pubkey is not None else (owner_pubkey() or "")
+    resolver = _kh.key_resolver(store, current=tp)   # W9-1: verify under the owner key valid at each seq
     archived = check_prune_safe(store, K)
     k_prev = int(prior["base_seq"]) if prior else 0
     prior_cumulative = str(prior["cumulative_merkle_root"]) if prior else ""
@@ -235,7 +239,7 @@ def snapshot_payload(store, K: int, *, prior: Optional[dict] = None,
     delta_root = merkle_root([r.entry_hash for r in delta])
     cumulative = chain_cumulative(prior_cumulative, delta_root)
     base_prev_hash = archived[-1].boundary_hash or _GENESIS_PREV   # == entry_hash(K-1), a stored boundary
-    folded = build(delta, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, seed=prior_folded)
+    folded = build(delta, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, seed=prior_folded, resolver=resolver)
     return {
         "signal": "spine.snapshot",
         "base_seq": K,

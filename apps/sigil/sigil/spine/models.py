@@ -21,6 +21,7 @@ KINDS = frozenset({
     "web_page", "operation",    # Phase 7/8: SCRIBE fetched-page provenance; OPERATOR plan/execute records
     "detection",                # P10 inbound: a Detection-Mirror FACT admitted by the finding receiver
     "snapshot",                 # cold-archive hard-prune: the owner-signed folded summary of a pruned prefix
+    "owner_key_history",        # W9-1: a cross-signed owner-key succession record (rotation / re-genesis)
 })
 
 # W5-1: per-record schema version. `SCHEMA_VERSION` is stamped on every NEW append; `KNOWN_SCHEMA_VERSIONS`

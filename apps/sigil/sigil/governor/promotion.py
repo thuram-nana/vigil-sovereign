@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ..spine.snapshot import SnapshotState
+from . import key_history as _kh
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
 
@@ -81,6 +82,7 @@ class PromotionPolicy:
         identity whose tp=="") BYPASS the snapshot and full-scan from genesis. BYTE-IDENTICAL under the
         empty snapshot: base_seq==0 => since_seq=-1 => the full scan, and an empty seed either way."""
         st = SnapshotState.load(self.store)
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)  # W9-1 succession-aware
         if self.trusted_pubkey != st.trusted_pubkey:
             state, since, issued = {}, -1, {}
         else:
@@ -91,7 +93,7 @@ class PromotionPolicy:
             p = r.payload
             if p.get("signal") != SIGNAL or p.get("state") not in ("granted", "revoked"):
                 continue
-            if not verify_signed(p, _CORE, self.trusted_pubkey):
+            if not verify_signed(p, _CORE, resolver.at(r.seq)):   # under the owner key valid at this seq
                 continue                          # fail-closed: an unsigned/forged record is not counted
             key = (p.get("agent"), p.get("scope"))
             if p["state"] == "granted":

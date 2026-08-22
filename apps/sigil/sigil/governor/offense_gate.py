@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from . import key_history as _kh
 from .authn import as_issued_at, signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
 
@@ -109,6 +110,7 @@ class OffenseGate:
         reason = "default-closed: no owner-signed open on the spine"
         na = 0.0
         max_issued = float("-inf")  # anti-replay high-water: each honoured open must exceed it
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)  # W9-1 succession-aware
         for record in self.store.iter_records():
             payload = record.payload if isinstance(record.payload, dict) else {}
             if payload.get("signal") != SIGNAL:
@@ -117,8 +119,9 @@ class OffenseGate:
             if st == "closed":
                 is_open, reason, na = False, "closed by a close event", 0.0  # honour ANY close
             elif st == "open":
-                # An OPEN counts ONLY if owner-signed AND bound to exactly this charter.
-                if not verify_signed(payload, _CORE, self.trusted_pubkey):
+                # An OPEN counts ONLY if owner-signed (under the key valid at its seq) AND bound to exactly
+                # this charter.
+                if not verify_signed(payload, _CORE, resolver.at(record.seq)):
                     continue  # forged/unsigned open — no effect
                 if payload.get("charter_id") != charter_id or payload.get("charter_hash") != charter_hash:
                     continue  # open for a DIFFERENT charter — no effect on this one

@@ -65,10 +65,34 @@ def _owner_keys() -> tuple[str, str]:
     return priv, _PUB.read_text(encoding="utf-8").strip()
 
 
-def trust_root() -> TrustRoot:
-    _, pub = _owner_keys()
+def trust_root(store: SpineStore | None = None) -> TrustRoot:
+    """The 1-of-1 head trust root, W9-1 SUCCESSION-AWARE. The anchor is the CURRENT owner key AS VALIDATED
+    by walking the cross-signed succession chain from the pinned genesis — not the raw on-disk `owner.pub`.
+    So a head (which `checkpoint()` always re-signs with the current key on every rotation) verifies under
+    the succession tip, while an owner.pub swapped in WITHOUT a valid cross-signed succession record does not
+    become trusted (its signer is not the succession tip). With no rotation, the tip == the on-disk key, so
+    this is byte-identical to the pre-W9-1 single-key root. A forked/ambiguous succession falls back to the
+    on-disk current key (the grant folds independently fail closed on a fork)."""
+    _, pub = _owner_keys()                                     # current on-disk key (also ensures one exists)
+    from ..governor import key_history as _kh
+    st = store or SpineStore()
+    # The genesis pin lives beside the owner key (`_PUB.parent`), so a test that monkeypatches this module's
+    # KEYS_DIR/_PUB is respected, and prod reads the same file `identity.pin_genesis` writes. Absent a pin
+    # (no rotation), the current key IS the genesis.
+    genesis = pub
+    try:
+        txt = (_PUB.parent / "owner.genesis.pub").read_text(encoding="utf-8").strip()
+        if txt:
+            genesis = txt
+    except OSError:
+        pass
+    try:
+        succ = _kh.succession_from_store(st, genesis_pubkey=genesis)
+        current = succ.current or pub
+    except _kh.SuccessionError:
+        current = pub                                         # forked → do not widen; keep the on-disk key
     return TrustRoot(threshold=1, authorizers=[
-        AuthorizerKey(key_id=OWNER_KEY_ID, name="owner", public_key_b64=pub)])
+        AuthorizerKey(key_id=OWNER_KEY_ID, name="owner", public_key_b64=current)])
 
 
 def _read_head_on_disk() -> SignedChainHead | None:
@@ -194,7 +218,7 @@ def verify_checkpoint(store: SpineStore | None = None) -> tuple[bool, str]:
     except Exception as e:  # noqa: BLE001 — a PRESENT-but-corrupt floor is suspicious; fail CLOSED, never clean
         return False, f"durable anti-rollback floor unreadable — refuse to certify (possible tamper): {e}"
     try:
-        return classify_head(head, store.entries(), trust_root(), floor=floor)
+        return classify_head(head, store.entries(), trust_root(store), floor=floor)
     except Exception as e:  # noqa: BLE001 — malformed head sig/key material (e.g. non-base64) makes verify_one
         # raise; a PRESENT head whose signature material is malformed is TAMPER — fail CLOSED with a clean
         # head-FAIL (so `sigil verify` exits 2), never an uncaught traceback (exit 1).
