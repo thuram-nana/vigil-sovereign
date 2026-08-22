@@ -644,11 +644,13 @@ Security posture (informational — off-by-default controls; does NOT affect the
   .. key-sealing: ABSENT  — no trust-root key files present yet (owner.priv=ABSENT, spine.dek=ABSENT, warden.key=ABSENT)
   .. sovereignty: PERMISSIVE  — dev default — the sovereignty ladder binds but admits cloud LLM egress; set CRUCIBLE_SOVEREIGNTY_TIER (AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD) to raise it
   .. entitlement: UNGOVERNED  — no trust root at ~/vigil/engine/crucible/framework/v2/.entitlement/trust-root.json — gated capabilities are permitted (logged at WARNING) but NOT enforced
-  .. backups:     OFF  — 0/6 systemd timers enabled (vigil-backup-drill, vigil-backup-push, vigil-backup, vigil-ha-mirror, vigil-posture, vigil-reprove) — backups/reprove/HA are not running
+  .. backups:     OFF  — 0/7 systemd timers enabled — backup durability NOT running; need one of vigil-backup/vigil-backup-push + vigil-backup-drill enabled and fired (disabled: vigil-backup.timer, vigil-backup-push.timer, vigil-backup-drill.timer)
   .. charter:     ABSENT  — no active VIGIL_ENGAGEMENT and no chartered engagement under targets/
 ```
 
 Each line reads the **real** on-disk / environment state — never an optimistic default — and a control it cannot read reports `UNKNOWN` rather than guessing. The block itself is **informational**: it never changes `vigil doctor`'s exit code. `vigil doctor` itself imports no `framework`/`strix`/`sigil`; the one sovereign-plane line (`vault`) is read from disk, so the two trust planes never co-load to produce it.
+
+Below the posture block, `vigil doctor` prints a **Backup / cadence timers** section — one line per `infra/systemd/*.timer` with its **enabled** state and **last successful run** — so you can see exactly which cadence is (or is not) running. The `backups` posture control above is derived from it: it reads `ON` only when a backup timer (`vigil-backup` or `vigil-backup-push`) **and** the recovery drill (`vigil-backup-drill`) are both enabled *and* have a successful last run; `PENDING` when they are enabled but have **never fired** (a backup that never ran is not durability); `OFF` when a required timer is disabled. `bootstrap.sh` installs the units, and — under the production posture — enables the backup + drill timers (see below).
 
 #### The opt-in `PRODUCTION` posture — refuse to start when misconfigured
 
@@ -657,7 +659,7 @@ For a real deployment the safe-by-default posture is the *wrong* default: you wa
 - **`vault`** is `SEALED` (secrets sealed at rest, not plaintext),
 - **`sovereignty`** is non-`PERMISSIVE` (the tier gates cloud LLM egress),
 - **`entitlement`** enforcement is `ACTIVE` (gated capabilities fail closed),
-- **`backups`** timers are `ON` (backup / reprove / HA are actually running),
+- **`backups`** timers are `ON` — a backup timer (`vigil-backup` or `vigil-backup-push`) **and** the recovery drill (`vigil-backup-drill`) are enabled **and** have a successful last run; a disabled **or** never-fired (`PENDING`) timer refuses the start (`bootstrap.sh --production` installs and enables them),
 - **`charter`** is `PRESENT` (a signed charter + `EngagementAuthority`),
 - **`legacy-owner-token`** is `DISABLED` (`SIGIL_LEGACY_OWNER_TOKEN=0`, so the cockpit requires per-user proof-of-possession auth).
 

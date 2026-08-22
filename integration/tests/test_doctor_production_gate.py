@@ -43,12 +43,27 @@ _CONTROLS = ["vault", "sovereignty", "entitlement", "backups", "charter", "legac
 
 # ------------------------------------------------------------------ world builder: all five SATISFIED
 
-def _fake_systemctl(enabled_names):
+def _fake_systemctl(enabled=(), fired=()):
+    """Fake `systemctl` covering both probes the backup-timer scan makes: `is-enabled <timer>` and
+    `show <service> -p ExecMainExitTimestamp -p ExecMainStatus -p Result`. A non-empty exit timestamp
+    (⇒ a completed run) is returned iff the paired timer is in `fired`. `backups` is ON only when the
+    durability set is BOTH enabled and fired; passing `enabled=set()` disables everything (⇒ OFF)."""
+    enabled, fired = set(enabled), set(fired)
+
     def _run(argv, capture_output=True, text=True, timeout=None, **kw):
-        name = argv[-1]
-        ok = name in enabled_names
-        return SimpleNamespace(returncode=0 if ok else 1,
-                               stdout=("enabled" if ok else "not-found") + "\n", stderr="")
+        verb, unit = argv[1], argv[2]
+        if verb == "is-enabled":
+            on = unit in enabled
+            return SimpleNamespace(returncode=0 if on else 4,
+                                   stdout=("enabled" if on else "disabled") + "\n", stderr="")
+        if verb == "show":
+            timer = unit[: -len(".service")] + ".timer"
+            ts = "Thu 2026-08-21 03:00:11 UTC" if timer in fired else ""
+            return SimpleNamespace(returncode=0,
+                                   stdout=f"ExecMainExitTimestamp={ts}\nExecMainStatus=0\nResult=success\n",
+                                   stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
     return _run
 
 
@@ -66,13 +81,17 @@ def _all_satisfied(monkeypatch, tmp_path) -> pathlib.Path:
     monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "AIR_GAPPED")
     # (3) entitlement ACTIVE (the enforce-env is the simplest ACTIVE state)
     monkeypatch.setenv("CRUCIBLE_ENTITLEMENT_ENFORCED", "1")
-    # (4) backups ON — a timer unit under <repo>/infra/systemd, systemctl reports it enabled
+    # (4) backups ON — the durability set (a backup timer + the recovery drill) must be ENABLED *and* have a
+    #     SUCCESSFUL last run (W7-8). Lay down the canonical units and report both enabled + fired.
     sysd = repo / "infra" / "systemd"
     sysd.mkdir(parents=True)
-    (sysd / "vigil-backup.timer").write_text("[Timer]\n", encoding="utf-8")
+    for t in ("vigil-backup.timer", "vigil-backup-push.timer", "vigil-backup-drill.timer"):
+        (sysd / t).write_text("[Timer]\n", encoding="utf-8")
     monkeypatch.setattr(dmod.shutil, "which",
                         lambda n: "/usr/bin/systemctl" if n == "systemctl" else None)
-    monkeypatch.setattr(dmod.subprocess, "run", _fake_systemctl({"vigil-backup.timer"}))
+    monkeypatch.setattr(dmod.subprocess, "run",
+                        _fake_systemctl(enabled={"vigil-backup.timer", "vigil-backup-drill.timer"},
+                                        fired={"vigil-backup.timer", "vigil-backup-drill.timer"}))
     # (5) charter PRESENT — a crucible root with a charter + a signed EngagementAuthority, pinned by
     #     VIGIL_ENGAGEMENT so the probe is deterministic
     cruc = tmp_path / "cruc"

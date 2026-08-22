@@ -415,33 +415,142 @@ def _posture_key_sealing() -> "tuple[str, str]":
     return "UNKNOWN", detail
 
 
-def _posture_backups(repo: Path) -> "tuple[str, str]":
-    """Are the systemd backup/reprove/HA timers enabled? Enumerated from infra/systemd/*.timer and probed
-    with `systemctl is-enabled`. ON iff at least one is enabled; OFF when none are (the default — the units
-    ship in the repo but are not installed/enabled)."""
+# ── backup / cadence timers (W7-8) ────────────────────────────────────────────────────────────────────
+# The backup-DURABILITY timers the PRODUCTION posture REQUIRES to be ENABLED *and* to have a SUCCESSFUL
+# last run. `vigil-backup` and `vigil-backup-push` are ALTERNATIVES (their own unit docs say enable ONE:
+# the push unit already takes a full local backup before it replicates), so AT LEAST ONE of the pair must
+# be engaged; the recovery drill proves the backup→restore round-trip and is required on its own. The
+# reprove / integrity / posture / ha-mirror timers are engagement- or topology-specific (ha-mirror runs
+# ONLY on a passive standby), so they are REPORTED per-timer but NOT forced by the production gate.
+_BACKUP_TIMER_ALTERNATIVES = ("vigil-backup.timer", "vigil-backup-push.timer")
+_BACKUP_TIMER_REQUIRED = ("vigil-backup-drill.timer",)
+
+
+def _one_timer_status(systemctl: str, timer_name: str) -> dict:
+    """Read ONE timer's enablement (`systemctl is-enabled <timer>`) and its LAST SUCCESSFUL RUN (from the
+    SERVICE the timer triggers: `systemctl show <service> -p ExecMainExitTimestamp -p ExecMainStatus -p
+    Result`). A oneshot service that has never completed a run reports an EMPTY ExecMainExitTimestamp — that
+    is the authoritative "never fired" signal (ExecMainStatus/Result carry success DEFAULTS for a unit that
+    never ran, so they cannot stand alone). Fail-soft: any probe error leaves that field False/None, never
+    a crash. Returns {name, enabled: bool, last_run: str|None, last_ok: bool}."""
+    enabled = False
+    try:
+        r = subprocess.run([systemctl, "is-enabled", timer_name],
+                           capture_output=True, text=True, timeout=10)
+        enabled = r.stdout.strip() == "enabled"
+    except (OSError, subprocess.SubprocessError):
+        enabled = False
+    service = timer_name[: -len(".timer")] + ".service"
+    ts = status = result = ""
+    try:
+        r = subprocess.run([systemctl, "show", service,
+                            "-p", "ExecMainExitTimestamp", "-p", "ExecMainStatus", "-p", "Result"],
+                           capture_output=True, text=True, timeout=10)
+        props: dict = {}
+        for line in r.stdout.splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                props[k.strip()] = v.strip()
+        ts = props.get("ExecMainExitTimestamp", "")
+        status = props.get("ExecMainStatus", "")
+        result = props.get("Result", "")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    last_run = ts or None
+    # SUCCESSFUL last run: the service actually completed (non-empty timestamp) with a zero exit + success
+    # result. A fired-but-FAILED run is NOT counted as engaged — a failing backup is worse than a missing one.
+    last_ok = bool(ts) and status == "0" and result in ("", "success")
+    return {"name": timer_name, "enabled": enabled, "last_run": last_run, "last_ok": last_ok}
+
+
+def _scan_backup_timers(repo: Path) -> "tuple[list, str]":
+    """Scan `<repo>/infra/systemd/*.timer` and read each one's enablement + last-successful-run via
+    systemctl. Returns (timers, status) where `timers` is a JSON-safe list of `_one_timer_status` dicts and
+    `status` is 'ok' / 'no-units' (dir empty) / 'no-systemctl' (systemctl not on PATH). Never raises."""
     timers_dir = repo / "infra" / "systemd"
     try:
-        timer_files = sorted(p.name for p in timers_dir.glob("*.timer")) if timers_dir.is_dir() else []
+        names = sorted(p.name for p in timers_dir.glob("*.timer")) if timers_dir.is_dir() else []
     except OSError:
-        timer_files = []
-    if not timer_files:
-        return "UNKNOWN", f"no timer units found under {_display_path(timers_dir)}"
-    total = len(timer_files)
+        names = []
+    if not names:
+        return [], "no-units"
     systemctl = shutil.which("systemctl")
     if not systemctl:
-        return "UNKNOWN", f"systemctl not available — cannot read enablement of {total} timer unit(s)"
-    enabled: list = []
-    for name in timer_files:
-        try:
-            r = subprocess.run([systemctl, "is-enabled", name], capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if r.stdout.strip() == "enabled":
-            enabled.append(name)
-    if enabled:
-        return "ON", f"{len(enabled)}/{total} systemd timers enabled: {', '.join(enabled)}"
-    return "OFF", (f"0/{total} systemd timers enabled ({', '.join(t[:-6] for t in timer_files)}) — "
-                   f"backups/reprove/HA are not running")
+        return ([{"name": n, "enabled": None, "last_run": None, "last_ok": None} for n in names],
+                "no-systemctl")
+    return [_one_timer_status(systemctl, n) for n in names], "ok"
+
+
+def _fmt_timer(t: dict) -> str:
+    """One human phrase for a timer's state, used in the posture detail line."""
+    name = t["name"]
+    if not t.get("enabled"):
+        return f"{name}: disabled"
+    if t.get("last_ok"):
+        return f"{name}: enabled, last ran {t.get('last_run')}"
+    return f"{name}: enabled, never fired"
+
+
+def _posture_backups(repo: Path) -> "tuple[str, str]":
+    """Is BACKUP DURABILITY actually running? Reads infra/systemd/*.timer enablement AND each paired
+    service's last successful run via systemctl. The state is decided over the DURABILITY set — at least one
+    of {vigil-backup, vigil-backup-push} PLUS vigil-backup-drill:
+
+      ON      — a backup timer AND the drill are enabled and have a SUCCESSFUL last run (durability proven);
+      PENDING — the required timers are enabled but at least one has NEVER FIRED (enabled != running yet);
+      OFF     — a required timer is disabled (backups are not scheduled);
+      UNKNOWN — no timer units found, systemctl unavailable, or a canonical backup unit is missing from the
+                tree (fail-closed: an unreadable/absent control is never reported as engaged).
+
+    The PRODUCTION gate requires ON, so BOTH a disabled (OFF) and a never-fired (PENDING) timer refuse the
+    start — exactly the W7-8 acceptance requirement."""
+    timers, status = _scan_backup_timers(repo)
+    if status == "no-units":
+        return "UNKNOWN", f"no timer units found under {_display_path(repo / 'infra' / 'systemd')}"
+    if status == "no-systemctl":
+        return "UNKNOWN", (f"systemctl not available — cannot read enablement of {len(timers)} timer unit(s)")
+    by = {t["name"]: t for t in timers}
+    total = len(timers)
+    enabled_all = [t["name"] for t in timers if t.get("enabled")]
+
+    # fail-closed on a partial tree: the canonical backup + drill units MUST be present to judge durability.
+    alt_present = [n for n in _BACKUP_TIMER_ALTERNATIVES if n in by]
+    missing_solo = [n for n in _BACKUP_TIMER_REQUIRED if n not in by]
+    if not alt_present:
+        return "UNKNOWN", (f"expected a backup timer ({' or '.join(_BACKUP_TIMER_ALTERNATIVES)}) under "
+                           f"{_display_path(repo / 'infra' / 'systemd')} — none present")
+    if missing_solo:
+        return "UNKNOWN", (f"expected backup timer unit(s) missing from "
+                           f"{_display_path(repo / 'infra' / 'systemd')}: {', '.join(missing_solo)}")
+
+    required = [*alt_present, *_BACKUP_TIMER_REQUIRED]
+    # the backup leg is satisfied by ANY alternative that is enabled + fired; the drill leg by ITS unit.
+    alt_engaged = [n for n in alt_present if by[n]["enabled"] and by[n]["last_ok"]]
+    alt_enabled = [n for n in alt_present if by[n]["enabled"]]
+    solo_engaged = all(by[n]["enabled"] and by[n]["last_ok"] for n in _BACKUP_TIMER_REQUIRED)
+    solo_enabled = all(by[n]["enabled"] for n in _BACKUP_TIMER_REQUIRED)
+
+    if alt_engaged and solo_engaged:
+        engaged = [*alt_engaged[:1], *_BACKUP_TIMER_REQUIRED]
+        return "ON", (f"{len(enabled_all)}/{total} systemd timers enabled; backup durability engaged — "
+                      + "; ".join(_fmt_timer(by[n]) for n in engaged))
+    if alt_enabled and solo_enabled:
+        never = [n for n in required if by[n]["enabled"] and not by[n]["last_ok"]]
+        return "PENDING", ("backup timers enabled but not yet proven by a successful run: "
+                           + ", ".join(never) + " — durability engages after the first successful fire "
+                           "(`systemctl --user start vigil-backup.service` to seed it now)")
+    disabled = [n for n in required if not by[n]["enabled"]]
+    return "OFF", (f"{len(enabled_all)}/{total} systemd timers enabled — backup durability NOT running; "
+                   f"need one of {'/'.join(a[:-6] for a in _BACKUP_TIMER_ALTERNATIVES)} + "
+                   f"{', '.join(s[:-6] for s in _BACKUP_TIMER_REQUIRED)} enabled and fired "
+                   f"(disabled: {', '.join(disabled) or 'none'})")
+
+
+def _backup_timers_report(repo: Path) -> list:
+    """The per-timer breakdown surfaced in `vigil doctor` (AC: report EACH timer's enabled state + last
+    successful run). A plain list of `_one_timer_status` dicts; empty when nothing could be read."""
+    timers, _status = _scan_backup_timers(repo)
+    return timers
 
 
 def _posture_charter(repo: Path) -> "tuple[str, str]":
@@ -754,6 +863,13 @@ def collect(repo_root) -> dict:
     #    passed so egress-gate reuses the already-collected gateway state.
     report["posture"] = _collect_posture(repo, services)
 
+    # 8b) Backup / cadence timers (W7-8) — the per-timer breakdown behind the `backups` posture line: EACH
+    #    infra/systemd/*.timer's enabled state AND last successful run, so an operator can see exactly which
+    #    cadence is (or is not) running. INFORMATIONAL — it never flips `ok` on its own; the refuse-to-start
+    #    decision rides the `backups` posture control in the production gate (step 9). Same systemctl reads,
+    #    no new import — FATAL-2 intact.
+    report["backup_timers"] = _backup_timers_report(repo)
+
     # 9) PRODUCTION posture gate (W9-4b) — the opt-in refuse-to-start gate, surfaced here so `vigil doctor`
     #    doubles as the production preflight. INERT unless VIGIL_POSTURE=production: when NOT armed the whole
     #    block is skipped, so the report is byte-identical to before (the additive, default-safe contract).
@@ -864,6 +980,24 @@ def render(report: dict) -> str:
             if detail:
                 seg += f"  — {detail}"
             lines.append(seg)
+    backup_timers = report.get("backup_timers")
+    if backup_timers:
+        # W7-8: EACH backup / cadence timer's enabled state + last successful run. Marker: OK = enabled and
+        # a successful last run; .. = enabled but never fired (or disabled); ?? = enablement unreadable.
+        lines.append("\nBackup / cadence timers (enabled + last successful run — `backups` posture rides "
+                     "these):")
+        twidth = max((len(str(t.get("name", ""))) for t in backup_timers), default=0)
+        for t in backup_timers:
+            name, enabled = str(t.get("name", "?")), t.get("enabled")
+            if enabled is None:
+                mark, state = "?? ", "unreadable (systemctl absent)"
+            elif not enabled:
+                mark, state = ".. ", "disabled"
+            elif t.get("last_ok"):
+                mark, state = "OK ", f"enabled, last ran {t.get('last_run')}"
+            else:
+                mark, state = ".. ", "enabled, never fired"
+            lines.append(f"  {mark}{(name + ':'):<{twidth + 1}} {state}")
     gate = report.get("production_gate")
     if gate:
         # W9-4b: shown ONLY when VIGIL_POSTURE=production (else the field is absent). Unlike the

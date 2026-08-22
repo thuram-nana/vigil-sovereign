@@ -23,7 +23,11 @@
 #   --with-strix         also build the Kali strix sandbox image (needs Docker; large)
 #   --no-tools           skip the offense host-tool install/probe step (nmap/nuclei/httpx/...)
 #   --with-tools         force the host-tool step on (it is on by default)
-#   --systemd            install the user systemd units (cockpit + consolidate)
+#   --systemd            install the user systemd units (cockpit + consolidate + the vigil backup/cadence
+#                        timers). With VIGIL_POSTURE=production (or --production) it also ENABLES the backup
+#                        + recovery-drill timers, so a production host actually runs its backups.
+#   --production         select the production posture for this run: install AND enable the backup timers
+#                        (implies --systemd). Equivalent to exporting VIGIL_POSTURE=production.
 #   --yes                non-interactive: assume "yes" to auto-installs (rustup + apt/pipx host tools)
 #   PYTHON=python3.13    pin the interpreter used to build the venvs
 # -----------------------------------------------------------------------------
@@ -35,7 +39,7 @@ export VIGIL_ROOT="$REPO"
 export CRUCIBLE_ROOT="$REPO/engine/crucible"
 
 # --- flags ---
-NO_RUST=0; NO_SERVICES=0; WITH_STRIX=0; DO_SYSTEMD=0; ASSUME_YES=0; WITH_TOOLS=1
+NO_RUST=0; NO_SERVICES=0; WITH_STRIX=0; DO_SYSTEMD=0; ASSUME_YES=0; WITH_TOOLS=1; PRODUCTION=0
 for arg in "$@"; do
   case "$arg" in
     --no-rust) NO_RUST=1 ;;
@@ -44,11 +48,18 @@ for arg in "$@"; do
     --no-tools) WITH_TOOLS=0 ;;
     --with-tools) WITH_TOOLS=1 ;;
     --systemd) DO_SYSTEMD=1 ;;
+    --production) PRODUCTION=1; DO_SYSTEMD=1 ;;   # production ⇒ install AND enable the backup timers
     --yes|-y) ASSUME_YES=1 ;;
     -h|--help) grep '^#' "$0" | grep -v '^#!' | sed 's/^#\s\{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $arg (try --help)"; exit 2 ;;
   esac
 done
+
+# The production posture is also selectable via the env `vigil doctor` / the refuse-to-start gate key on
+# (VIGIL_POSTURE=production|prod, case-insensitive) so bootstrap and the runtime agree on one selector.
+case "$(printf '%s' "${VIGIL_POSTURE:-}" | tr '[:upper:]' '[:lower:]')" in
+  production|prod) PRODUCTION=1; DO_SYSTEMD=1 ;;
+esac
 
 # --- pretty output ---
 c_g="\033[32m"; c_y="\033[33m"; c_r="\033[31m"; c_b="\033[1m"; c_0="\033[0m"
@@ -400,7 +411,48 @@ if [ "$DO_SYSTEMD" = 1 ]; then
   cp apps/sigil/deploy/systemd/*.service apps/sigil/deploy/systemd/*.timer "$HOME/.config/systemd/user/" 2>/dev/null || true
   [ -f "$SIGIL_HOME/cockpit.env" ] || cp apps/sigil/deploy/cockpit.env.example "$SIGIL_HOME/cockpit.env"
   [ -f "$SIGIL_HOME/bridge.env" ]  || cp apps/sigil/deploy/bridge.env.example  "$SIGIL_HOME/bridge.env"
-  systemctl --user daemon-reload 2>/dev/null && ok "installed user units (enable with: systemctl --user enable --now sigil-cockpit)" || warn "systemctl --user unavailable here."
+
+  # W7-8 — the VIGIL backup / cadence timers. THESE are what close the "backups are a capability, not an
+  # operating property" gap: the units ship in the repo but nothing installed them, so on a real host NO
+  # backup, push, drill, reprove, integrity or anchor cadence was running. Install the units + their env
+  # examples (0600 — they carry the backup passphrase); leave them DISABLED unless the production posture
+  # asks to enable them.
+  cp infra/systemd/vigil-*.service infra/systemd/vigil-*.timer "$HOME/.config/systemd/user/" 2>/dev/null || true
+  mkdir -p "$HOME/.config/vigil"
+  for envf in backup backup-push integrity posture reprove ha-mirror; do
+    src="infra/systemd/vigil-${envf}.env.example"; dst="$HOME/.config/vigil/${envf}.env"
+    [ -f "$src" ] && [ ! -f "$dst" ] && { cp "$src" "$dst"; chmod 600 "$dst"; }
+  done
+  systemctl --user daemon-reload 2>/dev/null \
+    && ok "installed user units (sigil cockpit + vigil backup/cadence timers)" \
+    || warn "systemctl --user unavailable here — units are copied but not registered."
+
+  if [ "$PRODUCTION" = 1 ]; then
+    # PRODUCTION posture: ENABLE the backup-DURABILITY timers so the machine actually backs itself up and
+    # proves the round-trip. `enable --now` starts the TIMER (not the service): with Persistent=true a
+    # freshly-enabled timer schedules its NEXT run and does NOT replay missed windows at enable time, so
+    # this does not fire a surprise backlog of runs. We enable ONE backup path (the air-gapped local backup)
+    # + the recovery drill — the exact durability set `vigil doctor`'s production gate requires. The
+    # off-host PUSH (vigil-backup-push) stays opt-in: it needs a configured VIGIL_PUSH_DEST first.
+    # IDEMPOTENT: `enable --now` on an already-enabled timer is a no-op.
+    if systemctl --user daemon-reload >/dev/null 2>&1; then
+      if systemctl --user enable --now vigil-backup.timer vigil-backup-drill.timer >/dev/null 2>&1; then
+        ok "enabled the backup + recovery-drill timers (production posture)"
+        warn "set the backup passphrase + base dir in ~/.config/vigil/backup.env, then seed the first run"
+        warn "  now with:  systemctl --user start vigil-backup.service   (else durability stays PENDING in"
+        warn "  'vigil doctor' until the first daily fire — the production gate refuses to start until then)"
+      else
+        warn "could not enable the backup timers (systemctl --user enable failed) — enable them by hand:"
+        warn "  systemctl --user enable --now vigil-backup.timer vigil-backup-drill.timer"
+      fi
+    else
+      warn "systemctl --user unavailable — enable the backup timers on the target host with:"
+      warn "  systemctl --user enable --now vigil-backup.timer vigil-backup-drill.timer"
+    fi
+  else
+    ok "backup timers installed but NOT enabled (dev posture). Enable them with --production, or:"
+    printf "       systemctl --user enable --now vigil-backup.timer vigil-backup-drill.timer\n"
+  fi
 fi
 
 # =============================================================================

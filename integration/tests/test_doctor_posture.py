@@ -104,30 +104,51 @@ def test_egress_off_until_gateway_running_and_sandbox_pinned(monkeypatch):
 
 # --------------------------------------------------------------------------- backups / timers
 
-def _fake_systemctl(enabled_names):
+def _fake_systemctl(enabled=(), fired=()):
+    """Fake `systemctl` covering both probes the timer scan makes — `is-enabled <timer>` and
+    `show <service> -p ExecMainExitTimestamp -p ExecMainStatus -p Result` (a non-empty exit timestamp iff
+    the paired timer is in `fired`, the real signal for a oneshot that has completed a run)."""
+    enabled, fired = set(enabled), set(fired)
+
     def _run(argv, capture_output=True, text=True, timeout=None, **kw):
-        name = argv[-1]
-        out = "enabled" if name in enabled_names else "not-found"
-        return SimpleNamespace(returncode=0 if name in enabled_names else 1, stdout=out + "\n", stderr="")
+        verb, unit = argv[1], argv[2]
+        if verb == "is-enabled":
+            on = unit in enabled
+            return SimpleNamespace(returncode=0 if on else 4,
+                                   stdout=("enabled" if on else "disabled") + "\n", stderr="")
+        if verb == "show":
+            timer = unit[: -len(".service")] + ".timer"
+            ts = "Thu 2026-08-21 03:00:11 UTC" if timer in fired else ""
+            return SimpleNamespace(returncode=0,
+                                   stdout=f"ExecMainExitTimestamp={ts}\nExecMainStatus=0\nResult=success\n",
+                                   stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
     return _run
 
 
-def test_backups_off_until_a_timer_is_enabled(monkeypatch, tmp_path):
+def test_backups_off_pending_on_reflects_enablement_and_last_run(monkeypatch, tmp_path):
     sysd = tmp_path / "infra" / "systemd"
     sysd.mkdir(parents=True)
-    for t in ("vigil-backup-push", "vigil-reprove", "vigil-backup"):
+    for t in ("vigil-backup", "vigil-backup-push", "vigil-backup-drill", "vigil-reprove"):
         (sysd / f"{t}.timer").write_text("[Timer]\n", encoding="utf-8")
     monkeypatch.setattr(dmod.shutil, "which", lambda n: "/usr/bin/systemctl" if n == "systemctl" else None)
 
-    # none enabled → OFF, and the count is real (0/3).
-    monkeypatch.setattr(dmod.subprocess, "run", _fake_systemctl(set()))
-    state, detail = dmod._posture_backups(tmp_path)
-    assert state == "OFF" and "0/3" in detail
+    # none enabled → OFF.
+    monkeypatch.setattr(dmod.subprocess, "run", _fake_systemctl())
+    assert dmod._posture_backups(tmp_path)[0] == "OFF"
 
-    # NEGATIVE CONTROL: enable one → ON, naming it.
-    monkeypatch.setattr(dmod.subprocess, "run", _fake_systemctl({"vigil-backup-push.timer"}))
-    state2, detail2 = dmod._posture_backups(tmp_path)
-    assert state2 == "ON" and "vigil-backup-push.timer" in detail2 and state2 != state
+    # the durability set enabled but NEVER FIRED → PENDING (enabled is not yet running).
+    monkeypatch.setattr(dmod.subprocess, "run",
+                        _fake_systemctl(enabled={"vigil-backup.timer", "vigil-backup-drill.timer"}))
+    assert dmod._posture_backups(tmp_path)[0] == "PENDING"
+
+    # NEGATIVE CONTROL: give them a successful last run → ON, naming the engaged timer.
+    monkeypatch.setattr(dmod.subprocess, "run",
+                        _fake_systemctl(enabled={"vigil-backup.timer", "vigil-backup-drill.timer"},
+                                        fired={"vigil-backup.timer", "vigil-backup-drill.timer"}))
+    state, detail = dmod._posture_backups(tmp_path)
+    assert state == "ON" and "vigil-backup.timer" in detail
 
 
 def test_backups_unknown_when_systemctl_absent(monkeypatch, tmp_path):
