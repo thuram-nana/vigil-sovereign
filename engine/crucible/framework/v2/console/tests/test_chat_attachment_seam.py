@@ -121,13 +121,6 @@ def test_a_refused_upload_records_nothing_in_the_transcript():
     assert attachments.list_attachments(CHAT) == []
 
 
-def test_the_attachments_list_route_returns_the_manifests():
-    _post_upload(CHAT, "app.zip", zip_bytes([("src/auth/login.py", CODE)]))
-    out = chat.attachments_list(CHAT)
-    assert out["chat_id"] == CHAT
-    assert [m.get("name") for m in out["attachments"]] == ["app.zip"]
-
-
 # ---------------------------------------------------------------------------------------------------
 # does the material actually reach the model?
 # ---------------------------------------------------------------------------------------------------

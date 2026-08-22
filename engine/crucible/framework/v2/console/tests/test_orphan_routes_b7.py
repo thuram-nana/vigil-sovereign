@@ -1,6 +1,7 @@
 """B7 — orphan-surface cleanup: three HTTP routes with no unified-UI consumer are removed, while their
 PROVIDER functions REMAIN (used internally + keep their unit tests), matching the A6 precedent that dropped
-``/api/engagement/`` and ``/api/reports/`` but kept ``engagement_detail`` / ``reports_data``.
+``/api/engagement/`` and ``/api/reports/`` but kept the providers with INTERNAL callers (``engagement_detail``).
+(``reports_data`` was later removed outright in W17-14 #548: it had neither a route NOR an internal caller.)
 
 Removed HTTP surface:
   * POST /api/launch/scan      — redundant: ``launch_assessment`` already spawns the SAME loopback ``scan``

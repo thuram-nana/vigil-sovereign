@@ -998,17 +998,6 @@ def attach_path(body: dict) -> dict:
     return out
 
 
-def attachments_list(chat_id: str) -> dict:
-    """The chat's finished attachments (pointers only) plus the scan offer, if an extracted codebase is
-    present. Fail-closed: an unsafe id raises ValueError → the server maps it to 404."""
-    cid = _safe_chat_id(str(chat_id or "").strip())
-    out = {"chat_id": cid, "attachments": _manifests(cid)}
-    offer = _scan_offer(cid)
-    if offer:
-        out["scan_offer"] = offer
-    return out
-
-
 # ---------------------------------------------------------------------------
 # THE REASONING CALL — modelled EXACTLY on ``actions.terminal_propose``:
 # environment key → honest "need key"; the SOVEREIGNTY GATE before the SDK import, any exception treated as

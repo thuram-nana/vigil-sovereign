@@ -359,4 +359,3 @@ def test_phase34_readers_resilient() -> None:
     a = api.authority_full("no-such-slug")
     assert a["killswitch"]["tripped"] in (True, False) and "gates" in a
     assert api.planner_data("no-such-slug")["present"] is False
-    assert api.reports_data("no-such-slug")["reports"] == []
