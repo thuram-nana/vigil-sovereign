@@ -227,6 +227,74 @@ def test_render_compose_refuses_unsafe_charter_slug():
     assert "myrepo/vigil-gateway:1.2.3" in net.render_compose(gateway_image="myrepo/vigil-gateway:1.2.3")
 
 
+def test_render_compose_charter_slug_is_env_interpolation_when_empty():
+    """sx-s2: the committed default must NOT ship a hardcoded empty charter-slug LITERAL — the gateway
+    fail-closes on it (config.from_env raises), so `vigil services up` on the committed compose brought up a
+    container that exited immediately AND could never be fixed without editing the file. It now ships the
+    ENV-INTERPOLATION form (exactly like the proxy token), so the launch path supplies the active
+    engagement's signed slug and an unset var still fail-closes (no scope ⇒ no gate)."""
+    net = SandboxNetworking()
+    frag = net.render_compose()
+    assert 'VIGIL_GATEWAY_CHARTER_SLUG: "${VIGIL_GATEWAY_CHARTER_SLUG:-}"' in frag
+    assert 'VIGIL_GATEWAY_CHARTER_SLUG: ""' not in frag            # never the unfixable empty literal
+    # a non-empty slug is still baked in LITERALLY (render a compose pinned to one engagement)
+    assert 'VIGIL_GATEWAY_CHARTER_SLUG: "acme-prod"' in net.render_compose(charter_slug="acme-prod")
+    # the committed artifact carries the interpolation form too (not just render_compose)
+    import pathlib
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    committed = (repo / "infra" / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    assert 'VIGIL_GATEWAY_CHARTER_SLUG: "${VIGIL_GATEWAY_CHARTER_SLUG:-}"' in committed
+    assert 'VIGIL_GATEWAY_CHARTER_SLUG: ""' not in committed
+
+
+def test_compose_up_threads_extra_env_into_the_compose_call(fake, tmp_path):
+    """sx-s2: compose_up must merge extra_env — the launch path's signed-charter slug + the minted
+    short-lived proxy token — into the environment the `docker compose up` subprocess sees, so the compose
+    interpolation forms resolve to them. No extra_env keeps the prior env byte-for-byte."""
+    fd = fake(image=True, container="running")
+    ctx = _ctx(tmp_path)
+    SandboxNetworking().compose_up(
+        "compose.yml", context_dir=ctx, pin_path=tmp_path / "pin.json",
+        extra_env={"VIGIL_GATEWAY_CHARTER_SLUG": "acme", "VIGIL_GATEWAY_PROXY_TOKEN": "s3cr3t"})
+    compose_envs = [e for c, e in zip(fd.calls, fd.envs) if c[1] == "compose"]
+    assert compose_envs, "no compose call was captured"
+    env = compose_envs[-1]
+    assert env["VIGIL_GATEWAY_CHARTER_SLUG"] == "acme"
+    assert env["VIGIL_GATEWAY_PROXY_TOKEN"] == "s3cr3t"
+    # negative control: no extra_env ⇒ the keys are absent (unless already ambient), i.e. the prior path
+    fd2 = fake(image=True, container="running")
+    ctx2 = tmp_path / "gw2"
+    ctx2.mkdir()
+    (ctx2 / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    SandboxNetworking().compose_up("compose.yml", context_dir=ctx2, pin_path=tmp_path / "p2.json")
+    env2 = [e for c, e in zip(fd2.calls, fd2.envs) if c[1] == "compose"][-1]
+    assert not env2.get("VIGIL_GATEWAY_CHARTER_SLUG")   # absent/empty on the no-extra_env path
+
+
+def test_gateway_attached_reads_container_network_membership(monkeypatch):
+    """sx-s2: the pre-flight's reachability check — is the gateway CONNECTED to the sandbox network? running
+    + network-exists is not enough (a gateway on only the egress net leaves the internal sandbox peerless)."""
+    monkeypatch.setattr(dmod.shutil, "which", lambda n: "/usr/bin/docker")
+
+    def _stdout(out_text):
+        def _run(args, capture_output=True, text=True, timeout=None, **kw):
+            return SimpleNamespace(returncode=0, stdout=out_text, stderr="")
+        return _run
+
+    # attached: the sandbox network is one of the container's networks
+    monkeypatch.setattr(dmod.subprocess, "run", _stdout("vigil_egress\nvigil_sandbox\n"))
+    assert SandboxNetworking().gateway_attached() is True
+    # detached: only the egress network — the internal sandbox would have no reachable peer
+    monkeypatch.setattr(dmod.subprocess, "run", _stdout("vigil_egress\n"))
+    assert SandboxNetworking().gateway_attached() is False
+
+    # fail-closed: an unreadable membership (absent container / inspect error) is 'not attached'
+    def _fail(args, capture_output=True, text=True, timeout=None, **kw):
+        return SimpleNamespace(returncode=1, stdout="", stderr="no such container")
+    monkeypatch.setattr(dmod.subprocess, "run", _fail)
+    assert SandboxNetworking().gateway_attached() is False
+
+
 # --------------------------- opt-in real build + smoke --------------------------------
 
 @pytest.mark.skipif(os.environ.get("VIGIL_GATEWAY_DOCKER_IT") != "1",

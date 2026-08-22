@@ -56,6 +56,16 @@ IMAGE_TAG_ENV = "VIGIL_GATEWAY_IMAGE_TAG"
 PIN_RELPATH = os.path.join(".vigil-live", "gateway-image-pin.json")
 PIN_SCHEMA = "vigil-gateway-image-pin/1"
 
+# sx-s2 short-lived gateway credential. The proxy's A7 client-auth secret is MINTED fresh at each bring-up
+# and persisted here (0600) so the two ends can never drift: the gateway container is started with this exact
+# token (VIGIL_GATEWAY_PROXY_TOKEN in the compose env) and the Strix launch pre-flight reads the SAME file to
+# tell the in-sandbox Caido what Basic credential to present upstream. A per-bring-up random token is
+# "short-lived" in the sense the plan means (rotated every time the gate is stood up), never a committed
+# constant. Fail-SAFE: if minting/persisting fails, no token is set on either end and the proxy degrades to
+# its prior no-client-auth posture (bind address + internal network + nftables backstop) — never a state
+# where the gateway demands a credential the sandbox cannot present.
+PROXY_TOKEN_RELPATH = os.path.join(".vigil-live", "gateway-proxy-token")
+
 # A DETERMINISTIC bridge interface name for the sandbox network (pinned via the docker driver-opt
 # `com.docker.network.bridge.name`, and passed to the firewall sidecar as VIGIL_GATEWAY_SANDBOX_IFACE).
 # Without it the bridge is `br-<random>`, unknowable ahead of time, so the auto-applied backstop could
@@ -149,6 +159,45 @@ def write_pin(pin_path, *, context_digest_hex: str, image_tag: str, image_id: st
     return dict(record)
 
 
+def mint_proxy_token(token_path) -> "str | None":
+    """Mint a fresh short-lived gateway proxy-auth token, persist it atomically (0600), return it.
+
+    Called by the launch path at each gateway bring-up. Returns the token on success, or ``None`` if it
+    could not be written — in which case the caller sets NO token on the gateway and the proxy keeps its
+    prior no-client-auth posture (never a gateway that demands a credential the sandbox cannot read back)."""
+    import secrets
+    token = secrets.token_urlsafe(32)
+    try:
+        path = Path(token_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        # Create the temp file 0600 BEFORE writing the secret (no world-readable window), then atomically
+        # replace. os.open with 0o600 + O_CREAT|O_TRUNC is the portable way to fix the mode at creation.
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, (token + "\n").encode("ascii"))
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)   # belt-and-suspenders: ensure the final file is owner-only
+        except OSError:
+            pass
+        return token
+    except OSError:
+        return None
+
+
+def load_proxy_token(token_path) -> "str | None":
+    """Read the persisted gateway proxy-auth token, or ``None`` if absent/unreadable/empty. Fail-safe: a
+    missing token means 'no client auth configured', never an error — the caller then presents none."""
+    try:
+        raw = Path(token_path).read_text(encoding="ascii")
+    except (OSError, ValueError):
+        return None
+    return raw.strip() or None
+
+
 def load_pin(pin_path) -> "dict | None":
     """Read the runtime image pin, or None if it is absent/unreadable/not our schema (fail-closed: the
     caller treats None as 'the runtime is invisible', never as 'verified')."""
@@ -196,6 +245,17 @@ class SandboxNetworking:
             supply-chain doc removed: this is a FIRST-PARTY image and the var carries a content address, so
             it forces recreate-on-change rather than masking upstream drift.
           * an explicit reference — templated literally (used when printing a compose for a specific tag).
+
+        ``charter_slug`` (default: "") controls the gateway's L7 scope source:
+          * "" — emit the ENV-INTERPOLATION form ``${VIGIL_GATEWAY_CHARTER_SLUG:-}``, exactly like the proxy
+            token below. This is the sx-s2 fix: the committed artifact used to ship a hardcoded empty LITERAL
+            (``VIGIL_GATEWAY_CHARTER_SLUG: ""``), on which ``config.from_env`` fail-closes, so the committed
+            compose brought up a gateway that exited immediately AND could never be fixed without editing the
+            file. As an interpolation the launch path (``vigil services up --charter-slug`` / ``vigil up
+            --services --charter-slug``, which set the var in the compose-up environment) supplies the active
+            engagement's signed-charter slug, and an unset var still fail-closes (no scope ⇒ no gateway) — the
+            same safe default, now with an actionable path instead of an unfixable literal.
+          * an explicit slug — templated LITERALLY (used when rendering a compose pinned to one engagement).
         """
         # BOTH templated values are guarded — a quote / newline in either would let it break out of its
         # YAML scalar and inject compose directives (e.g. privileged: true). charter_slug: a simple slug;
@@ -203,6 +263,9 @@ class SandboxNetworking:
         if charter_slug and not re.fullmatch(r"[A-Za-z0-9._-]+", charter_slug):
             raise ValueError("charter_slug must be a simple slug ([A-Za-z0-9._-]); refusing to template "
                              "an unsafe value into the compose file")
+        # Empty ⇒ the env-interpolation form (authored here, never caller-supplied, so injection-safe and not
+        # run through the slug guard above); non-empty ⇒ the validated literal slug baked in.
+        charter_slug_value = charter_slug or "${VIGIL_GATEWAY_CHARTER_SLUG:-}"
         if gateway_image:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", gateway_image):
                 raise ValueError("gateway_image must be a valid docker image reference; refusing to template "
@@ -301,7 +364,7 @@ services:
       VIGIL_GATEWAY_PROXY_PORT: "{self.proxy_port}"
       VIGIL_GATEWAY_PROXY_HOST: "{bind_ip}"
       VIGIL_GATEWAY_PROXY_TOKEN: "${{VIGIL_GATEWAY_PROXY_TOKEN:-}}"
-      VIGIL_GATEWAY_CHARTER_SLUG: "{charter_slug}"
+      VIGIL_GATEWAY_CHARTER_SLUG: "{charter_slug_value}"
     command: ["vigil-gateway", "serve-proxy", "--host", "{bind_ip}", "--port", "{self.proxy_port}"]
     healthcheck:
       # The gate is only "up" when the proxy is actually LISTENING on its pinned sandbox bind. A bad or
@@ -450,13 +513,30 @@ services:
             return "absent"
         return proc.stdout.strip() or "unknown"
 
+    def gateway_attached(self, container: str = "vigil-gateway", network: "str | None" = None) -> bool:
+        """Is the gateway container actually CONNECTED to the (default: sandbox) network?
+
+        ``container_state == running`` + ``network_exists`` is not enough for the sandbox to reach the
+        gateway: a gateway attached only to the egress network, or a sandbox network recreated after the
+        gateway started, both pass those two checks yet leave the ``--internal`` sandbox with NO reachable
+        peer. This inspects the container's own network membership (``NetworkSettings.Networks``) — spoof-free
+        and cheap — so the Strix launch pre-flight can refuse a gateway that cannot receive the sandbox's
+        forwarded traffic, instead of pinning the sandbox onto an isolated island. Fail-closed: any read
+        failure returns False (unreachable-until-proven-reachable)."""
+        net = network or self.sandbox_network
+        proc = self._run(["inspect", "-f",
+                          "{{range $k, $_ := .NetworkSettings.Networks}}{{$k}}\n{{end}}", container])
+        if proc.returncode != 0:
+            return False
+        return net in {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
     def _default_pin_path(self, context_dir) -> Path:
         # The gateway build context is <repo>/gateway, so the repo root is its parent; the pin lives under
         # the same .vigil-live runtime dir the offense plane already uses.
         return Path(context_dir).resolve().parent / PIN_RELPATH
 
     def compose_up(self, compose_file, *, build: bool = True, context_dir=None,
-                   image: str = DEFAULT_IMAGE, pin_path=None) -> dict:
+                   image: str = DEFAULT_IMAGE, pin_path=None, extra_env: "dict | None" = None) -> dict:
         """Bring the gateway topology up via `docker compose up -d`, content-addressing the image so an
         UPGRADE actually takes effect (issue #511).
 
@@ -473,7 +553,11 @@ services:
         # Point compose at the content-addressed tag. A FULL env (not a sparse override) so compose keeps
         # PATH / DOCKER_HOST / HOME etc.; the tag is the part after the repo (`ctx-<digest>` or `latest`).
         tag_only = tag.split(":", 1)[1] if ":" in tag else tag
-        env = {**os.environ, IMAGE_TAG_ENV: tag_only}
+        # ``extra_env`` (sx-s2) carries the launch-path-supplied compose interpolation values — the active
+        # engagement's VIGIL_GATEWAY_CHARTER_SLUG (signed scope) and the minted VIGIL_GATEWAY_PROXY_TOKEN
+        # (short-lived client credential). Merged LAST so it wins over any stale ambient value. Empty/None
+        # keeps the prior behaviour byte-for-byte (the compose then interpolates the env, or its `:-` default).
+        env = {**os.environ, IMAGE_TAG_ENV: tag_only, **{k: str(v) for k, v in (extra_env or {}).items()}}
         # `--wait` blocks until every service is running AND (given the vigil-gateway healthcheck) HEALTHY,
         # and returns non-zero if one never gets there — so a gateway that starts then exits (bad/missing
         # charter scope) is a compose FAILURE here rather than an exit-0-but-dead container. This is the

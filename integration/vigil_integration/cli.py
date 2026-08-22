@@ -1921,9 +1921,23 @@ def _cmd_up(args: argparse.Namespace) -> int:
         # the worst outcome, so a gateway bring-up failure ABORTS the run with a loud error UNLESS the
         # operator EXPLICITLY opts into ungated egress with --allow-ungated-egress (loud warning, continues).
         try:
-            from vigil_gateway.docker import SandboxNetworking
+            from vigil_gateway.docker import SandboxNetworking, PROXY_TOKEN_RELPATH, mint_proxy_token
+            # sx-s2: hand the gateway its two compose-interpolation values at bring-up. (1) The signed-charter
+            # slug (its L7 scope source) — from --charter-slug or the ambient env; unset still fail-closes the
+            # gateway (no scope ⇒ no gate), now settable instead of a hardcoded empty literal that could never
+            # come up. (2) A freshly MINTED short-lived proxy token, persisted so the Strix launch pre-flight
+            # reads the SAME secret for the sandbox's Caido to present — the two ends can never drift, and a
+            # mint failure simply leaves the proxy on its prior no-client-auth posture (never a deadlock).
+            _slug = getattr(args, "charter_slug", "") or os.environ.get("VIGIL_GATEWAY_CHARTER_SLUG", "")
+            _extra_env: dict = {}
+            if _slug:
+                _extra_env["VIGIL_GATEWAY_CHARTER_SLUG"] = _slug
+            _tok = mint_proxy_token(_repo / PROXY_TOKEN_RELPATH)
+            if _tok:
+                _extra_env["VIGIL_GATEWAY_PROXY_TOKEN"] = _tok
             _res = SandboxNetworking().compose_up(
-                _repo / "infra" / "docker" / "docker-compose.yml", build=True, context_dir=_repo / "gateway")
+                _repo / "infra" / "docker" / "docker-compose.yml", build=True, context_dir=_repo / "gateway",
+                extra_env=_extra_env)
             # A clean compose_up (exit 0) is NOT proof the gate is UP. `docker compose up -d` returns 0 as
             # soon as the container is CREATED, but the gateway proxy fails closed on a missing/bad charter
             # scope and can exit on the spot — leaving an exit-0-but-DEAD container. Trust the state in hand,
@@ -2022,8 +2036,19 @@ def _cmd_services(args: argparse.Namespace) -> int:
             print("gateway + services stopped (networks left in place)")
             return 0
         # up — create ONLY what is missing (idempotent): the gateway topology + the root services.
+        # sx-s2: supply the gateway's signed-charter slug (its L7 scope) and a freshly MINTED short-lived
+        # proxy token, persisted for the Strix launch pre-flight to read back (see the identical wiring in
+        # `vigil up --services`). Slug unset ⇒ the gateway still fail-closes; mint failure ⇒ no client auth.
+        from vigil_gateway.docker import PROXY_TOKEN_RELPATH, mint_proxy_token
+        slug = getattr(args, "charter_slug", "") or os.environ.get("VIGIL_GATEWAY_CHARTER_SLUG", "")
+        extra_env: dict = {}
+        if slug:
+            extra_env["VIGIL_GATEWAY_CHARTER_SLUG"] = slug
+        tok = mint_proxy_token(repo / PROXY_TOKEN_RELPATH)
+        if tok:
+            extra_env["VIGIL_GATEWAY_PROXY_TOKEN"] = tok
         result = {"gateway": net.compose_up(compose, build=not getattr(args, "no_build", False),
-                                            context_dir=gw_dir)}
+                                            context_dir=gw_dir, extra_env=extra_env)}
         result["services"] = root.up(_selected_root())
         print(json.dumps(result, indent=2))
         return 0
@@ -3214,6 +3239,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "if the gateway topology fails to come up, continue anyway with the sandbox UNGATED "
                          "(a default route to the operator LAN / a third party / 169.254.169.254 — FATAL-1). "
                          "Off by default; only pass it when you have accepted running without the egress gate.")
+    pu.add_argument("--charter-slug", default="",
+                    help="with --services: the signed-charter slug the egress gateway enforces as its L7 "
+                         "scope. Falls back to $VIGIL_GATEWAY_CHARTER_SLUG. Unset ⇒ the gateway fail-closes "
+                         "(no scope ⇒ no gate); set it to the active engagement's charter to gate real egress.")
     # ---- HA / clustering: a PROXY-ONLY read tier that federates to REMOTE backends -----------------
     pu.add_argument("--proxy-only", action="store_true",
                     help="run ONLY the reverse proxy — do NOT spawn the sovereign cockpit or the offense "
@@ -3240,6 +3269,9 @@ def build_parser() -> argparse.ArgumentParser:
     psu = psvc_sub.add_parser("up", help="create/start the gateway + root services if absent (idempotent)")
     psu.add_argument("--compose", default="", help="gateway compose file (default infra/docker/docker-compose.yml)")
     psu.add_argument("--no-build", action="store_true", help="do not build the gateway image (assume it exists)")
+    psu.add_argument("--charter-slug", default="",
+                     help="the signed-charter slug the gateway enforces as its L7 scope (falls back to "
+                          "$VIGIL_GATEWAY_CHARTER_SLUG; unset ⇒ the gateway fail-closes — no scope, no gate)")
     psu.add_argument("--with-graph", action="store_true", help="also bring up Neo4j (the knowledge graph)")
     psu.add_argument("--with-observability", action="store_true", help="also bring up the otel-collector")
     psu.add_argument("--all", action="store_true", help="bring up ALL services (gateway + qdrant + neo4j + otel)")
