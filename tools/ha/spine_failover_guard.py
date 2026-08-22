@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -82,6 +83,10 @@ from vigil_integration.transparency import (                     # noqa: E402
     is_split_view_resistant,
     verify_witnessed,
 )
+from vigil_integration.witnessed_anchor import (                 # noqa: E402
+    envelope_emitted_at,
+    freshness_verdict,
+)
 
 _EXIT_ACTIVATE = 0
 _EXIT_REFUSE = 2
@@ -101,10 +106,15 @@ class PromotionVerdict:
     local_last_seq: Optional[int] = None
     witnessed_count: Optional[int] = None
     witnessed_last_seq: Optional[int] = None
+    freshness: str = ""                       # W7-5: the anchor's freshness status (fresh/stale-warn/…)
+    anchor_age_s: Optional[float] = None      # W7-5: age of the retained anchor at evaluation time (s)
 
     def lines(self) -> list[str]:
         head = ("PROMOTE: SAFE — " if self.activate else "REFUSE (fail-closed): ") + self.reason
         out = [head]
+        if self.freshness:
+            out.append(f"anchor freshness: {self.freshness}"
+                       + ("" if self.anchor_age_s is None else f" (age {self.anchor_age_s:.0f}s)"))
         if self.guarantee:
             out.append(f"witness guarantee: {self.guarantee}")
         if not self.independent:
@@ -118,13 +128,16 @@ class PromotionVerdict:
         return json.dumps({
             "activate": self.activate, "exit_code": self.exit_code, "reason": self.reason,
             "independent": self.independent, "guarantee": self.guarantee,
+            "freshness": self.freshness, "anchor_age_s": self.anchor_age_s,
             "local": {"entry_count": self.local_count, "last_seq": self.local_last_seq},
             "witnessed": {"entry_count": self.witnessed_count, "last_seq": self.witnessed_last_seq},
         }, sort_keys=True)
 
 
 def evaluate_promotion(local_head: Any, witnessed_env: str, *, scope: str, trust_root,
-                       owner_trust_root, entries) -> PromotionVerdict:
+                       owner_trust_root, entries, now: Optional[float] = None,
+                       warn_after_s: Optional[int] = None,
+                       refuse_after_s: Optional[int] = None) -> PromotionVerdict:
     """Pure decision function (no IO) — the testable core.
 
     ``local_head`` is the passive's restored/synced ``SignedChainHead`` (or None); ``entries`` is that
@@ -168,6 +181,22 @@ def evaluate_promotion(local_head: Any, witnessed_env: str, *, scope: str, trust
                                 "witnessed checkpoint is NOT signed by a trusted witness quorum "
                                 "(forged/tampered anchor, or its witnesses are not in this store's roster)",
                                 independent=independent, guarantee=guarantee)
+
+    # (2b) W7-5 (#463) FRESHNESS: the anchor the whole HA interlock depends on must be RECENT. An anchor
+    # older than the refusal bound (or un-dated, or future-dated past the skew tolerance) means the scheduled
+    # off-box emitter has stopped and the rollback window is silently widening — REFUSE (fail-closed). Enforced
+    # only when ``now`` is supplied (the CLI / standalone run() path always supplies it; a test that omits it
+    # keeps the pre-W7-5 behaviour). ``emitted_at`` is UNSIGNED envelope metadata (see witness.dump_witnessed);
+    # it is a freshness/operational-drift signal, distinct from the anchor's SIGNATURE (verified in step 2).
+    fv = None
+    if now is not None:
+        fv = freshness_verdict(envelope_emitted_at(witnessed_env), now=now,
+                               warn_after_s=warn_after_s, refuse_after_s=refuse_after_s)
+        if fv.refuse:
+            return PromotionVerdict(False, _EXIT_REFUSE,
+                                    f"STALE ANCHOR — {fv.detail}",
+                                    independent=independent, guarantee=guarantee,
+                                    freshness=fv.status, anchor_age_s=fv.age_s)
 
     # (3) AUTHENTICATE THE LOCAL HEAD before trusting ANY of its self-declared scalar fields. This runs the
     # SAME owner-signature authentication the live spine runs before check_floor (checkpoint.classify_head ->
@@ -274,7 +303,9 @@ def evaluate_promotion(local_head: Any, witnessed_env: str, *, scope: str, trust
                             f"rollback, no same-height fork — safe to promote this passive to ACTIVE",
                             independent=independent, guarantee=guarantee,
                             local_count=lc, local_last_seq=ls,
-                            witnessed_count=int(cp.entry_count), witnessed_last_seq=int(cp.last_seq))
+                            witnessed_count=int(cp.entry_count), witnessed_last_seq=int(cp.last_seq),
+                            freshness=(fv.status if fv is not None else ""),
+                            anchor_age_s=(fv.age_s if fv is not None else None))
 
 
 # --------------------------------------------------------------------------------------------- IO / CLI
@@ -350,8 +381,9 @@ def run(argv: Optional[list[str]] = None) -> int:
     data = sys.stdin.read() if args.witnessed == "-" else Path(args.witnessed).read_text(encoding="utf-8")
     local_head = load_local_head(Path(args.head) if args.head else None)
     local_entries = load_local_entries()
+    # W7-5: production enforces anchor FRESHNESS — pass the wall clock so a stale off-box anchor is refused.
     verdict = evaluate_promotion(local_head, data, scope=scope, trust_root=tr,
-                                 owner_trust_root=owner_tr, entries=local_entries)
+                                 owner_trust_root=owner_tr, entries=local_entries, now=time.time())
 
     if args.json:
         print(verdict.to_json())

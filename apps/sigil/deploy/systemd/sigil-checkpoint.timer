@@ -1,0 +1,23 @@
+# SIGIL scheduled off-box witnessed-checkpoint timer — fires the emit oneshot on a cadence.
+# =====================================================================
+# W7-5 (#463). Refreshes the off-box HA anti-rollback anchor on a cadence so a failover always has a FRESH
+# anchor to promote against. A stale anchor silently widens the rollback window and the failover guard now
+# REFUSES one older than VIGIL_ANCHOR_REFUSE_AFTER_S (default 24h) — keep this cadence well under it.
+#
+# PRODUCTION posture: enable this timer.
+#   systemctl --user enable --now sigil-checkpoint.timer
+#   systemctl --user list-timers 'sigil-*'
+
+[Unit]
+Description=Cadence trigger for the SIGIL scheduled off-box witnessed-checkpoint emitter
+Documentation=file:%h/vigil/docs/architecture/HA-PROFILE.md
+
+[Timer]
+# Every 15 minutes, offset so it does not stampede with the other jobs. Far under the 6h/24h freshness bounds.
+OnCalendar=*-*-* *:11/15:00
+Persistent=true
+RandomizedDelaySec=60
+Unit=sigil-checkpoint.service
+
+[Install]
+WantedBy=timers.target

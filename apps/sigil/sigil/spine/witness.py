@@ -95,16 +95,27 @@ def _require(cond: bool, msg: str) -> None:
 
 # --------------------------------------------------------------------------- envelope (de)serialisation
 
-def dump_witnessed(wc: WitnessedCheckpoint, *, scope: str) -> str:
+def dump_witnessed(wc: WitnessedCheckpoint, *, scope: str, emitted_at: int | None = None) -> str:
     """Serialise a WitnessedCheckpoint to a portable JSON envelope, bound to ``scope`` so a checkpoint
-    from a different store is not accepted on verify."""
-    return json.dumps({
+    from a different store is not accepted on verify.
+
+    W7-5 (#463): ``emitted_at`` is the UNSIGNED emission timestamp (unix seconds) a SCHEDULED emitter stamps
+    so a verifier / the HA failover guard can REFUSE a STALE anchor. It is top-level metadata, deliberately
+    NOT part of the signed ``checkpoint`` (that would change the checkpoint's signed identity and break the
+    cross-plane byte-compat with ``vigil_integration.witnessed_anchor.dump_witnessed_envelope``). When None it
+    is OMITTED, so a hand-emitted / legacy envelope stays byte-identical to the pre-W7-5 format (and a freshness
+    gate treats it as un-dated → fail-closed). Byte-format-compatible with the integration reader/writer:
+    both stamp the SAME top-level ``emitted_at`` key, sorted+compact."""
+    obj = {
         "schema": _ENVELOPE_SCHEMA,
         "scope": scope,
         "checkpoint": wc.checkpoint.to_dict(),
         "witness_signatures": [{"key_id": s.key_id, "signature_b64": s.signature_b64}
                                for s in wc.witness_signatures],
-    }, sort_keys=True, separators=(",", ":"))
+    }
+    if emitted_at is not None:
+        obj["emitted_at"] = int(emitted_at)
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
 def load_witnessed(data: str) -> tuple[WitnessedCheckpoint, str]:
@@ -255,13 +266,14 @@ def load_tip(path: Path) -> WitnessedCheckpoint | None:
     return wc
 
 
-def save_tip(wc: WitnessedCheckpoint, path: Path, *, scope: str) -> None:
-    atomic_write_text(path, dump_witnessed(wc, scope=scope), prefix=".witness-tip-")
+def save_tip(wc: WitnessedCheckpoint, path: Path, *, scope: str, emitted_at: int | None = None) -> None:
+    atomic_write_text(path, dump_witnessed(wc, scope=scope, emitted_at=emitted_at), prefix=".witness-tip-")
 
 
 # ----------------------------------------------------------------------------------------------- emit
 
-def emit_checkpoint(head: Any, witnesses: list[Witness], *, tip_path: Path, scope: str) -> WitnessedCheckpoint:
+def emit_checkpoint(head: Any, witnesses: list[Witness], *, tip_path: Path, scope: str,
+                    now: float | None = None) -> WitnessedCheckpoint:
     """Summarise ``head`` into the next checkpoint (linked to the persisted tip so the meta-chain survives
     restarts), gather witness co-signatures, persist the new tip, and return the WitnessedCheckpoint.
 
@@ -275,6 +287,7 @@ def emit_checkpoint(head: Any, witnesses: list[Witness], *, tip_path: Path, scop
     signs before any state mutates)."""
     if not witnesses:
         raise WitnessError("emit needs at least one witness to co-sign the checkpoint")
+    stamp = None if now is None else int(now)
     tip = load_tip(tip_path)
     prev = "" if tip is None else checkpoint_hash(tip.checkpoint)
     cp = checkpoint_of(head, prev_checkpoint_hash=prev)
@@ -282,7 +295,13 @@ def emit_checkpoint(head: Any, witnesses: list[Witness], *, tip_path: Path, scop
         last = tip.checkpoint
         if (cp.entry_count, cp.last_seq, cp.head_hash, cp.base_seq, cp.base_count) == (
                 last.entry_count, last.last_seq, last.head_hash, last.base_seq, last.base_count):
-            return tip                                  # idempotent: unchanged position AND boundary
+            # W7-5 LIVENESS REFRESH: a SCHEDULED emitter (``now`` given) re-stamps the tip's emitted_at so the
+            # anchor's FRESHNESS advances even on an idle spine, while the signed checkpoint + signatures stay
+            # byte-identical. A caller that passes no ``now`` keeps the pre-W7-5 behaviour (return tip, no write).
+            if now is None:
+                return tip                              # idempotent: unchanged position AND boundary
+            save_tip(tip, tip_path, scope=scope, emitted_at=stamp)
+            return tip
         ok, why = consistent(last, cp)
         if not ok:
             raise WitnessError(f"refusing to emit an inconsistent checkpoint: {why}")
@@ -294,7 +313,7 @@ def emit_checkpoint(head: Any, witnesses: list[Witness], *, tip_path: Path, scop
         if w.would_accept(cp)[0]:
             willing.append(w)
     wc = WitnessedCheckpoint(cp, tuple(w.cosign(cp) for w in willing))
-    save_tip(wc, tip_path, scope=scope)
+    save_tip(wc, tip_path, scope=scope, emitted_at=stamp)
     return wc
 
 

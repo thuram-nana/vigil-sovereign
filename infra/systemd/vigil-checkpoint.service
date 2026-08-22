@@ -1,0 +1,66 @@
+# VIGIL scheduled off-box WITNESSED-CHECKPOINT emitter — systemd USER service (oneshot)
+# =====================================================================
+# W7-5 (#463). Runs ONE emit cycle of `vigil floor witness --watch --cycles 1`: it re-reads the current
+# offense head + anti-rollback high-water floor, emits a GOVERNANCE-signed witnessed checkpoint, and pushes
+# it OFF-BOX to VIGIL_CHECKPOINT_RETAIN — the anchor the anti-rollback verify/HA interlock depends on. The
+# paired timer (vigil-checkpoint.timer) fires this on a cadence, so the off-box anchor is refreshed
+# CONTINUOUSLY instead of only when a human remembers to run it by hand. Each cycle also:
+#   * ALARMS (vigil-checkpoint.<name>.emit-alarms.jsonl + journal) if the anchor it is about to refresh was
+#     already STALE — a WARNING while it is still usable, CRITICAL once past the refusal bound — so staleness
+#     is surfaced BEFORE the failover guard would refuse to promote off it;
+#   * writes a dead-man HEARTBEAT, so if THIS unit stops firing the emitter's silence is itself detectable.
+#
+# The freshness bounds the guard enforces (VIGIL_ANCHOR_WARN_AFTER_S / VIGIL_ANCHOR_REFUSE_AFTER_S, default
+# 6h / 24h) must be comfortably LARGER than this timer's cadence, or a healthy system false-alarms.
+#
+# ┌───────────────────────────────────────────────────────────────────┐
+# │  VIGIL_CHECKPOINT_RETAIN MUST point OFF-BOX (a mounted second      │
+# │  disk, a USB stick, a remote/tunnel mount). A copy kept on the     │
+# │  active host is rolled back WITH the spine and is worthless as an  │
+# │  anchor — see docs/architecture/HA-PROFILE.md §3.1.                │
+# └───────────────────────────────────────────────────────────────────┘
+#
+# INSTALL (paired with the timer — PRODUCTION posture enables the timer):
+#   mkdir -p ~/.config/systemd/user ~/.config/vigil
+#   cp infra/systemd/vigil-checkpoint.{service,timer} ~/.config/systemd/user/
+#   cp infra/systemd/vigil-checkpoint.env.example     ~/.config/vigil/checkpoint.env
+#   $EDITOR ~/.config/vigil/checkpoint.env            # set LOG_DIR / BASE_DIR / SCOPE / RETAIN (off-box)
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-checkpoint.timer
+
+[Unit]
+Description=VIGIL scheduled off-box witnessed-checkpoint emitter (anti-rollback anchor; alarm on stale)
+Documentation=file:%h/vigil/docs/architecture/HA-PROFILE.md
+
+[Service]
+Type=oneshot
+
+EnvironmentFile=-%h/.config/vigil/checkpoint.env
+Environment=PYTHONUNBUFFERED=1
+# Defaults (overridden by the env file). RETAIN MUST be an off-box path in production.
+Environment=VIGIL_CHECKPOINT_LOG_DIR=%h/.vigil-live/attestation-log
+Environment=VIGIL_CHECKPOINT_BASE_DIR=%h/.vigil-live
+Environment=VIGIL_CHECKPOINT_SCOPE=loopback
+Environment=VIGIL_CHECKPOINT_RETAIN=%h/.config/vigil/checkpoint.witnessed.json
+
+WorkingDirectory=%h/vigil
+# --cycles 1 = one emit cycle (the timer owns the cadence). Exits non-zero if the emit itself fails.
+ExecStart=%h/vigil/.venv-offense/bin/vigil floor witness --watch --cycles 1 \
+    --log-dir ${VIGIL_CHECKPOINT_LOG_DIR} --base-dir ${VIGIL_CHECKPOINT_BASE_DIR} \
+    --scope ${VIGIL_CHECKPOINT_SCOPE} --retain ${VIGIL_CHECKPOINT_RETAIN}
+
+# --- hardening -------------------------------------------------------------
+# It reads the offense attestation-log + governance key and writes the off-box anchor + its heartbeat/alarm
+# log. No target traffic, so PrivateNetwork is safe UNLESS RETAIN is a network/tunnel mount (then drop it).
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Add the off-box RETAIN directory here if it is outside these paths.
+ReadWritePaths=%h/.vigil-live %h/.config/vigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOTE: if VIGIL_CHECKPOINT_RETAIN is a network/tunnel mount, do NOT set PrivateNetwork; and add its mount
+# point to ReadWritePaths above.

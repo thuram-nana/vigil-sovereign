@@ -226,3 +226,95 @@ def test_positive_path_is_not_trivially_true(tmp_path):
     bad = guard.evaluate_promotion(imposter, env, scope=SCOPE, trust_root=_solo_tr(),
                                    owner_trust_root=_owner_tr(), entries=e2)
     assert not bad.activate and bad.exit_code == 2
+
+
+# ─────────────────────────────────────────── W7-5 (#463): fail-closed on a STALE off-box anchor ──────────
+# The witnessed checkpoint is the anchor the whole HA interlock depends on. If the scheduled off-box emitter
+# stops, the anchor ages and the rollback window silently widens. The guard now enforces FRESHNESS: an anchor
+# older than the refusal bound (or un-dated / future-dated past the skew tolerance) is REFUSED (fail-closed)
+# when a wall clock is supplied — which the CLI / standalone run() path always does. ``emitted_at`` is UNSIGNED
+# envelope metadata (an operational-drift signal), distinct from the anchor's SIGNATURE (still verified).
+
+_W7_WARN = 100
+_W7_REFUSE = 200
+
+
+def _witnessed_env_at(head, tmp_path, *, now):
+    """A witnessed envelope stamped with an emission timestamp (W7-5 scheduled-emitter behaviour)."""
+    wc = W.emit_checkpoint(head, [Witness("owner", OWNER.private_key_b64)],
+                           tip_path=tmp_path / "tip", scope=SCOPE, now=now)
+    return W.dump_witnessed(wc, scope=SCOPE, emitted_at=int(now))
+
+
+def test_stale_anchor_refused_fresh_accepted_negative_control(tmp_path):
+    """THE W7-5 fix + its negative control in ONE run: the SAME owner-authenticated head at the witnessed
+    height ACTIVATES with a FRESH anchor and is REFUSED with a back-dated (stale) one — so the refusal is
+    freshness, and freshness is not a no-op. Fails without the change: ``evaluate_promotion`` had no ``now``
+    kwarg (TypeError) and never checked ``emitted_at``."""
+    e2, h2 = _chain(2)
+    env = _witnessed_env_at(h2, tmp_path, now=1_000)
+
+    # sanity: WITHOUT the freshness clock the anchor activates (proves every other check is satisfied) —
+    ok_nofresh = guard.evaluate_promotion(h2, env, scope=SCOPE, trust_root=_solo_tr(),
+                                          owner_trust_root=_owner_tr(), entries=e2)
+    assert ok_nofresh.activate and ok_nofresh.exit_code == 0
+
+    # FRESH clock -> ACTIVATE
+    fresh = guard.evaluate_promotion(h2, env, scope=SCOPE, trust_root=_solo_tr(),
+                                     owner_trust_root=_owner_tr(), entries=e2,
+                                     now=1_000 + _W7_WARN - 1, warn_after_s=_W7_WARN, refuse_after_s=_W7_REFUSE)
+    assert fresh.activate and fresh.exit_code == 0 and fresh.freshness == "fresh"
+
+    # STALE clock -> REFUSE (exit 2), asserted in the SAME run
+    stale = guard.evaluate_promotion(h2, env, scope=SCOPE, trust_root=_solo_tr(),
+                                     owner_trust_root=_owner_tr(), entries=e2,
+                                     now=1_000 + _W7_REFUSE + 1, warn_after_s=_W7_WARN, refuse_after_s=_W7_REFUSE)
+    assert not stale.activate and stale.exit_code == 2 and "STALE ANCHOR" in stale.reason
+    assert stale.freshness == "stale-refuse"
+
+
+def test_undated_anchor_refused_when_freshness_enforced(tmp_path):
+    """An anchor with NO emission timestamp (a legacy / hand-emitted envelope) cannot be proven fresh →
+    REFUSE fail-closed once a clock is supplied. Re-emit it with the scheduled emitter."""
+    e2, h2 = _chain(2)
+    env = _witnessed_env(h2, tmp_path)                     # legacy emit path: no emitted_at stamped
+    v = guard.evaluate_promotion(h2, env, scope=SCOPE, trust_root=_solo_tr(),
+                                 owner_trust_root=_owner_tr(), entries=e2,
+                                 now=5_000, warn_after_s=_W7_WARN, refuse_after_s=_W7_REFUSE)
+    assert not v.activate and v.exit_code == 2 and "STALE ANCHOR" in v.reason
+    assert v.freshness == "unknown-age"
+
+
+def test_future_dated_anchor_refused(tmp_path):
+    """A future-dated anchor beyond the skew tolerance is a skewed clock → REFUSE (a skewed clock corrupts
+    every freshness bound)."""
+    e2, h2 = _chain(2)
+    env = _witnessed_env_at(h2, tmp_path, now=10_000)
+    v = guard.evaluate_promotion(h2, env, scope=SCOPE, trust_root=_solo_tr(),
+                                 owner_trust_root=_owner_tr(), entries=e2,
+                                 now=100, warn_after_s=_W7_WARN, refuse_after_s=_W7_REFUSE)
+    assert not v.activate and v.exit_code == 2 and v.freshness == "future-skew"
+
+
+def test_no_clock_keeps_pre_w7_behaviour(tmp_path):
+    """Backward compatible: with ``now=None`` (no clock) the freshness gate is skipped entirely — a caller
+    that does not opt in gets the exact pre-W7-5 verdict."""
+    e2, h2 = _chain(2)
+    env = _witnessed_env_at(h2, tmp_path, now=1)           # ancient, but no clock is supplied
+    v = guard.evaluate_promotion(h2, env, scope=SCOPE, trust_root=_solo_tr(),
+                                 owner_trust_root=_owner_tr(), entries=e2)
+    assert v.activate and v.exit_code == 0 and v.freshness == ""
+
+
+def test_emitted_at_is_cross_plane_byte_compatible():
+    """The sovereign ``witness.dump_witnessed`` and the integration
+    ``witnessed_anchor.dump_witnessed_envelope`` stamp the SAME top-level ``emitted_at``, so a scheduled
+    anchor from either plane is read by the other's freshness reader — one on-disk artifact for both planes."""
+    import tempfile
+
+    from vigil_integration import witnessed_anchor as WA
+    e2, h2 = _chain(2)
+    wc = W.emit_checkpoint(h2, [Witness("owner", OWNER.private_key_b64)],
+                           tip_path=Path(tempfile.mkdtemp()) / "xtip", scope=SCOPE, now=4242)
+    env = W.dump_witnessed(wc, scope=SCOPE, emitted_at=4242)
+    assert WA.envelope_emitted_at(env) == 4242

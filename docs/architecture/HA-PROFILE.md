@@ -176,15 +176,40 @@ divergent history — the "cold verifier off an untrusted mirror" gap documented
 witnessed checkpoint** (head authenticated + fork-bound + extension-proven) before
 it will promote — not merely comparing self-declared record counts.
 
-### 3.1 Prerequisite: retain a witnessed checkpoint OFF-BOX
+### 3.1 Prerequisite: SCHEDULE the off-box witnessed checkpoint (and fail on a stale anchor)
 
-The active writer must periodically emit a witnessed checkpoint and retain it
-**off the active host** (a second machine, a USB stick, a remote commit, or the
-paired device over WireGuard):
+The active writer must emit a witnessed checkpoint and retain it **off the active
+host** (a second machine, a USB stick, a remote commit, or the paired device over
+WireGuard). It must do so **on a schedule, not by hand** — a checkpoint emitted
+manually ages between runs, and a months-old anchor silently widens the rollback
+window to whatever the operator's last manual run was (W7-5, #463). So a **timer**
+ships and is enabled in the production posture:
 
 ```
+# sovereign (owner-signed) — apps/sigil/deploy/systemd/sigil-checkpoint.{service,timer}
+systemctl --user enable --now sigil-checkpoint.timer      # sigil checkpoint emit --out <off-box>, every 15 min
+# offense (governance-signed) — infra/systemd/vigil-checkpoint.{service,timer}
+systemctl --user enable --now vigil-checkpoint.timer      # vigil floor witness --watch, every 15 min
+
+# a manual emit is still available:
 sigil checkpoint emit --out /retained/off-box/checkpoint.witnessed.json
 ```
+
+Each emit **stamps an `emitted_at` timestamp** into the envelope (unsigned top-level
+metadata — it does **not** change the checkpoint's signed identity, so the anchor
+still verifies and stays byte-compatible across planes). The scheduled emitter
+refreshes that timestamp every cycle — **even on an idle spine** (a liveness touch),
+so a healthy anchor is never more than one cadence old — writes a **dead-man
+heartbeat**, and **alarms if the anchor it is about to refresh was already stale**
+(a *warning* while still usable, *critical* once past the refusal bound) so
+staleness is surfaced *before* the guard would refuse.
+
+**FRESHNESS BOUND (fail-closed).** The failover guard and the `verify-witnessed`
+path **REFUSE an anchor older than `VIGIL_ANCHOR_REFUSE_AFTER_S` (default 24h)** — or
+one carrying **no** `emitted_at` (un-datable → cannot be proven fresh), or one dated
+in the **future** past the skew tolerance. A *warning* bound
+(`VIGIL_ANCHOR_WARN_AFTER_S`, default 6h) alerts earlier. Keep the timer cadence well
+under the warn bound (the shipped timers fire every 15 min).
 
 A witnessed checkpoint commits `entry_count` / `last_seq` (and, post-Piece-C,
 `base_*` / `merkle_root`) under a witness quorum's signatures. **A copy kept only
@@ -209,6 +234,13 @@ promote-passive` verb) **refuses to activate (exit 2, fail-closed)** unless:
 
 1. the off-box envelope parses, is for **this** scope, and is signed by a
    **trusted witness quorum** (a forged/unsigned "checkpoint" is not a floor);
+1a. **(W7-5) the anchor is FRESH** — its `emitted_at` is within
+   `VIGIL_ANCHOR_REFUSE_AFTER_S` (default 24h). A stale, un-dated, or future-dated
+   anchor is refused fail-closed: a stale anchor means the scheduled off-box emitter
+   stopped and the rollback window has silently widened, so it must not gate a
+   promotion. (`emitted_at` is a freshness signal, distinct from the anchor's
+   signature in step 1 — a same-host key-holder who could forward-date it already
+   defeats the local floor, the documented irreducible limit.);
 2. the **local head is authenticated** — the guard runs the *same* owner-signature
    authentication the live spine runs before `check_floor`
    (`checkpoint.classify_head` → `reuse.verify_head`): the **owner Ed25519
@@ -284,6 +316,15 @@ single writer scheduled); a comment block in that file states plainly that
   prints "split-view-resistant" for a solo self-witness. Independent prevention
   requires ≥2 independent witness keys at a strict majority, which is a
   **deployment property** code cannot verify (see `witness.py` `guarantee_label`).
+- **The anchor's freshness timestamp is UNSIGNED (W7-5).** `emitted_at` is
+  top-level envelope metadata, not part of the signed checkpoint (signing it would
+  change the checkpoint's cross-plane signed identity). It is a fail-closed
+  *operational-drift* signal: it catches a scheduled emitter that STOPPED (the real
+  W7-5 hazard) and refuses an un-datable/future-dated anchor. It is **not** a tamper
+  control — a same-host owner/governance key-holder who could forward-date it already
+  defeats the whole local floor (the irreducible all-keys limit above). The anchor's
+  SIGNATURE + the anti-rollback consistency checks remain the tamper controls; the
+  freshness gate sits *on top of* them, never in their place.
 - **Shared owner key across passives is a trust concession, not HA.** For a
   passive to become a valid writer it must hold the owner signing key. Every host
   that holds that key is a host that can sign a fork. HA of the writer therefore
