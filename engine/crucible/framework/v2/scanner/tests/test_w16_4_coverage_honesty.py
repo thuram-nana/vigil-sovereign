@@ -192,7 +192,7 @@ import re  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from framework.v2.scanner.campaign import ScanReport, _corpus_bug_classes  # noqa: E402
-from framework.v2.scanner.engine import AuditFinding  # noqa: E402
+from framework.v2.scanner.engine import AuditFinding, ProbeRecord  # noqa: E402
 from framework.v2.scanner.library import split_checks  # noqa: E402
 
 
@@ -237,8 +237,19 @@ def test_default_run_clean_is_not_corpus_wide() -> None:
     assert len(cb["classes_exercised"]) + len(cb["classes_inconclusive"]) == cb["corpus_classes"]
     # a default run cannot claim a corpus-wide clean
     assert cb["clean_is_corpus_wide"] is False
-    # and precisely the library-only point classes are the inconclusive set
-    assert set(cb["classes_inconclusive"]) == _library_only_point_classes()
+    # every library-only point class is inconclusive on a default run ...
+    assert _library_only_point_classes() <= set(cb["classes_inconclusive"])
+    # ... AND the exercised set is bounded by what ACTUALLY probed: a default run can only
+    # exercise SEED classes, and only those a probe actually landed for (a committed seed
+    # class that needs a channel this run lacks — e.g. OOB-gated ssrf/blind_xxe — never got
+    # a probe, so it is honestly inconclusive, NOT clean; that is the #509 fix).
+    seed_classes = {c.bug_class for c in DEFAULT_CHECKS}
+    assert set(cb["classes_exercised"]) <= seed_classes
+    # the exercised-corpus set is derived from probes that ACTUALLY ran (∩ the point corpus),
+    # not from the committed plan — the #509 crux.
+    assert set(cb["classes_exercised"]) == (
+        {p.bug_class for p in report.exercised_probes} & _corpus_bug_classes()
+    )
     for c in ("nosqli", "ldap_injection", "xpath_injection", "el_injection"):
         assert report.verdict_by_class()[c] == "inconclusive"
 
@@ -258,31 +269,75 @@ def test_library_run_shrinks_the_inconclusive_set() -> None:
         assert lib.verdict_by_class()[c] != "inconclusive"
 
 
-def test_verdict_gate_is_not_a_noop_flips_with_the_committed_roster() -> None:
+def _probe(bug_class: str, *, verdict: str = "clean", point: str = "query:q") -> ProbeRecord:
+    """A minimal EXERCISED probe record of `bug_class` — the on-the-wire evidence that a
+    check of that class actually ran at an insertion point (deterministic, no wall-clock)."""
+    return ProbeRecord(
+        endpoint="http://127.0.0.1/search", method="GET", insertion_point=point,
+        param="q", check_id=f"{bug_class}-op", bug_class=bug_class, verdict=verdict,
+    )
+
+
+def test_verdict_gate_is_not_a_noop_flips_with_the_exercised_probes() -> None:
     """No-op-gate control (deterministic): the per-class verdict is driven by what the run
-    actually committed, not hardcoded. A class in the committed roster is `clean` (a bounded
-    negative); the SAME class absent is `inconclusive`; a confirmed finding of it is `finding`."""
+    actually PROBED (`exercised_probes`), not hardcoded. A class with a probe on the wire is
+    `clean` (a bounded negative); the SAME class with no probe is `inconclusive`; a confirmed
+    finding of it is `finding`."""
     assert {"nosqli", "boolean_sqli"} <= _corpus_bug_classes()
 
-    # default-shaped roster: boolean_sqli exercised, nosqli not
-    default = ScanReport(target="http://127.0.0.1/", committed_check_classes=["boolean_sqli"])
+    # default-shaped run: boolean_sqli was probed, nosqli was not
+    default = ScanReport(target="http://127.0.0.1/", exercised_probes=[_probe("boolean_sqli")])
     v = default.verdict_by_class()
-    assert v["boolean_sqli"] == "clean"        # exercised, no finding -> bounded negative
-    assert v["nosqli"] == "inconclusive"       # not exercised -> a CLEAN cannot be claimed
+    assert v["boolean_sqli"] == "clean"        # probed, no finding -> bounded negative
+    assert v["nosqli"] == "inconclusive"       # never probed -> a CLEAN cannot be claimed
 
-    # add nosqli to the committed roster -> it FLIPS to clean (the gate is real, not a no-op)
-    withlib = ScanReport(target="http://127.0.0.1/",
-                         committed_check_classes=["boolean_sqli", "nosqli"])
+    # add a nosqli probe -> it FLIPS to clean (the gate is real, not a no-op)
+    withlib = ScanReport(
+        target="http://127.0.0.1/",
+        exercised_probes=[_probe("boolean_sqli"), _probe("nosqli")],
+    )
     assert withlib.verdict_by_class()["nosqli"] == "clean"
 
     # a confirmed nosqli finding -> "finding" (the finding branch, over a real AuditFinding)
     found = ScanReport(
-        target="http://127.0.0.1/", committed_check_classes=["nosqli"],
+        target="http://127.0.0.1/", exercised_probes=[_probe("nosqli", verdict="finding")],
         active_findings=[AuditFinding(
             check_id="nosqli-op", bug_class="nosqli", insertion_point="query:q",
             param="q", confidence=0.99, confirmed_by="differential")],
     )
     assert found.verdict_by_class()["nosqli"] == "finding"
+
+
+def test_committed_but_never_probed_class_is_not_counted_exercised() -> None:
+    """RED-PEN #509 regression: the exercised set must come from what ACTUALLY ran a probe
+    (`exercised_probes`), NOT from `committed_check_classes` (the plan). A class the plan
+    committed to test but that never produced a probe on the wire (budget spent, no matching
+    insertion point, engine drop, ...) must be reported `inconclusive` — never a bounded
+    `clean`/adjudicated. Under the old committed-set logic this class read as `clean`, so
+    reverting the fix fails this test."""
+    assert {"nosqli", "boolean_sqli"} <= _corpus_bug_classes()
+
+    # The plan COMMITTED both classes, but only boolean_sqli got a probe on the wire;
+    # nosqli was committed-but-never-probed.
+    report = ScanReport(
+        target="http://127.0.0.1/",
+        committed_check_classes=["boolean_sqli", "nosqli"],
+        exercised_probes=[_probe("boolean_sqli")],
+    )
+
+    v = report.verdict_by_class()
+    assert v["boolean_sqli"] == "clean"        # actually probed -> a real bounded negative
+    assert v["nosqli"] == "inconclusive"       # committed but NEVER probed -> not clean
+
+    cb = report.coverage_bounds()
+    assert "nosqli" in cb["classes_inconclusive"]
+    assert "nosqli" not in cb["classes_exercised"]
+    assert "boolean_sqli" in cb["classes_exercised"]
+    # a run with an unprobed committed class can never be a corpus-wide clean
+    assert cb["clean_is_corpus_wide"] is False
+    # exercised + inconclusive still partition the corpus with no overlap
+    assert set(cb["classes_exercised"]).isdisjoint(cb["classes_inconclusive"])
+    assert len(cb["classes_exercised"]) + len(cb["classes_inconclusive"]) == cb["corpus_classes"]
 
 
 def test_json_report_carries_bounded_verdict() -> None:
@@ -321,9 +376,24 @@ def test_coverage_line_states_bounded_verdict() -> None:
     assert (f"adjudicated {len(d_bounds['classes_exercised'])}/"
             f"{d_bounds['corpus_classes']} point-check bug classes") in d_line
 
+    # --library over this OOB-off fixture adjudicates MORE classes than the default run,
+    # but is still honestly NOT corpus-wide: OOB/timing-gated classes (ssrf, blind_xxe,
+    # command_injection, ...) never got a probe, so their CLEAN cannot be claimed.
     l_line = coverage_line(lib)
-    assert "a CLEAN is corpus-wide" in l_line
-    assert "NOT corpus-wide" not in l_line
+    l_bounds = lib.coverage_bounds()
+    assert "NOT corpus-wide" in l_line
+    assert len(l_bounds["classes_inconclusive"]) < len(d_bounds["classes_inconclusive"])
+
+    # Positive control for the corpus-wide branch: a run that ACTUALLY probed every corpus
+    # class (no unprobed committed class remaining) DOES report a corpus-wide clean.
+    all_probed = ScanReport(
+        target="http://127.0.0.1/",
+        exercised_probes=[_probe(c) for c in sorted(_corpus_bug_classes())],
+    )
+    full_line = coverage_line(all_probed)
+    assert all_probed.coverage_bounds()["clean_is_corpus_wide"] is True
+    assert "a CLEAN is corpus-wide" in full_line
+    assert "NOT corpus-wide" not in full_line
 
 
 def test_html_report_shows_bounded_verdict() -> None:
