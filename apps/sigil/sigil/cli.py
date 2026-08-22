@@ -930,6 +930,7 @@ def cmd_key(a) -> None:
         cur = owner_pubkey()
         if not genesis:
             print("owner key: none yet (run `sigil sign` to mint the owner identity)")
+            _cmd_key_material(a)                            # still show the at-rest key-material state
             return
         try:
             succ = kh.succession_from_store(store, genesis_pubkey=genesis)
@@ -947,6 +948,7 @@ def cmd_key(a) -> None:
                   f"key state (recover with `sigil key re-genesis`)", file=sys.stderr)
             sys.exit(2)
         print(f"epochs: {len(succ.epochs)}  (rotations so far: {len(succ.epochs) - 1})")
+        _cmd_key_material(a)                                # + per-key at-rest sealing / KEK/DEK/warden state
         return
     if sub == "rotate":
         if not a.yes:
@@ -979,6 +981,9 @@ def cmd_key(a) -> None:
         print(f"new genesis owner pubkey: {new_kp.public_key_b64}")
         print("ABANDONED: every pre-re-genesis head, grant and succession record is no longer authenticated "
               "by the new root. Out-of-band verifiers MUST re-pin to this new genesis key.")
+        return
+    if sub in ("seal-warden", "reconcile", "rotate-warden", "rotate-dek", "rotate-kek"):
+        _cmd_key_material(a)                                # W9-2 at-rest key-material rotation verbs
         return
     print(f"unknown key subcommand {sub!r}", file=sys.stderr)
     sys.exit(2)
@@ -1312,7 +1317,7 @@ def cmd_vault(a) -> None:
         print(f"vault: {v.status()}")
 
 
-def cmd_key(a) -> None:
+def _cmd_key_material(a) -> None:
     """Key lifecycle (audit W9-2): rotate the spine DEK, the WARDEN kernel key and the TPM KEK; seal the
     WARDEN key. `status` reports the per-key sealing + succession state; the rotate verbs are
     verify-then-swap and FAIL-CLOSED — a leg that cannot be proven leaves every key untouched."""
@@ -1718,10 +1723,6 @@ def main(argv=None) -> None:
     pkern = sub.add_parser("kernel", help="WARDEN kernel-binary integrity pin (audit G2): status | pin")
     pkern.add_argument("kernel_cmd", choices=["status", "pin"], nargs="?", default="status")
     pkern.set_defaults(fn=cmd_kernel)
-    pkey = sub.add_parser("key", help="key lifecycle (audit W9-2): rotate the spine DEK / WARDEN key / TPM KEK; seal the WARDEN key")
-    pkey.add_argument("key_cmd", nargs="?", default="status",
-                      choices=["status", "seal-warden", "rotate-warden", "rotate-dek", "rotate-kek", "reconcile"])
-    pkey.set_defaults(fn=cmd_key)
     pbak = sub.add_parser("backup", help="portable, passphrase-encrypted off-box backup of the trust root + spine (audit G3)")
     pbak.add_argument("dest", help="destination file for the encrypted backup")
     pbak.set_defaults(fn=cmd_backup)
@@ -1895,9 +1896,12 @@ def main(argv=None) -> None:
     pop = sub.add_parser("owner-pubkey",
                          help="print the base64 owner PUBLIC key (read-only; for pinning the offense learn-drain)")
     pop.set_defaults(fn=cmd_owner_pubkey)
-    pkey = sub.add_parser("key", help="owner-key rotation via a signed cross-signed key history (W9-1): "
-                                      "status | rotate | re-genesis")
-    pkey.add_argument("key_cmd", choices=["status", "rotate", "re-genesis"], nargs="?", default="status")
+    pkey = sub.add_parser("key", help="key lifecycle: owner-key succession (W9-1) + at-rest key-material "
+                                      "rotation (W9-2) — status | rotate | re-genesis | seal-warden | "
+                                      "rotate-warden | rotate-dek | rotate-kek | reconcile")
+    pkey.add_argument("key_cmd", nargs="?", default="status",
+                      choices=["status", "rotate", "re-genesis", "seal-warden",
+                               "rotate-warden", "rotate-dek", "rotate-kek", "reconcile"])
     pkey.add_argument("--yes", action="store_true", help="confirm a rotate / re-genesis")
     pkey.add_argument("--i-understand-continuity-is-abandoned", dest="i_understand", action="store_true",
                       help="re-genesis only: acknowledge that ALL pre-re-genesis history stops being "
