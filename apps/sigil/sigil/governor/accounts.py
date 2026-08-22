@@ -66,6 +66,7 @@ assert_no_offense()
 from vigil_core.rbac import PERMISSIONS, ROLES, role_can  # noqa: E402,F401  (re-exported)
 
 from ..spine.snapshot import SnapshotState  # noqa: E402
+from . import key_history as _kh  # noqa: E402  (W9-1 succession-aware owner-key resolver)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
 
@@ -452,6 +453,11 @@ class AccountsRegistry:
         snapshot and full-scan from genesis. BYTE-IDENTICAL under the empty snapshot: base_seq==0 =>
         since_seq=-1 => the full genesis scan, and an empty seed either way."""
         snap = SnapshotState.load(self.store)
+        # W9-1: succession-aware owner-key resolver. An `active` grant is authenticated under the owner key
+        # valid AT ITS SEQ (`resolver.at(r.seq)`), so a grant signed by a since-rotated key still verifies
+        # (not orphaned) while a forged grant minted with a retired key at a later seq is refused. With no
+        # rotation the resolver is a single open window over the current key -> byte-identical to before.
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         if self.trusted_pubkey != snap.trusted_pubkey:
             state, accts, issued, since = {}, {}, {}, -1
         else:
@@ -479,8 +485,9 @@ class AccountsRegistry:
             if rec_state == "revoked":
                 state[username] = "revoked"          # honor ANY revoke (even unsigned) — the safe direction
             elif rec_state == "active":
-                if not verify_signed(p, _core_fields(p), self.trusted_pubkey):
-                    continue                          # fail-closed: an unsigned/forged grant is not counted
+                if not verify_signed(p, _core_fields(p), resolver.at(r.seq)):
+                    continue                          # fail-closed: an unsigned/forged grant is not counted,
+                    #                                   nor one signed by a key not valid at this grant's seq
                     #                                   (field set derived from the payload — see _core_fields)
                 at = as_issued_at(p.get("issued_at"))
                 if at <= issued.get(username, NO_HIGHWATER):

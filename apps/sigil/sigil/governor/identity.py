@@ -15,6 +15,11 @@ from ..reuse import KeyPair, generate_keypair
 
 _PRIV = KEYS_DIR / "owner.priv"
 _PUB = KEYS_DIR / "owner.pub"
+# W9-1: the PINNED genesis root of the owner-key succession chain. Written once (at the first rotation, or
+# repinned by a re-genesis) and thereafter the anchor a verifier walks the succession from. It is NOT
+# rewritten on a routine rotation — that is the whole point of a pinned root. Absent it, `genesis_owner_pubkey`
+# falls back to the CURRENT owner key (an install that has never rotated: current IS genesis).
+_GENESIS_PUB = KEYS_DIR / "owner.genesis.pub"
 
 
 def owner_pubkey() -> Optional[str]:
@@ -22,6 +27,38 @@ def owner_pubkey() -> Optional[str]:
         return (_PUB.read_text(encoding="utf-8").strip() or None)
     except OSError:
         return None
+
+
+def genesis_owner_pubkey() -> Optional[str]:
+    """The PINNED genesis owner pubkey the succession chain is walked from, or — absent a pin — the current
+    owner pubkey (an un-rotated install, where current == genesis). Read-only; never mints trust."""
+    try:
+        pinned = _GENESIS_PUB.read_text(encoding="utf-8").strip()
+        if pinned:
+            return pinned
+    except OSError:
+        pass
+    return owner_pubkey()
+
+
+def pin_genesis(pubkey: str, *, force: bool = False) -> None:
+    """Pin the genesis root. Idempotent set-if-absent by default (the first rotation records the incumbent
+    as the chain's root); `force=True` REPINS (a re-genesis, deliberately abandoning the old root)."""
+    if not pubkey:
+        raise ValueError("refusing to pin an empty genesis pubkey")
+    KEYS_DIR.mkdir(parents=True, exist_ok=True)
+    if force or not _GENESIS_PUB.exists():
+        _GENESIS_PUB.write_text(pubkey, encoding="utf-8")
+
+
+def set_owner_key(new_keypair) -> None:
+    """Rotate the AT-REST owner key material to `new_keypair`: write the private key through the owner vault
+    (TPM-sealed once a KEK is provisioned — the live-only residual; plaintext-fallback otherwise) and the
+    public key alongside it. The genesis pin is left untouched (a routine rotation keeps the same root)."""
+    from ..platform.vault import OWNER_PRIV_CONTEXT, owner_vault
+    KEYS_DIR.mkdir(parents=True, exist_ok=True)
+    owner_vault().write_text_secret(_PRIV, new_keypair.private_key_b64, context=OWNER_PRIV_CONTEXT)
+    _PUB.write_text(new_keypair.public_key_b64, encoding="utf-8")
 
 
 def owner_keypair() -> Optional[KeyPair]:

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..spine.snapshot import SnapshotState
+from . import key_history as _kh
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
 
@@ -135,6 +136,7 @@ class CapabilityGate:
         pubkey condition. It has to be: re-seeded to the bottom on every call, the first hard prune would
         make every enable in the pruned prefix replayable again."""
         st = SnapshotState.load(self.store)
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)  # W9-1 succession-aware
         if self.trusted_pubkey != st.trusted_pubkey:
             enabled = True                          # pubkey mismatch: folded latch invalid → genesis rescan
             since_seq = -1
@@ -153,7 +155,7 @@ class CapabilityGate:
             state = p.get("state")
             if state == "disabled":
                 enabled = False                     # honor ANY disable — disabling is fail-safe
-            elif state == "enabled" and verify_signed(p, _CORE, self.trusted_pubkey):
+            elif state == "enabled" and verify_signed(p, _CORE, resolver.at(r.seq)):
                 issued = as_issued_at(p.get("issued_at"))
                 if issued <= max_issued:
                     continue                        # REPLAY / stale re-append of an already-honored enable

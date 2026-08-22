@@ -34,6 +34,7 @@ from typing import Optional, Set
 
 from ..agents.approvals import SIGNAL as _APPROVAL_SIGNAL
 from ..agents.approvals import _approval_message
+from ..governor import key_history as _kh
 from ..governor.authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
 from ..governor.identity import owner_pubkey
 from ..reuse import sha256_hex, sign
@@ -94,9 +95,10 @@ def capability_map(store: SpineStore, trusted_pubkey: Optional[str] = None) -> d
         issued = dict(st.capability_map_issued_map())
     else:
         latest, since, issued = {}, -1, {}
+    resolver = _kh.key_resolver(store, current=tp)   # W9-1: verify under the owner key valid at each seq
     for r in store.iter_records(since_seq=since):
         p = r.payload
-        if p.get("signal") == CAP_SIGNAL and verify_signed(p, _CAP_CORE, tp):
+        if p.get("signal") == CAP_SIGNAL and verify_signed(p, _CAP_CORE, resolver.at(r.seq)):
             hkey = p.get("host_id")
             at = as_issued_at(p.get("issued_at"))
             if at <= issued.get(hkey, NO_HIGHWATER):
@@ -149,10 +151,11 @@ def authorized_devices(store: SpineStore, trusted_pubkey: Optional[str] = None) 
         issued = dict(st.mesh_dev_issued_map())
     else:
         state, since, issued = {}, -1, {}
+    resolver = _kh.key_resolver(store, current=tp)   # W9-1: verify under the owner key valid at each seq
     for r in store.iter_records(since_seq=since):
         p = r.payload
         if p.get("signal") == DEV_SIGNAL and p.get("state") in ("authorized", "revoked") \
-                and verify_signed(p, _DEV_CORE, tp):
+                and verify_signed(p, _DEV_CORE, resolver.at(r.seq)):
             dkey = p.get("device_pubkey")
             if p["state"] == "authorized":
                 at = as_issued_at(p.get("issued_at"))
