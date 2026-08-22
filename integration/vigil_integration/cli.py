@@ -2185,6 +2185,43 @@ def _cmd_panic(args: argparse.Namespace) -> int:
     return rc
 
 
+def _cmd_emergency_stop(args: argparse.Namespace) -> int:
+    """`vigil emergency-stop` (W13-6 #499) — deliberately enter RESTRICTED MODE: a safe landing state
+    BETWEEN fully-operational and the `vigil panic` hard-stop.
+
+    Unlike `vigil panic` (which ALSO masks the unit and kills the process/units), emergency-stop leaves
+    the process UP so an operator can still DIAGNOSE and EXPORT EVIDENCE. It reuses the EXISTING
+    machinery: it trips every engagement's kill-switch (so the already-existing conjunctive gate refuses
+    every target-touching / mutating action, persistently and fail-closed) and records the transition on
+    the hash-chained ledger (so entering/leaving is on the chain and survives a restart). Nothing
+    destructive happens; read-only diagnosis/evidence/audit-export/authorization-repair stay available.
+
+    `--leave` records a deliberate LEAVE transition (clearing the kill-switches themselves stays a
+    separate, explicit authorization-repair act). `--status` prints the current mode."""
+    from . import restricted_mode as rm
+
+    base_dir = args.base_dir
+    if getattr(args, "status", False):
+        state = rm.current_state(base_dir)
+        if state is None:
+            print("vigil emergency-stop: mode=OPERATIONAL (never entered restricted mode)")
+        else:
+            print(f"vigil emergency-stop: mode={'RESTRICTED' if state.entered else 'OPERATIONAL'} "
+                  f"(last: {state.action} trigger={state.trigger!r} at {state.at})")
+        return 0
+    if getattr(args, "leave", False):
+        t = rm.leave_restricted_mode(base_dir=base_dir, reason=(args.reason or ""))
+        print(f"vigil emergency-stop: recorded LEAVE on the chain (seq {t.seq}). NOTE: the kill-switches "
+              "stay tripped until you CLEAR each one deliberately (authorization repair).")
+        return 0
+    t = rm.enter_restricted_mode(base_dir=base_dir, trigger="emergency_stop",
+                                 reason=(args.reason or "vigil emergency-stop"))
+    print(f"vigil emergency-stop: entered RESTRICTED MODE (seq {t.seq}). Target-touching / mutating "
+          "actions are now REFUSED by the existing gate (kill-switches tripped). Diagnosis + evidence "
+          "export remain available. Clearing is a deliberate operator act (`--leave` + a kill-switch clear).")
+    return 0
+
+
 def _cmd_knowledge(args: argparse.Namespace) -> int:
     """`vigil knowledge sync|push|status` (K6) — the operator-gated `knowledge/` → GitHub sync.
 
@@ -3291,6 +3328,20 @@ def build_parser() -> argparse.ArgumentParser:
     ppan.add_argument("--reason", default="",
                       help="reason recorded in every kill-switch (default: 'vigil panic')")
     ppan.set_defaults(func=_cmd_panic)
+
+    pes = sub.add_parser("emergency-stop", help="enter RESTRICTED MODE — a safe landing state between "
+                                               "fully-operational and `vigil panic`: trips every "
+                                               "kill-switch (the existing gate then REFUSES every "
+                                               "target-touching/mutating action) but leaves the process "
+                                               "UP so diagnosis + evidence export still work. Recorded on "
+                                               "the chain; survives restart.")
+    pes.add_argument("--base-dir", default=".vigil-live",
+                     help="engagement home holding the restricted-mode transitions ledger")
+    pes.add_argument("--reason", default="", help="reason recorded on the chain and in each kill-switch")
+    pes.add_argument("--leave", action="store_true",
+                     help="record a deliberate LEAVE transition (clearing kill-switches stays separate)")
+    pes.add_argument("--status", action="store_true", help="print the current mode and exit")
+    pes.set_defaults(func=_cmd_emergency_stop)
 
     pk = sub.add_parser("knowledge", help="operator-gated sync of the living knowledge/ folder to git "
                                           "(regenerate + secret-scan + commit; push is separate). NB: the "
