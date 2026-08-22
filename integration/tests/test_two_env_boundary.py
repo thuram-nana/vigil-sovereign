@@ -96,6 +96,9 @@ assert "strix" not in _m, "k8s_rbac_grant_verify must not import strix at module
 import vigil_integration.live.cloud_benchmark  # the signed cloud benchmark harness (scoring/sign LAZY)
 assert "framework" not in _m, "cloud_benchmark must not import framework at module scope"
 assert "strix" not in _m, "cloud_benchmark must not import strix at module scope"
+import vigil_integration.sovereign_bridge  # W13-2: the unified authorization FACADE -- framework LAZY
+assert "framework" not in _m, "sovereign_bridge must not import framework at module scope"
+assert "strix" not in _m, "sovereign_bridge must not import strix at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 
