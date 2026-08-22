@@ -419,10 +419,16 @@
    "subject": "Strix+HexStrike sx-s5: harden the Strix runtime container (least-privilege + pinned image + reaper)"
   },
   {
-   "commit": "187324e5a51026c590dcaef3501be397e15d353e",
+   "commit": "8db697360f558c5290f1d0655e83ae1f6d558bc0",
    "file": "026-sx-inv12-s9-surface-proof-degradation-verificati.patch",
-   "sha256": "1ff785ff4920a18843e2cf5720af0cf7132b834253b91227b35125401651cff6",
+   "sha256": "ab8d2ffc5da1846b431d27339a6150c4f5f732f8002fe74679b0972d9f5c835a",
    "subject": "sx-inv12 (S9): surface proof degradation \u2014 verification_degraded is first-class (inv 12 MET)"
+  },
+  {
+   "commit": "46b7ee3878d64d5b8069a760baa15b3cd024e50d",
+   "file": "027-strix-batch2-p8-fix-proof-degradation-recording.patch",
+   "sha256": "e800fc3370c8f6ddcdedc95aec596b0d6aec76c7b0d5fb87760bed7cb5c3cf29",
+   "subject": "strix batch2: P8 fix \u2014 proof degradation recording must never trigger strix.report.__init__"
   }
  ],
  "schema": 1,

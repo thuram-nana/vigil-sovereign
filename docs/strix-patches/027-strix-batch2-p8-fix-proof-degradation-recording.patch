@@ -1,0 +1,91 @@
+From 46b7ee3878d64d5b8069a760baa15b3cd024e50d Mon Sep 17 00:00:00 2001
+Subject: [strix-patch 027] strix batch2: P8 fix — proof degradation recording must never trigger strix.report.__init__
+X-VIGIL-Commit: 46b7ee3878d64d5b8069a760baa15b3cd024e50d
+X-VIGIL-Date: 2026-08-22T06:28:02-04:00
+
+diff --git a/vendor/strix/strix/interface/cli.py b/vendor/strix/strix/interface/cli.py
+index a3763b9e..0aef0f94 100644
+--- a/vendor/strix/strix/interface/cli.py
++++ b/vendor/strix/strix/interface/cli.py
+@@ -145,10 +145,13 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
+         # inv 12 (S9): a VIGIL run (VIGIL_PROOF_RUN_DIR set) expected proofs but the proof-sink
+         # wiring failed to even install — record a TYPED proof_subsystem_unavailable cause so the
+         # console does not render this run's empty proof list as "clean". No-op standalone.
+-        from strix.report.degradation_hook import PROOF_SUBSYSTEM_UNAVAILABLE
+-        from strix.report.degradation_hook import record as _vigil_degrade
++        try:
++            from strix.report.degradation_hook import PROOF_SUBSYSTEM_UNAVAILABLE
++            from strix.report.degradation_hook import record as _vigil_degrade
+ 
+-        _vigil_degrade(PROOF_SUBSYSTEM_UNAVAILABLE, "strix.cli.install_from_env", _proof_exc)
++            _vigil_degrade(PROOF_SUBSYSTEM_UNAVAILABLE, "strix.cli.install_from_env", _proof_exc)
++        except Exception:  # noqa: BLE001 — recording is best-effort; importing the hook must not stop a scan
++            pass
+ 
+     def create_live_status() -> Panel:
+         status_text = Text()
+diff --git a/vendor/strix/strix/report/proof_capture.py b/vendor/strix/strix/report/proof_capture.py
+index 196832d6..8f847589 100644
+--- a/vendor/strix/strix/report/proof_capture.py
++++ b/vendor/strix/strix/report/proof_capture.py
+@@ -116,6 +116,27 @@ def _response_body(fetched: Any, parse: Any) -> tuple["bytes | None", Optional[i
+     return _as_bytes(raw if isinstance(raw, (bytes, bytearray)) else str(raw)), None
+ 
+ 
++def _record_capture_degraded(exc: BaseException) -> None:
++    """Record a TYPED capture_failed degradation WITHOUT triggering ``strix.report.__init__`` and WITHOUT
++    ever raising. A normal ``from strix.report.degradation_hook import ...`` runs the package __init__, which
++    eagerly imports ``dedupe`` -> ``strix.config`` -> ``pydantic_settings``; in a minimal env (missing that
++    dep) that turned this best-effort recorder into a raise that broke ``capture_for_report``'s never-raises
++    swallow contract. Load the stdlib-only ``degradation_hook`` module BY FILE (its own record() falls back
++    to a pure-stdlib manifest write when vigil_integration is absent), and swallow everything — a degradation
++    that cannot be recorded must never crash the reporting path."""
++    try:
++        import importlib.util
++        import pathlib
++
++        _dh_path = pathlib.Path(__file__).with_name("degradation_hook.py")
++        _spec = importlib.util.spec_from_file_location("_vigil_degradation_hook", _dh_path)
++        _mod = importlib.util.module_from_spec(_spec)
++        _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
++        _mod.record(_mod.CAPTURE_FAILED, "strix.proof_capture.capture_for_report", exc)
++    except Exception:  # noqa: BLE001 — recording is best-effort; never raise into the swallow path
++        pass
++
++
+ async def capture_for_report(
+     report: dict,
+     *,
+@@ -156,10 +177,7 @@ async def capture_for_report(
+         # above) and it FAILED (e.g. Caido raised) — NOT the same as "nothing to capture". Record a
+         # TYPED capture_failed cause so the console distinguishes a failed capture from a clean
+         # target; the finding still stays a LEAD. No-op standalone; the bridge never raises.
+-        from strix.report.degradation_hook import CAPTURE_FAILED
+-        from strix.report.degradation_hook import record as _vigil_degrade
+-
+-        _vigil_degrade(CAPTURE_FAILED, "strix.proof_capture.capture_for_report", exc)
++        _record_capture_degraded(exc)   # by-file, never raises (see helper) — honors the swallow contract
+         return None
+ 
+ 
+diff --git a/vendor/strix/strix/tools/reporting/tool.py b/vendor/strix/strix/tools/reporting/tool.py
+index 43ec564f..9e825fba 100644
+--- a/vendor/strix/strix/tools/reporting/tool.py
++++ b/vendor/strix/strix/tools/reporting/tool.py
+@@ -264,10 +264,13 @@ async def _do_create(  # noqa: PLR0912
+             # raised). Record a TYPED capture_failed cause — distinguishable from a clean target —
+             # rather than skipping silently.
+             logger.debug("proof_capture skipped", exc_info=True)
+-            from strix.report.degradation_hook import CAPTURE_FAILED
+-            from strix.report.degradation_hook import record as _vigil_degrade
++            try:
++                from strix.report.degradation_hook import CAPTURE_FAILED
++                from strix.report.degradation_hook import record as _vigil_degrade
+ 
+-            _vigil_degrade(CAPTURE_FAILED, "strix.reporting.create_vulnerability_report", _cap_exc)
++                _vigil_degrade(CAPTURE_FAILED, "strix.reporting.create_vulnerability_report", _cap_exc)
++            except Exception:  # noqa: BLE001 — recording is best-effort; importing the hook must not re-raise
++                logger.debug("degradation recording failed", exc_info=True)  # (strix.report.__init__ cascade)
+ 
+         existing = report_state.get_existing_vulnerabilities()
+         candidate = {
