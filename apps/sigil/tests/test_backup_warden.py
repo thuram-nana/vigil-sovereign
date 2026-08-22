@@ -79,13 +79,14 @@ def test_manifest_records_the_warden_set_schema_2(tmp_path, monkeypatch):
     dest = tmp_path / "bk.sglbk"
     create_backup(dest, PW, home=src, vault=v, owner_key=owner)
 
-    # decrypt the body and inspect the SIGNED manifest: schema 2, and the warden set names every warden rel.
+    # decrypt the body and inspect the SIGNED manifest: the current schema (the warden set was ADDED in
+    # schema 2 and persists), and the warden set names every warden rel.
     import json
     from vigil_core.sealing import unseal
     salt, sealed = backup._read_header(dest)
     body = json.loads(unseal(backup._derive_key(PW, salt), sealed, context=backup._BODY_CONTEXT))
     manifest = body["manifest"]
-    assert manifest["schema"] == 2
+    assert manifest["schema"] == backup._SCHEMA and manifest["schema"] >= 2
     assert set(manifest["warden"]) == {f"warden/{n}" for n in WARDEN_FILES}
 
 
