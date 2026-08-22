@@ -3311,12 +3311,16 @@
     }
   }
 
-  // A run that never CAPTURES a report: aegis (stream 'none') and a codebase/Strix run — the console
-  // spawns both with capture_report=False, so /api/report stays {pending:true} forever. Keyed on the real
-  // cause (mode) as well as the stream, because a codebase run now STREAMS its activity (W6c) and so is no
-  // longer identifiable by stream alone — without this it would sit on "Still running… no saved report
-  // YET", which is false twice over: it has finished, and no report is ever coming.
-  function p3RunCapturesNoReport(run) { return run.stream === "none" || run.mode === "codebase"; }
+  // A run that never CAPTURES a report: aegis (stream 'none'), a codebase/Strix run (mode 'codebase'), and
+  // an agentic `vigil engage` bridge run (engine 'integration') — launch_assessment spawns all three with
+  // capture_report=False, so /api/report stays {pending:true} forever. Keyed on all three axes because no
+  // single one identifies the set: a codebase run now STREAMS its activity (W6c) so is no longer identifiable
+  // by stream alone, and the integration bridge run shares that same stream 'progress' with the loopback scan
+  // that DOES capture a report — only its engine 'integration' distinguishes the two. (The remote-engage case,
+  // stream 'blackboard', is handled by the blackboard branch above before this predicate is reached.) Without
+  // the engine test an agentic run sat on "Still running… no saved report YET", false twice over: it has
+  // finished, and no report is ever coming.
+  function p3RunCapturesNoReport(run) { return run.stream === "none" || run.mode === "codebase" || run.engine === "integration"; }
   function p3NoReportEmpty(run, what) {
     if (run.stream === "blackboard") {
       return h("div.empty", null, [h("div.big", null, "This run reports on the reasoning spine"),
