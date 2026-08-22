@@ -8699,7 +8699,18 @@ credential.
 | Service-identity impersonation | `gcp_sa_impersonation` | live capture | Fixtures only |
 | Escalation primitive | `iam_escalation_primitive` | live capture | Fixtures only — and permanently so by design, as explained above |
 
-**The totals: 3 outside systems, 2 own infrastructure, 13 real local processes, 20 fixtures only.**
+**The totals**, generated from the detector-kind registry — the single source both this chapter and the today-and-catalogues inventory quote, so the number cannot drift between them:
+
+<!-- BEGIN GENERATED coverage-tiers (source: docs/capability-matrix/coverage-tiers.json; regenerate: python3 docs/capability-matrix/gen_coverage_tiers.py) -->
+| Evidence tier | Detector kinds |
+|---|---|
+| Outside system — real bytes from a third-party system on the public internet | 3 |
+| Own infrastructure — real bytes from infrastructure the system builds, uses and destroys | 2 |
+| Real local process — real bytes over a real connection or process on the testing machine | 13 |
+| Fixtures only — only ever judged evidence a person wrote by hand | 20 |
+| **Total detector kinds** | **38** |
+<!-- END GENERATED coverage-tiers -->
+
 They sum to 38. If the question asked is instead "how many have ever judged bytes from a real network
 connection of any kind", the answer is 18 — the thirteen local ones, plus all five graded above them.
 Response differencing and achieved state were exercised locally as well as externally; exposed-secret
