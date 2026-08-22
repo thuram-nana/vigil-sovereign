@@ -227,6 +227,24 @@ def test_engine_map_covers_every_oracle_engine_and_all_targets_known():
         assert is_known_bug_class(normalize_bug_class(cls)), f"{engine} -> {cls!r} is not a known bug class"
 
 
+def test_an_unmapped_oracle_engine_fails_closed_to_a_lead(tmp_path, monkeypatch):
+    """Runtime backstop for the drift guard: if the error-signature oracle fires on an engine with NO entry
+    in _ERRSIG_ENGINE_TO_CLASS, the mint REFUSES (LEAD) and records a degradation — it never falls back to
+    the producer's claim-derived class. So a future signature added without a map entry cannot re-open
+    laundering even if the CI drift test is bypassed."""
+    import vigil_integration.proof.run as run_mod
+    from vigil_integration.proof.degradation import DEGRADED_NAME, PROOFS_SUBDIR
+    monkeypatch.setattr(run_mod, "_ERRSIG_ENGINE_TO_CLASS",
+                        {k: v for k, v in run_mod._ERRSIG_ENGINE_TO_CLASS.items() if k != "ldap"})
+    mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="alpha")
+    res = mint({"id": "unmapped", "cwe": "CWE-90", "bug_class": "error_based_sqli",
+                CAPTURE_KEY: _errsig_cap(b"Invalid DN syntax: LDAP: error code 34 - invalid DN")})
+    assert res is None, f"a fired-but-unmapped engine must fail closed to a LEAD, not mint; got {res!r}"
+    deg = tmp_path / PROOFS_SUBDIR / DEGRADED_NAME
+    assert deg.is_file() and "unmapped_engine" in deg.read_text(encoding="utf-8"), (
+        "the fail-closed refusal must be recorded as a degradation so it cannot read as CLEAN")
+
+
 # =========================================================================================================
 # COLUMN 3 — the web re-drive sink: a benign endpoint that only RESEMBLES a finding mints nothing.
 # =========================================================================================================
