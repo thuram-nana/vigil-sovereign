@@ -56,10 +56,14 @@ __all__ = [
     "restricted_mode_permits",
     "Transition",
     "record_transition",
+    "record_refusal",
     "read_transitions",
     "is_restricted",
     "current_state",
+    "enumerate_engagement_slugs",
+    "killswitches_all_tripped",
     "trip_all_killswitches",
+    "guarded_authorize",
     "enter_restricted_mode",
     "leave_restricted_mode",
     "enforce_integrity_or_restrict",
@@ -100,9 +104,16 @@ def restricted_mode_permits(action: Any) -> bool:
     return _action_id(action) in RESTRICTED_ACTIONS
 
 
-# ── the hash-chained transitions ledger (recorded on the chain, survives restart) ───────────────────
+# ── the hash-chained event ledger (recorded on the chain, survives restart) ─────────────────────────
+# The SAME chain carries three event kinds, so a refusal cannot be excised without breaking the very
+# chain that also carries the enter/leave transitions:
+#   * ENTER / LEAVE — a mode TRANSITION (a record, never a decision), and
+#   * REFUSE        — one action REFUSED while the gate is closed (recorded per-refusal, so the audit
+#                     shows EACH refused action while restricted, not only the enter transition).
 ENTER = "enter"
 LEAVE = "leave"
+REFUSE = "refuse"
+_TRANSITION_ACTIONS = frozenset({ENTER, LEAVE})
 _LEDGER_DIRNAME = "restricted-mode"
 _LEDGER_FILENAME = "transitions.jsonl"
 _KIND = "vigil-restricted-mode-transition-v1"
@@ -110,8 +121,9 @@ _KIND = "vigil-restricted-mode-transition-v1"
 
 @dataclass(frozen=True)
 class Transition:
-    """One recorded enter/leave transition. ``action`` is :data:`ENTER` or :data:`LEAVE`; the rest is
-    signed-adjacent DATA (never an ordering key — the chain order is ``(seq, prev_hash)`` alone)."""
+    """One recorded ledger event. ``action`` is :data:`ENTER`, :data:`LEAVE` or :data:`REFUSE`; the rest
+    is signed-adjacent DATA (never an ordering key — the chain order is ``(seq, prev_hash)`` alone). For a
+    REFUSE event ``trigger`` is the gate's denial code and ``reason`` names the refused action/target."""
 
     seq: int
     action: str
@@ -123,6 +135,11 @@ class Transition:
     @property
     def entered(self) -> bool:
         return self.action == ENTER
+
+    @property
+    def is_transition(self) -> bool:
+        """A mode transition (enter/leave), as opposed to a per-refusal audit record."""
+        return self.action in _TRANSITION_ACTIONS
 
 
 def _ledger_path(base_dir: str | os.PathLike) -> Path:
@@ -191,12 +208,11 @@ def read_transitions(base_dir: str | os.PathLike) -> list[Transition]:
     return transitions
 
 
-def record_transition(base_dir: str | os.PathLike, *, action: str, trigger: str, reason: str,
-                      now: Optional[float] = None) -> Transition:
-    """Append one enter/leave transition to the hash-chained ledger and return it. The new link chains
-    onto the verified tail (a tampered ledger raises here too — we never chain onto a broken history)."""
-    if action not in (ENTER, LEAVE):
-        raise ValueError(f"transition action must be {ENTER!r} or {LEAVE!r}, not {action!r}")
+def _append_event(base_dir: str | os.PathLike, *, action: str, trigger: str, reason: str,
+                  now: Optional[float] = None) -> Transition:
+    """Append one event (enter/leave/refuse) to the hash-chained ledger and return it. The new link
+    chains onto the verified tail (a tampered ledger raises here too — we never chain onto a broken
+    history), so every event, refusals included, is on the same tamper-evident chain."""
     existing = read_transitions(base_dir)          # re-verifies the chain before we extend it
     prior_entries = [ChainEntry(seq=t.seq, prev_hash="", cert_digest="", entry_hash=t.entry_hash)
                      for t in existing]             # only entry_hash/seq are consulted by append_entry
@@ -225,21 +241,125 @@ def record_transition(base_dir: str | os.PathLike, *, action: str, trigger: str,
                       entry_hash=link.entry_hash)
 
 
+def record_transition(base_dir: str | os.PathLike, *, action: str, trigger: str, reason: str,
+                      now: Optional[float] = None) -> Transition:
+    """Append one enter/leave TRANSITION to the hash-chained ledger and return it."""
+    if action not in _TRANSITION_ACTIONS:
+        raise ValueError(f"transition action must be {ENTER!r} or {LEAVE!r}, not {action!r}")
+    return _append_event(base_dir, action=action, trigger=trigger, reason=reason, now=now)
+
+
+def record_refusal(base_dir: str | os.PathLike, *, action: Any, target: str, denial_code: str,
+                   reason: str = "", now: Optional[float] = None) -> Transition:
+    """Record ONE refused action on the same hash-chained ledger as the transitions — so an audit shows
+    EACH action refused while the gate is closed, not only the enter transition. This is a RECORD, not a
+    decision: the refusal itself is made by the existing kill-switch/gate; here we only append its audit
+    line. ``trigger`` carries the gate's ``denial_code`` and ``reason`` names the refused action/target."""
+    action_id = _action_id(action)
+    detail = f"refused {action_id!r} on {target!r}"
+    if reason:
+        detail = f"{detail}: {reason}"
+    return _append_event(base_dir, action=REFUSE, trigger=(denial_code or "refused"), reason=detail,
+                         now=now)
+
+
 def current_state(base_dir: str | os.PathLike) -> Optional[Transition]:
-    """The most recent transition (or None if the system has never entered restricted mode). Because
-    the ledger is on disk, this reflects the mode ACROSS a restart."""
+    """The most recent mode TRANSITION (or None if the system has never entered restricted mode). REFUSE
+    audit records are skipped — they never change the mode. Because the ledger is on disk, this reflects
+    the mode ACROSS a restart."""
     transitions = read_transitions(base_dir)
-    return transitions[-1] if transitions else None
+    for t in reversed(transitions):
+        if t.is_transition:
+            return t
+    return None
 
 
-def is_restricted(base_dir: str | os.PathLike) -> bool:
-    """True iff the last recorded transition is an ENTER — i.e. the system is in restricted mode. Reads
-    the persisted chain, so it is correct after a restart."""
+def is_restricted(
+    base_dir: str | os.PathLike,
+    *,
+    gate_closed_fn: Optional[Callable[[], bool]] = None,
+    authority_dir: Optional[str | os.PathLike] = None,
+    ks_path_for: Optional[Callable[[str], Path]] = None,
+    killswitch_cls: Any = None,
+) -> bool:
+    """True iff the system is genuinely in restricted mode — i.e. the last transition is an ENTER AND the
+    LIVE gate is closed.
+
+    The last transition is the RECORD of intent; the kill-switch/gate is the ENFORCEMENT. Reading only
+    the ledger would let this report ``restricted`` while an operator had already cleared the kill-switch
+    (a recovery step that clears the gate but records no LEAVE), i.e. while the gate was OPEN. That is
+    exactly the state a safety check must not misreport. So this ALSO consults the SAME live kill-switch
+    the refusal path consults (:func:`killswitches_all_tripped`): if any known engagement's gate is open,
+    this returns False. The invariant it upholds: **reported-restricted implies the gate is closed.**
+
+    ``gate_closed_fn`` (and the ``authority_dir`` / ``ks_path_for`` / ``killswitch_cls`` DI seams,
+    mirroring :func:`enter_restricted_mode`'s ``trip_fn``) let a caller/test drive the live-gate read
+    without the full offense install; the default reads the real offense kill-switches."""
     last = current_state(base_dir)
-    return bool(last and last.entered)
+    if not (last and last.entered):
+        return False
+    if gate_closed_fn is not None:
+        return bool(gate_closed_fn())
+    closed, _count = killswitches_all_tripped(
+        authority_dir=authority_dir, ks_path_for=ks_path_for, killswitch_cls=killswitch_cls
+    )
+    return closed
 
 
 # ── the stop primitive — the EXISTING kill-switch, shared with `vigil panic` ─────────────────────────
+def enumerate_engagement_slugs(authority_dir: str | os.PathLike) -> list[str]:
+    """Enumerate every engagement slug the offense engine knows in ``authority_dir`` — one per
+    ``<slug>.authority.json`` (provisioned) or ``<slug>.halt`` (already tripped). Pure filesystem read,
+    no framework import. Sorted for determinism. An absent/non-dir path is an empty set."""
+    adir = Path(authority_dir)
+    slugs: set[str] = set()
+    if adir.is_dir():
+        for f in adir.glob("*.authority.json"):
+            slugs.add(f.name[: -len(".authority.json")])
+        for f in adir.glob("*.halt"):                 # a slug already halted is re-affirmed
+            slugs.add(f.name[: -len(".halt")])
+    return sorted(slugs)
+
+
+def killswitches_all_tripped(
+    *,
+    authority_dir: Optional[str | os.PathLike] = None,
+    ks_path_for: Optional[Callable[[str], Path]] = None,
+    killswitch_cls: Any = None,
+) -> tuple[bool, int]:
+    """Read the LIVE gate state via the SAME ``KillSwitch`` primitive the refusal path consults, and
+    return ``(all_tripped, count)`` over every engagement the offense engine knows.
+
+    This is the read-side twin of :func:`trip_all_killswitches`: it makes NO decision and trips nothing —
+    it reports whether the gate is actually closed right now. ``all_tripped`` is True iff EVERY enumerated
+    engagement's kill-switch is currently tripped; if even one is clear (e.g. an operator cleared it
+    during recovery), it is False — the gate is open for that engagement. With no engagement provisioned
+    the result is vacuously ``(True, 0)``: there is nothing a gate could authorize.
+
+    The ``framework`` import is function-LOCAL (FATAL-2) and only runs on the default path; inject
+    ``killswitch_cls`` (with ``authority_dir`` / ``ks_path_for``) to drive it without the offense install.
+    A ``KillSwitch.is_tripped()`` is itself fail-closed (an ambiguous stat reads as TRIPPED)."""
+    if killswitch_cls is None:
+        from framework.v2.authority.killswitch import KillSwitch as killswitch_cls  # noqa: N806
+        from framework.v2.common import paths as _paths
+
+        adir = Path(authority_dir) if authority_dir is not None else _paths.authority_dir()
+    else:
+        adir = Path(authority_dir) if authority_dir is not None else Path(".")
+    slugs = enumerate_engagement_slugs(adir)
+    if not slugs:
+        return (True, 0)
+    all_tripped = True
+    for slug in slugs:
+        path = ks_path_for(slug) if ks_path_for is not None else None
+        try:
+            if not killswitch_cls(slug, path=path).is_tripped():
+                all_tripped = False
+        except Exception:  # noqa: BLE001 — cannot prove a switch is clear ⇒ fail closed (treat as tripped)
+            continue
+    return (all_tripped, len(slugs))
+
+
 def trip_all_killswitches(reason: str, *, authority_dir: Optional[str | os.PathLike] = None,
                           ks_path_for: Optional[Callable[[str], Path]] = None) -> list[str]:
     """Trip the persistent, fail-closed kill-switch for EVERY engagement the offense engine knows — the
@@ -253,14 +373,9 @@ def trip_all_killswitches(reason: str, *, authority_dir: Optional[str | os.PathL
     from framework.v2.common import paths as _paths
 
     adir = Path(authority_dir) if authority_dir is not None else _paths.authority_dir()
-    slugs: set[str] = set()
-    if adir.is_dir():
-        for f in adir.glob("*.authority.json"):
-            slugs.add(f.name[: -len(".authority.json")])
-        for f in adir.glob("*.halt"):                 # a slug already halted is re-affirmed
-            slugs.add(f.name[: -len(".halt")])
+    slugs = enumerate_engagement_slugs(adir)
     tripped: list[str] = []
-    for slug in sorted(slugs):
+    for slug in slugs:
         try:
             path = ks_path_for(slug) if ks_path_for is not None else None
             KillSwitch(slug, path=path).trip(reason)  # idempotent: the first reason is preserved
@@ -309,6 +424,41 @@ def leave_restricted_mode(
     restricted mode records the intent/audit event; it never silently re-arms the target-touching path."""
     return record_transition(base_dir, action=LEAVE, trigger=f"cleared_by:{cleared_by}",
                              reason=reason or "leave restricted mode", now=now)
+
+
+# ── per-refusal audit: record EACH action the closed gate refuses ────────────────────────────────────
+def guarded_authorize(
+    authority: Any,
+    request: Any,
+    *,
+    killswitch: Any,
+    base_dir: str | os.PathLike,
+    actions_taken: int = 0,
+    now: Any = None,
+    authorize_fn: Optional[Callable[..., Any]] = None,
+) -> Any:
+    """Authorize ONE action through the EXISTING authority gate and, when the gate REFUSES it because the
+    kill-switch is tripped (denial code ``halted`` — the restricted-mode / panic stop), record that
+    refusal on the hash-chained ledger before returning.
+
+    This adds NO new gate and makes NO authorization decision: the decision is entirely the existing
+    ``authorize_action``'s; this wrapper only appends the per-refusal audit line the objection asks for,
+    so an audit shows EACH action refused while the gate is closed — not only the enter transition. The
+    ``framework`` import is function-LOCAL (FATAL-2); inject ``authorize_fn`` to drive it in a test."""
+    if authorize_fn is None:
+        from framework.v2.authority.gate import authorize_action as authorize_fn  # noqa: N806
+    decision = authorize_fn(authority, request, killswitch=killswitch, actions_taken=actions_taken,
+                            now=now)
+    if not getattr(decision, "allowed", True) and getattr(decision, "denial_code", "") == "halted":
+        # A refusal by the CLOSED gate (kill-switch tripped) — the restricted-mode enforcement path.
+        record_refusal(
+            base_dir,
+            action=getattr(request, "action_kind", None) or getattr(request, "target", "action"),
+            target=str(getattr(request, "target", "")),
+            denial_code=str(getattr(decision, "denial_code", "halted")),
+            reason=str(getattr(decision, "reason", "")),
+        )
+    return decision
 
 
 # ── the integrity trigger ────────────────────────────────────────────────────────────────────────────
