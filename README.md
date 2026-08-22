@@ -651,13 +651,16 @@ Each line reads the **real** on-disk / environment state — never an optimistic
 
 #### The opt-in `PRODUCTION` posture — refuse to start when misconfigured
 
-For a real deployment the safe-by-default posture is the *wrong* default: you want the machine to **refuse to run** when a control it depends on is off. Set `VIGIL_POSTURE=production` (or `prod`) and a start path — `vigil up` or `vigil engage` — **refuses to start** unless **all five** of these production preconditions hold:
+For a real deployment the safe-by-default posture is the *wrong* default: you want the machine to **refuse to run** when a control it depends on is off. Set `VIGIL_POSTURE=production` (or `prod`) and a start path — `vigil up` or `vigil engage` — **refuses to start** unless **all six** of these production preconditions hold:
 
 - **`vault`** is `SEALED` (secrets sealed at rest, not plaintext),
 - **`sovereignty`** is non-`PERMISSIVE` (the tier gates cloud LLM egress),
 - **`entitlement`** enforcement is `ACTIVE` (gated capabilities fail closed),
 - **`backups`** timers are `ON` (backup / reprove / HA are actually running),
-- **`charter`** is `PRESENT` (a signed charter + `EngagementAuthority`).
+- **`charter`** is `PRESENT` (a signed charter + `EngagementAuthority`),
+- **`legacy-owner-token`** is `DISABLED` (`SIGIL_LEGACY_OWNER_TOKEN=0`, so the cockpit requires per-user proof-of-possession auth).
+
+The last one is **W10-7**. The cockpit's legacy embedded shared owner token always resolves to the owner — a deliberate fail-open so the operator physically at the host is never locked out. That is fine as a development convenience and **indefensible in a deployment someone else runs**, so it is a **named residual** that the production gate refuses to start around: set `SIGIL_LEGACY_OWNER_TOKEN=0` and provision per-user accounts (`sigil accounts create <user> <role>`, owner-signed offline — no HTTP token needed) that log in by proof-of-possession. Belt-and-suspenders: the sigil server **also refuses that shared token at runtime** whenever `VIGIL_POSTURE=production`, regardless of the toggle, so even a server started outside `vigil up` cannot honour it in production. (Registering this residual in the claims registry — [W0-3] #398 — is a follow-up: that registry is not yet built in this tree; the proving tests exist and run in required CI jobs today.)
 
 The gate is **additive and opt-in**: with `VIGIL_POSTURE` unset (or any non-production value) it is **inert** — behaviour is byte-identical to a fresh checkout, so nothing already deployed breaks. It is **fail-closed**: any precondition not in its required state — `UNKNOWN` included — refuses the start, with **one line per unmet precondition** naming the failing control and how to satisfy it. (The `egress-gate` control is deliberately *not* one of the five — a loopback engagement legitimately needs no docker gateway.) When armed, `vigil doctor` doubles as the production preflight: it prints a **`PRODUCTION posture gate`** block and exits non-zero while any precondition is unmet.
 
