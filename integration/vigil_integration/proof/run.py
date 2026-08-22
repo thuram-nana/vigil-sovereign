@@ -80,16 +80,49 @@ def read_proofs(run_dir: str | os.PathLike) -> list[dict]:
 # simply fails to fire (→ an honest LEAD), never fabricates a FACT. The auto-capture channel is response-side
 # error-signature (proof_capture), whose oracle is error-based injection, so those are the classes worth
 # hinting; an unrecognised finding keeps its raw class and stays a LEAD.
+# The error-signature oracle's matched datastore/parser ENGINE -> the certificate's KNOWN bug_class. The
+# oracle (framework.v2.verify.oracles.error_signature_oracle) is the SOLE authority on the class: a signed
+# certificate must name the vulnerability the EVIDENCE proves, never the producer's claimed CWE/title. Every
+# value is a KNOWN class (verify.verifier.is_known_bug_class) served by the ERROR_SIGNATURE oracle. A test
+# (test_release_gate_false_fact) pins that this map covers EVERY engine label the oracle can emit, so a new
+# datastore signature can never silently fall through to the producer's (launderable) self-report.
+_ERRSIG_ENGINE_TO_CLASS = {
+    "mysql": "error_based_sqli", "mariadb": "error_based_sqli", "postgresql": "error_based_sqli",
+    "mssql": "error_based_sqli", "oracle": "error_based_sqli", "sqlite": "error_based_sqli",
+    "sql-generic": "error_based_sqli", "mongodb": "nosqli",
+    "ldap": "ldap_injection", "xpath": "xpath_injection",
+}
+
+
+def _errsig_engine_class(observed_body: "bytes | None", control_body: "bytes | None") -> str:
+    """The KNOWN bug_class named by the error-signature oracle's matched engine, or ``""`` if it does not
+    fire. Deterministic and side-effect-free, run over the SAME observed/control bytes the mint adjudicates,
+    so the label the certificate carries is exactly the class the oracle proves — not the finding's claim."""
+    if not observed_body:
+        return ""
+    from framework.v2.verify.oracles import error_signature_oracle   # lazy — FATAL-2 (offense plane)
+    sig = error_signature_oracle(observed_body, control_body)
+    if not getattr(sig, "fired", False):
+        return ""
+    engine = str((getattr(sig, "observed", None) or {}).get("engine", ""))
+    return _ERRSIG_ENGINE_TO_CLASS.get(engine, "")
+
+
 def _oracle_bug_class(report: dict) -> str:
     explicit = str(report.get("bug_class") or "").strip()
     if explicit:
         return explicit
     hay = " ".join(str(report.get(k) or "") for k in ("cwe", "title", "finding_class", "description")).lower()
-    if "cwe-89" in hay or "sql injection" in hay or "sqli" in hay:
-        return "error_based_sqli"
+    # The SPECIFIC datastore CWE wins over a generic "sql" mention, so a CWE-90/91 finding whose prose merely
+    # mentions SQL is not string-laundered onto SQLi. This is only the fallback LABEL a NON-firing finding
+    # keeps (→ a LEAD): for an error-signature capture that reaches a FACT, the class is OVERRIDDEN at mint
+    # time by the datastore/parser ENGINE the oracle actually matched (see ``_errsig_engine_class``), so the
+    # certificate always names the vulnerability the EVIDENCE proves, never the producer's self-report.
     if "cwe-90" in hay or "ldap injection" in hay:
-        return "error_based_sqli"          # the error-signature oracle scans generic datastore/parser errors
+        return "ldap_injection"
     if "cwe-91" in hay or "xpath injection" in hay:
+        return "xpath_injection"
+    if "cwe-89" in hay or "sql injection" in hay or "sqli" in hay:
         return "error_based_sqli"
     return str(report.get("finding_class") or "").strip()
 
@@ -407,6 +440,21 @@ def build_report_mint(
                 return None
 
         finding = _finding_from_report(report)
+        # S6 — ORACLE-AUTHORITATIVE class. For an error-signature capture the certificate's bug_class is the
+        # datastore/parser ENGINE the deterministic oracle actually matched, OVERRIDING the finding's
+        # self-reported CWE/title/class. Set at the SOURCE (before the mint) so the whole chain — context,
+        # confirm_and_certify, certify, and offline reverify — is consistent and NO path can rename the class
+        # the evidence proves (this closes CWE/title-precedence laundering, the reverse mis-label of a
+        # mis-CWE'd finding, AND an explicitly mis-declared class in one move). If the oracle does not fire,
+        # the inferred class stands and the finding stays a LEAD.
+        if _errsig:
+            _ctrl_ex = next((ex for ex in _errsig if getattr(ex, "role", "") == "control"), None)
+            _engine_class = _errsig_engine_class(
+                _resolve(getattr(_observed, "response_bytes_ref", "") or ""),
+                _resolve(getattr(_ctrl_ex, "response_bytes_ref", "") or "") if _ctrl_ex is not None else None,
+            )
+            if _engine_class:
+                finding["bug_class"] = _engine_class
         action_id = "poc-" + hashlib.sha256(str(finding["check_id"]).encode("utf-8")).hexdigest()[:16]
         # Default the evidence root to <run_dir>/evidence so every FACT MATERIALISES its executor-captured
         # raw bytes into a cert-manifestable tree — that is what makes the exported proof bundle (C1)
