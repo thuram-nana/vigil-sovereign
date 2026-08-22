@@ -28,7 +28,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .degradation import CAPTURE_FAILED, DEGRADED_NAME, REDRIVE_FAILED, record_degradation
+from .degradation import CAPTURE_FAILED, DEGRADED_NAME, MINT_FAILED, REDRIVE_FAILED, record_degradation
 from .engine import mint_proof
 from .sink import CAPTURE_KEY
 
@@ -94,18 +94,19 @@ _ERRSIG_ENGINE_TO_CLASS = {
 }
 
 
-def _errsig_engine_class(observed_body: "bytes | None", control_body: "bytes | None") -> str:
-    """The KNOWN bug_class named by the error-signature oracle's matched engine, or ``""`` if it does not
-    fire. Deterministic and side-effect-free, run over the SAME observed/control bytes the mint adjudicates,
-    so the label the certificate carries is exactly the class the oracle proves — not the finding's claim."""
+def _errsig_engine(observed_body: "bytes | None", control_body: "bytes | None") -> str:
+    """The datastore/parser ENGINE the error-signature oracle matched over these bytes (e.g. "postgresql",
+    "ldap", "xpath"), or ``""`` if it does not fire. Deterministic and side-effect-free, run over the SAME
+    observed/control bytes the mint adjudicates, so the engine the certificate label is derived from is
+    exactly the one the oracle proves. The caller maps engine -> KNOWN class via ``_ERRSIG_ENGINE_TO_CLASS``
+    and FAILS CLOSED (refuses the mint) on a fired-but-unmapped engine — never the producer's claim."""
     if not observed_body:
         return ""
     from framework.v2.verify.oracles import error_signature_oracle   # lazy — FATAL-2 (offense plane)
     sig = error_signature_oracle(observed_body, control_body)
     if not getattr(sig, "fired", False):
         return ""
-    engine = str((getattr(sig, "observed", None) or {}).get("engine", ""))
-    return _ERRSIG_ENGINE_TO_CLASS.get(engine, "")
+    return str((getattr(sig, "observed", None) or {}).get("engine", ""))
 
 
 def _oracle_bug_class(report: dict) -> str:
@@ -449,11 +450,21 @@ def build_report_mint(
         # the inferred class stands and the finding stays a LEAD.
         if _errsig:
             _ctrl_ex = next((ex for ex in _errsig if getattr(ex, "role", "") == "control"), None)
-            _engine_class = _errsig_engine_class(
+            _engine = _errsig_engine(
                 _resolve(getattr(_observed, "response_bytes_ref", "") or ""),
                 _resolve(getattr(_ctrl_ex, "response_bytes_ref", "") or "") if _ctrl_ex is not None else None,
             )
-            if _engine_class:
+            if _engine:
+                _engine_class = _ERRSIG_ENGINE_TO_CLASS.get(_engine, "")
+                if not _engine_class:
+                    # FAIL-CLOSED: the oracle fired on a datastore/parser engine we cannot honestly name, so
+                    # REFUSE the mint rather than fall back to the producer's (launderable) claim-derived
+                    # class. The CI drift guard keeps the map complete; this is the runtime backstop if that
+                    # is bypassed. Recorded so the engagement can never read CLEAN over a fired-but-
+                    # unlabelable datastore error.
+                    record_degradation(run_dir, MINT_FAILED, where="proof.run.mint.unmapped_engine",
+                                       detail=_engine)
+                    return None
                 finding["bug_class"] = _engine_class
         action_id = "poc-" + hashlib.sha256(str(finding["check_id"]).encode("utf-8")).hexdigest()[:16]
         # Default the evidence root to <run_dir>/evidence so every FACT MATERIALISES its executor-captured
