@@ -65,6 +65,13 @@ _ALARM_STATES = {FAILED, STALE, ABSENT}
 # under two periods (else a wholly-missed cycle hides). We use cadence*1.5 + randomized_delay, which fires
 # after ~one-and-a-half missed periods: a single skipped run is caught without false positives from jitter.
 _STALENESS_CADENCE_FACTOR = 1.5
+# A heartbeat dated meaningfully in the FUTURE is not fresh — it means the writer's clock is skewed, was set
+# backward, or the timestamp was forged. Left unguarded, a future ``epoch`` yields a negative age that slips
+# under the ``age > bound`` staleness test and is reported HEALTHY — a silent fail-OPEN that contradicts the
+# never-silently-healthy guarantee. We tolerate a small skew (NTP jitter, brief drift) and treat anything
+# more future-dated than that (or, per unit, than its own randomized timer smear, whichever is larger) as
+# fail-closed STALE. This is symmetric with the past-dated ``age > bound`` staleness bound.
+SKEW_TOLERANCE_S = 300
 # A unit not in the registry (e.g. a brand-new timer whose author forgot to register it) gets this
 # conservative bound so it is monitored fail-closed rather than silently unwatched. 25h > a daily cadence.
 _DEFAULT_UNKNOWN_STALENESS_S = 25 * 3600
@@ -230,6 +237,11 @@ def unit_status(state_dir: str | os.PathLike, spec: UnitSpec, *, now: Optional[f
                           f"{spec.unit} heartbeat has no valid timestamp — treating as stale (fail-closed)",
                           age_s=None, staleness_bound_s=bound)
     age = now - float(epoch)
+    if age < -max(spec.randomized_delay_s, SKEW_TOLERANCE_S):
+        return UnitStatus(spec.unit, STALE,
+                          f"{spec.unit} heartbeat is dated {-age:.0f}s in the FUTURE — clock skew, a "
+                          f"backward-set clock, or a forged timestamp; fail-closed (never silently healthy)",
+                          age_s=age, staleness_bound_s=bound)
     if age > bound:
         return UnitStatus(spec.unit, STALE,
                           f"{spec.unit} heartbeat is {age:.0f}s old (> {bound}s) — the unit/timer has stopped "
@@ -455,6 +467,9 @@ def delivery_is_stale(state_dir: str | os.PathLike, *, now: Optional[float] = No
     if not isinstance(epoch, (int, float)):
         return True, "alert delivery heartbeat has no valid timestamp — treating as stale (fail-closed)"
     age = now - float(epoch)
+    if age < -SKEW_TOLERANCE_S:
+        return True, (f"alert delivery heartbeat is dated {-age:.0f}s in the FUTURE — clock skew, a "
+                      f"backward-set clock, or a forged timestamp; treating as stale (fail-closed)")
     if age > max_staleness_s:
         return True, (f"last successful alert delivery was {age:.0f}s ago (> {max_staleness_s}s) — the alerting "
                       f"path has stopped delivering (dead-man)")

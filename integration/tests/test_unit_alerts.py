@@ -205,6 +205,58 @@ def test_malformed_heartbeat_is_failclosed_stale_never_crashes(tmp_path):
     assert st2.state == ua.ABSENT and st2.is_alarm  # unreadable == never-ran, fail-closed
 
 
+def test_future_dated_heartbeat_is_failclosed_stale_and_alarms(tmp_path):
+    """RED-PEN REGRESSION (#467): a heartbeat dated meaningfully in the FUTURE (clock skew, a backward-set
+    clock, or a forged timestamp) must be fail-closed STALE and raise a staleness alarm — NOT silently
+    HEALTHY. Before the fix, ``age = now - epoch`` went negative, slipped under the ``age > bound`` test, and
+    the unit reported HEALTHY: a silent staleness fail-OPEN that contradicts the never-silently-healthy
+    guarantee. Reverting the guard turns this red (state == HEALTHY, no alarm)."""
+    _write_all_healthy(tmp_path, now=T0)
+    spec = ua._spec_for("vigil-ha-mirror.service")
+    # A beat dated well beyond both the skew tolerance and the unit's own randomized smear, into the future.
+    future = T0 + max(spec.randomized_delay_s, ua.SKEW_TOLERANCE_S) + 3600
+    ua.write_unit_heartbeat(tmp_path, "vigil-ha-mirror.service", now=future, ok=True, result="success")
+
+    st = ua.unit_status(tmp_path, spec, now=T0)
+    assert st.state == ua.STALE and st.is_alarm
+    assert st.age_s is not None and st.age_s < 0  # negative age == future-dated
+    assert "future" in st.detail.lower()
+
+    # ...and it drives EXACTLY one alarm through the monitor while every other, fresh unit stays silent.
+    sink = _RecordingSink()
+    summary = ua.run_alert_monitor(tmp_path, now=T0, sink=sink)
+    assert summary["alarms"] == 1
+    assert len(sink.alarms) == 1
+    a = sink.alarms[0]
+    assert a.kind == "unit-heartbeat-stale"
+    assert "vigil-ha-mirror.service" in a.detail
+
+
+def test_future_dated_heartbeat_within_skew_tolerance_stays_healthy(tmp_path):
+    """The guard tolerates benign NTP jitter: a heartbeat only slightly ahead of ``now`` (inside the skew
+    tolerance) is still HEALTHY, so the fix does not flap on ordinary clock drift."""
+    _write_all_healthy(tmp_path, now=T0)
+    spec = ua._spec_for("vigil-ha-mirror.service")
+    ua.write_unit_heartbeat(tmp_path, "vigil-ha-mirror.service",
+                            now=T0 + ua.SKEW_TOLERANCE_S - 1, ok=True, result="success")
+    st = ua.unit_status(tmp_path, spec, now=T0)
+    assert st.state == ua.HEALTHY and not st.is_alarm
+
+
+def test_future_dated_delivery_heartbeat_is_failclosed_stale(tmp_path):
+    """RED-PEN REGRESSION (#467), delivery path: a delivery heartbeat dated in the FUTURE must be treated as
+    stale (fail-closed), not silently reported as a healthy alerting path. Reverting the delivery-path guard
+    turns this red (stale is False)."""
+    transport = _FakeTransport(status=204)
+    notifier = _notifier(tmp_path, [ua.WebhookNotifyTarget("https://hook.example/a", transport=transport)])
+    # Deliver at a future timestamp so the recorded delivery heartbeat is dated ahead of the check's ``now``.
+    future = T0 + ua.SKEW_TOLERANCE_S + 3600
+    notifier.deliver(Alarm(ts="t", severity="critical", kind="unit-failed", home="h", detail="d"), now=future)
+    stale, detail = ua.delivery_is_stale(tmp_path, now=T0)
+    assert stale is True
+    assert "future" in detail.lower()
+
+
 def test_unknown_unit_is_watched_failclosed(tmp_path):
     summary = ua.run_alert_monitor(tmp_path, watched=["vigil-brand-new.service"], now=T0)
     assert summary["checked"] == 1
