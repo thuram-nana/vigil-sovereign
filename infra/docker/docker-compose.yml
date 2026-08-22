@@ -1,6 +1,11 @@
 # vigil-gateway egress topology. The Strix sandbox is launched by Strix with
 # STRIX_DOCKER_SANDBOX_NETWORK=vigil_sandbox; it is not defined here.
 #
+# The gateway image is CONTENT-ADDRESSED (issue #511): `vigil services up` rebuilds it when the build
+# context changes and sets VIGIL_GATEWAY_IMAGE_TAG to the resulting `ctx-<digest>` tag, which compose interpolates
+# below — so a source change forces a recreate and the running gateway is provably the built image. A bare
+# `docker compose up` falls back to the `:latest` alias the same build writes.
+#
 # A7 client authentication: set VIGIL_GATEWAY_PROXY_TOKEN in your shell before `docker compose
 # up` (compose interpolates ${VIGIL_GATEWAY_PROXY_TOKEN} below), and point the sandbox's
 # proxy at http://vigil:$VIGIL_GATEWAY_PROXY_TOKEN@172.31.240.2:48081 so it presents
@@ -18,7 +23,7 @@ networks:
 
 services:
   vigil-gateway:
-    image: vigil-gateway:latest
+    image: vigil-gateway:${VIGIL_GATEWAY_IMAGE_TAG:-latest}
     container_name: vigil-gateway   # a deterministic name so `vigil services status/down` can find it
     networks:
       vigil_sandbox:

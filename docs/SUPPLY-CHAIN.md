@@ -30,7 +30,7 @@ signal. A digest is content-addressed: the daemon verifies it, or the pull fails
 | `docker-compose.yml` → `otel-collector` | `otel/opentelemetry-collector:0.158.0@sha256:5b97e6e3…` |
 
 Two exemptions, and they are rules rather than holes: `FROM scratch` (no content to pin) and
-images **built from this tree** (`vigil-gateway:latest`, `vigil/strix-sandbox:local`) — there
+images **built from this tree** (`vigil-gateway`, `vigil/strix-sandbox:local`) — there
 is no upstream digest for something this repo produces. `integration/tests/test_supply_chain.py`
 carries a negative control proving the checker still flags an unpinned image, and still ignores
 a build-stage back-reference.
@@ -39,6 +39,44 @@ a build-stage back-reference.
 floating `latest` behind an environment variable is exactly the drift this section exists to
 stop, and nothing in the repo ever set either variable. The pinned versions are byte-identical
 to what `:latest` resolved to on 2026-08-12, so this is a no-op for behaviour.
+
+### 1a. The gateway RUNTIME image is content-addressed (issue #511 / W5-6)
+
+The scanner above sees only images the tree **declares** (`FROM`, compose `image:`). It cannot
+see the image the gateway is **actually running**. That mattered: `ensure_image` returned early
+when the `vigil-gateway:latest` tag existed, and `docker compose up -d` will not recreate an
+unchanged tag — so after a `git pull`, `vigil services up` **silently kept running the old egress
+gate**, with no diff and no signal.
+
+The gateway image is now **content-addressed by its build context**. `vigil services up` hashes
+the `gateway/` build context, tags the built image `vigil-gateway:ctx-<digest>` (plus a moving
+`:latest` alias), and the compose file interpolates `${VIGIL_GATEWAY_IMAGE_TAG:-latest}` into the
+`image:` line. A source change flips the tag, forcing a rebuild **and** a recreate; an unchanged
+context yields the same tag and rebuilds nothing. This is *not* the `${…:-latest}` upstream
+anti-pattern removed above: this image is first-party and the variable carries a **content
+address**, so it forces recreate-on-change rather than masking upstream drift.
+
+Two guards back it:
+
+* **Fail-closed at bring-up.** After `docker compose up`, `compose_up` refuses (raises) if the
+  running container's image content id is not the one it just built — a repointed tag or a
+  hand-started stale container can never leave a silent, downgraded egress gate. It then records a
+  runtime pin (`.vigil-live/gateway-image-pin.json`: the build-context digest + the built image
+  id).
+* **The A14 runtime check.** `python3 infra/supply-chain/image_pins.py --runtime-check` re-derives
+  the current build-context digest, reads the pin, reads the running container's image id, and
+  proves the running gateway is the image built from the **current** source. It is **loud** on a
+  stale / mismatched / unproven runtime and **refuses (exits non-zero) in the production posture**
+  (`VIGIL_POSTURE=production`, or `--production`); outside production it is advisory so a dev box
+  without the gateway up is not a red build. The content-digest algorithm is duplicated in
+  `gateway/vigil_gateway/docker.py` and here; a consistency test
+  (`gateway/tests/test_docker_content_address.py::test_context_digest_matches_the_a14_checker`)
+  pins the two together so a fresh build is never mis-flagged as stale.
+
+The actual `docker build` is exercised opt-in
+(`VIGIL_GATEWAY_DOCKER_IT=1 pytest gateway/tests/test_docker_bringup.py`); the digest-pinning,
+rebuild-on-change (with an unchanged-context negative control), fail-closed-on-mismatch and
+runtime-check **logic** are covered offline against a fake docker.
 
 ### Re-pinning
 

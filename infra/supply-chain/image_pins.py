@@ -6,7 +6,7 @@ serves at pull time", so a retag — benign or hostile — silently changes what
 diff, no review and no signal. A digest (`@sha256:...`) is content-addressed: the daemon
 verifies it or the pull fails.
 
-This module is the single source of truth for that rule. It has three users:
+This module is the single source of truth for that rule. It has four users:
 
   1. ``integration/tests/test_supply_chain.py`` — loads it by path and asserts, OFFLINE, that
      every base image in the repo is digest-pinned.
@@ -16,6 +16,12 @@ This module is the single source of truth for that rule. It has three users:
      each pinned TAG against the registry and reports where upstream has moved on. Advisory by
      design: upstream retagging is not the fault of the PR being tested, so it must not turn a
      contributor's build red. It exits 0 unless it is asked to do otherwise.
+  4. ``python3 infra/supply-chain/image_pins.py --runtime-check`` — the RUNTIME visibility gate
+     (issue #511 / W5-6). The two scanners above see only DECLARED images; they cannot see the
+     image the gateway is ACTUALLY running. This mode content-addresses the gateway build context,
+     reads the pin ``vigil services up`` recorded, and proves the running container is the image
+     built from the CURRENT source — catching the "``:latest`` never moved on upgrade" defect.
+     Loud on failure; fatal only in the PRODUCTION posture. See ``check_runtime_image``.
 
 Stdlib only, so it runs in any job without adding a dependency to the thing it is auditing.
 """
@@ -23,8 +29,11 @@ Stdlib only, so it runs in any job without adding a dependency to the thing it i
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -38,13 +47,161 @@ from pathlib import Path
 #: `FROM scratch` has no content to pin — it is the empty base.
 _SCRATCH = "scratch"
 
-#: Images built FROM THIS REPO. They never come from a registry, so there is no upstream
-#: digest to pin; their provenance is the tree itself. `vigil-gateway:latest` is produced by
-#: `docker build -t vigil-gateway:latest gateway` (see `vigil services up`), and
-#: `vigil/strix-sandbox:local` by `docker compose --profile strix build strix-sandbox`.
+#: Images built FROM THIS REPO. They never come from a registry, so there is no upstream digest to pin;
+#: their provenance is the tree itself, so the DECLARED-image scanners exempt them. The gateway image is
+#: instead CONTENT-ADDRESSED at build time — `vigil services up` tags it `vigil-gateway:ctx-<digest-of-the-
+#: build-context>` (plus a `:latest` alias) and records a runtime pin — and the `--runtime-check` mode below
+#: proves the RUNNING container is the image built from the current source. `vigil/strix-sandbox:local` is
+#: built by `docker compose --profile strix build strix-sandbox`.
 FIRST_PARTY_IMAGE_PREFIXES = ("vigil-gateway", "vigil/")
 
 DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
+
+# --------------------------------------------------------------------------------------
+# Runtime image visibility (issue #511 / W5-6)
+# --------------------------------------------------------------------------------------
+# The scanners above see only DECLARED images (Dockerfile `FROM`, compose `image:`). They cannot see the
+# image the gateway is ACTUALLY running: a first-party image built locally has no registry digest, and after
+# `git pull` a mutable `:latest` tag can leave the OLD gateway running with no diff and no signal. So this
+# module also owns a RUNTIME check: `vigil services up` content-addresses the gateway image by a digest of
+# its build context and records a pin (context digest + built image id); this check re-derives the current
+# context digest, reads the pin, and (given the running container's image id) proves the RUNNING gateway is
+# the image built from the CURRENT source. Fail-closed: any missing/ambiguous input is NOT a pass.
+
+#: The gateway build context, relative to the repo root (`docker build <root>/gateway`).
+GATEWAY_CONTEXT_RELPATH = "gateway"
+#: Where `vigil services up` records the runtime pin (mirror of vigil_gateway.docker.PIN_RELPATH).
+GATEWAY_PIN_RELPATH = ".vigil-live/gateway-image-pin.json"
+#: The pin record schema (mirror of vigil_gateway.docker.PIN_SCHEMA).
+GATEWAY_PIN_SCHEMA = "vigil-gateway-image-pin/1"
+
+# Keep BYTE IDENTICAL to gateway/vigil_gateway/docker.py::_CONTEXT_IGNORE. The two live in trees that must
+# not import each other (this module is stdlib-only by design; the gateway package must not be a dependency
+# of the thing auditing the supply chain), so the algorithm is duplicated and a consistency test in
+# gateway/tests pins the two together.
+_CONTEXT_IGNORE = frozenset(
+    {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".venv", "node_modules", ".ruff_cache"}
+)
+
+
+def context_digest(context_dir) -> str:
+    """A deterministic sha256 over a docker build context — the image's CONTENT ADDRESS.
+
+    Identical to vigil_gateway.docker.context_digest: a manifest of ``(posix-relative-path, sha256(bytes))``
+    for every file, sorted by path, skipping VCS/cache/venv junk; depends only on paths + contents.
+    """
+    root = Path(context_dir)
+    entries: list[tuple[str, str]] = []
+    for p in sorted(root.rglob("*")):
+        rel_parts = p.relative_to(root).parts
+        if any(part in _CONTEXT_IGNORE for part in rel_parts):
+            continue
+        if p.is_symlink() or not p.is_file():
+            continue
+        rel = "/".join(rel_parts)
+        entries.append((rel, hashlib.sha256(p.read_bytes()).hexdigest()))
+    manifest = hashlib.sha256()
+    for rel, digest in sorted(entries):
+        manifest.update(rel.encode("utf-8"))
+        manifest.update(b"\0")
+        manifest.update(digest.encode("ascii"))
+        manifest.update(b"\n")
+    return manifest.hexdigest()
+
+
+@dataclass(frozen=True)
+class RuntimePinResult:
+    """The outcome of the runtime image-pin check. ``ok`` is the ONLY thing a gate should key on."""
+
+    ok: bool
+    reason: str
+    stale: bool = False        # the pin was written for a different (older) source tree
+    mismatch: bool = False     # the running container is not the image the pin recorded
+    invisible: bool = False    # no pin / no running id — the runtime cannot be proven at all
+    current_digest: str = ""
+    pinned_digest: str = ""
+
+
+def load_gateway_pin(pin_path) -> dict | None:
+    """Read the runtime image pin, or None if absent/unreadable/not our schema (fail-closed: None means the
+    runtime is INVISIBLE, never 'verified')."""
+    try:
+        data = json.loads(Path(pin_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("schema") != GATEWAY_PIN_SCHEMA:
+        return None
+    return data
+
+
+def check_runtime_image(*, context_dir, pin, running_image_id) -> RuntimePinResult:
+    """Prove the RUNNING gateway is the image built from the CURRENT source. Pure + fail-closed.
+
+    Inputs (all live-reading is done by the caller so this stays testable):
+      * ``context_dir`` — the gateway build context to re-hash NOW.
+      * ``pin`` — the recorded pin dict (from ``load_gateway_pin``), or None.
+      * ``running_image_id`` — the content id the container is actually running (``sha256:...``), or None.
+
+    Fail-closed outcomes (``ok`` is False for every one):
+      * no pin                              → INVISIBLE (never built/recorded; the runtime is unproven).
+      * pin.context_digest != current tree  → STALE (an upgrade landed but the gateway was not rebuilt — the
+                                              exact #511 defect: the old egress gate is still running).
+      * no running image id                 → INVISIBLE (cannot read the container; do not assume it is fine).
+      * running id != pin.image_id          → MISMATCH (a tag repointed at other bytes / a stale container).
+    Only when the current tree digest matches the pin AND the running id matches the pinned id is it ``ok``.
+    """
+    current = context_digest(context_dir)
+    if not pin:
+        return RuntimePinResult(ok=False, invisible=True, current_digest=current,
+                                reason="no gateway image pin recorded — run `vigil services up` (the running "
+                                       "gateway image is unproven)")
+    pinned_digest = str(pin.get("context_digest", ""))
+    pinned_id = str(pin.get("image_id", ""))
+    if pinned_digest != current:
+        return RuntimePinResult(
+            ok=False, stale=True, current_digest=current, pinned_digest=pinned_digest,
+            reason=("gateway image is STALE — the build context changed since it was built (pin "
+                    f"{pinned_digest[:16] or '?'} != current {current[:16]}); the OLD egress gate is still "
+                    "running. Rebuild + recreate with `vigil services down && vigil services up`."))
+    if not running_image_id:
+        return RuntimePinResult(
+            ok=False, invisible=True, current_digest=current, pinned_digest=pinned_digest,
+            reason="cannot read the running gateway container's image id — the runtime is unproven "
+                   "(is the gateway up? `vigil services status`)")
+    if running_image_id != pinned_id:
+        return RuntimePinResult(
+            ok=False, mismatch=True, current_digest=current, pinned_digest=pinned_digest,
+            reason=(f"gateway image DIGEST MISMATCH — running {running_image_id} but the pin recorded "
+                    f"{pinned_id}; the container is not the built image. `vigil services down && "
+                    "vigil services up`."))
+    return RuntimePinResult(ok=True, current_digest=current, pinned_digest=pinned_digest,
+                            reason="running gateway matches the image built from the current source")
+
+
+def _running_gateway_image_id(container: str = "vigil-gateway") -> str | None:
+    """Live: the content id of the image the gateway container is actually running, or None. The only
+    networked/daemon-touching part of the runtime check; the pure logic above takes it as input."""
+    docker = _which_docker()
+    if not docker:
+        return None
+    try:
+        proc = subprocess.run([docker, "inspect", "-f", "{{.Image}}", container],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def _which_docker() -> str | None:
+    from shutil import which
+    return which("docker")
+
+
+def _production_posture() -> bool:
+    """True iff VIGIL_POSTURE selects the production gate (mirror of vigil_integration.doctor)."""
+    return os.environ.get("VIGIL_POSTURE", "").strip().lower() in ("production", "prod")
 
 
 @dataclass(frozen=True)
@@ -243,6 +400,37 @@ def resolve_hub_digest(repository: str, tag: str, timeout: int = 30) -> str | No
         return None
 
 
+def _runtime_check(root: Path, *, pin_path=None, production: bool = False) -> int:
+    """The A14 RUNTIME-visibility gate (issue #511). Re-derive the gateway context digest, read the recorded
+    pin, read the running container's image id, and prove they line up. LOUD on failure; fatal (non-zero)
+    only when the production posture is armed (VIGIL_POSTURE=production/prod or --production) — otherwise it
+    is advisory, so a dev box without the gateway up is not a red build."""
+    context_dir = root / GATEWAY_CONTEXT_RELPATH
+    pin_file = Path(pin_path) if pin_path else (root / GATEWAY_PIN_RELPATH)
+    pin = load_gateway_pin(pin_file)
+    running = _running_gateway_image_id()
+    result = check_runtime_image(context_dir=context_dir, pin=pin, running_image_id=running)
+    fatal = production or _production_posture()
+
+    print("A14 gateway RUNTIME image-pin check (issue #511 — the running image the scanners cannot see)\n")
+    print(f"  build context : {context_dir}")
+    print(f"  current digest: {result.current_digest}")
+    print(f"  pin file      : {pin_file}  ({'present' if pin else 'ABSENT'})")
+    print(f"  running image : {running or 'UNREADABLE'}")
+    if result.ok:
+        print(f"\n  ok  {result.reason}")
+        return 0
+    label = "STALE" if result.stale else "MISMATCH" if result.mismatch else "INVISIBLE"
+    banner = "REFUSED (fail-closed)" if fatal else "WARNING (advisory)"
+    print(f"\n  !!  {banner} — {label}: {result.reason}", file=sys.stderr)
+    if fatal:
+        print("      VIGIL_POSTURE selects the PRODUCTION posture (or --production) — refusing.", file=sys.stderr)
+        return 1
+    print("      Not fatal outside the production posture; run `vigil services up` to rebuild + recreate.",
+          file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default=None, help="repo root (default: two levels up from this file)")
@@ -253,9 +441,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="make --drift exit non-zero (NOT used by CI: upstream retags are not the PR's fault)",
     )
+    ap.add_argument(
+        "--runtime-check",
+        action="store_true",
+        help="prove the RUNNING gateway is the image built from the current source (issue #511). Loud "
+             "warning on a stale/mismatched/invisible runtime; exits non-zero only in the PRODUCTION "
+             "posture (VIGIL_POSTURE=production) or with --production.",
+    )
+    ap.add_argument("--production", action="store_true",
+                    help="treat a failed --runtime-check as fatal (exit non-zero) even outside VIGIL_POSTURE")
+    ap.add_argument("--pin", default=None, help="runtime pin path (default: <root>/.vigil-live/gateway-image-pin.json)")
     args = ap.parse_args(argv)
 
     root = Path(args.root).resolve() if args.root else Path(__file__).resolve().parents[2]
+
+    if args.runtime_check:
+        return _runtime_check(root, pin_path=args.pin, production=args.production)
+
     refs = collect(root)
     if not refs:
         print(f"ERROR: no image references found under {root} — the scanner is broken.", file=sys.stderr)
