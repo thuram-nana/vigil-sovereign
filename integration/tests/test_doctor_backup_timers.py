@@ -50,7 +50,10 @@ def _fake_systemctl(enabled=(), fired=()):
     enabled, fired = set(enabled), set(fired)
 
     def _run(argv, capture_output=True, text=True, timeout=None, **kw):
-        verb, unit = argv[1], argv[2]
+        # doctor invokes systemctl in USER mode; skip the --user token so the same fake
+        # matches both the is-enabled and show probes.
+        args = [a for a in argv[1:] if a != "--user"]
+        verb, unit = args[0], args[1]
         if verb == "is-enabled":
             on = unit in enabled
             return SimpleNamespace(returncode=0 if on else 4,
@@ -285,3 +288,31 @@ def test_bootstrap_installs_and_enables_the_backup_timers():
     assert "enable --now" in text
     assert "VIGIL_POSTURE" in text or "--production" in text, \
         "bootstrap does not gate timer enablement on the production posture"
+
+
+# --------------------------------------------------------------------------- red-pen regression: --user mode
+
+def test_timer_probe_invokes_systemctl_in_user_mode(monkeypatch):
+    """Red-pen BLOCK regression: the backup timers are USER units, so doctor MUST probe the per-user
+    systemd manager (`systemctl --user ...`). Probing the SYSTEM manager (no --user) can never see them,
+    so the production gate could NEVER pass on a real host. Assert the REAL argv of BOTH probes carries
+    --user, in the right position (immediately after the systemctl binary, before the verb)."""
+    calls: list[list[str]] = []
+
+    def _spy(argv, capture_output=True, text=True, timeout=None, **kw):
+        calls.append(list(argv))
+        # minimal well-formed reply so _one_timer_status completes without error
+        return SimpleNamespace(returncode=0,
+                               stdout="enabled\n" if "is-enabled" in argv
+                               else "ExecMainExitTimestamp=\nExecMainStatus=0\nResult=success\n",
+                               stderr="")
+
+    monkeypatch.setattr(dmod.subprocess, "run", _spy)
+    dmod._one_timer_status("/usr/bin/systemctl", "vigil-backup.timer")
+
+    is_enabled = [c for c in calls if "is-enabled" in c]
+    show = [c for c in calls if "show" in c]
+    assert is_enabled and show, f"expected both an is-enabled and a show probe, got {calls}"
+    for c in (is_enabled[0], show[0]):
+        assert "--user" in c, f"probe does not target the USER systemd manager: {c}"
+        assert c[1] == "--user", f"--user must sit immediately after the systemctl binary: {c}"

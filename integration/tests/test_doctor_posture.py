@@ -111,7 +111,10 @@ def _fake_systemctl(enabled=(), fired=()):
     enabled, fired = set(enabled), set(fired)
 
     def _run(argv, capture_output=True, text=True, timeout=None, **kw):
-        verb, unit = argv[1], argv[2]
+        # doctor invokes systemctl in USER mode; skip the --user token so the same fake
+        # matches both the is-enabled and show probes.
+        args = [a for a in argv[1:] if a != "--user"]
+        verb, unit = args[0], args[1]
         if verb == "is-enabled":
             on = unit in enabled
             return SimpleNamespace(returncode=0 if on else 4,
