@@ -491,6 +491,11 @@ class SpineStore:
         m = read_manifest(self._layout)
         if m is None and self._complete_orphan_migration_locked():
             m = read_manifest(self._layout)
+        if m is None:
+            # WRITE path fails CLOSED too (mirrors the read guard): if a seg-1+ artifact exists with no
+            # manifest, this is a manifest-REMOVED SEGMENTED spine — never fall back to (resurrect)
+            # spine.jsonl over it. A legacy single-file spine / lone seg-0 has no seg-1+ so this is a no-op.
+            self._guard_manifest_absent_segmented()
         new_active = self.path
         act = m.active() if m is not None else None
         if act is not None:
