@@ -557,3 +557,30 @@ def test_app_js_has_no_unconditional_sealed_claim():
     assert "sealed on this machine and never shown back to the" not in app_js, \
         "cloud/graph credential hint still asserts unconditional sealing"
     assert "not sealed" in app_js, "the honest plaintext-fallback qualifier must be present"
+
+
+def test_persist_env_writes_atomically_no_truncation_window(env, monkeypatch):
+    """RED-PEN #474: sigil.env must be written atomically (temp + os.replace), so a concurrent reader can
+    never observe a truncated/empty file — a torn read there silently relaxed a strict sovereignty tier to
+    PERMISSIVE on the offense-plane re-resolve."""
+    import os as _os
+
+    smod._persist_env("CRUCIBLE_SOVEREIGNTY_TIER", "AIR_GAPPED")
+    envf = smod.SIGIL_HOME / "sigil.env"
+    assert "CRUCIBLE_SOVEREIGNTY_TIER=AIR_GAPPED" in envf.read_text()
+
+    # atomicity: the final rename goes through os.replace, and no temp file is left behind.
+    replaced = {"n": 0}
+    real_replace = _os.replace
+
+    def _spy(src, dst):
+        replaced["n"] += 1
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(_os, "replace", _spy)
+    smod._persist_env("SOME_OTHER_VAR", "x")
+    assert replaced["n"] == 1, "sigil.env was not written via an atomic os.replace"
+    leftovers = list(smod.SIGIL_HOME.glob(".sigil.env.tmp.*"))
+    assert not leftovers, f"a temp file was left behind: {leftovers}"
+    txt = envf.read_text()
+    assert "SOME_OTHER_VAR=x" in txt and "CRUCIBLE_SOVEREIGNTY_TIER=AIR_GAPPED" in txt
