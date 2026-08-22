@@ -5671,7 +5671,87 @@
     if (!kvs.length) return h("div.hint", null, "no profile fields recorded for this proposal.");
     return h("div.kv", { style: { marginTop: "8px" } }, kvs);
   }
-  function brainChain(prop) {
+  // Join a proposed step's tool against THIS host's real tool roster (/api/toolprofiles) to say, with the
+  // engine's own reason, whether it could run here. Never fabricates: an unknown tool (or no roster) is
+  // "unknown — resolved at run time", not a green light. `SURFACE_LABEL` is the shared roster vocabulary.
+  function brainAvail(toolName, roster) {
+    var name = String(toolName || "").toLowerCase();
+    var prof = null;
+    for (var i = 0; i < (roster || []).length; i++) {
+      if (String(roster[i].name || "").toLowerCase() === name) { prof = roster[i]; break; }
+    }
+    if (!prof) return { state: "unknown",
+      why: "not in this host's tool roster — availability is resolved at run time (checkpoint-gated)" };
+    if (!prof.admitted) return { state: "unavailable", why: prof.admit_reason || "not admitted to the arsenal" };
+    if (!prof.installed) return { state: "unavailable",
+      why: (prof.status === "unsupported" ? "not supported on this platform" : "not installed on this host")
+        + " — install it from the Tools screen" };
+    return { state: "available",
+      why: "installed + admitted; driven by " + (SURFACE_LABEL[String(prof.control_surface || "")] || "the engine") };
+  }
+
+  // The four verdict classes the render keeps SEPARATE. A brain proposal is entirely LEADs; FACT/CLEAN/
+  // INCONCLUSIVE are outcomes a step can only earn after it actually runs (checkpoint-gated), so they read
+  // 0 here — the separation is explicit so the panel can never blur a proposed step into a confirmed fact.
+  function brainVerdictLegend(steps) {
+    var n = (steps || []).length;
+    function chip(label, count, cls, desc) {
+      return h("div.fix-card", { style: { padding: "8px 10px" } }, [
+        h("div.row-flex", { style: { gap: "6px", alignItems: "center" } },
+          [V.pill(label, cls, null), h("b", null, String(count))]),
+        h("div.dim", { style: { fontSize: "var(--fs-micro)", marginTop: "4px" } }, desc),
+      ]);
+    }
+    return h("div", { style: { marginTop: "12px" } }, [
+      h("span.label", null, "verdict classes (render separation)"),
+      h("div.grid.cols-4", { style: { marginTop: "8px" } }, [
+        chip("FACT", 0, "sm ok", "minted only by a fired VIGIL oracle over real evidence — a proposal never mints one."),
+        chip("LEAD", n, "sm warn", "what the brain proposes: an ordered, gated step. Every proposed step is a LEAD."),
+        chip("CLEAN", 0, "sm", "a checked surface with a sound negative — recorded only after a step runs."),
+        chip("INCONCLUSIVE", 0, "sm", "a missing channel / degraded run — recorded only after a step runs."),
+      ]),
+    ]);
+  }
+
+  // The plan-a-chain control row: a brain selector, the CLOSED objective enum (derived server-side from the
+  // brain's own `Objective` enum), and a RUN button that is deliberately disabled. Driving a live chain
+  // spawns the gated `vigil engage --brain` path — a FACT-adjacent action deferred to an owner checkpoint —
+  // so nothing here fires; the panel only SURFACES a proposal a real run already persisted.
+  function brainControls(brain) {
+    var b = brain || {};
+    var objs = b.objectives || [];
+    // The brains VIGIL's `--brain` flag distinguishes: the propose-only brain this panel describes (its
+    // name is derived from source), and the default agentic path (Strix). Inert until the checkpoint.
+    var brainOpts = [
+      { id: "hexstrike", label: (b.name || "HexStrike") + " (propose-only)" },
+      { id: "strix", label: "Strix (default agentic path)" },
+    ];
+    var brainSel = h("select", null, brainOpts.map(function (o, i) {
+      return h("option", { value: o.id, selected: i === 0 }, o.label);
+    }));
+    var objSel = objs.length
+      ? h("select", null, objs.map(function (o) {
+          return h("option", { value: o.id, selected: !!o.default }, o.id + (o.default ? " (default)" : "")); }))
+      : h("select", { disabled: true }, [h("option", null, "objective vocabulary unavailable")]);
+    var runBtn = h("button.btn.owner", { disabled: true,
+      title: "Live spawning is gated behind an owner checkpoint (not wired in this build)" },
+      [V.icon("bolt"), "Propose & drive chain"]);
+    return V.card("Plan a chain", "CHECKPOINT-GATED", h("div", null, [
+      h("div.grid.cols-2", { style: { gap: "12px", alignItems: "end" } }, [
+        h("div.field", null, [h("label", null, "Brain"), brainSel]),
+        h("div.field", null, [h("label", null, "Objective"), objSel]),
+      ]),
+      h("div.row-flex", { style: { gap: "10px", alignItems: "center", marginTop: "10px", flexWrap: "wrap" } }, [
+        runBtn, V.pill("checkpoint-gated", "sm warn", null),
+      ]),
+      h("div.hint", { style: { marginTop: "8px" } },
+        "Selecting a brain + objective and driving a live chain spawns the gated `vigil engage --brain` path "
+        + "— a FACT-adjacent action deferred to an owner checkpoint, so this button does not fire. This "
+        + "screen surfaces a proposal a real run persisted (below); it never invokes the brain itself."),
+    ]), false);
+  }
+
+  function brainChain(prop, roster) {
     var steps = prop.steps || [];
     var posture = prop.posture || "live";
     var head = h("div.row-flex", { style: { flexWrap: "wrap", gap: "8px", alignItems: "center" } }, [
@@ -5680,21 +5760,44 @@
       V.pill("posture " + posture, (posture === "live" ? "sm warn" : "sm"), null),
       prop.run_id ? V.pill("run " + prop.run_id, "sm", null) : null,
     ]);
+    function resCol(k, val) {
+      return h("div", null, [
+        h("div.dim", { style: { fontSize: "var(--fs-micro)" } }, k),
+        h("div.mono", { style: { fontSize: "var(--fs-xs)", marginTop: "2px" } }, val),
+      ]);
+    }
     var list = h("div.stack", { style: { marginTop: "10px", gap: "10px" } }, steps.map(function (s, i) {
       var gate = brainStepGate(s.danger, posture);
+      var avail = brainAvail(s.tool, roster);
+      var availCls = avail.state === "available" ? "sm ok" : (avail.state === "unavailable" ? "sm danger" : "sm");
       var params = s.params ? Object.keys(s.params).filter(function (k) { return k !== "danger"; })
         .map(function (k) { return k + "=" + JSON.stringify(s.params[k]); }).join("  ") : "";
       return h("div.fix-card", null, [
         h("div.fix-h", null, [
           h("span.pill.sm", null, "#" + (s.priority != null ? s.priority : i + 1)),
           h("b.mono", null, s.tool || "?"),
+          V.pill("LEAD", "sm warn", null),
           brainDangerChip(s.danger),
           gate.auto ? h("span.st.st-confirmed", null, [h("span.dot"), gate.label])
                     : h("span.st.st-queued", null, [h("span.dot"), gate.label]),
           h("span", { style: { marginLeft: "auto" } }, brainEffBar(s.effectiveness)),
         ]),
         params ? h("div.dim.mono", { style: { marginTop: "8px", fontSize: "var(--fs-xs)", wordBreak: "break-word" } }, params) : null,
-        h("div.dim", { style: { marginTop: "4px", fontSize: "var(--fs-micro)" } }, "LEAD · " + gate.detail),
+        // availability annotation WITH the engine's own reason (joined against this host's tool roster)
+        h("div.row-flex", { style: { marginTop: "8px", gap: "6px", alignItems: "center", flexWrap: "wrap" } }, [
+          h("span.dim", { style: { fontSize: "var(--fs-micro)" } }, "availability"),
+          V.pill(avail.state, availCls, null),
+          h("span.dim", { style: { fontSize: "var(--fs-micro)" } }, avail.why),
+        ]),
+        // per-step result columns — placeholders until the (checkpoint-gated) live run fills them
+        h("div.grid.cols-4", { style: { marginTop: "8px" } }, [
+          resCol("outcome", "pending — not executed"),
+          resCol("verdict", "LEAD"),
+          resCol("evidence", "—"),
+          resCol("admission", "—"),
+        ]),
+        h("div.dim", { style: { marginTop: "6px", fontSize: "var(--fs-micro)" } }, "LEAD · " + gate.detail
+          + " · outcome/evidence/admission fill only after a gated run (checkpoint-gated)"),
       ]);
     }));
     return h("div", { style: { marginTop: "12px" } }, [head, list]);
@@ -5704,34 +5807,47 @@
       var brain = (d && d.brain) || {};
       var prop = (d && d.proposal) || { present: false };
       var doctrine = (d && d.doctrine) || "";
-      var banner = h("div.legend", { style: { alignItems: "flex-start",
-        borderColor: "var(--owner-line)", background: "var(--owner-dim)" } },
-        [V.icon("info"), h("span", null, [h("b", null, "Proposals only. "),
-          "Every step crosses the conjunctive gate + egress gate; a finding is a FACT only when a VIGIL oracle fires."])]);
-      var brainCard = V.card("Active brain", "DECISION ENGINE", h("div", null, [
-        h("div.row-flex", { style: { flexWrap: "wrap", gap: "8px", alignItems: "center" } }, [
-          h("b", null, brain.name || "—"),
-          brain.propose_only ? V.pill("propose-only", "sm ok", null) : null,
-        ]),
-        brain.design_credit ? h("div.hint", { style: { marginTop: "8px" } },
-          [h("b", null, "Design credit: "), brain.design_credit]) : null,
-        brain.module ? h("div.dim.mono", { style: { marginTop: "6px", fontSize: "var(--fs-micro)" } }, brain.module) : null,
-      ]), false);
-      var gatePosture = doctrine ? h("div.legend", { style: { marginTop: "12px", alignItems: "flex-start" } },
-        [V.icon("shield"), h("span", null, doctrine)]) : null;
-      var chain;
-      if (prop.present) {
-        chain = h("div", { style: { marginTop: "12px" } }, [
-          V.card("Target profile", "OBSERVED", brainProfile(prop.profile), false),
-          brainChain(prop),
-        ]);
-      } else {
-        chain = h("div.empty", { style: { marginTop: "12px" } }, [
-          h("div.big", null, "No live proposal wired"),
-          h("p", null, prop.note || "No proposal source is wired into this console yet."),
-        ]);
+      // The host tool roster annotates each proposed step's availability with the engine's own reason.
+      // Fail-soft: no roster → steps annotate "unknown — resolved at run time (checkpoint-gated)".
+      V.getJSON(OFF("/api/toolprofiles")).then(function (tp) {
+        render((tp && tp.profiles) || []);
+      }).catch(function () { render([]); });
+
+      function render(roster) {
+        var banner = h("div.legend", { style: { alignItems: "flex-start",
+          borderColor: "var(--owner-line)", background: "var(--owner-dim)" } },
+          [V.icon("info"), h("span", null, [h("b", null, "Proposals only. "),
+            "Every step crosses the conjunctive gate + egress gate; a finding is a FACT only when a VIGIL oracle fires."])]);
+        var brainCard = V.card("Active brain", "DECISION ENGINE", h("div", null, [
+          h("div.row-flex", { style: { flexWrap: "wrap", gap: "8px", alignItems: "center" } }, [
+            h("b", null, brain.name || "—"),
+            brain.propose_only ? V.pill("propose-only", "sm ok", null) : null,
+            brain.derived ? V.pill("derived from source", "sm", null) : null,
+            (brain.available === false) ? V.pill("brain source unavailable", "sm danger", null) : null,
+          ]),
+          brain.design_credit ? h("div.hint", { style: { marginTop: "8px" } },
+            [h("b", null, "Design credit: "), brain.design_credit]) : null,
+          brain.module ? h("div.dim.mono", { style: { marginTop: "6px", fontSize: "var(--fs-micro)" } }, brain.module) : null,
+          brain.note ? h("div.dim", { style: { marginTop: "6px", fontSize: "var(--fs-micro)" } }, brain.note) : null,
+        ]), false);
+        var gatePosture = doctrine ? h("div.legend", { style: { marginTop: "12px", alignItems: "flex-start" } },
+          [V.icon("shield"), h("span", null, doctrine)]) : null;
+        var legend = brainVerdictLegend(prop.present ? prop.steps : []);
+        var chain;
+        if (prop.present) {
+          chain = h("div", { style: { marginTop: "12px" } }, [
+            V.card("Target profile", "OBSERVED", brainProfile(prop.profile), false),
+            brainChain(prop, roster),
+          ]);
+        } else {
+          chain = h("div.empty", { style: { marginTop: "12px" } }, [
+            h("div.big", null, "No live proposal wired"),
+            h("p", null, prop.note || "No proposal source is wired into this console yet. Plan a chain above "
+              + "(checkpoint-gated) or run `vigil engage --brain hexstrike`, which persists the proposal this panel surfaces."),
+          ]);
+        }
+        V.mount(v, [banner, brainControls(brain), brainCard, gatePosture, legend, chain]);
       }
-      V.mount(v, [banner, brainCard, gatePosture, chain]);
     }).catch(function () { V.mount(v, offlineEmpty()); });
   }
 
