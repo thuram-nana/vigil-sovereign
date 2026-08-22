@@ -47,10 +47,20 @@ in below and are non-negotiable).
    recon-auto only in STAGING/TWIN; asset-enum tools that call third-party APIs (crt.sh/VT) run ONLY
    through the egress-gated Docker topology, never `LocalSubprocessBackend`. Unknown/denylisted names ⇒
    DENY.
-6. **Converge one gated executor (red-pen MEDIUM).** Wire the body's proposals into the proven live loop
-   with a single gated executor+oracle (`seams.run_tool = run_external_tool` or prove parity), and route
-   think tokens through `kernel/llm.py get_backend()` (closing the `think_claude` BYO-bypass) together
-   with the Anthropic price-table fix so the budget governor arms.
+6. **Converge onto ONE canonical body (red-pen MEDIUM).** *PROPOSE half — DONE (slice hx-h1).*
+   `HexstrikeAgentBody` is now the PRODUCTION proposal source: `engine_think.BrainThink` is a thin
+   think-seam adapter that delegates its profile+chain construction to `HexstrikeAgentBody.plan` (the one
+   `_build_chain`), rather than re-implementing it. The body — which had zero production callers — is thus
+   driven by every `vigil engage --brain hexstrike` run, while the live engine keeps owning the single gated
+   executor + oracle + signed ExecRecord + approval broker + phase manifest. Objective-normalization and the
+   raise-only `danger_floor` stay on the adapter. Pinned by `test_brain_convergence.py` (delegation spy +
+   plan/propose parity + a structural negative control). *Residual (EXECUTE half):* the body's own
+   `gate`/`execute`/`learn` + the runner-owned oracle re-drive (`run_external_tool`) remain a second, tested
+   execution model with no production caller — production execution still flows through the live engine's
+   governed executor. Converging the two EXECUTE paths onto a single gated executor+oracle (`seams.run_tool
+   = run_external_tool` or a proven parity), plus routing think tokens through `kernel/llm.py get_backend()`
+   (closing the `think_claude` BYO-bypass) and the Anthropic price-table fix so the budget governor arms, is
+   the remaining step-6 work.
 7. **CI + honest docs.** Offline unit tests + skip-marked live-fire (angr/selenium/mitmproxy/fastmcp do
    not install here — a marked residual, never a faked capability). Mark the brain BUILT(propose-only)
    and live-fire a tooling residual.
@@ -76,5 +86,7 @@ From the system's own honesty ledger (V2-LIMITATIONS / DEFERRED-INFRA / TRUTHENO
   offline**; hexstrike live-fire cannot be validated here — a **tooling residual**, never a present FACT.
 - Only tool-output classes with a runner-owned oracle re-drive can mint FACTs; content-discovery / asset-
   enum / CMS-enum / generic misconfig outputs remain **LEADs**.
-- `run_external_tool` has no production caller yet and `AgentBody` wires no engine — the live-loop wiring
-  (steps 3–6) is unbuilt work, not an existing capability.
+- `HexstrikeAgentBody`'s PROPOSE path is now production (its `plan` is driven by every `--brain hexstrike`
+  run via the `BrainThink` adapter — slice hx-h1). But its EXECUTE path (`run_external_tool`) still has **no
+  production caller**: production execution flows through the live engine's governed executor, not the body's
+  own `execute`. Converging the two execute paths is the remaining step-6 work, not an existing capability.

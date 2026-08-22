@@ -492,6 +492,7 @@ jobs:
               integration/tests/test_dossier_case_file.py \
               integration/tests/test_brain_engine.py \
               integration/tests/test_brain_proposal_panel.py \
+              integration/tests/test_brain_convergence.py \
               integration/tests/test_sovereignty_governs_llm_egress.py \
               integration/tests/test_cloud_live_posture.py \
               integration/tests/test_cloud_benchmark.py \
