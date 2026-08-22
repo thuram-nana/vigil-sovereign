@@ -34,9 +34,12 @@
 #          disable`s this unit + stops it cleanly, so `Restart=always` does not revive the stack and a
 #          reboot does not restore it. To bring it back: `systemctl --user enable --now vigil-command`.
 #          (`systemctl --user stop vigil-command` runs `vigil down` as ExecStop, so it contains too.)
-# PANIC:   vigil panic    — emergency HARD-STOP: trips every engagement's kill-switch (gate-level DENY)
-#          then MASKS this unit. Un-mask with `systemctl --user unmask vigil-command` when it is safe.
-#          See docs/runbooks/PANIC-AND-CONTAINMENT.md.
+# PANIC:   vigil panic    — emergency HARD-STOP: trips every engagement's kill-switch (gate-level DENY),
+#          MASKS this unit, AND stops+disables every cadence sidecar timer/unit (reprove, posture,
+#          ha-mirror, backup-push, backup, backup-drill, integrity + the witness instances) with no
+#          Persistent= catch-up replay, then verifies containment held (W10-5b). Un-mask with
+#          `systemctl --user unmask vigil-command` and re-enable the sidecar timers you want when it is
+#          safe. See docs/runbooks/PANIC-AND-CONTAINMENT.md.
 
 [Unit]
 Description=VIGIL COMMAND — the unified interface, both planes behind one loopback origin

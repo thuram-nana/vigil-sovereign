@@ -140,6 +140,9 @@ def test_run_down_contains_the_unit_a_bare_pidkill_would_be_revived(tmp_path, mo
 
 def test_run_panic_masks_and_stops_the_unit(tmp_path, monkeypatch):
     monkeypatch.delenv("SERVICE_RESULT", raising=False)
+    # run_panic now also resets the sidecar timers' Persistent= catch-up stamps (W10-5b, #478); isolate
+    # XDG_DATA_HOME so the stamp writes land in tmp, never the real ~/.local/share/systemd/timers.
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     ctl = FakeSystemctl(known=True, active=True)
     rc = uiproxy.run_panic(base_dir=str(tmp_path), run=ctl)
     assert rc == 0
