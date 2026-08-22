@@ -435,6 +435,8 @@ jobs:
               integration/tests/test_sbom.py \
               integration/tests/test_web_redrive.py \
               integration/tests/test_web_redrive_proof_sink.py \
+              integration/tests/test_release_gate_deceptive_tool.py \
+              integration/tests/test_release_gate_false_fact.py \
               integration/tests/test_typed_outcomes.py \
               integration/tests/test_engine_live.py \
               integration/tests/test_engine_terminal.py \
