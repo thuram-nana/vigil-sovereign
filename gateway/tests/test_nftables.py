@@ -154,3 +154,96 @@ def test_iface_ruleset_loads_in_netns(tmp_path):
         pytest.skip("no rootless netns here")
     assert proc.returncode == 0, proc.stderr
     assert 'iifname "br-abc123"' in proc.stdout
+
+
+# --------------------------- S3 backstop: apply() is idempotent (delete-then-load) ----------------------
+# The one-shot firewall sidecar re-runs `apply-firewall` on every gateway bring-up. `nft -f` re-declaring
+# an already-present table errors ("File exists") on the existing chains, so apply() MUST drop the table
+# first — otherwise the second bring-up would fail closed with no real problem.
+
+def test_apply_deletes_the_table_before_loading(monkeypatch):
+    from vigil_gateway import nftables as nftmod
+
+    calls: list[list[str]] = []
+
+    def _fake_run(argv, *a, **kw):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(nftmod.GatewayFirewall, "_nft_bin", staticmethod(lambda: "/usr/sbin/nft"))
+    monkeypatch.setattr(nftmod.subprocess, "run", _fake_run)
+
+    FW.apply()
+
+    # first a delete of the table, THEN the `nft -f -` load — in that order.
+    assert any(c[:3] == ["/usr/sbin/nft", "delete", "table"] for c in calls), "apply() must delete first"
+    load_idx = next(i for i, c in enumerate(calls) if c[:2] == ["/usr/sbin/nft", "-f"])
+    del_idx = next(i for i, c in enumerate(calls) if c[:3] == ["/usr/sbin/nft", "delete", "table"])
+    assert del_idx < load_idx, "the table delete must precede the ruleset load (idempotent re-apply)"
+
+
+def test_apply_raises_when_the_load_is_rejected(monkeypatch):
+    from vigil_gateway import nftables as nftmod
+
+    def _fake_run(argv, *a, **kw):
+        # the delete succeeds; the load fails — a rejected ruleset / no privilege must surface, not pass
+        rc = 1 if argv[:2] == ["/usr/sbin/nft", "-f"] else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="Operation not permitted")
+
+    monkeypatch.setattr(nftmod.GatewayFirewall, "_nft_bin", staticmethod(lambda: "/usr/sbin/nft"))
+    monkeypatch.setattr(nftmod.subprocess, "run", _fake_run)
+
+    with pytest.raises(RuntimeError, match="nft -f failed"):
+        FW.apply()
+
+
+# ------------------ sx-s3 MEDIUM: apply() fails closed if the pinned sandbox bridge is absent ------------
+# An interface-governed ruleset whose bridge interface does not exist in the netns matches NO sandbox
+# traffic — the deny-default jump fires for nothing and the sandbox rides the forward `policy accept`
+# ungoverned (a silent fail-OPEN). apply() must REFUSE before loading such a ruleset.
+
+def _recording_nft(monkeypatch):
+    from vigil_gateway import nftables as nftmod
+    calls: list[list[str]] = []
+
+    def _run(argv, *a, **kw):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(nftmod.GatewayFirewall, "_nft_bin", staticmethod(lambda: "/usr/sbin/nft"))
+    monkeypatch.setattr(nftmod.subprocess, "run", _run)
+    return calls
+
+
+def test_apply_refuses_when_pinned_sandbox_iface_is_absent(monkeypatch):
+    from vigil_gateway import nftables as nftmod
+    fw = GatewayFirewall(sandbox_subnets=["172.31.240.0/24"], gateway_ip="172.31.240.1",
+                         proxy_port=48081, sandbox_iface="vigil-nope0")
+    monkeypatch.setattr(nftmod.os.path, "isdir", lambda p: False)   # the pinned bridge does NOT exist
+
+    def _boom(*a, **k):
+        raise AssertionError("apply() reached nft despite the pinned bridge being absent — not fail-closed")
+
+    monkeypatch.setattr(nftmod.GatewayFirewall, "_nft_bin", staticmethod(lambda: "/usr/sbin/nft"))
+    monkeypatch.setattr(nftmod.subprocess, "run", _boom)
+    with pytest.raises(RuntimeError, match="does not exist"):
+        fw.apply()
+
+
+def test_apply_proceeds_when_pinned_iface_present(monkeypatch):
+    from vigil_gateway import nftables as nftmod
+    fw = GatewayFirewall(sandbox_subnets=["172.31.240.0/24"], gateway_ip="172.31.240.1",
+                         proxy_port=48081, sandbox_iface="vigil-sbx0")
+    monkeypatch.setattr(nftmod.os.path, "isdir", lambda p: p == "/sys/class/net/vigil-sbx0")
+    calls = _recording_nft(monkeypatch)
+    fw.apply()
+    assert any(c[:2] == ["/usr/sbin/nft", "-f"] for c in calls), "the ruleset must load when the bridge exists"
+
+
+def test_apply_without_iface_skips_the_bridge_check(monkeypatch):
+    # source-subnet matching (no pinned iface) — the interface check is N/A and must not block apply()
+    from vigil_gateway import nftables as nftmod
+    monkeypatch.setattr(nftmod.os.path, "isdir", lambda p: False)   # even with NO interfaces present
+    calls = _recording_nft(monkeypatch)
+    FW.apply()   # FW is defined at module top WITHOUT a sandbox_iface
+    assert any(c[:2] == ["/usr/sbin/nft", "-f"] for c in calls), "subnet-matched apply must still load"

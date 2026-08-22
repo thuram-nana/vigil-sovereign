@@ -120,6 +120,33 @@ class GatewayConfig:
         return SandboxNetworking(sandbox_subnet=self.sandbox_subnet, proxy_port=self.proxy_port)
 
 
+def firewall_from_env() -> GatewayFirewall:
+    """Build the L3/L4 firewall from the environment WITHOUT requiring a charter scope.
+
+    The firewall is pure packet policy — only the L7 proxy needs the signed charter (scope). So the
+    ``render/check/apply-firewall`` commands, and the one-shot compose init service that loads the
+    backstop before Strix starts, can build it with just the network coordinates and NO
+    ``VIGIL_GATEWAY_CHARTER_SLUG``. This is what lets ``apply-firewall`` run automatically at gateway
+    bring-up. FAIL-CLOSED: ``VIGIL_GATEWAY_GATEWAY_IP`` is required — there is no safe default for the
+    address the sandbox's one permitted exit lives on, so a missing one refuses rather than guessing.
+    """
+    subnets = _parse_subnets(os.environ.get("VIGIL_GATEWAY_SANDBOX_SUBNET", "172.31.240.0/24"))
+    primary = subnets[0] if subnets else "172.31.240.0/24"
+    gateway_ip = os.environ.get("VIGIL_GATEWAY_GATEWAY_IP", "").strip()
+    if not gateway_ip:
+        raise RuntimeError(
+            "VIGIL_GATEWAY_GATEWAY_IP is required to build the firewall (the sandbox's one permitted "
+            "exit); refusing to load an egress backstop with a guessed gateway address"
+        )
+    return GatewayFirewall(
+        sandbox_subnets=[primary, *subnets[1:]],
+        gateway_ip=gateway_ip,
+        proxy_port=int(os.environ.get("VIGIL_GATEWAY_PROXY_PORT", "48081")),
+        sandbox_iface=os.environ.get("VIGIL_GATEWAY_SANDBOX_IFACE", "").strip() or None,
+        dns_ip=os.environ.get("VIGIL_GATEWAY_DNS_IP", "").strip() or None,
+    )
+
+
 def static_config(hosts: list[str], **kw) -> GatewayConfig:
     """Convenience for tests / ad-hoc runs: a fixed scope instead of a charter."""
     return GatewayConfig(scope=StaticScopeSource(hosts), **kw)

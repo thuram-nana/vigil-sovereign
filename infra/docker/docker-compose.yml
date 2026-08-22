@@ -15,6 +15,10 @@ networks:
   vigil_sandbox:
     name: vigil_sandbox
     internal: true              # Docker installs no route out — the deny-default boundary
+    driver_opts:
+      # Pin the bridge iface name so the firewall sidecar can govern by INTERFACE (family-agnostic:
+      # v4 AND v6) instead of a v4-only source-subnet match that leaves IPv6 egress policy-accepted.
+      com.docker.network.bridge.name: vigil-sbx0
     ipam:
       config:
         - subnet: 172.31.240.0/24
@@ -22,9 +26,52 @@ networks:
     name: vigil_egress
 
 services:
+  # The nftables L3/L4 BACKSTOP (S3) — a one-shot, PRIVILEGED sidecar that LOADS the host-side
+  # deny-default ruleset BEFORE the proxy (hence before Strix) comes up. It runs in the HOST network
+  # namespace with ONLY CAP_NET_ADMIN so `nft -f` lands in the authoritative netns, applies the ruleset,
+  # and EXITS. The proxy `depends_on` its CLEAN exit (below), so a backstop that cannot load FAILS the
+  # whole bring-up (`compose up --wait` returns non-zero) — the same fail-closed leg as W0-6, never a
+  # silent downgrade to the sandbox running without the backstop. `apply-firewall` needs no charter scope
+  # (the firewall is pure packet policy), so it runs from just these network coordinates. Rebuild the
+  # image (`docker build -t vigil-gateway:latest gateway`) so it carries `nft`; `vigil services up` does this
+  # automatically only when the image is ABSENT.
+  #
+  # WHY user: "0" (root). The image's default user is the unprivileged `vigil` (uid 10001). For a NON-root
+  # process a capability added with `cap_add` sits only in the container's permitted/bounding set — it is
+  # NOT in the process's EFFECTIVE set (there are no file-capabilities on `nft`), so `nft -f` fails EPERM
+  # and the backstop CAN NEVER LOAD: a FAIL-OPEN (the sandbox could come up with egress ungoverned).
+  # Running the ONE-SHOT sidecar as root makes CapEff equal the container's cap set; with cap_drop [ALL] +
+  # cap_add [NET_ADMIN] that CapEff is exactly {NET_ADMIN} — every other capability is still dropped,
+  # no-new-privileges is set, and it applies the ruleset and exits. (The world-facing `vigil-gateway`
+  # proxy below keeps running as the unprivileged image default with cap_drop ALL.)
+  vigil-gateway-firewall:
+    image: vigil-gateway:latest
+    container_name: vigil-gateway-firewall
+    user: "0"                   # root so cap_add NET_ADMIN is EFFECTIVE (non-root => EPERM => fail-OPEN)
+    network_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN               # the ONLY capability nft -f needs; nothing more (CapEff={NET_ADMIN})
+    security_opt:
+      - no-new-privileges:true
+    read_only: true             # rootfs immutable (parity with the proxy); nft -f - reads stdin, no scratch
+    restart: "no"               # one-shot: load the backstop, then exit 0
+    environment:
+      VIGIL_GATEWAY_GATEWAY_IP: "172.31.240.2"
+      VIGIL_GATEWAY_SANDBOX_SUBNET: "172.31.240.0/24"
+      VIGIL_GATEWAY_PROXY_PORT: "48081"
+      # Govern by INTERFACE, not source-subnet: family-agnostic (drops v4 AND v6 sandbox egress to the
+      # deny-default chain) and spoof-proof. A v4-only saddr match would leave IPv6 egress policy-accepted.
+      VIGIL_GATEWAY_SANDBOX_IFACE: "vigil-sbx0"
+    command: ["vigil-gateway", "apply-firewall"]
+
   vigil-gateway:
     image: vigil-gateway:${VIGIL_GATEWAY_IMAGE_TAG:-latest}
     container_name: vigil-gateway   # a deterministic name so `vigil services status/down` can find it
+    depends_on:
+      vigil-gateway-firewall:
+        condition: service_completed_successfully   # fail-closed: no proxy unless the backstop loaded
     networks:
       vigil_sandbox:
         ipv4_address: 172.31.240.2   # pinned so the proxy can bind ONLY the sandbox interface

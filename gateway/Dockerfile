@@ -1,10 +1,13 @@
 # vigil-gateway — the host-side deny-default egress gate (the A7-hardened filtering forward proxy).
 #
-# Runtime is STDLIB-ONLY (see pyproject: dependencies = []), so the image carries no third-party RUNTIME
-# packages — just the gateway + a non-root user. The proxy needs no privileges: it binds a socket and dials
-# only charter-authorized hosts. The nftables L3/L4 backstop is applied HOST-side (needs CAP_NET_ADMIN),
-# not from this container. (Build note: `pip install .` still fetches the hatchling BUILD backend via PEP
-# 517 unless you build with a warm pip cache — the runtime image itself stays dependency-free.)
+# Python runtime is STDLIB-ONLY (see pyproject: dependencies = []), so the image carries no third-party
+# RUNTIME python packages — just the gateway + a non-root user. The proxy needs no privileges: it binds a
+# socket and dials only charter-authorized hosts, and in compose it drops ALL capabilities and runs
+# read-only. The image DOES carry the `nftables` OS package: the L3/L4 backstop is loaded by the one-shot
+# `vigil-gateway-firewall` compose sidecar, which runs in the HOST netns with ONLY CAP_NET_ADMIN, runs
+# `vigil-gateway apply-firewall`, and exits — the proxy container itself still gets no netfilter access.
+# (Build note: `pip install .` still fetches the hatchling BUILD backend via PEP 517 unless you build with
+# a warm pip cache — the runtime image itself stays python-dependency-free.)
 #
 # Build (from the repo root):   docker build -t vigil-gateway:latest gateway
 # Run it via:                   vigil services up   (or docker compose -f infra/docker/docker-compose.yml up -d)
@@ -26,7 +29,14 @@ FROM ${PYTHON_BASE}
 RUN useradd --system --create-home --uid 10001 vigil
 WORKDIR /app
 
-# Install the package (provides the `vigil-gateway` console script). No third-party deps → nothing to fetch.
+# The nftables OS package supplies `nft`, which the privileged one-shot compose sidecar runs to load the
+# L3/L4 backstop into the host netns. The proxy service never uses it (it drops all caps), so it is inert
+# there. --no-install-recommends keeps the layer small; the apt lists are removed to keep the image lean.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nftables \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install the package (provides the `vigil-gateway` console script). No third-party python deps → nothing to fetch.
 COPY pyproject.toml README.md ./
 COPY vigil_gateway ./vigil_gateway
 RUN pip install --no-cache-dir . && rm -rf /root/.cache/pip
