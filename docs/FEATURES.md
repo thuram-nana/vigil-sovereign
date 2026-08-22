@@ -865,7 +865,7 @@ The load-bearing invariant across every module here: **none of them mint a fact,
 
 ### 2026-07 hardening program — the pending / stalled / scaffolded software features, now completed & merged
 
-Every item below is **built, tested, and merged** behind the required CI checks (**13** today; the exact list
+Every item below is **built, tested, and merged** behind the required CI checks (**14** today; the exact list
 and the `enforce_admins: false` owner override are in `AS-BUILT.md` §"What's assured now"). This closes the
 software-completable backlog; only genuinely external/hardware/research-gated
 items remain (listed at the end of this section, honestly stubbed).

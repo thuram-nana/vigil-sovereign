@@ -3667,19 +3667,23 @@ it is like pressing a lift button twice — and each step is fail-closed, so a s
 cannot complete stops the installation rather than continuing in a half-configured
 state.
 
-#### 6.7 Two operational questions this briefing cannot answer from the code
+#### 6.7 Two operational notes for a deployment
 
 Stated plainly, because silence would be misleading:
 
-- **Backup and restore.** The repository ships no documented backup-and-restore
-  procedure, and none was found in the reading done for this chapter. This matters more
-  here than for ordinary software, because of the anti-rollback floor: the system
-  deliberately **refuses** a record that is shorter than the high-water mark it has
-  already seen. A naive restore from an older copy is therefore not merely stale — it
-  will be rejected, and correctly so. An agency deployment should treat "what exactly do
-  we back up (the record, the floor marker, the keys, the evidence tree), and what is the
-  tested restore procedure" as an open question to settle before go-live, not as
-  something the product answers today.
+- **Backup and restore.** A documented, purpose-built backup-and-restore procedure
+  **does** ship. `vigil backup` writes an off-box, passphrase-encrypted backup of **both**
+  planes as two *separate* encrypted files (never a merged archive — one process holding
+  both planes' secrets would breach the two-env boundary), each with a signed file manifest;
+  `vigil restore` verifies every part's manifest **before** it writes a byte and refuses to
+  report success on a chain that does not re-verify. It is deliberately anti-rollback-aware:
+  the durable floor is part of what is captured, so a restore lands the high-water mark
+  rather than tripping it, and the identity keys are re-wrapped for fresh hardware. (Sources:
+  `integration/vigil_integration/backup.py`, `apps/sigil/sigil/backup.py`, the `backup`/
+  `restore` verbs in `integration/vigil_integration/cli.py`, and the scheduled/off-host units
+  under `infra/systemd/vigil-backup*`.) What stays a **deployment decision** — not a missing
+  feature — is the key-management policy for the never-stored backup passphrase, and running
+  the tested restore drill before go-live.
 - **Multiple analysts sharing one deployment.** The design as read is single-operator:
   one owner key, one owner identity, one approval queue. Per-analyst attribution beyond
   the signed usage record, and what it would mean for several analysts to share a
@@ -14282,6 +14286,19 @@ further value latches the tier once for the lifetime of the process, so a later
 change cannot relax it mid-engagement. The seal can only ever pin the tier; it can
 never loosen it.
 
+**In the unified `vigil up` deployment, the tier reaches the offense engine when
+it starts.** The engine re-reads the tier from its environment on each call, but a
+child process's environment is fixed at the moment it is launched — so changing the
+tier in the Settings screen updates the sovereign store, not an offense child that
+is already running. The change takes effect the next time the offense plane starts:
+restart it from the Status panel (Stop, then Start), or run `vigil up`. The restart
+**re-resolves the current tier from the sovereign** rather than respawning the
+boot-time snapshot, and it **fails closed** — a momentary sovereign error at restart
+retains the tier already in force rather than relaxing it to the default. The
+Governance screen shows the tier the running engine is actually enforcing; if that
+pill disagrees with the Settings value, the pill is the truth until the offense
+plane restarts, and the Settings screen says so where the tier is set.
+
 **Where the check is made.** Four places in the system construct a model client,
 and all four consult the same policy first: the reasoning step behind a live
 engagement, the automated code-fix component, the console's chat-style terminal,
@@ -15282,37 +15299,42 @@ fails the build rather than producing a confident-looking, wrong bill of materia
 
 #### 13.3 The vulnerability gate, and the proof that it can fire
 
-Every proposed change is scanned for known vulnerabilities in its components. The
-policy is deliberately narrow: a **critical** finding blocks the change and the merge
-cannot proceed; a **high** finding is reported in full but is advisory.
+Every proposed change is scanned for known vulnerabilities in its components. A
+**critical** or **high** finding blocks the change and the merge cannot proceed; a
+**medium** finding is reported in full but is advisory.
 
-The reasoning is written down and is worth repeating, because it is the opposite of
-what looks strict. This repository deliberately contains a vendored penetration-testing
-toolchain. Blocking on every high finding across that surface would require an exception
-list so long that nobody reads it — and an exception list nobody reads is worse than no
-gate at all, because it launders findings into invisibility. Blocking on critical only
-keeps the blocking set small enough that every entry is a decision someone made.
+The threshold was not always this strict, and the history is written down because it is
+the opposite of what looks strict. This repository deliberately contains a vendored
+penetration-testing toolchain, and for a while a known backlog of high findings sat
+inside it. While that backlog existed, blocking on every high finding would have required
+an exception list so long that nobody reads it — and an exception list nobody reads is
+worse than no gate at all, because it launders findings into invisibility. So the gate
+blocked on critical only until the backlog was actually cleared. It has now been cleared
+(the three vulnerable vendored libraries were upgraded at source), the tree scans clean
+at high, and the gate blocks high as well as critical — with the blocking set still small
+enough that every future exception is a decision someone made.
 
 Two supporting rules make that policy honest:
 
-- **The gate proves it can fail.** It currently passes with no exceptions at all,
-  because the tree has no critical findings. But "passing" and "misconfigured into
-  seeing nothing" look identical from outside. So immediately before the real gate runs,
-  the same configuration is run against a fixture of deliberately vulnerable packages,
-  and it must *fail*. If that control passes, the build stops with the message that the
-  gate below cannot fail, so its green tick means nothing.
+- **The gate proves it can fail — and that it fires on a high, not only a critical.** It
+  passes with no exceptions at all, because the tree has no high or critical findings. But
+  "passing" and "misconfigured into seeing nothing" look identical from outside. So
+  immediately before the real gate runs, the same blocking configuration is run against
+  two fixtures of deliberately vulnerable packages: one with a critical finding, and one
+  whose worst finding is *only* high. The high-only fixture must be **blocked** at the new
+  threshold and would have **passed** under the old critical-only threshold — which is the
+  proof that raising the bar did real work. If any of those come out the wrong way, the
+  build stops with the message that the gate's green tick means nothing.
 - **Every exception carries a written reason**, from a fixed list of five permitted
   reasons, and a test rejects a bare entry with no justification. Ignoring a finding
   costs a sentence of explanation.
 
-The project publishes its current position rather than only its policy: at the run
-recorded in its documentation, **zero critical and eight high findings across three
-components**, none suppressed, with the one first-party item — an outdated cryptography
-library — named as real, actionable, and blocked on a version ceiling that had to be
-raised in its own separate change. That change has since been made: the ceiling was
-lifted and the library moved past the vulnerable release at every place it is declared
-in both halves of the system, so the finding is addressed at source rather than
-suppressed. The remaining high findings sit inside the vendored third-party toolchain.
+The project publishes its current position rather than only its policy: a scan of the
+whole tree with the gate configuration now reports **zero critical and zero high
+findings** on every scanned component, none suppressed. The backlog that used to sit here
+— an outdated cryptography library plus two vendored networking/parsing libraries — was
+addressed at source: each was upgraded past its vulnerable release rather than
+suppressed.
 
 #### 13.4 What the build assurance does not prove
 
@@ -15331,8 +15353,8 @@ only lists wins is a marketing document". Repeated here rather than buried:
   gate does not regenerate or fingerprint.
 - **Base-image fingerprints are re-checked against one registry only.** An image hosted
   elsewhere is reported as unknown in the drift report rather than checked.
-- **Drift and high-severity findings are surfaced, not enforced.** That is the
-  deliberate trade described above, not an oversight.
+- **Drift and medium-and-below findings are surfaced, not enforced.** That is the
+  deliberate trade described above, not an oversight. High and critical now block.
 
 #### 13.5 The quarantine on vendored offensive code
 
@@ -15348,13 +15370,13 @@ are present and intact.
 That last clause is worth noting on its own. The quarantine removes the capability while
 preserving the credit.
 
-#### 13.6 The thirteen automated checks that must pass
+#### 13.6 The fourteen automated checks that must pass
 
-Every proposed change must clear thirteen independent automated jobs before it can be merged.
-All thirteen are registered on the repository as *required status checks* on the main line of
+Every proposed change must clear fourteen independent automated jobs before it can be merged.
+All fourteen are registered on the repository as *required status checks* on the main line of
 development; the branch must also be up to date with the main line before a merge, and
 force-pushing to that line and deleting it are both blocked — so the checks cannot be sidestepped
-by rewriting history. The exact thirteen are written down in one committed file,
+by rewriting history. The exact fourteen are written down in one committed file,
 `.github/required-status-checks.txt`, which the apply-tool, an offline test and a live-settings
 check all read, so this list and the live configuration cannot drift apart.
 
@@ -15363,7 +15385,7 @@ rather than left to discover: administrator enforcement is deliberately left **o
 means the repository's owner retains an explicit override and *can* merge without the checks
 being green. For every other contributor, and for every automated agent working in the
 repository, the gate is unconditional. For the owner it is a deliberate and attributable act
-rather than an impossibility. Both facts — the thirteen required checks and the owner override —
+rather than an impossibility. Both facts — the fourteen required checks and the owner override —
 can be confirmed by anyone with read access by querying the repository's own
 branch-protection settings, rather than taken on this briefing's word.
 
@@ -23092,10 +23114,16 @@ is never stored anywhere.** Lose it and the backup is unrecoverable, by design.
 That is the off-box confidentiality guarantee, and it is also a real operational
 risk your key-management policy must cover.
 
-For the parts the command does not cover — the offensive working directory, the
-engagement folders and their evidence — an ordinary encrypted file backup is the
-answer. There is no separate purpose-built command for those, and this chapter
-will not imply one.
+The offensive half is covered by the same tooling, not left to an ordinary file copy.
+The top-level `vigil backup` command is a *two-plane* orchestrator: it drives the sovereign
+command above as a subprocess **and** writes a second, separate encrypted file for the
+offensive working directory (`.vigil-live` — its signing identities, signed record chain,
+sessions and usage ledger) together with the engine's evidence tree (the reports,
+re-verifiable findings and raw evidence bytes under `.console/runs`, plus the proof
+database). The two planes are always two *separate* encrypted files, never a merged archive
+— one process holding both planes' secrets would breach the two-env boundary — and `vigil
+restore` checks each part's signed manifest before it writes a byte. So a purpose-built
+command *does* cover these parts.
 
 ##### Restore — and one warning that is specific to this system
 
@@ -23453,14 +23481,14 @@ recording them.
 is not required to pass is a report, not a gate, so the position on the shared
 code repository is worth stating exactly, and it was read from the repository's
 own settings rather than from a document. The main line of code is protected:
-**thirteen checks are required to pass before a change can be merged**, and the
-supply-chain gate described above is one of the thirteen. The other twelve cover the
+**fourteen checks are required to pass before a change can be merged**, and the
+supply-chain gate described above is one of the fourteen. The other thirteen cover the
 shared integrity substrate, the offensive core, the autonomous agent's runtime,
 the assistant half's permission gates, the outbound-traffic gate, the separation
 of the two halves, the machine-checked mathematical model of the core rules,
 the durability of the permission kernel, the accuracy benchmark corpus, the linter
 and type checker, the briefing-completeness census that keeps this document honest,
-and a fast live-fire smoke slice. The exact thirteen are the committed list in
+a fast live-fire smoke slice, and the end-to-end loopback engagement that re-verifies its evidence offline. The exact fourteen are the committed list in
 `.github/required-status-checks.txt`. Rewriting history on that line and deleting it
 are both disabled, and the branch must be up to date before a merge.
 
@@ -23468,8 +23496,8 @@ Three things are **not** switched on, and a procurement officer should have them
 volunteered rather than discover them:
 
 - **Administrators are exempt.** A repository administrator can merge without the
-  thirteen checks passing. On a single-maintainer project that is a documented
-  posture, not an oversight — but it means "thirteen required checks" is a statement
+  fourteen checks passing. On a single-maintainer project that is a documented
+  posture, not an oversight — but it means "fourteen required checks" is a statement
   about the ordinary path, not about every possible path.
 - **Review by a second person is not required** by the repository's settings.
 - **Signed commits are not required** by the repository's settings.
@@ -24796,7 +24824,7 @@ above enforceable rather than merely present.
   half alike. A security product that lags its own cryptography library is in no position to
   lecture anyone about dependencies.
 - **The gate is a required check, not an advisory one.** The repository's main branch is
-  protected, and thirteen automated checks — including the supply-chain gate — must pass before a
+  protected, and fourteen automated checks — including the supply-chain gate — must pass before a
   change can be merged, on a branch up to date with `main`. Rewriting or deleting the branch's history is disabled. Three honest
   gaps go with that, and an evaluator should be told them rather than left to find them:
   repository administrators are **exempt** from the required checks; independent review of a
