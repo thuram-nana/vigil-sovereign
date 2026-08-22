@@ -76,8 +76,8 @@ _TOOL_DANGER: dict[str, ToolDanger] = {
     "nmap": ToolDanger.RECON, "httpx": ToolDanger.RECON, "katana": ToolDanger.RECON,
     "gau": ToolDanger.RECON, "waybackurls": ToolDanger.RECON, "subfinder": ToolDanger.RECON,
     "amass": ToolDanger.RECON, "arp-scan": ToolDanger.RECON, "nbtscan": ToolDanger.RECON,
-    "rustscan": ToolDanger.RECON, "masscan": ToolDanger.RECON, "autorecon": ToolDanger.RECON,
-    "paramspider": ToolDanger.RECON,
+    "rustscan": ToolDanger.RECON, "masscan": ToolDanger.RECON, "naabu": ToolDanger.RECON,
+    "autorecon": ToolDanger.RECON, "paramspider": ToolDanger.RECON,
     # TLS posture (read-only assessment): the runner re-drives its OWN gated handshake and judges a weak
     # protocol/cipher (weak_tls) or a broken-hash cert (weak_crypto_artifact) — never sslscan's rows.
     "sslscan": ToolDanger.RECON,
@@ -249,7 +249,7 @@ class HexstrikeBrain:
                 "wpscan": 0.95, "gau": 0.82, "waybackurls": 0.8, "sslscan": 0.78,
             },
             TargetType.NETWORK_HOST.value: {
-                "nmap": 0.95, "rustscan": 0.9, "masscan": 0.92, "autorecon": 0.95,
+                "nmap": 0.95, "rustscan": 0.9, "masscan": 0.92, "naabu": 0.9, "autorecon": 0.95,
                 "enum4linux-ng": 0.88, "smbmap": 0.85, "nbtscan": 0.75, "arp-scan": 0.85, "amass": 0.7,
                 "sslscan": 0.72,
             },
@@ -286,10 +286,12 @@ class HexstrikeBrain:
             ],
             "network_discovery": [
                 {"tool": "rustscan", "priority": 1, "params": {"ulimit": 5000, "scripts": True}},
-                {"tool": "nmap", "priority": 2, "params": {"scan_type": "-sV -sC", "os_detection": True}},
-                {"tool": "sslscan", "priority": 3, "params": {"port": 443}},
-                {"tool": "enum4linux-ng", "priority": 4, "params": {"shares": True, "users": True}},
-                {"tool": "smbmap", "priority": 5, "params": {"recursive": True}},
+                {"tool": "masscan", "priority": 2, "params": {}},
+                {"tool": "naabu", "priority": 3, "params": {}},
+                {"tool": "nmap", "priority": 4, "params": {"scan_type": "-sV -sC", "os_detection": True}},
+                {"tool": "sslscan", "priority": 5, "params": {"port": 443}},
+                {"tool": "enum4linux-ng", "priority": 6, "params": {"shares": True, "users": True}},
+                {"tool": "smbmap", "priority": 7, "params": {"recursive": True}},
             ],
             "vulnerability_assessment": [
                 {"tool": "nuclei", "priority": 1, "params": {"severity": "critical,high,medium"}},
@@ -379,7 +381,7 @@ class HexstrikeBrain:
         first_port = (profile.open_ports[0] if profile.open_ports else None)
         if tool == "nmap":
             params = {"scan_type": "-sV -sC", "ports": ctx.get("ports", "80,443,8080,8443"), "timing": "T3"}
-        elif tool in ("rustscan", "masscan"):
+        elif tool in ("rustscan", "masscan", "naabu"):
             params = {"ports": ctx.get("ports", "1-65535"), "rate": 1000}
         elif tool == "httpx":
             params = {"probe": True, "tech_detect": True, "status_code": True}
@@ -407,7 +409,7 @@ class HexstrikeBrain:
         # sources are in-repo and curated — never operator or model input — and the merged result is still
         # scanned by _assert_drift_free below, so this cannot smuggle an evasion knob.
         params = {**{k: v for k, v in ctx.items() if k != "ports"}, **params}
-        if first_port and tool in ("nmap", "rustscan"):
+        if first_port and tool in ("nmap", "rustscan", "masscan", "naabu"):
             params.setdefault("ports", str(first_port))
         self._assert_drift_free(tool, params)
         return params

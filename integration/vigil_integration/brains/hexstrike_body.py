@@ -62,11 +62,44 @@ from .hexstrike_brain import (
 # brain tool name -> the runner-owned oracle-mapped ToolSpec builder. ONLY these can mint a FACT (via the
 # runner's own independent re-drive); every other tool stays a LEAD. Adding a tool = adding a ToolSpec +
 # a runner-owned per-class oracle re-drive — never a body-supplied provenance.
-#   nmap    -> service_reachable        (gated handshake re-drive)
-#   sslscan -> weak_tls + weak_crypto_artifact (gated TLS handshake re-drive; slice 4)
-_ORACLE_MAPPED_TOOLS = frozenset({"nmap", "sslscan"})
+#   nmap / masscan / rustscan / naabu -> service_reachable  (the SAME gated TCP-handshake re-drive; H5)
+#   sslscan                           -> weak_tls + weak_crypto_artifact (gated TLS handshake re-drive; slice 4)
+# The three extra port scanners are the H5 SERVICE_REACHABILITY reuse: they carry NO redrives on their
+# ToolSpec, so the runner re-proves every proposed port with its own gated handshake exactly as it does for
+# nmap — a port scanner's row is only a PROPOSAL, and only VIGIL's independent handshake mints the FACT.
+_ORACLE_MAPPED_TOOLS = frozenset({"nmap", "sslscan", "masscan", "rustscan", "naabu"})
 # a provenance/context/authorization key must NEVER originate from the body/brain (red-pen HIGH-3 guard).
 _FORBIDDEN_EXEC_KEYS = frozenset({"provenance", "oracle_context", "_authorized", "authorized"})
+
+
+def _spec_for_kind(kind: str, params: "dict | None"):
+    """Map an oracle-mapped brain tool name + its typed params to the runner-owned ToolSpec that mints its
+    FACT. Returns ``None`` for a name this builder does not handle (kept in lock-step with
+    ``_ORACLE_MAPPED_TOOLS`` by ``test_oracle_mapped_tools_all_have_a_spec_builder``). Only the typed
+    ``ports``/``port`` VALUES are read — every flag is constructed server-side inside the ToolSpec, and an
+    invalid ports value raises ``ValueError`` from the ToolSpec's strict schema (the caller keeps it a LEAD).
+
+    FATAL-2: the offense-side ``external_tool`` import is function-local, so importing this module co-loads no
+    offense engine into the sovereign env."""
+    from ..live.external_tool import (  # noqa: PLC0415
+        masscan_service_scan,
+        naabu_service_scan,
+        nmap_service_scan,
+        rustscan_service_scan,
+        tls_scan,
+    )
+    p = params or {}
+    if kind == "sslscan":
+        return tls_scan(port=int(p.get("port", 443)))
+    if kind == "nmap":
+        return nmap_service_scan(ports=str(p.get("ports", "1-1024")))
+    if kind == "masscan":
+        return masscan_service_scan(ports=str(p.get("ports", "1-1024")), rate=int(p.get("rate", 1000)))
+    if kind == "rustscan":
+        return rustscan_service_scan(ports=str(p.get("ports", "1-1024")))
+    if kind == "naabu":
+        return naabu_service_scan(ports=str(p.get("ports", "1-1024")))
+    return None
 
 
 @dataclass
@@ -192,13 +225,26 @@ class HexstrikeAgentBody(AgentBody):
         if self._runner is None:
             return ActionOutcome(executed=False, ok=False,
                                  blocked_reason="runner not provisioned (no RunnerDeps) — stays a LEAD")
-        from ..live.external_tool import nmap_service_scan, run_external_tool, tls_scan  # noqa: PLC0415 (FATAL-2)
+        # function-local (FATAL-2): building the spec co-loads no offense engine into the sovereign env.
+        from ..live.external_tool import run_external_tool  # noqa: PLC0415
 
         params = action.params or {}
-        if action.kind == "sslscan":
-            spec = tls_scan(port=int(params.get("port", 443)))
-        else:  # nmap (the only other oracle-mapped tool)
-            spec = nmap_service_scan(ports=str(params.get("ports", "1-1024")))
+        # SERVER-SIDE spec construction: only the typed `ports`/`port` VALUES are read from params; every
+        # flag is built inside the ToolSpec (no model/brain-supplied flags reach the tool). An invalid
+        # server-side ports value fails the ToolSpec's STRICT schema → the body keeps it a LEAD (fail-closed),
+        # never an un-validated argv.
+        try:
+            spec = _spec_for_kind(action.kind, params)
+        except ValueError as e:
+            return ActionOutcome(executed=False, ok=False,
+                                 blocked_reason=f"{action.kind!r} params rejected by the ToolSpec schema — "
+                                                f"stays a LEAD: {e}")
+        if spec is None:
+            # _ORACLE_MAPPED_TOOLS and _spec_for_kind agreed on membership above; a None here would be an
+            # internal drift, so refuse to run (fail-closed) rather than fabricate.
+            return ActionOutcome(executed=False, ok=False,
+                                 blocked_reason=f"{action.kind!r} is oracle-mapped but has no spec builder "
+                                                f"(internal) — stays a LEAD")
         res = run_external_tool(
             spec, action.target, scope_gate=self._runner.scope_gate, backend=self._runner.backend,
             engagement_slug=self._runner.engagement_slug, signers=self._runner.signers,

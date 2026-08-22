@@ -317,9 +317,152 @@ class ToolSpec:
     # through the SAME gated backend (no target traffic) and stamps the parsed version into every FACT this
     # run mints (criterion 9 tool_version). None ⇒ no version stamped (byte-identical certificate).
     version_argv: "Callable[[], list[str]] | None" = None
+    # DANGER classification of the argv THIS spec builds (the H5 typed-schema field): "recon" (reachability/
+    # read-only probes — the reuse ToolSpecs below), "active" (mutating/intrusive), or "excluded" (never
+    # buildable). It is the spec's own honest statement of what running its argv does, beside the argv it
+    # labels — a non-recon reachability ToolSpec is then a visible contradiction. The WARDEN A2 floor still
+    # queues every tool on a live target regardless of this field; it does not by itself authorise anything.
+    danger: str = "recon"
 
 
 _NMAP_GREPABLE_OPEN = re.compile(r"\b(\d{1,5})/open/(tcp|udp)\b")
+
+# --- SERVICE_REACHABILITY reuse ToolSpecs (H5): masscan / rustscan / naabu -------------------------
+# These three port scanners REUSE the exact reachability re-drive nmap uses — they carry NO redrives on the
+# spec, so ``run_external_tool`` falls back to the legacy ``service_reachable`` re-drive (the runner's own
+# gated ``capture_handshake`` judged by the ``service_reachability.tcp_handshake`` branch). The tool is only
+# a PROPOSER of a port; the FACT is always VIGIL's own independent handshake. Each parser extracts ONLY the
+# PORT from the tool output and pins the host to the already-scope-authorised ``target`` (never a host the
+# tool printed — the scope-safety property nmap's parser also has), and all flags are constructed SERVER-SIDE
+# from a STRICT, validated ports schema (no model/brain-supplied flags reach the tool).
+_MASSCAN_OPEN = re.compile(r"Discovered open port (\d{1,5})/(tcp|udp)\b")
+# rustscan greppable (``-g``): ``<ip> -> [22,80,443]`` — one bracketed comma-list of open ports per host.
+_RUSTSCAN_GREP = re.compile(r"->\s*\[([0-9,\s]+)\]")
+# naabu (``-silent``): one ``host:port`` per line — take the trailing port (host is pinned to the target).
+_NAABU_HOSTPORT = re.compile(r":(\d{1,5})\s*$")
+
+# a ports spec is a comma list of single ports and/or single-hyphen ranges, every value in 1..65535 — the
+# nmap/masscan/naabu ``-p`` syntax. Anything else (spaces, flags, letters) is REJECTED at spec-build time so
+# a server-side ports value can never inject a flag into the tool argv.
+_PORTS_RE = re.compile(r"^\d{1,5}(-\d{1,5})?(,\d{1,5}(-\d{1,5})?)*$")
+
+
+def _validate_ports(ports: str) -> str:
+    """Return the normalised ports string, or raise ``ValueError`` (STRICT schema — fail-closed at build).
+    Accepts single ports and single-hyphen ranges in a comma list, every endpoint in 1..65535 and lo≤hi."""
+    s = str(ports).strip()
+    if not _PORTS_RE.match(s):
+        raise ValueError(
+            f"invalid ports spec {ports!r}: only digits, commas and single-hyphen ranges are allowed "
+            f"(server-side schema — a ports value may not inject a tool flag)")
+    for seg in s.split(","):
+        a, _, b = seg.partition("-")
+        lo = int(a)
+        hi = int(b) if b else lo
+        if not (1 <= lo <= 65535 and 1 <= hi <= 65535 and lo <= hi):
+            raise ValueError(f"invalid port range {seg!r} in {ports!r}: endpoints must be 1..65535 with lo≤hi")
+    return s
+
+
+def _validate_rate(rate: int) -> int:
+    """Return the packet rate as a positive int, or raise ``ValueError`` (STRICT schema — no free-form str)."""
+    r = int(rate)
+    if not (1 <= r <= 10_000_000):
+        raise ValueError(f"invalid rate {rate!r}: must be a positive int ≤ 10_000_000")
+    return r
+
+
+def _rustscan_ports_argv(ports: str) -> list[str]:
+    """rustscan takes EITHER a single range via ``-r A-B`` OR a comma list of single ports via ``-p p1,p2`` —
+    never a mix in one flag. Returns the correct flag pair, or raises ``ValueError`` (strict schema)."""
+    s = _validate_ports(ports)
+    if "," in s and "-" in s:
+        raise ValueError(
+            f"rustscan takes EITHER a single range (A-B) OR a comma list of single ports, not a mix: {ports!r}")
+    return ["-r", s] if "-" in s else ["-p", s]
+
+
+def masscan_service_scan(*, ports: str = "1-1024", rate: int = 1000) -> ToolSpec:
+    """A :class:`ToolSpec` for masscan as a PROPOSER of open TCP/UDP ports. ``build_argv`` emits
+    ``masscan -p <ports> --rate <rate> --wait 0 <target>`` (all flags server-side; ``ports``/``rate`` are a
+    STRICT validated schema, never model-supplied); ``propose`` parses each ``Discovered open port
+    <port>/<proto>`` line into a :class:`ProposedService` PINNED to ``target``. It carries NO redrives, so the
+    runner re-proves every proposed port with its OWN gated handshake (the ``service_reachable`` branch nmap
+    uses) before any FACT is minted — masscan's row is never trusted."""
+    _validate_ports(ports)
+    _validate_rate(rate)
+
+    def build(target: str) -> list[str]:
+        return ["masscan", "-p", ports, "--rate", str(int(rate)), "--wait", "0", target]
+
+    def propose(outcome: ToolOutcome, target: str) -> list[ProposedService]:
+        seen: set[tuple[int, str]] = set()
+        out: list[ProposedService] = []
+        for m in _MASSCAN_OPEN.finditer(outcome.stdout or ""):
+            port, proto = int(m.group(1)), m.group(2)
+            if 0 < port < 65536 and (port, proto) not in seen:
+                seen.add((port, proto))
+                out.append(ProposedService(host=target, port=port, protocol=proto))
+        return out
+
+    return ToolSpec("masscan", build, propose, version_argv=lambda: ["masscan", "--version"], danger="recon")
+
+
+def rustscan_service_scan(*, ports: str = "1-1024") -> ToolSpec:
+    """A :class:`ToolSpec` for rustscan as a PROPOSER of open TCP ports. ``build_argv`` emits
+    ``rustscan --no-config -g -a <target> (-r A-B | -p p1,p2)`` — greppable so it does not hand off to nmap,
+    ``--no-config`` so no user config file can inject flags, and the ports flag chosen SERVER-SIDE from the
+    strict schema. ``propose`` parses the greppable ``<ip> -> [ports]`` list into ProposedServices PINNED to
+    ``target``. NO redrives ⇒ the runner re-proves each port with its own gated handshake (SERVICE_REACHABILITY
+    — the same oracle nmap uses); rustscan's output is never the FACT authority."""
+    ports_argv = _rustscan_ports_argv(ports)
+
+    def build(target: str) -> list[str]:
+        return ["rustscan", "--no-config", "-g", "-a", target, *ports_argv]
+
+    def propose(outcome: ToolOutcome, target: str) -> list[ProposedService]:
+        seen: set[tuple[int, str]] = set()
+        out: list[ProposedService] = []
+        for m in _RUSTSCAN_GREP.finditer(outcome.stdout or ""):
+            for tok in m.group(1).split(","):
+                tok = tok.strip()
+                if not tok.isdigit():
+                    continue
+                port = int(tok)
+                if 0 < port < 65536 and (port, "tcp") not in seen:
+                    seen.add((port, "tcp"))
+                    out.append(ProposedService(host=target, port=port, protocol="tcp"))
+        return out
+
+    return ToolSpec("rustscan", build, propose, version_argv=lambda: ["rustscan", "--version"], danger="recon")
+
+
+def naabu_service_scan(*, ports: str = "1-1024") -> ToolSpec:
+    """A :class:`ToolSpec` for naabu (ProjectDiscovery) as a PROPOSER of open TCP ports. ``build_argv`` emits
+    ``naabu -silent -host <target> -p <ports>`` (``-silent`` so only results print; ``-host`` takes the target
+    as a flag VALUE so it cannot be read as a flag; ``-p`` from the strict schema). ``propose`` parses each
+    ``host:port`` line, taking the trailing port and PINNING the host to ``target``. NO redrives ⇒ the runner
+    re-proves each port with its own gated handshake (SERVICE_REACHABILITY — the same oracle nmap uses);
+    naabu's output is never the FACT authority."""
+    _validate_ports(ports)
+
+    def build(target: str) -> list[str]:
+        return ["naabu", "-silent", "-host", target, "-p", ports]
+
+    def propose(outcome: ToolOutcome, target: str) -> list[ProposedService]:
+        seen: set[tuple[int, str]] = set()
+        out: list[ProposedService] = []
+        for line in (outcome.stdout or "").splitlines():
+            m = _NAABU_HOSTPORT.search(line.strip())
+            if not m:
+                continue
+            port = int(m.group(1))
+            if 0 < port < 65536 and (port, "tcp") not in seen:
+                seen.add((port, "tcp"))
+                out.append(ProposedService(host=target, port=port, protocol="tcp"))
+        return out
+
+    return ToolSpec("naabu", build, propose, version_argv=lambda: ["naabu", "-version"], danger="recon")
 
 
 # --- TLS posture re-drives (weak protocol/cipher + broken-hash cert) -------------------------------

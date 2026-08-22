@@ -24,7 +24,10 @@ from vigil_integration.live.external_tool import (  # noqa: E402
     LocalSubprocessBackend,
     ScopeGate,
     ToolOutcome,
+    masscan_service_scan,
+    naabu_service_scan,
     nmap_service_scan,
+    rustscan_service_scan,
 )
 
 _SIGNER = generate_keypair()
@@ -161,3 +164,83 @@ def test_deceptive_backend_proposing_nothing_is_non_conformant(tmp_path):
         pytest.skip("nmap not installed")
     assert report.checks.get("deceptive_proposed") is False
     assert report.conformant is False and "deceptive_proposed" in report.summary()
+
+
+# ===================================================================================================
+# H5 — the SERVICE_REACHABILITY reuse ToolSpecs (masscan / rustscan / naabu) each PASS the full
+# conformance battery through the REAL gated runner. These are HERMETIC: the tool binaries need not be
+# installed, because the FACT is the runner's OWN gated handshake against a real open loopback port — the
+# canned backend only supplies each tool's real-format PROPOSAL (exactly the doctrine: the tool is a
+# proposer, VIGIL's re-drive is the fact authority). This is the gate each tool passed before the
+# capability matrix marks it fact_capable=SERVICE_REACHABILITY.
+# ===================================================================================================
+_H5_BUILDERS = {
+    "masscan": masscan_service_scan,
+    "rustscan": rustscan_service_scan,
+    "naabu": naabu_service_scan,
+}
+
+
+def _h5_stdout(tool: str, port: int, host: str = "127.0.0.1") -> str:
+    if tool == "masscan":
+        return f"Discovered open port {port}/tcp on {host}\n"
+    if tool == "rustscan":
+        return f"{host} -> [{port}]\n"
+    if tool == "naabu":
+        return f"{host}:{port}\n"
+    raise AssertionError(tool)
+
+
+class _CannedBackend:
+    """Returns a fixed stdout for ANY argv — supplies a tool's real-format proposal with no binary present."""
+    name = "canned"
+
+    def __init__(self, stdout: str) -> None:
+        self._stdout = stdout
+
+    def available(self):
+        return True, "canned"
+
+    def run(self, argv, *, timeout=0):
+        return ToolOutcome(list(argv), 0, self._stdout, "", self.name)
+
+
+@pytest.mark.parametrize("tool", ["masscan", "rustscan", "naabu"])
+def test_h5_reachability_toolspec_passes_the_full_conformance_battery(tool: str, tmp_path):
+    from framework.v2.authority import KillSwitch
+
+    build = _H5_BUILDERS[tool]
+    _charter(tmp_path, "127.0.0.1")
+    # a real OPEN loopback port (positive: the runner's handshake reproduces it) + a definitely-CLOSED port
+    # (deceptive: the tool proposes it, the runner's handshake refuses → no fact).
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    open_port = srv.getsockname()[1]
+    tmp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tmp.bind(("127.0.0.1", 0))
+    closed_port = tmp.getsockname()[1]
+    tmp.close()
+
+    halt = tmp_path / "alpha.halt"
+    try:
+        report = run_toolspec_conformance(
+            tool_name=tool,
+            positive_spec=build(ports=str(open_port)),
+            positive_backend=_CannedBackend(_h5_stdout(tool, open_port)),
+            deceptive_spec=build(ports=str(closed_port)),
+            deceptive_backend=_CannedBackend(_h5_stdout(tool, closed_port)),
+            target="127.0.0.1",
+            scope_gate_in=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+            scope_gate_out=ScopeGate(scope=StaticScopeSource(["10.99.99.99"]), loopback_allowed_if_scoped=True),
+            engagement_slug="alpha", signers=SIGNERS, trust_root=TRUST,
+            trip_killswitch=lambda: KillSwitch("alpha").trip("conformance"),
+            clear_killswitch=lambda: halt.unlink(missing_ok=True),
+            timeout=30.0)
+    finally:
+        srv.close()
+
+    assert report.conformant, report.summary() + " | notes: " + "; ".join(report.notes)
+    from vigil_integration.live.conformance import REQUIRED_PROPERTIES
+    for prop in REQUIRED_PROPERTIES:
+        assert report.checks.get(prop) is True, f"{tool}: {prop} not satisfied: {report.summary()}"
