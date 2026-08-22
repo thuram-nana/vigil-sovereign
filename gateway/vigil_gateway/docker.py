@@ -261,7 +261,7 @@ services:
   # no-new-privileges is set, and it applies the ruleset and exits. (The world-facing `vigil-gateway`
   # proxy below keeps running as the unprivileged image default with cap_drop ALL.)
   vigil-gateway-firewall:
-    image: {gateway_image}
+    image: {image_ref}
     container_name: vigil-gateway-firewall
     user: "0"                   # root so cap_add NET_ADMIN is EFFECTIVE (non-root => EPERM => fail-OPEN)
     network_mode: host
