@@ -304,6 +304,19 @@ single writer scheduled); a comment block in that file states plainly that
   in §3. The k8s readiness gate automates the *check*, not a blind promotion:
   it gates a pod becoming Ready on the guard passing; a human still fences the
   old active and repoints the VIP.
+- **Passive fencing is ADVISORY, not a storage-layer lock — the accepted limit is a
+  detection SLA (W8-2, #468).** The fencing is a shell guard (`tools/ha/mirror-sync.sh`)
+  plus a `:ro` bind in the optional `passive` compose profile; nothing at the
+  storage/orchestration layer *prevents* a second concurrent writer. We deliberately do
+  NOT add a prevention lease — it would contradict this doctrine (§2: a second
+  owner-signed head is a *detectable fork*, never scale) and, being a liveness
+  mechanism, cannot soundly prevent the hazard anyway. Instead the limitation is
+  documented and TESTED with a fork-**detection SLA**: a second writer's divergent head
+  is detected (the audited `is_split`) within one witness-checkpoint cadence (the
+  shipped 15-min timer), and can never be silently *promoted* (the failover guard
+  refuses a same-height fork; the freshness gate refuses an anchor past the 24h
+  fail-closed ceiling). See `docs/decisions/W8-2-passive-fencing-detection-sla.md` and
+  `tools/ha/fork_detection_sla.py`.
 - **Neo4j community and embedded Qdrant are NOT HA.** This profile documents the
   enterprise (Neo4j causal cluster) and server-mode (Qdrant distributed)
   upgrades required, and ships neither. Running the k8s `neo4j-statefulset.yaml`
