@@ -202,9 +202,12 @@ jobs:
           python-version: "3.13"
       - name: install the engine's python deps + vigil_core
         run: |
-          pip install -e packages/core/vigil_core \
-            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
-            "cryptography>=42" packaging pytest
+          # W3-2 (#425): runtime from the committed HASH LOCK (== the shipped tree), pytest from the
+          # pinned CI toolchain lock; vigil_core editable --no-deps. An inline "cryptography>=42" here
+          # admitted a version below the >=50 project floor (CVE-2026-69247) and pytest floated unpinned.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
       - name: asserter logic + negative controls (stdlib, in-process)
         run: pytest tools/loopback-engagement/tests -q
       - name: end-to-end — scan the loopback range, re-verify OFFLINE on the clean checkout, controls
