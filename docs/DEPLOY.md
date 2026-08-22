@@ -30,11 +30,23 @@ Common variants:
 ```bash
 ./bootstrap.sh --with-strix     # also build the Kali strix sandbox image (large)
 ./bootstrap.sh --no-services    # native only; Qdrant runs embedded (no Docker)
-./bootstrap.sh --systemd        # install the user systemd units too
+./bootstrap.sh --systemd        # install the user systemd units too (cockpit + the vigil backup/cadence timers)
+./bootstrap.sh --production     # implies --systemd AND enables the backup + recovery-drill timers
 ./bootstrap.sh --yes            # non-interactive (auto-install rustup if needed)
 make setup                      # same as ./bootstrap.sh
 make help                       # all convenience targets
 ```
+
+`--systemd` copies every `infra/systemd/vigil-*.{service,timer}` into `~/.config/systemd/user/` and seeds
+the `~/.config/vigil/*.env` config files (0600), but leaves the timers **disabled** — nothing runs until you
+enable it. `--production` (or exporting `VIGIL_POSTURE=production`) additionally runs
+`systemctl --user enable --now vigil-backup.timer vigil-backup-drill.timer`, so the host actually takes a
+daily two-plane backup and proves the restore round-trip weekly. Enabling a timer schedules its **next** run
+(with `Persistent=true` it does not replay missed windows at enable time); until the first fire, `vigil
+doctor` shows the `backups` control as `PENDING` and — under the production posture — refuses to start. Set
+the backup passphrase in `~/.config/vigil/backup.env`, then seed the first backup now with
+`systemctl --user start vigil-backup.service`. The off-host push (`vigil-backup-push.timer`) stays opt-in:
+configure `VIGIL_PUSH_DEST` in `~/.config/vigil/backup-push.env` and enable it in place of the local backup.
 
 ### Prerequisites
 
