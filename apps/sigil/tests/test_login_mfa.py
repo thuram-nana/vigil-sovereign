@@ -806,3 +806,44 @@ def _post_no_token(port, path, body):
             return r.status, json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         return e.code, (json.loads(e.read().decode()) if e.headers.get("Content-Type", "").startswith("application/json") else {})
+
+# --- red-pen W9-2 BLOCK regression: a KEK rotation must NOT orphan an embedded TOTP secret ----------
+
+def test_kek_rotation_refuses_and_preserves_an_enrolled_totp_secret(monkeypatch):
+    """Red-pen BLOCK end-to-end: an account's TOTP second factor is sealed DIRECTLY under the KEK and rides
+    inside the immutable owner-signed spine. The CLI wiring (`_spine_embedded_secrets`) must ENUMERATE it and
+    `rotate_kek` must FAIL CLOSED — never silently rotate the KEK out from under it (which was a silent MFA
+    lockout with no recovery). The TOTP secret is untouched and still unseals after the refusal."""
+    from sigil import cli, config
+    from sigil.governor import identity as idmod
+    from sigil.governor import totp
+    from sigil.platform.vault import OWNER_PRIV_CONTEXT
+
+    vault = _module_vault()
+    # a persisted owner identity (sealed under the module vault) so the CLI's default AccountsRegistry(store)
+    # verifies the grants it signs.
+    owner = idmod.ensure_owner_keypair()
+    store = _store()
+    reg = AccountsRegistry(store, owner_key=owner, trusted_pubkey=owner.public_key_b64)
+    reg.create("alice", "operator", bearer_token="alice-bearer-xxxxxxxxxxxx", issued_at=_issue())
+    secret = totp.generate_secret()
+    sealed_b64 = base64.b64encode(vault.seal_secret(secret.encode(), context=acc.TOTP_SEAL_CONTEXT)).decode()
+    reg.enroll_totp("alice", sealed_b64, issued_at=_issue())
+
+    # the CLI enumerator (with its SpineStore() bound to our test store) FINDS the embedded TOTP secret.
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: store)
+    emb = cli._spine_embedded_secrets(config)
+    labels = [lbl for lbl, _b, _c in emb]
+    assert "totp:alice" in labels
+
+    # a KEK rotation that is handed those embedded secrets FAILS CLOSED (nothing swapped).
+    from vigil_core.rotation import RotationError
+    files = [(idmod._PRIV, OWNER_PRIV_CONTEXT)]
+    with pytest.raises(RotationError) as ei:
+        vault.rotate_kek(files, embedded_secrets=emb)
+    assert "orphan" in str(ei.value).lower()
+
+    # the enrolled TOTP secret is intact and still unseals (no MFA lockout).
+    a = reg.account("alice")
+    recovered = vault.unseal_secret(base64.b64decode(a.totp_secret), context=acc.TOTP_SEAL_CONTEXT).decode()
+    assert recovered == secret

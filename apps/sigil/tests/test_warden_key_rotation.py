@@ -136,3 +136,95 @@ def test_rotate_refuses_when_no_existing_key(tmp_path):
     v = Vault(tmp_path / "vault", make_fake_tpm())
     with pytest.raises(WardenKeyError):
         rotate_warden_key(tmp_path, v)   # no warden.key to succeed => fail-closed
+
+
+# --- red-pen W9-2 MEDIUM regression: crash between the key swap and the succession append ----------
+
+
+def test_warden_reconcile_completes_after_crash_before_key_swap(tmp_path, monkeypatch):
+    """Red-pen MEDIUM: the succession link must be durable BEFORE the live key swap, so a resumed rotation
+    completes — never a live NEW key with no succession link. We simulate a power loss on the key swap (right
+    after the link append). The invariant holds mid-crash (the live key is still the OLD one, which HAS a
+    link), and reconcile finishes: swaps in the staged key + pub, and succession verifies end-to-end."""
+    import sigil.warden_key as wk
+    from sigil.warden_key import reconcile_warden_rotation, warden_rotation_incomplete
+    v = Vault(tmp_path / "vault", make_fake_tpm()); v.provision()
+    seed0 = _seed_kernel_key(tmp_path); seal_warden_key(tmp_path, v)
+    pub0 = _derive_pub_hex(seed0)
+    wh = warden_home(tmp_path)
+
+    real_replace = wk.os.replace
+
+    def boom_on_live_key_swap(src, dst):
+        # trigger ONLY on the commit's live key swap (dst == warden.key, not warden.key.rot / *.tmp).
+        if str(dst).endswith("warden.key"):
+            raise KeyboardInterrupt("simulated power loss during the live key swap")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(wk.os, "replace", boom_on_live_key_swap)
+    with pytest.raises(KeyboardInterrupt):
+        rotate_warden_key(tmp_path, v)
+
+    # crash state: journal present, link already appended, but the live key is STILL the old one (not swapped).
+    assert warden_rotation_incomplete(tmp_path) is True
+    assert _derive_pub_hex(materialize_warden_key(tmp_path, v)) == pub0        # live key still OLD (safe)
+    assert (wh / "warden.pub").read_text().strip() == pub0
+    # the dangerous state "live NEW key with no succession link" NEVER occurred: the live key is old here.
+
+    monkeypatch.setattr(wk.os, "replace", real_replace)
+    res = reconcile_warden_rotation(tmp_path, v)
+    assert res["status"] == "completed"
+    assert not (wh / "warden.rotation.pending").exists()
+    new_pub = res["new_pub"]
+    assert _derive_pub_hex(materialize_warden_key(tmp_path, v)) == new_pub     # live key now the NEW one
+    assert (wh / "warden.pub").read_text().strip() == new_pub
+    ok, why = verify_warden_succession(tmp_path)
+    assert ok is True, why
+
+
+def test_warden_reconcile_completes_after_crash_before_succession_append(tmp_path, monkeypatch):
+    """Crash even earlier — right at the succession append (before the link lands). The journal + staged key
+    material still let reconcile complete the exact rotation and verify."""
+    import sigil.warden_key as wk
+    from sigil.warden_key import reconcile_warden_rotation
+    v = Vault(tmp_path / "vault", make_fake_tpm()); v.provision()
+    seed0 = _seed_kernel_key(tmp_path); seal_warden_key(tmp_path, v)
+    pub0 = _derive_pub_hex(seed0)
+    wh = warden_home(tmp_path)
+    real_append = wk._append_link
+
+    def boom(*a, **k):
+        raise KeyboardInterrupt("simulated power loss at the succession append")
+
+    monkeypatch.setattr(wk, "_append_link", boom)
+    with pytest.raises(KeyboardInterrupt):
+        rotate_warden_key(tmp_path, v)
+
+    assert (wh / "warden.rotation.pending").exists()
+    assert _derive_pub_hex(materialize_warden_key(tmp_path, v)) == pub0        # live key still OLD (safe)
+    # no succession link was appended yet AND the live key is old — invariant holds (no live new key sans link).
+    monkeypatch.setattr(wk, "_append_link", real_append)
+
+    res = reconcile_warden_rotation(tmp_path, v)
+    assert res["status"] == "completed"
+    ok, why = verify_warden_succession(tmp_path)
+    assert ok is True, why
+    assert not (wh / "warden.rotation.pending").exists()
+
+
+def test_warden_rotate_refuses_while_a_prior_rotation_is_unfinished(tmp_path):
+    """A dangling journal (a prior interrupted rotation) blocks a new rotation until it is reconciled
+    (fail-closed) — never stack two half-rotations."""
+    v = Vault(tmp_path / "vault", make_fake_tpm()); v.provision()
+    _seed_kernel_key(tmp_path); seal_warden_key(tmp_path, v)
+    wh = warden_home(tmp_path)
+    (wh / "warden.rotation.pending").write_text("{}", encoding="utf-8")
+    with pytest.raises(WardenKeyError):
+        rotate_warden_key(tmp_path, v)
+
+
+def test_warden_reconcile_is_noop_when_clean(tmp_path):
+    v = Vault(tmp_path / "vault", make_fake_tpm()); v.provision()
+    _seed_kernel_key(tmp_path); seal_warden_key(tmp_path, v)
+    from sigil.warden_key import reconcile_warden_rotation
+    assert reconcile_warden_rotation(tmp_path, v)["status"] == "clean"

@@ -170,10 +170,17 @@ def rotate_spine_dek(spine_path, vault) -> dict:
     staged_spine = p.with_name(p.name + ".rot")
     staged_spine.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in after) + "\n", encoding="utf-8")
     dek_path = Path(SPINE_DEK_PATH)
+    dek_prev = dek_path.with_name(dek_path.name + ".prev")   # crash anchor: the OLD sealed DEK
     dek_backup: Optional[bytes] = dek_path.read_bytes() if dek_path.exists() else None
     spine_backup = raw
     try:
-        # DEK first: once the fresh DEK is in place, a reader opens the re-keyed ciphertext (swapped next).
+        # CRASH ANCHOR (red-pen HIGH): snapshot the OLD sealed DEK to `.prev` BEFORE overwriting it, so a
+        # power loss between the DEK write and the spine swap is RECOVERABLE — the old DEK still opens the
+        # not-yet-swapped (old-ciphertext) spine, and `reconcile_spine_dek` finishes/rolls the swap. `.prev`
+        # is dropped only AFTER the spine is confirmed swapped, so the old DEK is never orphaned mid-rotation.
+        if dek_backup is not None:
+            _atomic_write_bytes(dek_prev, dek_backup)
+        # DEK next: once the fresh DEK is in place, a reader opens the re-keyed ciphertext (swapped next).
         vault.write_text_secret(dek_path, base64.b64encode(new_dek).decode("ascii"), context=envelope._DEK_CONTEXT)
         atomic_write_text(p, staged_spine.read_text(encoding="utf-8"), prefix=".spine-rot-")
     except Exception as e:  # noqa: BLE001 — any commit failure rolls BOTH back (fail-closed)
@@ -183,9 +190,95 @@ def rotate_spine_dek(spine_path, vault) -> dict:
                 _atomic_write_bytes(dek_path, dek_backup)
         finally:
             staged_spine.unlink(missing_ok=True)
+            dek_prev.unlink(missing_ok=True)
         raise DekRotationError(f"DEK rotation commit failed and was rolled back: {e}") from e
+    # spine is now confirmed swapped under the new DEK — retire the crash anchor (old DEK gone).
+    dek_prev.unlink(missing_ok=True)
     staged_spine.unlink(missing_ok=True)
     return {"rotated": len(after), "spine": str(p)}
+
+
+def dek_rotation_incomplete() -> bool:
+    """True iff a spine-DEK crash anchor (``spine.dek.prev``) is present — a DEK rotation wrote the new DEK
+    but was interrupted before it confirmed the spine swap (or before it retired the anchor). A cheap disk
+    check for the doctor posture / boot reconciler."""
+    from ..config import SPINE_DEK_PATH
+    return Path(str(SPINE_DEK_PATH) + ".prev").exists()
+
+
+def reconcile_spine_dek(spine_path, vault) -> dict:
+    """Finish an interrupted spine-DEK rotation (red-pen HIGH: no crash anchor → power loss between the DEK
+    write and the spine swap destroyed the spine). If ``spine.dek.prev`` is present, decide the on-disk state
+    and drive it to a consistent one, then retire the anchor. Fail-closed + idempotent: no anchor → no-op.
+
+      * anchor == current DEK (crash before the new DEK landed) → nothing committed → drop the anchor +
+        any staged ``.rot`` (rolled back to the old DEK; the spine was never touched);
+      * the spine already opens under the CURRENT (new) DEK (crash after the spine swap) → COMPLETE → drop
+        the anchor (and any leftover ``.rot``);
+      * the spine still opens under the OLD (anchor) DEK (crash after the new DEK, before the spine swap) →
+        re-encrypt every record under the current DEK, PROVE it, atomically swap the spine, then drop the
+        anchor. If the staged ``.rot`` verifies it could be reused; here the spine is recomputed from the
+        old-DEK plaintext (deterministic proof, no reliance on possibly-torn staged bytes).
+    Any step that cannot be proven leaves the anchor in place (the old DEK still opens the old spine) and
+    raises :class:`DekRotationError`."""
+    from ..config import SPINE_DEK_PATH
+    p = Path(spine_path)
+    dek_path = Path(SPINE_DEK_PATH)
+    dek_prev = dek_path.with_name(dek_path.name + ".prev")
+    if not dek_prev.exists():
+        return {"status": "clean", "rotated": 0}
+    if not vault.enabled():
+        raise DekRotationError("cannot reconcile the spine DEK — the vault is not provisioned")
+
+    old_b64 = vault.read_text_secret(dek_prev, context=envelope._DEK_CONTEXT)  # VaultLocked propagates
+    cur_b64 = vault.read_text_secret(dek_path, context=envelope._DEK_CONTEXT)
+    if not old_b64 or not cur_b64:
+        raise DekRotationError("DEK reconcile: the `.prev` anchor or the current DEK is unreadable (fail-closed)")
+    old_dek = base64.b64decode(old_b64)
+    cur_dek = base64.b64decode(cur_b64)
+
+    if cur_dek == old_dek:
+        # the new DEK never landed → nothing was committed. Roll back cleanly.
+        p.with_name(p.name + ".rot").unlink(missing_ok=True)
+        dek_prev.unlink(missing_ok=True)
+        return {"status": "rolled-back", "rotated": 0}
+
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except OSError as e:
+        raise DekRotationError(f"DEK reconcile: cannot read the spine at {p}: {e}") from e
+    records = [json.loads(line) for line in raw.splitlines() if line.strip()]
+
+    if _spine_opens_under(cur_dek, records):
+        # the spine swap already happened → the rotation is effectively complete; just retire the anchor.
+        p.with_name(p.name + ".rot").unlink(missing_ok=True)
+        dek_prev.unlink(missing_ok=True)
+        return {"status": "completed", "rotated": len(records)}
+
+    if not _spine_opens_under(old_dek, records):
+        raise DekRotationError("DEK reconcile: the on-disk spine opens under NEITHER the old nor the current "
+                               "DEK — refusing to touch it (keeping the `.prev` anchor, fail-closed)")
+
+    # Crash after the new DEK, before the spine swap: the spine is still old-ciphertext. Complete the swap by
+    # re-encrypting from the old DEK to the current (new) DEK, proving it, then swapping atomically.
+    after = reencrypt_records(old_dek, cur_dek, records)
+    _prove_reencryption(old_dek, cur_dek, records, after)
+    atomic_write_text(p, "\n".join(json.dumps(r, ensure_ascii=False) for r in after) + "\n", prefix=".spine-rec-")
+    p.with_name(p.name + ".rot").unlink(missing_ok=True)
+    dek_prev.unlink(missing_ok=True)
+    return {"status": "completed", "rotated": len(after)}
+
+
+def _spine_opens_under(dek: bytes, records: list[dict]) -> bool:
+    """True iff EVERY sealed content field in ``records`` opens under ``dek``. A spine with no sealed field
+    trivially 'opens' (there is nothing keyed). Used by the reconciler to tell which DEK the on-disk spine
+    is currently encrypted under, without mutating anything."""
+    for r in records:
+        try:
+            envelope.open_payload(dek, r.get("payload"), scope=r.get("scope"), seq=r.get("seq"))
+        except envelope.SpinePayloadLocked:
+            return False
+    return True
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
