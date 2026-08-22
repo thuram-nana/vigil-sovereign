@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .content_gate import ContentVerdict, screen_poc_content
+from .degradation import MINT_FAILED
 
 # The report key an executor path may attach its captured exchanges under (a list of CapturedExchange plus
 # a resolve map). Never populated by the LLM — only by the trusted capture path — so its mere presence is
@@ -70,9 +71,13 @@ class ProofSink:
         *,
         quarantine_dir: Optional[str | os.PathLike] = None,
         mint: Optional[Callable[[dict], Any]] = None,
+        run_dir: Optional[str | os.PathLike] = None,
     ) -> None:
         self.quarantine_dir = quarantine_dir
         self._mint = mint
+        # The run dir whose proofs/ manifest a degraded verification is recorded against (inv 12). When not
+        # supplied the recorder falls back to VIGIL_PROOF_RUN_DIR (what the console exports).
+        self.run_dir = run_dir
 
     def _finding_ref(self, report: dict) -> str:
         return str(
@@ -100,6 +105,19 @@ class ProofSink:
         except OSError:
             pass
 
+    def _record_degraded(self, kind: str, exc: BaseException) -> None:
+        """Record a TYPED proof-degradation cause (inv 12) — never raises. Prefers the sink's own run_dir,
+        else the run dir the console exported (VIGIL_PROOF_RUN_DIR)."""
+        try:
+            from .degradation import record_degradation, record_from_env
+            where = "proof.sink.ProofSink"
+            if self.run_dir is not None:
+                record_degradation(self.run_dir, kind, where=where, detail=type(exc).__name__)
+            else:
+                record_from_env(kind, where=where, detail=type(exc).__name__)
+        except Exception:  # noqa: BLE001 — the recorder must never raise into Strix's persistence path
+            pass
+
     def __call__(self, report: Any) -> SinkResult:
         """Screen a report and, on allow + attached capture + wired mint, mint. Never raises."""
         try:
@@ -125,8 +143,12 @@ class ProofSink:
                 try:
                     result = self._mint(report)
                     minted = bool(getattr(result, "is_fact", False))
-                except Exception:  # noqa: BLE001 — a mint error never breaks Strix; the finding stays a LEAD
+                except Exception as exc:  # noqa: BLE001 — a mint error never breaks Strix; finding stays a LEAD
+                    # inv 12 (S9): the mint CRASHED over a captured/re-drivable finding — that finding cannot
+                    # reach a FACT (it stays a LEAD) and its absence must not read as "clean". Record the
+                    # typed cause so the console distinguishes a crashed mint from a genuinely empty run.
                     minted = False
+                    self._record_degraded(MINT_FAILED, exc)
             return SinkResult(gate="allow", finding_ref=ref, minted=minted,
                               reason="content-gate cleared")
         except Exception as exc:  # noqa: BLE001 — the sink must never raise into Strix's persistence path

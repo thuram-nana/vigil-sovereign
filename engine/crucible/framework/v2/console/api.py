@@ -864,11 +864,13 @@ def proof_list(run_id: str) -> dict[str, Any]:
     no traffic. Each is an oracle-confirmed FACT, an honest LEAD, or a content-gate DENY."""
     from . import actions
 
-    d = actions.run_dir(run_id) / "proofs"
+    rd = actions.run_dir(run_id)
+    d = rd / "proofs"
     recs: list[dict] = []
     if _safe(lambda: d.is_dir(), default=False):
         for f in sorted(_safe(lambda: list(d.glob("*.json")), default=[]) or []):
-            if f.name == "reverifiable.json":     # the C1 re-verifiable report is a sibling, not a proof record
+            # siblings, not proof records: the C1 re-verifiable report and the inv-12 degradation manifest.
+            if f.name in ("reverifiable.json", "_degraded.json"):
                 continue
             rec = _safe(lambda f=f: json.loads(f.read_text(encoding="utf-8")), default=None)
             if isinstance(rec, dict):
@@ -879,9 +881,68 @@ def proof_list(run_id: str) -> dict[str, Any]:
     facts = sum(1 for r in recs if r.get("status") == "fact")
     leads = sum(1 for r in recs if r.get("status") == "lead")
     denied = sum(1 for r in recs if r.get("status") == "denied")
+
+    # inv 12 (S9): the run's proof subsystem may have DEGRADED — the sink never installed, a capture failed,
+    # or the mint crashed. Each such site records a TYPED cause under proofs/_degraded.json. Read + categorise
+    # it here with STDLIB ONLY — never by importing the integration package — because integration being
+    # unavailable is ITSELF a degradation the UI must surface (a framework→integration import that failed
+    # would silently drop back to "not degraded", re-opening the exact conflation this invariant closes). A
+    # recorded degradation makes a FACT and a CLEAN reading impossible: ``verification_degraded`` is True and
+    # ``disposition`` becomes the typed cause, so an empty proof list is no longer read as "nothing found".
+    summary = _proof_degradation_summary(rd, n_records=len(recs))
     return {"run_id": run_id, "proofs": recs, "total": len(recs),
             "facts": facts, "leads": leads, "denied": denied,
-            "pending": len(recs) == 0, "doctrine": _PROOF_DOCTRINE}
+            "pending": len(recs) == 0,
+            "verification_degraded": summary["verification_degraded"],
+            "disposition": summary["disposition"],
+            "degraded_causes": summary["degraded_causes"],
+            "clean": summary["clean"],
+            "doctrine": _PROOF_DOCTRINE}
+
+
+# inv 12 (S9): the typed proof-degradation causes + the primary-disposition order. Kept in lock-step with
+# ``vigil_integration.proof.degradation`` (the recorder side) — a subsystem-wide outage dominates a
+# per-finding capture/mint failure. Duplicated here (not imported) so the console surfaces the state with
+# stdlib only, even when the integration package is itself unavailable.
+_PROOF_DEGRADED_KINDS = ("proof_subsystem_unavailable", "mint_failed", "redrive_failed", "capture_failed")
+
+
+def _proof_degradation_summary(run_dir: "Path", *, n_records: int) -> dict[str, Any]:
+    """Read ``<run_dir>/proofs/_degraded.json`` (stdlib only; never trusts the producer) and derive the
+    run's proof disposition. While degraded a CLEAN reading is impossible: ``clean`` is False and
+    ``disposition`` is the most-global typed cause, so an empty proof list is never rendered as clean.
+    Fail-CLOSED: the mere PRESENCE of a non-empty ``_degraded.json`` we cannot parse is itself treated
+    as degraded — a corrupt/half-written manifest must never silently fall back to the clean view."""
+    counts: dict[str, int] = {}
+    state = {"present": False, "parsed": False}
+
+    def _read() -> None:
+        path = run_dir / "proofs" / "_degraded.json"
+        if not path.is_file():
+            return
+        raw = path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return  # an empty file carries no degradation signal
+        state["present"] = True  # a non-empty manifest EXISTS — from here a parse failure fails CLOSED
+        doc = json.loads(raw)
+        state["parsed"] = True
+        for c in (doc.get("degradations") or []) if isinstance(doc, dict) else []:
+            if isinstance(c, dict) and c.get("kind") in _PROOF_DEGRADED_KINDS:
+                counts[c["kind"]] = counts.get(c["kind"], 0) + int(c.get("count", 1) or 1)
+
+    _safe(_read, default=None)
+    # fail-CLOSED: a non-empty manifest we could not parse still degrades the run (never the clean default).
+    degraded = bool(counts) or (state["present"] and not state["parsed"])
+    if degraded:
+        disposition = next((k for k in _PROOF_DEGRADED_KINDS if k in counts), _PROOF_DEGRADED_KINDS[0])
+    else:
+        disposition = "nothing_found" if n_records <= 0 else "has_proofs"
+    return {
+        "verification_degraded": degraded,
+        "disposition": disposition,
+        "degraded_causes": [{"kind": k, "count": counts[k]} for k in _PROOF_DEGRADED_KINDS if k in counts],
+        "clean": (not degraded) and n_records <= 0,
+    }
 
 
 # ---------------------------------------------------------------------------

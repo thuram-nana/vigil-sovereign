@@ -591,6 +591,7 @@ h3 { font-size: 1.02rem; margin: 1.2rem 0 .3rem; }
 .banner.fact { background: #e7f6ec; border: 1px solid #67c98f; color: #145a32; }
 .banner.lead { background: #fbeecf; border: 1px solid #e0b354; color: #6b4e0a; }
 .banner.none { background: #f0f0f0; border: 1px solid #bbb; color: #333; }
+.banner.degraded { background: #fce4e4; border: 1px solid #d9534f; color: #7a1c1a; }
 table { border-collapse: collapse; width: 100%; margin: .5rem 0; }
 th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #e2e2e2; vertical-align: top; }
 th { background: #f2f2f2; font-size: .82rem; text-transform: uppercase; letter-spacing: .03em; color: #555; }
@@ -614,6 +615,7 @@ code.inl { background: rgba(127,127,127,.16); padding: .05rem .35rem; border-rad
   .banner.fact { background: #123123; border-color: #2f7d52; color: #a7e8c2; }
   .banner.lead { background: #3a2f12; border-color: #7d6320; color: #f0d79a; }
   .banner.none { background: #24262b; border-color: #444; color: #ccc; }
+  .banner.degraded { background: #3a1414; border-color: #a3423f; color: #f2b5b3; }
   .note { background: rgba(255,255,255,.05); border-left-color: #555; }
 }
 """.strip()
@@ -636,9 +638,48 @@ def _report_pointer(included: list[str]) -> str:
     return ""
 
 
+# inv 12 (S9): the typed proof-degradation causes, kept in lock-step with
+# ``vigil_integration.proof.degradation`` and the console (``console.api._PROOF_DEGRADED_KINDS``). A
+# subsystem-wide outage dominates a per-finding capture/mint failure. Duplicated here (not imported) so the
+# hand-off surfaces the state with STDLIB ONLY — integration being unavailable is ITSELF a degradation.
+_PROOF_DEGRADED_KINDS = ("proof_subsystem_unavailable", "mint_failed", "redrive_failed", "capture_failed")
+
+
+def _read_proof_degradation(run_dir: Path) -> dict:
+    """Read ``<run_dir>/proofs/_degraded.json`` (stdlib only; never trusts the producer) and derive whether
+    the run's proof subsystem DEGRADED. A degraded run is NEVER reported clean in the hand-off: an empty
+    proof list over a down subsystem is not "nothing found". Fail-CLOSED — the mere PRESENCE of a non-empty
+    manifest we cannot parse still degrades the run (a corrupt/half-written manifest never falls back to
+    the clean view)."""
+    counts: dict[str, int] = {}
+    present = parsed = False
+    try:
+        path = run_dir / "proofs" / "_degraded.json"
+        if path.is_file():
+            raw = path.read_text(encoding="utf-8")
+            if raw.strip():
+                present = True
+                doc = json.loads(raw)
+                parsed = True
+                for c in (doc.get("degradations") or []) if isinstance(doc, dict) else []:
+                    if isinstance(c, dict) and c.get("kind") in _PROOF_DEGRADED_KINDS:
+                        counts[c["kind"]] = counts.get(c["kind"], 0) + int(c.get("count", 1) or 1)
+    except (OSError, ValueError):
+        pass  # a read/parse failure is handled by the fail-closed `present and not parsed` branch below
+    degraded = bool(counts) or (present and not parsed)
+    disposition = (next((k for k in _PROOF_DEGRADED_KINDS if k in counts), _PROOF_DEGRADED_KINDS[0])
+                   if degraded else "")
+    return {
+        "verification_degraded": degraded,
+        "disposition": disposition,
+        "degraded_causes": [{"kind": k, "count": counts[k]} for k in _PROOF_DEGRADED_KINDS if k in counts],
+    }
+
+
 def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
                   proof: dict, spine_names: list[str], has_drift: bool, has_log: bool,
                   signed: bool, fingerprint: str, generated_at: Optional[str],
+                  degraded: Optional[dict] = None,
                   included: list[str], has_terminal: bool = False,
                   has_case_file: bool = False, label: str = "",
                   http_evidence_aids: Optional[list[str]] = None) -> str:
@@ -683,6 +724,18 @@ def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
     # count alone let a dossier promise an embedded bundle that its own README, on the very next
     # screen, said was absent — a self-contradiction inside governance-SIGNED bytes, which is
     # exactly the kind of defect that destroys a reader's warrant to believe any of it.
+    # inv 12 (S9): if the proof subsystem DEGRADED, surface it UNCONDITIONALLY — a FACT being present must
+    # NOT suppress the "this run is NOT clean" notice (a partial degradation, where one finding minted a FACT
+    # while another's mint crashed, is still degradation the signed hand-off must disclose). Mirrors app.js,
+    # which shows the degraded banner independent of the FACT/lead counts.
+    if degraded and degraded.get("verification_degraded"):
+        causes = ", ".join(f"{c['kind']}×{c['count']}" for c in degraded.get("degraded_causes", [])) \
+            or degraded.get("disposition", "proof_subsystem_unavailable")
+        L.append(f"<div class='banner degraded'>VERIFICATION DEGRADED — this run is NOT clean. The proof "
+                 f"subsystem degraded ({_e(degraded.get('disposition', ''))}; {_e(causes)}), so at least one "
+                 f"check could not be completed. An empty proof list here does NOT mean the target is safe: "
+                 f"treat the run as INCONCLUSIVE and re-run once the subsystem is healthy.</div>")
+
     if n_facts > 0:
         lead_txt = f"{n_leads} lead(s)" if n_leads is not None else "leads (see reports)"
         if proof.get("ok"):
@@ -693,6 +746,9 @@ def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
                      f"retained evidence when this dossier was built. NO offline proof bundle is embedded "
                      f"({_e(proof.get('note', 'no bundle was produced'))}), so a third party CANNOT "
                      f"re-verify them from this archive alone. Plus {_e(lead_txt)}{_e(lead_note)}.</div>")
+    elif degraded and degraded.get("verification_degraded"):
+        # already surfaced by the unconditional degraded banner above — no clean "none" banner for this run
+        pass
     else:
         if n_leads and n_leads > 0:
             L.append(f"<div class='banner lead'>This run produced NO oracle-confirmed FACT — {n_leads} "
@@ -1101,10 +1157,13 @@ def build_dossier(
         notes.append(f"the plain-English case file could not be rendered ({type(e).__name__}: {e}); "
                      f"the machine records and the proof bundle are unaffected")
 
+    # inv 12 (S9): the proof subsystem may have DEGRADED — an empty proof list is then NOT "clean".
+    degraded = _read_proof_degradation(run)
+
     index_html = _render_index(
         engagement_slug=engagement_slug, facts=facts, reports=reports, proof=proof,
         spine_names=sorted(spine), has_drift=has_drift, has_log=has_log, has_terminal=has_terminal,
-        signed=signed, fingerprint=fingerprint, generated_at=generated_at,
+        signed=signed, fingerprint=fingerprint, generated_at=generated_at, degraded=degraded,
         included=included_preview, has_case_file=bool(case_entries), label=human_label,
         http_evidence_aids=http_ev_aids)
     entries["index.html"] = index_html.encode("utf-8")
@@ -1155,6 +1214,9 @@ def build_dossier(
         "label": human_label,
         "case_file": sorted(case_entries),
         "proof_bundle": bool(proof.get("ok")),
+        # inv 12 (S9): a degraded proof subsystem is NEVER reported clean in the hand-off.
+        "verification_degraded": bool(degraded.get("verification_degraded")),
+        "proof_disposition": degraded.get("disposition", ""),
         "notes": notes,
     }
 

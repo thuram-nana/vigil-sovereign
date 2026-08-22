@@ -11,6 +11,8 @@ from uuid import uuid4
 from agents.usage import Usage
 
 from strix.core.paths import run_dir_for
+from strix.report.degradation_hook import MINT_FAILED
+from strix.report.degradation_hook import record as _vigil_degrade
 from strix.report.proof_capture import CAPTURE_KEY
 from strix.report.sarif import write_sarif
 from strix.report.usage import LLMUsageLedger
@@ -303,8 +305,13 @@ class ReportState:
                 if proof_capture is not None:
                     report_for_hook[CAPTURE_KEY] = proof_capture
                 hook(report_for_hook)
-            except Exception:
+            except Exception as hook_exc:
+                # inv 12 (S9): the proof_sink hook CRASHED — this finding cannot be verified into a
+                # FACT and its absence from the proofs must not read as "clean". Record a TYPED
+                # mint_failed cause (the console distinguishes a crashed mint from an empty run)
+                # before swallowing so persistence still proceeds. No-op standalone; never raises.
                 logger.exception("proof_sink hook failed (non-fatal)")
+                _vigil_degrade(MINT_FAILED, "strix.report.state.add_vulnerability_report", hook_exc)
 
         self.vulnerability_reports.append(report)
         logger.info(f"Added vulnerability report: {report_id} - {title}")

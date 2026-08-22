@@ -47,3 +47,37 @@ def test_proof_list_orders_facts_first_and_counts_are_exact(tmp_path, monkeypatc
     # the denied record honestly never claims to have crossed the spine
     denied = [p for p in d["proofs"] if p["status"] == "denied"][0]
     assert denied["spooled"] is False and denied["gate_category"] == "destructive"
+
+
+def test_proof_list_surfaces_a_degraded_subsystem_distinctly_from_a_clean_run(tmp_path, monkeypatch):
+    """inv 12 (S9): a degradation manifest makes a CLEAN reading impossible — an empty proof list reads as a
+    typed subsystem failure, never "nothing found". Computed with stdlib only in the console (no integration
+    import), so the state is surfaced even when the integration package is itself unavailable."""
+    monkeypatch.setattr(actions, "console_dir", lambda: tmp_path / ".console")
+
+    # a genuinely clean run: no proof records, no degradation manifest — the ONLY honest "clean" state.
+    clean_run = "20260101-000000-010"
+    crd = actions.run_dir(clean_run)
+    crd.mkdir(parents=True, exist_ok=True)
+    clean = api.proof_list(clean_run)
+    assert clean["pending"] is True and clean["verification_degraded"] is False
+    assert clean["disposition"] == "nothing_found" and clean["clean"] is True
+
+    # a degraded run: the proof sink never installed. Still zero proof records, but NOT clean.
+    degraded_run = "20260101-000000-011"
+    drd = actions.run_dir(degraded_run)
+    (drd / "proofs").mkdir(parents=True, exist_ok=True)
+    (drd / "proofs" / "_degraded.json").write_text(
+        json.dumps({"degradations": [{"kind": "proof_subsystem_unavailable", "where": "bootstrap",
+                                      "detail": "RuntimeError", "count": 1}]}),
+        encoding="utf-8")
+    d = api.proof_list(degraded_run)
+    assert d["total"] == 0 and d["proofs"] == [], "the degradation manifest was mis-read as a proof record"
+    assert d["verification_degraded"] is True and d["clean"] is False, (
+        "CLEAN must be impossible while the proof subsystem is degraded"
+    )
+    assert d["disposition"] == "proof_subsystem_unavailable"
+    assert {c["kind"] for c in d["degraded_causes"]} == {"proof_subsystem_unavailable"}
+    assert d["disposition"] != clean["disposition"], (
+        "a down proof subsystem renders identically to a clean target — the inv-12 conflation is back"
+    )
