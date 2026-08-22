@@ -144,16 +144,56 @@ def _module_imports(src: str) -> tuple[set[str], set[str]]:
     return absolute_roots, relative_names
 
 
+# The neutral shared core `vigil_core` is NOT a trust domain (it is neither the offense engine `framework`
+# nor the sovereign `sigil`) — both planes are built on it by design. uiproxy reaches exactly ONE of its
+# modules, `vigil_core.metrics` (W6-3 #454: the stdlib-only OpenMetrics `/metrics` registry the proxy serves
+# for its own RED relay counters — the decision doc records it as a ZERO-new-dependency, stdlib-only core
+# module). It is allowed, but PINNED to that one submodule and PROVEN to itself import stdlib only, so
+# "reaches the neutral core" can never silently widen into "reaches a boundary-crossing core module".
+_UP_ALLOWED_SHARED_CORE = {"vigil_core.metrics"}
+
+
+def _vigil_core_submodules(src: str) -> set[str]:
+    """Full dotted paths of every ABSOLUTE `vigil_core[.x...]` module imported in `src`."""
+    mods: set[str] = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ImportFrom) and not (node.level or 0) and node.module \
+                and node.module.split(".")[0] == "vigil_core":
+            mods.add(node.module)
+        elif isinstance(node, ast.Import):
+            mods.update(a.name for a in node.names if a.name.split(".")[0] == "vigil_core")
+    return mods
+
+
 def test_uiproxy_is_pure_stdlib():
-    # The reverse-proxy module: stdlib only + the (pure-stdlib) sibling `dispatch`. Never framework/strix/sigil.
+    # The reverse-proxy module: stdlib + the (pure-stdlib) sibling `dispatch` + the neutral shared core
+    # `vigil_core.metrics` (pinned & purity-checked below). Never framework/strix/sigil.
     from vigil_integration import uiproxy
-    absolute_roots, relative_names = _module_imports(Path(uiproxy.__file__).read_text(encoding="utf-8"))
-    stray = absolute_roots - _UP_ALLOWED_STDLIB
-    assert not stray, f"uiproxy must import stdlib only; found {stray}"
+    src = Path(uiproxy.__file__).read_text(encoding="utf-8")
+    absolute_roots, relative_names = _module_imports(src)
+    stray = absolute_roots - _UP_ALLOWED_STDLIB - {"vigil_core"}
+    assert not stray, f"uiproxy must import stdlib (+ the pinned vigil_core.metrics) only; found {stray}"
     assert relative_names <= {"dispatch"}, f"uiproxy may only reach the sibling `dispatch`; found {relative_names}"
     for banned in _BANNED:
         assert banned not in absolute_roots and banned not in relative_names, \
             f"uiproxy must not import {banned!r}"
+    # If uiproxy reaches the shared core it may reach ONLY the pinned pure-stdlib module(s), and each of
+    # those must itself import stdlib only — so the neutral-core allowance provably crosses no boundary.
+    core_mods = _vigil_core_submodules(src)
+    extra = core_mods - _UP_ALLOWED_SHARED_CORE
+    assert not extra, f"uiproxy may reach only {sorted(_UP_ALLOWED_SHARED_CORE)} of the shared core; found {sorted(extra)}"
+    import importlib
+    import sys
+    _STDLIB = set(sys.stdlib_module_names)  # the FULL stdlib surface (e.g. `resource` for process metrics)
+    for mod in sorted(core_mods):
+        mod_src = Path(importlib.import_module(mod).__file__).read_text(encoding="utf-8")
+        mod_roots, _mod_rel = _module_imports(mod_src)
+        # A reached core module must be pure stdlib: no third-party dep, and — with no vigil_core exemption
+        # here — no sibling core import either, so a future sibling edge re-trips this guard for review.
+        mod_stray = mod_roots - _STDLIB
+        assert not mod_stray, f"{mod} must be pure stdlib to be reachable from uiproxy; found {mod_stray}"
+        for banned in _BANNED:
+            assert banned not in mod_roots, f"{mod} (reached by uiproxy) must not import {banned!r}"
 
 
 def test_up_down_verbs_import_no_trust_domain():
