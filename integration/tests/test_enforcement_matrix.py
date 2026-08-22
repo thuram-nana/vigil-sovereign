@@ -62,6 +62,58 @@ def test_every_control_declares_a_negative_control():
     assert not missing, f"these controls declare no negative-control (refusal) proof — OPEN BYPASS: {missing}"
 
 
+# ── RED-PEN #494 regression: the matrix must NOT overclaim per-PATH coverage ─────────────────────────
+
+def test_matrix_does_not_overclaim_request_path_coverage():
+    """RED-PEN HIGH (#494, overclaim): every resolver drives the gate FUNCTION directly with synthesized
+    inputs and never executes a real request PATH — so the matrix must NOT assert that the named paths
+    (worker / adapter / proxy egress, the tool bridge, …) are traversed. It must state HONESTLY that it
+    measures the GATE-OF-RECORD LAYER — the shared primitive executes-and-refuses. Reverting the honest
+    wording (back to 'Each row is a sensitive execution path … proven by RUNNING the real gate') fails here.
+
+    This reproduces the red-pen 'attack': an auditor reading the artifact must be unable to conclude that a
+    named request path was itself exercised."""
+    md = render_matrix_markdown()
+
+    # (a) the honest scope framing is present: it measures the LAYER, and it explicitly DISCLAIMS the path.
+    assert "GATE-OF-RECORD LAYER" in md, "the matrix must state it measures the gate-of-record LAYER"
+    assert "does NOT drive a real end-to-end request path" in md, (
+        "the matrix must explicitly disclaim traversing the real request path"
+    )
+    assert "not that the named call site" in md and "actually reaches the gate" in md, (
+        "the matrix must say the proof is the SHARED GATE refusing, not that the named call site reaches it"
+    )
+
+    # (b) the load-bearing OVERCLAIM wording is gone. Its return would resurrect the red-pen defect.
+    assert "Each row is a sensitive execution path and the gate of record it traverses" not in md, (
+        "the overclaiming 'sensitive execution path … it traverses' wording must not return"
+    )
+    assert "Sensitive execution path |" not in md, (
+        "the column must not be titled 'Sensitive execution path' (implies the path is traversed)"
+    )
+
+    # (c) every row carries an explicit, honest proof scope, surfaced in the rendered table.
+    assert "Proof scope" in md, "the rendered matrix must carry a Proof scope column"
+    for r in CONTROLS:
+        assert r.proof_scope == "gate function", (
+            f"{r.id}: shipped rows are proven at 'gate function' scope only; a 'request path' scope "
+            f"requires the resolver to actually drive the live call site end-to-end (got {r.proof_scope!r})"
+        )
+    # the committed artifact reflects the per-row proof scope for every gate row.
+    assert md.count("| gate function |") == len(CONTROLS), (
+        "every matrix row must render its proof scope so no row silently implies path-level coverage"
+    )
+
+
+def test_committed_doc_carries_the_honest_scope_disclaimer():
+    """Belt-and-braces on the pinned artifact itself: the file a reader opens must carry the honest
+    disclaimer, not just the generator. Guards against the doc being hand-edited back to the overclaim."""
+    committed = _MATRIX_DOC.read_text(encoding="utf-8")
+    assert "does NOT drive a real end-to-end request path" in committed
+    assert "GATE-OF-RECORD LAYER" in committed
+    assert "Sensitive execution path |" not in committed
+
+
 def test_core_gate_functions_are_all_rowed():
     """Adding a NEW gate-decision function to a clean core gate module (vigil_core.gate / warden_tiers /
     hard_guardrail) turns CI red until it is either given a matrix row or documented as a non-gate helper.
