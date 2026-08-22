@@ -1,6 +1,6 @@
-From 45da6a1d320512b5d86bbb16ab50286b34111046 Mon Sep 17 00:00:00 2001
+From 6b7f6cb83c4ddaf14ae88d943c33ffadc1d692d4 Mon Sep 17 00:00:00 2001
 Subject: [strix-patch 024] S6 (slice 2): close two red-pen gate bypasses (role-resolution + unresolvable ref)
-X-VIGIL-Commit: 45da6a1d320512b5d86bbb16ab50286b34111046
+X-VIGIL-Commit: 6b7f6cb83c4ddaf14ae88d943c33ffadc1d692d4
 X-VIGIL-Date: 2026-08-21T18:38:25-04:00
 
 diff --git a/vendor/strix/strix/report/proof_capture.py b/vendor/strix/strix/report/proof_capture.py

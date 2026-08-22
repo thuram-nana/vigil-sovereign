@@ -245,6 +245,8 @@
   "vendor/strix/strix/report/state.py",
   "vendor/strix/strix/runtime/caido_bootstrap.py",
   "vendor/strix/strix/runtime/docker_client.py",
+  "vendor/strix/strix/runtime/sandbox_hardening.py",
+  "vendor/strix/strix/runtime/session_manager.py",
   "vendor/strix/strix/runtime/vigil_upstream.py",
   "vendor/strix/strix/skills/__init__.py",
   "vendor/strix/strix/telemetry/__init__.py",
@@ -258,6 +260,7 @@
   "vendor/strix/tests_vigil/test_dedupe_extract.py",
   "vendor/strix/tests_vigil/test_proof_capture.py",
   "vendor/strix/tests_vigil/test_reasoning_thinking.py",
+  "vendor/strix/tests_vigil/test_sandbox_hardening.py",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py",
   "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py",
   "vendor/strix/uv.lock"
@@ -397,16 +400,22 @@
    "subject": "S6 (slice 1): causal proof capture \u2014 remove the retrospective substring correlation"
   },
   {
-   "commit": "33dd46fe6c74dc962d19366d2d72f15e9c415b4d",
+   "commit": "0f9d451544a41cef1d6f0decfb240c3da31ab3e4",
    "file": "023-s6-slice-2-inv-6-gate-bind-the-exploit-request-b.patch",
-   "sha256": "311d7877c4e8e4ccd2f270a444ef39d00413e16f4ec510e4c63ee9a0bcb7a023",
+   "sha256": "d76c88c003050e1d732d891ef83a025f0eb95fcb2cc4655586dfbb12ff958ab1",
    "subject": "S6 (slice 2) + inv-6 gate: bind the exploit REQUEST bytes and refuse a FACT without them (inv 6 + 8 MET)"
   },
   {
-   "commit": "45da6a1d320512b5d86bbb16ab50286b34111046",
+   "commit": "6b7f6cb83c4ddaf14ae88d943c33ffadc1d692d4",
    "file": "024-s6-slice-2-close-two-red-pen-gate-bypasses-role.patch",
-   "sha256": "646e8bec3a00fdec46038220dbe6aaa70f8258a2796c3b0cf446225c51aa38c4",
+   "sha256": "99257a766a2737225a4ef9a813185d45b212ef11d5a5f00d907cfc351bf253d6",
    "subject": "S6 (slice 2): close two red-pen gate bypasses (role-resolution + unresolvable ref)"
+  },
+  {
+   "commit": "177633c98d3aeea4cb91c5348ee2965f7f50de2a",
+   "file": "025-strix-hexstrike-sx-s5-harden-the-strix-runtime-c.patch",
+   "sha256": "9572cd252af8e9e481dd1e38cc7de51bd63e7a3b089cf92b5d988e3014dcb9dd",
+   "subject": "Strix+HexStrike sx-s5: harden the Strix runtime container (least-privilege + pinned image + reaper)"
   }
  ],
  "schema": 1,
@@ -471,7 +480,7 @@
   "vendor/strix/strix/config/__init__.py": "cc75d19197d85b3c311b4af3714df175f3ad8f7c31c6a25b068ee6d255767fd5",
   "vendor/strix/strix/config/loader.py": "32efc8805d5bab0cfbe70377ed18af908a1680723443a0625b6d04312313a265",
   "vendor/strix/strix/config/models.py": "4bc1cc3afe231f5bcc3b81a83e6f43646e41e8d503d72ac8193bbbab0677003c",
-  "vendor/strix/strix/config/settings.py": "0e1fdd40add50ac46210100468f331159aa26775d3dc166d7975c6bfaca2f67c",
+  "vendor/strix/strix/config/settings.py": "e6c8e8e2bedd0c516b36c7f978d5ee6b6f986f3f6c2325a88c6ec0c4a479121a",
   "vendor/strix/strix/core/__init__.py": "7e6ff8e3393df64f4d6c7fa52f111d9fd7fbb9a3f2cd9fec1d0ce314e6c14678",
   "vendor/strix/strix/core/agents.py": "0faeb9c674f645e8bdb019754365f4052227b8473239c4c46d364dacbf706ae5",
   "vendor/strix/strix/core/execution.py": "e065648f6189bae3b6c0debb1968cbeed530879b08d02529e4c1d3a185aa2600",
@@ -517,9 +526,10 @@
   "vendor/strix/strix/runtime/__init__.py": "ac8999103459c5bb68ad82e1adaa6be8a30ccbb779393da8768340b60a76786b",
   "vendor/strix/strix/runtime/backends.py": "005d62b552bb494800d00ef16232499f4baa23b5e8371ff7f88168a6a0da0f04",
   "vendor/strix/strix/runtime/caido_bootstrap.py": "e8e03b8cdf0ee2760161d72ba173fa8aca5dbda0fa203b8a50bd4cfa293c00c6",
-  "vendor/strix/strix/runtime/docker_client.py": "874f20e07f660021844e163e6fb931585a9c3c83ae53204349c788961ad2e903",
+  "vendor/strix/strix/runtime/docker_client.py": "c03c88ad2f4d69a7dc804d1f5c93f007486759d556e457d4868b6a670f58fba8",
   "vendor/strix/strix/runtime/local_dir_staging.py": "4f8bc84226fb42cf816376e1706cecbe72dd633c69bf4a39eb2489f84b7fdabc",
-  "vendor/strix/strix/runtime/session_manager.py": "b40dfb64ff65d40b10a41e47968e54b0713776e4e68bf8a427def811d434a5a2",
+  "vendor/strix/strix/runtime/sandbox_hardening.py": "409cfd0c4b5b665b08741b69c9411ea64b1d745bf32b0ffe62b5d8dd484ac418",
+  "vendor/strix/strix/runtime/session_manager.py": "90c133dfdfdbc1318d92f7bf6095c5e36312377aceed56b47bf4620af03c163f",
   "vendor/strix/strix/runtime/vigil_upstream.py": "8b83cd8f6fb3f11969e7883ee9fe9f0f86f49c0836de88c2d24fb2d7368cb42d",
   "vendor/strix/strix/skills/README.md": "0f9834d74d33d20a1985189a2dc7e090c090cd4ea3111522fdfdc359c7540177",
   "vendor/strix/strix/skills/__init__.py": "9402336b992269e3668a11cd863b177718bd66af9455e003cf07c329bd8a7f0a",
@@ -647,6 +657,7 @@
   "vendor/strix/tests_vigil/test_dedupe_extract.py": "908371cfb9105f8c871152306f9116bdf7d2b817f00974ed585a873ed099e4da",
   "vendor/strix/tests_vigil/test_proof_capture.py": "8353aab117c4f75970df48c103ef6822d076be74aee9816775133bb24dd3a828",
   "vendor/strix/tests_vigil/test_reasoning_thinking.py": "56365c986fa3bb04ca250e45f7f2b126732a1c0c4b827d224ea44c75d9d515b0",
+  "vendor/strix/tests_vigil/test_sandbox_hardening.py": "73db3dd1f8bfeaaa798a9181dae7ace88f11f39c4a77005d1795a00c1ed41180",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
   "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "e3de57c3f4a12ac48f08815597d3c70ee959867bc52b4642470b341052ff55c1",
   "vendor/strix/uv.lock": "ef01a512cf243a9b7084e4724a89c52ef8567e6a144057219e72940280716a26"
