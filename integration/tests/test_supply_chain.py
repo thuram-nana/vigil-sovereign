@@ -25,6 +25,7 @@ import base64
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import re
 import stat
@@ -852,3 +853,95 @@ def test_require_hashes_rejects_a_corrupted_or_missing_hash() -> None:
         mis = install("obsidianfixture==1.0\n")
         assert mis.returncode != 0, "a MISSING hash was ACCEPTED — --require-hashes is a no-op"
         assert "hash" in (mis.stdout + mis.stderr).lower(), "no missing-hash diagnostic emitted"
+
+
+# ==========================================================================================
+# Runtime image visibility (issue #511 / W5-6) — prove the RUNNING gateway is the image built
+# from the CURRENT source, a check the Dockerfile/compose scanners cannot make.
+# ==========================================================================================
+
+def _gateway_context(root: Path) -> Path:
+    return root / "gateway"
+
+
+def test_runtime_check_ok_when_running_matches_current_source(tmp_path) -> None:
+    pins = _load_image_pins()
+    ctx = tmp_path / "gateway"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    cur = pins.context_digest(ctx)
+    pin = {"schema": pins.GATEWAY_PIN_SCHEMA, "context_digest": cur,
+           "image_id": "sha256:built", "image_tag": f"vigil-gateway:ctx-{cur[:16]}"}
+    res = pins.check_runtime_image(context_dir=ctx, pin=pin, running_image_id="sha256:built")
+    assert res.ok is True and not (res.stale or res.mismatch or res.invisible)
+
+
+def test_runtime_check_flags_stale_after_an_upgrade(tmp_path) -> None:
+    """THE #511 defect made observable: the source changed but the gateway was not rebuilt. The pin still
+    records the OLD context digest, so the check reports STALE and is NOT ok (fail-closed)."""
+    pins = _load_image_pins()
+    ctx = tmp_path / "gateway"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    old = pins.context_digest(ctx)
+    pin = {"schema": pins.GATEWAY_PIN_SCHEMA, "context_digest": old, "image_id": "sha256:old"}
+    # an "upgrade": the build context changes but nothing rebuilt / re-pinned
+    (ctx / "Dockerfile").write_text("FROM scratch\nENV UPGRADED=1\n", encoding="utf-8")
+    res = pins.check_runtime_image(context_dir=ctx, pin=pin, running_image_id="sha256:old")
+    assert res.ok is False and res.stale is True
+    assert "STALE" in res.reason
+
+
+def test_runtime_check_flags_digest_mismatch(tmp_path) -> None:
+    pins = _load_image_pins()
+    ctx = tmp_path / "gateway"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    cur = pins.context_digest(ctx)
+    pin = {"schema": pins.GATEWAY_PIN_SCHEMA, "context_digest": cur, "image_id": "sha256:built"}
+    # the tree matches the pin, but the CONTAINER runs a different image than the pin recorded
+    res = pins.check_runtime_image(context_dir=ctx, pin=pin, running_image_id="sha256:OTHER")
+    assert res.ok is False and res.mismatch is True
+    assert "MISMATCH" in res.reason
+
+
+def test_runtime_check_fail_closed_on_missing_inputs(tmp_path) -> None:
+    """NEGATIVE CONTROL: the check is not a no-op. Any missing/ambiguous input is NOT a pass — no pin
+    (never built) and no running id (cannot read the container) both fail closed."""
+    pins = _load_image_pins()
+    ctx = tmp_path / "gateway"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    cur = pins.context_digest(ctx)
+    # no pin at all -> INVISIBLE
+    r1 = pins.check_runtime_image(context_dir=ctx, pin=None, running_image_id="sha256:x")
+    assert r1.ok is False and r1.invisible is True
+    # a matching pin but the running image id is unreadable -> INVISIBLE (never assumed fine)
+    pin = {"schema": pins.GATEWAY_PIN_SCHEMA, "context_digest": cur, "image_id": "sha256:built"}
+    r2 = pins.check_runtime_image(context_dir=ctx, pin=pin, running_image_id=None)
+    assert r2.ok is False and r2.invisible is True
+
+
+def test_load_gateway_pin_rejects_foreign_schema(tmp_path) -> None:
+    pins = _load_image_pins()
+    p = tmp_path / "pin.json"
+    p.write_text(json.dumps({"schema": "not-ours", "image_id": "sha256:evil"}), encoding="utf-8")
+    assert pins.load_gateway_pin(p) is None
+    p.write_text("{ not json", encoding="utf-8")
+    assert pins.load_gateway_pin(p) is None
+    assert pins.load_gateway_pin(tmp_path / "absent.json") is None
+
+
+def test_runtime_check_cli_advisory_vs_production(tmp_path) -> None:
+    """The CLI is LOUD but advisory outside production (exit 0), and REFUSES (exit non-zero) when the
+    production posture is armed — matching the acceptance criterion."""
+    pins = _load_image_pins()
+    ctx_root = tmp_path
+    (ctx_root / "gateway").mkdir()
+    (ctx_root / "gateway" / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    missing_pin = ctx_root / "no-pin.json"
+    # advisory: no pin, no posture -> exit 0
+    assert pins._runtime_check(ctx_root, pin_path=missing_pin, production=False) == 0
+    # production (explicit flag) -> refuse
+    assert pins._runtime_check(ctx_root, pin_path=missing_pin, production=True) == 1
+

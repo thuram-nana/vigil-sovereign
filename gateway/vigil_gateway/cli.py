@@ -50,7 +50,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("apply-firewall", help="load the ruleset with nft -f (needs privilege)")
 
     rc = sub.add_parser("render-compose", help="print the docker-compose fragment")
-    rc.add_argument("--gateway-image", default="vigil-gateway:latest")
+    # Default "" -> the content-addressed interpolation form (image: vigil-gateway:${VIGIL_GATEWAY_IMAGE_TAG
+    # :-latest}); pass an explicit reference to pin the printed compose to a specific tag.
+    rc.add_argument("--gateway-image", default="")
     rc.add_argument("--charter-slug", default="")
     sub.add_parser("ensure-networks", help="create the sandbox + egress docker networks")
 
