@@ -171,6 +171,17 @@
       "ci_job": "the briefing explains every agent and capability",
       "failure_class": "n-a",
       "default": "n-a"
+    },
+    {
+      "id": "W13-5",
+      "title": "Capability tokens are validated (single-use, nine-field bound) at the executor boundary",
+      "claim": "The offense executor validates a nine-field-bound, single-use, owner-signed capability token immediately before it launches a tool, and burns the token's nonce in the existing O_EXCL nonce ledger, so an authorization decision cannot be stale, replayed, or reused for a different operation by the time execution happens.",
+      "source": "docs/decisions/W13-5-executor-capability-token.md:9",
+      "enforced_by": {"file": "integration/vigil_integration/live/external_tool.py", "symbol": "_capability_boundary_refusal"},
+      "proved_by": {"file": "integration/tests/test_capability_token.py", "tests": ["test_a_valid_token_authorizes_exactly_once", "test_negative_control_replayed_token_is_refused", "test_negative_control_different_operation_hash_is_refused", "test_negative_control_token_past_expiry_is_refused", "test_negative_control_different_target_is_refused", "test_uses_the_existing_o_excl_nonce_ledger", "test_executor_consults_the_capability_boundary_before_running", "test_structural_check_is_not_a_no_op_negative_control"]},
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
