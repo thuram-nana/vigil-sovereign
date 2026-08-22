@@ -1002,6 +1002,32 @@ def _listening(host: str, port: int) -> bool:
         return False
 
 
+# /readyz is UNAUTHENTICATED, so an untrusted caller could hammer it. Each check does a live TCP connect
+# to the sovereign backend; without a bound, a probe flood would AMPLIFY into a matching flood of backend
+# connects. Debounce it: a result is cached for a short TTL and shared across the ThreadingHTTPServer's
+# request threads, so no matter the incoming /readyz rate the proxy opens at most ~1 backend connect per
+# TTL per address. The window is tiny, so readiness still reflects reality for an orchestrator's probe.
+_READYZ_TTL = 1.0
+_readyz_lock = threading.Lock()
+_readyz_cache: dict = {}
+
+
+def _sovereign_ready_debounced(host: str, port: int) -> bool:
+    """`_listening(host, port)` behind a short-TTL, thread-safe cache, so an unauthenticated /readyz flood
+    cannot amplify into a flood of backend connects. Returns the cached result within the TTL, else does one
+    live connect and caches it."""
+    key = (host, int(port))
+    now = time.monotonic()
+    with _readyz_lock:
+        hit = _readyz_cache.get(key)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+    ok = _listening(host, port)          # the single live connect, done OUTSIDE the lock
+    with _readyz_lock:
+        _readyz_cache[key] = (now + _READYZ_TTL, ok)
+    return ok
+
+
 def _plane_ports_status(ports, *, starting: bool = False) -> dict:
     out = {name: _listening(host, port) for name, host, port in ports}
     return {"ok": True, "planes": out, "running": bool(out) and all(out.values()), "starting": starting}
@@ -1536,9 +1562,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         authenticated request to (per-user whoami lives there; without it the proxy can serve nothing but
         the login shell). A LIVE port probe (no bytes sent), so it reflects the sovereign address in
         `--proxy-only` too. 503 when the sovereign is not listening, so an orchestrator drains a replica
-        whose writer is gone. UNAUTHENTICATED, Host-UNGATED; the body carries no address/token."""
+        whose writer is gone. UNAUTHENTICATED, Host-UNGATED; the body carries no address/token. The live
+        connect is short-timeout and DEBOUNCED (`_sovereign_ready_debounced`, `_READYZ_TTL`) so an
+        unauthenticated probe flood cannot amplify into a flood of backend connects."""
         sov_host, sov_port = (getattr(self.server, "backends", None) or _default_backends())["sovereign"]
-        ok = _listening(sov_host, sov_port)
+        ok = _sovereign_ready_debounced(sov_host, sov_port)
         body = {"ok": ok, "checks": [{"name": "sovereign", "ok": ok}]}
         self._plane_json(body, status=200 if ok else 503)
 

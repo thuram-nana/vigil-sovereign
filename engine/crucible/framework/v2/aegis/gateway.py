@@ -27,6 +27,7 @@ from __future__ import annotations
 import itertools
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -38,6 +39,36 @@ from .models import AegisConfig, BeliefRef, Verdict
 from .response_policy import feed_and_score, feed_oob_correlation, graduated_action
 
 _log = get_logger("aegis.gateway")
+
+
+# /readyz is UNAUTHENTICATED, so an untrusted caller could hammer it. Each check does a live TCP connect
+# to the fixed upstream; without a bound that flood would AMPLIFY into a matching flood of upstream
+# connects. Debounce it: the result is cached for a short TTL, shared across the ThreadingHTTPServer's
+# request threads, so however fast /readyz is polled the gateway opens at most ~1 upstream connect per TTL
+# per address. The window is tiny, so readiness still tracks reality for an orchestrator's probe.
+_READYZ_TTL = 1.0
+_readyz_lock = threading.Lock()
+_readyz_cache: dict = {}
+
+
+def _upstream_listening_debounced(host: str, port: int) -> bool:
+    """A short-timeout TCP connect (no bytes sent) to (host, port), behind a short-TTL thread-safe cache,
+    so an unauthenticated /readyz flood cannot amplify into a flood of upstream connects. Returns the cached
+    result within the TTL, else does one live connect and caches it. Total: any error fails CLOSED."""
+    key = (host, int(port))
+    now = time.monotonic()
+    with _readyz_lock:
+        hit = _readyz_cache.get(key)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+    try:
+        with socket.create_connection((host, int(port)), timeout=0.5):
+            ok = True
+    except (OSError, ValueError, OverflowError):
+        ok = False
+    with _readyz_lock:
+        _readyz_cache[key] = (now + _READYZ_TTL, ok)
+    return ok
 
 # Hop-by-hop headers (RFC 7230 6.1) — never forwarded end-to-end in either direction.
 _HOP_BY_HOP = frozenset({
@@ -509,16 +540,17 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
 
     def _readyz_upstream_ok(self) -> bool:
         """A LIVE port probe of the operator's fixed upstream (a short-timeout TCP connect, no bytes sent):
-        the gateway's whole job is to forward there, so it is NOT ready when the upstream is down. Total —
-        any resolution/parse error fails CLOSED (not ready)."""
+        the gateway's whole job is to forward there, so it is NOT ready when the upstream is down. The
+        connect is DEBOUNCED (`_upstream_listening_debounced`, `_READYZ_TTL`) so an unauthenticated /readyz
+        flood cannot amplify into a flood of upstream connects. Total — any resolution/parse error fails
+        CLOSED (not ready)."""
         try:
             u = urlsplit(self.settings.upstream_base)
             host = u.hostname or ""
             port = u.port or (443 if u.scheme == "https" else 80)
-            with socket.create_connection((host, int(port)), timeout=0.5):
-                return True
-        except (OSError, ValueError, OverflowError):
+        except (ValueError, AttributeError):
             return False
+        return _upstream_listening_debounced(host, port)
 
     def _handle_probe(self) -> bool:
         """Answer the UNAUTHENTICATED liveness/readiness probes LOCALLY (never forwarded), so a k8s/LB

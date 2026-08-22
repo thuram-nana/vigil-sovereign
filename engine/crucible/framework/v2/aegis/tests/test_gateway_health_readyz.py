@@ -134,3 +134,33 @@ def test_probes_expose_no_secret():
             assert "traceback" not in low
     finally:
         gw.shutdown(); gw.server_close()
+
+
+def test_readyz_debounces_upstream_connects_no_amplification(upstream, monkeypatch):
+    """An UNAUTHENTICATED /readyz must not let a caller amplify: many rapid probes collapse to at most one
+    live upstream connect within the debounce TTL (`_READYZ_TTL`), so a probe flood cannot become a flood
+    of upstream connects."""
+    from framework.v2.aegis import gateway as gw_mod
+
+    gw_mod._readyz_cache.clear()
+    calls = {"n": 0}
+    import socket as _socket
+    real_create = _socket.create_connection
+
+    def _counting(addr, *a, **k):
+        # count only the gateway's own probe connect to the UPSTREAM (not the test client's connects to
+        # the gateway, which also route through socket.create_connection).
+        if isinstance(addr, tuple) and int(addr[1]) == int(upstream):
+            calls["n"] += 1
+        return real_create(addr, *a, **k)
+
+    monkeypatch.setattr(gw_mod.socket, "create_connection", _counting)
+    gw, port = _run_gateway(upstream)
+    try:
+        for _ in range(25):
+            st, _b = _get(port, "/readyz")
+            assert st == 200
+        assert calls["n"] == 1, f"expected 1 debounced upstream connect, got {calls['n']}"
+    finally:
+        gw.shutdown(); gw.server_close()
+        gw_mod._readyz_cache.clear()

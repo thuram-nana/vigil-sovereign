@@ -26,6 +26,7 @@ import only — no egress/exploit tool is exposed. A different registry can be i
 from __future__ import annotations
 
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -96,12 +97,44 @@ class ApiHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    # ---- health / readiness probes (UNAUTHENTICATED, secret-free) ---------
+
+    def _healthz(self) -> None:
+        """Liveness — the process answers. UNAUTHENTICATED and gate-UNGATED (a k8s/LB probe presents
+        neither an API key nor a same-origin proof), and carries NO secret."""
+        self._json({"ok": True})
+
+    def _readyz(self) -> None:
+        """Readiness — checks the API's REAL dependency: the console working directory it reads from and
+        the importer persists into. Returns 503 when that store cannot be created/written, so an
+        orchestrator drains an API that cannot serve a read or record an import. UNAUTHENTICATED and
+        gate-UNGATED; the body carries no path/token (only a boolean + the exception TYPE name on
+        failure)."""
+        ok, name = True, ""
+        try:
+            from ..console import actions as console_actions
+            d = console_actions.console_dir()       # creates + returns the console's .console working dir
+            if not os.access(d, os.W_OK):
+                ok, name = False, "not_writable"
+        except Exception as exc:  # noqa: BLE001 — a store that will not open is NOT ready (fail-closed)
+            ok, name = False, type(exc).__name__
+        body: dict = {"ok": ok, "checks": [{"name": "console_store", "ok": ok}]}
+        if not ok:
+            body["error"] = name                     # exception TYPE / short reason — never a path
+        self._json(body, status=200 if ok else 503)
+
     # ---- GET (read-first) -------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
+        path = urlsplit(self.path).path
+        # Health/readiness probes are answered FIRST — before the API-key gate — so a k8s/LB probe
+        # (which presents no key) can reach them. They expose no sensitive state.
+        if path == "/healthz":
+            return self._healthz()
+        if path == "/readyz":
+            return self._readyz()
         if not self._api_key_ok():   # fail-closed key gate on top of the loopback bind
             return
-        path = urlsplit(self.path).path
         try:
             if path == f"{_API}/tools":
                 self._json(reads.tools(self.server.registry))
