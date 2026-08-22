@@ -480,13 +480,6 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/chat/session/"):
                 self._json(chat.get_session(path[len("/api/chat/session/"):].strip("/")))
                 return
-            if path == "/api/chat/attachments":
-                # One chat's finished attachment MANIFESTS (name/digest/size/kind/counts — pointers, never
-                # bytes) plus the gated-scan offer when an extracted codebase is present. Read-only; the
-                # token + Host checks above already gated it. An unsafe chat id raises ValueError → 404.
-                q = parse_qs(parts.query)
-                self._json(chat.attachments_list((q.get("chat_id") or [""])[0]))
-                return
             if path == "/api/chat/hypotheses":
                 # Phase C: one chat's hypothesis ledger (open first, then closed with their finding ref).
                 # Read-only; reconciles against the engine's confirmed FACTs so a hypothesis a run has since

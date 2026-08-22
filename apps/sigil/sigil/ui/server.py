@@ -352,6 +352,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._sse()
         if path == "/api/sigil/hud":
             return self._hud()
+        # W17-14 (#548): /api/graph, /api/graph/entity and /api/classify (and /api/ask above) are gated,
+        # tested programmatic cockpit endpoints. The shipped static UI does not surface an affordance for
+        # them; they are the owner's programmatic query/dispatch surface (the phone bridge exposes the same
+        # read:snapshot graph). KEPT + documented (docs/FEATURES.md, docs/decisions/W17-14-...md), not orphaned.
         if path == "/api/graph":
             return self._graph()
         if path == "/api/graph/entity":

@@ -1178,16 +1178,11 @@ def planner_data(slug: str) -> dict[str, Any]:
     return _safe(_read, default={"slug": slug, "present": False})
 
 
-def reports_data(slug: str) -> dict[str, Any]:
-    """Generated reports on disk for an engagement (targets/<slug>/reports/)."""
-    def _read() -> dict[str, Any]:
-        rd = Path(paths.target_dir(slug)) / "reports"
-        if not rd.is_dir():
-            return {"slug": slug, "reports": []}
-        files = [{"name": f.name, "size": f.stat().st_size} for f in rd.iterdir() if f.is_file()]
-        return {"slug": slug, "reports": sorted(files, key=lambda x: x["name"])}
-
-    return _safe(_read, default={"slug": slug, "reports": []})
+# NB (W17-14 #548): ``reports_data`` was removed here. It had NO HTTP route (deliberately dropped in the
+# A6/B7 orphan-surface cleanup) AND — unlike ``authority_full``/``session_detail``, which stayed because
+# they keep internal callers — it had ZERO internal callers: nothing in the console, the dossier/report
+# assembly, or the /api/v1 plane read it. A provider with neither a route nor a caller is dead code, so it
+# is gone. (Generated reports on disk are surfaced through ``run_report`` / the dossier, not this provider.)
 
 
 # ---------------------------------------------------------------------------

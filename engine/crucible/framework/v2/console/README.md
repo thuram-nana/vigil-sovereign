@@ -177,9 +177,11 @@ Never `import vigil_integration`.
   (`actions.py:279`), static via the `STATIC_DIR` resolve check (`server.py:132`), chat/session ids
   via `_safe_chat_id`/`_safe_session_id`. A bad id raises `ValueError`, which `do_GET`/`do_POST` map
   to a clean **404** — never a 500, never a path leak. Reuse these; don't hand-roll a new guard.
-- **Some `api.*` providers have no GET route** by design (`engagement_detail`, `reports_data`,
-  `authority_full`, `session_detail` — see the U0 note at `server.py:74`). They stay callable and
-  unit-tested; don't assume "no route" means "dead code."
+- **Some `api.*` providers have no GET route** by design (`engagement_detail`, `authority_full`,
+  `session_detail` — see the U0 note at `server.py:74`). They stay callable and unit-tested BECAUSE
+  they keep INTERNAL callers (dossier/report assembly, `charter_status`, `framework.v2.api.reads`);
+  "no route" is not "dead code" only while an internal caller remains. A provider with neither a route
+  nor a caller IS dead code and is removed — e.g. `reports_data`, dropped in W17-14 #548.
 - **Kill-switch state fails closed:** `api._killswitch_state` reports `tripped=True` on an unreadable
   state — mirror that honesty in any new safety-state provider.
 - **The console never *clears* a kill-switch.** Tripping is a console action; clearing is a
