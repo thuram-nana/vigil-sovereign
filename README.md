@@ -641,6 +641,7 @@ The strong controls this README describes (the egress gate, the sovereignty tier
 Security posture (informational — off-by-default controls; does NOT affect the exit code):
   .. egress-gate: OFF  — no vigil-gateway container running (state: 'absent'); STRIX_DOCKER_SANDBOX_NETWORK unset
   .. vault:       UNPROVISIONED  — keys plaintext (~/.sigil/sigil.env) — run `sigil vault provision` to seal secrets at rest
+  .. key-sealing: ABSENT  — no trust-root key files present yet (owner.priv=ABSENT, spine.dek=ABSENT, warden.key=ABSENT)
   .. sovereignty: PERMISSIVE  — dev default — the sovereignty ladder binds but admits cloud LLM egress; set CRUCIBLE_SOVEREIGNTY_TIER (AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD) to raise it
   .. entitlement: UNGOVERNED  — no trust root at ~/vigil/engine/crucible/framework/v2/.entitlement/trust-root.json — gated capabilities are permitted (logged at WARNING) but NOT enforced
   .. backups:     OFF  — 0/6 systemd timers enabled (vigil-backup-drill, vigil-backup-push, vigil-backup, vigil-ha-mirror, vigil-posture, vigil-reprove) — backups/reprove/HA are not running

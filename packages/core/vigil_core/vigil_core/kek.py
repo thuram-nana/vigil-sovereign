@@ -89,32 +89,42 @@ def provision_kek(directory, *, runner: TpmRunner = _default_tpm_runner) -> None
     if pub.exists() or priv.exists():
         raise KekError("a sealed KEK already exists here — refusing to overwrite the trust root")
 
-    kek = new_kek()
-    with tempfile.TemporaryDirectory() as td:
-        primary = str(Path(td) / "primary.ctx")
-        pub_tmp, priv_tmp = str(Path(td) / "seal.pub"), str(Path(td) / "seal.priv")
-        r1 = runner(["tpm2_createprimary", *_PRIMARY_ARGS, "-c", primary], None)
-        if r1.rc != 0:
-            raise KekError("tpm2_createprimary failed (is tpm2-tools installed and the TPM reachable?)")
-        # seal the KEK as a keyedhash object under the primary; KEK bytes go in on stdin (never argv).
-        r2 = runner(["tpm2_create", "-C", primary, "-u", pub_tmp, "-r", priv_tmp, "-i", "-"], kek)
-        if r2.rc != 0 or not (Path(pub_tmp).exists() and Path(priv_tmp).exists()):
-            raise KekError("tpm2_create (seal KEK) failed")
-        sealed_pub = Path(pub_tmp).read_bytes()
-        sealed_priv = Path(priv_tmp).read_bytes()
-
-    _atomic_write(pub, sealed_pub)
-    _atomic_write(priv, sealed_priv)
+    _seal_kek_bytes(d, new_kek(), runner=runner, pub_name=_SEAL_PUB, priv_name=_SEAL_PRIV)
 
 
 def load_kek(directory, *, runner: TpmRunner = _default_tpm_runner) -> bytes:
     """Unseal the 32-byte KEK from the TPM using the persisted sealed blobs under ``directory``. Raises
     :class:`KekError` if not provisioned, if the TPM is unavailable, or if the unsealed KEK is not
     exactly 32 bytes — never returns a weak/partial KEK, never falls back to plaintext."""
+    return load_kek_from(directory, _SEAL_PUB, _SEAL_PRIV, runner=runner)
+
+
+def reseal_kek(directory, kek: bytes, *, runner: TpmRunner = _default_tpm_runner,
+               pub_name: str = _SEAL_PUB, priv_name: str = _SEAL_PRIV) -> None:
+    """Seal a PROVIDED 32-byte ``kek`` to this machine's TPM, persisting the sealed pub/priv blobs under
+    ``directory`` at the given names. Unlike :func:`provision_kek` (which MINTS a fresh KEK and refuses to
+    overwrite the trust root), this seals a KEK the caller already holds — used by KEK ROTATION to seal the
+    fresh KEK to STAGED blob names before the atomic cutover. Fail-closed: any TPM step failing raises
+    :class:`KekError`. Overwrites the named blobs (the caller owns the staged names)."""
+    if not isinstance(kek, (bytes, bytearray)) or len(kek) != _KEK_LEN:
+        raise KekError(f"KEK to seal must be exactly {_KEK_LEN} bytes")
     d = Path(directory)
-    pub, priv = d / _SEAL_PUB, d / _SEAL_PRIV
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    _seal_kek_bytes(d, bytes(kek), runner=runner, pub_name=pub_name, priv_name=priv_name)
+
+
+def load_kek_from(directory, pub_name: str, priv_name: str, *, runner: TpmRunner = _default_tpm_runner) -> bytes:
+    """Unseal the 32-byte KEK from the sealed blobs named ``pub_name``/``priv_name`` under ``directory``.
+    The name-parameterised form of :func:`load_kek` — used to VERIFY a freshly-sealed STAGED KEK unseals
+    back to the expected bytes before a rotation commits. Fail-closed on any TPM failure / wrong length."""
+    d = Path(directory)
+    pub, priv = d / pub_name, d / priv_name
     if not (pub.exists() and priv.exists()):
-        raise KekError("no sealed KEK found — run `provision_kek` once on this machine first")
+        raise KekError(f"no sealed KEK found at {pub_name}/{priv_name} under {d}")
     with tempfile.TemporaryDirectory() as td:
         primary = str(Path(td) / "primary.ctx")
         seal_ctx = str(Path(td) / "seal.ctx")
@@ -132,6 +142,25 @@ def load_kek(directory, *, runner: TpmRunner = _default_tpm_runner) -> bytes:
     if len(kek) != _KEK_LEN:
         raise KekError(f"unsealed KEK is {len(kek)} bytes, expected {_KEK_LEN} (fail-closed)")
     return kek
+
+
+def _seal_kek_bytes(d: Path, kek: bytes, *, runner: TpmRunner, pub_name: str, priv_name: str) -> None:
+    """Seal ``kek`` under a deterministic owner-hierarchy primary and atomically write the sealed pub/priv
+    blobs to ``d/pub_name`` and ``d/priv_name`` (0600). The single sealing routine shared by
+    :func:`provision_kek` and :func:`reseal_kek` so the two never drift. Fail-closed on any TPM error."""
+    with tempfile.TemporaryDirectory() as td:
+        primary = str(Path(td) / "primary.ctx")
+        pub_tmp, priv_tmp = str(Path(td) / "seal.pub"), str(Path(td) / "seal.priv")
+        if runner(["tpm2_createprimary", *_PRIMARY_ARGS, "-c", primary], None).rc != 0:
+            raise KekError("tpm2_createprimary failed (is tpm2-tools installed and the TPM reachable?)")
+        # seal the KEK as a keyedhash object under the primary; KEK bytes go in on stdin (never argv).
+        r2 = runner(["tpm2_create", "-C", primary, "-u", pub_tmp, "-r", priv_tmp, "-i", "-"], bytes(kek))
+        if r2.rc != 0 or not (Path(pub_tmp).exists() and Path(priv_tmp).exists()):
+            raise KekError("tpm2_create (seal KEK) failed")
+        sealed_pub = Path(pub_tmp).read_bytes()
+        sealed_priv = Path(priv_tmp).read_bytes()
+    _atomic_write(d / pub_name, sealed_pub)
+    _atomic_write(d / priv_name, sealed_priv)
 
 
 def is_provisioned(directory) -> bool:

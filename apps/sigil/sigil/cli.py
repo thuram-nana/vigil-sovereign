@@ -1312,6 +1312,76 @@ def cmd_vault(a) -> None:
         print(f"vault: {v.status()}")
 
 
+def cmd_key(a) -> None:
+    """Key lifecycle (audit W9-2): rotate the spine DEK, the WARDEN kernel key and the TPM KEK; seal the
+    WARDEN key. `status` reports the per-key sealing + succession state; the rotate verbs are
+    verify-then-swap and FAIL-CLOSED — a leg that cannot be proven leaves every key untouched."""
+    import sys as _sys
+    from pathlib import Path
+
+    from vigil_core.rotation import RotationError
+
+    from . import config
+    from .platform.vault import OWNER_PRIV_CONTEXT, owner_vault
+    from .spine import envelope as _env
+    from .spine.dek_rotation import DekRotationError, rotate_spine_dek
+    from .warden_key import (
+        WARDEN_KEY_CONTEXT, WardenKeyError, rotate_warden_key, seal_warden_key, verify_warden_succession,
+    )
+    v = owner_vault()
+    verb = getattr(a, "key_cmd", "status")
+
+    if verb == "status":
+        from vigil_core import is_sealed
+        print(f"vault: {v.status()}")
+        for label, path, _ctx in _kek_sealed_files(config, OWNER_PRIV_CONTEXT, _env, WARDEN_KEY_CONTEXT):
+            try:
+                raw = Path(path).read_bytes()
+                state = "SEALED" if is_sealed(raw) else "PLAINTEXT" if raw else "EMPTY"
+            except OSError:
+                state = "ABSENT"
+            print(f"  {label:<12} {state:<9} {path}")
+        ok, why = verify_warden_succession(config.SIGIL_HOME)
+        print(f"  warden succession: {'OK' if ok else 'BROKEN'} — {why}")
+        return
+
+    if verb == "seal-warden":
+        status = seal_warden_key(config.SIGIL_HOME, v)
+        print(f"warden key seal: {status}")
+        if status == "disabled":
+            print("  (vault not provisioned — run `sigil vault provision` first)")
+        return
+
+    try:
+        if verb == "rotate-warden":
+            res = rotate_warden_key(config.SIGIL_HOME, v)
+            print(f"WARDEN key rotated (succession seq {res['seq']}); new pub {res['new_pub'][:16]}…")
+        elif verb == "rotate-dek":
+            res = rotate_spine_dek(config.SPINE_PATH, v)
+            print(f"spine DEK rotated: {res['rotated']} record(s) re-encrypted under a fresh DEK")
+        elif verb == "rotate-kek":
+            files = [(p, c) for (_l, p, c) in _kek_sealed_files(config, OWNER_PRIV_CONTEXT, _env, WARDEN_KEY_CONTEXT)]
+            res = v.rotate_kek(files)
+            print(f"TPM KEK rotated: {res['rotated']} sealed file(s) re-wrapped under a fresh KEK")
+            print("  NOTE: secrets sealed DIRECTLY under the KEK and embedded in the immutable owner-signed "
+                  "spine (e.g. account TOTP secrets) are not files and are NOT re-wrapped here — see W9-1.")
+    except (RotationError, DekRotationError, WardenKeyError) as e:
+        print(f"!! rotation refused (fail-closed, nothing swapped): {e}", file=_sys.stderr)
+        _sys.exit(1)
+
+
+def _kek_sealed_files(config, owner_ctx, envmod, warden_ctx):
+    """The vault-sealed FILES that rest under the TPM KEK, as (label, path, aead_context). Only files that
+    exist are meaningful to rotate; callers filter. Excludes secrets embedded in the signed spine."""
+    from .warden_key import warden_home
+    return [
+        ("owner.priv", config.KEYS_DIR / "owner.priv", owner_ctx),
+        ("spine.dek", config.SPINE_DEK_PATH, envmod._DEK_CONTEXT),
+        ("warden.key", warden_home(config.SIGIL_HOME) / "warden.key", warden_ctx),
+        ("secrets.kv", config.SIGIL_HOME / "secrets.sealed", b"sigil/secrets.kv"),
+    ]
+
+
 def cmd_kernel(a) -> None:
     """WARDEN kernel-binary integrity pin (audit G2): `pin` owner-signs the resolved binary's content
     hash (+ scope / owner_key_id) into the security manifest; `status` reports the current verdict."""
@@ -1594,6 +1664,10 @@ def main(argv=None) -> None:
     pkern = sub.add_parser("kernel", help="WARDEN kernel-binary integrity pin (audit G2): status | pin")
     pkern.add_argument("kernel_cmd", choices=["status", "pin"], nargs="?", default="status")
     pkern.set_defaults(fn=cmd_kernel)
+    pkey = sub.add_parser("key", help="key lifecycle (audit W9-2): rotate the spine DEK / WARDEN key / TPM KEK; seal the WARDEN key")
+    pkey.add_argument("key_cmd", nargs="?", default="status",
+                      choices=["status", "seal-warden", "rotate-warden", "rotate-dek", "rotate-kek"])
+    pkey.set_defaults(fn=cmd_key)
     pbak = sub.add_parser("backup", help="portable, passphrase-encrypted off-box backup of the trust root + spine (audit G3)")
     pbak.add_argument("dest", help="destination file for the encrypted backup")
     pbak.set_defaults(fn=cmd_backup)
