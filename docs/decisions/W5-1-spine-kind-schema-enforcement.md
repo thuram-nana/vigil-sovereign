@@ -3,7 +3,12 @@
 Issue: [#445](https://github.com/thuram-nana/vigil-sovereign/issues/445) ·
 Milestone: W5 — UPGRADE & DATA MIGRATION.
 
-## The claim (register in the claims registry, [W0-3] #398)
+## The claim (registered in the claims registry — [W0-3] #398, id `W5-1`)
+
+<!-- CLAIM:W5-1 -->
+> **Registered claim (W0-3 #398):** Every record appended to the sovereign SIGIL spine carries a schema_version and a kind drawn from an enforced vocabulary, and an append with an out-of-vocabulary kind or an unknown schema_version fails closed.
+
+The fuller statement, and why it is TRUE of the code:
 
 > Every record appended to the sovereign SIGIL spine carries a `schema_version` and a `kind` drawn
 > from an **enforced** vocabulary. An append with an out-of-vocabulary `kind` or an unknown
@@ -54,5 +59,7 @@ While enforcing this, the `KINDS` set was found to be **out of sync** with the c
 append kind that had never been added to `KINDS` — precisely because the set was never enforced. It is
 now in the set; a regression test pins it.
 
-> **Registration:** fold this claim into the claims registry when [W0-3] #398 lands; until then this
-> decision record is the source of truth for the claim and the documented asymmetry.
+> **Registration:** this claim is registered in the claims registry (`docs/claims/registry.json`, id
+> `W5-1`) as of [W0-3] #398. The registry's guard (`docs/tests/test_claims_registry.py`) pins this claim
+> to its enforcing symbol (`SpineStore.append`) and its proving test; this decision record remains the
+> source of truth for the claim text and the documented asymmetry.

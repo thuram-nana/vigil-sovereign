@@ -88,10 +88,11 @@ repos:
       # claims / doc-truth — the shipped doc-truth checks (every declared gate/capability is explained
       # to a reader and not described as missing). The full doc-truth suite is a required CI job
       # (briefing-completeness: `pytest docs/tests -q`); this fast subset runs pre-commit-side too. The
-      # claims registry proper (W0-3 / #398) plugs in here when it lands.
+      # claims registry proper (W0-3 / #398) landed: test_claims_registry.py pins every registered claim
+      # to its enforcing symbol + proving test, and is run here as well as in the required CI job.
       - id: claims-doc-truth
         name: claims / doc-truth (docs are true of the code)
-        entry: python3 -m pytest -q docs/tests/test_shipped_gates_not_described_as_missing.py docs/tests/test_briefing_completeness.py
+        entry: python3 -m pytest -q docs/tests/test_shipped_gates_not_described_as_missing.py docs/tests/test_briefing_completeness.py docs/tests/test_claims_registry.py
         language: system
         pass_filenames: false
         files: '(^docs/|^README\.md$|^\.github/workflows/|^docs/capability-matrix/)'
