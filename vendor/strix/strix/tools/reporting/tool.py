@@ -264,10 +264,13 @@ async def _do_create(  # noqa: PLR0912
             # raised). Record a TYPED capture_failed cause — distinguishable from a clean target —
             # rather than skipping silently.
             logger.debug("proof_capture skipped", exc_info=True)
-            from strix.report.degradation_hook import CAPTURE_FAILED
-            from strix.report.degradation_hook import record as _vigil_degrade
+            try:
+                from strix.report.degradation_hook import CAPTURE_FAILED
+                from strix.report.degradation_hook import record as _vigil_degrade
 
-            _vigil_degrade(CAPTURE_FAILED, "strix.reporting.create_vulnerability_report", _cap_exc)
+                _vigil_degrade(CAPTURE_FAILED, "strix.reporting.create_vulnerability_report", _cap_exc)
+            except Exception:  # noqa: BLE001 — recording is best-effort; importing the hook must not re-raise
+                logger.debug("degradation recording failed", exc_info=True)  # (strix.report.__init__ cascade)
 
         existing = report_state.get_existing_vulnerabilities()
         candidate = {

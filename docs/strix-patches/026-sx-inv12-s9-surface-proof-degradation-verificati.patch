@@ -1,0 +1,200 @@
+From 187324e5a51026c590dcaef3501be397e15d353e Mon Sep 17 00:00:00 2001
+Subject: [strix-patch 026] sx-inv12 (S9): surface proof degradation — verification_degraded is first-class (inv 12 MET)
+X-VIGIL-Commit: 187324e5a51026c590dcaef3501be397e15d353e
+X-VIGIL-Date: 2026-08-22T06:04:16-04:00
+
+diff --git a/vendor/strix/strix/interface/cli.py b/vendor/strix/strix/interface/cli.py
+index 9ecec748..a3763b9e 100644
+--- a/vendor/strix/strix/interface/cli.py
++++ b/vendor/strix/strix/interface/cli.py
+@@ -141,8 +141,14 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
+         from vigil_integration.proof.bootstrap import install_from_env
+ 
+         install_from_env()
+-    except Exception:  # noqa: BLE001 — never let proof wiring stop a scan
+-        pass
++    except Exception as _proof_exc:  # noqa: BLE001 — never let proof wiring stop a scan
++        # inv 12 (S9): a VIGIL run (VIGIL_PROOF_RUN_DIR set) expected proofs but the proof-sink
++        # wiring failed to even install — record a TYPED proof_subsystem_unavailable cause so the
++        # console does not render this run's empty proof list as "clean". No-op standalone.
++        from strix.report.degradation_hook import PROOF_SUBSYSTEM_UNAVAILABLE
++        from strix.report.degradation_hook import record as _vigil_degrade
++
++        _vigil_degrade(PROOF_SUBSYSTEM_UNAVAILABLE, "strix.cli.install_from_env", _proof_exc)
+ 
+     def create_live_status() -> Panel:
+         status_text = Text()
+diff --git a/vendor/strix/strix/report/degradation_hook.py b/vendor/strix/strix/report/degradation_hook.py
+new file mode 100644
+index 00000000..fac71ca0
+--- /dev/null
++++ b/vendor/strix/strix/report/degradation_hook.py
+@@ -0,0 +1,84 @@
++"""VIGIL inv 12 (S9): the vendored-side bridge for recording a TYPED proof-degradation cause.
++
++Six sites on the Strix->VIGIL proof path used to swallow a proof failure silently, so "target
++clean", "proof subsystem never installed", "capture failed" and "mint crashed" collapsed to one
++console state. This module lets each vendored swallow site record a TYPED cause against the run the
++VIGIL console exported (``VIGIL_PROOF_RUN_DIR``) WITHOUT coupling the vendored tree to the
++integration package at module scope.
++
++A bare vendored checkout (no ``vigil_integration``, or ``VIGIL_PROOF_RUN_DIR`` unset) is a SILENT
++no-op -- vendored behaviour stays byte-identical. When the run context IS set the cause is routed to
++``vigil_integration.proof.degradation`` (the source of truth for the manifest format); if that
++package is itself unimportable -- the most extreme "subsystem unavailable" -- a stdlib fallback
++writes the same manifest shape directly, so even a broken integration install stays distinguishable
++from a clean target. NEVER raises.
++
++The kind strings below MUST equal ``vigil_integration.proof.degradation``'s constants -- a
++drift-guard test in ``integration/tests/test_production_invariants.py`` pins them.
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++import os
++from pathlib import Path
++
++
++logger = logging.getLogger(__name__)
++
++# Typed causes -- MUST match vigil_integration.proof.degradation (pinned by an inv-12 drift guard).
++PROOF_SUBSYSTEM_UNAVAILABLE = "proof_subsystem_unavailable"
++CAPTURE_FAILED = "capture_failed"
++REDRIVE_FAILED = "redrive_failed"
++MINT_FAILED = "mint_failed"
++
++
++def record(kind: str, where: str, exc: BaseException) -> None:
++    """Record a TYPED proof-degradation cause against the exported VIGIL run. Best-effort."""
++    run_dir = os.environ.get("VIGIL_PROOF_RUN_DIR")
++    if not run_dir:
++        return  # standalone Strix: no VIGIL run to degrade -- byte-identical no-op
++    detail = type(exc).__name__
++    try:
++        from vigil_integration.proof.degradation import record_from_env  # noqa: PLC0415
++
++        if record_from_env(kind, where=where, detail=detail):
++            return
++    except Exception:
++        # integration unimportable -- fall through to the stdlib writer (exc_info satisfies BLE001)
++        logger.debug("inv-12 record via integration failed; using stdlib fallback", exc_info=True)
++    _stdlib_record(run_dir, kind, where, detail)
++
++
++def _stdlib_record(run_dir: str, kind: str, where: str, detail: str) -> None:
++    """Write the degradation manifest with stdlib only (the SAME shape proof.degradation uses) for
++    the case where ``vigil_integration`` is unavailable. Merges + dedups by ``(kind, where)``.
++    Never raises."""
++    try:
++        d = Path(run_dir) / "proofs"
++        d.mkdir(parents=True, exist_ok=True)
++        path = d / "_degraded.json"
++        causes: list[dict] = []
++        if path.is_file():
++            try:
++                doc = json.loads(path.read_text(encoding="utf-8"))
++                if isinstance(doc, dict) and isinstance(doc.get("degradations"), list):
++                    causes = [c for c in doc["degradations"] if isinstance(c, dict)]
++            except (OSError, ValueError):
++                causes = []
++        for c in causes:
++            if c.get("kind") == kind and str(c.get("where", "")) == where:
++                c["count"] = int(c.get("count", 1)) + 1
++                break
++        else:
++            causes.append({"kind": kind, "where": where, "detail": detail, "count": 1})
++        causes.sort(key=lambda c: (str(c.get("kind", "")), str(c.get("where", ""))))
++        # Atomic write: a torn/half-written manifest must never be observed (mirrors
++        # vigil_integration.proof.degradation.record_degradation). Write a sibling .tmp then os.replace.
++        tmp = path.with_suffix(".json.tmp")
++        tmp.write_text(json.dumps({"degradations": causes}, sort_keys=True), encoding="utf-8")
++        os.replace(tmp, path)
++    except Exception:
++        # a degradation recorder must never break a scan (exc_info satisfies BLE001)
++        logger.debug("inv-12 stdlib degradation record failed", exc_info=True)
+diff --git a/vendor/strix/strix/report/proof_capture.py b/vendor/strix/strix/report/proof_capture.py
+index 22fb3dc6..196832d6 100644
+--- a/vendor/strix/strix/report/proof_capture.py
++++ b/vendor/strix/strix/report/proof_capture.py
+@@ -1,8 +1,9 @@
+ """proof_capture — build the executor-captured exchange bundle a VIGIL proof is minted from (Proof Studio).
+ 
+-This module is IMPORT-CLEAN: it imports only stdlib and (lazily, inside the async orchestrator) strix's own
+-``tools.proxy.caido_api``. It NEVER imports ``vigil_integration`` or ``framework`` — the mint happens later,
+-in the (offense-env) ``proof_sink`` hook. All this does is turn the raw request/response bytes Caido already
++This module is IMPORT-CLEAN of the integration package: it imports only stdlib, strix's own modules
++(``tools.proxy.caido_api`` lazily; the ``report.degradation_hook`` bridge in the capture-failure
++handler, inv 12), never ``framework``/``vigil_integration`` directly. The mint happens later, in the
++offense-env ``proof_sink`` hook. All this does is turn the raw request/response bytes Caido already
+ captured into the plain-dict ``_vigil_capture`` structure the sink understands::
+ 
+     {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
+@@ -150,7 +151,15 @@ async def capture_for_report(
+         return build_error_signature_capture(
+             bug_class=bug_class, exploit_body=body, exploit_status=status, control_body=control_body,
+             exploit_request=request_bytes)
+-    except Exception:  # noqa: BLE001 — capture is best-effort; a failure just means no proof (an honest LEAD)
++    except Exception as exc:  # noqa: BLE001 — capture is best-effort; it never raises into Strix
++        # inv 12 (S9): a capture was genuinely ATTEMPTED (a bug_class was present, past the guard
++        # above) and it FAILED (e.g. Caido raised) — NOT the same as "nothing to capture". Record a
++        # TYPED capture_failed cause so the console distinguishes a failed capture from a clean
++        # target; the finding still stays a LEAD. No-op standalone; the bridge never raises.
++        from strix.report.degradation_hook import CAPTURE_FAILED
++        from strix.report.degradation_hook import record as _vigil_degrade
++
++        _vigil_degrade(CAPTURE_FAILED, "strix.proof_capture.capture_for_report", exc)
+         return None
+ 
+ 
+diff --git a/vendor/strix/strix/report/state.py b/vendor/strix/strix/report/state.py
+index 62cbcf35..661fb866 100644
+--- a/vendor/strix/strix/report/state.py
++++ b/vendor/strix/strix/report/state.py
+@@ -11,6 +11,8 @@ from uuid import uuid4
+ from agents.usage import Usage
+ 
+ from strix.core.paths import run_dir_for
++from strix.report.degradation_hook import MINT_FAILED
++from strix.report.degradation_hook import record as _vigil_degrade
+ from strix.report.proof_capture import CAPTURE_KEY
+ from strix.report.sarif import write_sarif
+ from strix.report.usage import LLMUsageLedger
+@@ -303,8 +305,13 @@ class ReportState:
+                 if proof_capture is not None:
+                     report_for_hook[CAPTURE_KEY] = proof_capture
+                 hook(report_for_hook)
+-            except Exception:
++            except Exception as hook_exc:
++                # inv 12 (S9): the proof_sink hook CRASHED — this finding cannot be verified into a
++                # FACT and its absence from the proofs must not read as "clean". Record a TYPED
++                # mint_failed cause (the console distinguishes a crashed mint from an empty run)
++                # before swallowing so persistence still proceeds. No-op standalone; never raises.
+                 logger.exception("proof_sink hook failed (non-fatal)")
++                _vigil_degrade(MINT_FAILED, "strix.report.state.add_vulnerability_report", hook_exc)
+ 
+         self.vulnerability_reports.append(report)
+         logger.info(f"Added vulnerability report: {report_id} - {title}")
+diff --git a/vendor/strix/strix/tools/reporting/tool.py b/vendor/strix/strix/tools/reporting/tool.py
+index c989315f..43ec564f 100644
+--- a/vendor/strix/strix/tools/reporting/tool.py
++++ b/vendor/strix/strix/tools/reporting/tool.py
+@@ -258,8 +258,16 @@ async def _do_create(  # noqa: PLR0912
+                 proof_capture = await capture_for_report(
+                     {"finding_class": (cwe or title or "web"), "endpoint": endpoint, "method": method,
+                      "cwe": cwe, "title": title, "description": description})
+-        except Exception:
++        except Exception as _cap_exc:
++            # inv 12 (S9): the proof_sink IS installed (this branch only runs then), so a capture
++            # was expected for this finding but building it FAILED (e.g. the capture/state import
++            # raised). Record a TYPED capture_failed cause — distinguishable from a clean target —
++            # rather than skipping silently.
+             logger.debug("proof_capture skipped", exc_info=True)
++            from strix.report.degradation_hook import CAPTURE_FAILED
++            from strix.report.degradation_hook import record as _vigil_degrade
++
++            _vigil_degrade(CAPTURE_FAILED, "strix.reporting.create_vulnerability_report", _cap_exc)
+ 
+         existing = report_state.get_existing_vulnerabilities()
+         candidate = {

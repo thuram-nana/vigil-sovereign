@@ -417,6 +417,12 @@
    "file": "025-strix-hexstrike-sx-s5-harden-the-strix-runtime-c.patch",
    "sha256": "aec823be722b2b0afd49fa16c286dd43bcc2e8ce06dcc97b770ad1a896bd99bf",
    "subject": "Strix+HexStrike sx-s5: harden the Strix runtime container (least-privilege + pinned image + reaper)"
+  },
+  {
+   "commit": "187324e5a51026c590dcaef3501be397e15d353e",
+   "file": "026-sx-inv12-s9-surface-proof-degradation-verificati.patch",
+   "sha256": "1ff785ff4920a18843e2cf5720af0cf7132b834253b91227b35125401651cff6",
+   "subject": "sx-inv12 (S9): surface proof degradation \u2014 verification_degraded is first-class (inv 12 MET)"
   }
  ],
  "schema": 1,
@@ -492,7 +498,7 @@
   "vendor/strix/strix/core/sessions.py": "c2b4caf9a28d14b826a694ed5ad627ad6bb6d57d6bf29282a2defc764295621d",
   "vendor/strix/strix/interface/__init__.py": "c30db7b0539084808422b228d0cb705afdaa1d6e6a529aef3e3f10563bf748cd",
   "vendor/strix/strix/interface/assets/tui_styles.tcss": "1cc02119ce18b2c00a72c9e4622019e7c0068fa2c6ff1936da28defa0dd1bcb9",
-  "vendor/strix/strix/interface/cli.py": "d89fc9ba2af64b764c3ba610b721eb8b8f677963375dd3bf0a7c3865c2ea0ecf",
+  "vendor/strix/strix/interface/cli.py": "72adc5230c30c05ac9f3e124c5a35ee1bf540622d46bfadbe1a8511ba4f550cc",
   "vendor/strix/strix/interface/main.py": "a63d6d502da9d935099ff7e76f3f484a09c83e0b93aa570d400a079fd8d3261a",
   "vendor/strix/strix/interface/tui/__init__.py": "d3156f293b5aeba9c04f1e79bdfd42b33b28ff3b0665e2026f9872e9adb8c7e5",
   "vendor/strix/strix/interface/tui/app.py": "d859438fb30878c45c6d60d049441fe0fcec2dd3df56ce4348e641687dfdccf5",
@@ -520,7 +526,7 @@
   "vendor/strix/strix/report/anthropic_pricing.py": "114175e67481568fb7ab08105a10abe1afcc0edee90ee4698de5752e4b50d093",
   "vendor/strix/strix/report/dedupe.py": "f4094770da0dd5616912685269098620f57d7df8c107e1600336a92cb303adb4",
   "vendor/strix/strix/report/degradation_hook.py": "7b80de0574c779802595f70b3188995780123aaf475ed05ed4a1f8a123781f7f",
-  "vendor/strix/strix/report/proof_capture.py": "fda178565689b9a15261ff37e47cc04d9dd4ecc401f51392becdf53d5c9f80af",
+  "vendor/strix/strix/report/proof_capture.py": "618ef582e0f3b5b796416f48fae84109953bd19df97d0a074749332602559b29",
   "vendor/strix/strix/report/sarif.py": "2b32368c31a36628bae7dd6154b9a7190c979ab74ffdfe8ec72ce1c555773cb6",
   "vendor/strix/strix/report/state.py": "f0c5c3a9de13e4bf1519776e85ed879de963b83f73e341883757ff23957d85c8",
   "vendor/strix/strix/report/usage.py": "3a526249ca46f9ab28d273f028a6f1327b52671887c909e3609ce48532e5aa27",
@@ -614,7 +620,7 @@
   "vendor/strix/strix/tools/proxy/caido_api.py": "bee73005649eecdd64a163449f6c101f052fcf241c91393c1df1242f75591fdd",
   "vendor/strix/strix/tools/proxy/tools.py": "bac7503cf49fa3fa7633a4e2291a0635063965209d32f5d73203d2c5ebed4959",
   "vendor/strix/strix/tools/reporting/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "vendor/strix/strix/tools/reporting/tool.py": "bd25659f7cdd0ac68bafb123738e834210c4f7bb20837e78200a6d832799b961",
+  "vendor/strix/strix/tools/reporting/tool.py": "bc1fe9d4558e5da6dc931593d1754376cf948e4f5b9c4cd48db41e886321fbba",
   "vendor/strix/strix/tools/shell/README.md": "a0baee7a47acd0f1eca91d9b0ff439bc1f4e5bdbbc27d04fb0738ce63d19a58b",
   "vendor/strix/strix/tools/thinking/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "vendor/strix/strix/tools/thinking/tool.py": "3ff8e20340521677428fd8744b9c0a9011422f23c2e77c7022776241bb7a8c8d",
