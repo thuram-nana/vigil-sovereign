@@ -584,3 +584,42 @@ def test_persist_env_writes_atomically_no_truncation_window(env, monkeypatch):
     assert not leftovers, f"a temp file was left behind: {leftovers}"
     txt = envf.read_text()
     assert "SOME_OTHER_VAR=x" in txt and "CRUCIBLE_SOVEREIGNTY_TIER=AIR_GAPPED" in txt
+
+
+# --- W0-9 (residual): the Manual + toast must be ASSERTED honest, not just corrected once ------------
+# The core slice (#560) reworded the toast and the two Settings Manual blurbs, and pinned the app.js
+# screen blurbs. Two acceptance items were left unguarded: (1) the Manual is only asserted against the
+# source here, so the honest plaintext-fallback wording cannot silently regress to the old over-claim;
+# (2) the toast is proven to BRANCH on the server's returned {sealed, backend} rather than a constant.
+
+def test_manual_settings_blurbs_are_honest_about_sealing():
+    # The Manual's "Settings" page must state the plaintext fallback honestly — it must never tell the
+    # operator every secret is sealed when SecretStore can fall through to the 0600 plaintext
+    # ~/.sigil/sigil.env. Asserted against the source (acceptance: "the Manual is generated from the same
+    # source or asserted against it"). Fails on the pre-fix manual.js, which over-claimed unconditionally.
+    from pathlib import Path
+    manual = (Path(__file__).resolve().parents[3] / "packages" / "vigil-ui" / "manual.js").read_text(
+        encoding="utf-8")
+    # the exact over-claiming forms the slice removed must never come back
+    assert "Each is sealed into your machine's keyring or TPM-backed vault, shown" not in manual, \
+        "the Settings Manual blurb still claims every secret is unconditionally sealed"
+    assert "Every secret is sealed and delivered to the engine" not in manual, \
+        "the model-picker Manual blurb still claims every secret is unconditionally sealed"
+    # both Settings-page blurbs must carry the honest plaintext-fallback qualifier
+    assert manual.count("which is not sealed") >= 2, \
+        "both Settings Manual blurbs must carry the honest '…which is not sealed' plaintext-fallback qualifier"
+
+
+def test_seal_toast_is_computed_from_returned_backend_not_a_constant():
+    # The post-seal toast MUST be derived from the server's returned {sealed, backend}, never a constant.
+    # sealResultMsg is the toast's only source; guard that it branches on r.sealed, names the backend via
+    # r.backend, carries the "NOT sealed" plaintext-fallback line, and is fed the live response. Fails on
+    # the pre-fix app.js, whose toast was the constant "<label> sealed on this machine." (no sealResultMsg).
+    from pathlib import Path
+    app_js = (Path(__file__).resolve().parents[3] / "packages" / "vigil-ui" / "app.js").read_text(
+        encoding="utf-8")
+    assert "function sealResultMsg" in app_js, "the honest sealResultMsg toast helper is missing"
+    assert "r.sealed" in app_js, "the seal toast must branch on the server's returned `sealed` bool"
+    assert "r.backend" in app_js, "the seal toast must name the tier from the server's returned `backend`"
+    assert "NOT sealed" in app_js, "the seal toast must say NOT sealed on the plaintext fallback"
+    assert "sealResultMsg(r" in app_js, "the toast callback must pass the live server response to sealResultMsg"
