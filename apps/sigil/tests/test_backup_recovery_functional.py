@@ -302,20 +302,51 @@ def test_dropping_a_covered_item_breaks_its_functional_check(tmp_path, label, dr
 # ---------------------------------------------------------------------------------------------------
 # STRUCTURAL COVERAGE CONTRACT: nothing unclassified; an unknown artifact IS flagged.
 # ---------------------------------------------------------------------------------------------------
+def _source_top_level_home_names():
+    """INDEPENDENT source of truth for the coverage gate: the set of TOP-LEVEL ``SIGIL_HOME`` entry names the
+    PRODUCTION sigil package actually writes, harvested by STATIC SCAN of the source — NOT from the classifier's
+    own sets (that would be tautological). Matches ``<home-accessor> / "<name>"`` where the accessor is one of
+    the established home handles (``SIGIL_HOME`` / a bare ``home`` / ``_home()``), capturing the FIRST path
+    segment (the top-level child). A component that starts writing a NEW top-level artifact adds a literal here,
+    so if it is not also classified, :func:`test_coverage_contract_leaves_nothing_unclassified` goes RED — the
+    silently-dropped-artifact guard the tautological version never provided."""
+    import pathlib
+    import re
+
+    pkg = pathlib.Path(backup.__file__).parent
+    pat = re.compile(r'(?:SIGIL_HOME|_home\(\)|\bhome)\s*/\s*"([^"/]+)"')
+    names: set[str] = set()
+    for py in pkg.rglob("*.py"):
+        for m in pat.finditer(py.read_text(encoding="utf-8", errors="ignore")):
+            names.add(m.group(1))
+    return names
+
+
+def test_coverage_contract_is_grounded_in_the_real_source(tmp_path):
+    """The structural gate is NOT tautological: it enumerates an INDEPENDENT source of truth (a static scan of
+    the production package for top-level ``SIGIL_HOME`` writes) and asserts EVERY such name classifies as
+    captured-or-excluded. Reverting a name out of CAPTURED_TOP_LEVEL/EXCLUSION_REASONS (or a component adding a
+    new top-level artifact) makes it 'unclassified' → this test goes red."""
+    scanned = _source_top_level_home_names()
+    # sanity: the scan actually found the real home artifacts (guards against a broken regex silently passing).
+    assert {"spine", "vault", "warden", "witness.trust.json", "qdrant", "graph"} <= scanned, scanned
+    unclassified = sorted(n for n in scanned if backup.classify_top_level(n) == "unclassified")
+    assert not unclassified, (
+        f"production code writes these top-level SIGIL_HOME artifacts that are neither CAPTURED nor a documented "
+        f"exclusion — decide capture-vs-exclude in sigil.backup (a silent drop from disaster recovery): {unclassified}")
+
+
 def test_coverage_contract_leaves_nothing_unclassified(tmp_path):
-    """Every top-level entry a populated home can hold is captured OR a documented exclusion — a future
-    state artifact cannot be silently omitted from disaster recovery."""
-    home = tmp_path / "home"
-    home.mkdir()
-    for name in backup.CAPTURED_TOP_LEVEL | backup.EXCLUDED_TOP_LEVEL:
-        p = home / name
-        if name.endswith(".json") or name in ("sigil.env", "host_id", "secrets.sealed"):
-            p.write_text("{}")
-        else:
-            p.mkdir()
-    unclassified = [e.name for e in home.iterdir() if backup.classify_top_level(e.name) == "unclassified"]
-    assert not unclassified, f"unclassified SIGIL_HOME entries (decide capture vs exclude): {unclassified}"
-    # every excluded name carries a documented reason
+    """RUNTIME half: a home POPULATED BY REAL COMPONENTS (SpineStore, Vault, set_roster, the sealed KV store,
+    the config writers) leaves NO top-level entry unclassified — so a component whose real output is dropped
+    from the classifier turns this red, not a self-referential enumeration of the classifier's own sets."""
+    src, _v, _owner, _w = _make_full_source(tmp_path)   # a real home built by the real writers
+    populated = {e.name for e in src.iterdir()}
+    # the real writers produced a non-trivial home (not an empty dir that would pass vacuously) ...
+    assert {"spine", "vault", "secrets.sealed", "witness.trust.json"} <= populated, populated
+    unclassified = sorted(n for n in populated if backup.classify_top_level(n) == "unclassified")
+    assert not unclassified, f"unclassified SIGIL_HOME entries a real component wrote (decide capture vs exclude): {unclassified}"
+    # every excluded name carries a documented reason (the 'documented exclusion' acceptance criterion).
     for name in backup.EXCLUDED_TOP_LEVEL:
         assert backup._EXCLUSION_REASONS[name]
 
