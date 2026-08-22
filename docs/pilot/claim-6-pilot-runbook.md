@@ -129,7 +129,7 @@ pass condition is a refusal.
 | **3.1 Above-role action refused** | As **alice (viewer)**, attempt an operator action (e.g. start an engagement) via the UI or `POST /api/…` with alice's bearer | **403 / refused** — a viewer has only `read` |
 | **3.2 Operator can, owner-only cannot** | As **bob (operator)**, run an engagement → allowed; attempt an owner-only action (e.g. reveal a secret, toggle the protected-domain guard) | engagement **allowed**; owner-only **refused (403)** |
 | **3.3 Owner token never reaches the browser** | As **alice**, request `/offense/` through the proxy; inspect the raw response body | the owner token is **absent** (redacted); alice cannot scrape and replay it |
-| **3.4 Revoked bearer stops working** | `sigil accounts revoke bob`; within the auth-cache TTL (≤30 s) bob's next request | **401** once the cache expires (note the ≤30 s revocation lag — this is expected, documented behavior) |
+| **3.4 Revoked bearer stops working** | `sigil accounts revoke bob`, then force-purge the edge (`POST /__vigil/plane/auth/purge` with `{"username":"bob"}` as owner); bob's very next request | **401 immediately** — the edge revocation set + cache invalidation refuse bob on the next decision (W9-3/#436), no ≤30 s wait. An open SSE stream of bob's is torn down at the next re-auth interval (≤15 s). Absent the force-purge, a cached bearer still lapses within ≤30 s. |
 | **3.5 Protected-domain guard is owner-only** | As **bob (operator)**, attempt to set `VIGIL_ALLOW_PROTECTED_DOMAINS` on | **refused** — only the owner (`toggle_protected_guard`) may change it |
 | **3.6 Per-action offense RBAC (console gate)** | As **bob (operator)** through `vigil up` — bob clears the coarse proxy floor because he holds `run_engagement` — POST an **owner-tier** offense action (e.g. `/offense/api/authority/provision`) | **403 / refused** — the proxy stamps a signed hop-assertion, the console verifies it, and `role_can("operator", "offense_authority")` is **false**. (A **viewer** is refused one step earlier at the proxy floor, which requires `run_engagement` for any mutation — that 403 is the coarse floor, not the S1 console gate.) |
 
@@ -218,8 +218,12 @@ carries no plaintext secret; un-captured data survives `--force`.
 
 **Goal:** confirm the operator can turn a user off and halt the system.
 
-- **Revoke:** `sigil accounts revoke <user>` → the bearer stops authenticating (≤30 s cache lag). `revoke`
-  is honored even unsigned (the safe direction) — you can always turn a user off.
+- **Revoke:** `sigil accounts revoke <user>` → the bearer stops authenticating. To make it bite at the
+  proxy edge on the *very next* request (not at cache expiry), force-purge the edge:
+  `POST /__vigil/plane/auth/purge` `{"username":"<user>"}` as owner (W9-3/#436) — the edge revocation set +
+  cache invalidation refuse the user immediately, and an open SSE stream of theirs is torn down at the next
+  re-auth interval (≤15 s). `revoke` is honored even unsigned (the safe direction) — you can always turn a
+  user off.
 - **Kill-switch:** engage the kill-switch (any authenticated user may *engage*; only the owner
   `kill_release` may un-halt). Confirm autonomous actions are blocked while halted.
 
@@ -251,8 +255,11 @@ each of these back to the claim it verifies.
 
 ## Honest caveats for the pilot
 
-- **Revocation is not instant** — up to the ≤30 s auth-cache TTL, and an already-open SSE stream is
-  authenticated only at connect. Plan the pilot's revocation test around that window.
+- **Revocation is immediate at the edge (W9-3/#436)** when the revoke calls the owner-only force-purge
+  endpoint (`POST /__vigil/plane/auth/purge`): the edge revocation set is consulted on every decision and
+  the cache entry is dropped, so the next request is refused, and an open SSE stream is torn down at the next
+  re-auth interval (≤15 s). Absent that call, a bearer already cached at the proxy still lapses within the
+  ≤30 s cache TTL. Plan the pilot's revocation test to include the force-purge call for the immediate path.
 - **The command-UI proxy is a loopback / private-VIP listener**, not a hardened public gateway. Run the
   pilot behind the operator's own TLS edge; do not expose the proxy raw to the internet.
 - **Per-action offense RBAC rides the proxy hop-assertion.** The offense console now maps each POST to a

@@ -96,6 +96,12 @@ PLANE_STATUS_PATH = PLANE_BASE + "/status"
 PLANE_VERSION_PATH = PLANE_BASE + "/version"
 PLANE_START_OFFENSE_PATH = PLANE_BASE + "/offense/start"
 PLANE_STOP_OFFENSE_PATH = PLANE_BASE + "/offense/stop"
+# W9-3 — the admin force-purge / edge-revoke endpoint (POST). Itself authorized: it runs the SAME plane
+# guard conjunction as every other plane route (private peer + Host/Origin anti-rebind + per-user auth +
+# the SPA custom header) AND additionally requires the owner-only `manage_users` permission. It edits the
+# EDGE state only (the bearer cache + the revocation set), never the sovereign accounts spine — the
+# sovereign `sigil accounts revoke` remains the authority; this makes that revoke IMMEDIATE at the edge.
+PLANE_AUTH_PURGE_PATH = PLANE_BASE + "/auth/purge"
 # The plane-control routes take NO input: the START action is a FIXED, NAMED action whose argv the proxy
 # rebuilds from its OWN boot configuration. Any request body is drained and DISCARDED (never parsed as
 # configuration) — a caller-named command/path/port would be remote code execution wearing a button — so
@@ -151,6 +157,11 @@ _UNAUTH_FORWARD = frozenset(SOVEREIGN_BASE + p for p in _BOOTSTRAP_ROUTES)
 # floor (read vs. run) over the offense plane, which does not itself do per-action RBAC; the sovereign plane
 # keeps its fine-grained action→permission map, and owner-authority offense actions are sovereign-gated.
 _OFFENSE_RUN_PERM = "run_engagement"
+# W9-3 — the owner-only permission the admin force-purge / edge-revoke endpoint additionally requires. It is
+# the SAME cumulative `manage_users` permission the sovereign RBAC gives only to `owner` (vigil_core.rbac),
+# reached here the same way the coarse offense floor reaches `run_engagement`: as a string in the whoami-
+# resolved principal's `permissions` list. An operator/analyst/viewer lacks it → 403 (default-deny).
+_ADMIN_PURGE_PERM = "manage_users"
 _READ_METHODS = frozenset({"GET", "HEAD"})
 # Trusted identity headers the proxy STAMPS on an authenticated offense forward (and STRIPS from every
 # inbound request, so a client can never spoof them). The offense side uses them for attribution.
@@ -199,10 +210,42 @@ def _remount_setcookie_path(setcookie: str, mount: str) -> str:
             break
     return ";".join(parts)
 # Short-TTL cache of sha256(bearer) → resolved principal (or None). Bounds whoami round-trips under SSE /
-# polling; a revocation is visible after at most _AUTH_TTL_S (documented residual). A rejected bearer is
-# cached briefly too, to blunt a guessing flood without pinning a wrong answer for long.
+# polling. It is NO LONGER a revocation-lag window (W9-3): the edge REVOCATION SET (`_RevocationSet`) is
+# consulted on EVERY decision BEFORE the cache is trusted, so a revoke takes effect on the very next
+# decision — a positive is never shadowed past its revoke by a cached entry. The cache is here purely to
+# blunt whoami stampedes; a rejected bearer is cached briefly too, to blunt a guessing flood without
+# pinning a wrong answer for long.
 _AUTH_TTL_S = 30.0
 _AUTH_NEG_TTL_S = 5.0
+# W9-3 — how often a long-lived (SSE) stream RE-AUTHENTICATES. An SSE stream is authenticated at connect
+# like any request, but a connect-only check outlives revocation for as long as the stream stays open. So
+# the relay re-runs `_authenticate` (FRESH — cache-bypassed → a real whoami round trip + the edge
+# revocation-set consult) at most every `_SSE_REAUTH_INTERVAL_S`; the moment it no longer resolves (the
+# account was revoked / the edge was force-purged / a role was dropped) the stream is torn down. Overridable
+# per process via `VIGIL_SSE_REAUTH_INTERVAL_S` (a test sets a tiny value to observe the teardown quickly).
+_SSE_REAUTH_INTERVAL_S = 15.0
+# W9-3 — how long an edge revocation is REMEMBERED. It only has to outlive the ≤`_AUTH_TTL_S` cache window
+# it exists to defeat: after that the cache no longer holds the stale positive and the sovereign whoami (a
+# revoked account is already absent from its fold) is authoritative again — so the edge set is an
+# ACCELERATOR of an authority the sovereign already enforces, never the sole record. A generous multiple is
+# used so a clock hiccup can never let a stale positive slip through; re-activating a same-named account on
+# the sovereign becomes visible at the edge again after the retention window (documented residual).
+_REVOCATION_RETENTION_S = max(_AUTH_TTL_S * 8.0, 300.0)
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse a float env override, FAIL-SOFT to ``default``: a missing / unparseable / degenerate value
+    (nan / inf / non-positive) never raises and never disables the mechanism. Parsed at call time (never as
+    an import-time default arg) so a bad env cannot crash the module. A negative/zero interval would turn a
+    security control OFF (no re-auth) — refuse it and keep the default; a huge but finite value is left to
+    the caller (an operator may legitimately widen the interval)."""
+    try:
+        v = float(os.environ.get(name, ""))
+    except (TypeError, ValueError):
+        return default
+    if v != v or v == float("inf") or v <= 0:      # nan / +inf / non-positive → keep the safe default
+        return default
+    return v
 _WHOAMI_MAX = 64 * 1024          # cap the whoami response read (a Principal JSON is tiny)
 _MISS = object()                 # cache sentinel: "not present" — distinct from a cached negative (None)
 # BLOCK-A defense-in-depth caps: the ONLY time the proxy buffers+decodes a relayed body is the abnormal
@@ -402,6 +445,95 @@ class _PrincipalCache:
                 if len(self._d) >= self._max:
                     self._d.clear()                                          # hard cap: never grow unbounded
             self._d[key] = (value, time.monotonic() + ttl)
+
+    def invalidate(self, key: str) -> bool:
+        """Drop ONE entry by its ``sha256(bearer)`` digest. Returns True iff an entry was present. Used on
+        revoke so a stale positive is not even held (the revocation set is the authoritative gate; this is
+        belt-and-suspenders so a later cache read cannot serve the pre-revoke answer)."""
+        with self._lock:
+            return self._d.pop(key, None) is not None
+
+    def invalidate_username(self, username: str) -> int:
+        """Drop EVERY cached POSITIVE whose resolved principal has this username (a principal may hold more
+        than one live bearer/session). Returns the count dropped. A cached negative (``None``) has no
+        username and is never touched. This is TARGETED — other users' entries are untouched (the W9-3
+        negative control: a per-user revoke is not a session-wide nuke)."""
+        if not username:
+            return 0
+        with self._lock:
+            victims = [k for k, (val, _exp) in self._d.items()
+                       if isinstance(val, dict) and val.get("username") == username]
+            for k in victims:
+                self._d.pop(k, None)
+            return len(victims)
+
+    def purge_all(self) -> int:
+        """Clear the WHOLE cache. Returns the count dropped. This forces every bearer to re-resolve via
+        whoami on its next decision — a rotation / belt-and-suspenders control. It does NOT revoke: a still-
+        valid credential simply re-resolves positive (transparent), a revoked one now re-consults the
+        sovereign (which denies it). Distinct from a revoke, which also pins the credential in the
+        revocation set so no window can re-cache it."""
+        with self._lock:
+            n = len(self._d)
+            self._d.clear()
+            return n
+
+
+class _RevocationSet:
+    """A thread-safe, SELF-CONSULTED set of edge-revoked credentials, keyed by BOTH the ``sha256(bearer)``
+    digest (one specific session/credential) AND the resolved username (every current session of a
+    principal). It is consulted in ``_authenticate`` on EVERY decision — a cache hit included — and a match
+    FAILS CLOSED (the principal is DENIED). That is what makes a revoke immediate at the edge: the moment a
+    credential is added here, the very next decision refuses it, without waiting for the ≤``_AUTH_TTL_S``
+    cache entry to expire or for a restart.
+
+    It is an ACCELERATOR, not the record of truth: the sovereign ``sigil accounts revoke`` (an owner-signed
+    spine write; a revoked account is absent from its fold) remains the authority the proxy delegates to via
+    whoami. Entries therefore only need to outlive the cache window they defeat — see
+    ``_REVOCATION_RETENTION_S`` — after which whoami is authoritative again. Bounded by ``max_entries`` so a
+    flood of revokes cannot grow it without bound (an evicted entry falls back to the sovereign's answer)."""
+
+    def __init__(self, *, retention_s: float = _REVOCATION_RETENTION_S, max_entries: int = 8192):
+        self._d: dict[str, float] = {}          # namespaced key ("d:<digest>" / "u:<username>") → expiry
+        self._lock = threading.Lock()
+        self._retention = float(retention_s)
+        self._max = max_entries
+
+    def _revoke(self, key: str) -> None:
+        with self._lock:
+            if len(self._d) >= self._max:
+                now = time.monotonic()
+                self._d = {k: e for k, e in self._d.items() if e > now}     # prune expired first
+                if len(self._d) >= self._max:
+                    # still full → evict the soonest-to-expire to make room (bounded memory; anything
+                    # evicted early simply falls back to the sovereign whoami, which already denies it).
+                    for k in sorted(self._d, key=lambda x: self._d[x])[: max(1, self._max // 8)]:
+                        self._d.pop(k, None)
+            self._d[key] = time.monotonic() + self._retention
+
+    def revoke_digest(self, digest: str) -> None:
+        if digest:
+            self._revoke("d:" + digest)
+
+    def revoke_username(self, username: str) -> None:
+        if username:
+            self._revoke("u:" + username)
+
+    def _is(self, key: str) -> bool:
+        with self._lock:
+            exp = self._d.get(key)
+            if exp is None:
+                return False
+            if time.monotonic() >= exp:
+                self._d.pop(key, None)                                      # lazily forget an expired entry
+                return False
+            return True
+
+    def is_revoked(self, *, digest: "Optional[str]" = None, username: "Optional[str]" = None) -> bool:
+        """True iff the digest OR the username is currently edge-revoked. Either argument may be omitted."""
+        if digest and self._is("d:" + digest):
+            return True
+        return bool(username) and self._is("u:" + username)
 
 
 def _whoami(bearer: str, *, host: str = "127.0.0.1", port: Optional[int] = None,
@@ -937,6 +1069,11 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         # Claim 6: per-user auth is DELEGATED to the sovereign whoami; this caches the resolution briefly so
         # SSE / polling do not stampede it. Built here so every request handler shares one cache.
         self.auth_cache = _PrincipalCache()
+        # W9-3: the edge revocation set + the SSE re-auth interval — shared by every request handler so a
+        # revoke (via the admin force-purge endpoint) or an account revoke on the sovereign takes effect at
+        # the decision edge immediately (cache/plane paths) or within one interval (an open SSE stream).
+        self.revocations = _RevocationSet()
+        self.sse_reauth_interval = _env_float("VIGIL_SSE_REAUTH_INTERVAL_S", _SSE_REAUTH_INTERVAL_S)
         family = socket.AF_INET
         try:
             if ipaddress.ip_address(addr[0]).version == 6:
@@ -1006,22 +1143,48 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """The bearer on THIS request: the ``X-SIGIL-Token`` header, or ``?token=`` (SSE / downloads)."""
         return self.headers.get(_TOKEN_HEADER) or (parse_qs(query).get(_TOKEN_QUERY) or [""])[0]
 
-    def _authenticate(self, bearer: str) -> Optional[dict]:
+    def _authenticate(self, bearer: str, *, fresh: bool = False) -> Optional[dict]:
         """Resolve the request's bearer to a principal dict via the sovereign whoami (cached, short TTL),
-        or None (fail-closed). A blank bearer is never resolved."""
+        or None (fail-closed). A blank bearer is never resolved.
+
+        W9-3 — REVOCATION IS IMMEDIATE AT THE EDGE. The edge revocation set is consulted FIRST (by bearer
+        digest) and, after any resolution, AGAIN (by the resolved username) — a match FAILS CLOSED regardless
+        of what the cache or whoami says. So a revoke (admin force-purge, or an account revoke the whoami now
+        reflects) takes effect on the VERY NEXT decision, never bounded by the cache TTL.
+
+        ``fresh=True`` BYPASSES the cache read (used by the SSE re-auth loop): it still consults the
+        revocation set and still does a real whoami round trip, so a long-lived stream re-checks against the
+        live authority rather than a positive that was cached at connect."""
         if not bearer:
             return None
         cache = getattr(self.server, "auth_cache", None)
+        revset = getattr(self.server, "revocations", None)
         key = hashlib.sha256(bearer.encode("utf-8")).hexdigest()
-        if cache is not None:
+        # (1) edge revocation by DIGEST — consulted before the cache is even read, fail-closed.
+        if revset is not None and revset.is_revoked(digest=key):
+            if cache is not None:
+                cache.invalidate(key)
+            return None
+        if cache is not None and not fresh:
             hit = cache.get(key)
             if hit is not _MISS:
+                # (2) a cached POSITIVE is still subject to a username-scoped revoke that landed AFTER it was
+                #     cached — re-check and drop it, so the cache can never serve a pre-revoke answer.
+                if (hit is not None and revset is not None
+                        and revset.is_revoked(username=hit.get("username"))):
+                    cache.invalidate(key)
+                    return None
                 return hit                                    # may be a cached negative (None)
         # Per-user auth is DELEGATED to the sovereign whoami — which lives on the sovereign backend, so in
         # `--proxy-only` it is the REMOTE sovereign address, not 127.0.0.1. None (default path) ⇒ the local
         # loopback default, byte-identical to the historical `_whoami(bearer)`.
         sov_host, sov_port = (getattr(self.server, "backends", None) or _default_backends())["sovereign"]
         principal = _whoami(bearer, host=sov_host, port=sov_port)
+        # (3) a revoke that RACED the whoami round trip must still win — re-check both keys, fail-closed.
+        if principal is not None and revset is not None and (
+                revset.is_revoked(digest=key)
+                or revset.is_revoked(username=principal.get("username"))):
+            principal = None
         if cache is not None:
             cache.put(key, principal, _AUTH_TTL_S if principal is not None else _AUTH_NEG_TTL_S)
         return principal
@@ -1049,14 +1212,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if path in _UNAUTH_FORWARD:
             self._proxy(host, port, self._with_query(upstream_path, split.query))
             return
-        # 2) authenticate, fail-closed.
-        principal = self._authenticate(self._request_bearer(split.query))
+        # 2) authenticate, fail-closed. Keep the caller's OWN bearer for W9-3 SSE re-auth (an open stream
+        #    re-checks THIS credential against the live authority, not the substituted console token).
+        bearer = self._request_bearer(split.query)
+        principal = self._authenticate(bearer)
         if principal is None:
             self._auth_fail(401, "missing/invalid token")
             return
         # 3a) sovereign plane — forward the user's own bearer; the sovereign self-enforces role_can.
         if is_sovereign:
-            self._proxy(host, port, self._with_query(upstream_path, split.query))
+            self._proxy(host, port, self._with_query(upstream_path, split.query), reauth_bearer=bearer)
             return
         # 3b) offense plane — coarse floor: a mutation needs run_engagement (operator+); reads need viewer+.
         if self.command not in _READ_METHODS and _OFFENSE_RUN_PERM not in principal["permissions"]:
@@ -1065,7 +1230,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # substitute the offense console credential in ?token= (SSE/downloads); the header is substituted in
         # _forward_request_headers. The browser's own bearer never reaches the offense backend.
         upstream = self._with_query(upstream_path, self._sub_token_query(split.query))
-        self._proxy(host, port, upstream, offense_principal=principal)
+        self._proxy(host, port, upstream, offense_principal=principal, reauth_bearer=bearer)
 
     @staticmethod
     def _with_query(upstream_path: str, query: str) -> str:
@@ -1153,9 +1318,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         serve dir. The guards are the same conjunction every other endpoint is held to — private peer,
         Host/Origin (anti-rebinding), session token, and (POST) the SPA custom header a cross-site form
         cannot set — checked BEFORE anything is inspected or spawned."""
-        # 1) Drain the request body EXACTLY ONCE, up front, and DISCARD it. The caller names no command:
-        #    neither route takes input, so the body is never parsed. Draining keeps framing honest, and
-        #    the connection is closed on every plane response anyway (no smuggling window).
+        # 1) Drain the request body EXACTLY ONCE, up front. It is CAPTURED (not discarded) so the one route
+        #    that DOES take input — the W9-3 force-purge/edge-revoke endpoint, naming the username/credential
+        #    to revoke — can parse it; every other route ignores it (read + effectively discarded). Draining
+        #    keeps framing honest, and the connection is closed on every plane response anyway (no smuggling
+        #    window). The body is never a path/port/command that could redirect an action.
         try:
             clen = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -1164,8 +1331,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if clen > _PLANE_MAX_BODY:
             self._plane_json({"ok": False, "error": "request body too large"}, status=413, drained=True)
             return
-        if clen > 0:
-            self.rfile.read(clen)          # read + discard: NOT configuration, not logged
+        plane_body = self.rfile.read(clen) if clen > 0 else b""   # bounded above by _PLANE_MAX_BODY
 
         # 2) never-public: only a loopback / private-tunnel peer may drive the planes.
         if not _peer_ok(self.client_address[0] if self.client_address else ""):
@@ -1264,7 +1430,73 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return
             self._plane_json(pc.stop_offense(), drained=True)
             return
+        if path == PLANE_AUTH_PURGE_PATH:
+            self._plane_auth_purge(principal, plane_body)
+            return
         self._plane_json({"ok": False, "error": "not found"}, status=404, drained=True)
+
+    def _plane_auth_purge(self, principal: dict, body: bytes) -> None:
+        """W9-3 — the admin force-purge / edge-revoke endpoint. Makes a sovereign revoke IMMEDIATE at the
+        proxy edge. POST only; already past the shared plane guard (private peer + Host/Origin + per-user
+        auth + the SPA custom header). ADDITIONALLY owner-only: it requires `manage_users` (default-deny —
+        an operator/analyst/viewer is refused 403, the negative control that proves the gate is not a
+        no-op). It edits EDGE state only (the bearer cache + the revocation set), never the sovereign
+        accounts spine — `sigil accounts revoke` stays the authority; this makes that revoke bite now.
+
+        Body (JSON): any of
+          * ``{"username": "<name>"}`` — edge-revoke every current session of that principal (added to the
+            revocation set AND its cached entries dropped). TARGETED: other users are untouched.
+          * ``{"bearer": "<credential>"}`` — edge-revoke one specific credential by its digest.
+          * ``{"all": true}`` — force-purge the WHOLE bearer cache (a rotation control): every bearer
+            re-resolves via whoami on its next decision. This does NOT revoke (a still-valid credential
+            re-resolves positive); combine with ``username``/``bearer`` to also revoke."""
+        if self.command != "POST":
+            self._plane_json({"ok": False, "error": "method not allowed (POST only)"},
+                             status=405, drained=True)
+            return
+        # owner-only: the edge-revocation control is a user-management action.
+        if _ADMIN_PURGE_PERM not in principal.get("permissions", []):
+            self._plane_json({"ok": False, "action": "auth-purge",
+                              "error": "admin force-purge requires the manage_users capability (owner)"},
+                             status=403, drained=True)
+            return
+        try:
+            payload = json.loads(body.decode("utf-8", "replace")) if body else {}
+            if not isinstance(payload, dict):
+                raise ValueError("body must be a JSON object")
+        except ValueError as exc:
+            self._plane_json({"ok": False, "action": "auth-purge", "error": f"bad request body: {exc}"},
+                             status=400, drained=True)
+            return
+        cache = getattr(self.server, "auth_cache", None)
+        revset = getattr(self.server, "revocations", None)
+        result: dict[str, Any] = {"ok": True, "action": "auth-purge"}
+        username = str(payload.get("username") or "").strip()
+        bearer = payload.get("bearer")
+        did_something = False
+        if payload.get("all") is True:
+            result["purged_cache_entries"] = cache.purge_all() if cache is not None else 0
+            did_something = True
+        if username:
+            if revset is not None:
+                revset.revoke_username(username)
+            result["revoked_username"] = username
+            result["dropped_cache_entries"] = cache.invalidate_username(username) if cache is not None else 0
+            did_something = True
+        if isinstance(bearer, str) and bearer:
+            digest = hashlib.sha256(bearer.encode("utf-8")).hexdigest()
+            if revset is not None:
+                revset.revoke_digest(digest)
+            if cache is not None:
+                cache.invalidate(digest)
+            result["revoked_digest"] = digest[:12] + "…"     # never echo the full credential/digest
+            did_something = True
+        if not did_something:
+            self._plane_json({"ok": False, "action": "auth-purge",
+                              "error": "nothing to do: pass a username, a bearer, or all=true"},
+                             status=400, drained=True)
+            return
+        self._plane_json(result, drained=True)
 
     def _plane_authority_ok(self) -> tuple[bool, str]:
         """Host/Origin must name THIS proxy: loopback on its bound port, or the exact authority/origin
@@ -1308,7 +1540,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # -- faithful forward to a loopback backend, STREAMING the response ------------------------------
     def _proxy(self, host: str, port: int, upstream_path: str, *,
-               offense_principal: "Optional[dict]" = None):
+               offense_principal: "Optional[dict]" = None, reauth_bearer: str = ""):
         try:
             clen = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -1326,8 +1558,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         conn = http.client.HTTPConnection(host, port, timeout=None)  # no read timeout → SSE stays open
         try:
             conn.request(self.command, upstream_path, body=body or None, headers=req_headers)
+            # W9-3: CAPTURE the socket BEFORE getresponse — a `Connection: close` upstream (every SSE
+            # backend sets it) makes `response.will_close` true, and `getresponse()` then nulls `conn.sock`
+            # (the socket stays alive via the response's makefile ref-count). We hand this live socket to the
+            # relay so an SSE stream can wake on a read timeout and RE-AUTHENTICATE `reauth_bearer`
+            # periodically — a connect-only auth would otherwise outlive revocation for the stream's life.
+            upstream_sock = conn.sock
             resp = conn.getresponse()
-            self._relay_response(resp)
+            self._relay_response(resp, reauth_bearer=reauth_bearer, upstream_sock=upstream_sock)
         except (ConnectionRefusedError, OSError) as exc:
             self._fail(502, f"backend {host}:{port} unreachable: {exc}")
         finally:
@@ -1388,7 +1626,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 out[_ROLE_TS_HDR] = ts
         return out
 
-    def _relay_response(self, resp: http.client.HTTPResponse):
+    def _relay_response(self, resp: http.client.HTTPResponse, *, reauth_bearer: str = "",
+                        upstream_sock: "Optional[socket.socket]" = None):
         ctype = resp.getheader("Content-Type", "") or ""
         cmajor = ctype.split(";", 1)[0].strip().lower()
         is_sse = cmajor == "text/event-stream"
@@ -1455,14 +1694,45 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # the SSE negative-control test), and a carry-window would break incremental delivery — the property
         # the SSE relay exists to preserve. A token-free response (no needle) streams straight through.
         if is_sse or not needle:
-            while True:
-                chunk = resp.read1(65536)   # ONE underlying read → forwards each SSE event as it arrives
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                self.wfile.flush()          # push it to the browser live (do NOT buffer the stream)
+            self._stream_with_reauth(resp, is_sse=is_sse, reauth_bearer=reauth_bearer,
+                                     upstream_sock=upstream_sock)
             return
         self._relay_redacting(resp, needle)
+
+    def _stream_with_reauth(self, resp: http.client.HTTPResponse, *, is_sse: bool,
+                            reauth_bearer: str, upstream_sock: "Optional[socket.socket]") -> None:
+        """Stream a length-less / SSE body to the browser, forwarding each chunk as it arrives (never
+        buffering). W9-3 — for an SSE stream carrying a bearer, RE-AUTHENTICATE that bearer periodically so a
+        stream that was authorized at connect does not outlive a revocation: the moment a re-auth no longer
+        resolves (account revoked, edge force-purged, role dropped) the stream is torn down (we stop writing
+        and the connection is closed). A read timeout on the upstream socket is what lets the loop wake to
+        re-check even when NO event is flowing; when events flow the check is done on a wall-clock deadline
+        after each write. A non-SSE length-less body (no bearer / not SSE) streams exactly as before."""
+        interval = getattr(self.server, "sse_reauth_interval", _SSE_REAUTH_INTERVAL_S) or 0.0
+        do_reauth = bool(is_sse and reauth_bearer and interval > 0 and upstream_sock is not None)
+        if do_reauth and upstream_sock is not None:         # (`is not None` also narrows for the checker)
+            try:
+                upstream_sock.settimeout(interval)          # wake at least every `interval` to re-check
+            except OSError:
+                do_reauth = False
+        deadline = time.monotonic() + interval if do_reauth else None
+        while True:
+            try:
+                chunk = resp.read1(65536)   # ONE underlying read → forwards each SSE event as it arrives
+            except (socket.timeout, TimeoutError):
+                # a quiet interval with no new event — re-authenticate the still-open stream, fail-closed.
+                if self._authenticate(reauth_bearer, fresh=True) is None:
+                    break                                   # revoked/expired since connect → tear it down
+                deadline = time.monotonic() + interval
+                continue
+            if not chunk:
+                break
+            self.wfile.write(chunk)
+            self.wfile.flush()              # push it to the browser live (do NOT buffer the stream)
+            if do_reauth and deadline is not None and time.monotonic() >= deadline:
+                if self._authenticate(reauth_bearer, fresh=True) is None:
+                    break                                   # revoked/expired since connect → tear it down
+                deadline = time.monotonic() + interval
 
     def _send_prepared(self, resp: http.client.HTTPResponse, prepared: bytes):
         """Send a fully-buffered, already-redacted body with a corrected Content-Length (the length changed
