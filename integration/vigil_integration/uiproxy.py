@@ -2365,6 +2365,168 @@ def _contain_service_unit(*, mask: bool = False,
     return actions
 
 
+# --- containment of the CADENCE SIDECARS that keep acting during an incident (W10-5b, #478) --------
+#
+# `vigil-command.service` (contained above) is only ONE of the units VIGIL ships. The rest are the
+# systemd USER *cadence sidecars*, and their timers keep ACTING ON THE TARGET AND ON CUSTOMER DATA
+# even after `vigil down` / a masked command unit:
+#   * vigil-reprove.timer  (every 6 h) RE-FIRES the retained fact corpus AGAINST THE LIVE TARGET.
+#   * vigil-posture.timer  (30 min)    RE-SCANS the authorized target.
+#   * vigil-ha-mirror.timer(15 min)    rsyncs ~/.sigil to ANOTHER HOST.        ← shortest interval
+#   * vigil-backup-push.timer (daily)  pushes an encrypted backup OFF-HOST.
+#   * vigil-backup / -drill / -integrity timers run purely locally, but a real hard-stop contains
+#     them too so "panic" means the whole shipped surface is down, not a subset.
+# All these timers carry `Persistent=true`, so simply disabling them is NOT enough: on a later
+# RE-ENABLE systemd would fire every run missed during the incident (a catch-up burst straight back
+# at the target / the off-host store). `vigil witness@<port>` instances carry `Restart=on-failure`.
+#
+# So `vigil panic` (only — `vigil down` is the routine UI stop and must not disable an operator's
+# backups) STOPS + DISABLES every timer AND its paired oneshot service, RESETS each timer's
+# Persistent= catch-up stamp so a re-enable does not replay the missed runs, stops every live
+# witness instance, and then VERIFIES nothing is left active or enabled. ORDER: the timers that
+# reach the target / push data off-host go first. Subprocess `systemctl` only — no framework import.
+_SIDECAR_TIMERS = (
+    "vigil-reprove.timer",        # re-fires the corpus against the LIVE target (6 h)
+    "vigil-posture.timer",        # re-scans the authorized target (30 min)
+    "vigil-ha-mirror.timer",      # rsyncs ~/.sigil OFF-HOST (15 min — the shortest interval)
+    "vigil-backup-push.timer",    # pushes the encrypted backup OFF-HOST (daily)
+    "vigil-backup.timer",         # local two-plane backup (daily)
+    "vigil-backup-drill.timer",   # local restore drill (weekly)
+    "vigil-integrity.timer",      # local read-only spine verify (15 min)
+)
+# Each timer's paired oneshot service — STOPPED too, because stopping a *timer* does not interrupt a
+# oneshot that is ALREADY RUNNING (e.g. an rsync/push mid-copy). Derived from the timer names so the
+# two lists can never drift apart.
+_SIDECAR_SERVICES = tuple(t[: -len(".timer")] + ".service" for t in _SIDECAR_TIMERS)
+# The witness co-sign daemon is a TEMPLATE unit; live instances are vigil-witness@<port>.service.
+_WITNESS_TEMPLATE = "vigil-witness@.service"
+_WITNESS_GLOB = "vigil-witness@*.service"
+
+
+def _user_manager_reachable(*, run: Callable[..., Any] = subprocess.run) -> bool:
+    """True iff systemd's USER manager answers at all. `systemctl --user show` returns 0 when a user
+    manager is present; rc 127 (no `systemctl` binary) or a bus-connect failure (non-zero) means there
+    is nothing to contain. Used to skip sidecar containment cleanly on a host with no user systemd —
+    exactly as `_unit_is_known` gates the command-unit path."""
+    rc, _out, _err = _systemctl("show", "--property=Version", run=run)
+    return rc == 0
+
+
+def _timer_stamp_path(timer: str) -> Path:
+    """The systemd USER `Persistent=` stamp file for ``timer``. systemd records a timer's last realtime
+    trigger as the mtime of ``$XDG_DATA_HOME/systemd/timers/stamp-<timer>`` (defaulting XDG_DATA_HOME
+    to ``~/.local/share``). With ``Persistent=true``, the NEXT time the timer is enabled/started
+    systemd compares this stamp against ``OnCalendar`` and FIRES IMMEDIATELY for every window that
+    elapsed while it was down — so a re-enable after panic would replay every missed cadence at once
+    against the target. Touching this stamp to *now* zeroes that catch-up window."""
+    xdg = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return Path(xdg) / "systemd" / "timers" / f"stamp-{timer}"
+
+
+def _neutralize_persistent_catchup(timer: str) -> str:
+    """Zero the ``Persistent=`` catch-up window for ``timer`` by stamping its trigger file to *now*, so
+    a later re-enable does not fire the runs missed while panic held it down. Best-effort and never
+    raises (panic must not be blockable): a missing stamp dir is created; any error is reported as a
+    WARNING string, not an exception. Returns a human-readable action string."""
+    stamp = _timer_stamp_path(timer)
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch(exist_ok=True)
+        now = time.time()
+        os.utime(stamp, (now, now))
+        return (f"reset {timer} catch-up stamp to now "
+                f"(Persistent= will not replay missed runs on re-enable)")
+    except OSError as exc:
+        return f"WARNING: could not reset {timer} catch-up stamp ({stamp}): {exc}"
+
+
+def _witness_instances(*, run: Callable[..., Any] = subprocess.run) -> list[str]:
+    """Enumerate the ``vigil-witness@<port>.service`` INSTANCES systemd currently knows — both loaded
+    ones (running/failed, from ``list-units``) and enabled-but-not-loaded ones that would return at
+    boot (from ``list-unit-files``). The bare TEMPLATE (``vigil-witness@.service``, no instance) is
+    excluded — there is nothing to stop for the template itself. Empty when none are present / no
+    manager. Each instance carries ``Restart=on-failure`` and must be individually contained."""
+    names: set[str] = set()
+    for verb in ("list-units", "list-unit-files"):
+        args = [verb, "--no-legend", "--plain", _WITNESS_GLOB]
+        if verb == "list-units":
+            args[1:1] = ["--all", "--type=service"]
+        rc, out, _err = _systemctl(*args, run=run)
+        if rc != 0:
+            continue
+        for line in out.splitlines():
+            tok = line.strip().split()
+            if not tok:
+                continue
+            name = tok[0]
+            if (name.startswith("vigil-witness@") and name.endswith(".service")
+                    and name != _WITNESS_TEMPLATE):
+                names.add(name)
+    return sorted(names)
+
+
+def _contain_sidecar_units(*, run: Callable[..., Any] = subprocess.run) -> list[str]:
+    """Stop AND disable every CADENCE sidecar VIGIL ships — the piece `vigil down` never did (W10-5b,
+    #478) — returning a list of human-readable action strings (empty ⇒ no user manager to contain).
+
+    For each timer, in the documented order (target-/data-reaching first): STOP it (ends scheduling),
+    DISABLE it (no boot restore), then RESET its ``Persistent=`` catch-up stamp (so a re-enable does
+    not replay the runs missed during the incident). Then STOP + DISABLE each paired oneshot service
+    (to interrupt a run already in flight — stopping a timer does not stop a running oneshot). Finally
+    STOP + DISABLE every live ``vigil-witness@`` instance (``Restart=on-failure``).
+
+    Best-effort and idempotent throughout: one unit's failure is recorded as a WARNING and never
+    aborts the rest — a hard-stop must never be blockable by a single stubborn unit."""
+    if not _user_manager_reachable(run=run):
+        return []
+    actions: list[str] = []
+    for timer in _SIDECAR_TIMERS:
+        rc, _o, err = _systemctl("stop", timer, run=run)
+        actions.append(f"stopped {timer}" if rc == 0
+                       else f"WARNING: could not stop {timer}: {(err.strip() or rc)}")
+        rc, _o, err = _systemctl("disable", timer, run=run)
+        actions.append(f"disabled {timer} (systemd will not restore it at boot)" if rc == 0
+                       else f"WARNING: could not disable {timer}: {(err.strip() or rc)}")
+        actions.append(_neutralize_persistent_catchup(timer))
+    for svc in _SIDECAR_SERVICES:
+        rc, _o, err = _systemctl("stop", svc, run=run)
+        actions.append(f"stopped {svc} (interrupts an in-flight run)" if rc == 0
+                       else f"WARNING: could not stop {svc}: {(err.strip() or rc)}")
+        rc, _o, err = _systemctl("disable", svc, run=run)
+        # A timer-driven oneshot has no [Install] section, so `disable` is normally a benign no-op
+        # (rc 0). Only a genuine non-zero is worth surfacing.
+        if rc != 0:
+            actions.append(f"WARNING: could not disable {svc}: {(err.strip() or rc)}")
+    for inst in _witness_instances(run=run):
+        rc, _o, err = _systemctl("stop", inst, run=run)
+        actions.append(f"stopped {inst} (witness Restart=on-failure)" if rc == 0
+                       else f"WARNING: could not stop {inst}: {(err.strip() or rc)}")
+        rc, _o, err = _systemctl("disable", inst, run=run)
+        actions.append(f"disabled {inst}" if rc == 0
+                       else f"WARNING: could not disable {inst}: {(err.strip() or rc)}")
+    return actions
+
+
+def _verify_sidecar_containment(*, run: Callable[..., Any] = subprocess.run) -> list[str]:
+    """Post-condition check for W10-5b: after containment, NO VIGIL timer, sidecar service, or witness
+    instance is left ACTIVE or ENABLED. Returns a list of LEAK strings (empty ⇒ containment held).
+
+    Fail-LOUD, never fail-silent: the caller prints every leak as a WARNING so a partial containment
+    is visible instead of assumed. Skips cleanly (returns []) when there is no user manager to query."""
+    if not _user_manager_reachable(run=run):
+        return []
+    leaks: list[str] = []
+    units = list(_SIDECAR_TIMERS) + list(_SIDECAR_SERVICES) + _witness_instances(run=run)
+    for unit in units:
+        _rc, active, _e = _systemctl("is-active", unit, run=run)
+        if active.strip() in ("active", "activating", "reloading"):
+            leaks.append(f"{unit} is still {active.strip()}")
+        _rc, enabled, _e = _systemctl("is-enabled", unit, run=run)
+        if enabled.strip() in ("enabled", "enabled-runtime"):
+            leaks.append(f"{unit} is still {enabled.strip()}")
+    return leaks
+
+
 def _run_up_proxy_only(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool,
                        authority: str, scheme: str, origin: str, want_browser: bool,
                        src_dir: Optional[Path], sovereign_addr: str,
@@ -2888,19 +3050,43 @@ def run_down(*, base_dir: str, run: Callable[..., Any] = subprocess.run) -> int:
 
 
 def run_panic(*, base_dir: str, run: Callable[..., Any] = subprocess.run) -> int:
-    """The process-and-unit half of `vigil panic` — a real HARD-STOP of the running surface (W10-5).
+    """The process-and-unit half of `vigil panic` — a real HARD-STOP of the running surface (W10-5,
+    completed for the cadence sidecars in W10-5b, #478).
 
-    Panic is stricter than `down`: it MASKS the unit (so even a manual `systemctl start` is refused
-    until a deliberate `unmask`) as well as stopping and disabling it, then kills every tracked pid.
-    The gate-level half — tripping every engagement's kill-switch so any surviving or later-launched
-    gated action is DENIED — is applied by the caller (`_cmd_panic`) BEFORE this runs, because that half
-    needs the offense engine and this module is deliberately framework-free.
+    Panic is stricter than `down`: it (1) MASKS the command unit (so even a manual `systemctl start`
+    is refused until a deliberate `unmask`) as well as stopping and disabling it; (2) STOPS + DISABLES
+    EVERY cadence sidecar timer AND its oneshot service, resets each timer's `Persistent=` catch-up
+    stamp so a re-enable cannot replay the runs missed during the incident, and stops every live
+    `vigil-witness@` instance; (3) kills every tracked pid; (4) VERIFIES nothing is left active or
+    enabled and warns LOUDLY on any leak. The gate-level half — tripping every engagement's
+    kill-switch so any surviving or later-launched gated action is DENIED — is applied by the caller
+    (`_cmd_panic`) BEFORE this runs, because that half needs the offense engine and this module is
+    deliberately framework-free.
 
-    Idempotent and always fail-safe: it does as much containment as it can and reports what it did."""
+    Idempotent and always fail-safe: it does as much containment as it can and reports what it did.
+    Returns 0 (the hard-stop ran); a verification leak is surfaced as a WARNING, not by refusing to
+    complete — the operator must never be left with a half-contained system and no output saying so."""
     contained = _contain_service_unit(mask=True, run=run)
     for action in contained:
         print(f"  {action}")
+    sidecars = _contain_sidecar_units(run=run)
+    for action in sidecars:
+        print(f"  {action}")
     stopped, _rc = _kill_tracked_pids(base_dir, label="vigil panic")
-    tail = "the service unit is masked + stopped" if contained else "no systemd unit to contain"
-    print(f"vigil panic: killed {stopped} tracked process(es); {tail}.")
+    leaks = _verify_sidecar_containment(run=run)
+    if leaks:
+        print("vigil panic: WARNING — containment did NOT fully hold; still active/enabled:",
+              file=sys.stderr)
+        for leak in leaks:
+            print(f"  ! {leak}", file=sys.stderr)
+        print("  Investigate and stop/disable these by hand — do NOT assume the system is contained.",
+              file=sys.stderr)
+    if contained or sidecars:
+        tail = ("the command unit is masked + stopped and every cadence sidecar "
+                "is stopped + disabled")
+    else:
+        tail = "no systemd units to contain"
+    verified = ("containment verified (nothing active or enabled)" if not leaks
+                else f"{len(leaks)} unit(s) STILL active/enabled — see the warning above")
+    print(f"vigil panic: killed {stopped} tracked process(es); {tail}; {verified}.")
     return 0

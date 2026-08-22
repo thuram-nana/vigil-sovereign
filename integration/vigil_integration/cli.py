@@ -2111,16 +2111,22 @@ def _trip_all_killswitches(*, reason: str) -> list[str]:
 
 
 def _cmd_panic(args: argparse.Namespace) -> int:
-    """`vigil panic` — the emergency HARD-STOP (W10-5, #477). In order:
+    """`vigil panic` — the emergency HARD-STOP (W10-5 #477, completed for the cadence sidecars in
+    W10-5b #478). In order:
 
       1. Trip EVERY engagement's kill-switch (the gate-level stop): any in-flight or later-launched
          gated offense action is DENIED, persistently and fail-closed — even a process we do not track.
          This runs FIRST so a racing engagement is refused before we start killing anything.
-      2. Kill the tracked offense processes and MASK + stop + disable the `vigil-command` unit so
-         nothing restores the surface.
+      2. MASK + stop + disable the `vigil-command` unit, then STOP + DISABLE every cadence sidecar
+         timer AND its oneshot service (reprove/posture/ha-mirror/backup-push re-drive the target or
+         push data off-host; backup/backup-drill/integrity are local), reset each timer's
+         `Persistent=` catch-up stamp so a re-enable does not replay the missed runs, stop every live
+         `vigil-witness@` instance, kill the tracked processes, and VERIFY nothing is left active or
+         enabled.
 
-    Clearing is deliberately a separate operator act (a kill-switch clear, and `systemctl --user unmask`
-    for the unit). See docs/runbooks/PANIC-AND-CONTAINMENT.md."""
+    Clearing is deliberately a separate operator act (a kill-switch clear, `systemctl --user unmask`
+    for the command unit, and a re-enable of any sidecar timers you still want).
+    See docs/runbooks/PANIC-AND-CONTAINMENT.md."""
     try:
         tripped = _trip_all_killswitches(reason=(args.reason or "vigil panic"))
         print(f"vigil panic: tripped {len(tripped)} kill-switch(es): "
@@ -2133,7 +2139,8 @@ def _cmd_panic(args: argparse.Namespace) -> int:
     from .uiproxy import run_panic
     rc = run_panic(base_dir=args.base_dir)
     print("vigil panic: hard-stop complete. The kill-switches stay tripped until you CLEAR each one, "
-          "and the unit stays masked until `systemctl --user unmask vigil-command.service`. "
+          "the command unit stays masked until `systemctl --user unmask vigil-command.service`, and "
+          "the cadence sidecar timers stay disabled until you re-enable the ones you want. "
           "See docs/runbooks/PANIC-AND-CONTAINMENT.md.")
     return rc
 
@@ -3196,8 +3203,10 @@ def build_parser() -> argparse.ArgumentParser:
     pupg.set_defaults(func=_cmd_upgrade)
 
     ppan = sub.add_parser("panic", help="EMERGENCY HARD-STOP: trip every engagement's kill-switch (gate-"
-                                        "level DENY, persistent) then mask+stop the unit and kill the "
-                                        "offense processes. Clearing is a deliberate operator act.")
+                                        "level DENY, persistent) then mask+stop the command unit, "
+                                        "stop+disable EVERY cadence sidecar timer/unit (no catch-up "
+                                        "replay), kill the offense processes, and verify containment "
+                                        "held. Clearing is a deliberate operator act.")
     ppan.add_argument("--base-dir", default=".vigil-live",
                       help="engagement home holding the ui/pids file written by `vigil up`")
     ppan.add_argument("--reason", default="",

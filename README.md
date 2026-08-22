@@ -710,8 +710,10 @@ co-load) and serves a no-build static bundle.
 vigil up                      # → http://127.0.0.1:8770/?token=… (opens a browser on a loopback bind)
 # vigil down                  # CONTAIN: stop+disable the systemd unit (so Restart=always can't revive it)
 #                             #          AND reap the backends tracked in the pids file
-# vigil panic                 # EMERGENCY HARD-STOP: trip every engagement's kill-switch (gate-level DENY)
-#                             #          then mask+stop the unit and kill the offense processes
+# vigil panic                 # EMERGENCY HARD-STOP: trip every engagement's kill-switch (gate-level DENY),
+#                             #          mask+stop the command unit, stop+disable EVERY cadence sidecar
+#                             #          timer/unit (no Persistent= catch-up replay), kill the offense
+#                             #          processes, and verify nothing is left active/enabled (W10-5b)
 ```
 
 - **One origin, two planes.** The proxy binds **127.0.0.1:8770** (loopback, or a private/tunnel IP — a
