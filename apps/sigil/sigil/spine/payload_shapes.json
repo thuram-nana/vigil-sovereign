@@ -1,0 +1,158 @@
+{
+  "commit": {
+    "hash": {
+      "required": false,
+      "type": "str"
+    },
+    "repo": {
+      "required": false,
+      "type": "str"
+    },
+    "subject": {
+      "required": false,
+      "type": "str"
+    },
+    "text": {
+      "required": false,
+      "type": "str"
+    }
+  },
+  "detection": {
+    "bug_class": {
+      "required": false,
+      "type": "str"
+    },
+    "certificate": {
+      "required": false,
+      "type": "dict"
+    },
+    "evidence_digest_hex": {
+      "required": false,
+      "type": "str"
+    },
+    "oracle": {
+      "required": false,
+      "type": "str"
+    },
+    "schema": {
+      "required": false,
+      "type": "str"
+    },
+    "signatures": {
+      "required": false,
+      "type": "list"
+    }
+  },
+  "document": {
+    "chunk": {
+      "required": false,
+      "type": "int"
+    },
+    "path": {
+      "required": false,
+      "type": "str"
+    },
+    "project": {
+      "required": false,
+      "type": "str"
+    },
+    "text": {
+      "required": false,
+      "type": "str"
+    },
+    "title": {
+      "required": false,
+      "type": "str"
+    }
+  },
+  "finding": {
+    "certificate": {
+      "required": false,
+      "type": "dict"
+    },
+    "finding_ref": {
+      "required": false,
+      "type": "str"
+    },
+    "oracle_context_digest": {
+      "required": false,
+      "type": "str"
+    },
+    "schema": {
+      "required": false,
+      "type": "str"
+    },
+    "signatures": {
+      "required": false,
+      "type": "list"
+    }
+  },
+  "snapshot": {
+    "base_count": {
+      "required": false,
+      "type": "int"
+    },
+    "base_prev_hash": {
+      "required": false,
+      "type": "str"
+    },
+    "base_seq": {
+      "required": false,
+      "type": "int"
+    },
+    "cumulative_merkle_root": {
+      "required": false,
+      "type": "str"
+    },
+    "delta_merkle_root": {
+      "required": false,
+      "type": "str"
+    },
+    "folded_state": {
+      "required": false,
+      "type": "dict"
+    },
+    "prev_snapshot_seq": {
+      "required": false,
+      "type": "int"
+    },
+    "signal": {
+      "required": false,
+      "type": "str"
+    },
+    "snapshot_seq": {
+      "required": false,
+      "type": "int"
+    },
+    "trusted_pubkey": {
+      "required": false,
+      "type": "str"
+    }
+  },
+  "web_page": {
+    "content_hash": {
+      "required": false,
+      "type": "str"
+    },
+    "depth": {
+      "required": false,
+      "type": "int"
+    },
+    "http_status": {
+      "required": false,
+      "type": "int"
+    },
+    "robots_allowed": {
+      "required": false,
+      "type": "bool"
+    },
+    "text": {
+      "required": false,
+      "type": "str"
+    },
+    "url": {
+      "required": false,
+      "type": "str"
+    }
+  }
+}
