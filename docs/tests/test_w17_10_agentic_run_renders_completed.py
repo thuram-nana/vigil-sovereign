@@ -187,3 +187,23 @@ def test_no_new_bridge_combination_can_fall_through() -> None:
     assert "integration" in emitted_engines, (
         "launch_assessment no longer emits engine:'integration' — the P3 predicate's engine test would be dead"
     )
+
+
+def test_empty_state_text_is_not_codebase_or_aegis_only() -> None:
+    """Red-pen HIGH: once engine === 'integration' routes an agentic `vigil engage` run into the
+    no-report-captured empty state, the empty-state COPY must be true for that run too — the pre-fix text
+    ("A codebase (Strix) / AEGIS run reports inside its sandbox") mis-attributed an agentic engage run as a
+    codebase/AEGIS run. The copy must name the engage/agentic case or be generic across all routed types."""
+    import pathlib
+
+    app = pathlib.Path(__file__).resolve().parents[2] / "packages" / "vigil-ui" / "app.js"
+    src = app.read_text(encoding="utf-8")
+    # the exact pre-fix mis-attributing sentence must be gone
+    assert "A codebase (Strix) / AEGIS run reports inside its sandbox" not in src, (
+        "the empty-state copy still describes the run as codebase/AEGIS-only — it mis-attributes an "
+        "agentic engage run routed here by engine === 'integration'"
+    )
+    # and the replacement must cover the agentic engage case (named, or a generic 'streams its work' form)
+    assert ("agentic engage run" in src or "streams its work" in src), (
+        "the empty-state copy must be true for the agentic engage run too (name it, or be generic)"
+    )
