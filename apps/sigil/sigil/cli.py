@@ -384,18 +384,27 @@ def cmd_accounts(a) -> None:
     """Bootstrap + manage per-user RBAC accounts (Claim 6). Accounts are OWNER-SIGNED spine grants; the
     owner key (auto-created once) is the sole signer. `create` mints a per-user bearer token and prints it
     ONCE (only its salted hash is stored). `assign` changes a role; `revoke` disables an account (the safe
-    direction). `enroll-totp` owner-binds a TOTP second factor (S4) — the plaintext secret is shown once as
-    an otpauth:// URI and sealed at rest, never stored. `disable-totp` removes that factor (the documented
-    RECOVERY path for a lost authenticator — W17-1). `list` needs no key.
+    direction). `enroll-pubkey` owner-binds the account's Ed25519 PUBLIC key — the S3 stronger
+    challenge/response (proof-of-possession) login identity; the key comes from `--pubkey`/`--pubkey-file`
+    and is validated fail-closed. `enroll-totp` owner-binds a TOTP second factor (S4) — the plaintext secret
+    is shown once as an otpauth:// URI and sealed at rest, never stored. `set-password` owner-sets the
+    OPTIONAL weaker scrypt password login (prompted, never on argv; only its salted hash reaches the spine).
+    `disable-totp` removes the TOTP factor (the documented RECOVERY path for a lost authenticator — W17-1).
+    `list` needs no key. This is the CLI half of the W17-3 enrolment fix set; the Users & Roles screen wires
+    the same three enrolment actions (enroll_pubkey / enroll_totp / set_password) so a fresh operator can
+    enrol from either surface and then log in through the gate (bearer / password+TOTP / SSO).
 
         sigil accounts create <username> <viewer|analyst|operator>
         sigil accounts assign <username> <viewer|analyst|operator>
         sigil accounts revoke <username>
+        sigil accounts enroll-pubkey <username> --pubkey <b64> | --pubkey-file <path>
         sigil accounts enroll-totp <username>
+        sigil accounts set-password <username>          # prompts for the password (never on argv)
         sigil accounts disable-totp <username>
         sigil accounts list
     """
     import time as _time
+    from pathlib import Path
 
     from .governor.accounts import ROLES, AccountsRegistry
     from .governor.identity import ensure_owner_keypair
@@ -409,8 +418,8 @@ def cmd_accounts(a) -> None:
             print(f"  {ac.username:<24} {ac.role:<10} {ac.state}")
         return
     if not a.username:
-        print("  usage: sigil accounts <create|assign|revoke|enroll-totp|disable-totp> <username> [role]",
-              file=sys.stderr)
+        print("  usage: sigil accounts <create|assign|revoke|enroll-pubkey|enroll-totp|set-password|"
+              "disable-totp> <username> [role]", file=sys.stderr)
         sys.exit(2)
     if a.accounts_cmd in ("create", "assign") and not a.role:
         print(f"  usage: sigil accounts {a.accounts_cmd} <username> <viewer|analyst|operator>",
@@ -429,6 +438,56 @@ def cmd_accounts(a) -> None:
     elif a.accounts_cmd == "revoke":
         seq = reg.revoke(a.username)
         print(f"  account REVOKED: {a.username} (seq {seq}) — its bearer token no longer authenticates")
+    elif a.accounts_cmd == "enroll-pubkey":
+        # S3 — owner-bind the account's Ed25519 PUBLIC key (challenge/response proof-of-possession login,
+        # the stronger path). The key is read from --pubkey or --pubkey-file (never generated here — the
+        # PRIVATE half stays with the user, never on the host). enroll_pubkey validates it fail-closed
+        # (load_public_key rejects malformed / non-canonical / low-order keys), so binding garbage is a
+        # clean refusal now rather than a silently-always-failing login later.
+        pubkey = (getattr(a, "pubkey", None) or "").strip()
+        pubkey_file = (getattr(a, "pubkey_file", None) or "").strip()
+        if pubkey and pubkey_file:
+            print("  give EITHER --pubkey OR --pubkey-file, not both.", file=sys.stderr)
+            sys.exit(2)
+        if pubkey_file:
+            try:
+                pubkey = Path(pubkey_file).read_text(encoding="utf-8").strip()
+            except OSError as e:
+                print(f"  cannot read --pubkey-file {pubkey_file!r}: {e}", file=sys.stderr)
+                sys.exit(1)
+        if not pubkey:
+            print("  usage: sigil accounts enroll-pubkey <username> --pubkey <b64> | --pubkey-file <path>",
+                  file=sys.stderr)
+            sys.exit(2)
+        try:
+            seq = reg.enroll_pubkey(a.username, pubkey, issued_at=_time.time())
+        except ValueError as e:  # invalid key / unknown-or-revoked account → an actionable refusal
+            print(f"  cannot enroll pubkey: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"  PUBKEY ENROLLED for {a.username} (owner-signed, seq {seq}) — the account can now log in by "
+              f"proving possession of the matching PRIVATE key (challenge/response). Keypairs are the "
+              f"strongest login path; the private key never touches the host.")
+    elif a.accounts_cmd == "set-password":
+        # S4 — owner-set the OPTIONAL weaker scrypt password login. The plaintext is PROMPTED (never on
+        # argv, where it would land in shell history / the process table) and hashed inside set_password;
+        # only the salted-scrypt hash reaches the spine (mirrors the bearer, which is stored only as a hash).
+        import getpass as _getpass
+        pw = _getpass.getpass(f"  new password for {a.username} (input hidden): ")
+        pw2 = _getpass.getpass("  confirm password: ")
+        if pw != pw2:
+            print("  passwords do not match — nothing changed.", file=sys.stderr)
+            sys.exit(1)
+        if len(pw) < 8:
+            print("  refusing to set a password shorter than 8 characters (keypair login is the stronger "
+                  "path anyway — see `enroll-pubkey`).", file=sys.stderr)
+            sys.exit(1)
+        try:
+            seq = reg.set_password(a.username, pw, issued_at=_time.time())
+        except ValueError as e:  # unknown-or-revoked account → an actionable refusal
+            print(f"  cannot set password: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"  PASSWORD SET for {a.username} (owner-signed, seq {seq}; salted scrypt, the plaintext never "
+              f"reached the spine). If TOTP is enrolled, the password login still requires the current code.")
     elif a.accounts_cmd == "enroll-totp":
         # S4 — owner-bind a TOTP second factor. The plaintext secret is generated HERE, shown ONCE in the
         # provisioning URI, and SEALED via the owner vault before it lands on the spine (only the sealed blob
@@ -1560,13 +1619,19 @@ def main(argv=None) -> None:
     pcap.add_argument("--reason", default="", help="reason recorded on the spine")
     pcap.set_defaults(fn=cmd_capability)
     pacc = sub.add_parser("accounts",
-                          help="per-user RBAC accounts (Claim 6): create|assign|revoke|enroll-totp|"
-                               "disable-totp|list (owner-signed bearer grants)")
+                          help="per-user RBAC accounts (Claim 6): create|assign|revoke|enroll-pubkey|"
+                               "enroll-totp|set-password|disable-totp|list (owner-signed grants)")
     pacc.add_argument("accounts_cmd",
-                      choices=["create", "assign", "revoke", "enroll-totp", "disable-totp", "list"])
+                      choices=["create", "assign", "revoke", "enroll-pubkey", "enroll-totp",
+                               "set-password", "disable-totp", "list"])
     pacc.add_argument("username", nargs="?", default=None, help="the account username")
     pacc.add_argument("role", nargs="?", default=None, choices=[None, "viewer", "analyst", "operator"],
                       help="role for create/assign (viewer|analyst|operator; 'owner' is not grantable)")
+    pacc.add_argument("--pubkey", default=None,
+                      help="enroll-pubkey: the account's base64 Ed25519 PUBLIC key (challenge/response PoP "
+                           "login); the private half never touches the host")
+    pacc.add_argument("--pubkey-file", default=None,
+                      help="enroll-pubkey: read the base64 public key from this file instead of --pubkey")
     pacc.set_defaults(fn=cmd_accounts)
     pgn = sub.add_parser("gesture-nav",
                          help="toggle gesture NAV-MODE (S3): in nav-mode a live armed session's swipes/pinch "

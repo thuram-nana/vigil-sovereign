@@ -54,15 +54,19 @@ sigil accounts revoke alice             # alice's bearer no longer authenticates
 
 **Goal:** move a user beyond bearer-only by binding a cryptographic identity and a second factor. These are
 **owner-only** enrollment **actions** (`manage_users`) on the sovereign action plane — `POST /api/action`
-with `{action, username, …}` (the Users & Roles screen drives the same actions). There is **no**
-`sigil accounts enroll-*` CLI verb; enrollment is owner-signed into the account grant, so it needs the owner
-key present. Do **not** confuse these with the create/assign/revoke CLI verbs in Phase 1.
+with `{action, username, …}`. Each is reachable from **both** the Users & Roles screen (per-account **Enrol
+key / Enrol TOTP / Set password** controls) **and** a `sigil accounts` CLI verb
+(`enroll-pubkey`/`enroll-totp`/`set-password`, plus `disable-totp` for recovery — W17-1/#535, W17-3/#537);
+enrollment is owner-signed into the account grant, so it needs the owner key present. These are distinct from
+the create/assign/revoke CLI verbs in Phase 1.
 
 **1b.1 — Per-user keypair + challenge/response PoP login (`enroll_pubkey`):**
 
 - As the **owner**, enroll alice's Ed25519 public key: `POST /api/action` `{action:"enroll_pubkey",
-  username:"alice", user_pubkey:"<base64 raw ed25519 public key>"}`. It is owner-signed into her grant; an
-  account is bearer-only until enrolled.
+  username:"alice", user_pubkey:"<base64 raw ed25519 public key>"}` (or, at the host,
+  `sigil accounts enroll-pubkey alice --pubkey <b64>` / `--pubkey-file <path>`). It is owner-signed into her
+  grant; an account is bearer-only until enrolled. The key is validated fail-closed at binding (a malformed /
+  non-canonical / low-order key is refused, never silently bound).
 - As **alice**, log in by proof-of-possession (no bearer needed): `POST /api/login/challenge` → a single-use
   server nonce; sign `DOMAIN_TAG + challenge` with her private key; `POST /api/login`
   `{username:"alice", challenge, signature}` → a fresh session bearer is minted.
@@ -91,9 +95,10 @@ the owner runs `sigil accounts disable-totp alice` (the recovery path).
 
 **1b.3 — Optional password login (`set_password`), if you want the weaker fallback:**
 
-- As the **owner**, `POST /api/action` `{action:"set_password", username:"alice", password:"…"}` — stored as
-  salted **scrypt** (`scrypt$…`); the plaintext never reaches the spine. Keypair PoP (1b.1) is the **stronger**
-  path; use a password only where a keypair is impractical.
+- As the **owner**, `POST /api/action` `{action:"set_password", username:"alice", password:"…"}` (or, at the
+  host, `sigil accounts set-password alice`, which **prompts** for the password so it never lands on argv /
+  in shell history) — stored as salted **scrypt** (`scrypt$…`); the plaintext never reaches the spine.
+  Keypair PoP (1b.1) is the **stronger** path; use a password only where a keypair is impractical.
 
 ---
 

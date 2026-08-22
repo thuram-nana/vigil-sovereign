@@ -348,12 +348,16 @@ class Handler(BaseHTTPRequestHandler):
         self._json({**base, "oidc": oidc_enabled()})
 
     def _accounts(self):
-        """The owner's Users & Roles list — username/role/state/issued_at only. cred_hash/salt never leave
-        the server (they are not even placed in the response)."""
+        """The owner's Users & Roles list — username/role/state/issued_at plus PURE BOOLEAN factor flags
+        (has_pubkey / has_totp / has_password) so the enrolment UI (W17-3) can show which login factors are
+        bound. cred_hash/salt, the bound pubkey, the sealed TOTP blob and the password hash NEVER leave the
+        server — only the booleans (no secret, mirroring whoami.oidc)."""
         from ..governor.accounts import AccountsRegistry
         accts = AccountsRegistry(self.server.store()).accounts()
         self._json({"accounts": [{"username": a.username, "role": a.role, "state": a.state,
-                                  "issued_at": a.issued_at} for a in accts]})
+                                  "issued_at": a.issued_at,
+                                  "has_pubkey": bool(a.user_pubkey), "has_totp": bool(a.totp_secret),
+                                  "has_password": bool(a.password_hash)} for a in accts]})
 
     def _challenge_ledger(self):
         """The single-use login-challenge ledger, rooted next to the spine file (one dir per spine, so a

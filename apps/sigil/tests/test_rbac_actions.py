@@ -134,6 +134,11 @@ OWNER_ONLY = [
     ("create_account", {"username": "newbie", "role": "viewer"}),
     ("assign_role", {"username": "newbie", "role": "operator"}),
     ("revoke_account", {"username": "newbie"}),
+    # W17-3 enrolment actions are user-management -> owner-only, same as create/assign/revoke. The RBAC gate
+    # fires at the funnel BEFORE the registry is touched, so an unknown-account username is irrelevant here.
+    ("enroll_pubkey", {"username": "newbie", "user_pubkey": "x"}),
+    ("enroll_totp", {"username": "newbie"}),
+    ("set_password", {"username": "newbie", "password": "irrelevant-because-denied-first"}),
 ]
 
 

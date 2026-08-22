@@ -641,3 +641,168 @@ def test_w171_doc_and_cli_verbs_are_true_of_the_code():
         text = doc.read_text(encoding="utf-8")
         assert "enroll-totp" in text and "disable-totp" in text, "doc must name the enrolment/recovery verbs"
         assert "require=False" in text, "doc must state the bearer branch is not gated (require=False)"
+
+# ============================== W17-3: the LOGIN FIX SET — enrolment verbs + UI + unauth routes ========
+# Issue #537 (builds on W17-1 #535 / W17-2 #536). W17-2 already wired the login GATE (TOTP field + SSO
+# button) and the bootstrap routes through `vigil up`; W17-3 completes the ENROLMENT side: the CLI verbs
+# `enroll-pubkey` / `set-password` (the TOTP verb landed in W17-1) and the Users-screen enrolment fields
+# that drive the SAME owner-signed broker actions. These tests fail on a tree without the fix (the verbs /
+# UI wiring / doc lines do not exist) and each carries a negative control proving the gate is not a no-op.
+
+def test_w173_cli_accounts_enroll_pubkey_verb(monkeypatch):
+    """CLI lane — `sigil accounts enroll-pubkey <user> --pubkey <b64>` owner-binds the account's Ed25519
+    login key (folds with `user_pubkey` set). FAILS on a tree without the fix: the verb is not in the
+    argparse choices and cmd_accounts has no branch for it. Negative control in the sibling test below."""
+    from types import SimpleNamespace
+
+    from sigil import cli
+    from sigil.governor.identity import ensure_owner_keypair
+    owner = ensure_owner_keypair()
+    store = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: store)
+    reg = AccountsRegistry(store, owner_key=owner, trusted_pubkey=owner.public_key_b64)
+    reg.create("kayla", "operator", bearer_token="kayla-bearer-xxxxxxxx", issued_at=1.0)
+    assert reg.account("kayla").user_pubkey is None
+    user = generate_keypair()
+    cli.cmd_accounts(SimpleNamespace(accounts_cmd="enroll-pubkey", username="kayla", role=None,
+                                     pubkey=user.public_key_b64, pubkey_file=None))
+    assert reg.account("kayla").user_pubkey == user.public_key_b64      # the key is now owner-bound
+
+
+def test_w173_cli_enroll_pubkey_rejects_a_garbage_key_negative_control(monkeypatch):
+    """NEGATIVE CONTROL — enrol is not a no-op: a malformed public key is REFUSED (fail-closed exit),
+    the account is left with NO key bound (a silently-always-failing login can never be created)."""
+    from types import SimpleNamespace
+
+    from sigil import cli
+    from sigil.governor.identity import ensure_owner_keypair
+    owner = ensure_owner_keypair()
+    store = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: store)
+    reg = AccountsRegistry(store, owner_key=owner, trusted_pubkey=owner.public_key_b64)
+    reg.create("badkey", "viewer", bearer_token="badkey-bearer-xxxxxx", issued_at=1.0)
+    with pytest.raises(SystemExit):
+        cli.cmd_accounts(SimpleNamespace(accounts_cmd="enroll-pubkey", username="badkey", role=None,
+                                         pubkey="not-a-real-ed25519-key", pubkey_file=None))
+    assert reg.account("badkey").user_pubkey is None                    # nothing bound → no broken login
+
+
+def test_w173_cli_accounts_set_password_verb(monkeypatch):
+    """CLI lane — `sigil accounts set-password <user>` prompts (never on argv) and owner-sets a salted
+    scrypt password that verifies. FAILS on a tree without the fix (no verb/branch). Negative controls:
+    a mismatch and a too-short password are both refused, leaving no password bound."""
+    from types import SimpleNamespace
+
+    from sigil import cli
+    from sigil.governor.identity import ensure_owner_keypair
+    owner = ensure_owner_keypair()
+    store = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    monkeypatch.setattr(cli, "SpineStore", lambda *a, **k: store)
+    reg = AccountsRegistry(store, owner_key=owner, trusted_pubkey=owner.public_key_b64)
+    reg.create("pat", "operator", bearer_token="pat-bearer-xxxxxxxxxx", issued_at=1.0)
+    assert reg.account("pat").password_hash is None
+
+    # matching, long-enough password → set + verifies
+    monkeypatch.setattr("getpass.getpass", lambda *a, **k: "operator-pass-1")
+    cli.cmd_accounts(SimpleNamespace(accounts_cmd="set-password", username="pat", role=None))
+    ph = reg.account("pat").password_hash
+    assert ph and verify_password("operator-pass-1", ph) and not verify_password("WRONG-pass-9", ph)
+
+    # NEGATIVE CONTROL 1 — a mismatched confirmation is refused, the existing hash is unchanged
+    seq = iter(["one-password-x", "two-password-y"])
+    monkeypatch.setattr("getpass.getpass", lambda *a, **k: next(seq))
+    with pytest.raises(SystemExit):
+        cli.cmd_accounts(SimpleNamespace(accounts_cmd="set-password", username="pat", role=None))
+    assert reg.account("pat").password_hash == ph                       # untouched by the refused attempt
+
+    # NEGATIVE CONTROL 2 — a too-short password is refused (fail-closed on weak input)
+    monkeypatch.setattr("getpass.getpass", lambda *a, **k: "short")
+    with pytest.raises(SystemExit):
+        cli.cmd_accounts(SimpleNamespace(accounts_cmd="set-password", username="pat", role=None))
+    assert reg.account("pat").password_hash == ph
+
+
+def test_w173_cli_wires_the_enrolment_verbs_and_docs_mirror_them():
+    """DOC/CODE-TRUTH — derive the wired accounts verbs from cli.py (source of truth) and assert the two new
+    W17-3 verbs are BOTH in the argparse choices AND dispatched, and that docs/CLAIM-6-RBAC.md names them so
+    the doc cannot silently drift from the code."""
+    import re as _re
+    repo = Path(__file__).resolve().parents[3]
+    cli_src = (repo / "apps" / "sigil" / "sigil" / "cli.py").read_text(encoding="utf-8")
+    m = _re.search(r'"accounts_cmd",\s*choices=\[([^\]]*)\]', cli_src)
+    assert m, "could not locate the accounts_cmd choices in cli.py"
+    verbs = {v.strip().strip("\"'") for v in m.group(1).split(",") if v.strip()}
+    assert {"enroll-pubkey", "set-password"} <= verbs, f"CLI must wire the W17-3 verbs, got {verbs}"
+    assert 'a.accounts_cmd == "enroll-pubkey"' in cli_src, "cmd_accounts must dispatch enroll-pubkey"
+    assert 'a.accounts_cmd == "set-password"' in cli_src, "cmd_accounts must dispatch set-password"
+    doc = repo / "docs" / "CLAIM-6-RBAC.md"
+    if doc.exists():
+        text = doc.read_text(encoding="utf-8")
+        assert "enroll-pubkey" in text and "set-password" in text, "doc must name the W17-3 enrolment verbs"
+
+
+def test_w173_users_screen_wires_the_three_enrolment_actions():
+    """UI-WIRING TRUTH — the Users & Roles screen (packages/vigil-ui/app.js) must actually POST the three
+    owner-signed enrolment actions to the broker, so an operator can enrol a public key, a TOTP secret and a
+    password from the UI (AC: 'from both the Users screen and the CLI'). Reading app.js as text is the same
+    code-is-source-of-truth guard used by test_ui_settings.py. FAILS on a tree without the UI wiring."""
+    repo = Path(__file__).resolve().parents[3]
+    app_js = (repo / "packages" / "vigil-ui" / "app.js").read_text(encoding="utf-8")
+    for act in ("enroll_pubkey", "enroll_totp", "set_password"):
+        assert 'action: "' + act + '"' in app_js, f"the Users screen must issue the {act} action"
+    assert "usersEnrolBlock" in app_js, "usersRow must render the per-account enrolment block"
+    # the stale, now-false 'per-user command-UI login is the next slice' claim must be gone (W17-2 shipped it)
+    assert "next slice" not in app_js, "the false 'next slice' login claim must be removed (doc-truth)"
+
+
+def test_w173_end_to_end_enrol_pubkey_and_password_then_login_over_http():
+    """END-TO-END over the real HTTP server, exactly what the Users screen / CLI drive: the owner enrols a
+    PUBLIC KEY and a PASSWORD on a fresh account, then that account LOGS IN with the password and gets a
+    working bearer. This is the enrol-then-login flow the issue says bricks login today. Negative controls
+    below: a wrong password is refused, and an UNAUTHENTICATED enrolment attempt is refused (401)."""
+    s, port = _serve()
+    try:
+        st, d = _post(port, "/api/action", {"action": "create_account", "username": "quinn",
+                                            "role": "operator"})
+        assert st == 200, d
+        user = generate_keypair()
+        assert _post(port, "/api/action", {"action": "enroll_pubkey", "username": "quinn",
+                                           "user_pubkey": user.public_key_b64})[0] == 200
+        assert _post(port, "/api/action", {"action": "set_password", "username": "quinn",
+                                           "password": "quinn-pass-123"})[0] == 200
+        # the account now shows both factors bound in the owner's list (non-secret booleans)
+        row = next(a for a in _accounts(port) if a["username"] == "quinn")
+        assert row["has_pubkey"] is True and row["has_password"] is True and row["has_totp"] is False
+        # LOG IN with the password → 200 + a working bearer (the enrol-then-login flow)
+        st, dd = _login(port, {"username": "quinn", "password": "quinn-pass-123"})
+        assert st == 200 and dd["authenticated"] is True and dd["username"] == "quinn"
+        assert dd["bearer"] and _authed_get(port, "/api/snapshot", dd["bearer"]) == 200
+        # NEGATIVE CONTROL 1 — a wrong password is refused (the gate is not a no-op)
+        assert _login(port, {"username": "quinn", "password": "WRONG-pass-000"})[0] == 401
+        # NEGATIVE CONTROL 2 — enrolment requires an authenticated, authorized caller: a POST with NO token
+        # (unauthenticated) is refused by the action gate, never silently enrolling.
+        assert _post_no_token(port, "/api/action", {"action": "enroll_pubkey", "username": "quinn",
+                                                    "user_pubkey": user.public_key_b64})[0] in (401, 403)
+    finally:
+        s.shutdown()
+
+
+def _accounts(port):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/accounts",
+                                 headers={"X-SIGIL-Token": TOKEN})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.loads(r.read().decode())["accounts"]
+
+
+def _post_no_token(port, path, body):
+    """A POST to the action plane with NO X-SIGIL-Token — the unauthenticated caller. Origin/Host are still
+    set so we isolate the AUTH refusal (missing principal), not the anti-rebinding refusal."""
+    h = {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}",
+         "Host": f"127.0.0.1:{port}"}
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(body).encode(),
+                                 headers=h, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, (json.loads(e.read().decode()) if e.headers.get("Content-Type", "").startswith("application/json") else {})
