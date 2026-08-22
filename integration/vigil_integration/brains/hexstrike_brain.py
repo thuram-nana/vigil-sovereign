@@ -343,6 +343,11 @@ class HexstrikeBrain:
 
     def _risk_level(self, p: TargetProfile) -> str:
         s = p.attack_surface_score
+        # H3 — honest unknown: with NO observed surface (no ports/services/technologies/cms), we have
+        # nothing to rate, so the risk is UNKNOWN — never a fabricated "low" for a target nobody observed.
+        # A rated tier (low..critical) is reported only once a real observation gives the surface substance.
+        if s <= 0.0:
+            return "unknown"
         return "critical" if s >= 0.8 else "high" if s >= 0.6 else "medium" if s >= 0.3 else "low"
 
     def _confidence(self, p: TargetProfile) -> float:

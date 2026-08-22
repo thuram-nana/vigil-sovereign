@@ -129,12 +129,23 @@ def _cmd_engage(args: argparse.Namespace) -> int:
     if str(getattr(args, "brain", "") or "").strip().lower() == "hexstrike":
         from .brains.engine_think import BrainThink
         from .brains.hexstrike_brain import HexstrikeBrain
+        from .brains.profile_observations import collect_engage_observations
         # The planner objective is --brain-objective (a closed enum), NOT --objective. --objective is the
         # engagement's free-text goal, which is recorded with the run and does not steer it; feeding it to
         # the planner meant one flag carried two incompatible meanings, and its "" default silently built
         # the SHORT plan while labelling it comprehensive.
+        #
+        # H3 — feed the profile from VERIFIED, PROVENANCED observations instead of leaving it empty. The
+        # feed assembles VIGIL-owned observations available at engage-start (the signed-authority scope's
+        # literal IPs + a normalized observations sidecar) and reduces them to analyze_target's kwargs.
+        # Fail-soft: with no sources it returns all-empty kwargs, so a plain --brain engage proposes the
+        # same chain as before (only the profile is now honest unknowns, never a fabricated risk).
+        observations = collect_engage_observations(
+            slug=args.slug, base_dir=args.base_dir, scope=scope,
+            sidecar_path=(getattr(args, "brain_observations", "") or None))
         brain = BrainThink(HexstrikeBrain(), target=args.url,
-                           objective=getattr(args, "brain_objective", None))
+                           objective=getattr(args, "brain_objective", None),
+                           observations=observations)
     # GAP-1 — the per-session model sovereignty pick. --backend (LOCAL) and --model (CLOUD) are mutually
     # exclusive: a local backend routes think through the loopback-enforced provider with no cloud failover,
     # so simultaneously naming a cloud model string is contradictory. Fail-closed on the contradiction rather
@@ -2678,6 +2689,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="how thorough the --brain planner's proposed chain is (default: comprehensive). "
                          "Only meaningful with --brain. Distinct from --objective, which is the "
                          "engagement's recorded free-text goal.")
+    pe.add_argument("--brain-observations", default="",
+                    help="H3: path to a JSON sidecar of VERIFIED, PROVENANCED observations that seed the "
+                         "--brain planner's target profile (rows of {kind, value, provenance, confidence}; "
+                         "kinds: ip_address/open_port/service/tls/technology/repo_language/cms/"
+                         "cloud_provider/container_orch/api_descriptor/target_type). Only meaningful with "
+                         "--brain. Overrides VIGIL_BRAIN_OBSERVATIONS and the default "
+                         "<base-dir>/<slug>/observations.json. Absent => the profile is honest unknowns.")
     pe.add_argument("--scope", default="127.0.0.1",
                     help="comma-separated LITERAL hosts / *.wildcards the engagement is authorized for (no "
                          "CIDR); signed into the CRUCIBLE authority and enforced end-to-end. PREFER literal "
