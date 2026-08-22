@@ -40,6 +40,7 @@ OWNER_ROUTE = "/api/authority/provision"           # offense_authority (owner-on
 OPERATOR_ROUTE = "/api/terminal/dryrun"            # run_engagement (operator+), no filesystem setup needed
 KILLSWITCH_ROUTE = "/api/killswitch/testslug/trip" # read-tier — protective emergency-stop (viewer+ may halt)
 UNMAPPED_ROUTE = "/api/launch/scan"                # not in the map → default-deny
+LAUNCH_PREVIEW_ROUTE = "/api/launch/preview"        # operator-tier preflight (mirrors sibling launches)
 
 
 @pytest.fixture(autouse=True)
@@ -102,6 +103,27 @@ def test_operator_stamped_post_to_operator_route_reaches_handler():
     with _running() as base:
         st = _post(base, OPERATOR_ROUTE, extra_headers=_hop_headers("operator", OPERATOR_ROUTE))
         assert st != 403, f"operator on an operator route must pass RBAC, got {st}"
+
+
+def test_operator_stamped_post_to_launch_preview_reaches_handler():
+    # W17-9: /api/launch/preview is operator-tier (run_engagement), matching its sibling launch endpoints.
+    # A per-user proxied OPERATOR carries run_engagement → the RBAC gate passes (any non-403 = it reached
+    # the read-only handler). Regression guard: the preflight must never be silently default-denied for a
+    # legitimate operator now that it is mapped.
+    with _running() as base:
+        st = _post(base, LAUNCH_PREVIEW_ROUTE,
+                   extra_headers=_hop_headers("operator", LAUNCH_PREVIEW_ROUTE))
+        assert st != 403, f"operator on the launch-preview route must pass RBAC, got {st}"
+
+
+def test_analyst_stamped_post_to_launch_preview_is_forbidden():
+    # the other half: a per-user proxied principal WITHOUT run_engagement (analyst/viewer) is refused on
+    # the preview route — it is NOT silently (un)authorized. Mirrors the sibling-launch RBAC exactly.
+    with _running() as base:
+        for role in ("analyst", "viewer"):
+            st = _post(base, LAUNCH_PREVIEW_ROUTE,
+                       extra_headers=_hop_headers(role, LAUNCH_PREVIEW_ROUTE))
+            assert st == 403, f"{role} lacking run_engagement must be refused on launch-preview, got {st}"
 
 
 def test_operator_stamped_post_to_owner_route_is_forbidden():

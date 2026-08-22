@@ -73,7 +73,7 @@ def test_killswitch_trip_is_read_tier_protective():
 
 
 def test_ordinary_routes_are_operator_tier():
-    for path in ("/api/launch/assessment", "/api/launch/cloud", "/api/run/r1/cancel",
+    for path in ("/api/launch/preview", "/api/launch/assessment", "/api/launch/cloud", "/api/run/r1/cancel",
                  "/api/run/r1/retry", "/api/codebase/edit", "/api/codebase/apply",
                  "/api/session/create", "/api/chat/send", "/api/chat/stream",
                  "/api/chat/rename", "/api/chat/delete", "/api/reverify/r1",
@@ -82,6 +82,19 @@ def test_ordinary_routes_are_operator_tier():
         perm = offense_perm_for(path)
         assert perm == "run_engagement", f"{path} should be operator-tier, got {perm!r}"
         assert role_can("operator", perm) and not role_can("analyst", perm)
+
+
+def test_launch_preview_matches_sibling_launch_rbac_and_gates_by_perm():
+    # W17-9: the PRE-Send preflight /api/launch/preview must carry the SAME RBAC as its sibling launch
+    # endpoints (operator-tier run_engagement), so a per-user proxied operator is neither silently allowed
+    # nor silently denied on the new route. A principal LACKING run_engagement (analyst/viewer) is refused;
+    # one WITH it (operator+) is allowed — mirroring /api/launch/assessment and /api/launch/cloud exactly.
+    preview = offense_perm_for("/api/launch/preview")
+    assert preview == "run_engagement", f"preview must be operator-tier, got {preview!r}"
+    assert preview == offense_perm_for("/api/launch/assessment") == offense_perm_for("/api/launch/cloud")
+    # a user lacking the perm is refused; one with it is allowed
+    assert not role_can("analyst", preview) and not role_can("viewer", preview)
+    assert role_can("operator", preview) and role_can("owner", preview)
 
 
 def test_unmapped_route_is_default_deny():

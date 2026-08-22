@@ -1990,7 +1990,10 @@ def launch_assessment(body: dict) -> dict:
     # Its live steps stream to the console process box via progress.jsonl (VIGIL_PROOF_RUN_DIR +
     # stream:"progress"). Opt-in via `agentic` (or the legacy `graph_backed`). If opted-in but no `vigil`
     # entrypoint resolves, fall through to the offense engine with an honest note (session linkage kept).
-    if bool(body.get("agentic") or body.get("graph_backed")) and session_id and is_loopback:
+    # Share the gate predicate with `engine_plan`'s preflight (`_agentic_unmet_reason`) instead of
+    # re-implementing it: the block runs iff the first three conjuncts are met — i.e. the only unmet reason
+    # left is a missing `vigil` entrypoint (handled below by the `gcmd is None` fall-through) or none at all.
+    if _agentic_unmet_reason(body, is_loopback=is_loopback) in ("", "vigil_not_on_path"):
         gslug = _slugify(body.get("slug") or "loopback", fallback="loopback")
         # GAP-1 — thread the per-session model pick into the CHILD engage as a first-class launch field, not
         # display metadata. A LOCAL pick makes the child route its think (and every fireteam member) through
