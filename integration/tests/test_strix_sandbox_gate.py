@@ -181,7 +181,12 @@ def test_a_gated_run_carries_the_gateway_proxy_coordinates():
 
 
 def test_the_proxy_token_is_passed_only_when_the_deployment_sets_one(monkeypatch):
-    """The gateway demands client auth only when a token is configured; inventing one would fail."""
+    """The gateway demands client auth only when a token is configured; inventing one would fail. A token
+    has two legitimate sources — the env, and the short-lived credential MINTED + persisted by `vigil
+    services up` — so this pins the ENV source hermetically by neutralising the persisted-file source (that
+    source is exercised in test_strix_sandbox_attach_and_creds.py). With NEITHER, no token is passed."""
+    import vigil_integration.strix_sandbox as _sbx
+    monkeypatch.setattr(_sbx, "_persisted_proxy_token", lambda: "")   # isolate: no minted-file token
     monkeypatch.delenv("VIGIL_GATEWAY_PROXY_TOKEN", raising=False)
     assert "VIGIL_GATEWAY_PROXY_TOKEN" not in preflight(networking=_FakeNet()).env
     monkeypatch.setenv("VIGIL_GATEWAY_PROXY_TOKEN", "s3cr3t")

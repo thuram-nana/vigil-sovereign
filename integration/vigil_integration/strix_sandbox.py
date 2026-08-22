@@ -116,6 +116,27 @@ def preflight(*, allow_ungated: Optional[bool] = None, networking: Any = None) -
             f"Create it with `vigil services up`.",
             overridden=overridden, gateway_state=state, network=network, network_present=False)
 
+    # gateway ATTACHED+reachable: running + network-exists is not enough — a gateway attached only to the
+    # egress net (or a sandbox net recreated after the gateway started) passes both yet leaves the
+    # ``--internal`` sandbox with NO reachable peer. Verify the gateway is actually connected to the sandbox
+    # network before pinning onto it. Fail-closed: an unreadable membership is a refusal, never a proceed.
+    # (Injected test fakes without the method default to attached — production ``SandboxNetworking`` always
+    # implements it, so this only affects the older seams, never the real launch path.)
+    attached_fn = getattr(networking, "gateway_attached", None)
+    if callable(attached_fn):
+        try:
+            attached = bool(attached_fn())
+        except Exception as exc:  # noqa: BLE001 — cannot tell ⇒ refuse
+            return _refuse(f"the gateway's attachment to the sandbox network could not be read "
+                           f"({type(exc).__name__}: {exc})",
+                           overridden=overridden, gateway_state=state, network=network, network_present=True)
+        if not attached:
+            return _refuse(
+                f"the VIGIL egress gateway is running but is NOT attached to the gated sandbox network "
+                f"{network!r}, so the sandbox would be pinned onto an isolated network with no reachable "
+                f"peer (its one permitted exit). Recreate the topology with `vigil services up`.",
+                overridden=overridden, gateway_state=state, network=network, network_present=True)
+
     env = dict(networking.strix_env())
     env.update(_proxy_env(networking))
     return SandboxPreflight(ok=True, env=env, gateway_state=state,
@@ -127,8 +148,10 @@ def _proxy_env(networking: Any) -> dict[str, str]:
 
     The host is the gateway's PINNED address on the sandbox network (it binds only that interface, never
     0.0.0.0), so this is the one peer an ``--internal`` sandbox can reach. The token is the Basic
-    proxy-auth secret; when the deployment sets none, the gateway does not demand client auth and we pass
-    nothing rather than inventing a credential.
+    proxy-auth secret: the env wins, else the credential MINTED at gateway bring-up and persisted under
+    ``.vigil-live/gateway-proxy-token`` — so the sandbox's Caido presents the exact secret the gateway was
+    started with (the two ends never drift). When neither is present the gateway demands no client auth and
+    we pass nothing rather than inventing a credential.
     """
     try:
         host = str(networking.sandbox_gateway_ip())
@@ -138,10 +161,25 @@ def _proxy_env(networking: Any) -> dict[str, str]:
         "VIGIL_GATEWAY_PROXY_HOST": host,
         "VIGIL_GATEWAY_PROXY_PORT": str(os.environ.get("VIGIL_GATEWAY_PROXY_PORT", "") or "48081"),
     }
-    token = str(os.environ.get("VIGIL_GATEWAY_PROXY_TOKEN", "") or "").strip()
+    token = str(os.environ.get("VIGIL_GATEWAY_PROXY_TOKEN", "") or "").strip() or _persisted_proxy_token()
     if token:
         out["VIGIL_GATEWAY_PROXY_TOKEN"] = token
     return out
+
+
+def _persisted_proxy_token() -> str:
+    """The short-lived proxy token minted at gateway bring-up (``.vigil-live/gateway-proxy-token``), or "".
+
+    Resolved from the repo root (this file is ``<repo>/integration/vigil_integration/strix_sandbox.py``) so
+    it is CWD-independent and matches exactly where the launch path writes it. Total: never raises — a
+    missing/unreadable token means 'no client auth', never a blocked launch."""
+    try:
+        from pathlib import Path as _Path
+        from vigil_gateway.docker import PROXY_TOKEN_RELPATH, load_proxy_token  # VIGIL-owned; never sigil
+        repo = _Path(__file__).resolve().parents[2]
+        return load_proxy_token(repo / PROXY_TOKEN_RELPATH) or ""
+    except Exception:  # noqa: BLE001 — any failure to read the token is 'no token', never a refusal
+        return ""
 
 
 def _refuse(reason: str, *, overridden: bool, gateway_state: str = "unknown",

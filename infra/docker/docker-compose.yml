@@ -85,7 +85,7 @@ services:
       VIGIL_GATEWAY_PROXY_PORT: "48081"
       VIGIL_GATEWAY_PROXY_HOST: "172.31.240.2"
       VIGIL_GATEWAY_PROXY_TOKEN: "${VIGIL_GATEWAY_PROXY_TOKEN:-}"
-      VIGIL_GATEWAY_CHARTER_SLUG: ""
+      VIGIL_GATEWAY_CHARTER_SLUG: "${VIGIL_GATEWAY_CHARTER_SLUG:-}"
     command: ["vigil-gateway", "serve-proxy", "--host", "172.31.240.2", "--port", "48081"]
     healthcheck:
       # The gate is only "up" when the proxy is actually LISTENING on its pinned sandbox bind. A bad or
