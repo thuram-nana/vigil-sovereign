@@ -2120,13 +2120,13 @@ are present and intact.
 That last clause is worth noting on its own. The quarantine removes the capability while
 preserving the credit.
 
-### 13.6 The thirteen automated checks that must pass
+### 13.6 The fourteen automated checks that must pass
 
-Every proposed change must clear thirteen independent automated jobs before it can be merged.
-All thirteen are registered on the repository as *required status checks* on the main line of
+Every proposed change must clear fourteen independent automated jobs before it can be merged.
+All fourteen are registered on the repository as *required status checks* on the main line of
 development; the branch must also be up to date with the main line before a merge, and
 force-pushing to that line and deleting it are both blocked — so the checks cannot be sidestepped
-by rewriting history. The exact thirteen are written down in one committed file,
+by rewriting history. The exact fourteen are written down in one committed file,
 `.github/required-status-checks.txt`, which the apply-tool, an offline test and a live-settings
 check all read, so this list and the live configuration cannot drift apart.
 
@@ -2135,7 +2135,7 @@ rather than left to discover: administrator enforcement is deliberately left **o
 means the repository's owner retains an explicit override and *can* merge without the checks
 being green. For every other contributor, and for every automated agent working in the
 repository, the gate is unconditional. For the owner it is a deliberate and attributable act
-rather than an impossibility. Both facts — the thirteen required checks and the owner override —
+rather than an impossibility. Both facts — the fourteen required checks and the owner override —
 can be confirmed by anyone with read access by querying the repository's own
 branch-protection settings, rather than taken on this briefing's word.
 

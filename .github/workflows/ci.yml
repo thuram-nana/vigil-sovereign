@@ -154,6 +154,56 @@ jobs:
           PYTHONPATH: .
         run: pytest $CRUCIBLE_EVAL_SUITES -q
 
+  loopback-engagement:
+    name: loopback engagement (end-to-end + offline re-verify)
+    # W11-1 (#482). THE GAP THIS CLOSES: the flagship demonstration — scan a live target, confirm a real
+    # weakness through the oracle, and RE-VERIFY that evidence offline with no trust in the tool that
+    # produced it — existed only as a hand-run recorded in a memory file, which proves nothing on the next
+    # commit. This REQUIRED job mechanizes it on every PR, and it is the ANTIC reviewer demonstration.
+    #
+    # Hermetic: the target is this repository's own stdlib HTTP app (infra/loopback/vulnapp.py) bound to
+    # 127.0.0.1. NO docker, NO network egress, NO root — `scan` is loopback-only by design.
+    #
+    # Four ASSERTED legs (see tools/loopback-engagement/run_loopback_engagement.sh): POSITIVE (the
+    # vulnerable app yields oracle-confirmed, certificate-carrying facts over the full corpus) ->
+    # RE-VERIFY (those certificates re-run OFFLINE on the CLEAN independent checkout below) -> TAMPER
+    # (a forged certificate is REJECTED, proving the gate is not a no-op) -> NEGATIVE (the patched twin,
+    # vulnapp --safe, is a SOUND clean: zero findings AND a conclusive full-corpus coverage statement).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: a CLEAN, independent checkout to re-verify the evidence offline
+        # The re-verification runs `framework.v2 verify` from THIS tree over the report the primary tree
+        # produced — proving the proof is portable and needs no trust in the checkout that built it.
+        uses: actions/checkout@v4
+        with:
+          path: _clean-reverify
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install the engine's python deps + vigil_core
+        run: |
+          pip install -e packages/core/vigil_core \
+            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
+            "cryptography>=42" packaging pytest
+      - name: asserter logic + negative controls (stdlib, in-process)
+        run: pytest tools/loopback-engagement/tests -q
+      - name: end-to-end — scan the loopback range, re-verify OFFLINE on the clean checkout, controls
+        env:
+          VIGIL_LE_PYTHON: python
+          VIGIL_LE_OUT: ${{ github.workspace }}/loopback-engagement-out
+          VIGIL_LE_REVERIFY_DIR: ${{ github.workspace }}/_clean-reverify
+        run: bash tools/loopback-engagement/run_loopback_engagement.sh
+      - name: retain the reviewer demonstration artifact
+        # ALWAYS — a failing run's partial demo is exactly what a reviewer needs to see WHY it failed.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loopback-engagement-demo
+          path: loopback-engagement-out/
+          if-no-files-found: warn
+
   gateway:
     name: gateway egress gate (P6)
     runs-on: ubuntu-latest

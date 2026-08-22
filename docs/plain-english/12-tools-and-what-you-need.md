@@ -2113,14 +2113,14 @@ recording them.
 is not required to pass is a report, not a gate, so the position on the shared
 code repository is worth stating exactly, and it was read from the repository's
 own settings rather than from a document. The main line of code is protected:
-**thirteen checks are required to pass before a change can be merged**, and the
-supply-chain gate described above is one of the thirteen. The other twelve cover the
+**fourteen checks are required to pass before a change can be merged**, and the
+supply-chain gate described above is one of the fourteen. The other thirteen cover the
 shared integrity substrate, the offensive core, the autonomous agent's runtime,
 the assistant half's permission gates, the outbound-traffic gate, the separation
 of the two halves, the machine-checked mathematical model of the core rules,
 the durability of the permission kernel, the accuracy benchmark corpus, the linter
 and type checker, the briefing-completeness census that keeps this document honest,
-and a fast live-fire smoke slice. The exact thirteen are the committed list in
+a fast live-fire smoke slice, and the end-to-end loopback engagement that re-verifies its evidence offline. The exact fourteen are the committed list in
 `.github/required-status-checks.txt`. Rewriting history on that line and deleting it
 are both disabled, and the branch must be up to date before a merge.
 
@@ -2128,8 +2128,8 @@ Three things are **not** switched on, and a procurement officer should have them
 volunteered rather than discover them:
 
 - **Administrators are exempt.** A repository administrator can merge without the
-  thirteen checks passing. On a single-maintainer project that is a documented
-  posture, not an oversight — but it means "thirteen required checks" is a statement
+  fourteen checks passing. On a single-maintainer project that is a documented
+  posture, not an oversight — but it means "fourteen required checks" is a statement
   about the ordinary path, not about every possible path.
 - **Review by a second person is not required** by the repository's settings.
 - **Signed commits are not required** by the repository's settings.

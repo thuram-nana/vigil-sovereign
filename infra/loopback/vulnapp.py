@@ -14,6 +14,7 @@ rows; a path-traversal attempt returns a DECOY passwd string (so the signature f
 real file). Bind is hard-pinned to 127.0.0.1. This is a target, not a service — it wields nothing.
 
 Run:  python3 infra/loopback/vulnapp.py --port 8080 --logdir /path/to/logs
+      python3 infra/loopback/vulnapp.py --port 8081 --safe   # the PATCHED twin (W11-1 negative control)
 """
 
 from __future__ import annotations
@@ -113,15 +114,27 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _search(self, q: str) -> None:
         # GENUINE SQLi: string-concatenated query over a FAKE in-memory DB (sqlmap will confirm), plus a
         # reflected-XSS of q. Real signatures, zero real-data risk (the DB holds only test rows).
+        #
+        # SAFE MODE (`--safe`) is the PATCHED twin the W11-1 negative control scans: the SAME routes and the
+        # SAME surface, but the two confirmable weaknesses on `q` are fixed — a parameterized query (no
+        # SQLi: the string never reaches the SQL text, so a payload returns the empty/exact set with no
+        # differential and no error signature) and an HTML-escaped reflection (no XSS). A full-corpus scan
+        # of this twin must confirm NOTHING; that is what makes the negative a SOUND one, not merely
+        # "no findings on a surface the scanner never reached".
         con: sqlite3.Connection = self.server.db          # type: ignore[attr-defined]
+        safe: bool = getattr(self.server, "safe", False)  # type: ignore[attr-defined]
         rows, err = [], ""
         try:
             cur = con.cursor()
-            cur.execute("SELECT id, name FROM items WHERE name = '" + q + "'")   # noqa: S608 — intentional
+            if safe:
+                cur.execute("SELECT id, name FROM items WHERE name = ?", (q,))   # parameterized: no SQLi
+            else:
+                cur.execute("SELECT id, name FROM items WHERE name = '" + q + "'")   # noqa: S608 — intentional
             rows = cur.fetchall()
         except Exception as exc:   # a broken injection surfaces the SQL error (a real SQLi tell)
             err = f"SQL error: {exc}"
-        body = (f"<h1>Results for: {q}</h1>"                          # reflected XSS (q unescaped)
+        shown = html.escape(q) if safe else q                        # safe: escaped (no reflected XSS)
+        body = (f"<h1>Results for: {shown}</h1>"                      # unsafe: reflected XSS (q unescaped)
                 f"<ul>{''.join(f'<li>{r[0]}:{r[1]}</li>' for r in rows)}</ul>"
                 f"{('<pre>' + html.escape(err) + '</pre>') if err else ''}")
         self._send(200, body)
@@ -129,10 +142,15 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _file(self, path: str) -> None:
         # A path-traversal surface that returns a DECOY on an escape attempt — the signature (../, encoded
         # dots, %2e, absolute /etc/passwd) fires for both the offensive and the detection oracle, but no
-        # real file is ever read.
+        # real file is ever read. SAFE MODE rejects the escape (404) instead, so the patched twin has no
+        # traversal surface for a lead to anchor on either.
+        safe: bool = getattr(self.server, "safe", False)  # type: ignore[attr-defined]
         low = path.lower()
         if ".." in low or "%2e" in low or low.startswith("/etc/") or "passwd" in low:
-            self._send(200, _DECOY_PASSWD, "text/plain")   # decoy: proves the traversal, leaks nothing real
+            if safe:
+                self._send(404, "no such file")            # patched: refuse the escape, leak nothing
+            else:
+                self._send(200, _DECOY_PASSWD, "text/plain")   # decoy: proves the traversal, leaks nothing real
         elif path in ("readme", "readme.txt", ""):
             self._send(200, "This is the public readme.", "text/plain")
         else:
@@ -169,6 +187,11 @@ def main() -> None:
     # days across sessions on this machine, holding :18081 and :8099. Writing a pidfile is what lets a
     # caller reclaim its own instance; `range.sh strays` finds the ones nobody recorded.
     ap.add_argument("--pidfile", default="", help="write this process's pid here; removed on exit")
+    ap.add_argument("--safe", action="store_true",
+                    help="Serve the PATCHED twin: same routes/surface, but the SQLi + reflected-XSS on "
+                         "/search are fixed (parameterized query, escaped reflection) and /file refuses "
+                         "traversal. Used as the W11-1 negative control — a full-corpus scan must confirm "
+                         "NOTHING (a sound negative). Default OFF: the app stays deliberately vulnerable.")
     args = ap.parse_args()
     os.makedirs(args.logdir, exist_ok=True)
 
@@ -180,11 +203,13 @@ def main() -> None:
 
     srv = _Server(("127.0.0.1", args.port), _Handler)      # HARD-PINNED to loopback
     srv.db = _build_db()                                   # type: ignore[attr-defined]
+    srv.safe = args.safe                                   # type: ignore[attr-defined]
     srv.access_log = os.path.join(args.logdir, "access.log")   # type: ignore[attr-defined]
     srv.auth_log = os.path.join(args.logdir, "auth.log")       # type: ignore[attr-defined]
     srv.access_lock = threading.Lock()                    # type: ignore[attr-defined]
     srv.auth_lock = threading.Lock()                      # type: ignore[attr-defined]
-    print(f"vulnapp on http://127.0.0.1:{args.port}  logs={args.logdir}", flush=True)
+    mode = "PATCHED (--safe: negative control)" if args.safe else "VULNERABLE"
+    print(f"vulnapp [{mode}] on http://127.0.0.1:{args.port}  logs={args.logdir}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

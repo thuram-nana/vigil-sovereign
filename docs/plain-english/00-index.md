@@ -423,13 +423,13 @@ mapping from each model to the exact part of the code it abstracts is written do
 own correspondence document.
 
 **The automated build-and-test pipeline.** Verified for this index: every proposed change runs
-through fourteen independent jobs across three pipelines. Thirteen of them can block the merge —
-every job that runs on a pull request — and those thirteen are what the briefing means whenever it
+through fifteen independent jobs across three pipelines. Fourteen of them can block the merge —
+every job that runs on a pull request — and those fourteen are what the briefing means whenever it
 says "the required checks": the shared integrity core; the offensive engine's own tests; the accuracy
 benchmark corpus; the outbound-network gate; the integration layer; the vendored agent's runtime; the
 sovereign side's permission gates; the linter and type checker; the formal proofs above; the
 permission kernel written in a compiled language; the completeness check on this briefing itself; a
-fast live-fire smoke slice; and, in a separate pipeline, the supply-chain gate described immediately
+fast live-fire smoke slice; the end-to-end loopback engagement that re-verifies its evidence offline; and, in a separate pipeline, the supply-chain gate described immediately
 below. The one job that does *not* gate a change is the full live-fire table, which runs only on the
 nightly schedule and never on a pull request, so it reports but cannot block. The completeness check —
 which reads the agent roster and the named capabilities out of the source code and fails if the
@@ -444,7 +444,7 @@ live-fire slice, the benchmark corpus, the linter and the completeness check int
 and bound the owner to them; it reads one committed source of truth,
 `.github/required-status-checks.txt`, and refuses to mark a check required until the workflow that
 produces it is on the main line, because a required check that no job produces would block every
-change forever. All thirteen are registered as required status checks on the main line of
+change forever. All fourteen are registered as required status checks on the main line of
 development, which also requires a branch to be up to date before merging and blocks force-pushing
 and deletion. Administrator enforcement is deliberately off, so the repository's owner keeps an
 explicit override and can merge without them; every other contributor and every automated agent is
@@ -888,7 +888,7 @@ re-derived for this index at the version named above.
 | 186 named intergovernmental domains, and 14 government/military/educational suffix patterns | Read `integration/vigil_integration/safety/hard_guardrail.py` |
 | That the categorical block has no live call site | Search the repository for `assert_not_hard_blocked` and observe that the only matches are its own package, the safety package that re-exports it, its tests, and two research documents |
 | The four machine-checked safety properties, and their deliberately broken twins | Read `formal/README.md` and `formal/CORRESPONDENCE.md`, then run `bash formal/check.sh` |
-| The eleven CI jobs, the supply-chain gate, and the two live-fire jobs — and which thirteen of them can block a merge | Read `.github/workflows/ci.yml`, `.github/workflows/supply-chain.yml` and `.github/workflows/livefire.yml`, then compare against the required checks in the repository's own branch-protection settings — or against `.github/required-status-checks.txt`, the committed list they are set from |
+| The twelve CI jobs, the supply-chain gate, and the two live-fire jobs — and which fourteen of them can block a merge | Read `.github/workflows/ci.yml`, `.github/workflows/supply-chain.yml` and `.github/workflows/livefire.yml`, then compare against the required checks in the repository's own branch-protection settings — or against `.github/required-status-checks.txt`, the committed list they are set from |
 | 1,816 package fingerprints | Count the lines containing `--hash=sha256:` in `engine/crucible/framework/v2/requirements.lock.txt` (640) and `infra/supply-chain/sovereign.lock.txt` (1,176) |
 | That every outside container image is pinned by content | Run `python3 infra/supply-chain/image_pins.py --check` |
 | That the vulnerability gate can actually fire, and that its exemption list is empty | Read the "negative control" step in `.github/workflows/supply-chain.yml`, and read `.trivyignore` |
