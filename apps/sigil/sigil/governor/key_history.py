@@ -25,8 +25,12 @@ FAIL-CLOSED on a broken/forked succession: a record that is not validly cross-si
 the current tip, DOES NOT EXTEND the chain (it is ignored — so injecting garbage cannot advance or brick
 verification). A genuine FORK at the LIVE rotation boundary — two different, validly cross-signed successors
 of the CURRENT authority (the key whose first successor is still the tip; only the holder of that live/most-
-recent key can mint them) — is true current-owner ambiguity: `build_succession` raises `SuccessionError`, and
-every consumer treats that as DENY (trust nothing until a `re_genesis`). Fork detection is therefore BOUNDED
+recent key can mint them) — is a current-boundary ambiguity: `build_succession` raises `SuccessionError`, and
+every consumer treats that as DENY (trust nothing until a `re_genesis`). The record that triggers it is
+cross-signed by the RETIRED immediate-predecessor key (whose successor is still the tip), so a holder of THAT
+retired key can still force a `re_genesis` (continuity loss) — a NARROWED, REDUCIBLE residual (disambiguable by
+preferring the branch reaching the vault-trusted current key; tracked follow-up), never the old unbounded brick.
+Fork detection is therefore BOUNDED
 to the live boundary: a competing successor for a key whose boundary is ALREADY SUPERSEDED (the chain rotated
 onward past it) — the record a holder of a RETIRED key could append at an old epoch — is IGNORED, NOT a global
 brick. Bounding it this way is what denies a retired-key holder a total-governance-lockout DoS; the earlier
@@ -231,9 +235,17 @@ def build_succession(history: list[tuple[int, dict]], *, genesis_pubkey: Optiona
             tip, epoch = new, ep
         elif prev in succeeded and succeeded[prev] != new and succeeded[prev] == tip:
             # A SECOND validly cross-signed successor for `prev`, hands off to a DIFFERENT `new` — AND the
-            # successor we already took for `prev` is STILL the live tip (the chain has NOT rotated onward
-            # past it). That is a genuine CURRENT-authority ambiguity at the live rotation boundary (only the
-            # holder of the live/most-recent key can mint prev==the-key-that-owns-the-tip): fail closed.
+            # successor we already took for `prev` is STILL the live tip (the chain has NOT rotated onward past
+            # it). The record is cross-signed by `prev`'s private key + the attacker's new key, and `prev` here
+            # is the now-RETIRED immediate predecessor of the tip — so the trigger is possession of that
+            # retired key, NOT the live/most-recent key. Fail closed on the ambiguity.
+            # RESIDUAL (issue #434, REDUCIBLE follow-up, not irreducible): a holder of that retired
+            # immediate-predecessor key can thus still force SuccessionError -> DENY-all, whose only recovery
+            # is `re_genesis` (continuity loss) — and rotate() re-raises here, so it cannot self-recover. This
+            # is disambiguable in principle (prefer the competing successor whose branch reaches the
+            # vault-trusted `current` key; the genuine live-key double-succession stays caught by the existing
+            # `succ.current != current` check). Left as a tracked follow-up; it is a narrowed DoS, never a
+            # fail-open, and strictly bounds the earlier UNBOUNDED any-retired-key brick this issue closed.
             raise SuccessionError(
                 f"forked owner-key succession at epoch {ep}: key {prev[:12]}… was already succeeded to "
                 f"{succeeded[prev][:12]}… but a second validly cross-signed record hands off to {new[:12]}…")

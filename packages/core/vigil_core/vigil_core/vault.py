@@ -396,7 +396,9 @@ class Vault:
         """Finish an interrupted KEK rotation (red-pen HIGH: an interrupted commit leaves the OLD KEK valid
         forever, undetected). If a ``.prev`` anchor is present, re-wrap every secret FILE that still rests
         under the OLD (``.prev``) KEK to the ACTIVE KEK — proving each — and only then DELETE ``.prev`` so the
-        old KEK can no longer decrypt anything. Called at boot / ``vigil up`` and re-runnable from the CLI.
+        old KEK can no longer decrypt anything. Run from the CLI (``sigil key reconcile``); it is NOT yet
+        auto-invoked at boot / ``vigil up`` — an incomplete rotation is SURFACED (doctor reports
+        key-sealing=INCOMPLETE and ``sigil key status`` prints a warning) but an operator must run it.
 
         Idempotent + fail-closed: no ``.prev`` → no-op; a file that cannot be re-wrapped/proven, or the
         ``.prev`` KEK being unreadable while a file still needs it, ABORTS and leaves ``.prev`` in place (the
