@@ -1,6 +1,6 @@
 [project]
 name = "crucible-v2"
-version = "2.0.0a1"
+version = "0.1.0"
 description = "CRUCIBLE v2 — autonomous, learning offensive-intelligence platform layered onto v1"
 requires-python = ">=3.11"
 authors = [{name = "OBSIDIAN-FORGE"}]
