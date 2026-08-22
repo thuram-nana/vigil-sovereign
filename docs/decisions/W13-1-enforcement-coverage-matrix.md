@@ -5,11 +5,14 @@ Milestone: W13 — SOVEREIGN CONTROL PLANE (ANTIC programme). Blocks [W13-2] #49
 
 ## The claim (to register in the claims registry, [W0-3] #398, once it lands)
 
-> For each sensitive execution path VIGIL inventories, the gate of record it traverses is proven by
-> **executing** the real gate — a line tracer records that the enforcing code actually ran — and a
-> deliberately unauthorized action on that path is **refused** in the same run (the negative control).
-> A path with no refusal proof is recorded as an **OPEN BYPASS**, never as covered. The matrix is a
-> measurement facade over the existing gates; it adds no authorization logic of its own.
+> For each sensitive action VIGIL inventories, the GATE OF RECORD it depends on is proven by
+> **executing** the real gate FUNCTION with synthesized inputs — a line tracer records that the
+> enforcing code actually ran — and a deliberately unauthorized action is **refused** in the same run
+> (the negative control). This measures the **gate-of-record LAYER** — the shared authorization
+> primitive executes-and-refuses — NOT that the named request path (the worker/adapter/proxy egress
+> call site, the tool bridge, …) is itself traversed; each row records its `proof_scope` ("gate
+> function"). A gate with no refusal proof is recorded as an **OPEN BYPASS**, never as covered. The
+> matrix is a measurement facade over the existing gates; it adds no authorization logic of its own.
 
 The claims registry (#398) is not present on this tree, so — as the repo's prior slices did (see
 `docs/decisions/W5-1-*.md`) — this decision record + a doc-truth test (`test_committed_matrix_is_true_of_the_code`)

@@ -108,15 +108,24 @@ class ResolvedControl:
 
 @dataclass(frozen=True)
 class ControlRow:
-    """One sensitive execution path and the gate of record it traverses. Pure data — safe to enumerate in
-    either environment. ``resolver`` binds it to the live gate lazily (may import an env-specific module)."""
+    """One sensitive action and the gate of record it depends on. Pure data — safe to enumerate in either
+    environment. ``resolver`` binds it to the live gate lazily (may import an env-specific module).
+
+    HONESTY (W13-1 red-pen #494): this row measures the GATE-OF-RECORD LAYER, not a request path. Its
+    resolver drives the shared gate FUNCTION directly with synthesized inputs and proves that primitive
+    executes-and-refuses; it does NOT traverse the real end-to-end call site (worker/adapter/proxy egress,
+    the tool bridge, …). ``proof_scope`` records that: "gate function" means only the shared primitive was
+    exercised. Wiring that gate into a given call site is a SEPARATE claim, not measured here."""
 
     id: str
-    path: str                       # the sensitive execution path, in plain language
+    path: str                       # the sensitive action that DEPENDS on this gate, in plain language
     plane: str                      # "sovereign" (reachable without framework) | "offense" (needs framework)
     gate_label: str                 # module:function of the gate of record (stable; for the artifact)
     resolver: Callable[[], ResolvedControl]
-    negative_control: bool = True   # is a refusal proof DECLARED for this path? False => OPEN BYPASS
+    negative_control: bool = True   # is a refusal proof DECLARED for this gate? False => OPEN BYPASS
+    # Every resolver drives the gate FUNCTION with synthesized inputs, not a live request path, so this is
+    # "gate function" for all shipped rows. A future row driving a real path end-to-end → "request path".
+    proof_scope: str = "gate function"
 
 
 @dataclass
@@ -495,23 +504,40 @@ def render_matrix_markdown(rows: tuple[ControlRow, ...] = CONTROLS) -> str:
     both CI legs and a doc-truth test can pin it: adding a sensitive path without a matrix row makes the
     committed file drift from this render, turning that test red."""
     lines: list[str] = []
-    lines.append("# Enforcement coverage matrix — measured by execution (W13-1)")
+    lines.append("# Enforcement coverage matrix — gate-of-record LAYER, measured by execution (W13-1)")
     lines.append("")
     lines.append(
         "GENERATED, DO NOT EDIT BY HAND. Regenerated and pinned by "
-        "`integration/tests/test_enforcement_matrix.py`. Each row is a sensitive execution path and the "
-        "gate of record it traverses; the row is proven by RUNNING the real gate under a line tracer "
-        "(`vigil_integration.enforcement_matrix`), asserting the enforcing code executed on an authorized "
-        "action (ALLOW) and that a deliberately unauthorized action is REFUSED (the negative control). A "
-        "path with no refusal proof is an OPEN BYPASS, not covered."
+        "`integration/tests/test_enforcement_matrix.py`."
     )
     lines.append("")
-    lines.append("| # | Sensitive execution path | Plane | Gate of record | Negative control |")
-    lines.append("|---|--------------------------|-------|----------------|------------------|")
+    lines.append(
+        "**What this matrix proves — and what it does NOT.** It measures the GATE-OF-RECORD LAYER: the "
+        "shared authorization primitives that the sensitive actions below depend on. For each row it RUNS "
+        "the real gate FUNCTION under a line tracer (`vigil_integration.enforcement_matrix`) with "
+        "SYNTHESIZED inputs, and asserts by execution that the primitive traversed-and-ALLOWed an "
+        "authorized action and traversed-and-REFUSED a deliberately unauthorized one (the negative "
+        "control). It does NOT drive a real end-to-end request path: the *Sensitive action* column names "
+        "the action that depends on the gate, but the proof is that the SHARED GATE refuses — not that the "
+        "named call site (the worker / adapter / proxy egress call, the agent→tool bridge, …) actually "
+        "reaches the gate. The *Proof scope* column records this: every shipped row is proven at "
+        "`gate function` scope. Wiring a gate into a specific call site is a SEPARATE claim, not measured "
+        "here. A gate with no refusal proof is an OPEN BYPASS, not covered."
+    )
+    lines.append("")
+    lines.append(
+        "| # | Sensitive action (depends on the gate) | Plane | Gate of record | Proof scope | "
+        "Negative control |"
+    )
+    lines.append(
+        "|---|----------------------------------------|-------|----------------|-------------|"
+        "------------------|"
+    )
     for i, r in enumerate(rows, 1):
         nc = "yes" if r.negative_control else "**NONE → OPEN BYPASS**"
         lines.append(
-            f"| {i} | {_md_escape(r.path)} | {r.plane} | `{_md_escape(r.gate_label)}` | {nc} |"
+            f"| {i} | {_md_escape(r.path)} | {r.plane} | `{_md_escape(r.gate_label)}` | "
+            f"{_md_escape(r.proof_scope)} | {nc} |"
         )
     lines.append("")
     lines.append(
