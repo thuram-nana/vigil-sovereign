@@ -49,6 +49,8 @@ from docker.types import Mount as DockerSDKMount  # type: ignore[import-untyped,
 from docker.utils import parse_repository_tag  # type: ignore[import-untyped, unused-ignore]
 from requests.exceptions import RequestException
 
+from strix.runtime import sandbox_hardening
+
 
 logger = logging.getLogger(__name__)
 
@@ -84,30 +86,6 @@ def _apply_sandbox_network(create_kwargs: dict[str, Any]) -> None:
     if network:
         create_kwargs["network"] = network
         create_kwargs.pop("ports", None)
-
-
-def _apply_resource_limits(create_kwargs: dict[str, Any]) -> None:
-    """Apply optional cgroup resource caps from the environment. Unset/blank
-    values leave docker's default (unbounded), so this is opt-in per host."""
-    mem_limit = os.environ.get("STRIX_SANDBOX_MEM_LIMIT", "").strip()
-    if mem_limit:
-        create_kwargs["mem_limit"] = mem_limit
-
-    shm_size = os.environ.get("STRIX_SANDBOX_SHM_SIZE", "").strip()
-    if shm_size:
-        create_kwargs["shm_size"] = shm_size
-
-    cpus = os.environ.get("STRIX_SANDBOX_CPUS", "").strip()
-    if cpus:
-        with contextlib.suppress(ValueError, OverflowError):
-            nano_cpus = int(float(cpus) * 1_000_000_000)
-            if 0 < nano_cpus <= 2**63 - 1:
-                create_kwargs["nano_cpus"] = nano_cpus
-
-    pids_limit = os.environ.get("STRIX_SANDBOX_PIDS_LIMIT", "").strip()
-    if pids_limit:
-        with contextlib.suppress(ValueError):
-            create_kwargs["pids_limit"] = int(pids_limit)
 
 
 def _apply_log_limits(create_kwargs: dict[str, Any]) -> None:
@@ -181,6 +159,13 @@ class StrixDockerSandboxClient(DockerSandboxClient):
         exposed_ports: tuple[int, ...] = (),
         session_id: uuid.UUID | None = None,
     ) -> Container:
+        # S5 pre-flight (VIGIL, not upstream). Fail-closed if the runtime image is a MUTABLE
+        # tag (a registry retag can repoint it at arbitrary bytes between provisioning and run),
+        # and reap any container stranded by a previously SIGKILLed run before creating a new one.
+        # Both run BEFORE the SDK's image pull, so an unpinned image is refused before it's pulled.
+        sandbox_hardening.assert_runtime_image_pinned(image, log=logger)
+        sandbox_hardening.reap_orphan_containers(self.docker_client, log=logger)
+
         # ----- BEGIN VERBATIM COPY of DockerSandboxClient._create_container -----
         # SDK ref: src/agents/sandbox/sandboxes/docker.py:1434-1477 (v0.14.6).
         if not self.image_exists(image):
@@ -240,8 +225,14 @@ class StrixDockerSandboxClient(DockerSandboxClient):
         extra_hosts["host.docker.internal"] = "host-gateway"
 
         _apply_sandbox_network(create_kwargs)
-        _apply_resource_limits(create_kwargs)
         _apply_log_limits(create_kwargs)
+
+        # S5 — least-privilege hardening of the long-lived agent container, matching what
+        # DockerTopologyBackend already does for throwaway single-tool containers. Called HERE,
+        # after all cap_add / security_opt injection above, so it detects the FUSE/SYS_ADMIN branch
+        # and does NOT weaken it. Adds no-new-privileges, caps (pids/shm on; mem/cpu opt-in),
+        # opt-in read-only rootfs + user, and --rm + labels so a SIGKILLed run cannot strand a box.
+        sandbox_hardening.apply_all(create_kwargs, session_id=session_id)
 
         # Strix injection: host bind mounts (e.g. large repos passed via --mount)
         # that bypass the SDK's file-by-file LocalDir copy.

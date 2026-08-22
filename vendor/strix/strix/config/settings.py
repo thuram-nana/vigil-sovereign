@@ -46,8 +46,16 @@ class LlmSettings(BaseSettings):
 class RuntimeSettings(BaseSettings):
     model_config = _BASE_CONFIG
 
+    # VIGIL S5: default to the FIRST-PARTY sandbox image, not a mutable upstream tag. The runtime is
+    # customised (caido bootstrap, CA trust, docker-entrypoint) and requires the VIGIL-built image
+    # that docker-compose builds as `vigil/strix-sandbox:local` (see DEPLOY.md). Its provenance is
+    # this tree, so it is A14-exempt (no upstream digest exists). The former default
+    # `ghcr.io/usestrix/strix-sandbox:1.0.0` was BOTH wrong (vanilla upstream lacks VIGIL's wiring)
+    # and a supply-chain hole (a bare tag a registry retag can silently repoint). Override
+    # STRIX_IMAGE only with a first-party or @sha256-pinned ref —
+    # sandbox_hardening.assert_runtime_image_pinned refuses a mutable tag at launch (fail-closed).
     image: str = Field(
-        default="ghcr.io/usestrix/strix-sandbox:1.0.0",
+        default="vigil/strix-sandbox:local",
         alias="STRIX_IMAGE",
     )
     backend: str = Field(default="docker", alias="STRIX_RUNTIME_BACKEND")

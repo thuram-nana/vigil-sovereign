@@ -371,12 +371,50 @@ def compose_refs(path: Path, root: Path) -> list[ImageRef]:
     return refs
 
 
+# --------------------------------------------------------------------------------------
+# The Strix runtime (agent-sandbox) image — named in NO Dockerfile and NO compose `image:`.
+# --------------------------------------------------------------------------------------
+#: The offense agent pulls its sandbox image from the DEFAULT of the ``STRIX_IMAGE`` pydantic setting at
+#: launch, not from a Dockerfile or a compose service. A mutable tag as that default is exactly the drift
+#: this gate exists to stop — an operator who never sets ``STRIX_IMAGE`` runs whatever the registry serves
+#: — so A14 must see it too. This scans the committed default (the only value in the tree; the runtime
+#: layer ``sandbox_hardening.assert_runtime_image_pinned`` enforces the same rule on an env override).
+STRIX_SETTINGS_REL = "vendor/strix/strix/config/settings.py"
+
+#: ``default="<ref>", ... alias="STRIX_IMAGE"`` — anchored to the STRIX_IMAGE alias so it cannot latch
+#: onto an unrelated field's default; ``[^)]*?`` stays inside the one ``Field(...)`` call.
+_STRIX_IMAGE_DEFAULT_RE = re.compile(
+    r"""default\s*=\s*["']([^"']+)["'][^)]*?alias\s*=\s*["']STRIX_IMAGE["']"""
+)
+
+
+def strix_runtime_image_refs(root: Path) -> list[ImageRef]:
+    """The Strix runtime sandbox image, read from the ``STRIX_IMAGE`` setting default."""
+    path = root / STRIX_SETTINGS_REL
+    if not path.is_file():
+        return []
+    text = path.read_text(encoding="utf-8")
+    m = _STRIX_IMAGE_DEFAULT_RE.search(text)
+    if not m:
+        return []
+    line = text.count("\n", 0, m.start(1)) + 1
+    return [
+        ImageRef(
+            source=STRIX_SETTINGS_REL,
+            line=line,
+            ref=m.group(1),
+            context="STRIX_IMAGE default (strix runtime sandbox)",
+        )
+    ]
+
+
 def collect(root: Path) -> list[ImageRef]:
     refs: list[ImageRef] = []
     for p in find_dockerfiles(root):
         refs.extend(dockerfile_refs(p, root))
     for p in find_compose_files(root):
         refs.extend(compose_refs(p, root))
+    refs.extend(strix_runtime_image_refs(root))
     return refs
 
 
