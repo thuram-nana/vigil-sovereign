@@ -87,6 +87,16 @@ def _fuse_sensors(world: "WorldModel | None", slug: str, ctx: Any) -> list:
         return []          # WS-B not present yet → no extra sensor fusion (standalone)
     try:
         out = fuse_sensors(world, slug, ctx)
+        # A fusion sensor may have returned INCONCLUSIVE (a declared surface it could NOT assess).
+        # fuse_sensors collected these onto ctx.inconclusive_surfaces; persist them to the FRAMEWORK-OWNED
+        # run-dir artifact (<run_dir>/_inconclusive.json) the dossier consumes, so the AUTONOMOUS path's
+        # not-assessed surface is never folded into a silent CLEAN either. Written only on a genuine
+        # inconclusive with a resolvable run dir ($VIGIL_PROOF_RUN_DIR) => byte-identical otherwise. Total.
+        try:
+            from .engage_fusion import persist_inconclusive_surfaces  # type: ignore[attr-defined]
+            persist_inconclusive_surfaces(ctx)
+        except Exception:
+            pass
         return list(out) if out else []
     except Exception:
         return []

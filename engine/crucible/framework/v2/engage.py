@@ -634,7 +634,7 @@ def _run_fusion(world: "WorldModel", slug: str, *, seq_base: int, sink) -> tuple
     never sinks the engagement. Under ``--spine`` the folded LEADS also reach the report (graded as
     leads, never facts). The promotions are oracle-grounded FACTS in ``world`` (``oracle:`` provenance)."""
     try:
-        from .engage_fusion import fuse_sensors
+        from .engage_fusion import fuse_sensors, persist_inconclusive_surfaces
     except Exception:
         return (0, 0)
     from types import SimpleNamespace
@@ -653,6 +653,13 @@ def _run_fusion(world: "WorldModel", slug: str, *, seq_base: int, sink) -> tuple
         minted = fuse_sensors(world, slug, ctx)
     except Exception:
         return (0, 0)
+    # A fusion sensor may have returned INCONCLUSIVE (a declared surface it could NOT assess — a missing
+    # cloud/K8s prerequisite). fuse_sensors collected these onto ctx.inconclusive_surfaces; persist them to
+    # a FRAMEWORK-OWNED run-dir artifact (<run_dir>/_inconclusive.json, run dir from $VIGIL_PROOF_RUN_DIR)
+    # so the dossier's clean/verdict determination MUST consult a not-assessed surface — a "0 findings" run
+    # over an unassessed surface is NEVER reported clean. Written ONLY on a genuine inconclusive (no surface
+    # or no run dir => nothing written => byte-identical). Best-effort/total; never sinks the run.
+    persist_inconclusive_surfaces(ctx)
     facts = len(_oracle_nodes() - before)
     # Under --spine, mirror the folded LEADS onto the unified report (graded as leads, never facts).
     if sink is not None and minted:
