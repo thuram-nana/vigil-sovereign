@@ -16,7 +16,6 @@ without W8-2, so import + the doc assertions fail there.
 """
 from __future__ import annotations
 
-import math
 import re
 import sys
 from pathlib import Path
@@ -72,28 +71,88 @@ def _first_split_time(events):
     return None
 
 
+_TIMERS = (
+    _REPO / "apps" / "sigil" / "deploy" / "systemd" / "sigil-checkpoint.timer",
+    _REPO / "infra" / "systemd" / "vigil-checkpoint.timer",
+)
+
+
+def _timer_cadence_and_jitter_s(timer_path):
+    """Parse the REAL shipped timer for its OnCalendar step cadence AND its ``RandomizedDelaySec`` jitter.
+    The worst-case detection latency is grounded in THESE parsed numbers, not in the module's own constants,
+    so the SLA assertion can go RED if the shipped timer's cadence or jitter drifts past the documented SLA."""
+    text = timer_path.read_text(encoding="utf-8")
+    m = re.search(r"OnCalendar=.*:\d+/(\d+):00", text)
+    assert m, f"cannot parse the OnCalendar step cadence from {timer_path.name}:\n{text}"
+    cadence_s = int(m.group(1)) * 60
+    j = re.search(r"^\s*RandomizedDelaySec\s*=\s*(\d+)\s*$", text, re.MULTILINE)
+    jitter_s = int(j.group(1)) if j else 0
+    return cadence_s, jitter_s
+
+
 # ---------------------------------------------------------------- the SLA is grounded in shipped values
 
-def test_cadence_matches_the_shipped_checkpoint_timer():
-    """The SLA is one witness-checkpoint cadence; that cadence MUST equal the shipped timer's, or the SLA
-    number is a fiction. Parse the sovereign timer and assert a 15-minute cadence."""
-    timer = _REPO / "apps" / "sigil" / "deploy" / "systemd" / "sigil-checkpoint.timer"
-    text = timer.read_text(encoding="utf-8")
-    # OnCalendar=*-*-* *:MM/15:00 — the `/15` step is the 15-minute cadence.
-    assert re.search(r"OnCalendar=.*:\d+/15:00", text), \
-        f"sigil-checkpoint.timer must fire every 15 min to back the SLA; got:\n{text}"
-    assert sla.WITNESS_CHECKPOINT_CADENCE_S == 15 * 60
-    assert sla.FORK_DETECTION_SLA_S == sla.WITNESS_CHECKPOINT_CADENCE_S
+def test_cadence_and_jitter_match_the_shipped_checkpoint_timers():
+    """The SLA is one witness-checkpoint cadence PLUS the timer's max jitter; both MUST equal the shipped
+    timers', or the SLA number is a fiction. Parse BOTH timers and assert a 15-minute cadence and the jitter
+    the module accounts for, and that the SLA constant is exactly cadence + jitter."""
+    for timer in _TIMERS:
+        cadence_s, jitter_s = _timer_cadence_and_jitter_s(timer)
+        assert cadence_s == sla.WITNESS_CHECKPOINT_CADENCE_S == 15 * 60, \
+            f"{timer.name} cadence {cadence_s}s must back the SLA cadence"
+        assert jitter_s == sla.WITNESS_CHECKPOINT_MAX_JITTER_S, (
+            f"{timer.name} RandomizedDelaySec {jitter_s}s must equal the jitter the SLA accounts for "
+            f"({sla.WITNESS_CHECKPOINT_MAX_JITTER_S}s) — else the worst case is understated")
+    # The SLA is cadence + max jitter (a naive one-cadence SLA would be violated by exactly the jitter).
+    assert sla.FORK_DETECTION_SLA_S == sla.WITNESS_CHECKPOINT_CADENCE_S + sla.WITNESS_CHECKPOINT_MAX_JITTER_S
     # The hard fail-closed ceiling is the same 24h freshness-refuse bound the guard enforces (no drift).
     assert sla.FORK_PROMOTION_REFUSE_CEILING_S == 24 * 3600
+
+
+# ---------------------------------------------------------------- worst case (from the REAL timer) <= SLA
+
+def test_worst_case_from_the_real_timers_meets_the_sla():
+    """Compute the worst-case detection latency from the SHIPPED timers themselves (parsed cadence + parsed
+    ``RandomizedDelaySec`` jitter) and assert it meets the DOCUMENTED SLA. This assertion is NOT tautological:
+    the worst case comes from the timer files while the SLA is the module/decision-doc constant, so if a
+    future edit widens the cadence or the jitter without raising the SLA, or lowers the SLA below the real
+    worst case, this test goes RED (see the negative control below for proof the predicate can reject)."""
+    for timer in _TIMERS:
+        cadence_s, jitter_s = _timer_cadence_and_jitter_s(timer)
+        worst = sla.worst_case_detection_latency_s(cadence_s, jitter_s)
+        assert worst == cadence_s + jitter_s
+        assert sla.detection_within_sla(worst), (
+            f"{timer.name}: worst-case detection {worst}s (cadence {cadence_s}s + jitter {jitter_s}s) "
+            f"exceeds the documented SLA {sla.FORK_DETECTION_SLA_S}s")
+        assert worst <= sla.FORK_DETECTION_SLA_S
+
+
+# --------------------------------------- NEGATIVE CONTROL: the SLA assertion CAN go red (not green-washed)
+
+def test_the_sla_assertion_can_fail_negative_control():
+    """Prove the SLA assertion is not vacuous: for a hypothetical timer whose cadence alone already exceeds
+    the SLA — or whose within-cadence value is pushed over by jitter — the SLA predicate REJECTS the
+    worst-case latency. If ``detection_within_sla`` returned True here, the positive tests would be
+    green-washed (which is exactly the defect this fold closes)."""
+    # (a) a cadence past the SLA: worst case is over the bound and the predicate must reject it.
+    over_cadence = sla.FORK_DETECTION_SLA_S + 1
+    worst_over = sla.worst_case_detection_latency_s(over_cadence, 0)
+    assert worst_over > sla.FORK_DETECTION_SLA_S
+    assert sla.detection_within_sla(worst_over) is False
+
+    # (b) jitter is what pushes a within-cadence timer over: cadence == SLA but +1s jitter overflows. This is
+    #     precisely the class of bug the naive one-cadence SLA had (jitter ignored) — the predicate rejects it.
+    worst_jitter = sla.worst_case_detection_latency_s(sla.FORK_DETECTION_SLA_S, 1)
+    assert worst_jitter == sla.FORK_DETECTION_SLA_S + 1
+    assert sla.detection_within_sla(worst_jitter) is False
 
 
 # ---------------------------------------------------------------- detection fires, and within the SLA
 
 def test_second_writer_fork_is_detected_within_the_sla():
     """A deliberately started SECOND WRITER produces a divergent owner-signed head at the SAME height. Drive
-    a checkpoint-comparing monitor over a realistic timeline and MEASURE the detection latency against the
-    SLA (not assume it)."""
+    a checkpoint-comparing monitor over a WORST-CASE timeline grounded in the real timer (cadence + jitter)
+    and MEASURE the detection latency against the SLA (not assume it)."""
     _ea, ha = _chain(2)                              # writer A: head at count 2
     _eb, hb = _chain(2, salt="SECOND-WRITER")        # writer B (fencing failed): SAME height, different head
     assert hb.entry_count == ha.entry_count and hb.last_seq == ha.last_seq
@@ -103,16 +162,20 @@ def test_second_writer_fork_is_detected_within_the_sla():
     # detection actually fires on the fork (the audited is_split, via detect_fork)
     assert sla.detect_fork(cp_a, cp_b) is True and is_split(cp_a, cp_b) is True
 
-    # Timeline: A's checkpoint at t=0; B comes up just after (t=1s); a witness obtains B's divergent head at
-    # the NEXT cadence tick. This is the worst case (B started just after a tick).
-    cadence = sla.WITNESS_CHECKPOINT_CADENCE_S
-    b_start = 1
-    next_tick = int(math.ceil(b_start / cadence)) * cadence      # = one full cadence
-    events = [(0, cp_a), (next_tick, cp_b)]
+    # Worst-case timeline, grounded in the REAL sovereign timer: A's checkpoint at t=0; B advances its
+    # divergent head immediately after that tick (so the t=0 checkpoint missed it); a witness first obtains
+    # B's head at the NEXT tick, one cadence later AND delayed by up to one full RandomizedDelaySec. Parsing
+    # cadence+jitter from the timer (not from the SLA constant) is what lets this measurement exceed — and so
+    # this test go red — if the shipped timer ever drifts past the documented SLA.
+    cadence_s, jitter_s = _timer_cadence_and_jitter_s(_TIMERS[0])
+    b_start = 0
+    witnessed_at = b_start + cadence_s + jitter_s
+    events = [(0, cp_a), (witnessed_at, cp_b)]
 
     detect_time = _first_split_time(events)
     assert detect_time is not None, "the monitor must DETECT the second-writer fork"
     measured_latency = detect_time - b_start
+    assert measured_latency == cadence_s + jitter_s == sla.worst_case_detection_latency_s(cadence_s, jitter_s)
     assert sla.detection_within_sla(measured_latency), (
         f"measured detection latency {measured_latency}s exceeds the SLA {sla.FORK_DETECTION_SLA_S}s")
     assert measured_latency <= sla.worst_case_detection_latency_s()

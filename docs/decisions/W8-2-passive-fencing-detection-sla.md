@@ -43,7 +43,7 @@ So prevention stays out. The limitation is **accepted and tested**, with the SLA
 ## The claim (register in the claims registry, [W0-3] #398, id `W8-2`)
 
 <!-- CLAIM:W8-2 -->
-> **Registered claim (W0-3 #398):** Passive fencing is advisory and does NOT prevent a second concurrent writer; the accepted, tested limitation is a fork-DETECTION SLA — a second writer's divergent owner-signed head is detected as a fork (the audited same-height/different-`head_hash` `is_split` signal) within one witness-checkpoint cadence (the shipped 15-minute timer, `FORK_DETECTION_SLA_S`), and a detected-or-undetected fork can never be silently PROMOTED because the failover guard refuses a same-height fork and the freshness gate refuses any anchor older than a 24h fail-closed ceiling.
+> **Registered claim (W0-3 #398):** Passive fencing is advisory and does NOT prevent a second concurrent writer; the accepted, tested limitation is a fork-DETECTION SLA — a second writer's divergent owner-signed head is detected as a fork (the audited same-height/different-`head_hash` `is_split` signal) within one witness-checkpoint cadence plus the timer's `RandomizedDelaySec` jitter (the shipped 15-minute timer + up to a 60s smear = the 16-minute `FORK_DETECTION_SLA_S`), and a detected-or-undetected fork can never be silently PROMOTED because the failover guard refuses a same-height fork and the freshness gate refuses any anchor older than a 24h fail-closed ceiling.
 
 This claim is TRUE of the code as of W8-2:
 
@@ -54,13 +54,17 @@ This claim is TRUE of the code as of W8-2:
   checkpoints at one height with different heads has cryptographic proof of a fork (`is_split`;
   `transparency.consistent` likewise rejects a same-height different-head as not-an-extension). Two live
   writers necessarily produce exactly that.
-- **The detection SLA (nominal): one witness-checkpoint cadence = 15 minutes.** The off-box witnessed
-  checkpoint is emitted on the shipped timers (`apps/sigil/deploy/systemd/sigil-checkpoint.timer` +
-  `infra/systemd/vigil-checkpoint.timer`, every 15 min — W7-5 #463). A witness therefore obtains each
-  live writer's head at most one cadence after it advances; worst case, a second writer that comes up
-  just after a tick is detected at the next tick — **within one cadence** (`FORK_DETECTION_SLA_S =
-  WITNESS_CHECKPOINT_CADENCE_S = 900s`). The SLA test drives a checkpoint-comparing monitor over a real
-  timeline and **measures** the detection latency against this bound.
+- **The detection SLA: one witness-checkpoint cadence + the timer jitter = 16 minutes.** The off-box
+  witnessed checkpoint is emitted on the shipped timers (`apps/sigil/deploy/systemd/sigil-checkpoint.timer`
+  + `infra/systemd/vigil-checkpoint.timer`, every 15 min — W7-5 #463). Those timers also smear each fire
+  with `RandomizedDelaySec=60` so a fleet does not stampede, so the worst-case gap between two consecutive
+  fires is one cadence PLUS one full jitter — a naive "one cadence" SLA would be violated by exactly that
+  smear. A witness therefore obtains each live writer's head at most one cadence-plus-jitter after it
+  advances; worst case, a second writer that advances its head just after a tick is first witnessed at the
+  next (possibly-jittered) tick — **within one cadence + max jitter** (`FORK_DETECTION_SLA_S =
+  WITNESS_CHECKPOINT_CADENCE_S + WITNESS_CHECKPOINT_MAX_JITTER_S = 900s + 60s = 960s`). The SLA test derives
+  the worst-case latency from the parsed cadence AND `RandomizedDelaySec` of the shipped timers (not from the
+  SLA constant) and asserts it against this bound, so the test goes red if the timer ever drifts past it.
 - **The fail-closed CEILING (backstop, 24h).** If the scheduled emitter degrades and detection lags, a
   fork is still never silently **promoted**: the failover guard refuses a same-height fork
   (`tools/ha/spine_failover_guard.py`, "SAME-HEIGHT FORK"), and the W7-5 freshness gate refuses to anchor
@@ -72,18 +76,26 @@ Pinned by `apps/sigil/tests/test_ha_fork_detection_sla.py` (runs in the required
 
 - a test that **FAILS on a tree without this change** — `tools/ha/fork_detection_sla.py` and this decision
   record do not exist pre-W8-2, so the import and the doc assertions fail there;
+- a **worst-case-from-the-real-timers** SLA test — the cadence AND `RandomizedDelaySec` jitter are parsed
+  from the shipped timer files, the worst-case detection latency is computed as cadence + jitter, and it is
+  asserted `<= FORK_DETECTION_SLA_S`; this can go **red** if the timer drifts past the SLA (or the SLA
+  constant drops below the real worst case), so it is not tautological;
 - a **measured** SLA test — a deliberately started second writer's divergent head is detected by the real
-  `is_split` monitor, and the measured latency is asserted `<= FORK_DETECTION_SLA_S`;
-- a **negative control** asserted in the same run — a legitimate single-writer append-only extension
-  (count 2 → 3) is NOT flagged as a fork (`is_split` False, `consistent` True), proving the detector is
-  not a no-op that flags everything;
+  `is_split` monitor over a worst-case timeline (grounded in the parsed cadence + jitter), and the measured
+  latency is asserted `<= FORK_DETECTION_SLA_S`;
+- a **negative control that proves the SLA assertion can fail** — a hypothetical timer whose cadence alone
+  (or whose within-cadence value + jitter) exceeds the SLA yields a worst-case latency the
+  `detection_within_sla` predicate REJECTS, proving the positive assertions are not green-washed;
+- a **detector negative control** asserted in the same run — a legitimate single-writer append-only
+  extension (count 2 → 3) is NOT flagged as a fork (`is_split` False, `consistent` True), proving the
+  detector is not a no-op that flags everything;
 - a **composition backstop** test — the failover guard refuses (exit 2) to promote the second writer's
   forked head against the true active's witnessed checkpoint.
 
 ## Honest scope (do not overclaim)
 
 - This is **detection within an SLA, not prevention.** Between the second writer coming up and the next
-  witness cadence (≤ 15 min nominal), two heads can exist. The guarantee is that the divergence is
+  witness cadence + jitter (≤ 16 min worst case), two heads can exist. The guarantee is that the divergence is
   detected within that window and can never be silently promoted, not that it is impossible.
 - The SLA's *independence* strength is the witnessed-floor doctrine's (HA-PROFILE §4): at the default
   owner-only, threshold-1 witness set the anchor is retention-based **detection**, not independent

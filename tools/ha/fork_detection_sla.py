@@ -29,10 +29,17 @@ from vigil_integration.witnessed_anchor import DEFAULT_REFUSE_AFTER_S
 # head advances.
 WITNESS_CHECKPOINT_CADENCE_S = 15 * 60  # 900s — MUST match the shipped timers' OnCalendar cadence.
 
-# THE DETECTION SLA (nominal). Worst case, a second writer that comes up just after a checkpoint tick has
-# its divergent head first witnessed at the NEXT tick — one cadence later. So a fork is detected within one
-# witness-checkpoint cadence of the second writer advancing the head, once both heads reach a witness.
-FORK_DETECTION_SLA_S = WITNESS_CHECKPOINT_CADENCE_S  # 900s.
+# The shipped timers ALSO smear each activation with ``RandomizedDelaySec`` so a fleet does not fire
+# simultaneously. That jitter widens the worst-case gap between two consecutive fires to one cadence PLUS
+# one full jitter, so an honest SLA must include it — a naive "one cadence" SLA would be violated by
+# exactly this jitter. MUST match the ``RandomizedDelaySec`` on both shipped checkpoint timers.
+WITNESS_CHECKPOINT_MAX_JITTER_S = 60  # RandomizedDelaySec on sigil-/vigil-checkpoint.timer.
+
+# THE DETECTION SLA. Worst case, a second writer that advances its divergent head just after a checkpoint
+# tick has that head first witnessed at the NEXT tick — one cadence later — and that next tick may itself
+# be delayed by up to one ``RandomizedDelaySec``. So the worst-case time from the head advancing to a
+# witness holding both heads is one cadence PLUS the max jitter, and the SLA is exactly that bound.
+FORK_DETECTION_SLA_S = WITNESS_CHECKPOINT_CADENCE_S + WITNESS_CHECKPOINT_MAX_JITTER_S  # 960s (16 min).
 
 # THE FAIL-CLOSED CEILING (hard backstop, not the nominal SLA). If the scheduled emitter DEGRADES so that
 # detection is delayed, the freshness gate (W7-5, #463) refuses to anchor any promotion off an anchor older
@@ -48,10 +55,15 @@ def detect_fork(a: Checkpoint, b: Checkpoint) -> bool:
     return is_split(a, b)
 
 
-def worst_case_detection_latency_s(cadence_s: int = WITNESS_CHECKPOINT_CADENCE_S) -> int:
+def worst_case_detection_latency_s(
+    cadence_s: int = WITNESS_CHECKPOINT_CADENCE_S,
+    jitter_s: int = WITNESS_CHECKPOINT_MAX_JITTER_S,
+) -> int:
     """The worst-case time from a second writer advancing the head to a witness holding both heads at one
-    height (so :func:`detect_fork` fires): one witness-checkpoint cadence."""
-    return int(cadence_s)
+    height (so :func:`detect_fork` fires): one witness-checkpoint cadence PLUS one full ``RandomizedDelaySec``
+    of timer jitter (the largest gap two consecutive smeared fires can leave). Callers pass the cadence and
+    jitter PARSED FROM THE SHIPPED TIMER so the SLA test can go red if the real timer drifts past the SLA."""
+    return int(cadence_s) + int(jitter_s)
 
 
 def detection_within_sla(actual_latency_s: float, *, sla_s: int = FORK_DETECTION_SLA_S) -> bool:
