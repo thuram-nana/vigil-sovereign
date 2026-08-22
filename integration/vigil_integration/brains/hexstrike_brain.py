@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 
 class TargetType(str, Enum):
@@ -215,20 +215,41 @@ class AttackChain:
 
 
 def proposal_document(profile: "TargetProfile", steps: "list[AttackStep]", *,
-                      objective: str = "comprehensive", posture: str = "live") -> dict:
+                      objective: str = "comprehensive", posture: str = "live",
+                      capabilities: "Mapping[str, Mapping[str, Any]] | None" = None) -> dict:
     """Serialise a REAL brain proposal to the exact ``brain-proposal.json`` shape the console reads
     (``framework.v2.console.api.brain_decision``): ``{target, objective, posture, profile, steps}``, with
     the per-step ``{tool, priority, params, danger, effectiveness}`` and the profile ``.to_dict()`` fields
     the Brain-screen decision panel renders. ONE serialiser, used by the producer that persists a proposal
     (``engine_think.BrainThink``), so the persisted proposal is BYTE-for-byte what the brain proposed — the
     panel can never show a chain that differs from the one the engine drove. Pure: it invents nothing,
-    computes no facts, and reflects only the profile + steps handed to it (both carry no authority)."""
+    computes no facts, and reflects only the profile + steps handed to it (both carry no authority).
+
+    ``capabilities`` — OPTIONAL capability annotation, a ``{tool -> {status, reason}}`` map (as produced by
+    ``live.capability_join`` and folded to ``{r.name: {"status": r.status, "reason": r.reason}}``). When
+    provided, EVERY serialised step gains a ``capability`` field ``{"status": …, "reason": …}`` looked up by
+    the step's ``tool``, so the panel can render WHY a proposed tool is executable / blocked / unavailable
+    rather than the plan quietly listing a step that can never run. A tool ABSENT from the map is annotated
+    ``{"status": "UNAVAILABLE", "reason": "capability unknown"}`` — never silently un-annotated. This stays
+    PURE: the annotation is a straight lookup over the caller's own data; nothing here probes a host or
+    computes a status. DEFAULT ``None`` ⇒ NO step carries a ``capability`` key, so the output is
+    BYTE-IDENTICAL to before this parameter existed."""
+    step_dicts: list[dict] = []
+    for s in steps:
+        d = s.to_dict()
+        if capabilities is not None:
+            cap = capabilities.get(d["tool"])
+            if cap is None:
+                d["capability"] = {"status": "UNAVAILABLE", "reason": "capability unknown"}
+            else:
+                d["capability"] = {"status": cap.get("status"), "reason": cap.get("reason")}
+        step_dicts.append(d)
     return {
         "target": profile.target,
         "objective": objective,
         "posture": posture,
         "profile": profile.to_dict(),
-        "steps": [s.to_dict() for s in steps],
+        "steps": step_dicts,
     }
 
 
