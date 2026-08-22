@@ -54,7 +54,7 @@ Verification uses the PUBLIC key only, so this module is safe to import in eithe
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from numbers import Real
 from typing import Any, Callable
 
@@ -228,7 +228,10 @@ def mint_capability_token(
         signature_b64="",
     )
     sig = sign(owner_private_key_b64, token_signing_bytes(token))
-    return CapabilityToken(**{**token.__dict__, "signature_b64": sig})
+    # dataclasses.replace (not a {**__dict__, "signature_b64": sig} splat): the string-literal field name
+    # tripped gitleaks' generic-api-key heuristic (a false positive on "signature_b64"); replace() binds the
+    # field by keyword with no quoted literal and is the idiomatic frozen-dataclass update.
+    return _dc_replace(token, signature_b64=sig)
 
 
 def _well_formed(grant: object, token: object) -> str:
