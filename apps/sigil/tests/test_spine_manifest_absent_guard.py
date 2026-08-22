@@ -164,3 +164,20 @@ def test_manifest_absent_single_segment_orphan_migration_completes():
     ok, reason = s2.verify()
     assert ok, reason
     assert s2.count() == 4
+
+
+def test_manifest_absent_segmented_append_fails_closed():
+    """Red-pen MEDIUM: the WRITE path must fail closed too. An append to a manifest-removed multi-segment
+    spine must NOT silently resurrect spine.jsonl (a tampered, read-raising state) — it must RAISE, exactly
+    as the read paths do, so the write path and read path agree. (Construction stays non-raising — the read
+    guard fires on read; this guard fires when an appender refreshes its active target under lock.)"""
+    d = _fresh_dir("spine552-append")
+    lay = _make_segmented(d, [3, 4, 2])
+    assert lay.manifest_path.exists()
+    lay.manifest_path.unlink()                            # manifest-REMOVED segmented state (seg-1+ survive)
+    s2 = SpineStore(d / "spine.jsonl")                    # construction must not raise / not auto-repair
+    assert not lay.manifest_path.exists()
+    with pytest.raises(SpineError):
+        s2.append(kind="event", source="t", actor="u", payload={"n": 99})
+    # the failed append must NOT have resurrected a readable short chain: reads still fail closed
+    _assert_all_reads_raise(SpineStore(d / "spine.jsonl"))
