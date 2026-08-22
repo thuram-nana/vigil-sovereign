@@ -24,6 +24,7 @@ from ..reuse import ChainEntry, append_entry, build_chain, digest_payload, verif
 from . import envelope
 from .atomicio import atomic_write_text, fsync_dir
 from .manifest import (
+    SEGMENT_STEM,
     Manifest,
     Segment,
     SpineLayout,
@@ -245,6 +246,56 @@ class SpineStore:
             return r
 
     # --- segment layout / manifest ------------------------------------------------
+    @staticmethod
+    def _segment_id_of(name: str) -> "int | None":
+        """The numeric segment id embedded in a `seg-NNNNNNNN.jsonl[.gz]` filename, or None if `name` is
+        not a segment file. Used as the ON-DISK evidence discriminator, so it is deliberately strict about
+        the shape rotation/migration actually writes (`segment_filename`)."""
+        if not name.startswith(SEGMENT_STEM):
+            return None
+        if not (name.endswith(".jsonl") or name.endswith(".jsonl.gz")):
+            return None
+        digits = name[len(SEGMENT_STEM):].split(".", 1)[0]
+        return int(digits) if digits.isdigit() else None
+
+    def _segment_files(self) -> list[Path]:
+        """Every on-disk segment artifact (`<stem>.segments/seg-*.jsonl[.gz]`) in name order — the READER'S
+        physical evidence that this spine was ever segmented, independent of the (removable) manifest.
+        Empty for a genuine legacy (pre-migrate) single-file spine, which has no segments dir at all."""
+        d = self._layout.segments_dir
+        if not d.exists():
+            return []
+        return sorted(p for p in d.iterdir() if p.is_file() and self._segment_id_of(p.name) is not None)
+
+    def _guard_manifest_absent_segmented(self) -> None:
+        """Invariant-15 read guard for the manifest-ABSENT case. A missing manifest is legitimate on a
+        genuine legacy (pre-migrate) single-file spine (no segment artifacts at all) AND on the single-seg-0
+        window (a fresh migrate() that renamed spine.jsonl → seg-0 but has not published the manifest yet, or
+        an un-migrated store constructed before that rename): in every seg-0-ONLY case, seg-0 IS the complete
+        chain, so reading it is correct, not a short read.
+
+        A ROTATION is the ONLY thing that ever creates a non-genesis segment (`seg-1`+): it seals seg-k and
+        ALWAYS publishes the new-generation manifest as the same atomic commit. So a `seg-1`+ file present on
+        disk with the manifest ABSENT is unambiguous ON-DISK evidence of a manifest-REMOVED SEGMENTED spine —
+        reading the legacy single file (or a lone genesis-rooted survivor) would drop the sealed tail: a
+        SILENT SHORT CHAIN that even verify() cannot catch (the fail-OPEN invariant 15 forbids). Fail CLOSED.
+        This does NOT repair, recreate or resurrect anything (READ-PATH ONLY) — it refuses to read an
+        ambiguous/lossy state. (Detecting a lone-seg-0 that was ITSELF truncated from a larger spine — segment
+        files deleted too — needs the durable signed anchor tracked in W10-4/W16-11, and is out of scope here:
+        with no manifest and no seg-1+, there is no on-disk evidence a tail ever existed.)
+
+        The orphan reconciler (`_complete_orphan_migration_locked`) mirrors this exactly: it completes a
+        seg-0-ONLY interrupted migration but REFUSES to auto-publish when seg-1+ exists, so the multi-segment
+        manifest-removed spine is left manifest-absent for this guard to fail closed on."""
+        rotated = [p for p in self._segment_files() if (self._segment_id_of(p.name) or 0) > 0]
+        if rotated:
+            names = ", ".join(p.name for p in rotated[:4]) + (" …" if len(rotated) > 4 else "")
+            raise SpineError(
+                "spine manifest is absent but a sealed (non-genesis) segment artifact exists on disk "
+                f"({len(rotated)} file(s): {names}) — this is a manifest-REMOVED SEGMENTED spine, not a "
+                "legacy single-file spine; refusing to read a silent short chain (invariant 15: no "
+                "state-scanner fail-open)")
+
     def _resolve_active_path(self) -> Path:
         """The current append/read target. With a manifest, the active segment's absolute path; without
         one (a fresh or not-yet-migrated legacy spine), the legacy single file in place — byte-identical
@@ -330,6 +381,10 @@ class SpineStore:
             m = read_manifest(self._layout)
             if m is None:
                 if attempt == 0:
+                    # A missing manifest is a LEGACY single-file spine ONLY when no segment artifacts exist
+                    # on disk. Segment files + no manifest == a manifest-REMOVED segmented spine → fail
+                    # CLOSED (invariant 15) rather than read the legacy file as a silent short chain.
+                    self._guard_manifest_absent_segmented()
                     t = self._read_target()              # legacy (pre-manifest) spine: the single file
                     return (-1, [t] if t.exists() else [])
                 # We STARTED this resolve holding a manifest (gen >= 0) and it has since VANISHED: the
@@ -411,6 +466,18 @@ class SpineStore:
         the log (the critical review finding)."""
         seg0 = self._layout.segments_dir / segment_filename(0)
         if seg0.exists() and not self.path.exists():
+            # An INTERRUPTED single-file migration leaves EXACTLY seg-0 (migrate renames spine.jsonl →
+            # seg-0, then publishes the manifest — it never creates seg-1+ before the manifest). If any
+            # OTHER segment file is present, this is NOT a migrate crash but a manifest-REMOVED MULTI-segment
+            # spine; auto-publishing a seg-0-only manifest here would silently drop the sealed tail (the very
+            # short-chain fail-open of #552). Refuse to complete — leave the manifest absent so the READ path
+            # (_guard_manifest_absent_segmented) fails CLOSED on a full-chain read. NO auto-repair.
+            rotated = [p for p in self._segment_files() if (self._segment_id_of(p.name) or 0) > 0]
+            if rotated:
+                _log.warning("spine: manifest absent with %d sealed (non-genesis) segment file(s) (%s) — NOT "
+                             "an interrupted migration; refusing to auto-publish a short manifest",
+                             len(rotated), rotated[0].name)
+                return False
             write_manifest(self._layout, initial_manifest(SCOPE, active_file=self._layout.segment_rel(0)))
             _log.warning("spine: completed an interrupted migration — published the manifest for %s", seg0)
             return True
