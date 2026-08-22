@@ -412,9 +412,9 @@
    "subject": "S6 (slice 2): close two red-pen gate bypasses (role-resolution + unresolvable ref)"
   },
   {
-   "commit": "177633c98d3aeea4cb91c5348ee2965f7f50de2a",
+   "commit": "334f42a7916ebe87b41aa8b22be16408dba64f55",
    "file": "025-strix-hexstrike-sx-s5-harden-the-strix-runtime-c.patch",
-   "sha256": "9572cd252af8e9e481dd1e38cc7de51bd63e7a3b089cf92b5d988e3014dcb9dd",
+   "sha256": "83bc60edc6262769cf53beadf9b5e3c029041c69b5e3dafc3433ea5b03d99e41",
    "subject": "Strix+HexStrike sx-s5: harden the Strix runtime container (least-privilege + pinned image + reaper)"
   }
  ],
