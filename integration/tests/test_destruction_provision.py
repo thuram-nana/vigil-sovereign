@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import sys
 import pytest
 
 from vigil_integration.live.codefix_runner import build_destruction_quorum, file_backed_quorum
@@ -217,7 +218,22 @@ def test_write_single_use_authorization_second_write_is_refused(tmp_path):
 
 
 def test_provision_boundary_clean():
-    import sys
-    import vigil_integration.live.destruction_provision  # noqa: F401
-    bad = sorted(m for m in sys.modules if m.split(".")[0] in ("framework", "strix", "sigil"))
-    assert bad == []
+    # FATAL-2 in an ISOLATED subprocess so the check is not polluted by whatever a prior test in the same
+    # session already imported (the offense leg legitimately loads framework elsewhere). Uses the
+    # tree-under-test vigil_core so it holds locally AND in CI.
+    import os
+    import subprocess
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    probe = (
+        "import sys; import vigil_integration.live.destruction_provision; "
+        "bad=sorted(m for m in sys.modules if m.split('.')[0] in ('framework','strix','sigil')); "
+        "assert bad==[], bad; print('CLEAN')"
+    )
+    env = {
+        "PYTHONPATH": f"{repo / 'integration'}:{repo / 'gateway'}:{repo / 'packages' / 'core' / 'vigil_core'}",
+        "PATH": os.environ.get("PATH", ""),
+    }
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env, timeout=60)
+    assert out.returncode == 0 and "CLEAN" in out.stdout, f"FATAL-2 probe failed: {out.stdout}\n{out.stderr}"
