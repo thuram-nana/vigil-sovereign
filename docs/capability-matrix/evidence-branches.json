@@ -1,6 +1,6 @@
 {
   "schema": "vigil-evidence-branches/1",
-  "note": "Per-EVIDENCE-BRANCH capability CONTRACT, enforced by scanner/tests/test_claim_discipline.py. fact_capable/clean_capable are SEPARATE claims describing what is TRUE TODAY. target_fact_capable/target_clean_capable are what the branch MUST become — this registry is a ladder, not a ceiling. Any gap between current and target REQUIRES `blocking_work`: the concrete engineering that closes it. A gap without blocking work fails the enforcement test, so a capability can never be quietly abandoned by downgrading the claim; the claim stays, and the system is built up to meet it. Downgrading a TARGET requires an explicit `target_downgrade_rationale` stating why the capability is not achievable at all. `evidence_surface` is a CLOSED type (response_headers | response_body | transport | tls_handshake | service_response | artifact | composite) — rules key off the declared type, never off the branch name, so a future body-derived branch cannot escape them by being called something else. `implementation_refs` point at the code that realises the branch; the enforcement test checks the referenced file and symbol actually exist.",
+  "note": "Per-EVIDENCE-BRANCH capability CONTRACT, enforced by scanner/tests/test_claim_discipline.py. fact_capable/clean_capable are SEPARATE claims describing what is TRUE TODAY. target_fact_capable/target_clean_capable are what the branch MUST become — this registry is a ladder, not a ceiling. Any gap between current and target REQUIRES `blocking_work`: the concrete engineering that closes it. A gap without blocking work fails the enforcement test, so a capability can never be quietly abandoned by downgrading the claim; the claim stays, and the system is built up to meet it. Downgrading a TARGET requires an explicit `target_downgrade_rationale` stating why the capability is not achievable at all. `evidence_surface` is a CLOSED type (response_headers | response_body | transport | tls_handshake | service_response | artifact | composite | live_capture) — rules key off the declared type, never off the branch name, so a future body-derived branch cannot escape them by being called something else. `implementation_refs` point at the code that realises the branch; the enforcement test checks the referenced file and symbol actually exist. `control_requirements` is the CLOSED-vocabulary list of standing capability controls (gates / VIGIL-owned captures / instrumentation / primary-artifact parses) a branch depends on to reach its declared capability — distinct from `preconditions`, which admission evaluates per observation; for a LEAD-only branch it names the MISSING controls that `blocking_work` closes. `oracle_version` names the OracleKind whose deterministic decision procedure adjudicates a FACT on this branch — the FACT certificate binds verify.oracle_version(kind) at mint so a verifier re-runs the SAME procedure — and is EMPTY for a LEAD-only branch, which no VIGIL oracle adjudicates yet (that is its blocking_work). The manifest validator (integration/vigil_integration/live/tool_manifest.py:validate_branch_registry) enforces both columns: fact_capable ⇒ a named oracle_version, LEAD-only ⇒ none.",
   "branches": [
     {
       "id": "open_redirect.location_header",
@@ -18,7 +18,13 @@
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:OpenRedirectCheck"
       ],
-      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline."
+      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "benign_twin_control"
+      ]
     },
     {
       "id": "open_redirect.body_markup",
@@ -38,6 +44,13 @@
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:_markup_redirect_hosts"
+      ],
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "benign_twin_control",
+        "response_body_decode"
       ]
     },
     {
@@ -58,6 +71,13 @@
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/js_lex.py:sink_is_executable",
         "engine/crucible/framework/v2/scanner/checks.py:_JS_REDIRECT"
+      ],
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "benign_twin_control",
+        "js_lexer_executable_context"
       ]
     },
     {
@@ -75,6 +95,12 @@
       "evidence_surface": "response_headers",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:CorsActiveCheck"
+      ],
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "benign_twin_control"
       ]
     },
     {
@@ -93,7 +119,13 @@
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:HostHeaderCheck"
       ],
-      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline."
+      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "benign_twin_control"
+      ]
     },
     {
       "id": "host_header.body_emission",
@@ -113,6 +145,13 @@
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:_emitted_url_hosts"
+      ],
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "benign_twin_control",
+        "response_body_decode"
       ]
     },
     {
@@ -131,7 +170,13 @@
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/sso.py:OidcRedirectUriCheck"
       ],
-      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline."
+      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "benign_twin_control"
+      ]
     },
     {
       "id": "oidc_redirect_uri.body_markup",
@@ -151,6 +196,13 @@
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/sso.py:OidcRedirectUriCheck"
+      ],
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "benign_twin_control",
+        "response_body_decode"
       ]
     },
     {
@@ -168,6 +220,11 @@
       "evidence_surface": "transport",
       "implementation_refs": [
         "engine/crucible/framework/v2/verify/reachability.py:capture_handshake"
+      ],
+      "oracle_version": "service_reachability",
+      "control_requirements": [
+        "warden_scope_gate",
+        "vigil_owned_tcp_handshake"
       ]
     },
     {
@@ -185,6 +242,11 @@
       "evidence_surface": "tls_handshake",
       "implementation_refs": [
         "engine/crucible/framework/v2/verify/tls.py:capture_tls_handshake"
+      ],
+      "oracle_version": "tls_weakness",
+      "control_requirements": [
+        "warden_scope_gate",
+        "vigil_owned_tls_handshake"
       ]
     },
     {
@@ -203,6 +265,11 @@
       "evidence_surface": "artifact",
       "implementation_refs": [
         "integration/vigil_integration/live/sbom.py:sbom_verify"
+      ],
+      "oracle_version": "version_range",
+      "control_requirements": [
+        "parsed_advisory_manifest",
+        "deterministic_version_range_oracle"
       ]
     },
     {
@@ -221,6 +288,11 @@
       "evidence_surface": "artifact",
       "implementation_refs": [
         "integration/vigil_integration/live/k8s_posture.py:k8s_posture_verify"
+      ],
+      "oracle_version": "k8s_posture",
+      "control_requirements": [
+        "parsed_kube_bench_export",
+        "deterministic_k8s_posture_oracle"
       ]
     },
     {
@@ -239,6 +311,11 @@
       "evidence_surface": "artifact",
       "implementation_refs": [
         "integration/vigil_integration/live/k8s_posture.py:ingest_k8s_rbac"
+      ],
+      "oracle_version": "k8s_workload_posture",
+      "control_requirements": [
+        "parsed_rbac_export",
+        "deterministic_k8s_workload_posture_oracle"
       ]
     },
     {
@@ -257,6 +334,11 @@
       "evidence_surface": "artifact",
       "implementation_refs": [
         "integration/vigil_integration/live/mesh_cicd_posture.py:mesh_posture_verify"
+      ],
+      "oracle_version": "mesh_posture",
+      "control_requirements": [
+        "parsed_mesh_config",
+        "deterministic_mesh_posture_oracle"
       ]
     },
     {
@@ -275,6 +357,11 @@
       "evidence_surface": "artifact",
       "implementation_refs": [
         "integration/vigil_integration/live/mesh_cicd_posture.py:cicd_posture_verify"
+      ],
+      "oracle_version": "cicd_posture",
+      "control_requirements": [
+        "parsed_cicd_workflow",
+        "deterministic_cicd_posture_oracle"
       ]
     },
     {
@@ -295,6 +382,11 @@
         "integration/vigil_integration/live/iac_posture.py:iac_verify",
         "integration/vigil_integration/live/iac_posture.py:parse_terraform",
         "integration/vigil_integration/live/iac_posture.py:parse_cloudformation"
+      ],
+      "oracle_version": "cloud_posture",
+      "control_requirements": [
+        "parsed_iac_artifact",
+        "deterministic_cloud_posture_oracle"
       ]
     },
     {
@@ -313,6 +405,11 @@
       "evidence_surface": "artifact",
       "implementation_refs": [
         "integration/vigil_integration/live/iac_posture.py:iac_verify"
+      ],
+      "oracle_version": "policy_path",
+      "control_requirements": [
+        "parsed_iac_artifact",
+        "deterministic_policy_path_oracle"
       ]
     },
     {
@@ -331,6 +428,12 @@
       "evidence_surface": "live_capture",
       "implementation_refs": [
         "integration/vigil_integration/live/cloud_live_posture.py:cloud_live_verify"
+      ],
+      "oracle_version": "cloud_posture",
+      "control_requirements": [
+        "warden_scope_gate",
+        "vigil_owned_cloud_capture",
+        "deterministic_cloud_posture_oracle"
       ]
     },
     {
@@ -352,6 +455,13 @@
         "engine/crucible/framework/v2/verify/oracles.py:cloud_posture_oracle",
         "engine/crucible/framework/v2/verify/oracles.py:_canon_account_token",
         "engine/crucible/framework/v2/verify/oracles.py:_cloud_owner_accounts"
+      ],
+      "oracle_version": "cloud_posture",
+      "control_requirements": [
+        "warden_scope_gate",
+        "vigil_owned_cloud_capture",
+        "owner_account_threaded",
+        "deterministic_cloud_posture_oracle"
       ]
     },
     {
@@ -370,6 +480,12 @@
       "evidence_surface": "live_capture",
       "implementation_refs": [
         "integration/vigil_integration/live/cloud_live_posture.py:cloud_live_verify"
+      ],
+      "oracle_version": "policy_path",
+      "control_requirements": [
+        "warden_scope_gate",
+        "vigil_owned_cloud_capture",
+        "deterministic_policy_path_oracle"
       ]
     },
     {
@@ -390,6 +506,13 @@
         "engine/crucible/framework/v2/verify/oracles.py:imds_credential_capture_oracle",
         "integration/vigil_integration/live/imds_runner.py:run_imds_capture",
         "integration/vigil_integration/live/imds_verify.py:imds_verify"
+      ],
+      "oracle_version": "imds_credential_capture",
+      "control_requirements": [
+        "warden_a2_scope_gate",
+        "vigil_owned_metadata_capture",
+        "confirming_identity_call",
+        "secret_safe_retention"
       ]
     },
     {
@@ -413,6 +536,13 @@
         "integration/vigil_integration/live/live_transport.py:LiveTransport",
         "integration/vigil_integration/live/secret_verify.py:secret_verify",
         "tools/livefire/secret_github_livefire.py:main"
+      ],
+      "oracle_version": "secret_credential_validity",
+      "control_requirements": [
+        "warden_a2_scope_gate",
+        "vigil_owned_secret_capture",
+        "confirming_validity_call",
+        "secret_safe_retention"
       ]
     },
     {
@@ -433,6 +563,13 @@
         "engine/crucible/framework/v2/verify/oracles.py:gcp_sa_impersonation_oracle",
         "engine/crucible/framework/v2/verify/gcp_impersonation_capture.py:confirm_gcp_impersonation_capture",
         "integration/vigil_integration/live/gcp_impersonation_verify.py:gcp_impersonation_verify"
+      ],
+      "oracle_version": "gcp_sa_impersonation",
+      "control_requirements": [
+        "warden_a2_scope_gate",
+        "vigil_owned_impersonation_capture",
+        "confirming_identity_call",
+        "secret_safe_retention"
       ]
     },
     {
@@ -453,6 +590,12 @@
         "engine/crucible/framework/v2/verify/oracles.py:k8s_workload_posture_oracle",
         "engine/crucible/framework/v2/verify/k8s_workload_posture.py:confirm_k8s_workload_posture",
         "integration/vigil_integration/live/k8s_rbac_verify.py:rbac_verify"
+      ],
+      "oracle_version": "k8s_workload_posture",
+      "control_requirements": [
+        "warden_scope_gate",
+        "vigil_owned_rbac_capture",
+        "deterministic_k8s_workload_posture_oracle"
       ]
     },
     {
@@ -473,6 +616,12 @@
         "engine/crucible/framework/v2/verify/oracles.py:iam_escalation_oracle",
         "engine/crucible/framework/v2/verify/iam_escalation_capture.py:confirm_iam_escalation_capture",
         "integration/vigil_integration/live/iam_escalation_verify.py:iam_escalation_verify"
+      ],
+      "oracle_version": "iam_escalation_primitive",
+      "control_requirements": [
+        "warden_a2_scope_gate",
+        "vigil_owned_iam_capture",
+        "deterministic_iam_escalation_oracle"
       ]
     },
     {
@@ -493,6 +642,12 @@
         "engine/crucible/framework/v2/verify/oracles.py:k8s_rbac_verb_grant_oracle",
         "engine/crucible/framework/v2/verify/k8s_rbac_grant.py:confirm_k8s_rbac_grant",
         "integration/vigil_integration/live/k8s_rbac_grant_verify.py:grant_verify"
+      ],
+      "oracle_version": "k8s_rbac_verb_grant",
+      "control_requirements": [
+        "warden_scope_gate",
+        "vigil_owned_rbac_capture",
+        "deterministic_k8s_rbac_verb_grant_oracle"
       ]
     },
     {
@@ -511,6 +666,12 @@
       "evidence_surface": "service_response",
       "implementation_refs": [
         "integration/vigil_integration/live/wiring.py:_live_redrive_fact"
+      ],
+      "oracle_version": "error_signature",
+      "control_requirements": [
+        "channel_established_gate",
+        "vigil_owned_live_redrive",
+        "deterministic_error_signature_oracle"
       ]
     },
     {
@@ -529,6 +690,194 @@
       "evidence_surface": "tls_handshake",
       "implementation_refs": [
         "integration/vigil_integration/live/external_tool.py:_weak_crypto_context"
+      ],
+      "oracle_version": "tls_weakness",
+      "control_requirements": [
+        "warden_scope_gate",
+        "vigil_owned_tls_handshake",
+        "deterministic_weak_crypto_oracle"
+      ]
+    },
+    {
+      "id": "strix.dom_execution",
+      "check": "_finding_from_report",
+      "evidence": "A Strix agent's report that injected JavaScript executed in a page DOM (DOM-XSS). Producer-supplied narrative; VIGIL has not re-driven it.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "LEAD-only: a Strix DOM-XSS observation over bytes VIGIL did not produce. VIGIL cannot mint a FACT until it independently re-drives the injection through its OWN gated headless-browser capture and the deterministic dom_execution oracle observes VIGIL's canary actually executing in a real DOM (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). A non-firing is uninformative; this branch may neither confirm nor clear.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of a DOM-XSS sink is a coverage-based capability over every rendered path (a runtime-assembled sink never appears literally), not this single-observation re-drive's target, so clean-capability is deliberately not pursued on this branch.",
+      "blocking_work": "FACT requires a VIGIL-OWNED headless-browser re-drive control: render the reported endpoint, inject VIGIL's own canary, and let the deterministic dom_execution oracle (verify/oracles.py:dom_execution_oracle, OracleKind.DOM_EXECUTION) observe the canary executing in a real DOM, with a benign-twin control. The oracle exists; the missing piece is the gated render capture that binds a VIGIL-produced execution trace. Until that capture is wired a Strix DOM-XSS report stays a LEAD.",
+      "evidence_surface": "composite",
+      "implementation_refs": [
+        "integration/vigil_integration/proof/run.py:_finding_from_report",
+        "engine/crucible/framework/v2/verify/oracles.py:dom_execution_oracle"
+      ],
+      "oracle_version": "",
+      "control_requirements": [
+        "headless_dom_render_capture",
+        "vigil_owned_canary_injection",
+        "warden_scope_gate",
+        "benign_twin_control"
+      ]
+    },
+    {
+      "id": "strix.auth_outcome",
+      "check": "_finding_from_report",
+      "evidence": "A Strix agent's report that an authentication or authorization control was bypassed (a protected resource reached an unauthenticated or under-privileged actor). Producer-supplied narrative.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "LEAD-only: a Strix auth-bypass narrative is not a VIGIL-verified differential. VIGIL cannot mint a FACT until it independently re-drives the credentialed-vs-uncredentialed (or lower-vs-higher-privilege) request pair through its OWN gated capture and a deterministic auth-outcome oracle adjudicates the differential (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). No such oracle exists yet; this branch may neither confirm nor clear.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of any auth bypass is a coverage-based capability spanning every role/route/object pair with a completeness proof, not this single-observation re-drive's target, so clean-capability is deliberately not pursued on this branch.",
+      "blocking_work": "FACT requires (1) a NEW deterministic auth-outcome oracle that judges a credentialed-vs-uncredentialed response differential over VIGIL's OWN retained captures, and (2) a VIGIL-owned gated re-drive control that sends both the authorized-control and the unauthorized-treatment request and binds the pair. Neither the oracle nor the paired-capture control exists yet; until both are wired a Strix auth-bypass report stays a LEAD.",
+      "evidence_surface": "composite",
+      "implementation_refs": [
+        "integration/vigil_integration/proof/run.py:_finding_from_report",
+        "integration/vigil_integration/proof/sink.py:ProofSink"
+      ],
+      "oracle_version": "",
+      "control_requirements": [
+        "auth_outcome_oracle",
+        "authenticated_vs_unauthenticated_paired_capture",
+        "warden_scope_gate"
+      ]
+    },
+    {
+      "id": "strix.source_to_sink",
+      "check": "_finding_from_report",
+      "evidence": "A Strix agent's report of a tainted data flow from an attacker-controlled source to a dangerous sink. Producer-supplied dataflow reasoning.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "LEAD-only: a reported source-to-sink flow is the agent's analysis, not a VIGIL-observed effect. VIGIL cannot mint a FACT until it independently re-drives the flow — planting a unique marker at the source and observing that exact marker reach the sink — through its OWN capture, adjudicated by the deterministic side_effect oracle (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). The end-to-end marker re-drive control is not wired; this branch may neither confirm nor clear.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of every source-to-sink flow is a whole-program dataflow-completeness capability, not this single-flow re-drive's target, so clean-capability is deliberately not pursued on this branch.",
+      "blocking_work": "FACT requires a VIGIL-OWNED re-drive control that plants a unique high-entropy marker at the reported source and observes that same marker arrive at the sink, adjudicated by the deterministic side_effect oracle (verify/oracles.py:side_effect_oracle, OracleKind.SIDE_EFFECT). The oracle exists; the missing piece is the source-injection + sink-observation instrumentation that produces a VIGIL-owned marker trace. Until that control is wired a Strix source-to-sink report stays a LEAD.",
+      "evidence_surface": "composite",
+      "implementation_refs": [
+        "integration/vigil_integration/proof/run.py:_finding_from_report",
+        "engine/crucible/framework/v2/verify/oracles.py:side_effect_oracle"
+      ],
+      "oracle_version": "",
+      "control_requirements": [
+        "source_marker_injection",
+        "sink_observation_capture",
+        "warden_scope_gate"
+      ]
+    },
+    {
+      "id": "strix.service_reachability",
+      "check": "_finding_from_report",
+      "evidence": "A Strix agent's report that a network service was reachable/open. Producer-supplied; the FACT-capable twin is service_reachability.tcp_handshake, which VIGIL must independently reproduce.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "LEAD-only: a Strix reachability claim is not VIGIL's own handshake. A FACT is minted only when VIGIL independently completes its OWN TCP handshake against the reported host/port on the already-FACT-capable service_reachability.tcp_handshake branch (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). The binding that hands a Strix-reported endpoint to that gated capture is not wired; this branch may neither confirm nor clear on the producer's say-so.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Clean-capability (a closed-port negative) already belongs to the VIGIL-owned service_reachability.tcp_handshake branch; this producer-report branch is a LEAD proposer into that branch, not itself an absence-prover, so clean-capability is deliberately not pursued here.",
+      "blocking_work": "FACT requires routing the Strix-reported host/port into VIGIL's OWN gated handshake capture (verify/reachability.py:capture_handshake, OracleKind.SERVICE_REACHABILITY) on the existing FACT-capable service_reachability.tcp_handshake branch, under the WARDEN scope gate. The oracle and capture exist; the missing piece is the LEAD-to-re-drive binding. Until that binding is wired a Strix reachability report stays a LEAD.",
+      "evidence_surface": "transport",
+      "implementation_refs": [
+        "integration/vigil_integration/proof/run.py:_finding_from_report",
+        "engine/crucible/framework/v2/verify/reachability.py:capture_handshake"
+      ],
+      "oracle_version": "",
+      "control_requirements": [
+        "vigil_owned_tcp_handshake_redrive",
+        "warden_scope_gate"
+      ]
+    },
+    {
+      "id": "strix.tls_negotiation",
+      "check": "_finding_from_report",
+      "evidence": "A Strix agent's report of a weak TLS protocol/cipher negotiation. Producer-supplied; the FACT-capable twin is tls_weakness.tls_handshake, which VIGIL must independently reproduce.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "LEAD-only: a Strix TLS finding is not VIGIL's own handshake. A FACT is minted only when VIGIL independently negotiates its OWN TLS handshake against the reported host on the already-FACT-capable tls_weakness.tls_handshake branch (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). The binding that hands a Strix-reported endpoint to that gated capture is not wired; this branch may neither confirm nor clear on the producer's say-so.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Clean-capability belongs to the VIGIL-owned tls_weakness.tls_handshake branch (bounded to what a modern client negotiates); this producer-report branch is a LEAD proposer into that branch, not itself an absence-prover, so clean-capability is deliberately not pursued here.",
+      "blocking_work": "FACT requires routing the Strix-reported host/port into VIGIL's OWN gated TLS handshake capture (verify/tls.py:capture_tls_handshake, OracleKind.TLS_WEAKNESS) on the existing FACT-capable tls_weakness.tls_handshake branch, under the WARDEN scope gate. The oracle and capture exist; the missing piece is the LEAD-to-re-drive binding. Until that binding is wired a Strix TLS report stays a LEAD.",
+      "evidence_surface": "tls_handshake",
+      "implementation_refs": [
+        "integration/vigil_integration/proof/run.py:_finding_from_report",
+        "engine/crucible/framework/v2/verify/tls.py:capture_tls_handshake"
+      ],
+      "oracle_version": "",
+      "control_requirements": [
+        "vigil_owned_tls_handshake_redrive",
+        "warden_scope_gate"
+      ]
+    },
+    {
+      "id": "strix.cloud_credential_confirmation",
+      "check": "_finding_from_report",
+      "evidence": "A Strix agent's report that a cloud credential was captured and/or valid. Producer-supplied; the FACT-capable twins are the cloud_exploit.* achieved-effect branches VIGIL must independently reproduce.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "LEAD-only: a Strix credential-capture narrative is not a VIGIL-owned confirmation. A FACT is minted only when VIGIL independently retains a structurally-valid credential AND a confirming identity call over its OWN gated (secret-safe) capture on an already-FACT-capable cloud_exploit branch (imds/secret/gcp) (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). Routing a Strix credential report into those gated runners is not wired; this branch may neither confirm nor clear on the producer's say-so.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of a capturable/valid cloud credential is a posture-and-hygiene capability with a completeness proof, already a distinct target on the cloud_exploit branches; this producer-report branch is a LEAD proposer, not an absence-prover, so clean-capability is deliberately not pursued here.",
+      "blocking_work": "FACT requires routing the Strix-reported credential lead into a VIGIL-OWNED, WARDEN-A2/D5-gated capture runner on an existing FACT-capable cloud_exploit branch, where the deterministic imds_credential_capture / exposed_secret_validity / gcp_sa_impersonation oracle re-derives an achieved-effect FACT over VIGIL's OWN retained (secret-safe) capture and a confirming call. The oracles and runners exist; the missing piece is the LEAD-to-runner binding. Until that binding is wired a Strix credential report stays a LEAD.",
+      "evidence_surface": "live_capture",
+      "implementation_refs": [
+        "integration/vigil_integration/proof/run.py:_finding_from_report",
+        "engine/crucible/framework/v2/verify/oracles.py:imds_credential_capture_oracle"
+      ],
+      "oracle_version": "",
+      "control_requirements": [
+        "vigil_owned_credential_capture_runner",
+        "confirming_identity_call",
+        "warden_a2_scope_gate",
+        "secret_safe_retention"
+      ]
+    },
+    {
+      "id": "strix.misconfiguration_artifact",
+      "check": "_finding_from_report",
+      "evidence": "A Strix agent's report of a security misconfiguration. Producer-supplied; a FACT requires VIGIL to parse the PRIMARY configuration artifact itself (Track A) driving the relevant posture oracle.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "LEAD-only: a Strix misconfiguration narrative is the agent's reading of some artifact, not VIGIL's own parse of the primary artifact. A FACT is minted only when VIGIL independently parses the primary configuration artifact (IaC plan/state/template, kube-bench/RBAC export, cloud/mesh/CI-CD config) and the matching deterministic posture oracle re-derives the concrete insecure setting over VIGIL's OWN parse (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). Routing a Strix misconfig report to the correct primary-artifact parser is not wired; this branch may neither confirm nor clear on the producer's say-so.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Clean-capability (a bounded negative) belongs to the VIGIL-owned posture branches once a completeness proof over the parsed artifact exists; this producer-report branch is a LEAD proposer that selects which posture branch to re-drive into, not itself an absence-prover, so clean-capability is deliberately not pursued here.",
+      "blocking_work": "FACT requires routing the Strix-reported misconfiguration to VIGIL's OWN primary-artifact parse on an existing FACT-capable posture branch — iac_posture.iac_verify / k8s_posture.k8s_posture_verify / mesh_cicd_posture.* — where the matching deterministic posture oracle re-derives the concrete insecure setting over VIGIL's parse. The parsers and oracles exist; the missing piece is the LEAD-to-parser routing that maps a Strix misconfig class to the right primary artifact + posture oracle. Until that routing is wired a Strix misconfiguration report stays a LEAD.",
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "integration/vigil_integration/proof/run.py:_finding_from_report",
+        "integration/vigil_integration/live/iac_posture.py:iac_verify"
+      ],
+      "oracle_version": "",
+      "control_requirements": [
+        "vigil_owned_primary_artifact_parse",
+        "posture_oracle_selection",
+        "artifact_completeness_proof"
       ]
     }
   ]

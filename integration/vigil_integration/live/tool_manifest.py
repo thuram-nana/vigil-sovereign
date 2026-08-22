@@ -120,3 +120,78 @@ def validate_all(manifests: list[ToolManifest]) -> list[str]:
             errs.append(f"duplicate manifest name {m.name!r}")
         seen.add(m.name)
     return errs
+
+
+# ---------------------------------------------------------------------------
+# The EVIDENCE-BRANCH registry (docs/capability-matrix/evidence-branches.json) — the SAME single ladder the
+# claim-discipline tests enforce, NOT a parallel registry. This validator owns the two structural invariants
+# over the S8 schema columns, mirroring the tool-manifest rules above (fact_capable ⇒ oracle_family;
+# excluded ⇒ not fact_capable):
+#
+#   * ``fact_capable`` ⇒ a NON-EMPTY ``oracle_version`` (a FACT is adjudicated by a NAMED, versioned oracle —
+#     the certificate binds ``verify.oracle_version(kind)`` at mint, so a branch cannot claim FACT-capability
+#     without declaring which decision procedure re-derives it). Necessary, not sufficient: whether that name
+#     is a REAL OracleKind whose source resolves is enforced in the offense-leg ladder test, where framework
+#     is importable — this module stays vigil_core + stdlib only (loadable in either env).
+#   * NOT ``fact_capable`` ⇒ ``oracle_version`` is EMPTY. A LEAD-only branch has no oracle adjudicating it
+#     into a FACT yet; naming one would be the same overclaim as a scanner-report FACT. The gap is named in
+#     ``blocking_work``, never papered over with a borrowed oracle version.
+#   * ``control_requirements`` is a NON-EMPTY list of NON-EMPTY strings on EVERY branch — the standing
+#     controls (gates / VIGIL-owned captures / instrumentation / parses) the branch depends on. For a
+#     LEAD-only branch these name the MISSING controls; a branch that depends on no control is a red flag,
+#     so the empty list is rejected fail-closed.
+
+_BRANCH_BOOL_FIELDS = ("fact_capable", "clean_capable", "target_fact_capable", "target_clean_capable")
+
+
+def validate_branch_row(row: dict) -> list[str]:
+    """Return this evidence branch's S8-column invariant violations (empty ⇒ the row's new columns are
+    sound). Pure structure over dict data — no framework import, so it runs in the sovereign leg too."""
+    errs: list[str] = []
+    bid = str(row.get("id") or "")
+    if not bid:
+        errs.append("evidence branch without an id")
+
+    fact_capable = bool(row.get("fact_capable", False))
+    ov = row.get("oracle_version", None)
+    if not isinstance(ov, str):
+        errs.append(f"{bid}: oracle_version must be a string (an OracleKind value, or empty for LEAD-only)")
+        ov = ""
+    if fact_capable and not ov:
+        errs.append(f"{bid}: fact_capable requires a non-empty oracle_version (a FACT needs a named, "
+                    f"versioned oracle — mirrors fact_capable ⇒ oracle_family)")
+    if not fact_capable and ov:
+        errs.append(f"{bid}: LEAD-only branch (fact_capable=false) must not name an oracle_version — no "
+                    f"oracle adjudicates it into a FACT yet; name the gap in blocking_work instead")
+
+    creq = row.get("control_requirements", None)
+    if not isinstance(creq, list) or not creq:
+        errs.append(f"{bid}: control_requirements must be a non-empty list (the standing controls the "
+                    f"branch depends on; a LEAD-only branch names the MISSING controls here)")
+    else:
+        for c in creq:
+            if not isinstance(c, str) or not c.strip():
+                errs.append(f"{bid}: control_requirements entries must be non-empty strings, got {c!r}")
+    return errs
+
+
+def load_branch_registry(path: str | Path) -> list[dict]:
+    """Load the evidence-branch ladder's rows (the list under key ``branches``). Reads THE registry, not a
+    copy — the SAME file admission and the claim-discipline tests use."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    rows = data.get("branches", data) if isinstance(data, dict) else data
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def validate_branch_registry(rows: list[dict]) -> list[str]:
+    """Validate every evidence branch's S8 columns + cross-row uniqueness. Empty ⇒ the new columns are
+    sound across the ladder."""
+    errs: list[str] = []
+    seen: set[str] = set()
+    for r in rows:
+        errs.extend(validate_branch_row(r))
+        bid = str(r.get("id") or "")
+        if bid and bid in seen:
+            errs.append(f"duplicate evidence branch id {bid!r}")
+        seen.add(bid)
+    return errs

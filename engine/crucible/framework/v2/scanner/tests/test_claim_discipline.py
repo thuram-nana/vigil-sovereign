@@ -728,3 +728,117 @@ def test_the_firewall_is_not_a_universal_graph_gate() -> None:
     assert "no admission gate" in doc, (
         "the firewall docstring must keep stating the bound it actually has — that admission is on the "
         "wired paths, not on graph.add_node")
+
+
+# --- S8: the evidence-family LEAD-only declaration + its two new schema columns -----------------------
+#
+# S8 adds ``control_requirements`` and ``oracle_version`` to every branch and registers the Strix candidate
+# families LEAD-only (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives
+# it into an already-FACT-capable branch). The manifest validator
+# (integration/vigil_integration/live/tool_manifest.py) owns the STRUCTURAL invariants over the new columns;
+# these ladder tests drive it and add the offense-leg check that a declared oracle_version is a REAL,
+# versionable OracleKind — the check tool_manifest cannot make without importing framework.
+
+# The Strix candidate families this slice declares LEAD-only. Pinned so a future edit that quietly promotes
+# one to FACT-capable (before the re-drive it requires exists) fails here.
+_STRIX_LEAD_ONLY = {
+    "strix.dom_execution",
+    "strix.auth_outcome",
+    "strix.source_to_sink",
+    "strix.service_reachability",
+    "strix.tls_negotiation",
+    "strix.cloud_credential_confirmation",
+    "strix.misconfiguration_artifact",
+}
+
+
+def _tool_manifest():
+    """Import the sovereign-safe branch-registry validator, or FAIL (never skip — the S8 columns are
+    unenforced without it)."""
+    import sys
+    integration = str(_ROOT / "integration")
+    if integration not in sys.path:
+        sys.path.insert(0, integration)
+    try:
+        from vigil_integration.live import tool_manifest
+    except Exception as exc:                       # noqa: BLE001
+        pytest.fail(f"branch-registry validator unavailable — the S8 columns are unenforced here: {exc}")
+    return tool_manifest
+
+
+def test_every_branch_declares_the_s8_columns_and_passes_the_manifest_validator() -> None:
+    """Rule: every evidence branch declares ``control_requirements`` (a non-empty list of non-empty strings)
+    and ``oracle_version`` (a string), and satisfies fact_capable ⇒ oracle_version / LEAD-only ⇒ no
+    oracle_version. Enforced by the SAME validator the manifest module ships, over the SAME registry."""
+    tm = _tool_manifest()
+    rows = tm.load_branch_registry(_BRANCHES)
+    assert rows, "the branch registry is empty"
+    errs = tm.validate_branch_registry(rows)
+    assert not errs, "evidence-branch S8-column violations:\n  " + "\n  ".join(errs)
+
+
+def test_every_fact_capable_branch_names_a_real_versionable_oracle() -> None:
+    """The offense-leg strengthening of the structural rule: a declared ``oracle_version`` is not just a
+    non-empty string, it is a REAL OracleKind whose deterministic source resolves to a version — so the FACT
+    a branch mints truly binds a decision procedure a verifier can re-run. LEAD-only branches name none."""
+    import sys
+    engine = str(_ROOT / "engine" / "crucible")
+    if engine not in sys.path:
+        sys.path.insert(0, engine)
+    from framework.v2.verify.models import OracleKind
+    from framework.v2.verify.oracle_version import oracle_version
+
+    kinds = {k.value for k in OracleKind}
+    for branch in _load(_BRANCHES)["branches"]:
+        bid, ov = branch["id"], branch.get("oracle_version", "")
+        if branch["fact_capable"]:
+            assert ov in kinds, f"{bid}: oracle_version {ov!r} is not a real OracleKind value"
+            assert oracle_version(ov).startswith("sha256:"), (
+                f"{bid}: OracleKind {ov!r} has no resolvable versioned source — a FACT cannot bind it")
+        else:
+            assert ov == "", f"{bid}: LEAD-only branch names oracle_version {ov!r} — it adjudicates no FACT"
+
+
+def test_the_strix_candidate_families_are_registered_lead_only() -> None:
+    """Operator decision 2, made structural: each Strix candidate family is present, LEAD-only (neither
+    FACT- nor CLEAN-capable), still TARGETS FACT-capability, and names the missing oracle/control in
+    blocking_work — so a Strix report can never mint a FACT until VIGIL wires its own re-drive."""
+    by = {b["id"]: b for b in _load(_BRANCHES)["branches"]}
+    missing = _STRIX_LEAD_ONLY - set(by)
+    assert not missing, f"Strix candidate families absent from the ladder: {sorted(missing)}"
+    for bid in sorted(_STRIX_LEAD_ONLY):
+        b = by[bid]
+        assert b["fact_capable"] is False, f"{bid}: a Strix producer report must be LEAD-only, not FACT-capable"
+        assert b["clean_capable"] is False, f"{bid}: LEAD-only branch cannot be CLEAN-capable"
+        assert b["target_fact_capable"] is True, f"{bid}: must still TARGET FACT-capability (the ladder rule)"
+        assert "lead-only" in b["limitation"].lower(), f"{bid}: limitation must state it is LEAD-only"
+        work = (b.get("blocking_work") or "").strip()
+        assert len(work) > 40 and ("oracle" in work.lower() or "control" in work.lower() or "capture" in work.lower()), (
+            f"{bid}: blocking_work must name the missing oracle/control that closes the FACT gap")
+        assert b.get("control_requirements"), f"{bid}: must name the controls it depends on / is missing"
+
+
+def test_the_s8_column_validator_is_load_bearing() -> None:
+    """MUTATION CONTROL for the branch-registry validator. A checker nobody has seen fail is one that cannot
+    fail — so a valid row must pass and each broken row must be caught: a fact_capable row with no
+    oracle_version, a LEAD-only row that names one, and an empty / mistyped control_requirements list."""
+    tm = _tool_manifest()
+
+    ok_fact = {"id": "x.fact", "fact_capable": True, "oracle_version": "service_reachability",
+               "control_requirements": ["warden_scope_gate"]}
+    ok_lead = {"id": "x.lead", "fact_capable": False, "oracle_version": "",
+               "control_requirements": ["missing_redrive"]}
+    assert tm.validate_branch_row(ok_fact) == [], "a valid fact_capable row must pass"
+    assert tm.validate_branch_row(ok_lead) == [], "a valid LEAD-only row must pass"
+
+    assert any("oracle_version" in e for e in tm.validate_branch_row(
+        {**ok_fact, "oracle_version": ""})), "fact_capable with empty oracle_version must be caught"
+    assert any("oracle_version" in e for e in tm.validate_branch_row(
+        {**ok_lead, "oracle_version": "service_reachability"})), "LEAD-only naming an oracle must be caught"
+    assert any("control_requirements" in e for e in tm.validate_branch_row(
+        {**ok_fact, "control_requirements": []})), "empty control_requirements must be caught"
+    assert any("control_requirements" in e for e in tm.validate_branch_row(
+        {**ok_fact, "control_requirements": ["", "  "]})), "blank control_requirements entries must be caught"
+    # cross-row: a duplicate id is caught by the registry-level check.
+    assert any("duplicate" in e for e in tm.validate_branch_registry([ok_fact, dict(ok_fact)])), (
+        "a duplicate evidence branch id must be caught")
