@@ -1247,6 +1247,86 @@ def test_ci_tooling_lock_is_used_under_require_hashes() -> None:
     )
 
 
+def _ci_tooling_direct_names() -> set[str]:
+    """Canonical names of the DIRECT toolchain requirements the ci-tooling lock is compiled from.
+
+    These are the tools a CI job types by name (pytest, pytest-asyncio, ruff, mypy). Reading them
+    from the `.in` input — rather than hardcoding — means adding a tool to the toolchain lock
+    automatically extends the inline-install ban below, so the guard cannot fall behind the lock.
+    """
+    in_file, _ = LOCKS["ci-tooling"]
+    names: set[str] = set()
+    for raw in in_file.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        m = _REQ_NAME.match(line)
+        if m:
+            names.add(_canon(m.group(1)))
+    assert {"pytest", "ruff", "mypy"} <= names, (
+        f"ci-tooling.in no longer names pytest/ruff/mypy directly (parsed {sorted(names)}) — "
+        "the toolchain-install guard would go blind; fix the parser or the input."
+    )
+    return names
+
+
+def test_ci_installs_toolchain_only_under_require_hashes() -> None:
+    """W3-2 (#425): pytest/ruff/mypy are a hash lock CI installs from — never typed inline unpinned.
+
+    The runtime-floor and runtime-require-hashes guards above key on `_runtime_floors()`, which holds
+    only the shipped RUNTIME packages (cryptography, pydantic, …). The lint/type/test TOOLCHAIN
+    (pytest, ruff, mypy) is deliberately NOT in a runtime lock, so those guards are structurally
+    BLIND to it: `pip install "ruff==0.15.12" mypy pytest` in lint-config.yml pinned only ruff and
+    resolved mypy + pytest FRESH from PyPI on every run — the same "a lock nothing installs from is a
+    document, not a control" gap the runtime section closes, one class over. This asserts NO workflow
+    names a ci-tooling-locked tool inline without --require-hashes, so the whole toolchain is pinned
+    to the committed ci-tooling lock, not resolved at run time.
+
+    FAILS on the pre-fix tree (lint-config.yml's inline `mypy pytest`); the fixed tree installs the
+    ci-tooling lock under --require-hashes instead.
+    """
+    tool_names = _ci_tooling_direct_names()
+    offenders: list[str] = []
+    for wf in _workflow_files():
+        for line in _install_lines(wf.read_text(encoding="utf-8")):
+            if "--require-hashes" in line:
+                continue  # installed from a committed lock, hash-enforced — exactly the fix
+            for seg in _pip_install_segments(line):
+                for spec in _specs_in_segment(seg):
+                    name, _ = _spec_name_and_floor(spec)
+                    if name in tool_names:
+                        offenders.append(
+                            f"{wf.name}: installs toolchain '{spec}' WITHOUT --require-hashes"
+                        )
+    assert not offenders, (
+        "these CI installs pull a pinned toolchain package (pytest/ruff/mypy) inline instead of from "
+        "the hash lock, so the version pytest/ruff/mypy actually runs is not pinned to the committed "
+        "lock (W3-2 #425):\n  " + "\n  ".join(sorted(offenders))
+        + "\n\nReplace the inline toolchain list with:\n"
+        "  pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt"
+    )
+
+    # NEGATIVE CONTROL: the exact pre-fix line IS flagged; the hash-locked form is NOT — so this
+    # test is not a no-op that would pass on the vulnerable tree.
+    def _flags(line: str) -> list[str]:
+        found: list[str] = []
+        if "--require-hashes" in line:
+            return found
+        for seg in _pip_install_segments(line):
+            for spec in _specs_in_segment(seg):
+                nm, _ = _spec_name_and_floor(spec)
+                if nm in tool_names:
+                    found.append(spec)
+        return found
+
+    assert _flags('pip install "ruff==0.15.12" mypy pytest'), (
+        "negative control broken: the pre-fix inline toolchain install is not flagged"
+    )
+    assert not _flags(
+        "pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt"
+    ), "false positive: a --require-hashes ci-tooling lock install must not be flagged"
+
+
 def test_shared_runtime_versions_agree_across_locks() -> None:
     """The offense and sovereign locks must pin every SHARED package to the same version.
 
