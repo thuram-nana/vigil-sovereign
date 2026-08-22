@@ -72,10 +72,14 @@ jobs:
       - name: install pinned build-time tooling
         run: |
           python -m pip install --upgrade pip
+          # pip-tools + cyclonedx-bom are this gate's OWN build tooling (they regenerate/verify the
+          # locks and SBOMs); they are exact-pinned by env var. pytest — the harness that runs this
+          # file's own static checks — comes from the committed CI toolchain hash lock (W3-2), so even
+          # the supply-chain gate resolves nothing fresh.
           python -m pip install \
             "pip-tools==${PIP_TOOLS_VERSION}" \
-            "cyclonedx-bom==${CYCLONEDX_VERSION}" \
-            "pytest>=8"
+            "cyclonedx-bom==${CYCLONEDX_VERSION}"
+          python -m pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
           pip-compile --version
           cyclonedx-py --version
 
@@ -186,13 +190,22 @@ jobs:
       #    any requirement is unpinned or any artifact's digest does not match.
       # ------------------------------------------------------------------------------
 
-      - name: prove `pip install --require-hashes` succeeds (offense lock)
+      - name: prove `pip install --require-hashes` succeeds (offense lock) + record resolved vs lock
         run: |
           set -euo pipefail
           python -m venv /tmp/a14-offense
           /tmp/a14-offense/bin/pip install --require-hashes \
             -r engine/crucible/framework/v2/requirements.lock.txt
           /tmp/a14-offense/bin/python -c "import pydantic, httpx, cryptography, packaging; print('offense lock installs under --require-hashes')"
+          # W3-2 acceptance: RECORD the resolved versions and COMPARE them to the committed lock.
+          # --require-hashes already forces resolved==locked (pip installs exactly the pinned ==),
+          # so this is the belt-and-braces assertion of that invariant: it FAILS loudly if the CI
+          # environment ever diverges from the lock (e.g. a pre-installed runner package shadowing it).
+          /tmp/a14-offense/bin/pip freeze > /tmp/a14-offense-resolved.txt
+          echo "::group::offense — resolved (pip freeze) vs lock, per pinned package"
+          python .github/scripts/compare_resolved_to_lock.py \
+            engine/crucible/framework/v2/requirements.lock.txt /tmp/a14-offense-resolved.txt
+          echo "::endgroup::"
 
       - name: prove `pip install --require-hashes` succeeds (sovereign lock)
         run: |
@@ -201,6 +214,16 @@ jobs:
           /tmp/a14-sovereign/bin/pip install --require-hashes \
             -r infra/supply-chain/sovereign.lock.txt
           /tmp/a14-sovereign/bin/python -c "import cryptography, pydantic, qdrant_client; print('sovereign lock installs under --require-hashes')"
+
+      - name: prove `pip install --require-hashes` succeeds (ci-tooling lock, W3-2)
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/a14-tooling
+          /tmp/a14-tooling/bin/pip install --require-hashes \
+            -r infra/supply-chain/ci-tooling.lock.txt
+          /tmp/a14-tooling/bin/python -c "import pytest, pytest_asyncio; print('ci-tooling lock installs under --require-hashes')"
+          /tmp/a14-tooling/bin/ruff --version
+          /tmp/a14-tooling/bin/mypy --version
 
       - name: upload SBOMs
         if: always()

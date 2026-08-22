@@ -63,7 +63,24 @@ LOCKS: dict[str, tuple[Path, Path]] = {
         REPO_ROOT / "infra/supply-chain/sovereign.in",
         REPO_ROOT / "infra/supply-chain/sovereign.lock.txt",
     ),
+    # W3-2: the CI/test TOOLCHAIN (pytest + async plugin + ruff + mypy). Not a RUNTIME lock — it
+    # pins the harness CI runs, which is deliberately kept out of both runtime locks (it would drag
+    # test tooling into a shipped deployment). It is hash-locked, drift-checked and require-hashes
+    # installed exactly like the runtime locks, so it earns the same existence/hash/coverage checks
+    # here. `RUNTIME_LOCKS` below deliberately EXCLUDES it — the "tested tree == locked tree"
+    # floor/require-hashes gates apply to the runtime tree, not to the harness itself.
+    "ci-tooling": (
+        REPO_ROOT / "infra/supply-chain/ci-tooling.in",
+        REPO_ROOT / "infra/supply-chain/ci-tooling.lock.txt",
+    ),
 }
+
+#: The RUNTIME dependency locks — the "tree" that ships and that CI must test against. The W3-2
+#: floor / require-hashes guards key on these, NOT on the ci-tooling harness lock above.
+RUNTIME_LOCKS: tuple[Path, ...] = (
+    REPO_ROOT / "engine/crucible/framework/v2/requirements.lock.txt",
+    REPO_ROOT / "infra/supply-chain/sovereign.lock.txt",
+)
 
 _PINNED_LINE = re.compile(r"^([A-Za-z0-9._-]+)==([^\s\\;]+)")
 _REQ_NAME = re.compile(r"^([A-Za-z0-9._-]+)\s*(?:[<>=!~]|$)")
@@ -945,3 +962,334 @@ def test_runtime_check_cli_advisory_vs_production(tmp_path) -> None:
     # production (explicit flag) -> refuse
     assert pins._runtime_check(ctx_root, pin_path=missing_pin, production=True) == 1
 
+# ======================================================================================
+# 5. CI installs from the hash-locked files — the tested tree equals the locked tree (W3-2)
+#
+# The two runtime locks above prove the RESULT of resolution is committed and hashed. This
+# section proves the WORKFLOWS ACTUALLY USE it. CI once installed `cryptography>=42` in six jobs
+# while the project floor was `>=50` (CVE-2026-69247): the tested tree could be the vulnerable
+# version the repo claimed to have left behind, and a lock nothing installs from is a document,
+# not a control. These checks read every `.github/workflows/*.yml` and assert (a) no `pip install`
+# admits a runtime version BELOW the locked one, and (b) every runtime dependency is installed
+# under `--require-hashes` against a committed lock — never typed inline as a floating range.
+#
+# Pure stdlib + regex (no PyYAML): this file audits the dependency surface, it must not add to it.
+# ======================================================================================
+
+WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
+
+#: Shell control operators that end a `pip install`'s argument list (anything after is not a spec).
+_SHELL_BREAK = re.compile(r"\s(?:\|\||&&|;|\||>|>>|2>&1|<)\s")
+
+#: A pip flag that consumes the FOLLOWING token as its argument (a path or a value, never a spec).
+_FLAG_TAKES_ARG = {
+    "-r", "--requirement", "-c", "--constraint", "-e", "--editable",
+    "-f", "--find-links", "-o", "--output-file", "--index-url", "-i",
+    "--extra-index-url", "--target", "-t", "--prefix", "--root", "--python-version",
+}
+
+
+def _workflow_files() -> list[Path]:
+    assert WORKFLOWS_DIR.is_dir(), f"missing {WORKFLOWS_DIR}"
+    return sorted(p for p in WORKFLOWS_DIR.glob("*.yml"))
+
+
+def _logical_lines(text: str) -> list[str]:
+    """Join `\\`-continued shell lines so a `pip install` split over several lines is one string."""
+    lines = text.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        cur = lines[i]
+        while cur.rstrip().endswith("\\") and i + 1 < len(lines):
+            cur = cur.rstrip()[:-1].rstrip() + " " + lines[i + 1].strip()
+            i += 1
+        out.append(cur)
+        i += 1
+    return out
+
+
+def _pip_install_segments(line: str) -> list[str]:
+    """Every `pip install …` argument segment in one logical line (cut at the first shell operator).
+
+    A line may hold more than one (`pip install X && pip install Y`); each is returned as the raw
+    argument text AFTER `install`, with quotes stripped, up to the next shell control operator.
+    """
+    segs: list[str] = []
+    for m in re.finditer(r"pip(?:3)?\s+install\b", line):
+        tail = line[m.end():]
+        tail = _SHELL_BREAK.split(tail, maxsplit=1)[0]
+        segs.append(tail.replace('"', " ").replace("'", " "))
+    return segs
+
+
+def _specs_in_segment(seg: str) -> list[str]:
+    """Requirement tokens named directly in a pip-install segment (skips flags, their args, paths)."""
+    toks = seg.split()
+    specs: list[str] = []
+    skip_next = False
+    for t in toks:
+        if skip_next:
+            skip_next = False
+            continue
+        if t in _FLAG_TAKES_ARG:
+            skip_next = True
+            continue
+        if t.startswith("-"):
+            continue
+        if "/" in t or "\\" in t or "$" in t:
+            continue  # a path or a shell variable — never a bare PyPI requirement
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=(?!=)", t):
+            continue  # a `KEY=val` env assignment (the `=` is not part of a >=/==/<= specifier)
+        if re.match(r"^[A-Za-z][A-Za-z0-9._-]*(\[[^\]]*\])?([<>=!~].*)?$", t):
+            specs.append(t)
+    return specs
+
+
+def _spec_name_and_floor(spec: str) -> tuple[str | None, str | None]:
+    """(canonical name, lower-bound version or None) for a requirement spec.
+
+    A `>=`/`>` clause yields its version; an `==` (deliberate exact pin) or an unbounded name yields
+    None — an exact pin is a decision, not a floating range that could resolve below the lock.
+    """
+    m = re.match(r"^([A-Za-z][A-Za-z0-9._-]*)(?:\[[^\]]*\])?(.*)$", spec)
+    if not m:
+        return None, None
+    name = _canon(m.group(1))
+    rest = m.group(2)
+    if "==" in rest:
+        return name, None
+    lb: str | None = None
+    for cm in re.finditer(r"(?:>=|>)\s*([0-9][0-9A-Za-z.\-]*)", rest):
+        lb = cm.group(1)
+    return name, lb
+
+
+def _release(v: str) -> tuple[int, ...]:
+    """Numeric release tuple of a version string (`50.0.0` -> (50, 0, 0)); pre/post tags ignored."""
+    return tuple(int(p) for p in re.findall(r"\d+", v))
+
+
+def _ge_ver(a: str, b: str) -> bool:
+    """True iff version `a` >= version `b`, zero-padded so `50` == `50.0.0` (not `<`)."""
+    ta, tb = _release(a), _release(b)
+    n = max(len(ta), len(tb))
+    return ta + (0,) * (n - len(ta)) >= tb + (0,) * (n - len(tb))
+
+
+def _lock_versions(lock: Path) -> dict[str, str]:
+    """{canonical name: pinned version} for every `name==version` line in a requirements lock."""
+    out: dict[str, str] = {}
+    for line in lock.read_text(encoding="utf-8").splitlines():
+        m = _PINNED_LINE.match(line)
+        if m:
+            out[_canon(m.group(1))] = m.group(2)
+    return out
+
+
+def _runtime_floors() -> dict[str, str]:
+    """Merged {name: version} across the runtime locks — the authoritative version CI must not go below.
+
+    The two locks pin every shared package identically (asserted by
+    test_shared_runtime_versions_agree_across_locks); on the impossible-by-that-test conflict, the
+    higher version wins so the floor can only ever be tightened, never loosened.
+    """
+    floors: dict[str, str] = {}
+    for lock in RUNTIME_LOCKS:
+        assert lock.is_file(), f"missing runtime lock {lock}"
+        for name, ver in _lock_versions(lock).items():
+            if name not in floors or _ge_ver(ver, floors[name]):
+                floors[name] = ver
+    assert "cryptography" in floors, "runtime locks pin no cryptography — the floor map is broken"
+    return floors
+
+
+def _install_lines(text: str) -> list[str]:
+    """Comment-stripped logical lines that actually run a `pip install` (not a mention in prose)."""
+    stripped = _strip_comments(text)
+    return [ln for ln in _logical_lines(stripped) if re.search(r"pip(?:3)?\s+install\b", ln)]
+
+
+def _floor_offenders(line: str, floors: dict[str, str]) -> list[str]:
+    """Specs on this line that admit a runtime version below its locked floor."""
+    bad: list[str] = []
+    for seg in _pip_install_segments(line):
+        for spec in _specs_in_segment(seg):
+            name, lb = _spec_name_and_floor(spec)
+            if name in floors and lb is not None and not _ge_ver(lb, floors[name]):
+                bad.append(f"{spec} (admits {name} < locked {floors[name]})")
+    return bad
+
+
+def test_scanner_finds_the_repo_s_pip_installs() -> None:
+    """Guard against a vacuous pass: a workflow scan that finds no installs proves nothing."""
+    total = sum(len(_install_lines(wf.read_text(encoding="utf-8"))) for wf in _workflow_files())
+    assert total >= 8, (
+        f"the workflow scanner found only {total} `pip install` line(s); the repo's CI has many more, "
+        "so the parser is broken and every install assertion below would pass vacuously"
+    )
+
+
+def test_no_ci_pip_install_admits_a_version_below_a_lock_floor() -> None:
+    """W3-2 core: no workflow may install a runtime dependency BELOW its locked version.
+
+    FAILS on the pre-W3-2 tree, where six ci.yml jobs (+ livefire + pre-commit) install
+    `cryptography>=42` while both runtime locks pin `cryptography==50.0.0` — CI could resolve the
+    42.x line that still carries CVE-2026-69247, i.e. test against the version the repo claims to
+    have left behind. `pydantic>=2.10,<3` is caught the same way (locked 2.13.4).
+    """
+    floors = _runtime_floors()
+    offenders: list[str] = []
+    for wf in _workflow_files():
+        for line in _install_lines(wf.read_text(encoding="utf-8")):
+            for bad in _floor_offenders(line, floors):
+                offenders.append(f"{wf.name}: {bad}")
+    assert not offenders, (
+        "these CI installs admit a runtime version BELOW the committed lock — the tested tree could "
+        "differ from the shipped/locked tree (W3-2):\n  " + "\n  ".join(sorted(offenders))
+        + "\n\nInstall runtime deps from the hash lock instead:\n"
+        "  pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt"
+    )
+
+    # NEGATIVE CONTROL: the detector must FLAG the exact defect and PASS the fixed forms — otherwise
+    # a green run here would prove nothing (it would pass on the vulnerable tree too).
+    assert _floor_offenders('pip install "cryptography>=42"', floors), (
+        "negative control broken: the detector does not flag cryptography>=42 against the >=50 floor"
+    )
+    assert not _floor_offenders("pip install cryptography>=50", floors), (
+        "false positive: cryptography>=50 meets the floor and must not be flagged"
+    )
+    assert not _floor_offenders(
+        f"pip install cryptography=={floors['cryptography']}", floors
+    ), "false positive: an exact pin at the locked version must not be flagged"
+
+
+def test_ci_installs_runtime_deps_only_under_require_hashes() -> None:
+    """W3-2 core: a runtime dependency may be installed only from a committed lock, hash-enforced.
+
+    A floor that merely says `>=50` still lets pip resolve whatever it likes at run time, so the
+    tested tree is only pinned to the shipped tree when the install carries `--require-hashes`
+    against a lock. This asserts NO workflow names a runtime-locked package inline without it.
+
+    FAILS on the pre-W3-2 tree (the six ci.yml jobs type `pydantic … cryptography … packaging`
+    directly). First-party editable installs (`-e packages/core/vigil_core`) and the strix/SDK
+    extras (not in the runtime locks) are correctly exempt.
+    """
+    runtime_names = set(_runtime_floors())
+    offenders: list[str] = []
+    for wf in _workflow_files():
+        for line in _install_lines(wf.read_text(encoding="utf-8")):
+            if "--require-hashes" in line:
+                continue  # a hash-enforced install from a lock is exactly what we want
+            for seg in _pip_install_segments(line):
+                for spec in _specs_in_segment(seg):
+                    name, _ = _spec_name_and_floor(spec)
+                    if name in runtime_names:
+                        offenders.append(f"{wf.name}: installs runtime '{spec}' WITHOUT --require-hashes")
+    assert not offenders, (
+        "these CI installs pull a runtime dependency without --require-hashes, so the resolved "
+        "version is not pinned to the committed lock (W3-2):\n  " + "\n  ".join(sorted(offenders))
+        + "\n\nReplace the inline runtime list with:\n"
+        "  pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt\n"
+        "  pip install -e packages/core/vigil_core --no-deps"
+    )
+
+    # NEGATIVE CONTROL: an inline runtime install IS flagged; the hash-locked form is NOT.
+    def _flags(line: str) -> list[str]:
+        found: list[str] = []
+        if "--require-hashes" in line:
+            return found
+        for seg in _pip_install_segments(line):
+            for spec in _specs_in_segment(seg):
+                nm, _ = _spec_name_and_floor(spec)
+                if nm in runtime_names:
+                    found.append(spec)
+        return found
+
+    assert _flags('pip install "cryptography>=50" pydantic'), (
+        "negative control broken: an inline runtime install is not flagged"
+    )
+    assert not _flags(
+        "pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt"
+    ), "false positive: a --require-hashes lock install must not be flagged"
+    assert not _flags("pip install -e packages/core/vigil_core --no-deps"), (
+        "false positive: a first-party editable install names no runtime lock package"
+    )
+
+
+def test_ci_tooling_lock_is_used_under_require_hashes() -> None:
+    """W3-2: the pinned CI toolchain (pytest/ruff/mypy) is a committed hash lock CI installs from.
+
+    Its existence/hashing/coverage are enforced by the parametrized LOCKS tests above (it is a
+    member of LOCKS). This asserts the WIRING: ci.yml installs it under --require-hashes, so the
+    harness is pinned too, not resolved fresh.
+    """
+    _, lock = LOCKS["ci-tooling"]
+    rel = lock.relative_to(REPO_ROOT).as_posix()
+    assert lock.is_file(), (
+        f"missing {rel} — generate it with:\n"
+        "  pip install pip-tools==7.6.1\n"
+        "  pip-compile --generate-hashes --no-header --strip-extras "
+        f"--output-file={rel} infra/supply-chain/ci-tooling.in"
+    )
+    covered = _pinned_names(lock)
+    for tool in ("pytest", "pytest-asyncio", "ruff", "mypy"):
+        assert _canon(tool) in covered, f"{rel} does not pin {tool}"
+
+    ci = _strip_comments((REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    uses = [
+        ln for ln in _logical_lines(ci)
+        if "--require-hashes" in ln and rel in ln
+    ]
+    assert uses, (
+        f"no ci.yml job installs {rel} under --require-hashes — the pinned toolchain is committed "
+        "but never used, so pytest/ruff/mypy still resolve fresh."
+    )
+
+
+def test_shared_runtime_versions_agree_across_locks() -> None:
+    """The offense and sovereign locks must pin every SHARED package to the same version.
+
+    W3-2's lightweight CI jobs install the (light) offense framework lock for their third-party
+    runtime subset even in sovereign-side jobs — legitimate because it holds only third-party
+    packages (no `framework`/`sigil`, so FATAL-2 is untouched) and the sovereign lock's heavy ML
+    stack is not needed by a pure-Python test. That reuse is only sound if the shared versions are
+    identical; assert it, so a future divergence (CI testing a different cryptography than ships)
+    fails loudly instead of silently.
+    """
+    off = _lock_versions(REPO_ROOT / "engine/crucible/framework/v2/requirements.lock.txt")
+    sov = _lock_versions(REPO_ROOT / "infra/supply-chain/sovereign.lock.txt")
+    shared = set(off) & set(sov)
+    assert "cryptography" in shared, "cryptography is not shared across the locks — check the parser"
+    mismatched = {n: (off[n], sov[n]) for n in shared if off[n] != sov[n]}
+    assert not mismatched, (
+        "the offense and sovereign locks disagree on shared packages, so a CI job installing the "
+        "offense lock would test a different version than the sovereign deployment ships:\n  "
+        + "\n  ".join(f"{n}: offense={o} sovereign={s}" for n, (o, s) in sorted(mismatched.items()))
+    )
+
+
+def test_ci_tooling_lock_agrees_with_runtime_locks_on_shared_packages() -> None:
+    """Where the CI toolchain lock and a runtime lock pin the SAME package, the versions must match.
+
+    The converted CI jobs run two hash-enforced installs in sequence — the runtime lock, then the
+    ci-tooling lock. If a shared transitive (today: packaging, typing-extensions) were pinned to
+    different versions across the two, the second `--require-hashes` install would silently change
+    what the first pinned, so the tested tree would no longer equal the runtime lock. Assert the
+    overlap agrees, so a future ci-tooling regeneration that bumps a shared dep fails HERE (offline)
+    instead of as a confusing mid-install version change on a runner.
+    """
+    _, tooling = LOCKS["ci-tooling"]
+    tool = _lock_versions(tooling)
+    conflicts: list[str] = []
+    for lock in RUNTIME_LOCKS:
+        rt = _lock_versions(lock)
+        for name in set(tool) & set(rt):
+            if tool[name] != rt[name]:
+                conflicts.append(
+                    f"{name}: ci-tooling={tool[name]} {lock.name}={rt[name]}"
+                )
+    assert not conflicts, (
+        "the CI toolchain lock disagrees with a runtime lock on a shared package, so the two "
+        "sequential --require-hashes installs would fight over it:\n  " + "\n  ".join(sorted(conflicts))
+    )

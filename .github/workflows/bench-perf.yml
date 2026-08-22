@@ -40,8 +40,13 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.13"
-      - name: install vigil_core (supplies the real hot-path cases)
-        run: pip install -e packages/core/vigil_core
+      - name: install vigil_core (hash-locked deps; supplies the real hot-path cases) — W3-2
+        run: |
+          # W3-2: vigil_core's third-party deps (cryptography/pydantic) come from the committed HASH
+          # LOCK rather than resolving fresh, so the perf gate measures the shipped tree. vigil_core
+          # itself is first-party → editable --no-deps.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
       - name: negative control — the gate rejects an artificially slowed path
         run: python tools/perf/perf_bench.py selftest
       - name: perf gate — hot paths vs committed baseline (fail on regression beyond band)
