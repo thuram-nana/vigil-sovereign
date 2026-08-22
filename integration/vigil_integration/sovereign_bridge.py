@@ -42,6 +42,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional, Sequence
 
+from vigil_core.target_classification import (
+    RegisteredAssetStore, TargetClass, classify_target,
+)
+
 __all__ = [
     "Effect",
     "EnforcementMode",
@@ -391,6 +395,39 @@ def _entitlement_outcome(request: Any) -> GateOutcome:
     )
 
 
+def _classification_outcome(
+    request: Any, *, store: Optional[RegisteredAssetStore], in_scope: Optional[Callable[[str], bool]],
+) -> GateOutcome:
+    """Delegate to the EXISTING target classifier (``vigil_core.target_classification``): resolve the
+    request's target to a :class:`TargetClass` (registered-asset store first, then the signed charter scope
+    ``in_scope`` predicate) and NORMALIZE to an outcome. This leg adds NO scope policy — ``in_scope`` is the
+    charter scope (source of truth) the caller derived from the signed authority; the classifier only reads
+    it + the asset store. An authorized class ⇒ ALLOW; an UNKNOWN / out-of-scope / critical class ⇒ DENY
+    (UNKNOWN is never authorized). The classifier is TOTAL (a raising scope predicate → UNKNOWN), so this
+    leg never raises a verdict of its own."""
+    result = classify_target(request.target_url, store=store, in_scope=in_scope)
+    tc = result.target_class
+    if result.authorized:
+        return GateOutcome(Effect.ALLOW, result.reason, code=f"CLASS_{tc.name}")
+    code = "TARGET_UNKNOWN" if tc is TargetClass.UNKNOWN else f"TARGET_{tc.name}"
+    return GateOutcome(Effect.DENY, result.reason, code=code)
+
+
+def _scope_check_from_authority(slug: str, trust_root: Any) -> Callable[[str], bool]:
+    """Build the classification ``in_scope`` predicate from the SIGNED charter scope — the EXISTING source
+    of truth, not a re-implementation. It loads the verified authority (the same loader the authority leg
+    uses) and asks the EXISTING ``host_matches_scope``; framework is imported LAZILY (FATAL-2)."""
+
+    def in_scope(host: str) -> bool:
+        from framework.v2.authority.gate import load_authority_for_gate
+        from framework.v2.common.ethics import host_matches_scope
+
+        authority = load_authority_for_gate(slug, trust_root=trust_root)
+        return host_matches_scope(host, authority.scope)
+
+    return in_scope
+
+
 def build_offense_bridge(
     *,
     slug: str,
@@ -398,23 +435,32 @@ def build_offense_bridge(
     classify: Callable[[str], str],
     mode: EnforcementMode | str = EnforcementMode.ENFORCE,
     profile: DeploymentProfile | str = DeploymentProfile.PRODUCTION,
+    include_classification: bool = True,
     include_sovereignty: bool = True,
     include_entitlement: bool = True,
+    asset_store: Optional[RegisteredAssetStore] = None,
+    scope_check: Optional[Callable[[str], bool]] = None,
     base_gate: Optional[Callable[..., Any]] = None,
     **offense_gate_kwargs: Any,
 ) -> SovereignBridge:
     """Wire the facade over the REAL existing offense gates, in order:
 
+        classification→ the EXISTING target classifier (``vigil_core.target_classification``): resolve the
+                     target to a class (registered-asset store, then the SIGNED charter scope) and refuse
+                     an UNKNOWN / out-of-scope / critical target. On by default (``include_classification``)
+                     so UNKNOWN is never authorized; it consults the charter scope, it does not re-decide it.
         authority  → the EXISTING ``conjunctive_gate.build_offense_gate`` (kill-switch ∧ scope ∧ WARDEN ∧
                      m-of-n destruction) — the offense authority-of-record; a ``None`` trust_root is refused
                      by that builder, so the fail-closed refusal is inherited, not re-implemented here.
         sovereignty→ the EXISTING ``live.think_claude.llm_egress_refusal`` (kernel sovereignty tier).
         entitlement→ the EXISTING ``framework.v2.entitlement.require_capability``.
 
-    ``include_sovereignty`` / ``include_entitlement`` let the CALLER choose which existing gates a given
-    action's chain applies (a non-egress action needs no sovereignty leg; an action needing no capability
-    needs no entitlement leg) — this is chain COMPOSITION, not a per-request policy decision inside the
-    facade. Every leg wired in ALWAYS runs and delegates; nothing turns a wired gate off per call.
+    ``include_classification`` / ``include_sovereignty`` / ``include_entitlement`` let the CALLER choose
+    which existing gates a given action's chain applies (a non-egress action needs no sovereignty leg; an
+    action needing no capability needs no entitlement leg) — this is chain COMPOSITION, not a per-request
+    policy decision inside the facade. Every leg wired in ALWAYS runs and delegates; nothing turns a wired
+    gate off per call. ``asset_store`` (a :class:`vigil_core...RegisteredAssetStore`) and ``scope_check``
+    (the charter scope predicate; default: derived from the signed authority) feed the classification leg.
 
     ``base_gate`` (an already-built conjunctive gate callable) may be injected in place of building one — the
     same dependency-injection seam ``conjunctive_gate`` exposes, so the wiring is testable without the full
@@ -424,7 +470,17 @@ def build_offense_bridge(
 
         base_gate = build_offense_gate(slug=slug, trust_root=trust_root, classify=classify, **offense_gate_kwargs)
 
-    gates: list[Gate] = [Gate("authority", lambda req: _authority_outcome(base_gate, req))]
+    gates: list[Gate] = []
+    if include_classification:
+        # UNKNOWN is never authorized: classify the target FIRST (registered-asset store, then the signed
+        # charter scope) so an unknown/out-of-scope/critical target is refused before any other leg runs.
+        # ``scope_check`` is the charter scope predicate; when not injected it is derived from the SIGNED
+        # authority (the source of truth) — NOT a parallel scope engine.
+        check = scope_check if scope_check is not None else _scope_check_from_authority(slug, trust_root)
+        gates.append(
+            Gate("classification", lambda req: _classification_outcome(req, store=asset_store, in_scope=check))
+        )
+    gates.append(Gate("authority", lambda req: _authority_outcome(base_gate, req)))
     if include_sovereignty:
         gates.append(Gate("sovereignty", _sovereignty_outcome))
     if include_entitlement:

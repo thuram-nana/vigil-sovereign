@@ -37,6 +37,10 @@ from .rbac import (
 )
 from .rotation import RotationError, rewrap, rewrap_or_seal, verify_opens_to
 from .sealing import SealError, is_sealed, new_kek, seal, unseal
+from .target_classification import (
+    AUTHORIZED_CLASSES, ClassificationResult, DeploymentMode, RegisteredAsset, RegisteredAssetStore,
+    TargetClass, classify_target, is_authorized, normalize_target,
+)
 from .vault import Vault, VaultLocked
 
 __all__ = [
@@ -52,6 +56,8 @@ __all__ = [
     "ROLES", "PERMISSIONS", "role_can", "OFFENSE_ACTION_PERM", "offense_perm_for", "offense_route_key",
     "seal", "unseal", "new_kek", "is_sealed", "SealError",
     "RotationError", "rewrap", "rewrap_or_seal", "verify_opens_to",
+    "TargetClass", "DeploymentMode", "AUTHORIZED_CLASSES", "RegisteredAsset", "RegisteredAssetStore",
+    "ClassificationResult", "normalize_target", "classify_target", "is_authorized",
     "Vault", "VaultLocked",
     "IdentityAttestation", "Capability", "Attenuation", "EffectiveCapability", "WielderProof",
     "CapabilityError", "sign_identity_attestation", "verify_identity_attestation", "identity_digest",
