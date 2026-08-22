@@ -1503,7 +1503,8 @@ def cmd_backup(a) -> None:
     except BackupError as e:
         print(f"!! backup failed: {e}", file=sys.stderr)
         sys.exit(1)
-    print(f"backup written: {res['dest']} ({res['files']} files; owner_key={res['owner_key']}, dek={res['dek']})")
+    print(f"backup written: {res['dest']} ({res['files']} files; owner_key={res['owner_key']}, dek={res['dek']}, "
+          f"secrets_kv={res.get('secrets_kv')})")
     print("KEEP THE PASSPHRASE SAFE — it is the ONLY key to this backup (never stored; lose it → unrecoverable).")
 
 

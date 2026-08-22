@@ -13152,9 +13152,14 @@ a deployment rather than about code:
     included in the encrypted off-box backup (its key restored owner-only), so a machine loss no
     longer costs it — confirm the daily backup timer is enabled and that you have tested a restore.
 19. **Where does the evidence for a completed engagement live once the engagement is over?** The
-    off-box backup covers the owner's side. Finished evidence packages are ordinary files and are
-    the operator's to archive, the way any other case record would be. Ask to see where they go
-    and how long they are kept.
+    off-box backup covers the owner's side, and the offense backup **now also covers the whole
+    `targets/` engagement tree** — every charter and every byte of per-action HTTP evidence — so a
+    machine loss no longer costs the case record. The one thing deliberately **kept out** of the
+    backup is the crypto-shred *evidence key store* (the per-engagement keys that seal
+    credential-bearing evidence): a right-to-erasure destroys a key so the sealed evidence becomes
+    unrecoverable, and packaging that key next to the ciphertext it protects would undo the erasure
+    from the backup. Exported, self-contained evidence packages remain ordinary files the operator
+    may also archive separately. Ask to see where they go and how long they are kept.
 
 ---
 

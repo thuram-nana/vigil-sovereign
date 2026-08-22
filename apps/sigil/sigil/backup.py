@@ -9,12 +9,25 @@ moves CIPHERTEXT only, and the remote's own security is the operator's responsib
 
 The TPM-sealed vault (G1) binds the owner key + the spine DEK to THIS machine's TPM, so a dead disk is
 unrecoverable from the vault alone — the whole audit ledger + all memory would be lost. This produces a
-PORTABLE disaster-recovery backup: the spine (segments + manifest + signed head + floor + the G2 security
-manifest + the owner PUBLIC key), the WARDEN permission-kernel dir (its signed action ledger + kernel
-keypair + tool registry), plus the OWNER PRIVATE key and the spine DEK are packaged and encrypted under a
-key derived from an OWNER PASSPHRASE (scrypt), so the backup restores on NEW hardware where this machine's
-TPM is gone. The WARDEN kernel key (`warden/warden.key`) rides inside the AEAD-sealed body and is re-created
-0600 on restore.
+PORTABLE disaster-recovery backup of everything a FUNCTIONAL recovery needs (W7-2): the spine (segments +
+manifest + signed head + floor + the G2 security manifest + the owner PUBLIC key), the WARDEN permission-
+kernel dir (its signed action ledger + kernel keypair + tool registry), the CONFIG files (the HA witness
+roster ``witness.trust.json`` the failover guard depends on, the governor ``budgets.json`` caps, and the
+persisted ``sigil.env``), the MEMORY-state subtrees (the ``qdrant/`` vector store + the ``graph/`` mirror),
+plus the OWNER PRIVATE key, the spine DEK, and the sealed KV secret store (``secrets.sealed``) are packaged
+and encrypted under a key derived from an OWNER PASSPHRASE (scrypt), so the backup restores on NEW hardware
+where this machine's TPM is gone. The WARDEN kernel key (`warden/warden.key`) and ``sigil.env`` ride inside
+the AEAD-sealed body and are re-created 0600 on restore. Which top-level home entries are captured vs a
+DELIBERATE, documented exclusion is the coverage contract in :data:`CAPTURED_TOP_LEVEL` /
+:data:`EXCLUDED_TOP_LEVEL` — a structural test proves a populated home leaves nothing unclassified, so a new
+state artifact can never be silently dropped from disaster recovery again.
+
+The three portable secrets (owner private key, spine DEK, KV secret store) are re-wrapped from their
+PLAINTEXT into the passphrase-sealed body and re-sealed through the NEW vault on restore. These are the
+OPERATOR'S OWN recovery material (own keys / own API keys), legitimately co-travelling under the passphrase
+root of trust — distinct from captured TARGET-credential evidence, whose W16-8 "keep the DEK OUT of the
+place the ciphertext travels" rule governs the OFFENSE leg's shreddable evidence keystore (never touched by
+this sovereign trust-root backup).
 
 Integrity is layered, and it is important to be precise about WHICH layer runs WHEN. The whole body is
 AEAD-sealed and, inside it, a backup MANIFEST (sha256 of every packaged file) is OWNER-signed — so a wrong
@@ -50,9 +63,11 @@ from .reuse import KeyPair, canonical_json, sha256_hex, sign, verify_one
 from .spine.schema_guard import SchemaTooNew, refuse_newer
 
 _MAGIC = b"SGLBK1\x00"
-# schema 2 additionally records the WARDEN permission-kernel set ("warden": [rels…]); schema 1 (no warden
-# block) is still read on restore (back-compat) — the file table is authenticated the same way either way.
-_SCHEMA = 2
+# schema 2 additionally records the WARDEN permission-kernel set ("warden": [rels…]); schema 3 (W7-2)
+# additionally covers the config files (witness.trust.json / budgets.json / sigil.env), the memory state
+# subtrees (qdrant/ + graph/) and RE-WRAPS the sealed KV secret store (secrets.sealed) portably. Older
+# schemas are still read on restore (back-compat) — the file table is authenticated the same way either way.
+_SCHEMA = 3
 _MAX_BACKUP_SCHEMA = _SCHEMA   # refuse-newer gate (W5-3): a backup schema above this is "upgrade sigil"
 # scrypt work factors — n=2^16 (64 MiB) is a strong interactive KDF; salt is per-backup, stored in the header.
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2 ** 16, 8, 1
@@ -60,9 +75,77 @@ _SCRYPT_MAXMEM = 132 * _SCRYPT_N * _SCRYPT_R          # headroom over scrypt's 1
 _SALT_LEN = 16
 # AEAD context binding the sealed backup body to its purpose (domain separation vs the spine/owner seals).
 _BODY_CONTEXT = b"sigil/backup/v1"
-# The two vault-custodied secrets re-wrapped INTO the passphrase-encrypted backup so recovery is portable.
+# The vault-custodied secrets re-wrapped INTO the passphrase-encrypted backup so recovery is portable.
 _OWNER_PRIV_CONTEXT = b"sigil/owner.priv"
 _DEK_CONTEXT = b"sigil/spine.dek"
+# The sealed key-value secret store (API keys / service passwords). Its AEAD purpose context MUST match
+# ``platform.secrets._SEALED_CONTEXT`` — it is read as PLAINTEXT through the source vault and re-sealed
+# through the NEW vault on restore, so the operator's own recovery secrets survive a move to new hardware
+# where this box's KEK is gone. (This is the OPERATOR'S keys — legitimate recovery material, re-wrapped like
+# owner.priv/spine.dek — NOT captured target-credential evidence; W16-8's "don't co-locate the DEK with the
+# ciphertext" rule governs the OFFENSE leg's evidence keystore, never touched by this sovereign trust-root
+# backup.)  The KV store file itself is NEVER packaged as a raw ``files`` entry — only its plaintext, re-wrapped.
+_SECRETS_KV_FILE = "secrets.sealed"
+_SECRETS_KV_CONTEXT = b"sigil/secrets.kv"
+# Top-level CONFIG files (not key material) packaged verbatim into the sealed body. floor.json /
+# security.manifest.json were already covered; W7-2 adds the HA witness roster (the failover guard depends on
+# it), the governor budget caps, and the persisted env file. ``sigil.env`` can hold a signing secret (e.g.
+# VIGIL_DESTRUCTION_OWNER_KEY) so it is 0600 on restore (see :func:`_is_sensitive_rel`).
+_CONFIG_FILES = ("floor.json", "security.manifest.json", "witness.trust.json", "budgets.json", "sigil.env")
+# Top-level memory-STATE subtrees packaged verbatim (raw bytes, locks skipped): the Qdrant vector store and
+# the Kùzu graph mirror. They are derivable from the spine by a re-index, but a DR restore captures them so a
+# recovered install is immediately searchable (bounds RTO) rather than needing a costly re-embed/rebuild.
+_STATE_DIRS = ("qdrant", "graph")
+
+# --- backup COVERAGE CONTRACT (W7-2 structural enumeration) ---------------------------------------
+# Every top-level entry a real SIGIL_HOME can hold is either CAPTURED by this backup or a DELIBERATE,
+# DOCUMENTED exclusion. ``test_backup_coverage`` asserts a populated home has NO unclassified top-level
+# entry, so a NEW state artifact cannot be silently omitted from disaster recovery again — the failure is a
+# forced decision, not an accident.
+CAPTURED_TOP_LEVEL = frozenset({
+    "spine",                    # trust root: segments, signed head, owner PUBLIC key, the append-only ledger
+    "floor.json",               # anti-rollback floor
+    "security.manifest.json",   # G2 security manifest
+    "warden",                   # WARDEN permission kernel (signed action ledger + kernel key + tool registry)
+    "witness.trust.json",       # HA failover witness roster
+    "budgets.json",             # governor per-agent budget caps
+    "sigil.env",                # persisted config / legacy secret tier
+    "secrets.sealed",           # sealed KV secret store (re-wrapped portably, not a raw file entry)
+    "qdrant",                   # vector memory store
+    "graph",                    # graph memory mirror
+})
+# Deliberate exclusions, each with a reason the structural test surfaces. Keeping the REASONS in code is what
+# makes this a *documented* exclusion list (acceptance criterion), not a silent skip.
+_EXCLUSION_REASONS: dict[str, str] = {
+    "vault": "machine-bound TPM-sealed KEK — useless off-box; re-provisioned on the new host (the secrets it "
+             "wraps are re-wrapped into the sealed backup body instead)",
+    "backups": "the backup OUTPUT directory itself — packaging it would recurse prior backups into new ones",
+    "cache": "derived cache — rebuilt on demand, no trust or memory state",
+    "models": "re-downloadable ML model files (large) — not trust/memory state",
+    "host_id": "per-machine identity — deliberately re-derived on the new host, never carried across",
+    "prices.json": "re-fetchable provider price table (a cache)",
+    "bastion-assets.json": "BASTION scanner asset feed — a re-fetched cache",
+    "bastion-cve-feed.json": "BASTION CVE feed — a re-fetched cache",
+    "secret-health.json": "value-free secret-health verdict cache — re-derived",
+    "sigil-hud.json": "transient cockpit HUD state",
+    "inbox.json": "ENVOY in-flight message queue — operational scratch, not recovery state",
+    "actor": "in-flight browser-actor step journals — operational scratch, off the trust root",
+    "operator": "in-flight operator plan/journal pre-images — operational scratch, off the trust root",
+}
+EXCLUDED_TOP_LEVEL = frozenset(_EXCLUSION_REASONS)
+
+
+def classify_top_level(name: str) -> str:
+    """Classify a SIGIL_HOME top-level entry name as ``"captured"``, ``"excluded"`` or ``"unclassified"``.
+    A ``*.lock``/``*.tmp`` transient is always ``"excluded"``. The W7-2 structural test uses this to prove a
+    populated home has nothing unclassified — so a new state artifact forces a coverage decision."""
+    if name.endswith((".lock", ".tmp")):
+        return "excluded"
+    if name in CAPTURED_TOP_LEVEL:
+        return "captured"
+    if name in EXCLUDED_TOP_LEVEL:
+        return "excluded"
+    return "unclassified"
 
 
 class BackupError(Exception):
@@ -91,17 +174,19 @@ def _is_sensitive_rel(rel: str) -> bool:
     """True iff a restored file at ``rel`` must be ``chmod 0600`` — private key material that would otherwise
     land at the process umask (potentially world-readable). Covers the WARDEN kernel key
     (``warden/warden.key`` — a plaintext-0600 Rust-kernel file that rides inside the passphrase-sealed body)
-    and ANY packaged ``*.key`` file. The whole backup body is AEAD-sealed at rest regardless; this closes the
-    post-restore on-disk perms of the key material itself."""
-    return rel.endswith(".key")
+    and ANY packaged ``*.key`` file, PLUS ``sigil.env`` (the persisted config / legacy secret tier, which can
+    hold a signing secret such as VIGIL_DESTRUCTION_OWNER_KEY). The whole backup body is AEAD-sealed at rest
+    regardless; this closes the post-restore on-disk perms of the sensitive material itself."""
+    return rel.endswith(".key") or rel == "sigil.env"
 
 
 def _spine_files(home: Path) -> list[tuple[Path, str]]:
-    """Every trust-root/spine/kernel file to package, as ``(absolute_path, home-relative posix rel)`` pairs.
-    Includes the spine dir (segments, manifest, signed head, the owner PUBLIC key), the anti-rollback floor,
-    the G2 security manifest, AND the WARDEN permission-kernel dir. EXCLUDES the machine-bound secrets (they
-    are re-wrapped separately): the sealed owner PRIVATE key, the sealed DEK, the TPM-sealed KEK vault dir,
-    and transient lockfiles.
+    """Every trust-root/spine/kernel/config/state file to package, as ``(absolute_path, home-relative posix
+    rel)`` pairs. Includes the spine dir (segments, manifest, signed head, the owner PUBLIC key), the config
+    files (anti-rollback floor, G2 security manifest, HA witness roster, budget caps, persisted env), the
+    WARDEN permission-kernel dir, AND the memory-state subtrees (qdrant/ + graph/). EXCLUDES the machine-bound
+    secrets (re-wrapped separately): the sealed owner PRIVATE key, the sealed DEK, the sealed KV store
+    (re-wrapped via :data:`_SECRETS_KV_CONTEXT`), the TPM-sealed KEK vault dir, and transient lockfiles.
 
     The WARDEN files are packaged under a NORMALIZED ``warden/`` rel (relative to the warden dir, not
     ``home``) so a ``SIGIL_WARDEN_HOME`` pointed OUTSIDE ``SIGIL_HOME`` still restores to ``<home>/warden``;
@@ -118,27 +203,43 @@ def _spine_files(home: Path) -> list[tuple[Path, str]]:
             if rel.endswith((".lock",)) or rel in ("spine/keys/owner.priv", "spine/keys/spine.dek"):
                 continue
             out.append((p, rel))
-    for extra in ("floor.json", "security.manifest.json"):
+    for extra in _CONFIG_FILES:
         f = home / extra
-        if f.is_file():
+        if f.is_file() and not f.is_symlink():
             out.append((f, f.relative_to(home).as_posix()))
     warden = _warden_home(home)
     if warden.is_dir():
         for p in sorted(warden.rglob("*")):
             if p.is_file() and not p.name.endswith(".lock"):
                 out.append((p, "warden/" + p.relative_to(warden).as_posix()))
+    # memory-state subtrees (qdrant/ + graph/): raw byte capture of every regular file, locks skipped, symlinks
+    # never followed (they would let a crafted home escape the tree; restore's _safe_target is the backstop).
+    for state in _STATE_DIRS:
+        d = home / state
+        if d.is_dir() and not d.is_symlink():
+            for p in sorted(d.rglob("*")):
+                if p.is_symlink() or not p.is_file() or p.name.endswith(".lock"):
+                    continue
+                out.append((p, p.relative_to(home).as_posix()))
     return out
 
 
 def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, owner_key: KeyPair) -> dict:
     """Write a portable, signed, passphrase-encrypted backup of ``home``'s trust root + spine to ``dest``.
 
-    ``vault`` reads the (possibly TPM-sealed) owner private key + spine DEK as plaintext to re-wrap them
-    into the encrypted backup; ``owner_key`` signs the file manifest. Returns a summary."""
+    ``vault`` reads the (possibly TPM-sealed) owner private key + spine DEK + sealed KV secret store as
+    plaintext to re-wrap them into the encrypted backup; ``owner_key`` signs the file manifest. Returns a
+    summary."""
     home = Path(home)
     files = _spine_files(home)
     if not any(rel == "spine/head.json" for _f, rel in files):
         raise BackupError(f"no signed spine head under {home} — nothing to back up (run `sigil sign` first)")
+    # DEFENCE-IN-DEPTH against the W16-8 "don't co-locate the DEK with the ciphertext" rule: the sealed KV
+    # store is re-wrapped from its PLAINTEXT (below), never copied as a raw sealed file — assert no file entry
+    # is the sealed KV store, so a future _spine_files change can never quietly package the ciphertext too.
+    if any(rel == _SECRETS_KV_FILE for _f, rel in files):
+        raise BackupError(f"{_SECRETS_KV_FILE} must be re-wrapped from plaintext, never packaged as a raw "
+                          f"sealed file — refusing (a coverage bug)")
     file_blobs: dict[str, str] = {}
     file_hashes: dict[str, str] = {}
     warden_rels: list[str] = []
@@ -153,10 +254,16 @@ def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, 
     # portably by living INSIDE the passphrase-encrypted body.
     owner_priv = vault.read_text_secret(home / "spine" / "keys" / "owner.priv", context=_OWNER_PRIV_CONTEXT)
     dek = vault.read_text_secret(home / "spine" / "keys" / "spine.dek", context=_DEK_CONTEXT)
+    # the sealed KV secret store (the operator's own API keys / service passwords): read PLAINTEXT through the
+    # source vault so recovery is portable to new hardware where this box's KEK is gone. On restore it is
+    # re-SEALED through the NEW vault under the SAME purpose context — the plaintext only ever lives inside the
+    # passphrase-encrypted body, exactly like owner.priv/spine.dek.
+    secrets_kv = vault.read_text_secret(home / _SECRETS_KV_FILE, context=_SECRETS_KV_CONTEXT)
 
     manifest = {
         "schema": _SCHEMA, "scope": owner_key.public_key_b64, "file_sha256": file_hashes,
         "has_owner_priv": owner_priv is not None, "has_dek": dek is not None,
+        "has_secrets_kv": secrets_kv is not None,
         # the WARDEN permission-kernel set (schema 2) — restore asserts every listed rel is present in the
         # signed file table (fail-closed on a partial warden capture); an empty list means no warden dir existed.
         "warden": sorted(warden_rels),
@@ -165,7 +272,7 @@ def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, 
 
     body = {
         "manifest": manifest, "manifest_sig": manifest_sig, "manifest_pubkey": owner_key.public_key_b64,
-        "files": file_blobs, "owner_priv_b64": owner_priv, "spine_dek_b64": dek,
+        "files": file_blobs, "owner_priv_b64": owner_priv, "spine_dek_b64": dek, "secrets_kv_b64": secrets_kv,
     }
     salt = os.urandom(_SALT_LEN)
     sealed = seal(_derive_key(passphrase, salt), canonical_json(body), context=_BODY_CONTEXT)
@@ -181,7 +288,8 @@ def create_backup(dest: str | Path, passphrase: str, *, home: Path, vault: Any, 
         os.close(fd)
     os.replace(str(tmp), str(dest))
     return {"dest": str(dest), "files": len(file_blobs), "owner_key": owner_priv is not None,
-            "dek": dek is not None, "warden": len(warden_rels), "bytes": len(sealed)}
+            "dek": dek is not None, "secrets_kv": secrets_kv is not None, "warden": len(warden_rels),
+            "bytes": len(sealed)}
 
 
 def _read_header(src: Path) -> tuple[bytes, bytes]:
@@ -258,11 +366,12 @@ def _atomic_swap_unit(staged_unit: Path, dest_unit: Path) -> None:
 
 def _atomic_swap_captured_units(staged: Path, dest: Path) -> None:
     """Swap each TOP-LEVEL entry of the staged home onto ``dest`` as its own atomic unit, leaving every
-    top-level entry ALREADY under ``dest`` that the backup did NOT capture (vector/cursor/config caches, other
-    SIGIL_HOME state) UNTOUCHED. The staged home holds EXACTLY the captured SUBSET (``spine``, ``floor.json``,
-    ``security.manifest.json``, ``warden`` — see ``_spine_files``), so this replaces exactly those units and
-    nothing else: a ``--force`` restore can NEVER delete live, un-captured home content. Units are swapped
-    sequentially — each atomic; the set is not jointly atomic (a crash leaves some new, some old, none torn)."""
+    top-level entry ALREADY under ``dest`` that the backup did NOT capture (cache/models/agent journals, other
+    SIGIL_HOME state) UNTOUCHED. The staged home holds EXACTLY the captured SUBSET (``spine``, the config
+    files, ``warden``, ``qdrant``/``graph``, the re-sealed ``secrets.sealed`` — see ``_spine_files`` /
+    :data:`CAPTURED_TOP_LEVEL`), so this replaces exactly those units and nothing else: a ``--force`` restore
+    can NEVER delete live, un-captured home content. Units are swapped sequentially — each atomic; the set is
+    not jointly atomic (a crash leaves some new, some old, none torn)."""
     dest.mkdir(parents=True, exist_ok=True)
     for staged_unit in sorted(staged.iterdir()):
         _atomic_swap_unit(staged_unit, dest / staged_unit.name)
@@ -338,19 +447,24 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
         missing = [r for r in warden_listed if r not in files]
         if missing:
             raise BackupError(f"backup is missing WARDEN file(s) named in its signed manifest: {missing}")
-    # the two re-wrapped secrets must be strings (or absent) — validated BEFORE any write, so a malformed
+    # the re-wrapped secrets must be strings (or absent) — validated BEFORE any write, so a malformed
     # signed body fails closed with a clean BackupError instead of a bare AttributeError at the vault
     # boundary (`.encode()` on a non-str). Mirrors the manifest/pub/sig/files/hashes type guards above.
-    for _label, _val in (("owner private key", body.get("owner_priv_b64")), ("spine DEK", body.get("spine_dek_b64"))):
+    for _label, _val in (("owner private key", body.get("owner_priv_b64")),
+                         ("spine DEK", body.get("spine_dek_b64")),
+                         ("sealed KV secret store", body.get("secrets_kv_b64"))):
         if _val is not None and not isinstance(_val, str):
             raise BackupError(f"backup {_label} is malformed (expected a string)")
     # STAGED / ATOMIC restore, UNIT-SCOPED: restore replaces ONLY the captured units (top-level of the backup:
-    # ``spine``, ``floor.json``, ``security.manifest.json``, ``warden``), so it refuses (without force) ONLY
-    # when one of THOSE already exists at ``new_home`` — never merely because the home is non-empty. This keeps
-    # un-captured home content (vector/cursor/config caches) both un-blocking AND un-destroyed on a --force
-    # restore (the subset-capture-vs-replace-whole fix — "stale files do not survive" must not mean live data).
-    captured_units = sorted({rel.split("/", 1)[0] for rel in files})
-    present_units = [u for u in captured_units if (new_home / u).exists()]
+    # ``spine``, ``floor.json``, ``security.manifest.json``, ``warden``, the W7-2 config files + qdrant/graph
+    # state, and the re-wrapped ``secrets.sealed``), so it refuses (without force) ONLY when one of THOSE
+    # already exists at ``new_home`` — never merely because the home is non-empty. This keeps un-captured home
+    # content (cache/models/actor journals) both un-blocking AND un-destroyed on a --force restore (the
+    # subset-capture-vs-replace-whole fix — "stale files do not survive" must not mean live data).
+    captured_units = set(rel.split("/", 1)[0] for rel in files)
+    if body.get("secrets_kv_b64") is not None:      # re-wrapped (not a file entry) but lands as a top-level unit
+        captured_units.add(_SECRETS_KV_FILE)
+    present_units = sorted(u for u in captured_units if (new_home / u).exists())
     if not force and present_units:
         raise BackupError(
             f"refusing to overwrite existing SIGIL state {present_units} under {new_home} (a restore must not "
@@ -386,6 +500,11 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
         if body.get("spine_dek_b64"):
             vault.write_text_secret(staged / "spine" / "keys" / "spine.dek",
                                     body["spine_dek_b64"], context=_DEK_CONTEXT)
+        # re-seal the KV secret store through the NEW vault, under the SAME purpose context — so the operator's
+        # own API keys are recoverable on new hardware. Lands as a top-level ``secrets.sealed`` unit in staged.
+        if body.get("secrets_kv_b64"):
+            vault.write_text_secret(staged / _SECRETS_KV_FILE, body["secrets_kv_b64"],
+                                    context=_SECRETS_KV_CONTEXT)
 
         # re-verify the STAGED spine's internal integrity (keyless binding + chain) — never claim a restore
         # succeeded on a corrupt ledger, and never swap an unverified home into place.
@@ -404,5 +523,5 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
             shutil.rmtree(staged, ignore_errors=True)
 
     return {"home": str(new_home), "files": len(files), "owner_key": bool(body.get("owner_priv_b64")),
-            "dek": bool(body.get("spine_dek_b64")),
+            "dek": bool(body.get("spine_dek_b64")), "secrets_kv": bool(body.get("secrets_kv_b64")),
             "warden": sum(1 for rel in files if rel.startswith("warden/")), "verified": True}
