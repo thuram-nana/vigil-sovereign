@@ -3329,8 +3329,8 @@
           [V.icon("live"), "Open in Live"])]);
     }
     if (p3RunCapturesNoReport(run)) {
-      return h("div.empty", null, [h("div.big", null, "Runs in its own sandbox"),
-        h("p", null, "A codebase (Strix) / AEGIS run reports inside its sandbox — no re-checkable web report is captured here."),
+      return h("div.empty", null, [h("div.big", null, "This run streams its work"),
+        h("p", null, "A codebase (Strix) scan, an AEGIS run, or an agentic engage run streams its activity in its own sandbox — no re-checkable web report is captured here."),
         // Offer Live ONLY for a run that actually HAS a replayable feed (stream "progress"). A legacy
         // codebase run predates the feed and has stream "none" — sending it to Live would bounce the
         // operator to an empty screen that points straight back here.
