@@ -25,7 +25,7 @@
           "test_append_accepts_every_declared_kind"
         ]
       },
-      "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
       "failure_class": "n-a",
       "default": "on"
     },
@@ -175,10 +175,25 @@
     {
       "id": "W13-5",
       "title": "A PRESENTED capability token is validated (single-use, nine-field bound) at the external-tool executor boundary",
-      "claim": "The offense external-tool executor (run_external_tool), WHEN a capability token is presented, validates it immediately before launching the tool \u2014 nine-field-bound (deployment/engagement/operation-hash/normalized target/tool/danger class/\u2026), single-use, owner-signed \u2014 and burns its nonce in the existing O_EXCL nonce ledger, so a presented authorization cannot be stale, replayed, or reused for a different operation by the time execution happens. Enforcement is OPT-IN at this stage: a call with no token still runs (capability=None is not yet a refusal), and minting a token at the sovereign approval leg + threading it through every production caller \u2014 so a production deployment REQUIRES one on every run \u2014 is named follow-on work in the decision doc.",
+      "claim": "The offense external-tool executor (run_external_tool), WHEN a capability token is presented, validates it immediately before launching the tool — nine-field-bound (deployment/engagement/operation-hash/normalized target/tool/danger class/…), single-use, owner-signed — and burns its nonce in the existing O_EXCL nonce ledger, so a presented authorization cannot be stale, replayed, or reused for a different operation by the time execution happens. Enforcement is OPT-IN at this stage: a call with no token still runs (capability=None is not yet a refusal), and minting a token at the sovereign approval leg + threading it through every production caller — so a production deployment REQUIRES one on every run — is named follow-on work in the decision doc.",
       "source": "docs/decisions/W13-5-executor-capability-token.md:9",
-      "enforced_by": {"file": "integration/vigil_integration/live/external_tool.py", "symbol": "_capability_boundary_refusal"},
-      "proved_by": {"file": "integration/tests/test_capability_token.py", "tests": ["test_a_valid_token_authorizes_exactly_once", "test_negative_control_replayed_token_is_refused", "test_negative_control_different_operation_hash_is_refused", "test_negative_control_token_past_expiry_is_refused", "test_negative_control_different_target_is_refused", "test_uses_the_existing_o_excl_nonce_ledger", "test_executor_consults_the_capability_boundary_before_running", "test_structural_check_is_not_a_no_op_negative_control"]},
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/external_tool.py",
+        "symbol": "_capability_boundary_refusal"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_capability_token.py",
+        "tests": [
+          "test_a_valid_token_authorizes_exactly_once",
+          "test_negative_control_replayed_token_is_refused",
+          "test_negative_control_different_operation_hash_is_refused",
+          "test_negative_control_token_past_expiry_is_refused",
+          "test_negative_control_different_target_is_refused",
+          "test_uses_the_existing_o_excl_nonce_ledger",
+          "test_executor_consults_the_capability_boundary_before_running",
+          "test_structural_check_is_not_a_no_op_negative_control"
+        ]
+      },
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
@@ -267,7 +282,7 @@
     {
       "id": "W6-6",
       "title": "vigil doctor and sigil doctor share ONE check registry (no drift; README block CI-regenerated)",
-      "claim": "`vigil doctor` and `sigil doctor` share ONE check registry in `vigil_core.doctor` \u2014 the same `REQUIRED_CONTROLS` production-posture spec, the same fail-closed, opt-in gate decision (`evaluate`), and the same exit roll-up (`overall_ok`) \u2014 so the two entry points can never drift on which controls are required, what counts as satisfied, or whether a failure flips the exit code; and the security-posture block documented in README.md is REGENERATED from that registry by a required CI guard, not authored by hand, so it cannot rot.",
+      "claim": "`vigil doctor` and `sigil doctor` share ONE check registry in `vigil_core.doctor` — the same `REQUIRED_CONTROLS` production-posture spec, the same fail-closed, opt-in gate decision (`evaluate`), and the same exit roll-up (`overall_ok`) — so the two entry points can never drift on which controls are required, what counts as satisfied, or whether a failure flips the exit code; and the security-posture block documented in README.md is REGENERATED from that registry by a required CI guard, not authored by hand, so it cannot rot.",
       "source": "docs/decisions/W6-6-doctor-consolidation.md:14",
       "enforced_by": {
         "file": "packages/core/vigil_core/vigil_core/doctor.py",
@@ -283,6 +298,120 @@
         ]
       },
       "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W6-1",
+      "title": "Every server exposes unauthenticated /healthz + dependency-checking /readyz",
+      "claim": "Every VIGIL HTTP server — the sovereign glass-cockpit UI, the WireGuard bridge, the offense Ops Console, the unified `vigil up` reverse proxy, the loopback external API, and the AEGIS gateway — exposes an UNAUTHENTICATED, Host-ungated `/healthz` liveness route (the process answers, 200, no secret) and a `/readyz` readiness route that probes THAT server's real dependency and returns 503 when it is down",
+      "source": "docs/decisions/W6-1-healthz-readyz-probes.md:19",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/aegis/gateway.py",
+        "symbol": "AegisGatewayHandler._handle_probe"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/aegis/tests/test_gateway_health_readyz.py",
+        "tests": [
+          "test_healthz_answered_locally_not_forwarded",
+          "test_readyz_200_when_upstream_up",
+          "test_readyz_503_when_upstream_down_negative_control",
+          "test_non_probe_path_still_forwards"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W13-6",
+      "title": "Restricted mode over the existing kill-switch (safe landing state)",
+      "claim": "VIGIL has a RESTRICTED MODE — a safe landing state between fully-operational and the `vigil panic` hard-stop. It is a FACADE over the existing machinery, never a second policy engine: entering restricted mode TRIPS the existing per-engagement kill-switch (the same primitive `vigil panic` trips), so the ALREADY-EXISTING conjunctive authority gate REFUSES every target-touching / mutating action, fail-closed and persistently, while the process stays UP so read-only diagnosis, evidence access, audit export and authorization repair still work. An integrity failure (`enforce_integrity_or_restrict`, over the existing `verify_integrity` audit) transitions the system into restricted mode rather than crashing or continuing, and a clean audit leaves it fully-operational. Entering and leaving are recorded on a `vigil_core` hash-chained, tamper-evident ledger that survives a restart, and `emergency-stop` enters the mode deliberately.",
+      "source": "docs/decisions/W13-6-restricted-mode.md:9",
+      "enforced_by": {
+        "file": "integration/vigil_integration/restricted_mode.py",
+        "symbol": "enforce_integrity_or_restrict"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_restricted_mode.py",
+        "tests": [
+          "test_integrity_failure_drops_into_restricted_mode",
+          "test_clean_integrity_leaves_the_system_operational",
+          "test_emergency_stop_enters_restricted_mode_recorded_on_chain",
+          "test_restricted_mode_survives_restart",
+          "test_restricted_mode_permits_only_the_diagnostic_surface"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "opt-in-stated-as-default",
+      "default": "off"
+    },
+    {
+      "id": "W17-9",
+      "title": "New-Assessment preflight surfaces the agentic engine's triple-conjunction gate before Send",
+      "claim": "The New-Assessment preflight states which engine will run and, when the agentic engine will not, names the unmet conjunct (no session, a remote target, or vigil not on PATH) before the operator clicks Send.",
+      "source": "docs/decisions/W17-9-agentic-engine-preflight.md:8",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/console/actions.py",
+        "symbol": "engine_plan"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/console/tests/test_engine_plan_w17_9.py",
+        "tests": [
+          "test_agentic_runs_when_every_conjunct_is_met",
+          "test_the_three_fall_through_reasons_are_distinct_and_visible",
+          "test_vigil_not_on_path_names_its_own_reason",
+          "test_plan_matches_the_real_routing_when_agentic_runs"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W11-4",
+      "title": "Audit/spine writer fails closed under resource exhaustion",
+      "claim": "The audit/spine writer fails closed on an unwritable audit: when the append-only signed spine cannot durably accept a record, `VigilCoreSpine.writer` raises rather than returning as if the action were audited, and it never advances its append point on a failed write.",
+      "source": "docs/decisions/W11-4-fail-closed-resource-exhaustion.md:12",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/spine_vigilcore.py",
+        "symbol": "VigilCoreSpine.writer"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_spine_resource_exhaustion_failclosed.py",
+        "tests": [
+          "test_unwritable_audit_sink_refuses_the_action",
+          "test_disk_full_enospc_refuses_and_does_not_advance",
+          "test_fd_exhaustion_rlimit_nofile_refuses",
+          "test_oom_memoryerror_on_append_refuses_and_does_not_advance"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W8-2",
+      "title": "Passive fencing is advisory; the accepted limitation is a fork-DETECTION SLA",
+      "claim": "Passive fencing is advisory and does NOT prevent a second concurrent writer; the accepted, tested limitation is a fork-DETECTION SLA",
+      "source": "docs/decisions/W8-2-passive-fencing-detection-sla.md:45",
+      "enforced_by": {
+        "file": "tools/ha/fork_detection_sla.py",
+        "symbol": "detection_within_sla"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_ha_fork_detection_sla.py",
+        "tests": [
+          "test_cadence_and_jitter_match_the_shipped_checkpoint_timers",
+          "test_worst_case_from_the_real_timers_meets_the_sla",
+          "test_the_sla_assertion_can_fail_negative_control",
+          "test_second_writer_fork_is_detected_within_the_sla",
+          "test_legitimate_single_writer_extension_is_not_flagged",
+          "test_detected_fork_can_never_be_silently_promoted",
+          "test_decision_record_states_the_limitation_and_sla"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
       "failure_class": "n-a",
       "default": "on"
     }

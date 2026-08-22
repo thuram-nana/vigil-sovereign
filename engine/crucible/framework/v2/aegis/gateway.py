@@ -25,6 +25,7 @@ read-only ``observe``.
 from __future__ import annotations
 
 import itertools
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
@@ -488,9 +489,63 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _probe_path(self) -> str:
+        """The request path with any query stripped — used only to match the exact probe routes."""
+        try:
+            return urlsplit(self.path).path
+        except Exception:
+            return self.path
+
+    def _send_probe(self, status: int, payload: dict) -> None:
+        import json as _json
+        body = _json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _readyz_upstream_ok(self) -> bool:
+        """A LIVE port probe of the operator's fixed upstream (a short-timeout TCP connect, no bytes sent):
+        the gateway's whole job is to forward there, so it is NOT ready when the upstream is down. Total —
+        any resolution/parse error fails CLOSED (not ready)."""
+        try:
+            u = urlsplit(self.settings.upstream_base)
+            host = u.hostname or ""
+            port = u.port or (443 if u.scheme == "https" else 80)
+            with socket.create_connection((host, int(port)), timeout=0.5):
+                return True
+        except (OSError, ValueError, OverflowError):
+            return False
+
+    def _handle_probe(self) -> bool:
+        """Answer the UNAUTHENTICATED liveness/readiness probes LOCALLY (never forwarded), so a k8s/LB
+        probe can reach the firewall itself. `/healthz` = liveness; `/readyz` = a live probe of the fixed
+        upstream (the gateway's real dependency). Returns True when it handled the request. GET/HEAD only —
+        a probe path under any other method falls through to the normal proxy path unchanged. Bodies carry
+        no upstream address or secret."""
+        if self.command not in ("GET", "HEAD"):
+            return False
+        path = self._probe_path()
+        if path == "/healthz":
+            self._send_probe(200, {"ok": True})
+            return True
+        if path == "/readyz":
+            ok = self._readyz_upstream_ok()
+            self._send_probe(200 if ok else 503, {"ok": ok, "checks": [{"name": "upstream", "ok": ok}]})
+            return True
+        return False
+
     def _handle_inner(self) -> None:
         settings = self.settings
         method = self.command
+        # PROBE-SAFE FIRST: liveness/readiness are answered locally, before any body read, inspection, or
+        # forward — a k8s/LB probe must reach the firewall without a credential and without shadowing the
+        # upstream except on the two exact probe paths (GET/HEAD only).
+        if self._handle_probe():
+            return
         # (0) OPT-IN passive OOB belief elevation — drain any unsolicited canary hits and fold the
         #     correlated elevations into the tied actors' beliefs BEFORE the graduated decision, so a
         #     prior inbound hit is reflected in this/next request's belief. Belief-only; total; a no-op
