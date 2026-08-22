@@ -35,6 +35,7 @@ from typing import Any, Callable
 # The pure gate-of-record composition now lives in the neutral shared core (S6). Re-exported here so every
 # existing `from vigil_integration.conjunctive_gate import ...` keeps working, byte-identical semantics.
 from vigil_core.gate import CrucibleResult, DestructionOutcome, GateVerdict, conjunctive_decide
+from vigil_core.metrics import record_gate_verdict
 
 from .warden_gate import DEFAULT_CEILING, DEFAULT_FLOOR, ToolDecision, decide_tool
 
@@ -190,11 +191,13 @@ def build_offense_gate(
                         is_consumed=is_consumed,
                     )
 
-        return conjunctive_decide(
+        # Emit-only telemetry (W6-3): COUNT a DENY into the gate-denial metric. record_gate_verdict
+        # returns the verdict UNCHANGED and never raises, so the authorization result is untouched.
+        return record_gate_verdict(conjunctive_decide(
             crucible_authorize=crucible_authorize,
             warden_decide=warden_decide,
             destructive=destructive,
             destruction_authorize=destruction_authorize,
-        )
+        ))
 
     return gate

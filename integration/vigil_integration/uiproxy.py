@@ -69,6 +69,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from . import dispatch
+from vigil_core.metrics import CONTENT_TYPE as _OPENMETRICS_CT, set_plane
 
 # ---- ports (fixed; the proxy is the only human-facing listener) -----------------------------------
 DEFAULT_PROXY_PORT = 8770
@@ -1067,6 +1068,14 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                  allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
                  plane_control: "Optional[PlaneControl]" = None, backends: "Optional[dict]" = None):
         self.serve_dir = serve_dir
+        # W6-3: this process's OpenMetrics registry (RED + process + domain), labelled OFFENSE. The domain
+        # counters are fed at scrape time from the G2 business snapshot (`vigil up --with-telemetry` writes
+        # <base>/live-ui/telemetry.json); None/absent ⇒ the domain series still render (0), never a crash.
+        self.metrics = set_plane("offense")
+        try:
+            self.metrics_snapshot_path = Path(serve_dir).resolve().parent / "live-ui" / "telemetry.json"
+        except Exception:  # noqa: BLE001
+            self.metrics_snapshot_path = None
         # The three federation targets. None (the default, spawn-local `vigil up`) ⇒ the local loopback
         # trio; `--proxy-only` supplies REMOTE addresses so a stateless proxy replica federates to ONE
         # central sovereign writer (+ co-located/remote offense) instead of routing to 127.0.0.1.
@@ -1145,7 +1154,41 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_OPTIONS(self):  # noqa: N802
         self._handle()
 
+    # W6-3: capture the response status for RED, across BOTH send paths (send_response and the relay's
+    # send_response_only, which send_response itself calls). Emit-only — this only records a number.
+    def send_response_only(self, code, message=None):  # noqa: N802
+        try:
+            self._red_code = int(code)
+        except Exception:  # noqa: BLE001
+            pass
+        return super().send_response_only(code, message)
+
+    def _record_red(self, t0):
+        try:
+            self.server.metrics.observe_request(
+                duration_s=time.time() - t0, method=self.command or "GET",
+                status=getattr(self, "_red_code", 200))
+        except Exception:  # noqa: BLE001 — telemetry must never break a request
+            pass
+
+    def _metrics(self):
+        """OpenMetrics exposition for the OFFENSE plane: RED (this proxy's requests) + process (rss/fds/
+        uptime) + the four domain counters. UNAUTHENTICATED and Host-ungated — the SAME probe posture as
+        /healthz+/readyz (the proxy binds loopback or a private WG/Tailscale address only; a public serve
+        goes behind the operator's TLS reverse proxy). The body carries no token, path, or backend address.
+        facts/leads/refusals are folded from the signed-spine business snapshot; gate_denials is the live
+        authorization-edge counter. Total: an unreadable snapshot still renders RED+process+gate_denials."""
+        reg = self.server.metrics
+        snap_path = getattr(self.server, "metrics_snapshot_path", None)
+        try:
+            if snap_path and Path(snap_path).is_file():
+                reg.update_domain_from_snapshot(json.loads(Path(snap_path).read_text(encoding="utf-8")))
+        except Exception:  # noqa: BLE001 — a malformed/absent snapshot must not fail the scrape
+            pass
+        self._plane_text(reg.render(), _OPENMETRICS_CT)
+
     def _handle(self):
+        _red_t0 = time.time()
         try:
             split = urlsplit(self.path)
             # PROBE-SAFE FIRST: liveness/readiness are answered by THIS process, before plane control,
@@ -1156,6 +1199,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return
             if split.path == "/readyz":
                 self._readyz()
+                return
+            if split.path == "/metrics":
+                self._metrics()
                 return
             # PROXY-LOCAL: plane control is answered by this process, BEFORE any attempt to route
             # or to serve a file. That ordering is the whole point — a backend that is down cannot answer
@@ -1172,6 +1218,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
         except Exception as exc:  # noqa: BLE001 — never 500 the whole proxy on one bad request
             self._fail(502, f"proxy error: {type(exc).__name__}: {exc}")
+        finally:
+            self._record_red(_red_t0)
 
     # -- per-user auth boundary (Claim 6): every forward past the login bootstrap is authenticated ----
     def _request_bearer(self, query: str) -> str:
@@ -1569,6 +1617,28 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         ok = _sovereign_ready_debounced(sov_host, sov_port)
         body = {"ok": ok, "checks": [{"name": "sovereign", "ok": ok}]}
         self._plane_json(body, status=200 if ok else 503)
+
+    def _plane_text(self, text: str, content_type: str, status: int = 200, *, drained: bool = False):
+        """Send a plain-text body (e.g. the OpenMetrics exposition) with the probe headers, no-store, and a
+        drained request body — the same posture as `_plane_json`, so /metrics leaks no keep-alive smuggling
+        surface and carries no cache."""
+        body = (text or "").encode("utf-8")
+        if not drained:
+            self._read_request_body()
+        self.close_connection = True
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.close_connection = True
 
     def _plane_json(self, payload: dict, status: int = 200, *, drained: bool = False):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

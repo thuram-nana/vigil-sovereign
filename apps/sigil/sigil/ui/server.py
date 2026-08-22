@@ -38,6 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from vigil_core.metrics import CONTENT_TYPE as _OPENMETRICS_CT, set_plane
 from vigil_core.posture import legacy_owner_token_grants_owner
 from vigil_core.spine_domains import DOMAIN_TAGS
 
@@ -95,6 +96,8 @@ class UIServer(ThreadingHTTPServer):
         super().__init__(addr, handler)
         self.token = token
         self.spine_path = spine_path
+        # W6-3: this process's OpenMetrics registry (RED + process + domain), labelled for the plane.
+        self.metrics = set_plane("sovereign")
         port = self.server_address[1]              # the ACTUAL bound port (correct even for port 0)
         # Anti-DNS-rebinding allowlist: the REAL bound address, plus the loopback pair only when bound to
         # loopback (dev convenience — never added for a private/WG bind), UNIONED with the operator's
@@ -243,13 +246,66 @@ class Handler(BaseHTTPRequestHandler):
             body["error"] = name         # exception TYPE only — never its message (which can hold a path)
         self._send(200 if ok else 503, _json_bytes(body))
 
+    # --- RED instrumentation + /metrics (W6-3) ----------------------------------------------------
+    def _record_red(self, method, t0, status_box):
+        try:
+            self.server.metrics.observe_request(
+                duration_s=time.perf_counter() - t0, method=method, status=status_box.get("code", 200))
+        except Exception:  # noqa: BLE001 — telemetry must never break a request
+            pass
+
+    def _timed(self, method, fn):
+        """Time ONE request and fold it into the plane's RED metrics. Wraps `_send` for this request only
+        to capture the final status code; the wrapper is always restored (finally), so a handler that never
+        sends still records (as the default 200). Emit-only — never changes the response."""
+        t0 = time.perf_counter()
+        status_box = {"code": 200}
+        orig = self._send
+
+        def _send(code, body, ctype="application/json"):
+            status_box["code"] = code
+            return orig(code, body, ctype)
+
+        self._send = _send  # type: ignore[method-assign]
+        try:
+            return fn()
+        finally:
+            self._send = orig  # type: ignore[method-assign]
+            self._record_red(method, t0, status_box)
+
+    def _metrics(self):
+        """OpenMetrics exposition for the SOVEREIGN plane: RED (this server's requests) + process (rss/
+        fds/uptime) + the four domain counters. UNAUTHENTICATED and Host-ungated — the SAME probe posture as
+        /healthz+/readyz (this cockpit binds loopback or a private WG/Tailscale address only; a public serve
+        goes behind the operator's TLS reverse proxy). The body carries no token, path, or account state —
+        only aggregate counters. Refusals are projected from the sovereign spine's DENY decisions; facts/
+        leads are offense-plane domain series (0 here). Total: a projection error still renders RED+process."""
+        reg = self.server.metrics
+        try:
+            from ..dashboard import snapshot as _snapshot
+            d = _snapshot(self.server.store())
+            dec = d.get("recent_decisions") or {}
+            refusals = sum(int(v) for k, v in dec.items() if str(k) in ("deny", "denied", "refused"))
+            reg.update_domain_from_snapshot({"totals": {"refusals": refusals}})
+        except Exception:  # noqa: BLE001 — a projection hiccup must not fail the scrape
+            pass
+        self._send(200, reg.render().encode("utf-8"), _OPENMETRICS_CT)
+
     # --- GET (read plane) -------------------------------------------------------------------------
     def do_GET(self):
+        return self._timed("GET", self._do_GET)
+
+    def do_POST(self):
+        return self._timed("POST", self._do_POST)
+
+    def _do_GET(self):
         path = urlparse(self.path).path
         if path == "/healthz":
             return self._healthz()
         if path == "/readyz":
             return self._readyz()
+        if path == "/metrics":
+            return self._metrics()
         if path in ("/", "/index.html"):
             return self._serve_index()
         if path.startswith("/static/"):
@@ -821,7 +877,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     # --- POST (action plane) ----------------------------------------------------------------------
-    def do_POST(self):
+    def _do_POST(self):
         path = urlparse(self.path).path
         if path == "/api/login/challenge":
             return self._login_challenge()

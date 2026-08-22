@@ -1,0 +1,88 @@
+{
+  "__comment": "VIGIL example Grafana dashboard (W6-3 #454) over the OpenMetrics /metrics series each plane exposes. Import into Grafana with a Prometheus datasource scraping both planes. RED + process + the four domain counters (facts/leads/refusals/gate-denials). Example/starting point; tune to your deployment.",
+  "schemaVersion": 39,
+  "title": "VIGIL — planes (RED · process · domain)",
+  "tags": ["vigil", "openmetrics", "red"],
+  "timezone": "utc",
+  "templating": {
+    "list": [
+      {
+        "name": "plane",
+        "type": "query",
+        "query": "label_values(vigil_requests_total, plane)",
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request rate (R)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {"expr": "sum by (plane) (rate(vigil_requests_total{plane=~\"$plane\"}[5m]))", "legendFormat": "{{plane}}"}
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Error rate (E)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {"expr": "sum by (plane) (rate(vigil_request_errors_total{plane=~\"$plane\"}[5m])) / clamp_min(sum by (plane) (rate(vigil_requests_total{plane=~\"$plane\"}[5m])), 1)", "legendFormat": "{{plane}} error ratio"}
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Latency p50/p90/p99 (D)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (plane, le) (rate(vigil_request_duration_seconds_bucket{plane=~\"$plane\"}[5m])))", "legendFormat": "{{plane}} p50"},
+        {"expr": "histogram_quantile(0.90, sum by (plane, le) (rate(vigil_request_duration_seconds_bucket{plane=~\"$plane\"}[5m])))", "legendFormat": "{{plane}} p90"},
+        {"expr": "histogram_quantile(0.99, sum by (plane, le) (rate(vigil_request_duration_seconds_bucket{plane=~\"$plane\"}[5m])))", "legendFormat": "{{plane}} p99"}
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Domain counters (facts / leads / refusals / gate-denials)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {"expr": "vigil_facts_total{plane=~\"$plane\"}", "legendFormat": "{{plane}} facts"},
+        {"expr": "vigil_leads_total{plane=~\"$plane\"}", "legendFormat": "{{plane}} leads"},
+        {"expr": "vigil_refusals_total{plane=~\"$plane\"}", "legendFormat": "{{plane}} refusals"},
+        {"expr": "vigil_gate_denials_total{plane=~\"$plane\"}", "legendFormat": "{{plane}} gate-denials"}
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Process: resident memory",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "vigil_process_resident_memory_bytes{plane=~\"$plane\"}", "legendFormat": "{{plane}} rss"}
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Process: open FDs",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16},
+      "targets": [
+        {"expr": "vigil_process_open_fds{plane=~\"$plane\"}", "legendFormat": "{{plane}} fds"}
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Process: uptime",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16},
+      "targets": [
+        {"expr": "vigil_process_uptime_seconds{plane=~\"$plane\"}", "legendFormat": "{{plane}} uptime"}
+      ]
+    }
+  ]
+}

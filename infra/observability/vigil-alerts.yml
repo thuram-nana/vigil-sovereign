@@ -1,0 +1,68 @@
+# VIGIL example Prometheus alert rules (W6-3 #454).
+#
+# These rules alert on the OpenMetrics series each plane exposes on /metrics (RED + process + the four
+# domain counters). They are an EXAMPLE / starting point shipped with the product; tune the thresholds and
+# `for:` windows to your deployment. Load them into Prometheus via `rule_files:` and pair with the example
+# dashboard in `vigil-dashboard.json`. Feeds [W8-1] #467 (alerting) and [W6-7] #458.
+#
+# Every series is labelled `plane="sovereign"|"offense"`, so each alert fires per plane.
+groups:
+  - name: vigil.red
+    rules:
+      - alert: VigilHighRequestErrorRate
+        # Errors (5xx / handler crash) exceed 5% of requests over 5m.
+        expr: |
+          sum by (plane) (rate(vigil_request_errors_total[5m]))
+            / clamp_min(sum by (plane) (rate(vigil_requests_total[5m])), 1) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High request error rate on the {{ $labels.plane }} plane"
+          description: "5xx/error rate is above 5% of requests for 10m on plane {{ $labels.plane }}."
+
+      - alert: VigilHighRequestLatencyP99
+        # p99 request latency over 5m exceeds 2s.
+        expr: |
+          histogram_quantile(0.99,
+            sum by (plane, le) (rate(vigil_request_duration_seconds_bucket[5m]))) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High p99 latency on the {{ $labels.plane }} plane"
+          description: "p99 request latency exceeds 2s for 10m on plane {{ $labels.plane }}."
+
+  - name: vigil.domain
+    rules:
+      - alert: VigilGateDenialSpike
+        # ANY authorization-gate DENY in the last 5m. A denial is a security-relevant event: it means the
+        # conjunctive gate refused an action. `> 0` fires on the first denial.
+        expr: increase(vigil_gate_denials_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Authorization-gate denial(s) on the {{ $labels.plane }} plane"
+          description: "The conjunctive authorization gate DENIED at least one action in the last 5m."
+
+      - alert: VigilNoConfirmedFacts
+        # The offense plane has run but produced no oracle-confirmed FACTs — a possible pipeline stall.
+        expr: max_over_time(vigil_facts_total{plane="offense"}[1h]) == 0
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "No oracle-confirmed FACTs in the last hour"
+          description: "vigil_facts_total has been 0 for 1h on the offense plane."
+
+  - name: vigil.process
+    rules:
+      - alert: VigilProcessManyOpenFDs
+        expr: vigil_process_open_fds > 4096
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High open file descriptors on the {{ $labels.plane }} plane"
+          description: "The server process holds more than 4096 open FDs for 15m."
