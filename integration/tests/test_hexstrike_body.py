@@ -257,3 +257,52 @@ def test_h5_live_masscan_fact_through_the_body(tmp_path: Path):
         srv.close()
     assert outcome.executed is True and outcome.ok is True, outcome
     assert outcome.detail.get("n_facts") == 1, f"expected 1 reachability FACT via masscan, got {outcome.detail}"
+
+
+# ===================================================================================================
+# H7 — the body integrates BY SHARED ORACLE FAMILY: the FACT-capable set is DERIVED from the family
+# registry (not a flat hand-kept list), and the chain's tools fuse by family into raised-priority LEADs
+# that can NEVER become a FACT.
+# ===================================================================================================
+def test_h7_oracle_mapped_set_is_derived_from_the_family_registry():
+    """_ORACLE_MAPPED_TOOLS is no longer a literal: it is oracle_mapped_tools(_SPEC_BUILDER_TOOLS), so
+    FACT-capability is a property of a tool's family (FACT-capable) AND its having a runner spec builder.
+    The derived set is exactly the five shipped re-drive tools, and each is in a FACT-capable family."""
+    from vigil_integration.brains.hexstrike_body import _ORACLE_MAPPED_TOOLS, _SPEC_BUILDER_TOOLS
+    from vigil_integration.live.oracle_families import is_fact_capable_family, oracle_mapped_tools
+
+    assert _ORACLE_MAPPED_TOOLS == oracle_mapped_tools(_SPEC_BUILDER_TOOLS)
+    assert _ORACLE_MAPPED_TOOLS == {"nmap", "sslscan", "masscan", "rustscan", "naabu"}
+    for tool in _ORACLE_MAPPED_TOOLS:
+        assert is_fact_capable_family(tool), f"{tool}: mapped but its family is not FACT-capable"
+
+
+def test_h7_family_votes_raise_priority_but_never_mint():
+    """The body's family_votes() fuses the proposed chain BY FAMILY. Where several tools of one family are
+    proposed (three web-discovery tools here), agreement raises the family LEAD's priority — but every vote
+    is a LEAD, is_fact False, no matter the agreement count. Routing/voting never mints."""
+    body = HexstrikeAgentBody()
+    body.plan(_obs())
+    votes = body.family_votes()
+    assert votes, "the web chain has several families to vote"
+    assert all(v.verdict == "LEAD" and v.is_fact is False for v in votes), \
+        "a family vote must ALWAYS be a LEAD — agreement is not evidence"
+    web = [v for v in votes if v.family == "web_discovery"]
+    assert web and web[0].agreement >= 2, "httpx/katana/gobuster should agree in the web-discovery family"
+    assert web[0].verifier == "ACHIEVED_STATE"
+    # a lone-member family (tls: sslscan) gets no raise beyond its base
+    tls = [v for v in votes if v.family == "tls"]
+    assert tls and tls[0].agreement == 1
+
+
+def test_h7_the_only_fact_path_is_the_runner_redrive_not_the_family_route():
+    """An oracle-mapped tool with NO runner provisioned reaches the runner dispatch and stays a LEAD; the
+    family route/vote never substitutes a FACT for it. Minting is the runner-owned re-drive's job alone."""
+    from vigil_integration.live.oracle_families import route
+
+    r = route("nmap", env={})            # DEFAULT-OFF flag → routing emits a LEAD, no mint
+    assert r.verdict == "LEAD" and r.mint_via_redrive is False and r.fact_capable_family is True
+    out = HexstrikeAgentBody(runner=None).execute(
+        ProposedAction(kind="nmap", target="127.0.0.1", params={"ports": "80"}),
+        GateDecision(authorized=True))
+    assert out.executed is False and "runner not provisioned" in out.blocked_reason

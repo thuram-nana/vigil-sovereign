@@ -58,6 +58,9 @@ from .hexstrike_brain import (
     ToolDanger,
     parse_objective,
 )
+# H7: FACT-capability is a property of the tool's SHARED ORACLE FAMILY, not a per-tool flat set. The family
+# registry is pure stdlib (no framework import), so importing it at module scope is FATAL-2 safe.
+from ..live.oracle_families import ToolObservation, family_for, fuse, oracle_mapped_tools
 
 # brain tool name -> the runner-owned oracle-mapped ToolSpec builder. ONLY these can mint a FACT (via the
 # runner's own independent re-drive); every other tool stays a LEAD. Adding a tool = adding a ToolSpec +
@@ -67,7 +70,15 @@ from .hexstrike_brain import (
 # The three extra port scanners are the H5 SERVICE_REACHABILITY reuse: they carry NO redrives on their
 # ToolSpec, so the runner re-proves every proposed port with its own gated handshake exactly as it does for
 # nmap — a port scanner's row is only a PROPOSAL, and only VIGIL's independent handshake mints the FACT.
-_ORACLE_MAPPED_TOOLS = frozenset({"nmap", "sslscan", "masscan", "rustscan", "naabu"})
+# The tools with a runner-owned ToolSpec builder in ``_spec_for_kind`` below — the ONLY tools whose FACT can
+# be minted by VIGIL's own gated re-drive. Kept in lock-step with ``_spec_for_kind`` by
+# ``test_oracle_mapped_tools_all_have_a_spec_builder_no_drift``.
+_SPEC_BUILDER_TOOLS = frozenset({"nmap", "sslscan", "masscan", "rustscan", "naabu"})
+# H7 — FACT-capability is derived from the SHARED ORACLE FAMILY, not hand-listed per tool: a spec-builder
+# tool mints only if its family owns a re-drive that crosses ``verdict.admit()`` (network-discovery →
+# SERVICE_REACHABILITY for the four port scanners; tls → TLS_WEAKNESS for sslscan). Adding a member to a
+# FACT-capable family that also gains a spec builder makes it FACT-capable automatically — no edit here.
+_ORACLE_MAPPED_TOOLS = oracle_mapped_tools(_SPEC_BUILDER_TOOLS)
 # a provenance/context/authorization key must NEVER originate from the body/brain (red-pen HIGH-3 guard).
 _FORBIDDEN_EXEC_KEYS = frozenset({"provenance", "oracle_context", "_authorized", "authorized"})
 
@@ -177,6 +188,23 @@ class HexstrikeAgentBody(AgentBody):
         self.think(observation)                 # sets self._profile / self._host (no network)
         self._queue = self._build_chain()
         return self._profile, list(self._queue)
+
+    # ---- family votes (H7: agreement raises PRIORITY, never mints) -------------------------------
+    def family_votes(self) -> list:
+        """The current chain's tools fused BY SHARED ORACLE FAMILY into per-family LEADs, with priority
+        raised on agreement. When several proposed tools belong to the SAME family against this host — the
+        four network-discovery port scanners, say — their agreement is a stronger reason to LOOK, so the
+        family's LEAD is prioritised. It is NEVER a fact: every returned ``FamilyVote`` is a LEAD by
+        construction (``oracle_families.fuse``), no matter how many tools agree or whether the family is
+        FACT-capable. Minting stays the runner-owned re-drive's job alone.
+
+        Keyed on this host, so tools in one family voting about the same target fuse into one lead; a tool in
+        no discovery family (an excluded offense binary the brain proposed) simply does not vote."""
+        chain = self._queue or self._build_chain()
+        host = self._host or (self._profile.target if self._profile is not None else "")
+        obs = [ToolObservation(tool=s.tool, observation_key=host, base_priority=int(s.priority))
+               for s in chain if family_for(s.tool) is not None]
+        return fuse(obs)
 
     # ---- propose (one step per cycle; a LEAD) ----------------------------------------------------
     def propose(self, thought: Thought) -> Optional[ProposedAction]:
