@@ -249,3 +249,117 @@ def test_httpx_is_pinned_in_the_offense_lock() -> None:
 def test_dependency_parser_can_fail_negative_control() -> None:
     """NEGATIVE CONTROL. A package that is NOT a crucible dependency must not be reported as one."""
     assert "definitely-not-a-real-dep-xyz" not in _crucible_hard_deps()
+
+
+# --------------------------------------------------------------------------------------
+# W1-7 (#416) — the AEGIS runtime is ALIGNED to the Python minor the committed locks target.
+#
+# `aegis/Dockerfile` used to pin `python:3.11-slim` while the locks (and every CI job, and the sibling
+# `gateway/Dockerfile` data-plane image) target 3.13 — so the interpreter that SHIPS in the AEGIS image
+# was the one version CI never exercised. These guards DERIVE both sides from the tree and assert they
+# are equal, so the alignment cannot silently rot back. Each is paired with a NEGATIVE CONTROL proving
+# the detector can fail (a green is evidence, not a vacuous pass). Pure stdlib file reads — no Docker
+# daemon, no network — so this runs in the sovereign integration leg alongside the checks above.
+# --------------------------------------------------------------------------------------
+
+BUILD_ENVS = REPO_ROOT / "envs/build_envs.sh"
+GATEWAY_DOCKERFILE = REPO_ROOT / "gateway/Dockerfile"
+
+
+def _dockerfile_python_minor(dockerfile_text: str) -> str | None:
+    """The `major.minor` of a Dockerfile's python base, read from the first non-comment `FROM`/`ARG`
+    line that names `python:X.Y` — so both the direct form (`FROM python:3.13-slim@sha256:…`, the AEGIS
+    image) and the build-arg form (`ARG PYTHON_BASE=python:3.13-slim@…` + `FROM ${PYTHON_BASE}`, the
+    gateway image) resolve. Whole-line `#` comments are skipped first, so a commented example base can
+    never be mistaken for the real pin. None when no python base is named."""
+    for raw in dockerfile_text.splitlines():
+        s = raw.strip()
+        if s.startswith("#"):
+            continue
+        if re.match(r"(?i)^(FROM|ARG)\b", s):
+            m = re.search(r"\bpython:(\d+\.\d+)", s)
+            if m:
+                return m.group(1)
+    return None
+
+
+def _locked_python_minor() -> str | None:
+    """The Python minor the committed hash-locks target — the interpreter `envs/build_envs.sh` pins when
+    it builds the two locked environments (`python3.13`). That script is the authoritative declaration of
+    "the minor the locks target" (it says so in its own header and pins the interpreter accordingly), so
+    it is the single source of truth these guards compare the image pins against. Parsed statically."""
+    if not BUILD_ENVS.is_file():
+        return None
+    m = re.search(r"command -v python(\d+\.\d+)", BUILD_ENVS.read_text(encoding="utf-8"))
+    return m.group(1) if m else None
+
+
+def _python_pin_drift(dockerfile_text: str, locked_minor: str) -> str | None:
+    """Return a human description of the drift when `dockerfile_text`'s python base does not equal
+    `locked_minor`, else None. The pure predicate both the positive test and the negative control run
+    through, so the negatives prove the very code the positive relies on actually rejects bad input."""
+    pin = _dockerfile_python_minor(dockerfile_text)
+    if pin is None:
+        return "no `FROM python:X.Y` base pin found"
+    if pin != locked_minor:
+        return f"pins python:{pin} but the committed locks target python:{locked_minor}"
+    return None
+
+
+def aegis_python_pin_drift() -> str | None:
+    """The ENFORCING predicate of the W1-7 claim: None IFF the AEGIS Dockerfile's python base equals the
+    minor the committed locks target. A non-None result is the drift that turns the claim red."""
+    locked = _locked_python_minor()
+    if locked is None:
+        return "could not resolve the locked Python minor from envs/build_envs.sh"
+    return _python_pin_drift(AEGIS_DOCKERFILE.read_text(encoding="utf-8"), locked)
+
+
+def test_locked_python_minor_resolves() -> None:
+    """Anti-vacuous: the source of truth parses, so the equality below is a real comparison and not a
+    `None == None` pass."""
+    locked = _locked_python_minor()
+    assert locked is not None and re.fullmatch(r"\d+\.\d+", locked), (
+        f"could not read the locked Python minor from {BUILD_ENVS.relative_to(REPO_ROOT)}"
+    )
+
+
+def test_aegis_runtime_python_is_aligned_to_the_locked_target() -> None:
+    """The AEGIS image's Python base equals the minor the locks target — so the runtime that ships is the
+    one CI exercises. FAILS on the pre-fix tree (aegis pinned 3.11 while the locks target 3.13)."""
+    drift = aegis_python_pin_drift()
+    assert drift is None, (
+        f"the AEGIS Dockerfile is not aligned to the locked Python target: {drift}. Align "
+        f"{AEGIS_DOCKERFILE.relative_to(REPO_ROOT)}'s `FROM python:` base to the locked minor (and re-pin "
+        "its digest), or the shipped runtime is a version CI never exercises (W1-7 #416)."
+    )
+
+
+def test_gateway_and_aegis_share_the_locked_python_base() -> None:
+    """Both public-facing data-plane images (the P6 egress gateway and the AEGIS sidecar) sit on the SAME
+    locked Python minor — a second, independent witness that the alignment is to the real shipped base
+    and not merely to a number in a build script."""
+    locked = _locked_python_minor()
+    aegis = _dockerfile_python_minor(AEGIS_DOCKERFILE.read_text(encoding="utf-8"))
+    gateway = _dockerfile_python_minor(GATEWAY_DOCKERFILE.read_text(encoding="utf-8"))
+    assert aegis == gateway == locked, (
+        f"data-plane python bases disagree: aegis={aegis}, gateway={gateway}, locked={locked}"
+    )
+
+
+def test_python_pin_drift_is_not_vacuous_negative_control() -> None:
+    """NEGATIVE CONTROL. The drift predicate FIRES on a Dockerfile pinning a different minor than the
+    locked target (the gate is not a no-op), passes one that matches (it is not always-red), and the
+    extractor reads the real `FROM`/`ARG` pin — not a commented example — and returns None for a
+    non-python base."""
+    locked = _locked_python_minor()
+    assert locked is not None
+    bad = f"FROM python:2.7-slim@sha256:{'0' * 64}\n"
+    assert _python_pin_drift(bad, locked) is not None, "a mismatched python pin must be flagged"
+    good = f"FROM python:{locked}-slim@sha256:{'0' * 64}\n"
+    assert _python_pin_drift(good, locked) is None, "a pin equal to the locked target must pass"
+    assert _dockerfile_python_minor("# FROM python:3.9-slim  (an example in a comment)\n") is None
+    assert _dockerfile_python_minor("FROM scratch\n") is None
+    assert _dockerfile_python_minor(
+        "ARG PYTHON_BASE=python:3.13-slim@sha256:" + "a" * 64 + "\nFROM ${PYTHON_BASE}\n"
+    ) == "3.13"

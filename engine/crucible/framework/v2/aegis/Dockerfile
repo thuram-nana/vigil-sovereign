@@ -18,12 +18,15 @@
 # Full walkthrough: framework/v2/aegis/QUICKSTART.md.
 #
 # A14 (supply chain): digest-pinned. This is a public-facing DATA PLANE — it sits inline in front
-# of someone's app — so "whatever :3.11-slim resolves to today" is not an acceptable provenance
+# of someone's app — so "whatever :3.13-slim resolves to today" is not an acceptable provenance
 # story for it. A digest is content-addressed: it either matches or the pull fails.
 # Re-pin with: bash infra/supply-chain/resolve-image-digests.sh   (see docs/SUPPLY-CHAIN.md)
-# python:3.11-slim, resolved 2026-08-12.
+# python:3.13-slim, resolved 2026-08-12 (same base + digest as gateway/Dockerfile). ALIGNED to the
+# 3.13 minor the committed locks target (W1-7 #416): the previous 3.11 pin was the one interpreter CI
+# never exercised. integration/tests/test_aegis_dockerfile_wired.py asserts this pin equals the locked
+# target and turns red if either side drifts.
 
-FROM python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff
+FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
 
 # --- build + install the package (the repo-root pyproject delivers importable framework.v2) ---
 WORKDIR /src

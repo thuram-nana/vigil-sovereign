@@ -115,6 +115,14 @@ KNOWN_ADVISORY: dict[str, str] = {
         "required check until that secret exists, or it would block every PR as a no-op. The committed "
         "artifacts are pinned offline by this very test."
     ),
+    "python-compat": (
+        "ci.yml (W1-7 #416) — the cross-version matrix (Python 3.12 + 3.13) for the version-sensitive, "
+        "stdlib-only guard suite (AEGIS runtime alignment + the env-gate guard). Advisory because the "
+        "committed hash-locks target 3.13, so the FULL suites cannot yet run under 3.12; promoting this "
+        "to a merge blocker needs the operator's tools/governance/require-checks.sh --apply. The alignment "
+        "invariant it exercises is ALSO proven in the REQUIRED 'integration two-env boundary (P5)' job on "
+        "3.13, so no coverage is lost by leaving this advisory."
+    ),
 }
 
 # Jobs that never run on a pull_request at all (push/tag or schedule/dispatch only) and so CANNOT be a PR

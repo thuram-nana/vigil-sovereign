@@ -943,6 +943,46 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W1-7",
+      "title": "AEGIS runtime Python is aligned to the locked target",
+      "claim": "The AEGIS gateway Dockerfile pins the same Python minor the committed locks target, and a required CI test asserts the two are equal and turns red if either the Dockerfile pin or the locked target drifts.",
+      "source": "docs/decisions/W1-7-aegis-runtime-aligned-to-locked-python.md:29",
+      "enforced_by": {
+        "file": "integration/tests/test_aegis_dockerfile_wired.py",
+        "symbol": "aegis_python_pin_drift"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_aegis_dockerfile_wired.py",
+        "tests": [
+          "test_aegis_runtime_python_is_aligned_to_the_locked_target",
+          "test_python_pin_drift_is_not_vacuous_negative_control"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W1-4",
+      "title": "No test is gated on an env var no workflow sets",
+      "claim": "Every environment variable a test's skipif consults is either set by a CI workflow so the test runs, or a documented cannot-run-on-hosted-CI exemption, and a guard turns the build red otherwise; the gateway container bring-up test's VIGIL_GATEWAY_DOCKER_IT gate is set by the required gateway job.",
+      "source": "docs/decisions/W1-4-gateway-bringup-runs-in-ci.md:31",
+      "enforced_by": {
+        "file": "gateway/tests/test_env_gated_tests_run_in_ci.py",
+        "symbol": "_env_gates_without_a_setter"
+      },
+      "proved_by": {
+        "file": "gateway/tests/test_env_gated_tests_run_in_ci.py",
+        "tests": [
+          "test_no_test_is_gated_on_an_env_var_no_workflow_sets",
+          "test_env_gate_guard_is_not_vacuous_negative_control"
+        ]
+      },
+      "ci_job": "gateway egress gate (P6)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
