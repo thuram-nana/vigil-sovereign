@@ -27,7 +27,10 @@ from vigil_integration.live.external_tool import (  # noqa: E402
     masscan_service_scan,
     naabu_service_scan,
     nmap_service_scan,
+    run_external_tool,
     rustscan_service_scan,
+    unicornscan_service_scan,
+    zmap_service_scan,
 )
 
 _SIGNER = generate_keypair()
@@ -244,3 +247,131 @@ def test_h5_reachability_toolspec_passes_the_full_conformance_battery(tool: str,
     from vigil_integration.live.conformance import REQUIRED_PROPERTIES
     for prop in REQUIRED_PROPERTIES:
         assert report.checks.get(prop) is True, f"{tool}: {prop} not satisfied: {report.summary()}"
+
+
+# ===================================================================================================
+# H5 BATCH 2 — MORE network-discovery ToolSpecs (zmap / unicornscan), LEAD-ONLY BY DEFAULT.
+#
+# Per the H5 checkpoint these ship LEAD-only by default: VIGIL performs its OWN gated capture_handshake
+# against each proposed port and the oracle fires, but the outcome is admitted to the LEAD-only
+# hexstrike.service_reachability branch (fired over a non-FACT-capable branch => LEAD, never a FACT).
+# Constructing the spec with fact_capable=True (DEFAULT-OFF, flag-gated) routes the IDENTICAL re-drive to the
+# already-FACT-capable service_reachability.tcp_handshake twin — the sanctioned FACT path (an EXISTING
+# FACT-capable family, VIGIL's own re-drive crossing admit()); no new oracle, no new FACT branch. These
+# tests prove (a) the PROMOTED spec passes the FULL conformance battery through the real gated runner, and
+# (b) the DEFAULT spec emits a channel-confirmed LEAD and NEVER a FACT, and (c) every flag is server-side
+# (a model/brain-supplied value is rejected at build time), so no flag reaches the tool.
+# ===================================================================================================
+
+
+def _h5b_promoted_spec(tool: str, port: int):
+    """The FACT-mode (flag-gated ON) spec — used only to PROVE fact-readiness via the existing family."""
+    if tool == "zmap":
+        return zmap_service_scan(port=port, fact_capable=True)
+    return unicornscan_service_scan(ports=str(port), fact_capable=True)
+
+
+def _h5b_default_spec(tool: str, port: int):
+    """The shipped DEFAULT spec — LEAD-only."""
+    if tool == "zmap":
+        return zmap_service_scan(port=port)
+    return unicornscan_service_scan(ports=str(port))
+
+
+def _h5b_stdout(tool: str, port: int) -> str:
+    """Each tool's REAL-format output line proposing the given port (host pinned to the target by the parser,
+    never read from the tool's bytes)."""
+    if tool == "zmap":
+        return "127.0.0.1\n"      # zmap prints one responding IP per line for the single scanned port
+    if tool == "unicornscan":
+        return f"TCP open  svc[ {port}]  from 127.0.0.1  ttl 64\n"
+    raise AssertionError(tool)
+
+
+@pytest.mark.parametrize("tool", ["zmap", "unicornscan"])
+def test_h5_batch2_toolspec_passes_full_conformance_in_promoted_fact_mode(tool: str, tmp_path):
+    """The PROMOTED (fact_capable=True) spec passes the full conformance battery through the REAL gated
+    runner — the gate the matrix requires before the FACT path may be turned on. HERMETIC: the tool binary
+    need not be installed; the FACT is the runner's OWN gated handshake against a real open loopback port,
+    the canned backend only supplies each tool's real-format proposal."""
+    from framework.v2.authority import KillSwitch
+
+    _charter(tmp_path, "127.0.0.1")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    open_port = srv.getsockname()[1]
+    tmp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tmp.bind(("127.0.0.1", 0))
+    closed_port = tmp.getsockname()[1]
+    tmp.close()
+
+    halt = tmp_path / "alpha.halt"
+    try:
+        report = run_toolspec_conformance(
+            tool_name=tool,
+            positive_spec=_h5b_promoted_spec(tool, open_port),
+            positive_backend=_CannedBackend(_h5b_stdout(tool, open_port)),
+            deceptive_spec=_h5b_promoted_spec(tool, closed_port),
+            deceptive_backend=_CannedBackend(_h5b_stdout(tool, closed_port)),
+            target="127.0.0.1",
+            scope_gate_in=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+            scope_gate_out=ScopeGate(scope=StaticScopeSource(["10.99.99.99"]), loopback_allowed_if_scoped=True),
+            engagement_slug="alpha", signers=SIGNERS, trust_root=TRUST,
+            trip_killswitch=lambda: KillSwitch("alpha").trip("conformance"),
+            clear_killswitch=lambda: halt.unlink(missing_ok=True),
+            timeout=30.0)
+    finally:
+        srv.close()
+
+    assert report.conformant, report.summary() + " | notes: " + "; ".join(report.notes)
+    from vigil_integration.live.conformance import REQUIRED_PROPERTIES
+    for prop in REQUIRED_PROPERTIES:
+        assert report.checks.get(prop) is True, f"{tool}: {prop} not satisfied: {report.summary()}"
+
+
+@pytest.mark.parametrize("tool", ["zmap", "unicornscan"])
+def test_h5_batch2_default_spec_is_lead_only_never_a_fact(tool: str, tmp_path):
+    """LEAD-by-default (the H5 checkpoint): the SHIPPED default spec, run against a REAL open loopback port,
+    yields a channel-confirmed LEAD (VIGIL's own handshake fired) and mints ZERO facts — the fired oracle is
+    admitted to the LEAD-only hexstrike.service_reachability branch. This is the runtime proof that the
+    adapter 'emits LEADs; mints no new live FACT by default'."""
+    _charter(tmp_path, "127.0.0.1")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    open_port = srv.getsockname()[1]
+    try:
+        res = run_external_tool(
+            _h5b_default_spec(tool, open_port), "127.0.0.1",
+            scope_gate=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+            backend=_CannedBackend(_h5b_stdout(tool, open_port)),
+            engagement_slug="alpha", signers=SIGNERS, timeout=30.0)
+    finally:
+        srv.close()
+
+    assert res.status == "ran", res.reason
+    assert res.proposed, f"{tool}: the tool proposed no service (fixture wrong)"
+    assert res.facts == [], f"{tool}: minted a FACT by DEFAULT — must be LEAD-only per the H5 checkpoint"
+    assert res.leads, f"{tool}: expected a channel-confirmed LEAD by default, got none"
+    # the LEAD was admitted to the LEAD-only hexstrike branch (never the FACT-capable twin)
+    lead = res.leads[0]
+    assert not getattr(lead, "is_fact", False)
+
+
+def test_h5_batch2_argv_is_server_side_and_rejects_model_supplied_values():
+    """The typed-schema property: build_argv is a FIXED server-side construction and every free value passes
+    a STRICT schema, so a model/brain-supplied value that could inject a flag is rejected at build time —
+    never reaching the tool argv."""
+    for bad in ("80; rm -rf /", "$(id)", "-oG -", "1-2,3", "80,443", "0", "70000", ""):
+        with pytest.raises(ValueError):
+            zmap_service_scan(port=bad)
+    for bad in ("80;rm", "$(id)", "-p 22", "a-b", "", "1-2-3"):
+        with pytest.raises(ValueError):
+            unicornscan_service_scan(ports=bad)
+    # a valid spec builds a fixed server-side argv: no positional the model controls beyond the (already
+    # scope-authorised) target, and no free-form flag.
+    assert zmap_service_scan(port=443).build_argv("10.0.0.5") == \
+        ["zmap", "-p", "443", "-q", "-o", "-", "10.0.0.5"]
+    assert unicornscan_service_scan(ports="22,80").build_argv("10.0.0.5") == \
+        ["unicornscan", "-mT", "10.0.0.5:22,80"]
