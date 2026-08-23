@@ -21,9 +21,12 @@ import os
 import pytest
 
 pytest.importorskip("agents.sandbox.entries")  # session_manager / cli import the SDK at module load
-
-from strix.runtime import sandbox_hardening as sh
-from strix.runtime import session_manager
+# session_manager also pulls the full strix runtime dep chain (strix.config.settings -> pydantic-settings,
+# runtime.backends -> docker). The SDK-only P8 CI job installs `agents`+litellm but NOT those, so import via
+# importorskip: RUN where the full strix runtime is present, SKIP cleanly (never ERROR at collection) where a
+# transitive dep is absent. The container-removal PRIMITIVES stay covered SDK-free in test_sandbox_hardening.py.
+sh = pytest.importorskip("strix.runtime.sandbox_hardening")
+session_manager = pytest.importorskip("strix.runtime.session_manager")
 
 
 # --- duck-typed fake docker client (matches sandbox_hardening's use) -------------------------------
