@@ -1348,6 +1348,29 @@
       "ci_job": "CRUCIBLE core on vigil_core",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W15-3",
+      "title": "The claim-vs-enforcement audit is code-grounded and machine-checked",
+      "claim": "Every enforcement-flavoured claim enumerated in `docs/audit/claim-audit.json` carries a verdict (TRUE, SCOPED, FALSE, or UNVERIFIABLE) and a deciding code reference that resolves, every FALSE or SCOPED verdict is pinned by a claims-registry entry, and all eight audited surfaces are represented — or the build goes red.",
+      "source": "docs/claim-audit.md:1",
+      "enforced_by": {
+        "file": "docs/tests/test_claim_vs_enforcement_audit.py",
+        "symbol": "validate_audit_entry"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_claim_vs_enforcement_audit.py",
+        "tests": [
+          "test_every_audit_entry_is_valid",
+          "test_every_false_or_scoped_verdict_is_pinned_by_a_registry_entry",
+          "test_all_eight_named_surfaces_are_represented",
+          "test_no_false_self_verifiable_claim_is_left_unflagged",
+          "test_negative_control_false_without_registry_is_rejected"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

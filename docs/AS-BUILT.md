@@ -305,7 +305,7 @@ only *proposes*, the oracle judges the bytes); the per-action **cryptographic ap
 (`integration/vigil_integration/live/approval_token.py`, M2 — single-use `O_EXCL` nonce, action-bound, owner-signed,
 expiry-checked; consumed inside the conjunctive gate); the live **telemetry-collector sidecar**
 (`integration/vigil_integration/telemetry.py`, G2 — `vigil up --with-telemetry`); the **bwrap-isolated `sandbox.exec`
-runner** (`integration/vigil_integration/live/sandbox_exec.py`, `--unshare-net` + minimal RO allowlist); the live
+runner** (`integration/vigil_integration/live/sandbox_exec.py`, `--unshare-all` + minimal RO allowlist); the live
 **external**, network-egress engagement (§2.1 Live L2 — done against `testasp.vulnweb.com`, 2/2 re-verified).
 
 Still deferred (need a live external service / silicon): a running **external** Neo4j/OTLP service
