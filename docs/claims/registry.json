@@ -832,6 +832,74 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W7-1",
+      "title": "RPO/RTO are defined numerically and the recovery drill asserts them (fail-closed)",
+      "claim": "VIGIL states its disaster-recovery objectives numerically — RPO = 24 hours (the daily backup / off-host-push cadence) and RTO = 30 minutes (the `vigil restore` data-restore budget) — and the recovery drill ASSERTS them: it times the real restore and measures the age of the backup it restored, and fails fail-closed when the recovery time exceeds the RTO or the data loss exceeds the RPO. The RTO covers the automated data restore only, not manual detection / decision / hardware / DNS cutover, which stays the operator's runbook time.",
+      "source": "docs/decisions/W7-1-rpo-rto-objectives-and-drill.md:37",
+      "enforced_by": {
+        "file": "tools/backup/objectives.py",
+        "symbol": "assert_within_objectives"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_backup_dr_objectives.py",
+        "tests": [
+          "test_objectives_are_stated_as_sane_numbers",
+          "test_assert_fails_when_recovery_exceeds_the_rto",
+          "test_assert_fails_when_data_loss_exceeds_the_rpo",
+          "test_objectives_cli_fails_closed_on_a_stale_backup",
+          "test_drill_passes_within_objectives_and_reports_them",
+          "test_drill_FAILS_when_the_restore_exceeds_the_rto"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W7-3a",
+      "title": "The offense recovery drill covers retained/pruned + pushed backups and detects a corrupted one",
+      "claim": "The offense recovery drill covers more than a freshly-minted backup: it restores a backup that has been through retention and pruning, and one fetched from the off-host push destination, and re-verifies each; and a corrupted retained backup is detected fail-closed — a non-zero restore that writes no spine/keys to the destination — rather than restored silently broken.",
+      "source": "docs/decisions/W7-3-drill-retained-pushed-sovereign.md:36",
+      "enforced_by": {
+        "file": "integration/vigil_integration/backup.py",
+        "symbol": "restore_offense_backup"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_backup_dr_drill_coverage.py",
+        "tests": [
+          "test_drill_restores_a_retained_pruned_backup",
+          "test_drill_restores_the_pushed_off_host_copy",
+          "test_negative_control_corrupted_retained_backup_is_detected_by_the_cli",
+          "test_negative_control_inner_body_tamper_raises_and_leaves_destination_untouched"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W7-3b",
+      "title": "The sovereign plane is drilled: restore re-verifies the signed chain, retained restores, corruption detected",
+      "claim": "The sovereign plane is drilled too: a create→restore round-trip into a fresh home re-verifies the restored spine's signed chain after restore, a retained (superseded) sovereign backup still restores to its exact point-in-time state, and a corrupted retained sovereign backup is detected fail-closed rather than restored silently broken.",
+      "source": "docs/decisions/W7-3-drill-retained-pushed-sovereign.md:46",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/backup.py",
+        "symbol": "restore_backup"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_backup_recovery_drill_sovereign.py",
+        "tests": [
+          "test_sovereign_drill_restores_and_reverifies_the_signed_chain",
+          "test_sovereign_drill_of_a_retained_superseded_backup",
+          "test_negative_control_corrupted_retained_sovereign_backup_is_detected",
+          "test_negative_control_a_tampered_record_in_a_retained_backup_fails_reverify"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
