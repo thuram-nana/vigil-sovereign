@@ -228,6 +228,31 @@
       ]
     },
     {
+      "id": "hexstrike.service_reachability",
+      "check": "capture_handshake",
+      "evidence": "VIGIL's own completed TCP handshake against a host/port a HexStrike port-scanner (zmap/unicornscan) PROPOSED. The FACT-capable twin is service_reachability.tcp_handshake; this branch holds the SAME VIGIL-owned re-drive LEAD-only by default.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "gate_authorized"
+      ],
+      "limitation": "LEAD-only by default (H5 checkpoint): VIGIL performs its OWN gated capture_handshake against the proposed host/port and the deterministic oracle fires, but the result is admitted here and held as a LEAD rather than minted as a FACT. Promotion routes the identical re-drive to the already-FACT-capable service_reachability.tcp_handshake branch; until promoted this branch may neither confirm nor clear on its own.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Clean-capability (a closed-port channel-confirmed negative) belongs to the VIGIL-owned service_reachability.tcp_handshake branch; this default-LEAD proposer routes into that branch once promoted and is not itself an absence-prover, so clean-capability is deliberately not pursued on this LEAD-only twin.",
+      "blocking_work": "Promotion to FACT is via the already-FACT-capable service_reachability.tcp_handshake branch: construct the port-scanner ToolSpec with fact_capable=True so VIGIL's own capture_handshake re-drive admits there instead. The oracle, the gated capture and the re-drive are all wired and pass live.conformance.run_toolspec_conformance; per the H5 checkpoint the FACT path ships DEFAULT-OFF/flag-gated pending the operator promotion decision, so the shipped default emits a LEAD.",
+      "evidence_surface": "transport",
+      "implementation_refs": [
+        "integration/vigil_integration/live/external_tool.py:zmap_service_scan",
+        "engine/crucible/framework/v2/verify/reachability.py:capture_handshake"
+      ],
+      "oracle_version": "",
+      "control_requirements": [
+        "vigil_owned_tcp_handshake",
+        "warden_scope_gate"
+      ]
+    },
+    {
       "id": "tls_weakness.tls_handshake",
       "check": "capture_tls_handshake",
       "evidence": "VIGIL's own TLS handshake and the certificate the peer presented",

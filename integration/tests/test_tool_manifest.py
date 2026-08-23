@@ -175,3 +175,37 @@ def test_the_strix_candidate_families_are_lead_only_in_the_committed_registry():
         assert b["fact_capable"] is False, f"{bid}: must be LEAD-only"
         assert b.get("oracle_version", "") == "", f"{bid}: LEAD-only branch must name no oracle_version"
         assert validate_branch_row(b) == [], f"{bid}: fails the S8-column validator"
+
+
+def test_h5_batch2_reuse_tools_are_present_lead_only_service_reachability():
+    """H5 batch 2: zmap/unicornscan are adapted as MORE network-discovery PROPOSERS that REUSE the existing
+    SERVICE_REACHABILITY family via VIGIL's own re-drive, but ship LEAD-only BY DEFAULT (the checkpoint). Each
+    must be present, NOT fact_capable (the FACT path is flag-gated OFF, so the pinned fact set is unchanged),
+    name the SERVICE_REACHABILITY family, be a non-excluded active-assessment scanner, and carry a reason."""
+    by = {m.name: m for m in load_manifests(_MATRIX)}
+    for name in ("zmap", "unicornscan"):
+        assert name in by, f"H5 batch-2 tool {name!r} missing from the capability matrix"
+        m = by[name]
+        assert m.fact_capable is False, f"{name}: LEAD-only by default (FACT path is flag-gated OFF)"
+        assert m.oracle_family == "SERVICE_REACHABILITY", f"{name}: reuses the SERVICE_REACHABILITY family"
+        assert m.excluded is False, f"{name}: a reachability proposer is not excluded"
+        assert m.category == "active-assessment", f"{name}: a port scanner actively probes"
+        assert m.notes.strip() and "LEAD-only" in m.notes, f"{name}: must carry a LEAD-only reason"
+    # the pinned fact_capable set is UNCHANGED — the batch added LEAD-only rows, never a new FACT claim
+    fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
+    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu"}, f"fact set changed: {fact}"
+
+
+def test_h5_batch2_lead_branch_is_registered_lead_only_transport():
+    """The LEAD-only twin the batch adds: hexstrike.service_reachability. It admits VIGIL's OWN handshake as a
+    LEAD (fired over a non-FACT-capable branch), and promotion routes the SAME re-drive to the FACT-capable
+    service_reachability.tcp_handshake branch. It must be registered LEAD-only (no oracle_version) and pass
+    the S8-column validator."""
+    by = {b["id"]: b for b in load_branch_registry(_BRANCHES)}
+    b = by.get("hexstrike.service_reachability")
+    assert b is not None, "hexstrike.service_reachability LEAD branch missing from the registry"
+    assert b["fact_capable"] is False and b["clean_capable"] is False, "must be LEAD-only, neither fact nor clean"
+    assert b.get("oracle_version", "") == "", "a LEAD-only branch names no oracle_version"
+    assert b["evidence_surface"] == "transport", "reachability is a transport-surface branch"
+    assert b["target_fact_capable"] is True, "the FACT twin exists; the target is fact-capable (flag-gated)"
+    assert validate_branch_row(b) == [], f"fails the S8-column validator: {validate_branch_row(b)}"

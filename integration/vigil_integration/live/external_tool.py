@@ -476,6 +476,101 @@ def naabu_service_scan(*, ports: str = "1-1024") -> ToolSpec:
     return ToolSpec("naabu", build, propose, version_argv=lambda: ["naabu", "-version"], danger="recon")
 
 
+# --- H5 batch 2: MORE network-discovery ToolSpecs (zmap / unicornscan) — LEAD-ONLY BY DEFAULT ------
+# These extend the adapted set with two more real port scanners that REUSE the exact VIGIL-owned reachability
+# re-drive nmap/masscan use (``capture_handshake``). Per the H5 checkpoint they ship LEAD-only BY DEFAULT:
+# VIGIL still performs its OWN gated handshake against each proposed port and the deterministic oracle fires,
+# but the outcome is admitted to the LEAD-only ``hexstrike.service_reachability`` branch — ``admit`` maps a
+# fired oracle over a non-FACT-capable branch to a LEAD (never a FACT). Constructing a spec with
+# ``fact_capable=True`` (DEFAULT-OFF, flag-gated) routes the IDENTICAL re-drive to the already-FACT-capable
+# ``service_reachability.tcp_handshake`` twin — the sanctioned FACT path (an EXISTING FACT-capable family,
+# VIGIL's own re-drive crossing ``admit()``). No new oracle and no new FACT branch are added. Each parser
+# extracts ONLY a port and PINS the host to the already-scope-authorised ``target`` (never a host the tool
+# printed — nmap's scope-safety property), and every flag is built SERVER-SIDE from a STRICT validated schema,
+# so no model/brain-supplied flag can reach the tool.
+_HEXSTRIKE_REACHABILITY_LEAD_BRANCH = "hexstrike.service_reachability"
+
+# zmap prints one responding IP per line for the ONE port it scanned (default output field ``saddr``); the
+# port is fixed SERVER-SIDE, so a responding IP line means "that port is open" and the host is pinned to the
+# target — the printed IP is never trusted as the host.
+_IPV4_LINE = re.compile(r"^\s*(?:\d{1,3}\.){3}\d{1,3}\s*$")
+# unicornscan TCP result row: ``TCP open  <service>[ <port>]  from <ip>  ttl <n>`` — take the bracketed port.
+_UNICORNSCAN_OPEN = re.compile(r"\bopen\b[^\[\]]*\[\s*(\d{1,5})\s*\]")
+
+
+def _validate_single_port(port: int) -> int:
+    """Return the port as an int in 1..65535, or raise ``ValueError`` (STRICT single-value schema — a zmap
+    ``-p`` value scans exactly one port and may never carry a range, list, or flag)."""
+    p = int(port)
+    if not (1 <= p <= 65535):
+        raise ValueError(f"invalid port {port!r}: must be a single value in 1..65535 (server-side schema)")
+    return p
+
+
+def _reachability_redrives(fact_capable: bool) -> "tuple[Redrive, ...]":
+    """The runner-owned reachability re-drive for a proposed port.
+
+    ``fact_capable=False`` (DEFAULT) → an explicit re-drive to the LEAD-only ``hexstrike.service_reachability``
+    branch: VIGIL runs its OWN ``capture_handshake`` (``_default_capture``) and the fired oracle is admitted
+    as a LEAD. ``fact_capable=True`` (DEFAULT-OFF, flag-gated) → EMPTY, so ``run_external_tool`` uses its
+    injectable ``service_reachable`` fallback on the FACT-capable ``service_reachability.tcp_handshake``
+    branch — byte-for-byte the nmap/masscan/naabu FACT path. ``_default_capture`` / ``_reachable_context`` are
+    module globals defined below; this builder is only ever CALLED at spec-construction time, after import."""
+    if fact_capable:
+        return ()
+    return (Redrive("service_reachable", _default_capture, _reachable_context,
+                    branch=_HEXSTRIKE_REACHABILITY_LEAD_BRANCH),)
+
+
+def zmap_service_scan(*, port: int = 80, fact_capable: bool = False) -> ToolSpec:
+    """A :class:`ToolSpec` for zmap as a single-port PROPOSER of a reachable TCP service. ``build_argv`` emits
+    ``zmap -p <port> -q -o - <target>`` — all flags server-side, ``port`` a STRICT single-value schema, ``-q``
+    to silence status output and ``-o -`` to print responding IPs to stdout. ``propose`` yields ONE
+    :class:`ProposedService` PINNED to ``target`` at the scanned ``port`` when any responding IP line appears.
+    LEAD-only by default: the runner re-proves the port with its OWN gated handshake and admits to the
+    LEAD-only ``hexstrike.service_reachability`` branch. ``fact_capable=True`` (flag-gated) routes the SAME
+    re-drive to the FACT-capable ``service_reachability.tcp_handshake`` twin (the nmap/masscan family)."""
+    _validate_single_port(port)
+
+    def build(target: str) -> list[str]:
+        return ["zmap", "-p", str(int(port)), "-q", "-o", "-", target]
+
+    def propose(outcome: ToolOutcome, target: str) -> list[ProposedService]:
+        for line in (outcome.stdout or "").splitlines():
+            if _IPV4_LINE.match(line):
+                return [ProposedService(host=target, port=int(port), protocol="tcp")]
+        return []
+
+    return ToolSpec("zmap", build, propose, redrives=_reachability_redrives(fact_capable),
+                    version_argv=lambda: ["zmap", "--version"], danger="recon")
+
+
+def unicornscan_service_scan(*, ports: str = "1-1024", fact_capable: bool = False) -> ToolSpec:
+    """A :class:`ToolSpec` for unicornscan as a PROPOSER of open TCP ports. ``build_argv`` emits
+    ``unicornscan -mT <target>:<ports>`` — TCP mode, ``ports`` a STRICT validated schema and the target/ports
+    combined into one already-authorised argument (no positional a flag could ride). ``propose`` parses each
+    ``TCP open <service>[ <port>]`` row, taking ONLY the bracketed port and PINNING the host to ``target``.
+    LEAD-only by default (see :func:`zmap_service_scan`); ``fact_capable=True`` is the flag-gated FACT path on
+    the SERVICE_REACHABILITY twin. unicornscan's rows are never the FACT authority — VIGIL's handshake is."""
+    _validate_ports(ports)
+
+    def build(target: str) -> list[str]:
+        return ["unicornscan", "-mT", f"{target}:{ports}"]
+
+    def propose(outcome: ToolOutcome, target: str) -> list[ProposedService]:
+        seen: set[int] = set()
+        out: list[ProposedService] = []
+        for m in _UNICORNSCAN_OPEN.finditer(outcome.stdout or ""):
+            p = int(m.group(1))
+            if 0 < p < 65536 and p not in seen:
+                seen.add(p)
+                out.append(ProposedService(host=target, port=p, protocol="tcp"))
+        return out
+
+    return ToolSpec("unicornscan", build, propose, redrives=_reachability_redrives(fact_capable),
+                    version_argv=lambda: ["unicornscan", "-v"], danger="recon")
+
+
 # --- TLS posture re-drives (weak protocol/cipher + broken-hash cert) -------------------------------
 # The runner negotiates its OWN bounded, gated TLS handshake (capture_tls_handshake, the same audited gate
 # as reachability) and judges THAT with the pure tls/weak-crypto oracles — never sslscan's output rows.
