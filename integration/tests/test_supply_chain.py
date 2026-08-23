@@ -477,7 +477,10 @@ def test_a14_workflow_declares_every_leg_of_the_gate() -> None:
         "the built gateway image is scanned": "trivy image",
         "the image is tagged by content address": "--context-tag",
         "the shipped Strix image layer is scanned via its SBOM": "trivy sbom",
-        # W3-8 (#431): resolvable base-image drift BLOCKS; a future edit must not make it advisory again.
+        # W3-8 (#431): the drift STEP runs --fail-on-drift, so resolvable drift BLOCKS the job. Option A
+        # (#431) makes ONLY a documented rolling base (image_pins.py::_ADVISORY_ROLLING_DRIFT) advisory
+        # WITHIN the tool; the workflow step itself is never continue-on-error and still blocks every other
+        # resolvable move — asserted by test_workflow_drift_step_blocks_and_is_not_advisory.
         "base-image drift blocks resolvable movement": "--fail-on-drift",
         # W3-10 (#433): the PEP 517 build backends are hash-locked and the non-Python locks are verified.
         "build backends are hash-locked": "build-backends.lock.txt",
@@ -1710,6 +1713,12 @@ def test_ci_tooling_lock_agrees_with_runtime_locks_on_shared_packages() -> None:
 
 _HUB_REF = "python:3.13-slim@sha256:" + "a" * 64
 _GHCR_REF = "ghcr.io/owner/image:1.2@sha256:" + "b" * 64
+#: A DOCUMENTED rolling base (image_pins.py::_ADVISORY_ROLLING_DRIFT) — its repository normalises to
+#: exactly the allowlist key "kalilinux/kali-rolling"; it lives in vendor/strix/containers/Dockerfile.
+_KALI_ROLLING_REF = "kalilinux/kali-rolling:latest@sha256:" + "a" * 64
+#: A stable service tag Option A deliberately RE-PINNED (docker-compose.yml). Its repository normalises
+#: to "library/neo4j" — NOT allowlisted — so its drift must still BLOCK (the negative control).
+_NEO4J_REF = "neo4j:5-community@sha256:" + "a" * 64
 
 
 def _pinned_ref(pins, ref):
@@ -1787,6 +1796,169 @@ def test_drift_summary_makes_unknowns_visible(tmp_path: Path) -> None:
     assert "UNKNOWN" in body and "ghcr.io/owner/image" in body
 
 
+# ------------------------------------------------------------------------------------------
+# W3-8 (#431) Option A — a DOCUMENTED rolling base's drift is ADVISORY (surfaced, never blocking);
+# EVERY other resolvable move still BLOCKS. All OFFLINE: a stub resolver drives the pure logic, so a
+# negative control proves the gate did NOT turn off. Each test fails on a revert (see the revert-proof
+# test at the end of this block, which simulates dropping the allowlist entry).
+# ------------------------------------------------------------------------------------------
+
+
+def test_allowlisted_rolling_drift_is_advisory_not_blocking(tmp_path: Path, capsys) -> None:
+    """A DOCUMENTED rolling base (kalilinux/kali-rolling) whose digest MOVED classifies
+    DRIFT_MOVED_ADVISORY: is_drift is False, run_drift does NOT block even with --fail-on-drift armed,
+    and the move is SURFACED (a `~~` line, a `rolling ADVISORY: 1` count, AND the GitHub step summary).
+    Fails on a revert — without the allowlist branch the same ref classifies DRIFT_MOVED (proven by
+    test_reverting_the_allowlist_makes_the_rolling_drift_block)."""
+    pins = _load_image_pins()
+    ref = _pinned_ref(pins, _KALI_ROLLING_REF)
+    # the ref's repository is EXACTLY the allowlist key — the classification is not an accident of parsing.
+    assert ref.repository == "kalilinux/kali-rolling"
+    assert ref.repository in pins._ADVISORY_ROLLING_DRIFT
+
+    def moved(_r):
+        return pins.Resolution(supported=True, digest="sha256:" + "9" * 64)
+
+    results = pins.evaluate_drift([ref], moved)
+    assert len(results) == 1
+    r0 = results[0]
+    assert r0.status == pins.DRIFT_MOVED_ADVISORY
+    assert r0.is_advisory_drift and not r0.is_drift and not r0.is_unknown
+
+    # The point of Option A: advisory drift does NOT block, even under --fail-on-drift.
+    summary = tmp_path / "summary.md"
+    assert pins.run_drift([ref], moved, fail_on_drift=True, summary_path=str(summary)) == 0
+    # ...and even the strictest --fail-on-unknown does not turn advisory drift into a block.
+    assert pins.run_drift([ref], moved, fail_on_drift=True, fail_on_unknown=True) == 0
+
+    # Surfaced, never a silent pass: the `~~` advisory line, the repo, and a non-zero advisory count.
+    out = capsys.readouterr().out
+    assert "~~" in out and "kalilinux/kali-rolling:latest" in out
+    assert "rolling ADVISORY: 1" in out
+    # Surfaced in the GitHub step summary too (W3-8: nothing invisible in the run).
+    body = summary.read_text(encoding="utf-8")
+    assert "kalilinux/kali-rolling" in body and "advisory" in body.lower()
+
+
+def test_non_allowlisted_moved_digest_still_blocks_negative_control(capsys) -> None:
+    """NEGATIVE CONTROL — Option A did NOT turn the gate off. The advisory carve-out is scoped to the
+    DOCUMENTED repository, so a NON-allowlisted image whose digest MOVED is still DRIFT_MOVED and STILL
+    exits non-zero under --fail-on-drift. Three proofs, the last the sharpest: a ref that SHARES kali's
+    `latest` tag but has a different repository STILL blocks — the allowlist keys on the repository,
+    never on 'any :latest'."""
+    pins = _load_image_pins()
+
+    def moved(_r):
+        return pins.Resolution(supported=True, digest="sha256:" + "9" * 64)
+
+    cases = {
+        "neo4j (the re-pinned stable service tag)": _NEO4J_REF,
+        "python (an ordinary Hub base)": _HUB_REF,
+        "a :latest tag on a NON-allowlisted repo": "debian:latest@sha256:" + "a" * 64,
+    }
+    for why, ref_str in cases.items():
+        ref = _pinned_ref(pins, ref_str)
+        assert ref.repository not in pins._ADVISORY_ROLLING_DRIFT, why
+        results = pins.evaluate_drift([ref], moved)
+        assert results[0].status == pins.DRIFT_MOVED, why
+        assert results[0].is_drift and not results[0].is_advisory_drift, why
+        assert pins.run_drift([ref], moved, fail_on_drift=True) == 1, (
+            f"{why}: its digest MOVED but run_drift did not block — Option A turned the gate off"
+        )
+    # reported as BLOCKING (`!!`), never advisory (`~~`).
+    out = capsys.readouterr().out
+    assert "!!" in out and "~~" not in out
+
+
+def test_option_a_leaves_the_other_verdicts_unchanged() -> None:
+    """INVARIANT: Option A only re-labels a MOVED digest of a documented rolling repo — every other
+    verdict is unchanged.
+
+      (a) a stable tag whose digest MATCHES -> DRIFT_MATCH (ok, exit 0), for BOTH a plain repo and the
+          allowlisted rolling repo, so the allowlist NEVER masks a match as advisory;
+      (b) a non-Hub registry -> still DRIFT_UNKNOWN_REGISTRY (explicit UNKNOWN, not a pass), unchanged;
+      (c) an allowlisted-repo PATH served from a non-queryable registry stays UNKNOWN, NOT advisory —
+          advisory requires a RESOLVED move, so it can never launder an unchecked pin into a pass."""
+    pins = _load_image_pins()
+
+    def matches(r):
+        return pins.Resolution(supported=True, digest=r.digest)
+
+    # (a) matching digest -> DRIFT_MATCH, for a plain repo AND the allowlisted rolling repo.
+    for ref_str in (_NEO4J_REF, _KALI_ROLLING_REF):
+        ref = _pinned_ref(pins, ref_str)
+        res = pins.evaluate_drift([ref], matches)
+        assert res[0].status == pins.DRIFT_MATCH and not res[0].is_advisory_drift, ref_str
+        assert pins.run_drift([ref], matches, fail_on_drift=True) == 0, ref_str
+
+    # (b) an UNKNOWN registry stays UNKNOWN (real resolver, non-Hub -> unsupported, no network).
+    ghcr = _pinned_ref(pins, _GHCR_REF)
+    res = pins.evaluate_drift([ghcr], pins.hub_resolver)
+    assert res[0].status == pins.DRIFT_UNKNOWN_REGISTRY and res[0].is_unknown
+    assert not res[0].is_advisory_drift and not res[0].is_drift
+    assert pins.run_drift([ghcr], pins.hub_resolver, fail_on_drift=True) == 0
+
+    # (c) allowlisted PATH but non-queryable registry -> UNKNOWN, never advisory.
+    hosted = _pinned_ref(pins, "someregistry.io/kalilinux/kali-rolling:latest@sha256:" + "a" * 64)
+    assert hosted.repository == "kalilinux/kali-rolling"  # path matches the allowlist key...
+    res = pins.evaluate_drift([hosted], pins.hub_resolver)  # ...but the registry cannot be queried
+    assert res[0].status == pins.DRIFT_UNKNOWN_REGISTRY and not res[0].is_advisory_drift
+
+
+def test_every_rolling_drift_allowlist_entry_carries_a_reason() -> None:
+    """The advisory allowlist is a set of RULES, not holes: every _ADVISORY_ROLLING_DRIFT entry must map
+    a non-empty repository to a real, non-empty reason string — mirroring the .trivyignore
+    reason-required discipline so a future edit cannot quietly add an UNREASONED exemption. Non-vacuous:
+    the SAME validator rejects a bare/terse reasonless entry (asserted in this run)."""
+    pins = _load_image_pins()
+
+    def _check(allowlist) -> None:
+        problems: list[str] = []
+        for repo, reason in allowlist.items():
+            if not (isinstance(repo, str) and repo.strip()):
+                problems.append(f"{repo!r}: empty/invalid repository key")
+            if not (isinstance(reason, str) and reason.strip()):
+                problems.append(f"{repo!r}: has NO reason string (a bare exemption)")
+            elif len(reason.strip()) < 20:
+                problems.append(f"{repo!r}: reason too terse to be a justification: {reason!r}")
+        assert not problems, (
+            "_ADVISORY_ROLLING_DRIFT entries must each name a real reason (mirror .trivyignore):\n  "
+            + "\n  ".join(problems)
+        )
+
+    # the REAL allowlist must pass and must not be empty (an empty one documents nothing).
+    assert pins._ADVISORY_ROLLING_DRIFT, "the advisory allowlist is empty — unexpected for this slice"
+    _check(pins._ADVISORY_ROLLING_DRIFT)
+
+    # NON-VACUITY / negative control: a bare, blank, or terse reason must be rejected.
+    for bad in ({"foo/bar": ""}, {"foo/bar": "   "}, {"foo/bar": "rolling"}):
+        with pytest.raises(AssertionError):
+            _check(bad)
+
+
+def test_reverting_the_allowlist_makes_the_rolling_drift_block(monkeypatch) -> None:
+    """NON-VACUITY / revert proof: the advisory verdict is DUE TO the documented allowlist entry, not
+    incidental. Simulate the exact Option-A revert — drop kalilinux/kali-rolling from
+    _ADVISORY_ROLLING_DRIFT — and the SAME moved ref becomes ordinary resolvable drift: DRIFT_MOVED,
+    is_drift True, and run_drift --fail-on-drift exits 1, exactly like every other move. This is why
+    test_allowlisted_rolling_drift_is_advisory_not_blocking would fail on a real revert."""
+    pins = _load_image_pins()
+    ref = _pinned_ref(pins, _KALI_ROLLING_REF)
+
+    def moved(_r):
+        return pins.Resolution(supported=True, digest="sha256:" + "9" * 64)
+
+    # WITH the entry: advisory + non-blocking (the current, hardened behavior).
+    assert pins.evaluate_drift([ref], moved)[0].status == pins.DRIFT_MOVED_ADVISORY
+    assert pins.run_drift([ref], moved, fail_on_drift=True) == 0
+
+    # REVERT: empty the allowlist -> the same ref is now ordinary resolvable drift and BLOCKS.
+    monkeypatch.setattr(pins, "_ADVISORY_ROLLING_DRIFT", {})
+    reverted = pins.evaluate_drift([ref], moved)
+    assert reverted[0].status == pins.DRIFT_MOVED and reverted[0].is_drift
+    assert pins.run_drift([ref], moved, fail_on_drift=True) == 1
+
+
 def _workflow_steps(body: str) -> list[str]:
     """Split a workflow's `steps:` into per-step text blocks (a step starts at `      - name:`)."""
     steps: list[str] = []
@@ -1805,7 +1977,13 @@ def _workflow_steps(body: str) -> list[str]:
 
 def test_workflow_drift_step_blocks_and_is_not_advisory() -> None:
     """The real drift GATE (not the --root negative-control fixture) must run --fail-on-drift and must
-    NOT be continue-on-error — otherwise resolvable drift would be advisory again, the W3-8 regression."""
+    NOT be continue-on-error — otherwise resolvable drift would be advisory again, the W3-8 regression.
+
+    Reconciled with Option A (#431): the per-repo advisory carve-out lives WITHIN image_pins.py and
+    covers only a DOCUMENTED rolling base (_ADVISORY_ROLLING_DRIFT). It does not touch this STEP: the
+    workflow still runs --fail-on-drift and is not continue-on-error, so every OTHER resolvable move
+    still blocks the job. This test guards the step; the in-tool classification is guarded by the
+    W3-8 Option-A tests below (advisory vs. the non-allowlisted negative control)."""
     body = WORKFLOW.read_text(encoding="utf-8")
     gate = [s for s in _workflow_steps(body)
             if "image_pins.py" in s and "--drift --fail-on-drift" in s and "--root" not in s]

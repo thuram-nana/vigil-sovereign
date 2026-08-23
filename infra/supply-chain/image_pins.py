@@ -536,7 +536,7 @@ _UNKNOWN = (DRIFT_UNKNOWN_REGISTRY, DRIFT_UNKNOWN_NETWORK)
 # job, so gating a per-PR build on its daily movement would be a category error. BLOCKING drift still
 # applies to every other (stable, pinned-intent) tag; only these documented rolling bases are advisory.
 # Re-pin them deliberately on a cadence (read the changelog), not under a red build. Each entry needs a reason.
-_ADVISORY_ROLLING_DRIFT: "dict[str, str]" = {
+_ADVISORY_ROLLING_DRIFT: dict[str, str] = {
     # The Strix sandbox base: a rolling Kali distro tracked at :latest so the offensive toolchain stays
     # current. Its committed SBOM is regenerated deliberately (gen_image_sbom.py), never per-drift, and its
     # image vuln scan is already ADVISORY in the A14 job — so its drift is surfaced, not blocking.
@@ -624,20 +624,28 @@ def evaluate_drift(refs, resolver) -> list[DriftResult]:
 
 
 def _drift_summary_markdown(results: list[DriftResult]) -> str:
-    """A GitHub step-summary block: resolvable drift and — the point of W3-8 — the explicit UNKNOWNs,
-    so an unqueryable registry is VISIBLE in the run, never a silent pass."""
+    """A GitHub step-summary block: resolvable drift, the documented-rolling ADVISORY moves (W3-8 #431 —
+    surfaced, never blocking), and — the point of W3-8 — the explicit UNKNOWNs, so neither an advisory
+    rolling move nor an unqueryable registry is INVISIBLE in the run, and nothing is a silent pass."""
     drifted = [d for d in results if d.is_drift]
+    advisory = [d for d in results if d.is_advisory_drift]
     unknown = [d for d in results if d.is_unknown]
     matched = [d for d in results if d.status == DRIFT_MATCH]
     lines = ["## A14 base-image drift (W3-8)", ""]
     lines.append(f"- resolvable & up-to-date: **{len(matched)}**")
     lines.append(f"- resolvable & DRIFTED (blocking): **{len(drifted)}**")
+    lines.append(f"- documented rolling base MOVED (advisory, NOT blocking): **{len(advisory)}**")
     lines.append(f"- UNKNOWN (registry not queryable / unreachable): **{len(unknown)}**")
     if drifted:
         lines += ["", "### Resolvable drift — BLOCKING", ""]
         for d in drifted:
             lines.append(f"- `{d.ref.source}:{d.ref.line}` {d.ref.repository}:{d.ref.tag} — "
                          f"pinned `{d.ref.digest}` → live `{d.current}`")
+    if advisory:
+        lines += ["", "### Rolling base moved — ADVISORY, not blocking (re-pin deliberately)", ""]
+        for d in advisory:
+            lines.append(f"- `{d.ref.source}:{d.ref.line}` {d.ref.repository}:{d.ref.tag} — "
+                         f"pinned `{d.ref.digest}` → live `{d.current}` ({d.detail})")
     if unknown:
         lines += ["", "### UNKNOWN — not a pass, could not be checked", ""]
         for d in unknown:
@@ -653,6 +661,7 @@ def run_drift(refs, resolver, *, fail_on_drift: bool, fail_on_unknown: bool = Fa
     that could not run."""
     results = evaluate_drift(refs, resolver)
     drifted = [d for d in results if d.is_drift]
+    advisory = [d for d in results if d.is_advisory_drift]
     unsupported = [d for d in results if d.status == DRIFT_UNKNOWN_REGISTRY]
     unresolved = [d for d in results if d.status == DRIFT_UNKNOWN_NETWORK]
     matched = [d for d in results if d.status == DRIFT_MATCH]
@@ -676,6 +685,7 @@ def run_drift(refs, resolver, *, fail_on_drift: bool, fail_on_unknown: bool = Fa
             print(f"  ??  {d.ref.source}:{d.ref.line} {d.ref.ref} — {label}: {d.detail}")
 
     print(f"\nresolvable up-to-date: {len(matched)}   resolvable DRIFTED: {len(drifted)}   "
+          f"rolling ADVISORY: {len(advisory)}   "
           f"UNKNOWN: {len(unsupported) + len(unresolved)} "
           f"({len(unsupported)} unqueryable registry, {len(unresolved)} unreachable)")
 
@@ -692,6 +702,10 @@ def run_drift(refs, resolver, *, fail_on_drift: bool, fail_on_unknown: bool = Fa
               "then commit the new image:tag@sha256:<digest>.")
         if fail_on_drift:
             code = 1
+    if advisory:
+        print("\nDocumented rolling bases MOVED (advisory — surfaced, NOT blocking): re-pin deliberately on "
+              "a cadence (read the upstream changelog first), not under a red build. The reasoned allowlist "
+              "is infra/supply-chain/image_pins.py::_ADVISORY_ROLLING_DRIFT.")
     if unsupported or unresolved:
         print("UNKNOWN registries are reported, not silently passed. They cannot be auto-checked; verify "
               "their pins by hand or set --fail-on-unknown for the strictest posture.")
