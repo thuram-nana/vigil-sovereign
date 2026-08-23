@@ -432,15 +432,15 @@
    "subject": "strix batch2: P8 fix \u2014 proof degradation recording must never trigger strix.report.__init__"
   },
   {
-   "commit": "d8b9fc818e6a406ce481c6b64bba64199a052460",
+   "commit": "c0cdb95a9258be16c4791977a5bd100baf0e1290",
    "file": "028-s10-vendor-strix-synchronous-container-teardown.patch",
-   "sha256": "26f3ffe23fd4145c8329549a0e3543d65c26f688cbd4031a878bbae95e3df314",
+   "sha256": "e6b05465bcfa24fcb54beca8f2d4b1791577c15ce6ac9438c6b3e7cba755597f",
    "subject": "S10 (vendor/strix): synchronous container teardown on the signal path"
   },
   {
-   "commit": "4966d1c4db78a08242022e9ca31be0699a1b80e9",
+   "commit": "185e5a43e56cdfd75d1bbec9e5294cb38c0170fb",
    "file": "029-s10-lifecycle-fix-p8-collection-error-importorsk.patch",
-   "sha256": "a6c4be4e5df937e4870030b4f45bb55280d20850415f8d559f3f1b403cf95584",
+   "sha256": "b5d049b73e2f7e6012da0dec35d1c5a4383cfa0caed33c5c7ec136f0ad9cefd5",
    "subject": "S10-lifecycle: fix P8 collection ERROR \u2014 importorskip the strix runtime chain"
   }
  ],
