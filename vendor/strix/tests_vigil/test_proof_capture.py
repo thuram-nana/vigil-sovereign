@@ -42,6 +42,20 @@ def test_build_capture_includes_a_control_when_present():
     assert roles == ["mutated", "control"] and cap["blobs"]["ctrl"] == b"ok"
 
 
+def test_build_capture_records_the_observed_scheme_when_valid():
+    """S6 scheme-pairing: a valid ``exploit_scheme`` is recorded as ``observed_scheme`` on the mutated
+    exchange (proof.run pairs the benign control twin to it). An invalid/absent scheme is OMITTED — proof.run
+    then fails closed to a LEAD unless the report endpoint exact-matches the observed host+path."""
+    cap = pc.build_error_signature_capture(bug_class="error_based_sqli", exploit_body="err",
+                                           exploit_request=b"GET / HTTP/1.1\r\nHost: t\r\n\r\n",
+                                           exploit_scheme="https")
+    assert cap["exchanges"][0]["observed_scheme"] == "https"
+    assert "observed_scheme" not in pc.build_error_signature_capture(
+        bug_class="error_based_sqli", exploit_body="err", exploit_scheme="ftp")["exchanges"][0]
+    assert "observed_scheme" not in pc.build_error_signature_capture(
+        bug_class="error_based_sqli", exploit_body="err")["exchanges"][0]
+
+
 class _Resp:
     def __init__(self, raw):
         self.raw = raw
@@ -147,3 +161,39 @@ def test_capture_for_report_is_none_without_a_class_or_on_error():
     # a Caido failure is swallowed → an honest None (no proof), never an exception into the reporting path
     assert asyncio.run(pc.capture_for_report(
         {"finding_class": "sqli", "endpoint": "/x"}, caido=_Boom(), explicit_ids=["r1"])) is None
+
+
+class _ReqTls:
+    """A fetched request half that also knows its transport (Caido's ``request.is_tls``)."""
+    def __init__(self, raw, is_tls):
+        self.raw = raw
+        self.is_tls = is_tls
+
+
+class _FetchedTls:
+    def __init__(self, resp_raw, req_raw, is_tls):
+        self.response = _Resp(resp_raw)
+        self.request = _ReqTls(req_raw, is_tls)
+
+
+def test_capture_carries_the_observed_transport_scheme_when_tls_is_known():
+    """S6: when the fetched exchange knows its transport (``request.is_tls``), the capture records it as
+    ``observed_scheme`` so proof.run can fetch the benign control twin over the SAME scheme (never a silent
+    http default). Absent the flag it is omitted (the existing ``_Fetched`` fake has no ``is_tls``)."""
+    raw = b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"
+    req = b"GET /api/search?q=%27 HTTP/1.1\r\nHost: t\r\n\r\n"
+
+    caido_https = _FakeCaido(by_id={"r": _FetchedTls(raw, req, is_tls=True)})
+    cap = asyncio.run(pc.capture_for_report(
+        {"finding_class": "sqli", "endpoint": "/api/search"}, caido=caido_https, explicit_ids=["r"]))
+    assert cap["exchanges"][0]["observed_scheme"] == "https"
+
+    caido_http = _FakeCaido(by_id={"r": _FetchedTls(raw, req, is_tls=False)})
+    cap_http = asyncio.run(pc.capture_for_report(
+        {"finding_class": "sqli", "endpoint": "/api/search"}, caido=caido_http, explicit_ids=["r"]))
+    assert cap_http["exchanges"][0]["observed_scheme"] == "http"
+
+    caido_none = _FakeCaido(by_id={"r": _Fetched(raw, request_raw=req)})   # .request has no is_tls
+    cap_none = asyncio.run(pc.capture_for_report(
+        {"finding_class": "sqli", "endpoint": "/api/search"}, caido=caido_none, explicit_ids=["r"]))
+    assert "observed_scheme" not in cap_none["exchanges"][0]

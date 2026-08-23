@@ -39,6 +39,7 @@ def build_error_signature_capture(
     exploit_status: Optional[int] = None,
     control_body: "bytes | str | None" = None,
     exploit_request: "bytes | str | None" = None,
+    exploit_scheme: "str | None" = None,
 ) -> Optional[dict]:
     """Build the plain-dict ``_vigil_capture`` for an error-signature proof from already-fetched bytes.
 
@@ -48,7 +49,14 @@ def build_error_signature_capture(
     ``exploit_request`` are the raw REQUEST bytes the agent actually sent (inv 8): when present they are
     bound as ``request_bytes_ref`` on the mutated exchange so the certificate records WHAT produced the
     response, not only the response. Without them the mint declines a FACT (see ``proof.run``): a response
-    alone, with no record of the request, is not something VIGIL can attribute — it stays a LEAD."""
+    alone, with no record of the request, is not something VIGIL can attribute — it stays a LEAD.
+
+    ``exploit_scheme`` ("http"/"https") is the OBSERVED exchange's transport scheme, from the proxy's TLS
+    flag (an origin-form request line carries none). It is recorded as a VIGIL-internal ``observed_scheme``
+    annotation on the mutated exchange (stripped before ``CapturedExchange`` in ``proof.run``) so the S6
+    benign CONTROL twin can be fetched over the SAME scheme as the observed exchange — never a silent http
+    default. Absent/invalid ⇒ omitted, and the mint pairs the scheme from the report endpoint only when it
+    exact-matches the observed host+path, else refuses the control to a LEAD (fail-closed)."""
     if not str(bug_class or "").strip():
         return None
     ex_bytes = _as_bytes(exploit_body)
@@ -58,6 +66,9 @@ def build_error_signature_capture(
         "channel": _ERROR_SIGNATURE, "role": "mutated",
         "response_bytes_ref": "resp", "status": exploit_status, "bug_class": bug_class,
     }
+    if exploit_scheme in ("http", "https"):
+        mutated["observed_scheme"] = exploit_scheme   # S6: pair the benign control twin to the observed scheme
+
     blobs: dict[str, bytes] = {"resp": ex_bytes}
     req_bytes = _as_bytes(exploit_request)
     if req_bytes:
@@ -93,6 +104,22 @@ def _request_bytes(fetched: Any) -> "bytes | None":
     if not isinstance(raw, (bytes, bytearray, str)):
         return None
     return _as_bytes(raw)
+
+
+def _request_scheme(fetched: Any) -> "str | None":
+    """The OBSERVED exploit request's transport scheme ("https"/"http"), from Caido's connection TLS flag on
+    the SAME fetched object the request bytes come from (``result.request.is_tls``; ``get_request_with_client``
+    fetches the request half with the response). It is the authoritative, transport-derived scheme the benign
+    CONTROL twin must be fetched over — a request LINE is origin-form and carries none. Returns ``None`` when
+    the flag is absent (⇒ ``proof.run`` pairs the scheme from the report endpoint only when it exact-matches
+    the observed host+path, else refuses the control to a LEAD — never a silent http default)."""
+    req = getattr(fetched, "request", None)
+    is_tls = getattr(req, "is_tls", None) if req is not None else None
+    if is_tls is True:
+        return "https"
+    if is_tls is False:
+        return "http"
+    return None
 
 
 def _response_body(fetched: Any, parse: Any) -> tuple["bytes | None", Optional[int]]:
@@ -165,13 +192,14 @@ async def capture_for_report(
         if not body:
             return None
         request_bytes = _request_bytes(exploit)
+        request_scheme = _request_scheme(exploit)
         control_body = None
         if control_id:
             control = await caido.view_request(control_id, part="response")
             control_body, _ = _response_body(control, caido.parse_raw_response)
         return build_error_signature_capture(
             bug_class=bug_class, exploit_body=body, exploit_status=status, control_body=control_body,
-            exploit_request=request_bytes)
+            exploit_request=request_bytes, exploit_scheme=request_scheme)
     except Exception as exc:  # noqa: BLE001 — capture is best-effort; it never raises into Strix
         # inv 12 (S9): a capture was genuinely ATTEMPTED (a bug_class was present, past the guard
         # above) and it FAILED (e.g. Caido raised) — NOT the same as "nothing to capture". Record a
