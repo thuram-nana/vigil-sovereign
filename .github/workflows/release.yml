@@ -192,7 +192,7 @@ jobs:
           printf '  %s\n' "${assets[@]}"
 
       - name: upload signed artifacts + attestations
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: vigil-release-signed
           path: |
