@@ -356,3 +356,159 @@ def test_negative_control_bad_w16_issue_type_rejected():
     bad = _good()
     bad["w16_issue"] = "seventeen"
     assert any("w16_issue" in e for e in validate_limitation(bad))
+
+
+# ==================================================================================================
+# The honest-limit PROSE scan (claim W15-1-prose). The marker bijection above enforces the OPT-IN token;
+# this section enforces the AC literally: it scans every non-test product .py for a curated set of
+# honest-limit / deferred DEBT PHRASES and REFUSES any hit that is neither a VIGIL-LIMIT marker line nor a
+# registered ``honest_limit_sites`` entry. So an author who writes a new "... is not wired / does not yet
+# ..." docstring WITHOUT registering it turns CI red — even if they never add a marker. It is
+# BIDIRECTIONAL: a registered site whose prose has been removed/moved (its snippet matches no debt-phrase
+# line) also turns CI red.
+#
+# A curated, HIGH-PRECISION phrase set is used on purpose: a broad scan (e.g. "placeholder", "inert")
+# yields hundreds of false hits in ordinary prose ("{URL} placeholder", a SCAFFOLD_SENTINEL token, ...).
+# These phrases are the ones the W15 intake names ("not wired", "does not yet", "is a stub", "*-gated");
+# every current hit is classified in the inventory's honest_limit_sites census.
+# --------------------------------------------------------------------------------------------------
+_DEBT_PHRASES = re.compile(
+    r"does not yet|do not yet|not yet implemented|not yet wired|not yet built|not yet supported|"
+    r"not\s+wired|is a stub|are stubs|is a full stub|stub that raises|hardware-gated stub|"
+    r"is a scaffold|interface-only scaffold|deploy-gated|tooling-gated|hardware-gated|research-gated",
+    re.IGNORECASE,
+)
+
+# .py sources that are NOT product debt sites for this census: vendored/venv/patch trees; and test files
+# (a test legitimately asserts "... not wired" or describes a limit in its docstring — it is not debt).
+_PROSE_SCAN_EXCLUDE = _SCAN_EXCLUDE + ("strix-patches",)
+
+
+def _is_test_path(path: Path) -> bool:
+    return "tests" in path.parts or path.name.startswith("test_") or path.name.endswith("_test.py")
+
+
+def _sites() -> list[dict]:
+    return _load().get("honest_limit_sites", [])
+
+
+def _scan_debt_phrase_hits() -> list[tuple[str, int, str]]:
+    """(relpath, lineno, line) for every non-test product .py line matching a debt phrase."""
+    this = Path(__file__).resolve()
+    hits: list[tuple[str, int, str]] = []
+    for path in REPO.rglob("*.py"):
+        if any(part in _PROSE_SCAN_EXCLUDE for part in path.parts):
+            continue
+        if _is_test_path(path) or path.resolve() == this:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        rel = str(path.relative_to(REPO))
+        for i, line in enumerate(text.splitlines(), 1):
+            if _DEBT_PHRASES.search(line):
+                hits.append((rel, i, line))
+    return hits
+
+
+def line_is_accounted(rel: str, line: str, sites: list[dict]) -> bool:
+    """A debt-phrase line is accounted for IFF it is a VIGIL-LIMIT marker line, or a registered
+    honest_limit_sites entry for that file has a snippet that is a case-insensitive substring of it."""
+    if "VIGIL-LIMIT:" in line:
+        return True
+    low = line.lower()
+    return any(s.get("file") == rel and str(s.get("snippet", "")).lower() in low for s in sites)
+
+
+def find_unregistered_debt_prose() -> list[str]:
+    """The enforcing routine (claim W15-1-prose): every honest-limit/deferred debt phrase in non-test
+    product code must be registered (a marker line or an honest_limit_sites entry), else it is returned
+    here as a violation and the build goes red."""
+    sites = _sites()
+    return [f"{rel}:{ln}:: {line.strip()[:120]}"
+            for rel, ln, line in _scan_debt_phrase_hits() if not line_is_accounted(rel, line, sites)]
+
+
+def validate_site(entry: dict, limit_ids: set[str]) -> list[str]:
+    """A single honest_limit_sites entry validator. Real sites and negative controls both run through it."""
+    errs: list[str] = []
+    for f in ("file", "snippet", "kind", "note"):
+        if f not in entry:
+            errs.append(f"missing field {f!r}")
+    if errs:
+        return errs
+    if entry["kind"] not in {"debt", "non-debt"}:
+        errs.append(f"{entry['file']}: bad kind {entry['kind']!r}")
+    if entry["kind"] == "debt":
+        lid = entry.get("limit_id")
+        if not lid:
+            errs.append(f"{entry['file']}: a debt site needs a limit_id")
+        elif lid not in limit_ids:
+            errs.append(f"{entry['file']}: limit_id {lid!r} is not a registered limitation")
+    fp = REPO / entry["file"]
+    if not fp.is_file():
+        errs.append(f"{entry['file']}: site file does not exist")
+        return errs
+    # Bidirectional leg: the snippet must still match a DEBT-PHRASE line in the file.
+    snip = str(entry["snippet"]).lower()
+    if not any(snip in ln.lower() and _DEBT_PHRASES.search(ln)
+               for ln in fp.read_text(encoding="utf-8").splitlines()):
+        errs.append(f"{entry['file']}: snippet {entry['snippet']!r} matches no honest-limit line "
+                    f"(the prose was removed/moved — update honest_limit_sites)")
+    return errs
+
+
+# ---- the real census ----
+def test_honest_limit_sites_schema_and_not_stale():
+    data = _load()
+    limit_ids = {l["id"] for l in data["limitations"]}
+    problems: list[str] = []
+    for s in _sites():
+        problems += validate_site(s, limit_ids)
+    assert not problems, "honest_limit_sites problems:\n  - " + "\n  - ".join(problems)
+
+
+def test_no_unregistered_honest_limit_prose():
+    """The AC's core check: scanning the code for honest-limit docstrings finds NOTHING unregistered."""
+    violations = find_unregistered_debt_prose()
+    assert not violations, (
+        "UNREGISTERED honest-limit/deferred docstring(s) — a debt phrase in non-test product code that is "
+        "neither a VIGIL-LIMIT marker line nor a registered honest_limit_sites entry. Classify each in "
+        "docs/limitations/inventory.json (kind 'debt' -> a limitations id, or kind 'non-debt' -> a reason):"
+        "\n  - " + "\n  - ".join(violations))
+
+
+# ---- negative controls (the gate is provably not a no-op) ----
+def test_negative_control_unregistered_prose_is_flagged():
+    """Adding an unregistered honest-limit docstring turns the check red: an in-memory debt line with NO
+    covering site is NOT accounted for (and IS accounted once a matching site is supplied)."""
+    rel = "engine/crucible/framework/v2/some_new_module.py"
+    line = "        The alerting path is not wired on this build; results are dropped."
+    assert not line_is_accounted(rel, line, _sites())
+    covering = [{"file": rel, "snippet": "alerting path is not wired",
+                 "kind": "debt", "limit_id": "x", "note": "n"}]
+    assert line_is_accounted(rel, line, covering)
+
+
+def test_negative_control_scan_is_not_a_noop_over_live_code():
+    """Load-bearing: if the honest_limit_sites census were empty, the live tree's debt prose WOULD be
+    flagged — proving the scan reads real code, not just the manifest."""
+    hits = _scan_debt_phrase_hits()
+    unaccounted_without_sites = [f"{r}:{ln}" for r, ln, line in hits if not line_is_accounted(r, line, [])]
+    assert unaccounted_without_sites, "expected the live tree to contain honest-limit prose to guard"
+
+
+def test_negative_control_stale_site_is_flagged():
+    limit_ids = {l["id"] for l in _load()["limitations"]}
+    bad = {"file": "engine/crucible/framework/v2/attest/provider.py",
+           "snippet": "this exact phrase appears on no honest-limit line zzz",
+           "kind": "non-debt", "note": "n"}
+    assert any("matches no honest-limit line" in e for e in validate_site(bad, limit_ids))
+
+
+def test_negative_control_debt_site_with_unknown_limit_id_rejected():
+    limit_ids = {l["id"] for l in _load()["limitations"]}
+    bad = {"file": "engine/crucible/framework/v2/graph/store.py", "snippet": "deploy-gated",
+           "kind": "debt", "limit_id": "LIMIT-does-not-exist-zzz", "note": "n"}
+    assert any("not a registered limitation" in e for e in validate_site(bad, limit_ids))

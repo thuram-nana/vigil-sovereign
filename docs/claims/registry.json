@@ -1526,6 +1526,28 @@
       "ci_job": "the briefing explains every agent and capability",
       "failure_class": "display-manufactures-evidence",
       "default": "on"
+    },
+    {
+      "id": "W15-1-prose",
+      "title": "The honest-limit prose scan catches unregistered deferred/limitation docstrings in code",
+      "claim": "The honest-limit prose scan refuses any deferred or limitation docstring in non-test product code that is neither a VIGIL-LIMIT marker line nor a registered honest_limit_sites entry, so adding an unregistered honest-limit docstring turns the build red, and removing a registered site's prose turns it red too.",
+      "source": "docs/limitations/README.md:6",
+      "enforced_by": {
+        "file": "docs/tests/test_limitation_inventory.py",
+        "symbol": "find_unregistered_debt_prose"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_limitation_inventory.py",
+        "tests": [
+          "test_no_unregistered_honest_limit_prose",
+          "test_honest_limit_sites_schema_and_not_stale",
+          "test_negative_control_unregistered_prose_is_flagged",
+          "test_negative_control_stale_site_is_flagged"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

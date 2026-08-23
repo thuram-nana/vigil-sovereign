@@ -3,6 +3,9 @@
 
 **Registered claim (W0-3 #398):** Every real-unfinished-code limitation in the inventory resolves to a real code anchor, every re-verified-closed item names real evidence, and an unregistered honest-limit marker turns the build red.
 
+<!-- CLAIM:W15-1-prose -->
+**Registered claim (W15-1-prose):** The honest-limit prose scan refuses any deferred or limitation docstring in non-test product code that is neither a VIGIL-LIMIT marker line nor a registered honest_limit_sites entry, so adding an unregistered honest-limit docstring turns the build red, and removing a registered site's prose turns it red too.
+
 This directory is the landed answer to the W15 intake question: *what does VIGIL not do yet, stated
 against the code rather than against a wish?* The W15 plan is explicit — **"do not treat W15 as complete
 until [the three audits] land and their items are filed."** `inventory.json` is that landed inventory for
@@ -21,7 +24,7 @@ constraint that decides `docs/claims/registry.json`.
 ## The entry schema
 
 `inventory.json` is `{"inventory_version", "classes", "severities", "dispositions", "re_verified_closed",
-"limitations"}`. Each `limitations` entry:
+"limitations", "honest_limit_sites"}`. Each `limitations` entry:
 
 | field | meaning |
 |-------|---------|
@@ -53,6 +56,38 @@ store (`LIMIT-neo4j-deploy-gated`). Because `stub-raises` items are checked to a
 `NotImplementedError`, **implementing a stub without updating the inventory turns CI red** — the debt
 cannot be silently "completed" out of the honest list.
 
+## The honest-limit PROSE scan (`honest_limit_sites`) — the marker is opt-in; this is not
+
+The marker convention is opt-in: an author who forgets the `VIGIL-LIMIT:` token would escape the
+bijection above. So the guard ALSO scans every **non-test product `.py`** for a curated, high-precision
+set of honest-limit / deferred **debt phrases** (`not wired`, `does not yet`, `is a stub`, `is a
+scaffold`, `*-gated`, ...) and **refuses any hit that is neither a `VIGIL-LIMIT:` marker line nor a
+registered `honest_limit_sites` entry**. Adding a new "… is not wired / does not yet …" docstring
+without registering it turns CI red even if no marker is ever added — the literal W15-1 acceptance
+criterion. A broad word-list (`placeholder`, `inert`, …) is deliberately NOT used: it produces hundreds
+of false hits in ordinary prose; the curated set is the phrasing the W15 intake actually names.
+
+Each `honest_limit_sites` entry is `{file, snippet, kind, note[, limit_id]}`:
+
+- `kind: "debt"` — the phrase IS a capability limit; `limit_id` names the `limitations` item it belongs
+  to (which must exist). This is how the prose census maps back to a tracked, W16-fileable item.
+- `kind: "non-debt"` — the phrase is a deliberate design choice, a runtime-state description, or a phrase
+  describing a **check's target** rather than VIGIL itself; `note` explains why it is not debt.
+
+The scan is **bidirectional**: every `snippet` must still match a debt-phrase line in its `file`, so if
+the prose is reworded or moved, the stale site turns CI red until the census is corrected.
+
+## Newly-mined limitations (W15-1 completion)
+
+The prose scan surfaced honest-limit docstrings the first inventory pass had missed. They are now
+registered `limitations` (all `file-into-w16`): **`LIMIT-spine-seal-at-capture`** (high — spine
+credential excerpts stored in plaintext until seal-at-capture is wired), **`LIMIT-posture-no-structured-findings`**
+(medium — cloud/k8s/infra posture assessments record no structured findings/proofs),
+**`LIMIT-container-kill-unwired`** (low — sandbox container force-kill has no VIGIL caller),
+**`LIMIT-favicon-fingerprint-stub`** (low — fixture-only favicon table),
+**`LIMIT-a11y-capture-unwired`** (info — accessibility-tree capture seam) and
+**`LIMIT-gesture-native-inject-unwired`** (info — macOS/Windows native input injection is honestly inert).
+
 ## The twelve re-verified-closed items (do not re-work these)
 
 These were named on an older audit list and re-verified against the current tree as **already done**. Each
@@ -80,12 +115,17 @@ is listed with the evidence path the guard asserts exists, so nobody re-works th
    `symbol-exists` anchor is a real symbol; a `file-exists`/`doc-exists` anchor is a real file;
 3. **re-verified-closed** — the census is EXACTLY the twelve ids above, each with an evidence path that
    exists (deleting the closing test/module turns CI red);
-4. **bijection** — the `VIGIL-LIMIT:<id>` marker ↔ inventory correspondence above;
-5. **disposition** — every item is filed-into-w16 or re-verified-closed;
-6. **registered** — the behaviour is in the claims registry (this claim, `W15-1`);
-7. **negative controls** — deliberately-broken entries (missing field, bad enum, a stub that no longer
+4. **marker bijection** — the `VIGIL-LIMIT:<id>` marker ↔ inventory correspondence above;
+5. **prose scan** — no non-test product `.py` carries an unregistered honest-limit/deferred debt phrase
+   (every hit is a marker line or a registered `honest_limit_sites` entry), and every registered site's
+   snippet still matches a debt-phrase line (bidirectional);
+6. **disposition** — every item is filed-into-w16 or re-verified-closed;
+7. **registered** — the behaviour is in the claims registry (`W15-1` for the code-anchored inventory,
+   `W15-1-prose` for the code scan);
+8. **negative controls** — deliberately-broken entries (missing field, bad enum, a stub that no longer
    raises, an absent symbol, a marker with no token, an RVC with no real evidence, a bad `w16_issue`
-   type) are rejected by the same validator in the same run, proving the gate is not a no-op.
+   type, an unregistered debt line, a stale `honest_limit_sites` snippet, a debt site with an unknown
+   `limit_id`) are rejected by the same validators in the same run, proving the gate is not a no-op.
 
 ## Filing the open items into W16
 
@@ -98,4 +138,7 @@ issues have been opened yet.
 
 1. Land (or identify) the honest-limit docstring; add the `VIGIL-LIMIT:<id>` token if it is code debt.
 2. Add the `inventory.json` entry (fill every field; pick the honest `classification`, `severity`, `check`).
-3. Run `python -m pytest docs/tests/test_limitation_inventory.py -q` — green before you commit.
+3. If the docstring uses a debt phrase the prose scan catches (`not wired`, `does not yet`, `is a stub`,
+   `*-gated`, ...) and you did NOT add a `VIGIL-LIMIT:` marker, add a `honest_limit_sites` entry
+   (`kind: "debt"` with the `limit_id`, or `kind: "non-debt"` with a `note`) so the scan stays green.
+4. Run `python -m pytest docs/tests/test_limitation_inventory.py -q` — green before you commit.
