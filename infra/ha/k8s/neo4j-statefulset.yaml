@@ -31,10 +31,19 @@ spec:
           ports:
             - { name: http, containerPort: 7474 }
             - { name: bolt, containerPort: 7687 }
+          # W6-2 (#453): both probes. readiness = the bolt query port accepts connections (it can serve
+          # Cypher); liveness = the HTTP listener is up (the process is alive) — kept lenient so a GC/IO
+          # pause does not get the DB killed. neo4j is a third-party image with no VIGIL /readyz, so these
+          # use its own listening ports. No workload ships without both.
           readinessProbe:
             tcpSocket: { port: bolt }
             initialDelaySeconds: 15
             periodSeconds: 15
+          livenessProbe:
+            tcpSocket: { port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 5
           volumeMounts:
             - { name: neo4j-data, mountPath: /data }
   volumeClaimTemplates:

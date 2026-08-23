@@ -46,10 +46,19 @@ spec:
             - { name: otlp-http, containerPort: 4318 }
           volumeMounts:
             - { name: otel-config, mountPath: /etc/otelcol }
+          # W6-2 (#453): both probes. The collector is a dependency-free stateless OTLP->stdout receiver,
+          # so its only real health surface is its own listening socket: liveness AND readiness both TCP-
+          # connect the OTLP receiver port (process alive / accepting), liveness kept more lenient. No
+          # workload ships without both.
           readinessProbe:
             tcpSocket: { port: otlp-http }
             initialDelaySeconds: 5
             periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: otlp-http }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
       volumes:
         - name: otel-config
           configMap:

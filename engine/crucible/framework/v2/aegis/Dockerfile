@@ -61,6 +61,14 @@ USER aegis
 
 EXPOSE 8080
 
+# W6-2 (#453): HEALTHCHECK exercises the W6-1 /readyz probe (AegisGatewayHandler._handle_probe) on the
+# EXPOSEd port. /readyz LIVE-probes the fixed upstream and returns 503 when it is down → urlopen raises
+# HTTPError → non-zero exit → the container is marked UNHEALTHY (and a mis-run gateway with no --upstream
+# exits at once, also surfacing as unhealthy rather than a silent dead data plane). Stdlib-only python
+# (the base image ships no curl); a short timeout keeps an unauthenticated probe cheap.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["python3", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=4).status==200 else 1)"]
+
 # `aegis gateway` REQUIRES --upstream at run time, and needs --host 0.0.0.0 to be reachable
 # from outside the container. Default CMD keeps it READ-ONLY (observe); override to enforce
 # only after confirming zero false positives against your real traffic in observe.

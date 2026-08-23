@@ -324,6 +324,29 @@
       "default": "on"
     },
     {
+      "id": "W6-2",
+      "title": "Dockerfile HEALTHCHECKs + real k8s liveness/readiness probes wired to /readyz + /healthz",
+      "claim": "Every VIGIL k8s workload — the single-writer sovereign StatefulSet, the active-active reverse-proxy Deployment, and the Qdrant, Neo4j and otel-collector backends — declares BOTH a liveness and a readiness probe; the two VIGIL-owned workloads wire readiness to the W6-1 httpGet `/readyz` route (which returns 503 when that server's real dependency is down, so a proxy whose sovereign backend is dead is drained rather than served) and liveness to the httpGet `/healthz` route (which does no dependency I/O, so a dependency outage does not get an otherwise-healthy process killed), never the pre-fix shallow `GET /` on the static bundle; every shipped VIGIL server image declares a Dockerfile `HEALTHCHECK` (the AEGIS gateway's exercises `/readyz`; the egress forward proxy, a CONNECT proxy with no HTTP routes, uses a TCP connect to its bind); and `tools/ha/deploy.sh` REFUSES to apply the stack — its `tools/ha/require_probes.py` preflight exits non-zero — unless all of this holds.",
+      "source": "docs/decisions/W6-2-healthchecks-and-probes.md:19",
+      "enforced_by": {
+        "file": "tools/ha/require_probes.py",
+        "symbol": "require"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_ha_probes_required.py",
+        "tests": [
+          "test_every_workload_declares_both_probes",
+          "test_sovereign_statefulset_has_a_liveness_probe",
+          "test_vigil_owned_workload_wired_to_readyz_and_healthz",
+          "test_shallow_root_readiness_is_rejected_negative_control",
+          "test_shipped_server_dockerfiles_declare_a_healthcheck"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
       "id": "W13-6",
       "title": "Restricted mode over the existing kill-switch (safe landing state)",
       "claim": "VIGIL has a RESTRICTED MODE — a safe landing state between fully-operational and the `vigil panic` hard-stop. It is a FACADE over the existing machinery, never a second policy engine: entering restricted mode TRIPS the existing per-engagement kill-switch (the same primitive `vigil panic` trips), so the ALREADY-EXISTING conjunctive authority gate REFUSES every target-touching / mutating action, fail-closed and persistently, while the process stays UP so read-only diagnosis, evidence access, audit export and authorization repair still work. An integrity failure (`enforce_integrity_or_restrict`, over the existing `verify_integrity` audit) transitions the system into restricted mode rather than crashing or continuing, and a clean audit leaves it fully-operational. Entering and leaving are recorded on a `vigil_core` hash-chained, tamper-evident ledger that survives a restart, and `emergency-stop` enters the mode deliberately.",

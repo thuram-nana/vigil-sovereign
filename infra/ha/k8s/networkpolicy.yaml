@@ -25,9 +25,11 @@ spec:
             matchLabels: { app: vigil-proxy }
       ports:
         - { protocol: TCP, port: 8733 }
-    # NOTE — kubelet health probes: the readiness probe (httpGet :8733) originates from the NODE, not a
-    # pod. Most CNIs exempt kubelet health-check traffic from NetworkPolicy; a CNI that does NOT will fail
-    # the probe under this default-deny. If your CNI enforces policy on probe traffic, ALSO allow the node
+    # NOTE — kubelet health probes: the readiness AND liveness probes (both httpGet :8733 → /readyz and
+    # /healthz after W6-2) originate from the NODE, not a pod. Most CNIs exempt kubelet health-check traffic
+    # from NetworkPolicy; a CNI that does NOT will fail the probes under this default-deny (and a failed
+    # LIVENESS probe would then RESTART the writer in a loop). If your CNI enforces policy on probe traffic,
+    # ALSO allow the node
     # source (an `ipBlock` for your node CIDR, cluster-specific) or switch to an exec/tcpSocket probe.
     # This is left out here because the node CIDR is deployment-specific — do not paste a wrong one.
 ---

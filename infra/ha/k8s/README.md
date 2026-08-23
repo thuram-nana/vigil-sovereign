@@ -18,6 +18,37 @@ availability of the sovereign spine.**
 | `services.yaml` | Services | — | ClusterIP + a **headless** Service for the StatefulSet. Sticky sessions on the proxy Service. |
 | `networkpolicy.yaml` | NetworkPolicy | — | **REQUIRED (enforced in the deploy path — not optional).** Restricts ingress to `vigil-sovereign:8733` to the proxy pods only — the cockpit serves its owner token token-free at `GET /`, so it must be reachable only via the authenticating proxy. The first resource of `kustomization.yaml`; `tools/ha/deploy.sh` REFUSES to deploy without it (or without a NetworkPolicy controller). |
 
+## Health probes (liveness + readiness) — W6-2
+
+Every workload declares **both** a liveness and a readiness probe (a CI test —
+`apps/sigil/tests/test_ha_probes_required.py` — and the `tools/ha/deploy.sh`
+preflight both REFUSE a set where one is missing):
+
+| Workload | Readiness | Liveness |
+|---|---|---|
+| `vigil-sovereign` (cockpit :8733) | `GET /readyz` — live probe of the spine store (503 when it cannot open) | `GET /healthz` — the process answers, no dependency I/O |
+| `vigil-proxy` (:8770) | `GET /readyz` — live probe of the **sovereign backend** it federates to (503 when that writer is down) | `GET /healthz` |
+| `qdrant` (:6333) | `GET /readyz` (native) | `GET /livez` (native) |
+| `neo4j` (bolt :7687 / http :7474) | `tcpSocket` bolt (accepts Cypher) | `tcpSocket` http (process up; lenient) |
+| `otel-collector` (:4318) | `tcpSocket` OTLP receiver | `tcpSocket` OTLP receiver (lenient) |
+
+The two **VIGIL-owned** workloads wire readiness to the **W6-1 `/readyz`** route and
+liveness to **`/healthz`** — never the pre-fix shallow `GET /` on the static bundle,
+which returned 200 even when the real backend was dead (so a proxy whose sovereign
+backend was down stayed Ready). `/readyz` returns **503** when the server's real
+dependency is down, so the Service **drains** a degraded replica; `/healthz` does no
+dependency I/O, so a dependency outage does not get an otherwise-healthy process
+**killed**. Both are the unauthenticated, Host-ungated routes a credential-less kubelet
+can reach (matched before the cockpit's auth/anti-rebinding gates). The single-writer
+sovereign StatefulSet — which had **no liveness probe at all** — now has one, so a hung
+writer is restarted. See the kubelet-probe caveat in `networkpolicy.yaml` (some CNIs
+enforce policy on probe traffic and need the node source allowed).
+
+Shipped VIGIL **server images** also declare a Dockerfile `HEALTHCHECK`: the AEGIS
+gateway (`engine/crucible/framework/v2/aegis/Dockerfile`) exercises `/readyz`; the
+egress forward proxy (`gateway/Dockerfile`), a CONNECT proxy with no HTTP routes, uses
+a TCP connect to its bind. Details: [`docs/decisions/W6-2-healthchecks-and-probes.md`](../../../docs/decisions/W6-2-healthchecks-and-probes.md).
+
 ## Why the proxy runs `--proxy-only` (and binds the pod IP)
 
 `vigil up` is **not** a stateless proxy by default: it LAUNCHES the sovereign
@@ -114,7 +145,8 @@ current height.
 **Use the gated deploy** — it makes the REQUIRED NetworkPolicy required *in the deploy
 path*, refusing to proceed if the policy is absent, does not deny the cross-workload
 path, is not wired into the kustomization, or the cluster has no NetworkPolicy
-controller to enforce it:
+controller to enforce it — and (W6-2) refusing unless every workload declares real
+liveness+readiness probes wired to `/healthz` + `/readyz`:
 
 ```
 tools/ha/deploy.sh

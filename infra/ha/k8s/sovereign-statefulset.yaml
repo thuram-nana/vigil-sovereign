@@ -91,10 +91,23 @@ spec:
               value: "vigil.example.com"
           ports:
             - { name: cockpit, containerPort: 8733 }
+          # W6-2 (#453): REAL probes on the W6-1 endpoints. `sigil serve` answers /healthz + /readyz
+          # UNAUTHENTICATED and Host-ungated (matched BEFORE the cockpit's auth/anti-rebinding gates), so a
+          # credential-less kubelet can reach them. readiness = /readyz, a live probe of the spine store
+          # (503 when it cannot open) → the headless Service DRAINS a degraded writer instead of routing
+          # writes to it (was a shallow `GET /` on the token-embedding index, which stayed 200 even if the
+          # spine was wedged). liveness = /healthz, which does NO dependency I/O — a dependency outage must
+          # NOT get an otherwise-healthy single writer KILLED — closing the cited "no liveness probe at all
+          # on the single-writer sovereign StatefulSet" gap so a genuinely HUNG writer IS restarted.
           readinessProbe:
-            httpGet: { path: /, port: cockpit }
+            httpGet: { path: /readyz, port: cockpit }
             initialDelaySeconds: 5
             periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: cockpit }
+            initialDelaySeconds: 15
+            periodSeconds: 20
             failureThreshold: 3
           volumeMounts:
             - { name: sigil-home, mountPath: /sigil-home }
