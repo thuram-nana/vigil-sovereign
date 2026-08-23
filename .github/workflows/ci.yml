@@ -670,7 +670,7 @@ jobs:
           fi
 
   sigil-lint:
-    name: SIGIL lint (ruff + mypy ratchet, blocking)
+    name: SIGIL lint (ruff blocking + mypy can-complete)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # ruff and mypy were declared as dev extras but NEVER run in CI. A "# type:" PROSE comment in
