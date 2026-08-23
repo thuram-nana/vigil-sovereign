@@ -43,12 +43,16 @@ class ToolContext:
     """What a gated tool invocation is given. ``slug`` binds the run to its charter/scope/
     kill-switch. ``world`` is the optional shared world-model for read-only internal query tools.
     ``prompt_callback`` (``(question, timeout_s) -> bool``, default-deny) backs destructive-confirm.
-    ``dry_run`` lets a tool short-circuit any real effect while still exercising the gates."""
+    ``dry_run`` lets a tool short-circuit any real effect while still exercising the gates.
+    ``run_dir`` (S9c) is the authoritative run dir the engage flow threads in, so a tool/seam that must
+    persist a run-scoped artifact (e.g. the fusion INCONCLUSIVE-COVERAGE manifest) writes it under the
+    SAME dir the run's other artifacts land in, without re-reading the environment at the leaf."""
 
     slug: str
     world: Any = None
     prompt_callback: Any = None
     dry_run: bool = False
+    run_dir: "str | None" = None
 
 
 @dataclass

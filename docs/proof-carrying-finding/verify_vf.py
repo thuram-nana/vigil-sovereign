@@ -1060,6 +1060,42 @@ def _project_posture_claims(coverage_cert: dict) -> list:
     return claims
 
 
+# S9c: VIGIL-free mirror of posture.certificate._normalize_incomplete / posture_overall_verdict — so a
+# third party enforces the SAME coverage-incomplete downgrade the in-tree verifier does. A certificate that
+# declares an UNASSESSED surface (``coverage_incomplete``) must carry the downgraded overall verdict and can
+# never read as a clean whole-target CLOSED. Additive: absent the disclosure block this is a no-op, so an
+# existing (web-only) bundle verifies byte-for-byte as before.
+def _pp_normalize_incomplete(coverage_incomplete: Any) -> list:
+    seen = set()
+    for item in coverage_incomplete or ():
+        try:
+            if isinstance(item, dict):
+                sensor = str(item.get("sensor") or "").strip()
+                missing = str(item.get("missing_prerequisite") or "").strip()
+            else:
+                sensor, missing = item
+                sensor, missing = str(sensor or "").strip(), str(missing or "").strip()
+        except Exception:
+            continue
+        if sensor:
+            seen.add((sensor, missing))
+    return [{"sensor": s, "missing_prerequisite": m} for (s, m) in sorted(seen)]
+
+
+def _pp_overall_verdict(claims: list, unassessed: list) -> str:
+    if any(c.get("status") == "OPEN" for c in claims):
+        return "OPEN"
+    if unassessed:
+        return "COVERAGE_INCOMPLETE"
+    n_closed = sum(1 for c in claims if c.get("status") == "CLOSED")
+    n_unproven = sum(1 for c in claims if c.get("status") == "UNPROVEN")
+    if n_closed and not n_unproven:
+        return "CLOSED"
+    if n_closed:
+        return "PARTIAL"
+    return "UNPROVEN"
+
+
 def verify_posture(posture: dict, *, pin: str, owner_pubkey: str, engagement: str, now: int) -> tuple[bool, str]:
     """Standalone-verify a PostureCertificate. ``posture`` = {"certificate": {...}, "signature": {...}}.
     Fail-closed: authenticity + pin, then coverage-projection binding, then owner target-binding."""
@@ -1093,6 +1129,20 @@ def verify_posture(posture: dict, *, pin: str, owner_pubkey: str, engagement: st
     for c in rederived:
         if c["status"] == "CLOSED" and not c.get("evidence_oracle_kinds"):
             return False, "a CLOSED claim names no conclusive oracle"
+    # 3a. S9c coverage-incomplete disclosure: a cert that declares an UNASSESSED surface must carry the
+    #     downgraded overall verdict and cannot read as a clean whole-target CLOSED (no disclosure => no-op).
+    _disc = cert.get("coverage_incomplete")
+    if isinstance(_disc, dict) and _disc.get("incomplete"):
+        _unassessed = _pp_normalize_incomplete(_disc.get("unassessed_surfaces"))
+        if not _unassessed:
+            return False, "coverage_incomplete is set but names no unassessed surface"
+        _want = _pp_overall_verdict(cert.get("posture_claims") or [], _unassessed)
+        _got = (cert.get("summary") or {}).get("overall")
+        if _got != _want:
+            return False, (f"posture overall verdict {_got!r} disagrees with the coverage-incomplete "
+                           f"projection {_want!r} — a clean reading over an unassessed surface")
+        if _got == "CLOSED":
+            return False, "a coverage-incomplete certificate must not read CLOSED (whole-target)"
     # 3b. RE-EXECUTION (the re-executable tier): re-run the oracle over every re-executable probe's
     #     retained values and refuse a forged negative/positive — a tamper-check that re-derives the verdict
     #     (NOT a liveness proof; values are producer-supplied), run
@@ -1115,8 +1165,16 @@ def verify_posture(posture: dict, *, pin: str, owner_pubkey: str, engagement: st
                  f"values are producer-supplied — trusting the negative reflects the live target needs a "
                  f"live re-run), "
                  f"{n_binding} binding-only (re-firing those needs VIGIL)")
+    _incov = cert.get("coverage_incomplete")
+    _incov_note = ""
+    if isinstance(_incov, dict) and _incov.get("incomplete"):
+        _names = "; ".join(f"{u.get('sensor')} (missing: {u.get('missing_prerequisite') or 'unknown'})"
+                           for u in (_incov.get("unassessed_surfaces") or []))
+        _incov_note = (f" — COVERAGE INCOMPLETE (overall={s.get('overall', 'COVERAGE_INCOMPLETE')}): "
+                       f"declared surface(s) NOT ASSESSED: {_names}")
     return True, (f"SOUND: {s.get('n_closed', '?')} CLOSED / {s.get('n_open', '?')} OPEN / "
-                  f"{s.get('n_unproven', '?')} UNPROVEN over {cert.get('target_sample')} — {tier_note}")
+                  f"{s.get('n_unproven', '?')} UNPROVEN over {cert.get('target_sample')} — {tier_note}"
+                  f"{_incov_note}")
 
 
 # ---------------------------------------------------------------------------

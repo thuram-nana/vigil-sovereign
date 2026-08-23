@@ -51,6 +51,21 @@ def scan_loopback_benchmark(*, max_pages: int = 25, max_depth: int = 4,
         ).run(base)
 
 
+def _read_coverage_incomplete(run_dir: "str | Path | None") -> list[dict]:
+    """Read the framework-owned ``<run_dir>/_inconclusive.json`` (the fusion INCONCLUSIVE-COVERAGE manifest)
+    through the ONE shared stdlib parser and return its unassessed surfaces for the posture disclosure. A
+    function-local framework import (this module already imports framework function-locally; the reader is
+    stdlib-only, so no sigil is co-loaded — FATAL-2 holds). Absent run dir / absent artifact => ``[]`` (no
+    disclosure -> byte-identical certificate)."""
+    if not run_dir:
+        return []
+    try:
+        from framework.v2.inconclusive_manifest import read_manifest  # noqa: PLC0415 (FATAL-2: function-local, stdlib-only)
+        return read_manifest(run_dir)["surfaces"]
+    except Exception:
+        return []
+
+
 def attest_loopback_benchmark(
     out_dir: str | Path,
     *,
@@ -60,6 +75,7 @@ def attest_loopback_benchmark(
     max_pages: int = 25,
     max_depth: int = 4,
     retain_evidence: bool = False,
+    run_dir: "str | Path | None" = None,
 ) -> dict:
     """End-to-end: scan the loopback benchmark app → coverage cert → posture cert → sign → export the
     portable bundle at ``out_dir``. Keys default to fresh ephemerals (the operator pins the returned
@@ -79,7 +95,15 @@ def attest_loopback_benchmark(
     target_sample = {"host": "127.0.0.1"}
     identity = sign_identity_attestation(owner, engagement=engagement, policy={"host": ["127.0.0.1"]},
                                          not_after=9_999_999_999)
-    cert = build_posture_certificate(coverage, target_identity=identity, target_sample=target_sample)
+    # S9c: if this attestation is minted over a run dir that carries the fusion INCONCLUSIVE-COVERAGE
+    # manifest (a declared cloud/K8s surface a sensor could NOT assess), the certificate discloses those
+    # unassessed surfaces and downgrades its overall verdict — it can never read as a clean whole-target
+    # CLOSED while silent about a surface it never looked at. The loopback benchmark is web-only, so
+    # ``run_dir`` is None here and the certificate is byte-identical; the seam is live for any caller that
+    # mints a posture cert over an engage run dir.
+    coverage_incomplete = _read_coverage_incomplete(run_dir)
+    cert = build_posture_certificate(coverage, target_identity=identity, target_sample=target_sample,
+                                     coverage_incomplete=coverage_incomplete)
 
     out = Path(out_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
@@ -99,5 +123,6 @@ def attest_loopback_benchmark(
         "owner_pubkey": owner.public_key_b64,
         "engagement": engagement,
         "summary": cert.get("summary", {}),
+        "coverage_incomplete": cert.get("coverage_incomplete", {"incomplete": False, "unassessed_surfaces": []}),
         "target_sample": target_sample,
     }

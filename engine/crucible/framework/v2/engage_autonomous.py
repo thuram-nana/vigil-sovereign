@@ -90,11 +90,14 @@ def _fuse_sensors(world: "WorldModel | None", slug: str, ctx: Any) -> list:
         # A fusion sensor may have returned INCONCLUSIVE (a declared surface it could NOT assess).
         # fuse_sensors collected these onto ctx.inconclusive_surfaces; persist them to the FRAMEWORK-OWNED
         # run-dir artifact (<run_dir>/_inconclusive.json) the dossier consumes, so the AUTONOMOUS path's
-        # not-assessed surface is never folded into a silent CLEAN either. Written only on a genuine
-        # inconclusive with a resolvable run dir ($VIGIL_PROOF_RUN_DIR) => byte-identical otherwise. Total.
+        # not-assessed surface is never folded into a silent CLEAN either. The run dir is THREADED on the
+        # ctx (``ctx.run_dir``, set by run_autonomous_cycle from the engage flow's authoritative resolve);
+        # persist falls back to $VIGIL_PROOF_RUN_DIR only as a last resort. Written only on a genuine
+        # inconclusive with a resolvable run dir => byte-identical otherwise. Total.
         try:
             from .engage_fusion import persist_inconclusive_surfaces  # type: ignore[attr-defined]
-            persist_inconclusive_surfaces(ctx)
+            _rd = ctx.get("run_dir") if isinstance(ctx, dict) else getattr(ctx, "run_dir", None)
+            persist_inconclusive_surfaces(ctx, run_dir=_rd)
         except Exception:
             pass
         return list(out) if out else []
@@ -1210,6 +1213,7 @@ def run_autonomous_cycle(
     crawl_max_pages: int = 20,
     enable_multi_probe: bool = False,
     probe_posture: str = "auto-test",
+    run_dir: "str | None" = None,
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
@@ -1253,6 +1257,15 @@ def run_autonomous_cycle(
     registry = registry if registry is not None else _default_registry()
     if ctx is None:
         ctx = ToolContext(slug=slug, world=world, prompt_callback=prompt_callback)
+    # S9c: thread the engage flow's authoritative run dir onto the ctx so the fusion seam persists the
+    # INCONCLUSIVE-COVERAGE manifest under THIS run's dir (env-independent). Only set it when threaded and
+    # not already present, so a caller that passed its own ctx.run_dir is respected and the default (no run
+    # dir) path is byte-identical.
+    if run_dir and getattr(ctx, "run_dir", None) in (None, ""):
+        try:
+            ctx.run_dir = run_dir
+        except Exception:
+            pass
 
     out = AutonomyResult(engagement=result, slug=slug)
     out.lookahead_depth = lookahead_depth

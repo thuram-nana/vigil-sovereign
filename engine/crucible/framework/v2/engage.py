@@ -622,7 +622,19 @@ def _run_reasoning_pass(sink, spine, slug, report, result, world) -> None:
         pass
 
 
-def _run_fusion(world: "WorldModel", slug: str, *, seq_base: int, sink) -> tuple[int, int]:
+def _engage_run_dir() -> "str | None":
+    """The AUTHORITATIVE run dir for THIS engage process, resolved ONCE the way the run's own artifacts are
+    located: ``$VIGIL_PROOF_RUN_DIR`` — the exact handle the console exports on every fusion-capable engage
+    spawn and the same one the proof subsystem writes ``proofs/_degraded.json`` / ``reverifiable.json`` under.
+    The engage flow resolves it here and THREADS it explicitly into fusion (``_run_fusion`` / the autonomous
+    seam), so persistence never depends on a leaf re-reading the environment. Absent (a hand-run CLI engage
+    with no console) => there is no run dir to attach an artifact to and nothing is written."""
+    rd = os.environ.get("VIGIL_PROOF_RUN_DIR")
+    return rd or None
+
+
+def _run_fusion(world: "WorldModel", slug: str, *, seq_base: int, sink,
+                run_dir: "str | None" = None) -> tuple[int, int]:
     """Opt-in (``--fuse-sensors``) sensor fusion over the run world-model. Folds the operator's declared
     OFFLINE sensor LEADS (``targets/<slug>/fusion.json``: declared_service / sbom_vuln / kube_bench /
     cloud_import) into ``world`` through the GATED pipeline, and lets the deterministic promotion oracles
@@ -648,18 +660,22 @@ def _run_fusion(world: "WorldModel", slug: str, *, seq_base: int, sink) -> tuple
     before = _oracle_nodes()
     # ctx carries the fusion clock base (so fusion's seq continues after the run) + the spine sink; it
     # carries NO explicit plan, so fuse_sensors resolves the operator's targets/<slug>/fusion.json.
-    ctx = SimpleNamespace(base_seq=seq_base, sink=sink)
+    # Resolve the run dir ONCE, the authoritative way (explicit thread first, env only as last resort), and
+    # carry it ON the ctx so the persist below is env-INDEPENDENT — it uses the threaded value, not a leaf
+    # os.environ read. On a hand-run CLI engage with no run dir this stays None and nothing is written.
+    rd = run_dir or _engage_run_dir()
+    ctx = SimpleNamespace(base_seq=seq_base, sink=sink, run_dir=rd)
     try:
         minted = fuse_sensors(world, slug, ctx)
     except Exception:
         return (0, 0)
     # A fusion sensor may have returned INCONCLUSIVE (a declared surface it could NOT assess — a missing
     # cloud/K8s prerequisite). fuse_sensors collected these onto ctx.inconclusive_surfaces; persist them to
-    # a FRAMEWORK-OWNED run-dir artifact (<run_dir>/_inconclusive.json, run dir from $VIGIL_PROOF_RUN_DIR)
-    # so the dossier's clean/verdict determination MUST consult a not-assessed surface — a "0 findings" run
-    # over an unassessed surface is NEVER reported clean. Written ONLY on a genuine inconclusive (no surface
-    # or no run dir => nothing written => byte-identical). Best-effort/total; never sinks the run.
-    persist_inconclusive_surfaces(ctx)
+    # a FRAMEWORK-OWNED run-dir artifact (<run_dir>/_inconclusive.json) using the run dir THREADED into this
+    # function (env only as last resort) so the dossier's clean/verdict determination MUST consult a not-
+    # assessed surface — a "0 findings" run over an unassessed surface is NEVER reported clean. Written ONLY
+    # on a genuine inconclusive (no surface or no run dir => nothing written => byte-identical). Best-effort.
+    persist_inconclusive_surfaces(ctx, run_dir=rd)
     facts = len(_oracle_nodes() - before)
     # Under --spine, mirror the folded LEADS onto the unified report (graded as leads, never facts).
     if sink is not None and minted:
@@ -713,6 +729,7 @@ def run_engagement(
     defender_log_format: str | None = None,
     fuse_sensors: bool = False,
     resume: bool = False,
+    run_dir: "str | None" = None,
 ) -> EngagementResult:
     """Run one authorized engagement end to end and return an
     :class:`EngagementResult` — the oracle-confirmed :class:`ScanReport` plus the
@@ -1011,7 +1028,8 @@ def run_engagement(
         try:
             fusion_base = max((n.last_seen for n in world.all_nodes()), default=0) + 1
             result.fused_leads, result.fused_facts = _run_fusion(
-                world, slug, seq_base=fusion_base, sink=fusion_sink)
+                world, slug, seq_base=fusion_base, sink=fusion_sink,
+                run_dir=(run_dir or _engage_run_dir()))
         except Exception:
             pass
         # C4 — internal attack paths over the NOW-FUSED world. Bridge the GROUNDED cloud oracle
@@ -1064,7 +1082,7 @@ def run_engagement(
     return result
 
 
-def run_fusion_only(slug: str, *, spine: object = None) -> EngagementResult:
+def run_fusion_only(slug: str, *, spine: object = None, run_dir: "str | None" = None) -> EngagementResult:
     """FUSION-ONLY engagement (slice C2b): NO seed URL, NO web crawl / recon / scan. Build the run
     world-model and fold ONLY the operator's declared sensor LEADS (``targets/<slug>/fusion.json``)
     through the GATED pipeline, letting the deterministic promotion oracles re-fire over each sensor's
@@ -1097,7 +1115,8 @@ def run_fusion_only(slug: str, *, spine: object = None) -> EngagementResult:
     try:
         # seq_base=1 over a fresh (empty) world — the fusion clock starts at 1, exactly as the default
         # engage's post-scan fusion does over an empty world.
-        result.fused_leads, result.fused_facts = _run_fusion(world, slug, seq_base=1, sink=sink)
+        result.fused_leads, result.fused_facts = _run_fusion(world, slug, seq_base=1, sink=sink,
+                                                             run_dir=(run_dir or _engage_run_dir()))
     except Exception:
         pass   # fusion is the whole point, but a failure is an honest empty, never a crash
 
@@ -1276,6 +1295,9 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
             probe_posture=("auto-test" if getattr(args, "discover_autotest", False)
                            else str(getattr(args, "autonomous_posture", "discover-queue"))),
             blackboard=spine,   # reuse the --spine blackboard as planning substrate + tool sink
+            # S9c: thread the run's authoritative dir so the autonomous fusion seam persists any
+            # INCONCLUSIVE-COVERAGE manifest under THIS run's dir (env-independent; env is last resort).
+            run_dir=_engage_run_dir(),
             # LEARN — opt in (default OFF) to writing this run's confirm/refute outcomes to the
             # operator's targets/<slug>/outcomes.json, closing the learning loop the meta-monitor
             # reads next run. Explicit because it mutates the operator's target dir.
