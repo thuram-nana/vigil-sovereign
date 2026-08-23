@@ -30,7 +30,8 @@ AEGIS ships inside CRUCIBLE and runs locally (loopback) — no cloud, no telemet
   console entry points: `aegis` (== `python3 -m framework.v2 aegis`) and `crucible`. No install is
   required to try it from a source checkout — the `python3 -m framework.v2 aegis …` form works as-is.
 - **Docker sidecar.** [`framework/v2/aegis/Dockerfile`](../../aegis/Dockerfile) packages the gateway on
-  `python:3.11-slim` (non-root, `ENTRYPOINT python3 -m framework.v2 aegis gateway`, default
+  `python:3.13-slim` (the minor the committed locks target; non-root,
+  `ENTRYPOINT python3 -m framework.v2 aegis gateway`, default
   `CMD --mode observe`). It is wired into `docker-compose.yml` (the build-only `aegis-gateway` service,
   `aegis` profile) and the root `make aegis-image` target, both of which supply the `vigil_core` named
   build context the image needs — so build it with `make aegis-image` (== `docker compose --profile aegis

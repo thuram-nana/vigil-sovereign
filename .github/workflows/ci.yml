@@ -253,6 +253,20 @@ jobs:
             # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
             echo "::error::gateway/tests missing from the checkout"; exit 1
           fi
+      - name: gateway container bring-up proof (W1-4 #413 — the env-gated IT actually RUNS here)
+        # W1-4 (#413): test_docker_bringup.py::test_real_docker_build_and_fail_closed was gated on
+        # VIGIL_GATEWAY_DOCKER_IT, set NOWHERE → the container carrying the egress gate had no EXECUTED
+        # bring-up proof. This required job's GitHub-hosted ubuntu-latest runner ships a working Docker
+        # daemon and Docker Hub egress (this job already pulls apt), so the opt-in bring-up runs here for
+        # real; -rA surfaces its node id in the run report. If the daemon/registry are genuinely
+        # unavailable the test skips LOUDLY (never a silent green); a real fail-OPEN is RED. The whole
+        # "env-gated but set nowhere" class is guarded by gateway/tests/test_env_gated_tests_run_in_ci.py.
+        # See docs/decisions/W1-4-gateway-bringup-runs-in-ci.md.
+        env:
+          VIGIL_GATEWAY_DOCKER_IT: "1"
+        run: |
+          PYTHONPATH=gateway python -m pytest -rA -v \
+            gateway/tests/test_docker_bringup.py::test_real_docker_build_and_fail_closed
 
   integration:
     name: integration two-env boundary (P5)
@@ -723,3 +737,34 @@ jobs:
             # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
             echo "::error::apps/sigil/kernel/Cargo.toml missing from the checkout"; exit 1
           fi
+
+  python-compat:
+    name: python-compat
+    # W1-7 (#416): a real cross-version matrix. The committed hash-locks — and every other CI job — target
+    # 3.13 (the interpreter the shipped runtimes now pin), so the FULL suites stay on 3.13; broadening them
+    # to 3.12 needs a second 3.12 hash-lock (filed as a residual). What IS cross-version here is the
+    # version-SENSITIVE, stdlib-only guard suite: the AEGIS runtime-alignment check (W1-7) and the env-gate
+    # guard (W1-4). They install ONLY pytest from a universal-wheel subset of the CI toolchain lock
+    # (py3-none-any → byte-identical on both minors, no fresh resolution, no compiler) and run under 3.12
+    # AND 3.13, so the alignment invariant is proven on more than the single minor CI used to exercise.
+    # ADVISORY (not a required check): promoting it to a merge blocker needs the operator's
+    # tools/governance/require-checks.sh --apply (a GitHub-admin action). It is enumerated with this reason
+    # in docs/tests/test_required_checks_canonical.py so it can never become a silently-unguarded PR job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: install pytest (universal-wheel subset of the CI toolchain lock, hash-pinned)
+        run: pip install --require-hashes -r infra/supply-chain/matrix-tooling.lock.txt
+      - name: cross-version guards — AEGIS runtime alignment (W1-7) + env-gate class guard (W1-4)
+        run: |
+          PYTHONPATH=gateway python -m pytest -rA -v \
+            integration/tests/test_aegis_dockerfile_wired.py \
+            gateway/tests/test_env_gated_tests_run_in_ci.py
