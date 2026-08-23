@@ -27,6 +27,11 @@ from .hard_guardrail import (
     HardBlockError, assert_not_hard_blocked, candidate_hosts, is_hard_blocked, normalize_domain,
     protected_guard_enabled,
 )
+from .install_manifest import (
+    INSTALL_MANIFEST_SCHEMA, InstallManifest, InstallManifestError, InstallManifestRefused,
+    build_manifest, ensure_operable, manifest_path, new_install_id, read_manifest, verify_manifest,
+    write_manifest,
+)
 from .highwater import (
     HighWaterDowngrade, HighWaterError, advance_highwater, check_highwater, highwater_lock, load_highwater,
     read_highwater_dict, strict_highwater_enabled, verify_highwater_signature,
@@ -52,6 +57,9 @@ __all__ = [
     "generate_keypair", "sign", "verify_one", "verify_threshold", "KeyPair", "IntegrityError",
     "HardBlockError", "assert_not_hard_blocked", "candidate_hosts", "is_hard_blocked",
     "normalize_domain", "protected_guard_enabled",
+    "INSTALL_MANIFEST_SCHEMA", "InstallManifest", "InstallManifestError", "InstallManifestRefused",
+    "build_manifest", "ensure_operable", "manifest_path", "new_install_id", "read_manifest",
+    "verify_manifest", "write_manifest",
     "AuthorizerKey", "ChainEntry", "Signature", "SignedChainHead", "TrustRoot",
     "ROLES", "PERMISSIONS", "role_can", "OFFENSE_ACTION_PERM", "offense_perm_for", "offense_route_key",
     "seal", "unseal", "new_kek", "is_sealed", "SealError",

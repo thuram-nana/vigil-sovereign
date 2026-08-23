@@ -3556,6 +3556,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if argv and argv[0] in PASSTHROUGH_VERBS:
         return dispatch(argv[0], argv[1:])
     args = build_parser().parse_args(argv)
+    # W5-4 (#448): fail-closed install-manifest gate for the offense `.vigil-live` data dir — write-if-absent
+    # (fresh install, no operator action) + verify-if-present (refuse-newer / fail closed on corruption). Runs
+    # only for native (argparse) verbs; a PASSTHROUGH verb is handled above and runs the target subsystem's
+    # OWN gate. Never crosses FATAL-2: `install_gate` imports only vigil_core + stdlib.
+    from .install_gate import ensure_operable_or_exit
+    from .strix_runtime import resolve_base_dir
+    _gate_rc = ensure_operable_or_exit(
+        resolve_base_dir(getattr(args, "base_dir", None)), getattr(args, "command", "") or "")
+    if _gate_rc is not None:
+        return _gate_rc
     try:
         return int(args.func(args))
     except Exception as exc:  # noqa: BLE001 — the CLI surfaces a clean error, never a traceback dump

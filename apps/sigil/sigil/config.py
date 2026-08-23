@@ -246,6 +246,40 @@ def ensure_dirs() -> None:
             pass
 
 
+# --- W5-4 (#448): the ~/.sigil install manifest (product version + schema versions + install id) ---------
+def install_manifest_schema_versions() -> "dict[str, int]":
+    """The versioned artifacts THIS sovereign build writes into ``~/.sigil`` and the max schema of each it
+    understands — the map that drives the fail-closed startup verify (W5-4). A future build that bumps any of
+    these refuses-newer a ``~/.sigil`` written by an even newer build; and an older build refuses a home this
+    one wrote with a bumped schema. Assembled from the per-artifact ``_MAX_*_SCHEMA`` constants so a schema
+    bump is reflected here automatically. Imported lazily to avoid an import cycle (config -> spine)."""
+    from .spine.checkpoint import _MAX_HEAD_SCHEMA
+    from .spine.floor import _MAX_FLOOR_SCHEMA
+    from .spine.manifest import _MAX_MANIFEST_SCHEMA
+    from .spine.models import SCHEMA_VERSION
+    from .spine.snapshot import _MAX_SNAPSHOT_SCHEMA
+    return {
+        "spine_record": int(SCHEMA_VERSION),
+        "signed_head": int(_MAX_HEAD_SCHEMA),
+        "anti_rollback_floor": int(_MAX_FLOOR_SCHEMA),
+        "segment_manifest": int(_MAX_MANIFEST_SCHEMA),
+        "snapshot_state": int(_MAX_SNAPSHOT_SCHEMA),
+    }
+
+
+def ensure_install_manifest():
+    """Write-if-absent + verify-if-present the ``~/.sigil`` install manifest (W5-4, #448). Returns
+    ``(manifest, created)``. Raises ``vigil_core.install_manifest.InstallManifestRefused`` (fail closed) if
+    ``~/.sigil`` was written by a build this one does not understand (a newer manifest format, or a
+    newer/foreign tracked schema) or whose self-integrity hash does not match. A fresh install writes the
+    manifest with NO operator action. Called at sovereign CLI startup."""
+    from vigil_core.install_manifest import ensure_operable
+
+    from . import __version__
+    return ensure_operable(SIGIL_HOME, product_version=__version__,
+                           schema_versions=install_manifest_schema_versions())
+
+
 # --- effective config + self-check ----------------------------------------------------
 _SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
 

@@ -2076,7 +2076,11 @@ _MIGRATION_GATE_EXEMPT = frozenset({"upgrade", "spine", "doctor", "restore", "ba
 def _assert_store_operable_or_exit(cmd: str) -> None:
     """Fail-closed startup gate (W5-5, #449): refuse to run a normal command against a legacy (pre-segment)
     spine that already holds data, naming the command that fixes it. Exempts the recovery/diagnostic
-    commands so the operator can always reach the fix. Never raises out of `main()` — prints and exits 3."""
+    commands so the operator can always reach the fix. Never raises out of `main()` — prints and exits 3.
+
+    W5-4 (#448) runs FIRST: the install-manifest gate writes ``~/.sigil``'s install manifest on a fresh
+    install (no operator action) and refuses-newer a home this build does not understand."""
+    _assert_install_manifest_or_exit(cmd)
     if cmd in _MIGRATION_GATE_EXEMPT:
         return
     from .spine.upgrade import MigrationRequired, assert_operable
@@ -2086,6 +2090,29 @@ def _assert_store_operable_or_exit(cmd: str) -> None:
         print(f"sigil: refusing to run `{cmd}` — {e}", file=sys.stderr)
         sys.exit(3)
     except Exception:  # noqa: BLE001 — a transient store-open error is the COMMAND's to surface, not the gate's
+        return
+
+
+def _assert_install_manifest_or_exit(cmd: str) -> None:
+    """Fail-closed install-manifest gate (W5-4, #448). Write-if-absent (fresh install, no operator action) +
+    verify-if-present the ``~/.sigil`` data directory. Runs for EVERY command so a fresh install always gets
+    a manifest. A data directory this build does not understand — a newer manifest format / a newer or
+    foreign tracked schema / a self-integrity-hash mismatch (corruption or a naive hand-edit) — is REFUSED
+    (exit 3) for a normal command; for a recovery/diagnostic command it WARNS and continues so the operator
+    can upgrade the binary or inspect. A transient FS error never bricks the CLI (the command surfaces its
+    own errors)."""
+    from vigil_core.install_manifest import InstallManifestRefused
+
+    from .config import ensure_install_manifest
+    try:
+        ensure_install_manifest()
+    except InstallManifestRefused as e:
+        if cmd in _MIGRATION_GATE_EXEMPT:
+            print(f"sigil: WARNING — {e} (allowed for `{cmd}` so you can fix it)", file=sys.stderr)
+            return
+        print(f"sigil: refusing to run `{cmd}` — {e}", file=sys.stderr)
+        sys.exit(3)
+    except Exception:  # noqa: BLE001 — a transient marker/FS error is the COMMAND's to surface, not the gate's
         return
 
 
