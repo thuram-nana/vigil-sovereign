@@ -68,6 +68,15 @@ def _findings(report: dict) -> list[dict]:
     return fs if isinstance(fs, list) else ([report] if report.get("oracle_context") else [])
 
 
+def _strict_oracle_version_enabled() -> bool:
+    """The STRICT ORACLE-VERSION production profile (fail-safe OFF). When on, a bundle that is crypto-sound but
+    carries a certificate whose oracle version CHANGED since mint — or cannot be confirmed — is REFUSED (exit
+    non-zero): re-verification is not under the SAME oracle procedure the issuer signed, so the government
+    'this exact proof re-executes' claim is not met. Mirrors the ``VIGIL_STRICT_HIGHWATER`` convention; the CLI
+    also accepts an explicit ``--strict-oracle-version``. Default OFF → exit codes byte-identical to before."""
+    return os.environ.get("VIGIL_STRICT_ORACLE_VERSION", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _certify(args: argparse.Namespace) -> int:
     report = json.loads(Path(args.report).read_text(encoding="utf-8"))
     signers = _parse_signers(args.signer)
@@ -288,22 +297,52 @@ def _verify(args: argparse.Namespace) -> int:
 
     for v in result.certificate_results:
         mark = "OK " if v.ok else "BAD"
-        print(f"  [{mark}] {v.finding_ref}: authentic={v.authentic} bound={v.bound} "
+        # The TIER is the first-class headline (a version-skewed cert is never rendered as a bare SOUND).
+        print(f"  [{mark}] {v.finding_ref}: tier={v.tier.value} authentic={v.authentic} bound={v.bound} "
               f"artifacts_ok={v.artifacts_ok} primary_artifact_ok={v.primary_artifact_ok} "
-              f"reproduced={v.reproduced} — {v.reason}")
+              f"reproduced={v.reproduced} oracle_version={v.oracle_version_status.value} — {v.reason}")
     print(f"  chain: {'OK ' if result.chain_ok and result.cert_set_bound else 'BAD'} — {result.chain_note}")
 
-    ok_n = sum(1 for v in result.certificate_results if v.ok)
-    print(f"verified {ok_n}/{len(result.certificate_results)} certificate(s) sound; "
-          f"bundle {'SOUND' if result.ok else 'NOT SOUND'}")
+    # ORACLE-VERSION policy (LOUD, never silent). A cert that is cryptographically sound but whose oracle
+    # version CHANGED since mint — or cannot be confirmed — is NOT fully sound: re-verification did not (or
+    # cannot be shown to have) re-run the SAME procedure the issuer signed. Surface it prominently, and — under
+    # the strict production profile (--strict-oracle-version / VIGIL_STRICT_ORACLE_VERSION, fail-safe OFF) — fail
+    # the exit. Default OFF keeps the exit code byte-identical to before; the headline is loud regardless.
+    strict_ov = bool(getattr(args, "strict_oracle_version", False)) or _strict_oracle_version_enabled()
+    not_fully = [v for v in result.certificate_results if v.ok and not v.fully_sound]
+    for v in not_fully:
+        kind = ("CHANGED since mint" if v.oracle_version_status.value == "changed" else "UNCONFIRMED")
+        print(f"  [WARN] {v.finding_ref}: oracle version {kind} — cryptographically SOUND but NOT fully sound "
+              f"(stamped {v.stamped_oracle_version or 'none'}, current {v.current_oracle_version or 'unavailable'}). "
+              f"tier={v.tier.value}", file=sys.stderr)
 
-    # advance the high-water only on a fully-sound bundle (atomic + owner-only + symlink-refusing), GOVERNANCE-
-    # signed when --highwater-signer-file was supplied (offense parity), else byte-identical unsigned.
+    ok_n = sum(1 for v in result.certificate_results if v.ok)
+    full_n = sum(1 for v in result.certificate_results if v.fully_sound)
+    if not result.ok:
+        headline = "NOT SOUND"
+    elif result.fully_sound:
+        headline = "SOUND"
+    else:
+        headline = ("SOUND but NOT FULLY SOUND — oracle version changed/unconfirmed on "
+                    f"{len(not_fully)} certificate(s) (see per-cert tiers)")
+    print(f"verified {ok_n}/{len(result.certificate_results)} certificate(s) crypto-sound, "
+          f"{full_n} fully sound; bundle {headline}")
+
+    # advance the high-water only on a CRYPTO-sound bundle (atomic + owner-only + symlink-refusing), GOVERNANCE-
+    # signed when --highwater-signer-file was supplied (offense parity), else byte-identical unsigned. Gated on
+    # ``ok`` (crypto soundness + anti-rollback), NOT ``fully_sound``: the anti-rollback mark tracks that a valid,
+    # non-stale bundle was seen — orthogonal to oracle-version currency.
     if result.ok and hw_path is not None and head is not None:
         new_hw = max(prev_hw or 0, head.last_seq)
         _save_highwater(hw_path, new_hw, signer=hw_signer)
 
-    return 0 if result.ok else 2
+    if not result.ok:
+        return 2
+    if strict_ov and not result.fully_sound:
+        print("bundle refused under --strict-oracle-version: crypto-sound but the oracle version is "
+              "changed/unconfirmed (re-execution is not under the minted procedure)", file=sys.stderr)
+        return 2
+    return 0
 
 
 def _ctx_by_ref(report: dict) -> dict[str, dict]:
@@ -405,6 +444,13 @@ def main(argv: list[str]) -> int:
                         "PAIR IT with --highwater-signer-file so this verifier WRITES a signed floor; enabling "
                         "strict WITHOUT a signer makes the first verify write an unsigned floor and the next "
                         "strict-verify reject it (exit 2).")
+    p.add_argument("--strict-oracle-version", action="store_true", dest="strict_oracle_version",
+                   help="STRICT ORACLE-VERSION production profile: REFUSE (exit 2) a crypto-sound bundle whose "
+                        "oracle version CHANGED since mint or cannot be confirmed — re-verification would not be "
+                        "under the SAME oracle procedure the certificate attests. Also enabled by "
+                        "VIGIL_STRICT_ORACLE_VERSION=1. Default OFF = crypto-sound bundles still exit 0, but the "
+                        "per-cert tier + a loud [WARN] always surface the skew (never a silent bare SOUND). Use "
+                        "in a government deployment that requires exact-procedure re-execution of every proof.")
     p.set_defaults(fn=_verify)
 
     p = sub.add_parser("pcf-export", help="project a signed evidence bundle into PCF v0.1 certificates")

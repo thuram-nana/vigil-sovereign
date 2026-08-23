@@ -34,7 +34,9 @@ from .manifest import manifest_dir, verify_manifest
 from .certify import (
     BundleVerification,
     EvidenceVerification,
+    OracleVersionStatus,
     PathVerification,
+    VerificationTier,
     build_certificate,
     build_path_certificate,
     sign_certificate,
@@ -52,6 +54,7 @@ __all__ = [
     "ReportClaim", "claims_for_finding", "decompose_prose", "canonical_fact_sentence",
     "manifest_dir", "verify_manifest",
     "EvidenceVerification", "BundleVerification", "PathVerification",
+    "OracleVersionStatus", "VerificationTier",
     "build_certificate", "build_path_certificate", "sign_certificate",
     "verify_certificate", "verify_bundle",
     "append_entry", "build_chain", "sign_head", "verify_chain", "verify_head",

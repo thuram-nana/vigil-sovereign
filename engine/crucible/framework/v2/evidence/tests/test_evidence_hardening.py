@@ -13,6 +13,8 @@ from pydantic import ValidationError
 from framework.v2.entitlement.crypto import generate_keypair
 from framework.v2.entitlement.models import AuthorizerKey, TrustRoot
 from framework.v2.evidence import (
+    OracleVersionStatus,
+    VerificationTier,
     build_certificate,
     build_chain,
     sign_certificate,
@@ -69,19 +71,96 @@ def test_unsigned_head_bundle_is_not_ok_even_with_signed_certs():
     assert r2.head_anchored is True and r2.ok is True
 
 
-# ============ #2 — oracle version stamped AND surfaced (informational, non-gating) =================
+# ============ #2 — oracle-version POLICY: skew DOWNGRADES the tier, is never a bare SOUND ==========
 
-def test_stale_oracle_version_flagged_but_still_sound():
+def test_stale_oracle_version_downgrades_tier_not_bare_sound():
+    """A cert minted under oracle vA, verified when the oracle is now vB, must NOT report a bare SOUND: the
+    crypto ``ok`` stays True (authentic + reproduces under today's oracle, so old certs are not
+    mass-invalidated), but the TIER downgrades to SOUND_ORACLE_VERSION_CHANGED and ``fully_sound`` is False."""
     tr, signers = _trust_root()
     f, ctx = _finding()
     cert = build_certificate(f, engagement_slug="acme", seq=0)
-    # tamper the stamped oracle_version to a value that differs from the current oracle body
+    minted_ov = cert.oracle_version
+    assert minted_ov  # the mint stamped a real version over the firing oracle
+    # a cert minted under a DIFFERENT (older) oracle body: stamp a version that differs from the current one,
+    # then sign it — the signature authenticates the (skewed) stamp, so this is a genuine version-skewed cert.
     forged = cert.model_copy(update={"oracle_version": "sha256:0000deadbeef"})
     signed = sign_certificate(forged, signers[:2])
     v = verify_certificate(signed, oracle_context=ctx, trust_root=tr)
-    assert v.oracle_version_current is False          # the change is DETECTED + surfaced
-    assert v.reproduced is True and v.ok is True       # but reproduction (current oracle) holds → still sound
+    # the mismatch is DETECTED + surfaced LOUDLY as first-class fields (not buried in reason):
+    assert v.oracle_version_status is OracleVersionStatus.CHANGED
+    assert v.stamped_oracle_version == "sha256:0000deadbeef"
+    assert v.current_oracle_version == minted_ov and v.current_oracle_version != v.stamped_oracle_version
+    assert v.oracle_version_current is False           # back-compat bool still flags it
+    # crypto soundness holds (reproduces under the current oracle) → not mass-invalidated ...
+    assert v.reproduced is True and v.ok is True
+    # ... but it is NOT a bare SOUND: the government-facing tier is downgraded, fully_sound is False.
+    assert v.tier is VerificationTier.SOUND_ORACLE_VERSION_CHANGED
+    assert v.fully_sound is False
     assert "ORACLE-VERSION CHANGED" in v.reason
+
+
+def test_same_oracle_version_is_fully_sound():
+    """A cert whose stamped oracle version equals the current oracle body verifies as a bare SOUND / fully
+    sound — the re-execution ran the SAME procedure the issuer signed."""
+    tr, signers = _trust_root()
+    f, ctx = _finding()
+    signed = sign_certificate(build_certificate(f, engagement_slug="acme", seq=0), signers[:2])
+    v = verify_certificate(signed, oracle_context=ctx, trust_root=tr)
+    assert v.oracle_version_status is OracleVersionStatus.MATCH
+    assert v.stamped_oracle_version == v.current_oracle_version != ""
+    assert v.ok is True and v.fully_sound is True
+    assert v.tier is VerificationTier.SOUND
+    assert v.oracle_version_current is True
+
+
+def test_empty_oracle_version_reported_unconfirmed_not_a_pass():
+    """A legacy / source-less cert with NO stamped oracle version is reported HONESTLY as UNCONFIRMED — crypto
+    ``ok`` stays True (not mass-invalidated), but it is NOT a bare SOUND / fully sound (currency unconfirmed)."""
+    tr, signers = _trust_root()
+    f, ctx = _finding()
+    cert = build_certificate(f, engagement_slug="acme", seq=0)
+    empty = cert.model_copy(update={"oracle_version": ""})   # a cert minted before/without a version stamp
+    signed = sign_certificate(empty, signers[:2])
+    v = verify_certificate(signed, oracle_context=ctx, trust_root=tr)
+    assert v.oracle_version_status is OracleVersionStatus.UNCONFIRMED
+    assert v.stamped_oracle_version == ""
+    assert v.ok is True                                  # authentic + reproduces → crypto-sound, not invalidated
+    assert v.fully_sound is False                        # ... but currency is NOT confirmed → not a full pass
+    assert v.tier is VerificationTier.SOUND_ORACLE_VERSION_UNCONFIRMED
+    assert v.oracle_version_current is True              # back-compat: empty is not the CHANGED case
+
+
+def test_oracle_version_verification_is_deterministic():
+    """Re-running verification over the same version-skewed cert yields an IDENTICAL result (tier, status, both
+    version strings, serialized fields) — FATAL-2 determinism."""
+    tr, signers = _trust_root()
+    f, ctx = _finding()
+    cert = build_certificate(f, engagement_slug="acme", seq=0)
+    forged = cert.model_copy(update={"oracle_version": "sha256:0000deadbeef"})
+    signed = sign_certificate(forged, signers[:2])
+    v1 = verify_certificate(signed, oracle_context=ctx, trust_root=tr)
+    v2 = verify_certificate(signed, oracle_context=ctx, trust_root=tr)
+    assert v1.model_dump(mode="json") == v2.model_dump(mode="json")
+    assert v1.tier is v2.tier is VerificationTier.SOUND_ORACLE_VERSION_CHANGED
+    assert (v1.oracle_version_status, v1.stamped_oracle_version, v1.current_oracle_version) == \
+           (v2.oracle_version_status, v2.stamped_oracle_version, v2.current_oracle_version)
+
+
+def test_version_skewed_bundle_is_crypto_ok_but_not_fully_sound():
+    """At bundle scope: a version-skewed but crypto-sound bundle has ``ok`` True (anti-rollback + anchoring
+    intact) yet ``fully_sound`` False, so a caller gating on the government re-execution guarantee refuses it
+    while a caller gating on crypto soundness (the legacy ``ok``) is unaffected."""
+    tr, signers = _trust_root()
+    f, ctx = _finding()
+    cert = build_certificate(f, engagement_slug="acme", seq=0)
+    forged = cert.model_copy(update={"oracle_version": "sha256:0000deadbeef"})
+    signed = sign_certificate(forged, signers[:2])
+    chain = build_chain([signed.certificate.cert_digest])
+    head = sign_head(chain, engagement_slug="acme", signers=signers[:2])
+    b = verify_bundle([signed], chain, head, contexts={"boolean-sqli": ctx}, trust_root=tr)
+    assert b.ok is True and b.fully_sound is False
+    assert b.certificate_results[0].tier is VerificationTier.SOUND_ORACLE_VERSION_CHANGED
 
 
 # ============ #3 — authenticated freshness: three distinct states ==================================

@@ -25,13 +25,17 @@ Exit 0 iff ALL of the above hold for EVERY certificate — INCLUDING the out-of-
 flipped byte anywhere, OR a missing --trust-root-fingerprint, → non-zero.
 
 WHAT THIS DOES NOT DO — the honest residual, stated plainly:
-  * REPRODUCTION. It does NOT re-fire the deterministic oracle over each oracle_context (that would
-    re-derive the verdict WITHOUT trusting the signer's honesty about it). Re-firing an oracle needs the
-    oracle's code — the open-source VIGIL verifier (``python3 -m framework.v2 evidence verify``), shipped
-    as a reference and referenced in RUNBOOK.md. So this standalone check proves the governance authorisers
-    ATTESTED these exact oracle_contexts + verdicts, tamper-evidently; it does not independently re-run the
-    verdict. Whom you still trust after this step: the signer's honesty about each verdict (removed only by
-    the reproduction step) and the verifier you are reading.
+  * REPRODUCTION (and ORACLE-VERSION CURRENCY). It does NOT re-fire the deterministic oracle over each
+    oracle_context (that would re-derive the verdict WITHOUT trusting the signer's honesty about it), and it
+    does NOT re-derive the current oracle id@version to compare against the one stamped in the certificate —
+    both need the oracle's code, so both are the job of the open-source VIGIL verifier (``python3 -m
+    framework.v2 evidence verify``), shipped as a reference and referenced in RUNBOOK.md. That verifier
+    surfaces the oracle-version TIER (a cert whose oracle body changed since mint is reported SOUND-BUT-NOT-
+    FULLY-SOUND, never a bare SOUND). So this standalone check proves the governance authorisers ATTESTED
+    these exact oracle_contexts + verdicts + the stamped oracle version, tamper-evidently; it does not
+    independently re-run the verdict nor confirm the oracle body is unchanged. Whom you still trust after this
+    step: the signer's honesty about each verdict AND that the stamped oracle version is the one that fired
+    (both removed only by the reproduction step) and the verifier you are reading.
   * THE AUDIT ITSELF. A package is what VIGIL can PREPARE; an independent audit needs an external team.
 """
 from __future__ import annotations
