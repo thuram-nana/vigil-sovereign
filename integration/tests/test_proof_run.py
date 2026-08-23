@@ -92,14 +92,18 @@ def test_sink_denies_dangerous_poc_and_persists_no_proof(tmp_path):
 
 def _errsig_capture(*, with_request: bool):
     """An error-signature capture whose RESPONSE carries a datastore error the oracle fires on. With
-    ``with_request`` it also binds the exploit REQUEST bytes (inv 8); without, it is response-only."""
+    ``with_request`` it also binds the exploit REQUEST bytes (inv 8); without, it is response-only. It
+    carries a benign CONTROL exchange (S6) — a fetch of the same endpoint WITHOUT the error — so the mint's
+    mandatory control-comparison is satisfied when the request binding is present."""
     ex = {"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
           "status": 500, "bug_class": "error_based_sqli"}
-    blobs = {"resp": b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"}
+    ctrl = {"channel": "error_signature", "role": "control", "response_bytes_ref": "ctrl"}
+    blobs = {"resp": b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended",
+             "ctrl": b"HTTP/1.1 200 OK\r\n\r\n{\"items\": []}"}
     if with_request:
         ex["request_bytes_ref"] = "req"
         blobs["req"] = b"GET /items?id=1%27 HTTP/1.1\r\nHost: t\r\n\r\n"
-    return {"exchanges": [ex], "blobs": blobs}
+    return {"exchanges": [ex, ctrl], "blobs": blobs}
 
 
 def test_error_signature_without_a_bound_request_stays_a_lead(tmp_path):

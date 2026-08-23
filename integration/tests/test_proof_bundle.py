@@ -30,7 +30,8 @@ _SQL_ERROR = b"HTTP/1.1 500\r\n\r\nYou have an error in your SQL syntax near '''
 
 
 def _mint_a_fact(run_dir: Path) -> object:
-    mint = build_report_mint(run_dir=run_dir, signers=SIGNERS, engagement_slug="acme")
+    mint = build_report_mint(run_dir=run_dir, signers=SIGNERS, engagement_slug="acme",
+                             control_fetch=lambda _r: b"HTTP/1.1 200 OK\r\n\r\nok")
     report = {
         "id": "errsqli-001", "bug_class": "error_based_sqli", "poc_script_code": "print('benign repro')",
         CAPTURE_KEY: {"exchanges": [{"channel": "error_signature", "role": "mutated",
@@ -52,7 +53,8 @@ def _mint_two_same_class_facts(run_dir: Path) -> None:
     each retained finding's explicit ref so both fall back to ``bug_class`` — the exact shape a plain
     ``--reverifiable-out`` scan writes (bug_class + oracle_context, no check_id/finding_slug). The two then
     share ONE natural finding_ref: the collision the producer must resolve for the bundle to be usable."""
-    mint = build_report_mint(run_dir=run_dir, signers=SIGNERS, engagement_slug="acme")
+    mint = build_report_mint(run_dir=run_dir, signers=SIGNERS, engagement_slug="acme",
+                             control_fetch=lambda _r: b"HTTP/1.1 200 OK\r\n\r\nok")
     for i, param in enumerate(("id", "name")):
         res = mint({
             "id": f"errsqli-00{i}", "bug_class": "error_based_sqli", "param": param,

@@ -82,7 +82,8 @@ def _seed_evidence_bundle(crucible_root: Path) -> Path:
     run_dir = crucible_root / ".console" / "runs" / RUN_ID
     run_dir.mkdir(parents=True, exist_ok=True)
     mint = build_report_mint(run_dir=run_dir, signers=[("root0", mint_signer.private_key_b64)],
-                             engagement_slug=SLUG)
+                             engagement_slug=SLUG,
+                             control_fetch=lambda _r: b"HTTP/1.1 200 OK\r\n\r\nok")
     res = mint({
         "id": "errsqli-001", "bug_class": "error_based_sqli", "poc_script_code": "print('benign repro')",
         CAPTURE_KEY: {"exchanges": [{"channel": "error_signature", "role": "mutated",

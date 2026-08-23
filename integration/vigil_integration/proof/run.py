@@ -371,6 +371,25 @@ def _web_redrive_mint(report: dict, wclass: str, *, run_dir: "str | os.PathLike"
     return _WebMintResult(is_fact=(claimed == "FACT"), facts=list(wr.facts), family_verdict=claimed)
 
 
+def _fetch_control(report: dict, control_fetch: "Optional[Callable[[dict], bytes | None]]") -> "bytes | None":
+    """Perform ONE VIGIL-owned benign CONTROL fetch for ``report`` — a second, benign fetch of the same
+    endpoint (no payload/canary) whose response bytes are what the error-signature oracle compares the
+    exploit response against. Returns the control bytes, or ``None`` when no fetcher is wired or the fetch
+    captured no channel. NEVER raises: a control we could not fetch degrades to a LEAD, it never crashes the
+    mint (a raising fetcher must not become a false CLEAN)."""
+    if control_fetch is None:
+        return None
+    try:
+        b = control_fetch(report)
+    except Exception:  # noqa: BLE001 — a control-fetch failure ⇒ no control (LEAD), never raises into the mint
+        return None
+    if isinstance(b, (bytes, bytearray)):
+        return bytes(b) or None
+    if isinstance(b, str):
+        return b.encode("utf-8") or None
+    return None
+
+
 def build_report_mint(
     *,
     run_dir: str | os.PathLike,
@@ -379,10 +398,17 @@ def build_report_mint(
     evidence_root: Optional[str | os.PathLike] = None,
     spool_dir: Optional[str | os.PathLike] = None,
     quarantine_dir: Optional[str] = None,
+    control_fetch: "Optional[Callable[[dict], bytes | None]]" = None,
 ) -> Callable[[dict], Any]:
     """Return the ``mint(report)`` callback for ``proof.sink``. It mints ONLY from the report's attached
     executor capture (``_vigil_capture``), persists a proof record, and returns the ``MintResult`` (or
-    ``None`` if the capture is unusable — the finding then stays a plain Strix report / LEAD)."""
+    ``None`` if the capture is unusable — the finding then stays a plain Strix report / LEAD).
+
+    ``control_fetch`` is the CONTROL-exchange seam (S6): a callable ``(report) -> bytes | None`` that performs
+    a benign fetch of the finding's endpoint so the error-signature oracle's control-comparison guard is LIVE
+    (see the mint body). When a capture already carries an executor ``role="control"`` exchange that is used
+    directly and ``control_fetch`` is not called. When it is ``None`` and no executor control is present, an
+    error-signature capture cannot be attributed and stays a LEAD — the mint never invents a control."""
 
     def mint(report: dict) -> Any:
         # S7: a web-re-drivable finding is verified by traffic VIGIL ITSELF sends — its own gated, crafted
@@ -434,11 +460,46 @@ def build_report_mint(
         # Non-error-signature channels (a ``request_payload`` proof, a process-execution proof) bind their
         # own causal artifact and are unaffected.
         _errsig = [ex for ex in exchanges if getattr(ex, "channel", "") == "error_signature"]
+        _ctrl_ex = None
         if _errsig:
             _observed = next((ex for ex in _errsig if getattr(ex, "role", "") == "mutated"), _errsig[0])
             _req = _resolve(getattr(_observed, "request_bytes_ref", "") or "")
             if not (_req and _req.strip()):
                 return None
+
+            # S6 — the CONTROL exchange (this slice). An error-signature FACT is attributable ONLY when the
+            # SAME datastore/parser error is ABSENT from a benign CONTROL of the same endpoint. Without a
+            # control the oracle's control-comparison guard (``verify.oracles.error_signature_oracle``, the
+            # ``if control and pattern.search(control)`` arm) is DEAD CODE — a page that ALWAYS returns the
+            # error would mint. Make it LIVE by REQUIRING a control fed to the oracle:
+            #   * prefer an executor-captured ``role="control"`` exchange (already emitted by
+            #     ``report.proof_capture`` when a benign id is cited);
+            #   * else perform ONE VIGIL-owned benign fetch (no payload/canary) and INJECT it as a
+            #     ``role="control"`` exchange so ``context_from_exchanges`` feeds it to the oracle.
+            # A control that cannot be captured REFUSES to a LEAD (never a silent skip). This can only REMOVE
+            # facts (an always-erroring page now fails to mint) — it enables none.
+            _ctrl_ex = next((ex for ex in _errsig if getattr(ex, "role", "") == "control"), None)
+            _ctrl_body = (_resolve(getattr(_ctrl_ex, "response_bytes_ref", "") or "")
+                          if _ctrl_ex is not None else None)
+            if not (_ctrl_body and _ctrl_body.strip()):
+                _fetched = _fetch_control(report, control_fetch)   # a second, benign fetch of the same endpoint
+                if not (_fetched and _fetched.strip()):
+                    # No control could be captured ⇒ the error is NOT attributable ⇒ LEAD. Record the inv-12
+                    # cause when a fetch was actually ATTEMPTED (a fetcher was wired) so an unverifiable
+                    # finding never reads as CLEAN; a deployment with no control fetcher is a plain LEAD, like
+                    # the request-binding gate above.
+                    if control_fetch is not None:
+                        record_degradation(run_dir, REDRIVE_FAILED,
+                                           where="proof.run.mint.control_unavailable",
+                                           detail="benign control fetch established no channel")
+                    return None
+                _ctrl_ref = "vigil_control_resp"
+                blobs[_ctrl_ref] = _fetched
+                _ctrl_dict = {"channel": "error_signature", "role": "control",
+                              "response_bytes_ref": _ctrl_ref, "status": None}
+                ex_dicts.append(_ctrl_dict)                # keep capture["exchanges"] consistent (persisted record)
+                _ctrl_ex = CapturedExchange(**_ctrl_dict)
+                exchanges.append(_ctrl_ex)                 # feed the control to the oracle via context_from_exchanges
 
         finding = _finding_from_report(report)
         # S6 — ORACLE-AUTHORITATIVE class. For an error-signature capture the certificate's bug_class is the
@@ -449,7 +510,11 @@ def build_report_mint(
         # mis-CWE'd finding, AND an explicitly mis-declared class in one move). If the oracle does not fire,
         # the inferred class stands and the finding stays a LEAD.
         if _errsig:
-            _ctrl_ex = next((ex for ex in _errsig if getattr(ex, "role", "") == "control"), None)
+            # ``_ctrl_ex`` is the control established above (executor-supplied or the injected benign fetch);
+            # it is guaranteed present here (a missing control already returned a LEAD). Re-run the SAME
+            # oracle over observed+control so the engine the certificate class is derived from is exactly the
+            # one the oracle proves — and so a same-error control (guard suppresses the fire) yields no engine
+            # and the finding falls through to the LEAD path in ``mint_proof`` below.
             _engine = _errsig_engine(
                 _resolve(getattr(_observed, "response_bytes_ref", "") or ""),
                 _resolve(getattr(_ctrl_ex, "response_bytes_ref", "") or "") if _ctrl_ex is not None else None,

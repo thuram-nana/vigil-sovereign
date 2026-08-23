@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from .run import build_report_mint
 from .sink import ProofSink
@@ -42,6 +42,21 @@ def _run_signers(engagement_slug: str, scope: Sequence[str], base_dir: Optional[
     return list(prov.signers)
 
 
+def _live_control_fetch(engagement_slug: str) -> "Callable[[dict], bytes | None]":
+    """The production CONTROL-exchange fetcher (S6) for this run: a benign, charter-GATED fetch of a
+    finding's endpoint, so the error-signature oracle's control-comparison guard is LIVE (an always-erroring
+    page cannot mint). ``framework`` is pulled only lazily (inside ``benign_control_fetch``), so this keeps
+    the offense/sovereign import boundary (FATAL-2). Never raises — no endpoint / no channel ⇒ ``None`` ⇒ the
+    finding stays a LEAD."""
+    def _fetch(report: dict) -> "bytes | None":
+        from ..live.web_redrive import benign_control_fetch  # noqa: PLC0415 — import-clean at call time (FATAL-2)
+        url = str((report or {}).get("endpoint") or "").strip()
+        if not url:
+            return None
+        return benign_control_fetch(url, slug=engagement_slug)
+    return _fetch
+
+
 def install(
     *,
     run_dir: str | os.PathLike,
@@ -52,16 +67,21 @@ def install(
     quarantine_dir: Optional[str] = None,
     scope: Sequence[str] = _DEFAULT_SCOPE,
     base_dir: Optional[str] = None,
+    control_fetch: "Optional[Callable[[dict], bytes | None]]" = None,
 ) -> Any:
     """Assign the Proof Studio ``proof_sink`` for this run and return it. ``signers`` defaults to the run's
-    provisioned governance authority (loopback scope)."""
+    provisioned governance authority (loopback scope). ``control_fetch`` defaults to the live, charter-gated
+    benign CONTROL fetcher (S6) — pass an explicit callable to override it (tests)."""
     import strix.report.state as report_state    # lazy — offense-env only
 
     if signers is None:
         signers = _run_signers(engagement_slug, scope, base_dir)
+    if control_fetch is None:
+        control_fetch = _live_control_fetch(engagement_slug)
     mint = build_report_mint(
         run_dir=run_dir, signers=signers, engagement_slug=engagement_slug,
-        evidence_root=evidence_root, spool_dir=spool_dir, quarantine_dir=quarantine_dir)
+        evidence_root=evidence_root, spool_dir=spool_dir, quarantine_dir=quarantine_dir,
+        control_fetch=control_fetch)
     sink = ProofSink(quarantine_dir=quarantine_dir, mint=mint, run_dir=run_dir)
     report_state.proof_sink = sink
     logger.info("Proof Studio sink installed for engagement=%s run_dir=%s", engagement_slug, run_dir)

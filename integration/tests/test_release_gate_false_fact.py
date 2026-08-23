@@ -39,7 +39,7 @@ import pytest
 pytest.importorskip("framework.v2.verify", reason="CRUCIBLE (framework) not importable in this leg")
 
 from vigil_core import AuthorizerKey, TrustRoot, generate_keypair  # noqa: E402
-from vigil_integration.proof.run import _oracle_bug_class, build_report_mint  # noqa: E402
+from vigil_integration.proof.run import _oracle_bug_class, build_report_mint, read_proofs  # noqa: E402
 from vigil_integration.proof.sink import CAPTURE_KEY, ProofSink  # noqa: E402
 
 _SIGNER = generate_keypair()
@@ -74,16 +74,28 @@ def _charter(tmp_path, host, slug="alpha"):
 # =========================================================================================================
 # COLUMN 1 — the error-signature / captured-bytes mint: resemblance alone (a static error page) is a LEAD.
 # =========================================================================================================
-def _errsig_capture(*, with_request: bool):
+# A benign CONTROL response (S6) — a fetch of the same endpoint carrying NO datastore/parser error. The
+# error-signature oracle's control-comparison guard confirms the exploit error is attributable only when it
+# is ABSENT here; an always-erroring page (this body carrying the SAME error) is refused to a LEAD.
+_BENIGN_CONTROL = b"HTTP/1.1 200 OK\r\n\r\n{\"items\": []}"
+
+
+def _errsig_capture(*, with_request: bool, control: "bytes | None" = _BENIGN_CONTROL):
     """A capture whose RESPONSE carries a datastore error the oracle fires on. ``with_request`` also binds the
-    exploit REQUEST bytes — the difference between a resemblance and an attributable finding (inv 6/8)."""
+    exploit REQUEST bytes — the difference between a resemblance and an attributable finding (inv 6/8). By
+    default it carries a benign CONTROL exchange (S6); pass ``control=None`` to omit it, or ``control=<error
+    bytes>`` for an always-erroring page."""
     ex = {"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
           "status": 500, "bug_class": "error_based_sqli"}
+    exchanges = [ex]
     blobs = {"resp": b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"}
     if with_request:
         ex["request_bytes_ref"] = "req"
         blobs["req"] = b"GET /items?id=1%27 HTTP/1.1\r\nHost: t\r\n\r\n"
-    return {"exchanges": [ex], "blobs": blobs}
+    if control is not None:
+        exchanges.append({"channel": "error_signature", "role": "control", "response_bytes_ref": "ctrl"})
+        blobs["ctrl"] = control
+    return {"exchanges": exchanges, "blobs": blobs}
 
 
 def test_a_static_error_page_with_no_bound_request_is_a_lead_not_a_fact(tmp_path):
@@ -142,6 +154,77 @@ def test_a_report_with_no_capture_at_all_mints_nothing(tmp_path):
 
 
 # =========================================================================================================
+# COLUMN 1b — the CONTROL exchange (S6): the oracle's control-comparison guard is now LIVE, not dead code.
+# An error-signature FACT is attributable ONLY when the SAME datastore error is ABSENT from a benign control
+# of the same endpoint. A page that ALWAYS errors — the error present in BOTH observed and control — can no
+# longer mint; a missing control refuses to a LEAD; a genuine payload-only error still mints.
+# =========================================================================================================
+def test_an_always_erroring_page_same_signature_in_control_mints_no_fact(tmp_path):
+    """THE key false-FACT negative control this slice closes: the error is present in the exploit response AND
+    in a benign CONTROL of the same endpoint (an always-erroring page), so it is NOT attributable to the
+    payload. The oracle's control-comparison guard suppresses the fire ⇒ the finding stays a LEAD, never a
+    signed FACT."""
+    mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="alpha")
+    # the control carries the SAME datastore error as the exploit response
+    always_erroring = b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"
+    cap = _errsig_capture(with_request=True, control=always_erroring)
+    res = mint({"id": "always-err", "bug_class": "error_based_sqli", CAPTURE_KEY: cap})
+    assert res is None or not getattr(res, "is_fact", False), (
+        "an always-erroring page (same error in observed AND control) minted a FACT — the control guard is "
+        "still dead: this is exactly the false-FACT this slice must close"
+    )
+
+
+def test_a_missing_control_stays_a_lead_not_a_fact(tmp_path):
+    """A request-bound datastore error with NO control captured and no control fetcher wired is UNattributable
+    — VIGIL cannot show the error is payload-provoked rather than a permanent property of the page. The mint
+    refuses to a LEAD (never silently skipping the control)."""
+    mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="alpha")   # no control_fetch
+    cap = _errsig_capture(with_request=True, control=None)                                  # no control exchange
+    res = mint({"id": "no-ctrl", "bug_class": "error_based_sqli", CAPTURE_KEY: cap})
+    assert res is None or not getattr(res, "is_fact", False), (
+        "an error-signature capture with NO control minted a FACT — a missing control must stay a LEAD"
+    )
+
+
+def test_a_missing_control_is_rescued_by_a_wired_benign_control_fetch(tmp_path):
+    """Non-vacuity for the control seam: when NO executor control is captured but a benign control FETCHER is
+    wired (production ``bootstrap`` supplies one), the mint performs the second benign fetch, feeds it to the
+    oracle, and — the benign control carrying no error — mints. A same-error fetcher would instead LEAD."""
+    mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="alpha",
+                             control_fetch=lambda _r: _BENIGN_CONTROL)
+    cap = _errsig_capture(with_request=True, control=None)
+    res = mint({"id": "fetched-ctrl", "bug_class": "error_based_sqli", CAPTURE_KEY: cap})
+    assert res is not None and getattr(res, "is_fact", False), (
+        "a wired benign control fetch did not rescue the mint — the control seam is vacuous"
+    )
+    # a fetcher that returns the SAME error (always-erroring page, discovered live) must NOT mint
+    mint_bad = build_report_mint(run_dir=tmp_path / "b", signers=SIGNERS, engagement_slug="alpha",
+                                 control_fetch=lambda _r: b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended")
+    res_bad = mint_bad({"id": "fetched-err", "bug_class": "error_based_sqli",
+                        CAPTURE_KEY: _errsig_capture(with_request=True, control=None)})
+    assert res_bad is None or not getattr(res_bad, "is_fact", False), (
+        "a live control fetch that found the SAME error minted a FACT — the guard must suppress it"
+    )
+
+
+def test_the_control_gated_mint_is_deterministic(tmp_path):
+    """Determinism: minting the SAME control-bound capture twice yields the SAME disposition, class and
+    content-addressed proof id (no wallclock / rng enters the control path)."""
+    def _mint_once(where):
+        m = build_report_mint(run_dir=where, signers=SIGNERS, engagement_slug="alpha")
+        return m({"id": "det-1", "bug_class": "error_based_sqli",
+                  CAPTURE_KEY: _errsig_capture(with_request=True)})
+    a = _mint_once(tmp_path / "a")
+    b = _mint_once(tmp_path / "b")
+    assert a is not None and b is not None
+    assert (a.is_fact, a.bug_class, a.status) == (b.is_fact, b.bug_class, b.status)
+    recs_a = {r["proof_id"] for r in read_proofs(tmp_path / "a")}
+    recs_b = {r["proof_id"] for r in read_proofs(tmp_path / "b")}
+    assert recs_a == recs_b and recs_a, "the control-gated mint is not deterministic across runs"
+
+
+# =========================================================================================================
 # COLUMN 2 — CLASS LAUNDERING: a certificate must never rename the vulnerability class it describes (S6).
 # =========================================================================================================
 def test_a_class_is_never_laundered_into_a_different_class(tmp_path):
@@ -151,8 +234,10 @@ def test_a_class_is_never_laundered_into_a_different_class(tmp_path):
     injection."""
     mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="alpha")
     cap = {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
-                          "request_bytes_ref": "req", "status": 500}],
+                          "request_bytes_ref": "req", "status": 500},
+                         {"channel": "error_signature", "role": "control", "response_bytes_ref": "ctrl"}],
            "blobs": {"resp": b"HTTP/1.1 500\r\n\r\nInvalid DN syntax: LDAP: error code 34 - invalid DN",
+                     "ctrl": _BENIGN_CONTROL,
                      "req": b"GET /dir?u=*)(uid=*) HTTP/1.1\r\nHost: t\r\n\r\n"}}
     res = mint({"id": "ldap-1", "cwe": "CWE-90", "finding_class": "ldap injection", CAPTURE_KEY: cap})
     assert res is not None and getattr(res, "status", "") == "fact", "a genuine LDAP error must still certify"
@@ -170,11 +255,14 @@ def test_negative_control_an_explicit_true_class_is_preserved():
     assert _oracle_bug_class({"bug_class": "xpath_injection", "cwe": "CWE-91"}) == "xpath_injection"
 
 
-def _errsig_cap(err_body: bytes):
-    """An error-signature capture: a request-bound 500 whose response carries `err_body`."""
+def _errsig_cap(err_body: bytes, *, control: bytes = _BENIGN_CONTROL):
+    """An error-signature capture: a request-bound 500 whose response carries `err_body`, plus a benign
+    CONTROL exchange (S6) so the mint's mandatory control-comparison is satisfied for a genuine finding."""
     return {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
-                           "request_bytes_ref": "req", "status": 500}],
+                           "request_bytes_ref": "req", "status": 500},
+                          {"channel": "error_signature", "role": "control", "response_bytes_ref": "ctrl"}],
             "blobs": {"resp": b"HTTP/1.1 500\r\n\r\n" + err_body,
+                      "ctrl": control,
                       "req": b"GET /x?u=1 HTTP/1.1\r\nHost: t\r\n\r\n"}}
 
 
