@@ -1,6 +1,6 @@
-From 4966d1c4db78a08242022e9ca31be0699a1b80e9 Mon Sep 17 00:00:00 2001
+From 185e5a43e56cdfd75d1bbec9e5294cb38c0170fb Mon Sep 17 00:00:00 2001
 Subject: [strix-patch 029] S10-lifecycle: fix P8 collection ERROR — importorskip the strix runtime chain
-X-VIGIL-Commit: 4966d1c4db78a08242022e9ca31be0699a1b80e9
+X-VIGIL-Commit: 185e5a43e56cdfd75d1bbec9e5294cb38c0170fb
 X-VIGIL-Date: 2026-08-22T23:49:26-04:00
 
 diff --git a/vendor/strix/tests_vigil/test_lifecycle_teardown.py b/vendor/strix/tests_vigil/test_lifecycle_teardown.py
