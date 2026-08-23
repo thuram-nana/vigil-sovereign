@@ -2307,8 +2307,9 @@ def _pump_child_output(proc: subprocess.Popen, log_path: Path,
             if on_line is not None:
                 on_line("")  # sentinel — the stream ended
 
+    pump_thread = threading.Thread(target=_pump, daemon=True)
     try:
-        threading.Thread(target=_pump, daemon=True).start()
+        pump_thread.start()
     except (RuntimeError, OSError) as exc:
         try:
             proc.kill()
@@ -2316,6 +2317,14 @@ def _pump_child_output(proc: subprocess.Popen, log_path: Path,
             pass
         writer.close()
         raise OSError(f"could not start the log pump thread: {exc}") from exc
+    # Expose the pump thread so a caller can deterministically await FULL drain + the final rotation before
+    # reading the rotating log set — a reader that snapshots the files mid-rotation otherwise races a rename
+    # (glob sees backend.log.1, the pump renames it to .2, a following stat() raises FileNotFoundError).
+    # Attached as an attribute so _spawn's return type is unchanged (_spawn_tracked stays valid).
+    try:
+        proc._vigil_pump_thread = pump_thread  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 — bookkeeping must never break a successful spawn
+        pass
 
 
 def _spawn(argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None) -> subprocess.Popen:
