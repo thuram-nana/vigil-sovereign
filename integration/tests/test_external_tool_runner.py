@@ -634,29 +634,73 @@ def test_killswitch_check_ERROR_fails_closed_refuses(tmp_path: Path, monkeypatch
 
 
 def test_run_attaches_a_canonical_observation(tmp_path: Path) -> None:
-    """PHASE 0.3: every run — refused or ran — attaches the canonical Observation (crit 4)."""
+    """PHASE 0.3 / crit-4: EVERY execution path — refused, ran, errored — attaches the ONE canonical
+    Observation carrying the full field set (tool identity + trusted binary digest, version, target, args
+    digest, backend, outcome class, raw-output digest, artifact refs, proposals, truncation, error/refusal
+    reason). No path may attach a bare list or omit the record."""
     _charter(tmp_path, "127.0.0.1")
     gate_in = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
     gate_out = ScopeGate(scope=StaticScopeSource(["10.99.99.99"]), loopback_allowed_if_scoped=True)
 
-    # refused (out of scope) → a 'refused' Observation, tool never ran
+    # refused (out of scope) → a 'refused' Observation, tool never ran, WITH the refusal reason recorded
     ref = run_external_tool(nmap_service_scan(ports="80"), "127.0.0.1", scope_gate=gate_out,
                             backend=_SpyBackend(), engagement_slug="alpha", signers=SIGNERS)
     assert ref.refused and ref.observation is not None and ref.observation.outcome_class == "refused"
     assert ref.observation.raw_output_sha256 == "" and ref.observation.proposals == ()
+    assert ref.observation.binary_sha256 == "" and ref.observation.args_sha256 == ""
+    assert ref.observation.error_reason and ref.observation.error_reason == ref.reason  # WHY it was refused
 
-    # ran → a 'ran' Observation binding the tool's raw output by digest, with the parsed proposals
+    # ran → a 'ran' Observation binding the raw output, the exact argv, and the backend-attested binary bytes
+    _BINDIGEST = "sha256:" + "b" * 64
     class _Reached:
         name = "b"
         def available(self):  # noqa: E704
             return True, ""
         def run(self, argv, *, timeout=0):
-            return ToolOutcome(list(argv), 0, "Host: 127.0.0.1 ()\tPorts: 80/open/tcp//x///\n", "", self.name)
+            return ToolOutcome(list(argv), 0, "Host: 127.0.0.1 ()\tPorts: 80/open/tcp//x///\n", "",
+                               self.name, binary_sha256=_BINDIGEST)
     ran = run_external_tool(nmap_service_scan(ports="80"), "127.0.0.1", scope_gate=gate_in,
                             backend=_Reached(), engagement_slug="alpha", signers=SIGNERS)
     assert ran.observation is not None and ran.observation.outcome_class == "ran"
     assert ran.observation.tool == "nmap" and ran.observation.raw_output_sha256.startswith("sha256:")
     assert ("127.0.0.1", 80, "tcp") in ran.observation.proposals
+    assert ran.observation.binary_sha256 == _BINDIGEST          # backend-attested, threaded to the record
+    assert ran.observation.args_sha256.startswith("sha256:")    # the exact argv is bound
+    assert ran.observation.backend == "b" and ran.observation.error_reason == ""  # a clean run has no error
+
+    # errored (tool timed out) → an 'errored' Observation with the error recorded; still what-ran is bound
+    class _TimedOut:
+        name = "t"
+        def available(self):  # noqa: E704
+            return True, ""
+        def run(self, argv, *, timeout=0):
+            return ToolOutcome(list(argv), None, "", "", self.name, timed_out=True)
+    err = run_external_tool(nmap_service_scan(ports="80"), "127.0.0.1", scope_gate=gate_in,
+                            backend=_TimedOut(), engagement_slug="alpha", signers=SIGNERS)
+    assert err.observation is not None and err.observation.outcome_class == "errored"
+    assert err.observation.error_reason and err.tool_errored
+    assert err.observation.args_sha256.startswith("sha256:")   # what ran is still bound on the error path
+
+
+def test_local_backend_attests_a_real_host_binary_digest(tmp_path: Path) -> None:
+    """crit-4 trusted binary digest: the LocalSubprocessBackend hashes the RESOLVED host executable that
+    runs, and that digest reaches the Observation (proof the binary provenance is real, not a placeholder).
+    Uses ``true`` (POSIX) via a bespoke recon ToolSpec so no target traffic is required."""
+    import hashlib as _hashlib
+
+    true_bin = shutil.which("true")
+    if not true_bin:
+        pytest.skip("no 'true' binary on PATH")
+    with open(true_bin, "rb") as fh:
+        want = "sha256:" + _hashlib.sha256(fh.read()).hexdigest()
+
+    _charter(tmp_path, "127.0.0.1")
+    gate = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
+    spec = ToolSpec("true", build_argv=lambda _t: ["true"], propose=lambda _o, _t: [], danger="recon")
+    res = run_external_tool(spec, "127.0.0.1", scope_gate=gate,
+                            backend=LocalSubprocessBackend(), engagement_slug="alpha", signers=SIGNERS)
+    assert res.status == "ran" and res.observation is not None
+    assert res.observation.binary_sha256 == want   # the digest of the exact host bytes that ran
 
 
 # ===================================================================================================

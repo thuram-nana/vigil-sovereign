@@ -41,6 +41,7 @@ lazy) and is imported at module load via a small path bootstrap mirroring ``scop
 
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import socket
@@ -107,6 +108,11 @@ class ToolOutcome:
     backend: str
     timed_out: bool = False
     truncated: bool = False
+    # TRUSTED digest of the bytes that actually ran, attested by the EXEC BACKEND (the only layer that
+    # knows where the binary is): the host executable's file digest for a host backend, the digest-pinned
+    # image ref for a container backend. "" ⇒ the backend could not attest it (never fabricated). This is a
+    # PROVENANCE datum, not a proof of behaviour — it binds WHICH bytes ran, not what they did.
+    binary_sha256: str = ""
 
 
 class BackendUnavailable(RuntimeError):
@@ -136,9 +142,37 @@ def _cap(s: str) -> tuple[str, bool]:
     return s, False
 
 
-def _run_argv(argv: list[str], *, timeout: float, backend: str) -> ToolOutcome:
+def _file_sha256(path: str) -> str:
+    """sha256 of the bytes of the executable at ``path`` (the host binary that will run). Best-effort and
+    TOTAL — any error (missing / unreadable / huge) yields "" so a digest never breaks a run. Deterministic:
+    a pure function of the file bytes, no wallclock."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return "sha256:" + h.hexdigest()
+    except OSError:
+        return ""
+
+
+def _image_pinned_digest(image: str) -> str:
+    """The TRUSTED digest of a container image ref — the ``sha256:<hex>`` a digest-pinned ``<name>@sha256:…``
+    ref carries (the bytes that run inside the container). A mutable tag (":latest") is NOT pinned, so it has
+    no trusted digest and yields "". Mirrors ``DockerTopologyBackend._is_digest_pinned`` (fail-closed)."""
+    _, sep, digest = str(image or "").rpartition("@")
+    if not sep or not digest.startswith("sha256:"):
+        return ""
+    hexpart = digest[len("sha256:"):]
+    if len(hexpart) == 64 and all(c in "0123456789abcdef" for c in hexpart):
+        return digest
+    return ""
+
+
+def _run_argv(argv: list[str], *, timeout: float, backend: str, binary_sha256: str = "") -> ToolOutcome:
     """One bounded, captured subprocess run with stdin closed. Total — a spawn error / timeout is a
-    captured negative ToolOutcome, never a raise (so adjudication sees "the tool produced nothing")."""
+    captured negative ToolOutcome, never a raise (so adjudication sees "the tool produced nothing").
+    ``binary_sha256`` (attested by the caller-backend) is threaded onto every returned outcome."""
     try:
         proc = subprocess.run(
             argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -149,12 +183,15 @@ def _run_argv(argv: list[str], *, timeout: float, backend: str) -> ToolOutcome:
         se = te.stderr if isinstance(te.stderr, str) else (te.stderr.decode("utf-8", "replace") if te.stderr else "")
         so, t1 = _cap(so)
         se, t2 = _cap(se)
-        return ToolOutcome(argv, None, so, se, backend, timed_out=True, truncated=t1 or t2)
+        return ToolOutcome(argv, None, so, se, backend, timed_out=True, truncated=t1 or t2,
+                           binary_sha256=binary_sha256)
     except OSError as e:
-        return ToolOutcome(argv, None, "", f"spawn error: {type(e).__name__}: {e}", backend)
+        return ToolOutcome(argv, None, "", f"spawn error: {type(e).__name__}: {e}", backend,
+                           binary_sha256=binary_sha256)
     so, t1 = _cap(proc.stdout or "")
     se, t2 = _cap(proc.stderr or "")
-    return ToolOutcome(argv, proc.returncode, so, se, backend, truncated=t1 or t2)
+    return ToolOutcome(argv, proc.returncode, so, se, backend, truncated=t1 or t2,
+                       binary_sha256=binary_sha256)
 
 
 @dataclass(frozen=True)
@@ -183,7 +220,10 @@ class LocalSubprocessBackend:
         binary = shutil.which(argv[0])
         if not binary:
             return ToolOutcome(argv, None, "", f"tool not found on PATH: {argv[0]!r}", self.name)
-        return _run_argv([binary, *argv[1:]], timeout=timeout, backend=self.name)
+        # crit-4 trusted binary digest: hash the RESOLVED host executable that will run (this backend runs
+        # it directly on the host, so the host file IS the bytes that run). Best-effort — "" on any error.
+        return _run_argv([binary, *argv[1:]], timeout=timeout, backend=self.name,
+                         binary_sha256=_file_sha256(binary))
 
 
 @dataclass(frozen=True)
@@ -280,7 +320,11 @@ class DockerTopologyBackend:
 
     def run(self, tool_argv: Sequence[str], *, timeout: float) -> ToolOutcome:
         argv = self.build_argv(tool_argv)
-        return _run_argv(argv, timeout=timeout, backend=self.name)
+        # crit-4 trusted binary digest: the bytes that run inside the container are the DIGEST-PINNED image
+        # (available() already refuses a non-pinned image), so the image's @sha256 ref IS the trusted digest
+        # of what ran. The host cannot hash a binary inside the container; this is the honest attestation.
+        return _run_argv(argv, timeout=timeout, backend=self.name,
+                         binary_sha256=_image_pinned_digest(self.image))
 
 
 # ---------------------------------------------------------------------------
@@ -866,25 +910,26 @@ def run_external_tool(
     refusal = _preflight_gate_refusal(engagement_slug)
     if refusal is not None:
         from .observation import refused_observation  # noqa: PLC0415
-        return RunnerResult("refused", f"pre-flight gate: {refusal}", spec.name, target,
-                            observation=refused_observation(spec, target))
+        why_refused = f"pre-flight gate: {refusal}"
+        return RunnerResult("refused", why_refused, spec.name, target,
+                            observation=refused_observation(spec, target, reason=why_refused))
 
     allowed, reason = scope_gate.authorize(target)
     if not allowed:
         from .observation import refused_observation  # noqa: PLC0415
         return RunnerResult("refused", reason, spec.name, target,
-                            observation=refused_observation(spec, target))
+                            observation=refused_observation(spec, target, reason=reason))
 
     # crit-1 isolation floor: a loopback-only backend (LocalSubprocessBackend runs UNISOLATED on the host)
     # must NOT be used against a NON-loopback target — an external scan goes through the network-namespaced,
     # resource-capped DockerTopologyBackend. Refuse before any traffic.
     if getattr(backend, "loopback_only", False) and not _is_loopback_host(target):
         from .observation import refused_observation  # noqa: PLC0415
-        return RunnerResult(
-            "refused",
+        why_refused = (
             f"{backend.name} backend is loopback-only (unisolated host run); target {target!r} is not "
-            f"loopback — use the network-namespaced DockerTopologyBackend for an external target",
-            spec.name, target, observation=refused_observation(spec, target))
+            f"loopback — use the network-namespaced DockerTopologyBackend for an external target")
+        return RunnerResult("refused", why_refused, spec.name, target,
+                            observation=refused_observation(spec, target, reason=why_refused))
 
     ok, why = backend.available()
     if not ok:
@@ -898,7 +943,7 @@ def run_external_tool(
     if cap_refusal is not None:
         from .observation import refused_observation  # noqa: PLC0415
         return RunnerResult("refused", cap_refusal, spec.name, target,
-                            observation=refused_observation(spec, target))
+                            observation=refused_observation(spec, target, reason=cap_refusal))
 
     outcome = backend.run(spec.build_argv(target), timeout=timeout)
 
@@ -978,8 +1023,17 @@ def run_external_tool(
     detail = (f"{spec.name} ran via {outcome.backend}; proposed {len(proposed)} service(s), "
               f"oracle-confirmed {len(facts)} FACT(s), {len(leads)} lead(s)"
               + ("; TOOL ERRORED (timeout/spawn)" if tool_errored else ""))
+    # crit-4 canonical Observation: bind the artifacts THIS run produced (the finding_ref of each lead/fact —
+    # pointers only, never a verdict) and record the tool-level error honestly. A refused run never reaches
+    # here; its Observation carries the refusal reason via refused_observation() above.
+    artifact_refs = tuple(fr for fr in (getattr(r, "finding_ref", "") for r in (facts + leads)) if fr)
+    error_reason = ""
+    if tool_errored:
+        error_reason = ("tool run timed out (no exit code)" if outcome.timed_out
+                        else (outcome.stderr or "tool failed to run").strip()[:200])
     from .observation import observe  # noqa: PLC0415
     observation = observe(spec, target, outcome, proposed, tool_version=tool_version,
-                          outcome_class="errored" if tool_errored else "ran")
+                          outcome_class="errored" if tool_errored else "ran",
+                          artifact_refs=artifact_refs, error_reason=error_reason)
     return RunnerResult("ran", detail, spec.name, target, outcome, facts, leads, proposed, contexts,
                         outcomes=outcomes, tool_errored=tool_errored, observation=observation)
