@@ -86,7 +86,7 @@ window.VIGIL_MANUAL = [
       { h: "One-time setup" },
       { list: [
         ["1. Generate the keys", "Run `vigil provision-destruction`. It prints your signing key(s) ONCE and writes a public trust file. Seal the owner key in Settings → “Auto-patch signing key (owner)” for safekeeping, and keep a copy to export for the signing step below."],
-        ["2. (optional) Share duties", "For a team, run `vigil provision-destruction --signers 2 --threshold 2` and give each co-signer their own key, kept on their own machine — then no single machine can authorize a PR alone."],
+        ["2. Share duties securely (per-host keys)", "For a team — and REQUIRED once you set VIGIL_POSTURE=production, which refuses a solo 1-of-1 authority — each signer runs `vigil enroll-cosigner --key-id <name>` on THEIR OWN machine: it keeps that signer's private key 0600 on that machine and emits only a PUBLIC enrolment request (public key + proof-of-possession). You collect the enrolment requests and run `vigil assemble-destruction --enrollment owner=… --enrollment worker1=… --threshold 2` on the minting box — it verifies each proof-of-possession and builds the quorum from PUBLIC material only, so no co-signer private key ever transits one box. (The older `vigil provision-destruction`, which mints every key on one machine, is a solo/dev convenience and is refused under the production posture.)"],
       ] },
       { h: "Per fix" },
       { list: [

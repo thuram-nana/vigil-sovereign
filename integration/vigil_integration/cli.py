@@ -1428,6 +1428,222 @@ def _cmd_authorize_destruction(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_enroll_cosigner(args: argparse.Namespace) -> int:
+    """W9-5 PHASE 1 — run on the CO-SIGNER's (or owner's) OWN host. Generate this signer's destruction key
+    LOCALLY and emit a PUBLIC enrolment request (public key + proof-of-possession). The PRIVATE key is
+    written 0600 on THIS host and never leaves it; only the enrolment request travels to the minting box."""
+    from pathlib import Path
+
+    from .live.destruction_provision import build_enrollment, write_cosigner_private_key
+
+    kid = str(args.key_id or "").strip()
+    if not kid:
+        print("vigil enroll-cosigner: --key-id is required", file=sys.stderr)
+        return 2
+    try:
+        priv, doc = build_enrollment(key_id=kid, name=args.name)
+    except ValueError as exc:
+        print(f"vigil enroll-cosigner: {exc}", file=sys.stderr)
+        return 2
+    key_out = args.key_out or f"{kid}.destruction.key"
+    enroll_out = args.out or f"{kid}.enrollment.json"
+    try:
+        write_cosigner_private_key(key_out, priv)
+    except ValueError as exc:
+        print(f"vigil enroll-cosigner: {exc}", file=sys.stderr)
+        return 2
+    Path(enroll_out).parent.mkdir(parents=True, exist_ok=True)
+    Path(enroll_out).write_text(doc, encoding="utf-8")
+    print("=== vigil enroll-cosigner — per-host destruction key generation (W9-5) ===")
+    print(f"key_id            : {kid}")
+    print(f"PRIVATE key (0600): {key_out}   <- KEEP ON THIS HOST; NEVER send it to the minting box")
+    print(f"enrolment request : {enroll_out}   <- PUBLIC (pubkey + proof-of-possession); send THIS to the minting box")
+    print()
+    if kid == str(args.owner_id or "owner").strip():
+        print("This is the OWNER key. Export its contents where you sign from:")
+        print(f"    export VIGIL_DESTRUCTION_OWNER_KEY=\"$(cat {key_out})\"   # then `vigil sign-destruction`")
+    else:
+        print("At authorize time, sign the shared request on THIS host with this key:")
+        print(f"    vigil sign-destruction --request authorization-request.json --key-id {kid} --key-file {key_out}")
+    print()
+    print("The minting box assembles the quorum from the PUBLIC enrolment requests only:")
+    print("    vigil assemble-destruction --enrollment "
+          f"{kid}={enroll_out} --enrollment <owner=...> --threshold M --base-dir .vigil-live")
+    return 0
+
+
+def _cmd_assemble_destruction(args: argparse.Namespace) -> int:
+    """W9-5 PHASE 2 — run on the MINTING box. Assemble the m-of-n destruction trust root from PUBLIC enrolment
+    requests. Verifies every proof-of-possession, refuses duplicate/forged keys, and — under the production
+    posture — refuses anything that is not a genuine multi-signer quorum. No private key is ever on this box."""
+    from pathlib import Path
+
+    from .live.destruction_provision import assemble_authority, write_trust_root
+
+    enrollments: list = []
+    for spec in (args.enrollment or []):
+        s_spec = str(spec or "")
+        if "=" not in s_spec:
+            print(f"vigil assemble-destruction: --enrollment must be key_id=/path/to/enrollment.json, "
+                  f"got {spec!r}", file=sys.stderr)
+            return 2
+        kid, path = s_spec.split("=", 1)
+        try:
+            doc = Path(path.strip()).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"vigil assemble-destruction: could not read enrolment {kid.strip()!r}: {exc}", file=sys.stderr)
+            return 2
+        enrollments.append((kid.strip(), doc))
+    if not enrollments:
+        print("vigil assemble-destruction: at least one --enrollment key_id=path is required", file=sys.stderr)
+        return 2
+    try:
+        gen = assemble_authority(enrollments=enrollments, threshold=args.threshold, owner_id=args.owner_id)
+    except ValueError as exc:
+        print(f"vigil assemble-destruction: {exc}", file=sys.stderr)
+        return 2
+    tr_path = write_trust_root(args.base_dir, gen.trust_root_json)
+    print("=== vigil assemble-destruction — m-of-n quorum from per-host enrolments (W9-5) ===")
+    print(f"threshold          : {gen.threshold}-of-{len(enrollments)}   "
+          f"mandatory signer(s): {', '.join(gen.mandatory_signer_ids)}")
+    print(f"trust root (public): {tr_path}")
+    print("NO private keys were read or written here — each signer's key stays on its own host.")
+    print()
+    print("Per fix (per-host signing keeps keys apart at AUTHORIZE time too):")
+    print("  (1) coordinator: vigil request-destruction --action-id pr-... --slug ... --target R "
+          f"--base-dir {args.base_dir}")
+    print("  (2) each signer: vigil sign-destruction --request <request.json> --key-id <id> --key-file <key> "
+          "(owner: VIGIL_DESTRUCTION_OWNER_KEY)")
+    print(f"  (3) coordinator: vigil combine-destruction --request <request.json> --signature id=sig.json ... "
+          f"--base-dir {args.base_dir}")
+    print(f"  (4) vigil patch ... --target-repo R --open-pr   (auto-discovers under {args.base_dir})")
+    return 0
+
+
+def _cmd_request_destruction(args: argparse.Namespace) -> int:
+    """W9-5 coordinator step — mint the SHARED, unsigned destruction authorization (one nonce + bounded
+    window) each signer will sign detached on their own host. Written O_EXCL (single-use slot)."""
+    import time
+
+    from .live.destruction_provision import (
+        AuthorizationExistsError,
+        build_authorization_request,
+        default_paths,
+        fresh_nonce,
+        write_single_use_authorization,
+    )
+
+    try:
+        req = build_authorization_request(action_id=args.action_id, engagement_slug=args.slug,
+                                          target=args.target, now=time.time(), window_s=args.window_s,
+                                          nonce=fresh_nonce())
+    except ValueError as exc:
+        print(f"vigil request-destruction: {exc}", file=sys.stderr)
+        return 2
+    out = args.out or default_paths(args.base_dir)["signed"].replace("signed-authorization.json",
+                                                                     "authorization-request.json")
+    try:
+        write_single_use_authorization(out, req)
+    except AuthorizationExistsError as exc:
+        print(f"vigil request-destruction: {exc}", file=sys.stderr)
+        return 2
+    print("=== vigil request-destruction — shared unsigned authorization (W9-5) ===")
+    print(f"action    : {args.action_id!r}  slug={args.slug!r}  target={args.target!r}")
+    print(f"window    : {int(args.window_s)}s  (single-use nonce; within the 900s dead-man's-switch)")
+    print(f"written   : {out}")
+    print("Distribute this file to EACH signer host; each runs `vigil sign-destruction` with their own key.")
+    return 0
+
+
+def _cmd_sign_destruction(args: argparse.Namespace) -> int:
+    """W9-5 per-signer step — run on the signer's OWN host. Sign the shared request DETACHED with THIS host's
+    key (owner from VIGIL_DESTRUCTION_OWNER_KEY, a co-signer from --key-file) and write {key_id, signature}.
+    The private key never leaves this host; only the detached signature returns to the coordinator."""
+    import os
+    from pathlib import Path
+
+    from .live.destruction_provision import load_worker_key_file, sign_request_detached
+
+    try:
+        request_json = Path(args.request).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"vigil sign-destruction: could not read --request: {exc}", file=sys.stderr)
+        return 2
+    kid = str(args.key_id or "").strip()
+    if not kid:
+        print("vigil sign-destruction: --key-id is required", file=sys.stderr)
+        return 2
+    if args.key_file:
+        try:
+            _kid, priv = load_worker_key_file(f"{kid}={args.key_file}")
+        except ValueError as exc:
+            print(f"vigil sign-destruction: {exc}", file=sys.stderr)
+            return 2
+    else:
+        priv = os.environ.get("VIGIL_DESTRUCTION_OWNER_KEY", "").strip()
+        if not priv:
+            print("vigil sign-destruction: no key — pass --key-file, or export VIGIL_DESTRUCTION_OWNER_KEY "
+                  "for the owner (never argv).", file=sys.stderr)
+            return 2
+    try:
+        sig = sign_request_detached(request_json=request_json, key_id=kid, private_key_b64=priv)
+    except ValueError as exc:
+        print(f"vigil sign-destruction: {exc}", file=sys.stderr)
+        return 2
+    out = args.out or f"{kid}.sig.json"
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_text(sig, encoding="utf-8")
+    print("=== vigil sign-destruction — detached signature (W9-5) ===")
+    print(f"key_id    : {kid}")
+    print(f"written   : {out}   <- return THIS to the coordinator (public; no private material)")
+    return 0
+
+
+def _cmd_combine_destruction(args: argparse.Namespace) -> int:
+    """W9-5 coordinator step — combine per-host DETACHED signatures over the shared request into the
+    single-use signed-authorization.json the PR leg consumes (written O_EXCL). The signatures are re-verified
+    by the gate, not trusted here."""
+    from pathlib import Path
+
+    from .live.destruction_provision import (
+        AuthorizationExistsError,
+        combine_authorization,
+        default_paths,
+        write_single_use_authorization,
+    )
+
+    try:
+        request_json = Path(args.request).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"vigil combine-destruction: could not read --request: {exc}", file=sys.stderr)
+        return 2
+    sigs: list = []
+    for spec in (args.signature or []):
+        s_spec = str(spec or "")
+        path = s_spec.split("=", 1)[1] if "=" in s_spec else s_spec
+        try:
+            sigs.append(Path(path.strip()).read_text(encoding="utf-8"))
+        except OSError as exc:
+            print(f"vigil combine-destruction: could not read signature {spec!r}: {exc}", file=sys.stderr)
+            return 2
+    try:
+        doc = combine_authorization(request_json=request_json, detached_signatures=sigs)
+    except ValueError as exc:
+        print(f"vigil combine-destruction: {exc}", file=sys.stderr)
+        return 2
+    out = args.out or default_paths(args.base_dir)["signed"]
+    try:
+        write_single_use_authorization(out, doc)
+    except AuthorizationExistsError as exc:
+        print(f"vigil combine-destruction: {exc}", file=sys.stderr)
+        return 2
+    print("=== vigil combine-destruction — single-use signed authorization (W9-5) ===")
+    print(f"signatures: {len(sigs)}")
+    print(f"written   : {out}")
+    print(f"Then: vigil patch ... --base-dir {args.base_dir} --target-repo {args.target or '<repo>'} --open-pr")
+    return 0
+
+
 def _cmd_approve_provision(args: argparse.Namespace) -> int:
     """Mint + persist the OWNER approval AUTHORITY (VIGIL A2). Prints the owner PRIVATE key ONCE (never
     stored) — export it as VIGIL_APPROVAL_OWNER_KEY to sign approvals; the PUBLIC key is persisted under
@@ -3277,6 +3493,70 @@ def build_parser() -> argparse.ArgumentParser:
                        help="a co-signer as key_id=/path/to/keyfile (repeatable; read from FILE, never argv). "
                             "The owner key comes from VIGIL_DESTRUCTION_OWNER_KEY.")
     pauth.set_defaults(func=_cmd_authorize_destruction)
+
+    # W9-5 — SECURE per-host co-signer provisioning + production multi-signer default.
+    penr = sub.add_parser(
+        "enroll-cosigner",
+        help="(W9-5) PHASE 1 on a signer's OWN host: generate its destruction key locally + emit a PUBLIC "
+             "enrolment request (pubkey + proof-of-possession); the private key never leaves this host")
+    penr.add_argument("--key-id", required=True, help="this signer's key id (e.g. owner, worker1)")
+    penr.add_argument("--name", default="", help="human-readable signer name (default: the key id)")
+    penr.add_argument("--key-out", default="",
+                      help="path for the PRIVATE key (0600, O_EXCL; default <key-id>.destruction.key) — keep it here")
+    penr.add_argument("--out", default="",
+                      help="path for the PUBLIC enrolment request (default <key-id>.enrollment.json) — send this")
+    penr.add_argument("--owner-id", default="owner",
+                      help="which key id is the owner (only affects the printed hint)")
+    penr.set_defaults(func=_cmd_enroll_cosigner)
+
+    pasm = sub.add_parser(
+        "assemble-destruction",
+        help="(W9-5) PHASE 2 on the MINTING box: assemble the m-of-n trust root from PUBLIC enrolment requests "
+             "(verifies every proof-of-possession; no private key on this box)")
+    pasm.add_argument("--base-dir", default=".vigil-live",
+                      help="where the PUBLIC trust root is written (shared with `vigil patch`)")
+    pasm.add_argument("--enrollment", action="append", default=[],
+                      help="a signer as key_id=/path/to/enrollment.json (repeatable; PUBLIC material only). "
+                           "Must include the owner.")
+    pasm.add_argument("--threshold", type=int, required=True,
+                      help="m in m-of-n — how many signers must sign. Under VIGIL_POSTURE=production must be >=2")
+    pasm.add_argument("--owner-id", default="owner", help="the mandatory owner signer's key id")
+    pasm.set_defaults(func=_cmd_assemble_destruction)
+
+    preq = sub.add_parser(
+        "request-destruction",
+        help="(W9-5) coordinator: mint the SHARED unsigned authorization each signer signs detached on its own host")
+    preq.add_argument("--action-id", required=True, help="the pr-<remediation_id> printed by the dry run")
+    preq.add_argument("--slug", required=True, help="the engagement_slug printed by the dry run")
+    preq.add_argument("--target", required=True, help="the target repo printed by the dry run (must match)")
+    preq.add_argument("--base-dir", default=".vigil-live", help="where authorization-request.json is written")
+    preq.add_argument("--out", default="", help="output path (default: <base-dir>/authorization-request.json)")
+    preq.add_argument("--window-s", type=float, default=600.0,
+                      help="validity window in seconds (single-use; total window must stay <=900s)")
+    preq.set_defaults(func=_cmd_request_destruction)
+
+    psgn = sub.add_parser(
+        "sign-destruction",
+        help="(W9-5) per-signer on its OWN host: sign the shared request DETACHED with this host's key "
+             "(owner via VIGIL_DESTRUCTION_OWNER_KEY, a co-signer via --key-file)")
+    psgn.add_argument("--request", required=True, help="the authorization-request.json from `vigil request-destruction`")
+    psgn.add_argument("--key-id", required=True, help="this signer's key id (must match its enrolment)")
+    psgn.add_argument("--key-file", default="",
+                      help="co-signer PRIVATE key file (read from FILE, never argv). Omit for the owner "
+                           "(read from VIGIL_DESTRUCTION_OWNER_KEY).")
+    psgn.add_argument("--out", default="", help="output path for the detached signature (default <key-id>.sig.json)")
+    psgn.set_defaults(func=_cmd_sign_destruction)
+
+    pcmb = sub.add_parser(
+        "combine-destruction",
+        help="(W9-5) coordinator: combine per-host detached signatures into the single-use signed authorization")
+    pcmb.add_argument("--request", required=True, help="the same authorization-request.json the signers signed")
+    pcmb.add_argument("--signature", action="append", default=[],
+                      help="a detached signature file (repeatable; key_id=/path or just /path)")
+    pcmb.add_argument("--base-dir", default=".vigil-live", help="where signed-authorization.json is written")
+    pcmb.add_argument("--out", default="", help="output path (default: <base-dir>/signed-authorization.json)")
+    pcmb.add_argument("--target", default="", help="(display only) the target repo, for the printed next-step")
+    pcmb.set_defaults(func=_cmd_combine_destruction)
 
     # A2 — per-action owner approval for offense tools (the DEFAULT high-assurance path once an authority is
     # provisioned). Three sub-actions: provision-authority | list | sign.

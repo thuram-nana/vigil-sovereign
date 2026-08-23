@@ -99,7 +99,11 @@ SECRET_META = {
                    "to the offense engine: the `vigil authorize-destruction` step reads it from the "
                    "VIGIL_DESTRUCTION_OWNER_KEY env, so run that one command in a shell where it is exported. "
                    "Optional until you open PRs. Solo setups: whoever holds this key can authorize — for "
-                   "separation of duties, provision with more signers and keep their keys off this machine."},
+                   "separation of duties, provision with more signers and keep their keys off this machine. "
+                   "W9-5: under VIGIL_POSTURE=production a multi-signer quorum is REQUIRED (a 1-of-1 authority "
+                   "is refused); generate each signer's key on its OWN host with `vigil enroll-cosigner` and "
+                   "assemble from public enrolments with `vigil assemble-destruction` (no private key transits "
+                   "the minting box)."},
 }
 # Ordered allowlist (grouping order preserved for the UI). Only these names may be sealed here.
 SECRET_NAMES = tuple(SECRET_META.keys())
