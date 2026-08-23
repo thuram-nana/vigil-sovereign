@@ -1030,6 +1030,48 @@
       "ci_job": "vigil_core — shared integrity substrate",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W2-1",
+      "title": "mypy is blocking behind a per-module ratchet",
+      "claim": "mypy runs blocking behind a committed per-module ratchet: a type error in any SIGIL module not on the not-yet-clean allowlist fails CI, and the allowlist can only shrink",
+      "source": "docs/decisions/W2-1-mypy-blocking-ratchet.md:8",
+      "enforced_by": {
+        "file": "tools/governance/mypy_ratchet.py",
+        "symbol": "evaluate"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_mypy_ratchet.py",
+        "tests": [
+          "test_evaluate_rejects_a_regression",
+          "test_evaluate_rejects_a_stale_entry",
+          "test_ci_mypy_step_is_blocking_and_wired"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W2-4",
+      "title": "line + branch coverage is measured and ratcheted",
+      "claim": "line and branch coverage of the vigil_core substrate are measured every CI run and gated by a committed ratchet floor: a drop below the floor fails CI",
+      "source": "docs/decisions/W2-4-coverage-ratchet.md:8",
+      "enforced_by": {
+        "file": "tools/coverage/coverage_ratchet.py",
+        "symbol": "evaluate"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_coverage_ratchet.py",
+        "tests": [
+          "test_evaluate_rejects_a_line_regression",
+          "test_evaluate_rejects_a_branch_regression",
+          "test_ci_job_measures_and_gates"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

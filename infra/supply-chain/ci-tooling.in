@@ -25,5 +25,12 @@
 # ruff is held at the version lint-config.yml already validates its rule behaviour against.
 pytest==8.4.2
 pytest-asyncio==1.4.0
+# pytest-cov + coverage measure line+branch coverage in the required jobs (W2-4 #421); the ratchet
+# guard (tools/coverage/coverage_ratchet.py) fails the build on a drop below the committed floor.
+# coverage is pinned explicitly (a direct requirement, not only pytest-cov's transitive dep) so the
+# lock-covers-input supply-chain test guards it; CI passes every --cov flag on the command line and
+# reads the JSON report, so no [toml] config-discovery extra is needed under the 3.13 toolchain.
+pytest-cov
+coverage
 ruff==0.15.12
 mypy

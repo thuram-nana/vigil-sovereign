@@ -100,9 +100,10 @@ KNOWN_ADVISORY: dict[str, str] = {
         "'SIGIL lint' job, and the config is pinned by docs/tests/test_precommit_config.py."
     ),
     "lint-config (W2-2 ruff + mypy — every package incl tests)": (
-        "lint-config.yml — a wider ruff+mypy config sweep over every package incl tests; advisory until "
-        "the W2-1 (#418) blocking ratchet promotes it. The blocking lint subset is the REQUIRED "
-        "'SIGIL lint (ruff blocking + mypy can-complete)' job."
+        "lint-config.yml — a wider ruff+mypy config sweep over every package incl tests; still advisory "
+        "because it spans every package, whereas the W2-1 (#418) blocking per-module mypy ratchet that "
+        "has now landed covers the SIGIL package. The blocking lint gate is the REQUIRED "
+        "'SIGIL lint (ruff + mypy ratchet, blocking)' job."
     ),
     "scheduled supply-chain scan (advisory)": (
         "scheduled-supply-chain-scan.yml — the daily counterpart to the REQUIRED 'A14 supply-chain gate'; "
