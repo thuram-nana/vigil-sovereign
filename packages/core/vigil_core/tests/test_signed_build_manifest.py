@@ -399,3 +399,22 @@ def test_out_of_band_pin_mismatch_refuses_the_trust_root(tree, monkeypatch):
     monkeypatch.setenv("VIGIL_BUILD_TRUST_ROOT_SHA256", "00" * 32)
     r = evaluate_build_integrity(tree)
     assert r.state == S.UNKNOWN_BUILD and "pin" in r.detail.lower()
+
+
+# --- red-pen MEDIUM (W9-7/W4-3): the state machine's "never raises" contract must hold for a signature or
+# key whose bytes are malformed but which parsed structurally (pydantic only enforces min_length on
+# signature_b64). Before the fix, verify_threshold's IntegrityError escaped verify_build_integrity; now a
+# material we cannot decode is a material we cannot authenticate -> fail-closed UNKNOWN_BUILD, never a crash.
+def test_a_byte_malformed_signature_fails_closed_to_UNKNOWN_never_raises(tree):
+    import dataclasses
+    kp, tr = _solo_root()
+    m = _sign(tree, kp)
+    tampered = dataclasses.replace(
+        m, signatures=(Signature(key_id="rel1", signature_b64="!!!definitely-not-base64!!!"),))
+    # MUST NOT raise (pre-fix this raised IntegrityError out of the "never raises" state machine):
+    r = verify_build_integrity(tampered, tree_root=tree, trust_root=tr)
+    assert r.state == S.UNKNOWN_BUILD          # cannot authenticate -> fail closed, never a false VALID
+    assert r.ok is False
+    assert r.signature.get("satisfied") is False
+    # evaluate_build_integrity (the surface call) likewise never raises on the same material:
+    #   (routed here directly since the malformed sig lives in-memory, not on disk)
