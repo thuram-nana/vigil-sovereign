@@ -374,3 +374,43 @@ def kill_scan_container(
     if removed:
         lg.info("kill switch removed %d Strix container(s) for session %s", removed, sid)
     return removed
+
+
+def kill_containers_for_owner(
+    docker_client: Any,
+    *,
+    owner_pid: Any,
+    owner_boot: str | None = None,
+    log: logging.Logger | None = None,
+) -> int:
+    """S10 kill switch by OWNER pid — force-remove the managed container(s) an owning process spawned.
+
+    This is the cross-process complement to :func:`kill_scan_container` (which needs the SDK
+    ``session_id``, known only inside the spawning process). The VIGIL console, a SEPARATE process,
+    holds only the host pid it recorded and the boot id — never the sandbox session id — so after its
+    kill switch ``SIGKILL``s that host pid it reaps the stranded container by the ``LABEL_OWNER_PID``
+    the container carries.
+
+    Unlike :func:`reap_orphan_containers`, this does NOT gate on pid liveness: the caller has already
+    decided this owner's container must die (the console just killed that owner, or this very process
+    is tearing itself down in a signal handler where its own pid is still alive). When ``owner_boot``
+    is given a container is removed only if its boot label ALSO matches, so a recycled pid from a
+    different boot is never mistaken for the target. Returns the number removed. Never raises.
+    """
+    lg = log or logger
+    try:
+        pid_s = str(int(owner_pid))
+    except (TypeError, ValueError):
+        return 0
+    if int(pid_s) <= 0:
+        return 0
+    boot = str(owner_boot) if owner_boot else ""
+    removed = 0
+    for container in _list_managed(docker_client, [f"{LABEL_OWNER_PID}={pid_s}"]):
+        if boot and _labels_of(container).get(LABEL_OWNER_BOOT, "") != boot:
+            continue  # same pid number, different boot — not the container we mean
+        if _force_remove(container):
+            removed += 1
+    if removed:
+        lg.info("kill switch removed %d Strix container(s) for owner pid %s", removed, pid_s)
+    return removed

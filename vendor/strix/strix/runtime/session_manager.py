@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -212,4 +213,54 @@ async def kill_run(scan_id: str) -> int:
         if docker_client is not None and session_id is not None:
             removed = sandbox_hardening.kill_scan_container(docker_client, session_id, log=logger)
     await cleanup(scan_id)
+    return removed
+
+
+def kill_run_sync(scan_id: str) -> int:
+    """SYNCHRONOUS container teardown for a SIGNAL handler — S10.
+
+    The SIGINT/SIGTERM/SIGHUP handler in ``strix/interface/cli.py`` runs in the main thread and
+    CANNOT ``await``; the async :func:`cleanup` / :func:`kill_run` paths need the running event loop
+    (which the signal is tearing down). Before this, a signalled run destroyed its report state but
+    left its detached sandbox container running ``tail -f /dev/null`` — the exact strand the reaper
+    exists to catch, but only on the NEXT launch.
+
+    This tears the container down NOW, synchronously, from the same process that spawned it (so the
+    in-memory session cache is live): force-remove by the SDK session label when it is readable,
+    else — because the label read reaches into SDK internals — fall back to removing by THIS process's
+    own owner-pid label (``kill_containers_for_owner``); then reap any sibling orphan and close the
+    docker client. It never touches the event loop, never awaits, and never raises: a teardown
+    failure must not stop the process from exiting. Returns the number of containers removed.
+    """
+    bundle = _SESSION_CACHE.pop(scan_id, None)
+    if bundle is None:
+        return 0
+    removed = 0
+    client = bundle.get("client")
+    docker_client = getattr(client, "docker_client", None)
+    if docker_client is None:
+        return 0
+    try:
+        state = getattr(getattr(bundle.get("session"), "_inner", None), "state", None)
+        session_id = getattr(state, "session_id", None)
+        if session_id is not None:
+            removed = sandbox_hardening.kill_scan_container(docker_client, session_id, log=logger)
+        if removed == 0:
+            # Session id unreadable (or already gone): this very process owns the container, and its
+            # pid is still alive inside the handler, so reap_orphan_containers would SPARE it. Remove
+            # by our own owner-pid label instead — unconditional, exactly what the console does to us.
+            removed = sandbox_hardening.kill_containers_for_owner(
+                docker_client,
+                owner_pid=os.getpid(),
+                owner_boot=sandbox_hardening.owner_boot_id(),
+                log=logger,
+            )
+        sandbox_hardening.reap_orphan_containers(docker_client, log=logger)
+    except Exception:  # noqa: BLE001 — a signal handler must never raise
+        logger.debug("kill_run_sync(%s): teardown raised", scan_id, exc_info=True)
+    finally:
+        try:
+            docker_client.close()
+        except Exception:  # noqa: BLE001
+            logger.debug("kill_run_sync(%s): docker_client.close() raised", scan_id, exc_info=True)
     return removed
