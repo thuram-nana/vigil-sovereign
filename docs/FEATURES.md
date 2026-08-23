@@ -28,8 +28,9 @@ claiming `vigil authorize-destruction` opens its file `O_EXCL` when the code act
 
 > **Machine-readable companions (W15).** Two registries make this catalog's honesty machine-checked:
 > [`docs/features/wiring-status.json`](features/wiring-status.md) assigns every CLI verb, subsystem
-> passthrough and deferred-infra subsystem a wiring status (LIVE / OPT-IN / GATED / BUILT-NOT-WIRED /
-> ORPHANED) verified against the code (W15-2 #394), and
+> passthrough, unified-UI screen, subsystem seam (chat / fireteam / brain / the MCP tool-governance
+> boundary + the not-yet-wired MCP live-client seam) and deferred-infra subsystem a wiring status (LIVE /
+> OPT-IN / GATED / BUILT-NOT-WIRED / ORPHANED) verified against the code (W15-2 / W15-2b #394), and
 > [`docs/limitations/inventory.json`](limitations/README.md) is the code-grounded documented-limitation
 > inventory feeding the W16 burndown (W15-1 #393). Both are guarded in the required `the briefing explains
 > every agent and capability` CI job; when this prose and those registries disagree, the registries and

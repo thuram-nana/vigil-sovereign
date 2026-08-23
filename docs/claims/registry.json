@@ -1283,6 +1283,28 @@
       "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W15-2b",
+      "title": "The feature-wiring audit also covers the UI-screen map and the MCP / chat / fireteam / brain subsystem seams",
+      "claim": "The wiring-status registry also covers every unified-UI screen (each a real NAV id and route() id in app.js), the chat, fireteam and brain subsystems, the MCP tool-governance boundary and the not-yet-wired MCP live-client seam; the declared UI-screen set must equal the UI's NAV == route() set, and a subsystem seam anchored to a phantom symbol turns the build red.",
+      "source": "docs/features/wiring-status.md:108",
+      "enforced_by": {
+        "file": "docs/tests/test_feature_wiring_status.py",
+        "symbol": "validate_feature"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_feature_wiring_status.py",
+        "tests": [
+          "test_ui_screen_coverage_equals_the_system_map",
+          "test_mcp_live_client_seam_is_still_unwired",
+          "test_negative_control_ui_screen_phantom_rejected",
+          "test_negative_control_symbol_exists_phantom_rejected"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
