@@ -55,6 +55,7 @@ import json
 import os
 import re
 import secrets
+import select
 import signal
 import socket
 import socketserver
@@ -757,16 +758,17 @@ def _remote_backends(sovereign_addr: str, offense_console_addr: str, offense_api
 # byte-identical to the historical path. But the HA / k8s profile federates to a REMOTE cockpit
 # (`--proxy-only --sovereign-addr vigil-sovereign:8733`), and that hop crosses the pod network in
 # cleartext, carrying the per-user bearer + the substituted owner console credential (issue #472). This
-# wires a stdlib-`ssl` TLS client onto the hop: verify the backend server certificate (optionally against
-# an operator-provided CA), optionally present a client certificate for mutual TLS, and — under the
-# PRODUCTION posture — REFUSE a plaintext hop to a remote backend (fail-closed refuse-to-start).
+# wires a stdlib-`ssl` TLS client onto the hop: verify the backend server certificate — PINNED to an
+# operator CA when `VIGIL_HOP_CA` is set (system trust store NOT loaded), else the system store — optionally
+# present a client certificate for mutual TLS, and — under the PRODUCTION posture — REFUSE a plaintext hop
+# to a remote backend (fail-closed refuse-to-start).
 #
 # The two-env boundary is preserved: `ssl` is stdlib and `vigil_core.posture` is the neutral, namespace-
 # pure, pure-stdlib posture parser BOTH planes already share (never `framework`/`strix`/`sigil`). Cert
 # MATERIAL — the CA/leaf/key files and a TLS-terminating cockpit — is the operator residual; this is the
 # mechanism that USES it and fails closed without it (docs/decisions/W8-6-*.md).
 _HOP_TLS_ENV = "VIGIL_HOP_TLS"                    # truthy ⇒ the hop uses TLS (HTTPS); unset/falsy ⇒ plaintext
-_HOP_CA_ENV = "VIGIL_HOP_CA"                      # PEM CA bundle used to VERIFY the backend server cert
+_HOP_CA_ENV = "VIGIL_HOP_CA"                      # operator CA (PEM) the backend cert is PINNED to (set ⇒ system store NOT trusted)
 _HOP_CLIENT_CERT_ENV = "VIGIL_HOP_CLIENT_CERT"    # client cert (PEM) — present it for mTLS (proxy→backend auth)
 _HOP_CLIENT_KEY_ENV = "VIGIL_HOP_CLIENT_KEY"      # client private key (PEM) for the client cert
 _HOP_TLS_TRUTHY = frozenset({"1", "on", "true", "yes", "require", "required", "tls", "mtls"})
@@ -798,19 +800,36 @@ def build_hop_tls_context(env: "Optional[dict]" = None) -> "Optional[ssl.SSLCont
     + TLS ≥ 1.2, and none of those is ever relaxed. A configured CA / client-cert / key file that is
     MISSING or INVALID raises here (so the proxy refuses to start), rather than falling back to a
     no-verify context or plaintext. Mutual TLS is opt-in: set BOTH ``VIGIL_HOP_CLIENT_CERT`` and
-    ``VIGIL_HOP_CLIENT_KEY`` — exactly one of the pair is a misconfiguration and is refused."""
+    ``VIGIL_HOP_CLIENT_KEY`` — exactly one of the pair is a misconfiguration and is refused.
+
+    Trust anchor: ``VIGIL_HOP_CA``, when set, PINS the hop to that operator CA ALONE — the system trust
+    store is NOT loaded, so a leaf mis-issued (or coerced) from any of the ~120 public CAs the OS trusts
+    is REJECTED. That is the whole point for a hop addressed by a public FQDN: without the pin any public
+    CA could vouch for the backend and MITM the control-plane hop. When ``VIGIL_HOP_CA`` is UNSET, the
+    hop verifies against the SYSTEM trust store (``create_default_context``) — the documented default,
+    honestly weaker (any OS-trusted CA can vouch for the backend), correct only when the cockpit presents
+    a publicly-trusted cert."""
     if not _hop_tls_enabled(env):
         return None
     e = os.environ if env is None else env
-    # create_default_context(SERVER_AUTH) ⇒ check_hostname=True, verify_mode=CERT_REQUIRED, secure ciphers.
-    ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ca = e.get(_HOP_CA_ENV, "").strip()
     if ca:
-        # A hop told to verify against a specific CA must FAIL CLOSED if it cannot load that CA — never
-        # silently fall back to the system trust store. load_verify_locations raises FileNotFoundError /
+        # PIN to the operator CA ONLY. ssl.SSLContext(PROTOCOL_TLS_CLIENT) does NOT auto-load the system
+        # trust store (unlike create_default_context), so ONLY this CA is trusted and a leaf from any
+        # public CA is rejected — the exact MITM defence for a hop reached over a public FQDN. FAIL-CLOSED:
+        # a hop told to verify against a specific CA must refuse to start if it cannot load it, never
+        # silently fall back to the system store — load_verify_locations raises FileNotFoundError /
         # ssl.SSLError on a missing / malformed file; let it propagate.
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.load_verify_locations(cafile=ca)
+    else:
+        # No operator CA pinned ⇒ verify against the SYSTEM trust store (documented default).
+        # create_default_context(SERVER_AUTH) ⇒ check_hostname=True, verify_mode=CERT_REQUIRED, secure ciphers.
+        ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+    # Invariants held for BOTH branches, never relaxed: hostname check on, peer cert required, TLS ≥ 1.2.
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     cert = e.get(_HOP_CLIENT_CERT_ENV, "").strip()
     key = e.get(_HOP_CLIENT_KEY_ENV, "").strip()
     if bool(cert) != bool(key):
@@ -1952,22 +1971,40 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         buffering). W9-3 — for an SSE stream carrying a bearer, RE-AUTHENTICATE that bearer periodically so a
         stream that was authorized at connect does not outlive a revocation: the moment a re-auth no longer
         resolves (account revoked, edge force-purged, role dropped) the stream is torn down (we stop writing
-        and the connection is closed). A read timeout on the upstream socket is what lets the loop wake to
-        re-check even when NO event is flowing; when events flow the check is done on a wall-clock deadline
-        after each write. A non-SSE length-less body (no bearer / not SSE) streams exactly as before."""
+        and the connection is closed).
+
+        To wake and re-check even when NO event is flowing, we WAIT on the upstream with ``select`` (plus
+        ``SSLSocket.pending()`` for TLS app-data already decrypted into the SSL buffer) rather than arming a
+        socket READ TIMEOUT. A read timeout on the makefile-wrapped socket sets CPython's one-way
+        ``_timeout_occurred`` flag, after which the NEXT read raises ``OSError('cannot read from timed out
+        object')`` — so a merely-quiet-but-valid stream (every SSE stream over TLS that idles a single
+        interval) would be KILLED instead of re-checked. ``select`` leaves the socket blocking and re-usable.
+        When events flow, the periodic re-check also rides a wall-clock deadline after each write. A non-SSE
+        length-less body (no bearer / not SSE) streams exactly as before — no wait, no re-auth."""
         interval = getattr(self.server, "sse_reauth_interval", _SSE_REAUTH_INTERVAL_S) or 0.0
         do_reauth = bool(is_sse and reauth_bearer and interval > 0 and upstream_sock is not None)
-        if do_reauth and upstream_sock is not None:         # (`is not None` also narrows for the checker)
-            try:
-                upstream_sock.settimeout(interval)          # wake at least every `interval` to re-check
-            except OSError:
-                do_reauth = False
         deadline = time.monotonic() + interval if do_reauth else None
         while True:
+            if do_reauth and upstream_sock is not None:     # (`is not None` also narrows for the checker)
+                # Wait up to `interval` for upstream data WITHOUT arming a read-timeout (which would poison
+                # the socket — see the docstring). TLS app-data already buffered in the SSL layer is invisible
+                # to select, so consult pending() first; only a genuinely quiet interval falls through.
+                pending = upstream_sock.pending() if isinstance(upstream_sock, ssl.SSLSocket) else 0
+                if not pending:
+                    try:
+                        ready, _, _ = select.select([upstream_sock], [], [], interval)
+                    except (OSError, ValueError):
+                        ready = [upstream_sock]              # can't select (e.g. closed fd) → let read1 surface it
+                    if not ready:
+                        # a quiet interval with no new event — re-authenticate the still-open stream, fail-closed.
+                        if self._authenticate(reauth_bearer, fresh=True) is None:
+                            break                            # revoked/expired since connect → tear it down
+                        deadline = time.monotonic() + interval
+                        continue
             try:
                 chunk = resp.read1(65536)   # ONE underlying read → forwards each SSE event as it arrives
             except (socket.timeout, TimeoutError):
-                # a quiet interval with no new event — re-authenticate the still-open stream, fail-closed.
+                # defensive: no read-timeout is armed above, but if one ever were, treat it as a quiet interval.
                 if self._authenticate(reauth_bearer, fresh=True) is None:
                     break                                   # revoked/expired since connect → tear it down
                 deadline = time.monotonic() + interval
@@ -2110,6 +2147,20 @@ def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
             f"(WireGuard/Tailscale) address only — never 0.0.0.0 / an unspecified / a public address. "
             f"Front a real domain with a TLS reverse proxy (--domain; see deploy/reverse-proxy/).")
     hop_tls = resolve_hop_tls(backends)   # raises → refuse to start on a production plaintext remote hop
+    if hop_tls is None:
+        # Defense-in-depth (W8-6): production already REFUSED a remote plaintext hop above; OUTSIDE
+        # production it is allowed but must never be SILENT — the per-user bearer and the substituted
+        # owner console credential would cross the network in cleartext. Emit a structured start-time
+        # WARNING so an operator federating to a remote backend without hop TLS always sees it. uiproxy is
+        # stdlib-only and shares no logger (test_uiproxy_is_pure_stdlib), so the sink is stderr.
+        _b = backends or _default_backends()
+        _remote = sorted({f"{h}:{p}" for (h, p) in _b.values() if not _hop_is_loopback(h)})
+        if _remote:
+            sys.stderr.write(
+                "vigil up: WARNING event=hop_plaintext_remote hop_tls=disabled "
+                f"remote_backends={','.join(_remote)} "
+                f"hint=\"set {_HOP_TLS_ENV}=require + {_HOP_CA_ENV} to encrypt the proxy->backend hop; "
+                "the per-user bearer and the owner console credential are otherwise sent in cleartext\"\n")
     return _ProxyServer((host, port), ProxyHandler, serve_dir=serve_dir, token=token, hop_key=hop_key,
                         allowed_hosts=tuple(allowed_hosts), allowed_origins=tuple(allowed_origins),
                         plane_control=plane_control, backends=backends, hop_tls=hop_tls)

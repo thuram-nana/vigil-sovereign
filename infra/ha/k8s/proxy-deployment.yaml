@@ -61,17 +61,24 @@ spec:
               valueFrom: { secretKeyRef: { name: vigil-secrets, key: crucible-api-key } }
             # W8-6 (#472) — ENCRYPT THE PROXY->COCKPIT HOP. The `--sovereign-addr vigil-sovereign:8733`
             # hop above crosses the pod network; the NetworkPolicy bounds WHO connects, not confidentiality.
-            # The proxy is a TLS client for the hop: verify the cockpit's cert (VIGIL_HOP_CA), and present a
-            # client cert for mutual TLS (the VIGIL_HOP_CLIENT_CERT/KEY pair). Under VIGIL_POSTURE=production
-            # the proxy REFUSES TO START with a plaintext hop to this remote cockpit (fail-closed).
+            # The proxy is a TLS client for the hop: verify the cockpit's cert (VIGIL_HOP_CA — PINS to that
+            # operator CA alone; the system trust store is NOT loaded, so no public CA can vouch for the
+            # backend), and present a client cert for mutual TLS (the VIGIL_HOP_CLIENT_CERT/KEY pair). Under
+            # VIGIL_POSTURE=production the proxy REFUSES TO START with a plaintext hop to this remote cockpit.
+            #
+            # POSTURE IS ARMED BY DEFAULT (below, ACTIVE — not commented): this profile federates the
+            # credential-bearing hop to a REMOTE cockpit, so it is fail-closed out of the box. Applying this
+            # manifest AS SHIPPED — before the hop-TLS material exists — makes the proxy REFUSE TO START (the
+            # pod crashloops on the resolve_hop_tls ValueError) rather than run the per-user bearer + the
+            # substituted owner console credential over the pod network in CLEARTEXT. That refusal is
+            # intentional: it forces the operator to provide the hop-TLS material below, never a silent leak.
             #
             # RESIDUAL, operator-provided: (a) the CA/cert/key MATERIAL (the `vigil-hop-tls` Secret mounted
             # below), and (b) a TLS-TERMINATING cockpit — `sigil serve` binds plaintext, so front the
             # sovereign StatefulSet with a TLS sidecar (or a service-mesh mTLS) that presents a cert whose
-            # SAN is `vigil-sovereign`. Left COMMENTED so the manifest applies before that material exists;
-            # uncomment (with the Secret + the volume mount below) to turn the hop on. Set VIGIL_POSTURE
-            # too, and the plaintext hop becomes a refuse-to-start rather than a silent cleartext leak.
-            # - { name: VIGIL_POSTURE,          value: "production" }
+            # SAN is `vigil-sovereign`. Uncomment the four hop-TLS env vars + the volumeMounts + the volume +
+            # Secret below to enable the encrypted hop and CLEAR the refusal.
+            - { name: VIGIL_POSTURE,          value: "production" }
             # - { name: VIGIL_HOP_TLS,          value: "require" }
             # - { name: VIGIL_HOP_CA,           value: "/etc/vigil/hop-tls/ca.pem" }
             # - { name: VIGIL_HOP_CLIENT_CERT,  value: "/etc/vigil/hop-tls/client-cert.pem" }
