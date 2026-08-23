@@ -174,6 +174,7 @@ def _cmd_engage(args: argparse.Namespace) -> int:
         scope=tuple(scope) or ("127.0.0.1",),   # --scope is signed into the authority + enforced end-to-end
         access_log=args.access_log, auth_log=args.auth_log, conn_log=args.conn_log,
         max_iterations=args.max_iterations, owner_approves_offense=args.approve_offense,
+        brain_execute_via_body=bool(getattr(args, "brain_execute_via_body", False)),
     )
     engine = build_engine(cfg)
     report = engine.engage(args.url, objective=args.objective, resume=bool(getattr(args, "resume", False)))
@@ -3179,6 +3180,11 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--brain", default="", choices=("", "hexstrike"),
                     help="drive `think` with a homegrown propose-only decision brain (e.g. hexstrike) "
                          "instead of the Claude/replay path — gate + executor + oracle unchanged")
+    pe.add_argument("--brain-execute-via-body", action="store_true",
+                    help="H1x-1 (DEFAULT OFF): route a GATE-AUTHORIZED brain tool through the ONE canonical "
+                         "HexstrikeAgentBody.execute instead of the governed executor. The gate is unchanged "
+                         "(offense still queues; nuclei stays A2) and the FACT seam stays CLOSED — the body "
+                         "runs with no runner, so it mints ZERO facts. Only meaningful with --brain hexstrike.")
     pe.add_argument("--approve-offense", action="store_true",
                     help="a SINGLE-USE standing approval to run ONE queued offense action against the "
                          "operator's own chartered loopback (the human leg of the conjunctive gate; scope "

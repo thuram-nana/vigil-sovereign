@@ -86,7 +86,14 @@ From the system's own honesty ledger (V2-LIMITATIONS / DEFERRED-INFRA / TRUTHENO
   offline**; hexstrike live-fire cannot be validated here — a **tooling residual**, never a present FACT.
 - Only tool-output classes with a runner-owned oracle re-drive can mint FACTs; content-discovery / asset-
   enum / CMS-enum / generic misconfig outputs remain **LEADs**.
-- `HexstrikeAgentBody`'s PROPOSE path is now production (its `plan` is driven by every `--brain hexstrike`
-  run via the `BrainThink` adapter — slice hx-h1). But its EXECUTE path (`run_external_tool`) still has **no
-  production caller**: production execution flows through the live engine's governed executor, not the body's
-  own `execute`. Converging the two execute paths is the remaining step-6 work, not an existing capability.
+- `HexstrikeAgentBody`'s PROPOSE path is production (its `plan` is driven by every `--brain hexstrike`
+  run via the `BrainThink` adapter — slice hx-h1). Its EXECUTE path (`HexstrikeAgentBody.execute` ->
+  `run_external_tool`) now has a **flag-gated production caller** behind `--brain engage
+  --brain-execute-via-body` (slice **H1x-1**), **DEFAULT OFF**: with the flag OFF production execution is
+  byte-identical to before (the live engine's governed executor; the body is only planned through), and with
+  it ON a gate-authorized tool routes through the body's own `execute`. The **FACT seam stays CLOSED either
+  way** for this slice — the body is driven with **no `RunnerDeps`**, so its execute returns an unexecuted
+  LEAD and mints **zero facts** (`fact_count == 0` in both flag states; the FP-0 tripwire holds in both).
+  The gate is unchanged (DENY-PARITY: nuclei still A2, offense still queues). Provisioning the body's runner
+  so a tool mints its **first live FACT** (nmap `SERVICE_REACHABILITY` — slice **H8f**) is a SEPARATE,
+  operator-checkpoint-gated step that also updates the tripwire tool-by-tool; it is **not** enabled here.

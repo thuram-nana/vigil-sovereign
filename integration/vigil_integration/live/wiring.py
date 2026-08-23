@@ -221,6 +221,16 @@ class EngineConfig:
                                             # slot", e.g. brains.engine_think.BrainThink); when set it drives
                                             # `think` instead of the Claude/replay path — gate/executor/oracle
                                             # unchanged (the brain proposes; the engine gates; the oracle confirms)
+    # H1x-1 — the flag-gated EXECUTE-path convergence (DEFAULT OFF). When True AND a ``brain`` is wired,
+    # a GATE-AUTHORIZED tool executes through the ONE canonical ``HexstrikeAgentBody.execute`` (the body's
+    # own R4-runner path) instead of the live engine's governed executor. OFF ⇒ byte-identical to today
+    # (the executor path; the body is only PLANNED through). ON ⇒ execution routes through the body, but the
+    # FACT-minting seam stays CLOSED for this slice: the body is built with NO RunnerDeps, so its execute
+    # returns an unexecuted LEAD and mints ZERO facts (fact_count==0 stays green even ON). The gate is
+    # UNCHANGED either way (DENY-PARITY: nuclei still A2, offense still queues). Provisioning the body's
+    # runner so a tool mints its first live FACT (nmap SERVICE_REACHABILITY) is the SEPARATE,
+    # operator-checkpoint-gated H8f slice — never enabled here.
+    brain_execute_via_body: bool = False
     # attestation
     operator_keypair: Optional[KeyPair] = None
     # spine
@@ -288,6 +298,31 @@ def _offense_scope_source(slug: str, trust_root: Any):
                 return []
 
     return _AuthorityScope()
+
+
+@dataclass(frozen=True)
+class _BodyExecResult:
+    """H1x-1 — an ExecResult-shaped view of a ``HexstrikeAgentBody.execute`` ActionOutcome, so the live
+    engine's OODA loop consumes a body-routed execution through the SAME surface (``.ran``/``.outcome``/
+    ``.stdout``/``.record``) it reads from the governed executor. Duck-typed to ``engine._DenyResult`` /
+    the executor's ExecResult.
+
+    FACT SEAM CLOSED for this slice: the canonical body is driven with NO RunnerDeps, so its execute never
+    runs a tool (``executed`` is always False) — this maps to ``ran=False`` (a recorded refusal), carries
+    an EMPTY ``stdout`` (nothing reaches oracle intake) and NO signed ExecRecord, so ``fact_count`` stays 0.
+    ``ran`` mirrors ``ActionOutcome.executed`` defensively: were a future H8f slice to provision the runner,
+    a genuinely-executed body outcome would surface as ``ran=True`` — but even then this view carries no
+    stdout, so THIS engine path still mints nothing; the body owns its own runner-side oracle re-drive."""
+
+    tool: str
+    reason: str
+    ran: bool = False
+    outcome: str = "deny"
+    tier: str = "A0"
+    target: str = ""
+    destructive: bool = False
+    stdout: str = ""
+    record: Any = None
 
 
 def build_engine(config: EngineConfig) -> VigilEngine:
@@ -473,6 +508,52 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         if standing_approval is not None:
             standing_approval.bind(gtool, gtarget, digest)
 
+    def _run_via_body(tool: Any) -> Any:
+        """H1x-1 — route ONE gate-authorized tool through the ONE canonical ``HexstrikeAgentBody.execute``
+        and return an ExecResult-shaped view the engine loop consumes. Reached only when
+        ``config.brain_execute_via_body`` is set and a brain is wired; the engine already authorized the
+        edge (this is the post-gate execute sink), so a ``GateDecision(authorized=True)`` faithfully
+        reflects the gate's real verdict — the body re-checks its own forbidden-key guard defensively.
+
+        FACT SEAM CLOSED: ``config.brain.body()`` is the planning body, built with NO RunnerDeps, so
+        ``execute`` returns an unexecuted LEAD ("runner not provisioned") — ``executed`` is False,
+        ``ran`` is False, the returned view carries no stdout and no ExecRecord, and the loop records a
+        refusal. ZERO facts by construction. FAIL-CLOSED: a missing ``body`` accessor or ANY error is a
+        recorded deny, never a crash and never an execution. FATAL-2: the framework agent-body interface
+        (and the body itself) are imported/constructed function-locally — this offense-leg path co-loads
+        no framework into module scope."""
+        tool_name = str(getattr(tool, "tool_name", "") or "")
+        body_accessor = getattr(config.brain, "body", None)
+        if not callable(body_accessor):
+            return _BodyExecResult(tool=tool_name, reason=(
+                "--brain-execute-via-body set but the wired brain exposes no canonical body() — "
+                "fail-closed deny (no execution)"))
+        try:
+            from ..agent.targets import extract_target  # noqa: PLC0415 (pure, offense-free)
+            from framework.v2.agent_body.interface import (  # noqa: PLC0415 (FATAL-2: framework local)
+                GateDecision,
+                ProposedAction,
+            )
+            body = body_accessor()
+            tool_args = dict(getattr(tool, "tool_args", None) or {})
+            target = extract_target(tool_args) or ""
+            # the body reads only its TYPED params (ports/port/rate/…); the target rides in .target, and
+            # never as a param. (A forbidden provenance/authorized key — never emitted by the brain — is
+            # additionally refused inside body.execute.)
+            params = {k: v for k, v in tool_args.items() if k != "target"}
+            action = ProposedAction(kind=tool_name, target=target, params=params)
+            decision = GateDecision(authorized=True,
+                                    reason="live-engine gate authorized this action (routed to body.execute)")
+            outcome = body.execute(action, decision)
+        except Exception as exc:  # noqa: BLE001 — any body/import error is a DENY, never a crash or a run
+            return _BodyExecResult(tool=tool_name, target="",
+                                   reason=f"body-execute route error (fail-closed): {type(exc).__name__}: {exc}")
+        ran = bool(getattr(outcome, "executed", False))
+        reason = (str(getattr(outcome, "blocked_reason", "") or "")
+                  or str((getattr(outcome, "detail", None) or {}).get("reason", "") or ""))
+        return _BodyExecResult(tool=tool_name, target=target, ran=ran,
+                               outcome=("ran" if ran else "deny"), reason=reason)
+
     def run_tool(tool: Any, phase: Phase, seq: int, *, approved: bool = False) -> Any:
         _seq["n"] = seq
         kw = {"run": config.runner} if config.runner is not None else {}
@@ -482,6 +563,20 @@ def build_engine(config: EngineConfig) -> VigilEngine:
 
         is_terminal = (isinstance(getattr(tool, "tool_name", None), str)
                        and tool.tool_name.strip().lower() == _TERMINAL_TOOL)
+
+        # H1x-1 — EXECUTE-PATH CONVERGENCE (flag-gated, DEFAULT OFF). When the operator opted into
+        # ``--brain-execute-via-body`` AND a brain is wired, a GATE-AUTHORIZED (reached here only after
+        # authorize_edge allowed/approved it) NON-terminal tool executes through the ONE canonical
+        # ``HexstrikeAgentBody.execute`` instead of the governed executor below. The gate is UNCHANGED —
+        # this branch is post-gate, so DENY-PARITY holds (nuclei still A2, offense still queues; those
+        # never reach here). The body is driven with NO RunnerDeps (``config.brain.body()``), so its
+        # execute returns an unexecuted LEAD and mints ZERO facts — the FACT seam stays CLOSED for this
+        # slice (fact_count==0 even ON). The terminal path is deliberately excluded (its governed local
+        # executor is a distinct, non-network path the brain never proposes). Provisioning the body's
+        # runner so a tool mints its first live FACT (nmap SERVICE_REACHABILITY) is the SEPARATE,
+        # operator-checkpoint-gated H8f slice — never done here.
+        if config.brain_execute_via_body and config.brain is not None and not is_terminal:
+            return _run_via_body(tool)
 
         # Per-action binding (A2 §4 / W0-11): when the per-action approval gate is the active gate, bind the
         # action it will authorize BEFORE execution, so the gate spends ONLY an approval bound to THIS exact
