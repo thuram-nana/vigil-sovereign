@@ -37,9 +37,14 @@ def _resolve_sigil_home() -> Path:
 
 
 def default_readyz() -> tuple[bool, dict]:
-    """Run the integrity verifier over the sovereign spine home + the dead-man heartbeat check. Returns
-    ``(ready, body)`` — ``ready`` False on any integrity FAILURE. Never raises (a verifier crash → not
-    ready, with the error surfaced, fail-CLOSED)."""
+    """Run the integrity verifier over the sovereign spine home + the dead-man heartbeat check, AND the
+    signed-build-manifest integrity check (W9-7 #440 / W4-3 #443) over the install root. Returns
+    ``(ready, body)`` — ``ready`` False on any spine-integrity FAILURE, or when the build integrity is
+    MODIFIED / MISSING (a tampered SIGNED RELEASE install: the orchestrator should drain the node rather
+    than serve files that do not match what shipped). The other build states (VALID, and the honest
+    UNKNOWN_BUILD / UNSIGNED_BUILD / DEVELOPMENT_BUILD of a source checkout or dev build) never flip
+    readiness on their own. Never raises (a verifier crash → not ready, with the error surfaced,
+    fail-CLOSED)."""
     try:
         from .. import integrity_verifier as iv
         home = _resolve_sigil_home()
@@ -49,7 +54,21 @@ def default_readyz() -> tuple[bool, dict]:
                 "heartbeat_detail": hb_detail,
                 "checks": [{"check": c.check, "status": c.status, "detail": c.detail}
                            for c in report.checks]}
-        return report.ok, body
+        ready = report.ok
+        # Build integrity is additive and fail-soft: it augments the body and can only ever turn a ready
+        # node NOT-ready (on a tampered signed release), never mask a spine-integrity failure.
+        try:
+            from .. import doctor as _doctor
+            from vigil_core.signed_build_manifest import (
+                BuildIntegrityState as _BIS, evaluate_build_integrity)
+            bi = evaluate_build_integrity(_doctor.find_repo_root())
+            body["build_integrity"] = bi.to_dict()
+            if bi.state in (_BIS.MODIFIED, _BIS.MISSING):
+                ready = False
+        except Exception as exc:  # noqa: BLE001 — a build-integrity probe crash must not brick readiness
+            body["build_integrity"] = {"state": "UNKNOWN_BUILD", "ok": False,
+                                       "error": f"{type(exc).__name__}: {exc}"}
+        return ready, body
     except Exception as exc:  # noqa: BLE001 — a readiness probe that cannot run is NOT ready (fail-closed)
         return False, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 

@@ -954,6 +954,31 @@ def collect(repo_root) -> dict:
         report["integrity"] = {"ok": None, "error": f"{type(exc).__name__}: {exc}", "checks": []}
         _note(f"the integrity verifier could not run: {exc}")
 
+    # 10b) BUILD integrity (W9-7 #440 / W4-3 #443) — "are my own files the ones that shipped?" Reads the
+    #     signed build manifest at the install/repo root and reports ONE of six explicit states, never an
+    #     optimistic default. A tampered SIGNED RELEASE install (MODIFIED / MISSING) is a HARD issue (it
+    #     flips `ok`) — an operator must know their files were changed. The other four states are NOTES: a
+    #     source checkout carries no manifest (UNKNOWN_BUILD) and a dev/unsigned build is not a shipped
+    #     release — none of those should brick doctor. FATAL-2: `vigil_core.signed_build_manifest` imports
+    #     only stdlib + vigil_core crypto (never sigil/framework); function-local import keeps the load path
+    #     light (mirrors the integrity block above). HONEST SCOPE: user-space self-verification detects an
+    #     accidental/naive tamper; it does NOT defend against a hostile admin who re-signs under their own
+    #     key (see docs/decisions/W9-7-signed-build-manifest.md).
+    try:
+        from vigil_core.signed_build_manifest import BuildIntegrityState as _BIS, evaluate_build_integrity
+        bi = evaluate_build_integrity(repo)
+        report["build_integrity"] = bi.to_dict()
+        if bi.state in (_BIS.MODIFIED, _BIS.MISSING):
+            _issue(f"BUILD integrity {bi.state}: {bi.detail} — this install's shipped files do not match "
+                   f"the signed build manifest (`python3 tools/build_manifest.py verify` for detail).")
+        elif bi.state != _BIS.VALID:
+            _note(f"build integrity: {bi.state} — {bi.detail}. A signed build manifest is produced by the "
+                  f"release build (`tools/build_manifest.py generate`); a source checkout carries none.")
+    except Exception as exc:  # noqa: BLE001 — the build-integrity probe must never crash the report
+        report["build_integrity"] = {"state": "UNKNOWN_BUILD", "ok": False,
+                                     "error": f"{type(exc).__name__}: {exc}"}
+        _note(f"the build-integrity verifier could not run: {exc}")
+
     # 11) HA/timer unit alerts (W8-1) — the DEAD-MAN for every scheduled unit. Reads each unit's heartbeat
     #     (written by its ExecStopPost hook) and surfaces any that are STALE/ABSENT (the timer stopped) or
     #     whose last run FAILED, plus the alert-delivery dead-man. ADVISORY by default (the alert timer is
@@ -1094,6 +1119,22 @@ def render(report: dict) -> str:
         if integ.get("heartbeat_stale") is not None:
             hb = "!! " if integ.get("heartbeat_stale") else "OK "
             lines.append(f"  {hb}scheduled-verifier heartbeat: {integ.get('heartbeat_detail', '')}")
+    bi = report.get("build_integrity")
+    if bi is not None:
+        # W9-7/W4-3: one honest headline state + the per-artifact breakdown. VALID = OK; MODIFIED/MISSING =
+        # a tampered signed release (hard, also in "Action needed"); the other four are informational.
+        state = str(bi.get("state", "?"))
+        mark = {"VALID": "OK ", "MODIFIED": "!! ", "MISSING": "!! "}.get(state, ".. ")
+        lines.append("\nBuild integrity (are my files the ones that shipped? — one of six explicit states):")
+        lines.append(f"  {mark}{state}  — {bi.get('detail', bi.get('error', ''))}")
+        if bi.get("build_id"):
+            lines.append(f"     build_id={bi.get('build_id')} channel={bi.get('channel')} "
+                         f"version={bi.get('product_version')}")
+        for a in bi.get("artifacts", []):
+            st = str(a.get("status", "?"))
+            amark = {"VALID": "OK ", "MODIFIED": "!! ", "MISSING": "!! ",
+                     "ATTESTED_ONLY": "-- "}.get(st, "?? ")
+            lines.append(f"  {amark}{a.get('name', '?')} ({a.get('kind', '?')}): {st}")
 
     issues = report.get("issues", [])
     if issues:
