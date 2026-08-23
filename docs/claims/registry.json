@@ -1499,6 +1499,30 @@
       "ci_job": "the briefing explains every agent and capability",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W13-9",
+      "title": "The reviewer readiness package is script-assembled from committed sources and every claim is bound to a proving test",
+      "claim": "every assurance statement it makes resolves to a claims-registry entry whose enforcing symbol is real",
+      "source": "docs/decisions/W13-9-reviewer-package.md:11",
+      "enforced_by": {
+        "file": "tools/reviewer-package/assemble.py",
+        "symbol": "build_package"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_w13_9_reviewer_package.py",
+        "tests": [
+          "test_build_package_assembles_from_committed_sources",
+          "test_every_assurance_claim_resolves_to_a_passing_registry_test",
+          "test_removing_a_proving_test_makes_the_build_fail",
+          "test_no_wording_asserts_a_compliance_accreditation",
+          "test_inserting_forbidden_wording_fails_the_gate",
+          "test_pending_inputs_are_flagged_not_fabricated"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "display-manufactures-evidence",
+      "default": "on"
     }
   ]
 }
