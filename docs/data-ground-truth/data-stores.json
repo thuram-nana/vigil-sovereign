@@ -1,0 +1,97 @@
+{
+  "_note": "SOURCE OF TRUTH for DATA-GROUND-TRUTH.md. Regenerate the doc: python3 docs/data-ground-truth/gen_data_ground_truth.py. Verify (no writes): add --check. Grounded against the code that defines each on-disk store by docs/tests/test_data_ground_truth_drift.py, which runs in the required 'the briefing explains every agent and capability' CI job. Do not hand-edit the generated blocks in DATA-GROUND-TRUTH.md; edit this file and regenerate.",
+  "engine_root": "engine/crucible",
+  "sink_sources": [
+    "framework/v2/common/paths.py",
+    "framework/v2/agents/blackboard.py"
+  ],
+  "cli_source": "framework/v2/__main__.py",
+  "cross_check_test": "engine/crucible/framework/v2/agents/tests/test_evidence_erasure.py",
+  "stores": [
+    {
+      "id": "http-evidence-archive",
+      "data": "HTTP evidence archive",
+      "location": "`targets/<slug>/evidence/<action_id>/` (`request.http`, `response.http`, `response.body`)",
+      "credentials": "**Yes** — `Authorization`/`Cookie` request lines; raw response bodies",
+      "at_rest": "plaintext (0600); credential header *names* masked in `.http` dumps per `common/redact.py`; raw `response.body` byte-faithful",
+      "mutable": "filesystem (not append-only)",
+      "erasure": "**crypto-shred** — sealed in place under the per-engagement DEK, then the DEK is destroyed (`erase-evidence`)",
+      "sinks": ["evidence"],
+      "symbols": [
+        {"file": "framework/v2/common/paths.py", "symbol": "evidence_archive_dir"},
+        {"file": "framework/v2/common/paths.py", "symbol": "evidence_dir"},
+        {"file": "framework/v2/common/redact.py", "symbol": "redact_header"}
+      ],
+      "cli_verbs": ["erase-evidence"]
+    },
+    {
+      "id": "event-spine",
+      "data": "Event spine",
+      "location": "`framework/v2/.blackboard/store.sqlite`",
+      "credentials": "Possibly — small excerpts (`ResultPayload.body_excerpt`, `ObservationPayload.raw_excerpt`)",
+      "at_rest": "plaintext unless sealed via `crypto_shred.seal_text`; **append-only** (SQLite triggers + signed hash chain)",
+      "mutable": "**No** — append-only; supersede-only",
+      "erasure": "credential excerpts sealed under the DEK become unrecoverable when the DEK is shredded; the row itself is never deleted (a tombstone is appended)",
+      "sinks": [".blackboard"],
+      "symbols": [
+        {"file": "framework/v2/agents/blackboard.py", "symbol": "blackboard_path"},
+        {"file": "framework/v2/agents/models.py", "symbol": "ResultPayload.body_excerpt"},
+        {"file": "framework/v2/agents/models.py", "symbol": "ObservationPayload.raw_excerpt"},
+        {"file": "framework/v2/common/crypto_shred.py", "symbol": "EvidenceKeyring.seal_text"}
+      ],
+      "literals": [
+        {"file": "framework/v2/agents/blackboard.py", "text": "bb_events_no_update"},
+        {"file": "framework/v2/agents/blackboard.py", "text": "bb_events_no_delete"}
+      ]
+    },
+    {
+      "id": "evidence-dek-keystore",
+      "data": "Evidence DEK keystore",
+      "location": "`framework/v2/.evidence-keys/<slug>.dek` (override: `CRUCIBLE_EVIDENCE_KEYS_DIR`)",
+      "credentials": "the keys, not the data",
+      "at_rest": "32-byte AES-256 key, 0600, gitignored",
+      "mutable": "yes — **shreddable** (this is the point)",
+      "erasure": "destroying a `.dek` crypto-shreds that engagement's sealed evidence everywhere it was copied",
+      "sinks": [".evidence-keys"],
+      "symbols": [
+        {"file": "framework/v2/common/paths.py", "symbol": "evidence_keys_dir"},
+        {"file": "framework/v2/common/crypto_shred.py", "symbol": "EvidenceKeyring.shred"}
+      ],
+      "env_overrides": [
+        {"file": "framework/v2/common/paths.py", "name": "CRUCIBLE_EVIDENCE_KEYS_DIR"}
+      ],
+      "literals": [
+        {"file": "framework/v2/common/crypto_shred.py", "text": ".dek"}
+      ]
+    },
+    {
+      "id": "governance-entitlement",
+      "data": "Governance / entitlement material",
+      "location": "`framework/v2/.entitlement/`, `framework/v2/.authority/`",
+      "credentials": "trust roots, signed grants, kill-switch",
+      "at_rest": "owner-only, gitignored",
+      "mutable": "operator-provisioned",
+      "erasure": "out of scope for evidence erasure",
+      "sinks": [".entitlement", ".authority"],
+      "symbols": [
+        {"file": "framework/v2/common/paths.py", "symbol": "entitlement_dir"},
+        {"file": "framework/v2/common/paths.py", "symbol": "authority_dir"},
+        {"file": "framework/v2/common/paths.py", "symbol": "killswitch_path"}
+      ]
+    }
+  ],
+  "out_of_scope": [
+    {"sink": ".memory", "file": "framework/v2/common/paths.py", "symbol": "memory_dir",
+     "reason": "cross-engagement learning priors / world-model; stores derived signal (archetypes, embeddings, outcomes), not raw captured HTTP or credential headers"},
+    {"sink": ".dryrun", "file": "framework/v2/common/paths.py", "symbol": "dryrun_dir",
+     "reason": "dry-run planning artifacts; no live target capture is performed in dry-run, so no credentials come to rest here"},
+    {"sink": ".improve", "file": "framework/v2/common/paths.py", "symbol": "improve_dir",
+     "reason": "self-improvement-loop gaps and reviewable proposals about the framework itself; never target credentials or captured evidence"},
+    {"sink": ".intake-authorizations.txt", "file": "framework/v2/common/paths.py", "symbol": "authorization_ledger",
+     "reason": "the operator's own intake-authorization records (attestations that a target may be tested); not target data or credentials"},
+    {"sink": ".crucible-v2.log", "file": "framework/v2/common/paths.py", "symbol": "crucible_v2_log",
+     "reason": "per-engagement structured audit log; every event passes through common/redact.scrub_log_event before write, so it is not a raw-credential archive"},
+    {"sink": ".planner-state.json", "file": "framework/v2/common/paths.py", "symbol": "planner_state",
+     "reason": "engagement planner checkpoint (phase/step cursor); no captured HTTP or credential material"}
+  ]
+}
