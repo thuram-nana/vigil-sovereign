@@ -116,12 +116,17 @@ captured). Therefore:
   path, is not wired into the kustomization, **or the cluster has no NetworkPolicy
   controller (CNI) to enforce it** — an unenforced NetworkPolicy object is silently a
   no-op and leaves the leak open. Do not run the sovereign StatefulSet without it.
-- **The proxy→cockpit hop is cleartext HTTP inside the pod network** (MEDIUM residual,
-  §4): it carries the per-user bearer and the substituted owner console credential. The
-  NetworkPolicy bounds *who* may connect; it does not *encrypt* the hop. A cluster whose
-  pod network an attacker can sniff needs transport isolation too — a service-mesh mTLS
-  (Istio/Linkerd) or an encrypted CNI (WireGuard/IPsec overlay). Do not assume the pod
-  network is confidential by default.
+- **The proxy→cockpit hop is TLS-capable, and fail-closed in production (W8-6, §4).** The
+  NetworkPolicy bounds *who* may connect; encryption is a separate control the proxy now
+  ships. The proxy is a TLS **client** for the hop (`VIGIL_HOP_TLS=require` + `VIGIL_HOP_CA`,
+  and the `VIGIL_HOP_CLIENT_CERT`/`VIGIL_HOP_CLIENT_KEY` pair for mutual TLS), and under
+  `VIGIL_POSTURE=production` it **refuses to start** with a plaintext hop to the remote
+  cockpit rather than leak the per-user bearer + substituted owner console credential in
+  cleartext. **Residual (operator-provided):** the CA/cert/key **material** and a
+  TLS-**terminating** cockpit — `sigil serve` binds plaintext by design, so front the
+  sovereign StatefulSet with a TLS sidecar (or a service-mesh mTLS: Istio/Linkerd, or an
+  encrypted CNI: WireGuard/IPsec). Until that material is provisioned, do not assume the pod
+  network is confidential. See `docs/decisions/W8-6-encrypt-proxy-cockpit-hop.md`.
 
 ---
 
@@ -356,11 +361,19 @@ single writer scheduled); a comment block in that file states plainly that
   proxy scrubs the embedded owner token out of any relayed HTML (value-agnostic
   `data-token=""`). Running the sovereign StatefulSet WITHOUT that NetworkPolicy leaves
   any in-cluster workload able to scrape owner off the cockpit directly (§1.2).
-- **The proxy→backend auth hop is cleartext HTTP on the pod network** (per-user bearer
-  + substituted owner console credential). The NetworkPolicy bounds *who* connects; it
-  does not encrypt. If your pod network is not trusted, add transport isolation — a
-  service-mesh mTLS (Istio/Linkerd) or an encrypted CNI (WireGuard/IPsec). This path is
-  NOT silently assumed confidential (§1.2).
+- **The proxy→backend hop is encryptable (TLS), and refuses plaintext in production —
+  cert material + a TLS-terminating cockpit are the residual (W8-6 #472).** The hop carries
+  the per-user bearer + the substituted owner console credential. It is plaintext on
+  loopback (a single-host `vigil up` never puts those bytes on a network) and, by default,
+  outside the production posture. In the HA/k8s profile it is a **remote** hop: set
+  `VIGIL_HOP_TLS=require` (+ `VIGIL_HOP_CA`, and the `VIGIL_HOP_CLIENT_*` pair for mutual
+  TLS) on the proxy to encrypt + authenticate it, and under `VIGIL_POSTURE=production` the
+  proxy **refuses to start** with a plaintext hop to a remote backend — so a production
+  deploy cannot silently run it in cleartext. What the proxy owns is the verifying **client**;
+  the residual the operator supplies is the CA/cert/key **material** and a TLS-**terminating**
+  cockpit (a sidecar, or a service-mesh mTLS: Istio/Linkerd, or an encrypted CNI:
+  WireGuard/IPsec) — `sigil serve` binds plaintext by design. Until that material exists the
+  pod network is NOT silently assumed confidential (§1.2).
 - **`--host $(POD_IP)` requires an RFC1918 / ULA pod IP.** `bind_ok` accepts loopback,
   IPv4 RFC1918 (10/172.16-31/192.168), Tailscale-CGNAT (100.64/10), and IPv6 ULA
   (fc00::/7) / link-local — and REFUSES everything else, including a globally-routable
@@ -390,5 +403,10 @@ single writer scheduled); a comment block in that file states plainly that
   `--offense-api-addr`, or the `VIGIL_*_ADDR` env equivalents) — the spawn-nothing
   read/proxy mode that federates to remote backends (§1.1). Default (no `--proxy-only`)
   is byte-identical to the historical spawn-local `vigil up`.
+- The **proxy→cockpit hop TLS client** (W8-6 #472): `VIGIL_HOP_TLS` / `VIGIL_HOP_CA` / the
+  `VIGIL_HOP_CLIENT_CERT`/`VIGIL_HOP_CLIENT_KEY` mTLS pair on the stdlib proxy, with a
+  `VIGIL_POSTURE=production` refuse-to-start on a plaintext hop to a remote backend. Templated
+  in `infra/ha/k8s/proxy-deployment.yaml`; cert material + a TLS-terminating cockpit are the
+  operator residual (§4, `docs/decisions/W8-6-encrypt-proxy-cockpit-hop.md`).
 - `tools/ha/spine_failover_guard.py` + `sigil floor promote-passive` — the
   witnessed-floor failover interlock (§3).

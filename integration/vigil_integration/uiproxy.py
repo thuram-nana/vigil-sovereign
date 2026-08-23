@@ -58,6 +58,7 @@ import secrets
 import signal
 import socket
 import socketserver
+import ssl
 import subprocess
 import sys
 import threading
@@ -71,6 +72,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from . import dispatch
 from vigil_core.logging_setup import RotatingLineWriter
 from vigil_core.metrics import CONTENT_TYPE as _OPENMETRICS_CT, set_plane
+from vigil_core.posture import is_production_posture
 
 # ---- ports (fixed; the proxy is the only human-facing listener) -----------------------------------
 DEFAULT_PROXY_PORT = 8770
@@ -539,16 +541,18 @@ class _RevocationSet:
 
 
 def _whoami(bearer: str, *, host: str = "127.0.0.1", port: Optional[int] = None,
-            timeout: float = 4.0) -> Optional[dict]:
-    """DELEGATE bearer verification to the sovereign plane's token-optional ``/api/whoami`` (loopback GET,
-    the bearer in ``X-SIGIL-Token``). Returns the resolved principal dict ``{username, role, permissions}``
+            timeout: float = 4.0, tls_ctx: "Optional[ssl.SSLContext]" = None) -> Optional[dict]:
+    """DELEGATE bearer verification to the sovereign plane's token-optional ``/api/whoami`` (GET, the
+    bearer in ``X-SIGIL-Token``). Returns the resolved principal dict ``{username, role, permissions}``
     on ``authenticated:true``, else ``None``. PURE STDLIB (imports no sigil). Fail-closed: a blank bearer,
-    any transport/parse error, a non-200, or ``authenticated:false`` all yield ``None``."""
+    any transport/parse error, a non-200, or ``authenticated:false`` all yield ``None``. When ``tls_ctx``
+    is supplied this AUTH hop rides TLS too (W8-6) — the whoami carries the caller's bearer, so it must not
+    cross a network in cleartext when the forwarding hop does not."""
     if not bearer:
         return None
     p = SOVEREIGN_PORT if port is None else port
     try:
-        conn = http.client.HTTPConnection(host, p, timeout=timeout)
+        conn = _hop_connection(host, p, timeout=timeout, tls_ctx=tls_ctx)
         try:
             conn.request("GET", _WHOAMI_PATH,
                          headers={_TOKEN_HEADER: bearer, "Host": f"{host}:{p}",
@@ -745,6 +749,116 @@ def _remote_backends(sovereign_addr: str, offense_console_addr: str, offense_api
     return {"sovereign": _split_hostport(sovereign_addr, "127.0.0.1", SOVEREIGN_PORT),
             "console": _split_hostport(offense_console_addr, "127.0.0.1", CONSOLE_PORT),
             "api": _split_hostport(offense_api_addr, "127.0.0.1", API_PORT)}
+
+
+# ==================================================================================================
+# W8-6 — encrypt the proxy→cockpit hop (TLS). The reverse proxy is a CLIENT of three backends. On a
+# single host (`vigil up`, the loopback trio) the hop never leaves the box, so it stays plaintext HTTP —
+# byte-identical to the historical path. But the HA / k8s profile federates to a REMOTE cockpit
+# (`--proxy-only --sovereign-addr vigil-sovereign:8733`), and that hop crosses the pod network in
+# cleartext, carrying the per-user bearer + the substituted owner console credential (issue #472). This
+# wires a stdlib-`ssl` TLS client onto the hop: verify the backend server certificate (optionally against
+# an operator-provided CA), optionally present a client certificate for mutual TLS, and — under the
+# PRODUCTION posture — REFUSE a plaintext hop to a remote backend (fail-closed refuse-to-start).
+#
+# The two-env boundary is preserved: `ssl` is stdlib and `vigil_core.posture` is the neutral, namespace-
+# pure, pure-stdlib posture parser BOTH planes already share (never `framework`/`strix`/`sigil`). Cert
+# MATERIAL — the CA/leaf/key files and a TLS-terminating cockpit — is the operator residual; this is the
+# mechanism that USES it and fails closed without it (docs/decisions/W8-6-*.md).
+_HOP_TLS_ENV = "VIGIL_HOP_TLS"                    # truthy ⇒ the hop uses TLS (HTTPS); unset/falsy ⇒ plaintext
+_HOP_CA_ENV = "VIGIL_HOP_CA"                      # PEM CA bundle used to VERIFY the backend server cert
+_HOP_CLIENT_CERT_ENV = "VIGIL_HOP_CLIENT_CERT"    # client cert (PEM) — present it for mTLS (proxy→backend auth)
+_HOP_CLIENT_KEY_ENV = "VIGIL_HOP_CLIENT_KEY"      # client private key (PEM) for the client cert
+_HOP_TLS_TRUTHY = frozenset({"1", "on", "true", "yes", "require", "required", "tls", "mtls"})
+
+
+def _hop_tls_enabled(env: "Optional[dict]" = None) -> bool:
+    e = os.environ if env is None else env
+    return e.get(_HOP_TLS_ENV, "").strip().lower() in _HOP_TLS_TRUTHY
+
+
+def _hop_is_loopback(host: str) -> bool:
+    """True IFF ``host`` names the local host — traffic to it never crosses a network. Loopback IPs and the
+    literal ``localhost`` only; ANY other name/IP (a k8s Service DNS name, a pod IP, a routable address) is
+    treated as REMOTE. FAIL-CLOSED: an unparseable/unknown host is REMOTE, never assumed local, so the
+    production plaintext gate below errs toward refusing."""
+    h = (host or "").strip().strip("[]").lower()
+    if h in ("localhost", "localhost.localdomain", "ip6-localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def build_hop_tls_context(env: "Optional[dict]" = None) -> "Optional[ssl.SSLContext]":
+    """Build the hop's TLS *client* context from the environment, or ``None`` when hop TLS is not enabled.
+
+    FAIL-CLOSED, never a silent downgrade: verification is ALWAYS on — ``CERT_REQUIRED`` + hostname check
+    + TLS ≥ 1.2, and none of those is ever relaxed. A configured CA / client-cert / key file that is
+    MISSING or INVALID raises here (so the proxy refuses to start), rather than falling back to a
+    no-verify context or plaintext. Mutual TLS is opt-in: set BOTH ``VIGIL_HOP_CLIENT_CERT`` and
+    ``VIGIL_HOP_CLIENT_KEY`` — exactly one of the pair is a misconfiguration and is refused."""
+    if not _hop_tls_enabled(env):
+        return None
+    e = os.environ if env is None else env
+    # create_default_context(SERVER_AUTH) ⇒ check_hostname=True, verify_mode=CERT_REQUIRED, secure ciphers.
+    ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ca = e.get(_HOP_CA_ENV, "").strip()
+    if ca:
+        # A hop told to verify against a specific CA must FAIL CLOSED if it cannot load that CA — never
+        # silently fall back to the system trust store. load_verify_locations raises FileNotFoundError /
+        # ssl.SSLError on a missing / malformed file; let it propagate.
+        ctx.load_verify_locations(cafile=ca)
+    cert = e.get(_HOP_CLIENT_CERT_ENV, "").strip()
+    key = e.get(_HOP_CLIENT_KEY_ENV, "").strip()
+    if bool(cert) != bool(key):
+        raise ValueError(
+            f"hop mTLS misconfigured: set BOTH {_HOP_CLIENT_CERT_ENV} and {_HOP_CLIENT_KEY_ENV} "
+            f"(a client certificate needs its private key), or neither")
+    if cert and key:
+        # Presenting a client identity for mutual TLS. Raises on a missing / invalid cert or key.
+        ctx.load_cert_chain(certfile=cert, keyfile=key)
+    return ctx
+
+
+def resolve_hop_tls(backends: "Optional[dict]" = None,
+                    env: "Optional[dict]" = None) -> "Optional[ssl.SSLContext]":
+    """Resolve the hop TLS context AND enforce the production plaintext-refusal (the W8-6 fail-closed).
+
+    Returns the ``ssl.SSLContext`` for the hop, or ``None`` (a plaintext HTTP hop). RAISES ``ValueError``
+    — which the ``make_proxy_server`` callers turn into a refuse-to-start — when the PRODUCTION posture is
+    armed AND any backend is REMOTE (non-loopback) AND hop TLS is not enabled: a cleartext hop across a
+    network is refused in production. A loopback hop (the local single-host `vigil up`) stays plaintext
+    even in production — its bytes never traverse a network, so it is not the pod-network cleartext the
+    gate exists to reject, and forcing TLS there would break the single-host deployment for no
+    confidentiality gain."""
+    ctx = build_hop_tls_context(env)          # may raise on missing/invalid cert material (fail-closed)
+    if ctx is not None:
+        return ctx
+    if is_production_posture(env):
+        b = backends or _default_backends()
+        remote = sorted({f"{h}:{p}" for (h, p) in b.values() if not _hop_is_loopback(h)})
+        if remote:
+            raise ValueError(
+                "PRODUCTION posture refuses a plaintext proxy→backend hop to a remote backend "
+                f"({', '.join(remote)}): the per-user bearer + the substituted owner console credential "
+                f"would cross the network in cleartext. Set {_HOP_TLS_ENV}=require and provide the hop "
+                f"cert material ({_HOP_CA_ENV} + a TLS-terminating cockpit), or run the backends on "
+                "loopback. (W8-6 — encrypt the proxy→cockpit hop.)")
+    return None
+
+
+def _hop_connection(host: str, port: int, *, timeout: "Optional[float]",
+                    tls_ctx: "Optional[ssl.SSLContext]"):
+    """Open the proxy→backend hop. TLS (``HTTPSConnection``) when ``tls_ctx`` is supplied — the context
+    enforces certificate verification + hostname check; the verified peer name is ``host`` (use the
+    cockpit's DNS / SAN name as the backend address so the SAN matches). Plaintext ``HTTPConnection``
+    otherwise (the loopback / non-production default)."""
+    if tls_ctx is not None:
+        return http.client.HTTPSConnection(host, port, timeout=timeout, context=tls_ctx)
+    return http.client.HTTPConnection(host, port, timeout=timeout)
 
 
 def route(path: str, backends: "Optional[dict]" = None) -> Optional[tuple[str, int, str]]:
@@ -1067,8 +1181,14 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
     def __init__(self, addr, handler, *, serve_dir: Path, token: str = "", hop_key: str = "",
                  allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
-                 plane_control: "Optional[PlaneControl]" = None, backends: "Optional[dict]" = None):
+                 plane_control: "Optional[PlaneControl]" = None, backends: "Optional[dict]" = None,
+                 hop_tls: "Optional[ssl.SSLContext]" = None):
         self.serve_dir = serve_dir
+        # W8-6: the proxy→backend hop's TLS client context, or None (a plaintext hop — the loopback /
+        # non-production default). Resolved by `make_proxy_server` via `resolve_hop_tls`, which ALSO refuses
+        # to start (raises) on a production plaintext hop to a remote backend. Every request handler reads
+        # it (`self.server.hop_tls`) so the forward AND the delegated-whoami auth hop ride the same TLS.
+        self.hop_tls = hop_tls
         # W6-3: this process's OpenMetrics registry (RED + process + domain), labelled OFFENSE. The domain
         # counters are fed at scrape time from the G2 business snapshot (`vigil up --with-telemetry` writes
         # <base>/live-ui/telemetry.json); None/absent ⇒ the domain series still render (0), never a crash.
@@ -1263,7 +1383,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # `--proxy-only` it is the REMOTE sovereign address, not 127.0.0.1. None (default path) ⇒ the local
         # loopback default, byte-identical to the historical `_whoami(bearer)`.
         sov_host, sov_port = (getattr(self.server, "backends", None) or _default_backends())["sovereign"]
-        principal = _whoami(bearer, host=sov_host, port=sov_port)
+        principal = _whoami(bearer, host=sov_host, port=sov_port,
+                            tls_ctx=getattr(self.server, "hop_tls", None))   # W8-6: the auth hop rides TLS too
         # (3) a revoke that RACED the whoami round trip must still win — re-check both keys, fail-closed.
         if principal is not None and revset is not None and (
                 revset.is_revoked(digest=key)
@@ -1678,7 +1799,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         offense_path = upstream_path.split("?", 1)[0]
         req_headers = self._forward_request_headers(offense_principal=offense_principal,
                                                     offense_path=offense_path)
-        conn = http.client.HTTPConnection(host, port, timeout=None)  # no read timeout → SSE stays open
+        # W8-6: TLS the hop when configured (HTTPS to a remote cockpit); plaintext on loopback. No read
+        # timeout → SSE stays open. The TLS handshake still honours a connect timeout via the socket.
+        conn = _hop_connection(host, port, timeout=None,
+                               tls_ctx=getattr(self.server, "hop_tls", None))
         try:
             conn.request(self.command, upstream_path, body=body or None, headers=req_headers)
             # W9-3: CAPTURE the socket BEFORE getresponse — a `Connection: close` upstream (every SSE
@@ -1973,15 +2097,22 @@ def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
     Only ``run_up`` — the boot path that owns the backends' lifecycle — supplies either.
 
     ``backends`` (``None`` ⇒ the local loopback trio) names the three federation targets; ``run_up
-    --proxy-only`` supplies REMOTE addresses so a stateless replica federates to a central sovereign."""
+    --proxy-only`` supplies REMOTE addresses so a stateless replica federates to a central sovereign.
+
+    W8-6: the proxy→backend hop TLS context is resolved here from the environment (``VIGIL_HOP_TLS`` /
+    ``VIGIL_HOP_CA`` / the ``VIGIL_HOP_CLIENT_*`` mTLS pair). ``resolve_hop_tls`` FAILS CLOSED — it raises
+    a ``ValueError`` (⇒ refuse to start) if the PRODUCTION posture is armed and any backend is remote and
+    the hop is not TLS, or if the configured cert material is missing/invalid. Both ``run_up`` call sites
+    already treat a ``ValueError`` here as a clean refuse-to-start."""
     if not bind_ok(host):
         raise ValueError(
             f"refusing to bind {host!r}: the vigil up proxy binds loopback or a PRIVATE "
             f"(WireGuard/Tailscale) address only — never 0.0.0.0 / an unspecified / a public address. "
             f"Front a real domain with a TLS reverse proxy (--domain; see deploy/reverse-proxy/).")
+    hop_tls = resolve_hop_tls(backends)   # raises → refuse to start on a production plaintext remote hop
     return _ProxyServer((host, port), ProxyHandler, serve_dir=serve_dir, token=token, hop_key=hop_key,
                         allowed_hosts=tuple(allowed_hosts), allowed_origins=tuple(allowed_origins),
-                        plane_control=plane_control, backends=backends)
+                        plane_control=plane_control, backends=backends, hop_tls=hop_tls)
 
 
 # ==================================================================================================

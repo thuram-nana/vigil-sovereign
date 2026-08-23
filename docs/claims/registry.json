@@ -763,6 +763,30 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "opt-in-stated-as-default",
       "default": "off"
+    },
+    {
+      "id": "W8-6",
+      "title": "Proxy->cockpit hop refuses a plaintext remote hop under the production posture (fail-closed)",
+      "claim": "Under the PRODUCTION posture (VIGIL_POSTURE=production/prod) the reverse proxy REFUSES TO START with a plaintext proxy->backend hop to a remote (non-loopback) backend: resolve_hop_tls raises unless hop TLS is enabled, so the per-user bearer and the substituted owner console credential never cross a network in cleartext; a loopback hop stays plaintext because its bytes never traverse a network, and outside the production posture the default hop is unchanged (byte-identical).",
+      "source": "docs/decisions/W8-6-encrypt-proxy-cockpit-hop.md:37",
+      "enforced_by": {
+        "file": "integration/vigil_integration/uiproxy.py",
+        "symbol": "resolve_hop_tls"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_uiproxy_hop_tls.py",
+        "tests": [
+          "test_production_refuses_a_plaintext_remote_hop",
+          "test_production_loopback_hop_is_allowed",
+          "test_nonproduction_remote_plaintext_hop_is_allowed",
+          "test_make_proxy_server_refuses_plaintext_remote_hop_in_production",
+          "test_tls_hop_round_trips_via_hop_connection",
+          "test_mtls_client_cert_is_presented_and_absence_is_refused"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "opt-in-stated-as-default",
+      "default": "off"
     }
   ]
 }

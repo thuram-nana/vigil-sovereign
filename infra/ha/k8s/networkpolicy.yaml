@@ -37,8 +37,14 @@ spec:
 # is the only human-facing listener, so its ingress is deliberately NOT locked to in-cluster sources here.
 # What matters for the owner-token leak is that the SOVEREIGN cockpit above is proxy-only — enforced.
 #
-# The MEDIUM residual, stated honestly (see HA-PROFILE.md §1.1 + §4): the proxy→cockpit hop carries the
-# per-user bearer and the substituted owner console credential over CLEARTEXT HTTP inside the pod network.
-# This NetworkPolicy bounds WHO may connect (the proxy only); it does NOT encrypt the hop. A cluster whose
-# pod network an attacker can sniff still needs transport isolation — a service-mesh mTLS (Istio/Linkerd)
-# or an encrypted CNI (WireGuard/IPsec overlay). Do not assume the pod network is confidential by default.
+# CONFIDENTIALITY OF THE HOP (W8-6 #472): this NetworkPolicy bounds WHO may connect (the proxy only); it
+# does NOT itself encrypt the hop. Encryption is a SEPARATE control, and the proxy now ships it:
+#   * The proxy is a TLS client for the hop — set VIGIL_HOP_TLS=require (+ VIGIL_HOP_CA, and the
+#     VIGIL_HOP_CLIENT_CERT/KEY pair for mutual TLS) on the vigil-proxy Deployment (proxy-deployment.yaml).
+#   * Under VIGIL_POSTURE=production the proxy REFUSES TO START with a plaintext hop to a REMOTE cockpit
+#     (fail-closed) — so a production deploy cannot silently run this hop in cleartext.
+# RESIDUAL (operator-provided): the CA / cert / key MATERIAL and a TLS-TERMINATING cockpit. `sigil serve`
+# binds plaintext by design (the single-owner on-host surface above), so in-cluster the cockpit must be
+# fronted by a TLS-terminating sidecar (or an equivalent service-mesh mTLS — Istio/Linkerd — or an
+# encrypted CNI: WireGuard/IPsec). Until that material is provisioned, do not assume the pod network is
+# confidential. See HA-PROFILE.md §1.2 + §4 and docs/decisions/W8-6-encrypt-proxy-cockpit-hop.md.
