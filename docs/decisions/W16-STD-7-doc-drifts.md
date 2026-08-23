@@ -23,7 +23,7 @@ Correct the still-open §16 drifts against the code and pin them:
 
 | # | Doc | Was | Now (true of the code) |
 |---|-----|-----|------------------------|
-| 16.2 / 16.16 | DEVELOPER-HANDOFF.md §3, AS-BUILT.md §7 | "CI runs six / 6 jobs" | 12 jobs in `ci.yml` (full table); required set is the 14 in `.github/required-status-checks.txt` |
+| 16.2 / 16.16 | DEVELOPER-HANDOFF.md §3, AS-BUILT.md §7 | "CI runs six / 6 jobs" | 13 jobs in `ci.yml` (full table); required set is the 14 in `.github/required-status-checks.txt` |
 | 16.3 | FEATURES.md | `k8s_workload_posture_oracle` "is NOT wired into `verifier._run`" | it **is** wired (`verifier.py:854-858`), firing on the `k8s_workload_control` ctx key |
 | 16.4 | FEATURES.md | `crucible-blackboard-chain` "owner_rooted=False AND file_backed=False — NOT wired" | `owner_rooted=True, file_backed=True`, wired + offline-verified (`spine_domains.py`, `live/wiring.py`, `live/spine_verify.py`) |
 | 16.5 / 16.8 | AS-BUILT.md, AS-BUILT-LIVE.md, FEATURES.md | `Neo4jGraphStore` "[SCAFFOLD] (every method raises)" | a real client body issuing MERGE/read Cypher (`store.py:315-420`); only construction without a driver raises |

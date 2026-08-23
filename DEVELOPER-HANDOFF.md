@@ -164,9 +164,9 @@ keyless "replay" runs and *the provable layer never depends on the model*).
 
 ---
 
-## 3. Build / test / CI workflow — the 12 CI jobs
+## 3. Build / test / CI workflow — the 13 CI jobs
 
-CI (`.github/workflows/ci.yml`) runs **12 jobs** (Python 3.13 for the Python seams; Rust for the WARDEN
+CI (`.github/workflows/ci.yml`) runs **13 jobs** (Python 3.13 for the Python seams; Rust for the WARDEN
 kernel), one per trust seam or gate. Run the matching commands locally before you push. The key discipline:
 **framework (offense) and `sigil.governor` (sovereign) tests run in separate processes** — running them in
 one process trips the `assert_no_offense` boundary check (which is the boundary *working*). Two further jobs
