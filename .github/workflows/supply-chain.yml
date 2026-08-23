@@ -92,13 +92,39 @@ jobs:
       - name: base images are digest-pinned (offline)
         run: python3 infra/supply-chain/image_pins.py --check
 
-      - name: base-image drift report (network, ADVISORY)
-        # Advisory on purpose: a tag moving upstream is not a defect in this PR, and re-pinning
-        # should be a deliberate act after reading a changelog — not something done under the
-        # pressure of a red build.
+      # NEGATIVE CONTROL for the drift gate below, and it runs FIRST on purpose. The gate passes when
+      # every resolvable pin is up-to-date — the right outcome, but indistinguishable from a drift check
+      # that silently resolves nothing. So point the EXACT blocking config at a fixture whose registry IS
+      # resolvable (Docker Hub `library/python:3.13-slim`) but whose pinned digest is deliberately WRONG,
+      # and require it to FAIL. If it passes, the gate is a no-op and this job says so instead of a green
+      # tick. The fixture lives outside the repo tree so the real drift scan never sees it. (The pure drift
+      # logic has an OFFLINE negative control in integration/tests/test_supply_chain.py too — this is the
+      # live, end-to-end proof against the real Docker Hub resolver.)
+      - name: negative control — a deliberately drifted resolvable pin turns the drift gate red
         if: always()
-        continue-on-error: true
-        run: python3 infra/supply-chain/image_pins.py --drift
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/a14-drift-negctl
+          printf 'FROM python:3.13-slim@sha256:%064d\n' 0 > /tmp/a14-drift-negctl/Dockerfile
+          set +e
+          python3 infra/supply-chain/image_pins.py --root /tmp/a14-drift-negctl --drift --fail-on-drift
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::NEGATIVE CONTROL FAILED — the drift gate exited 0 on a fixture with a KNOWN-wrong digest on a resolvable (Docker Hub) registry. Resolvable drift is not being enforced; the gate below is a no-op. Do not merge."
+            exit 1
+          fi
+          echo "negative control OK — the drift gate exits ${rc} on a deliberately drifted resolvable pin."
+
+      # THE DRIFT GATE (W3-8, issue #431). Three-valued, not two: a pin on a registry the resolver CAN
+      # query (Docker Hub) that has MOVED is real drift and BLOCKS (`--fail-on-drift`); a pin on any other
+      # registry is an explicit UNKNOWN, written to the job summary ($GITHUB_STEP_SUMMARY) and NEVER a
+      # silent `??` pass. UNKNOWNs do not block — a gate cannot honestly fail on a state it could not check
+      # (an operator wanting the strictest posture adds `--fail-on-unknown`). Re-pinning after resolvable
+      # drift is still a deliberate act (read the upstream changelog), but it is now a REQUIRED one.
+      - name: base-image drift — resolvable drift BLOCKS; other registries reported UNKNOWN (W3-8)
+        if: always()
+        run: python3 infra/supply-chain/image_pins.py --drift --fail-on-drift
 
       # ------------------------------------------------------------------------------
       # 2. Dependency locks. Regeneration comes FIRST and its output is uploaded
@@ -240,6 +266,31 @@ jobs:
           /tmp/a14-tooling/bin/python -c "import pytest, pytest_asyncio; print('ci-tooling lock installs under --require-hashes')"
           /tmp/a14-tooling/bin/ruff --version
           /tmp/a14-tooling/bin/mypy --version
+
+      # W3-10 (issue #433): the PEP 517 BUILD backends are hash-locked too. Prove the lock installs under
+      # --require-hashes (which refuses the whole file if a single line is unpinned/unhashed) and that the
+      # backends actually import — envs/build_envs.sh installs exactly this, then builds every member with
+      # --no-build-isolation so no backend is ever fetched fresh under isolation.
+      - name: prove `pip install --require-hashes` succeeds (build-backends lock, W3-10)
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/a14-backends
+          /tmp/a14-backends/bin/pip install --require-hashes \
+            -r infra/supply-chain/build-backends.lock.txt
+          /tmp/a14-backends/bin/python -c "import hatchling, setuptools, wheel, setuptools_rust, editables; print('build-backends lock installs under --require-hashes')"
+
+      # W3-10 (issue #433): the NON-PYTHON locks are verified, not merely scanned. This is the LIVE,
+      # authoritative regenerate-and-diff — `uv lock --check` (on a copy outside the uv workspace, the
+      # same trick gen-strix-lock.sh uses) for vendor/strix/uv.lock, and `cargo metadata --locked` for
+      # apps/sigil/kernel/Cargo.lock — each exits non-zero if regenerating the lock would change it.
+      # The OFFLINE half (every direct dep is pinned in its lock) runs with no toolchain in the required
+      # integration + A14 jobs via integration/tests/test_supply_chain.py. cargo ships on ubuntu-latest;
+      # uv is version-pinned so the check resolves against the same uv that produced the committed lock.
+      - name: install pinned uv (for the uv.lock regenerate-check)
+        run: python -m pip install "uv==0.11.29"
+
+      - name: non-Python locks are current (uv.lock + Cargo.lock regenerate-and-diff, W3-10)
+        run: python3 infra/supply-chain/verify_native_locks.py --regenerate-check
 
       - name: upload SBOMs
         if: always()

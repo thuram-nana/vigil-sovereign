@@ -73,6 +73,14 @@ LOCKS: dict[str, tuple[Path, Path]] = {
         REPO_ROOT / "infra/supply-chain/ci-tooling.in",
         REPO_ROOT / "infra/supply-chain/ci-tooling.lock.txt",
     ),
+    # W3-10 (#433): the PEP 517 BUILD backends (hatchling / setuptools+wheel / setuptools-rust). Like
+    # ci-tooling this is BUILD-TIME, not runtime, so it is excluded from RUNTIME_LOCKS below — but it is
+    # hash-locked and require-hashes installed exactly like the others, so it earns the same
+    # existence/hash/coverage checks (it is generated with --allow-unsafe so setuptools is pinned too).
+    "build-backends": (
+        REPO_ROOT / "infra/supply-chain/build-backends.in",
+        REPO_ROOT / "infra/supply-chain/build-backends.lock.txt",
+    ),
 }
 
 #: The RUNTIME dependency locks — the "tree" that ships and that CI must test against. The W3-2
@@ -114,6 +122,50 @@ def _load_image_pins():
         del sys.modules[name]
         raise
     return mod
+
+
+def _load_native_locks():
+    """Load infra/supply-chain/verify_native_locks.py by path (same rationale as _load_image_pins)."""
+    path = REPO_ROOT / "infra" / "supply-chain" / "verify_native_locks.py"
+    assert path.is_file(), f"missing {path} — the non-Python lock verifier is the W3-10 source of truth"
+    name = "vigil_a14_native_locks"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        del sys.modules[name]
+        raise
+    return mod
+
+
+def _pyproject_build_requires() -> dict[str, list[str]]:
+    """Every ``[build-system].requires`` backend declared across the repo's first-party pyprojects,
+    as {relpath: [names]}. Loaded with tomllib; extras/version specifiers stripped to the bare name."""
+    import tomllib
+
+    out: dict[str, list[str]] = {}
+    members = (
+        "packages/core/vigil_core/pyproject.toml",
+        "integration/pyproject.toml",
+        "gateway/pyproject.toml",
+        "engine/crucible/pyproject.toml",
+        "apps/sigil/pyproject.toml",
+        "vendor/strix/pyproject.toml",
+    )
+    for rel in members:
+        p = REPO_ROOT / rel
+        if not p.is_file():
+            continue
+        data = tomllib.loads(p.read_text(encoding="utf-8"))
+        reqs = data.get("build-system", {}).get("requires", []) or []
+        names = [re.split(r"[<>=!~;\[\s]", r, maxsplit=1)[0] for r in reqs if r.strip()]
+        out[rel] = [n for n in names if n]
+    return out
 
 
 def _require_lock(env: str, lock: Path) -> None:
@@ -425,6 +477,11 @@ def test_a14_workflow_declares_every_leg_of_the_gate() -> None:
         "the built gateway image is scanned": "trivy image",
         "the image is tagged by content address": "--context-tag",
         "the shipped Strix image layer is scanned via its SBOM": "trivy sbom",
+        # W3-8 (#431): resolvable base-image drift BLOCKS; a future edit must not make it advisory again.
+        "base-image drift blocks resolvable movement": "--fail-on-drift",
+        # W3-10 (#433): the PEP 517 build backends are hash-locked and the non-Python locks are verified.
+        "build backends are hash-locked": "build-backends.lock.txt",
+        "non-Python locks are regenerate-checked": "verify_native_locks.py",
     }
     missing = sorted(f"{why} ({needle!r})" for why, needle in required.items() if needle not in body)
     assert not missing, "the A14 workflow no longer declares:\n  " + "\n  ".join(missing)
@@ -915,7 +972,9 @@ def test_no_operator_install_path_resolves_strix_extras_unlocked() -> None:
     # and the ONLY fresh (deps-from-PyPI) strix install must be the dev fallback reached AFTER
     # lock_missing_or_die has run (fail-closed in production posture).
     assert 'if [ -n "$strix_locked" ]; then' in text, "the strix install is not gated on the strix lock"
-    assert '--no-deps -e "$s"' in text, (
+    # When the strix lock IS present, strix installs --no-deps over the pinned extras. W3-10 inserts the
+    # --no-build-isolation flag array ($nbi) between --no-deps and -e, so match both parts, not one literal.
+    assert re.search(r'--no-deps [^\n]*-e "\$s"', text), (
         "when the strix lock IS present, strix must install --no-deps over the pinned extras"
     )
     fresh = [mo.start() for mo in re.finditer(r'venv_pip "\$venv" -e "\$s"', text)]
@@ -1635,4 +1694,218 @@ def test_ci_tooling_lock_agrees_with_runtime_locks_on_shared_packages() -> None:
     assert not conflicts, (
         "the CI toolchain lock disagrees with a runtime lock on a shared package, so the two "
         "sequential --require-hashes installs would fight over it:\n  " + "\n  ".join(sorted(conflicts))
+    )
+
+
+# ==========================================================================================
+# W3-8 (#431) — base-image drift: BLOCKING where resolvable, explicit UNKNOWN otherwise.
+#
+# The old drift check was two-valued: a Docker-Hub pin either matched or "??" — and "??" (any non-Hub
+# registry, or a network blip) was PRESENTED AS A PASS. These tests pin the three-valued replacement:
+# resolvable drift BLOCKS, an unqueryable registry is an explicit UNKNOWN (surfaced, never a silent
+# pass), and the gate is proven able to fire. All OFFLINE — the network lives only in `hub_resolver`,
+# so a stub resolver drives the pure logic. Several import `evaluate_drift`/`run_drift`/`Resolution`,
+# which do not exist on a tree without the W3-8 fix, so they fail there as the AC requires.
+# ==========================================================================================
+
+_HUB_REF = "python:3.13-slim@sha256:" + "a" * 64
+_GHCR_REF = "ghcr.io/owner/image:1.2@sha256:" + "b" * 64
+
+
+def _pinned_ref(pins, ref):
+    return pins.ImageRef(source="Dockerfile", line=1, ref=ref, context="FROM")
+
+
+def test_drift_registry_classification() -> None:
+    """A ref's registry decides whether drift is RESOLVABLE. Hub (implicit) is; ghcr.io is not."""
+    pins = _load_image_pins()
+    hub = _pinned_ref(pins, _HUB_REF)
+    ghcr = _pinned_ref(pins, _GHCR_REF)
+    assert hub.is_docker_hub and hub.registry_host is None
+    assert not ghcr.is_docker_hub and ghcr.registry_host == "ghcr.io"
+    # the Hub-API coordinates a hub ref resolves through:
+    assert hub.repository == "library/python" and hub.tag == "3.13-slim"
+    assert hub.digest == "sha256:" + "a" * 64
+    # a registry with a port is not mistaken for a tag:
+    port = _pinned_ref(pins, "myreg:5000/image:1.2@sha256:" + "c" * 64)
+    assert port.registry_host == "myreg:5000" and port.tag == "1.2" and port.repository == "image"
+
+
+def test_resolvable_drift_blocks() -> None:
+    """A Docker-Hub pin whose live digest MOVED is resolvable drift and FAILS under --fail-on-drift."""
+    pins = _load_image_pins()
+    ref = _pinned_ref(pins, _HUB_REF)
+
+    def moved(_r):
+        return pins.Resolution(supported=True, digest="sha256:" + "9" * 64)
+
+    results = pins.evaluate_drift([ref], moved)
+    assert len(results) == 1 and results[0].is_drift
+    assert pins.run_drift([ref], moved, fail_on_drift=True) == 1
+
+
+def test_up_to_date_pin_does_not_block() -> None:
+    pins = _load_image_pins()
+    ref = _pinned_ref(pins, _HUB_REF)
+    assert pins.run_drift([ref], lambda r: pins.Resolution(supported=True, digest=r.digest),
+                          fail_on_drift=True) == 0
+
+
+def test_unresolvable_registry_is_explicit_unknown_not_a_pass() -> None:
+    """The exact bug W3-8 closes: a non-Hub registry was reported as a pass. Now it is an explicit
+    UNKNOWN — surfaced and counted, NOT drift; it does not block a build for a check that could not
+    run, but --fail-on-unknown makes it block for the strictest posture."""
+    pins = _load_image_pins()
+    ref = _pinned_ref(pins, _GHCR_REF)
+    results = pins.evaluate_drift([ref], pins.hub_resolver)  # real resolver: ghcr is unsupported
+    assert len(results) == 1
+    r0 = results[0]
+    assert r0.is_unknown and not r0.is_drift and r0.status == pins.DRIFT_UNKNOWN_REGISTRY
+    assert pins.run_drift([ref], pins.hub_resolver, fail_on_drift=True) == 0
+    assert pins.run_drift([ref], pins.hub_resolver, fail_on_drift=True, fail_on_unknown=True) == 1
+
+
+def test_drift_gate_negative_control_can_fail() -> None:
+    """NEGATIVE CONTROL, asserted in the same run: run_drift returns non-zero on a deliberately drifted
+    resolvable pin AND zero when nothing moved — so the gate is neither a no-op nor stuck-on."""
+    pins = _load_image_pins()
+    ref = _pinned_ref(pins, _HUB_REF)
+    assert pins.run_drift([ref], lambda r: pins.Resolution(supported=True, digest="sha256:" + "0" * 64),
+                          fail_on_drift=True) == 1
+    assert pins.run_drift([ref], lambda r: pins.Resolution(supported=True, digest=r.digest),
+                          fail_on_drift=True) == 0
+
+
+def test_drift_summary_makes_unknowns_visible(tmp_path: Path) -> None:
+    """The AC requires unresolvable registries be VISIBLE in the job summary. Assert the summary text
+    names the UNKNOWN entry (image_pins.py writes it to $GITHUB_STEP_SUMMARY / --summary-file)."""
+    pins = _load_image_pins()
+    ref = _pinned_ref(pins, _GHCR_REF)
+    out = tmp_path / "summary.md"
+    pins.run_drift([ref], pins.hub_resolver, fail_on_drift=True, summary_path=str(out))
+    body = out.read_text(encoding="utf-8")
+    assert "UNKNOWN" in body and "ghcr.io/owner/image" in body
+
+
+def _workflow_steps(body: str) -> list[str]:
+    """Split a workflow's `steps:` into per-step text blocks (a step starts at `      - name:`)."""
+    steps: list[str] = []
+    cur: list[str] = []
+    for ln in body.splitlines():
+        if re.match(r"^      - name:", ln):
+            if cur:
+                steps.append("\n".join(cur))
+            cur = [ln]
+        elif cur:
+            cur.append(ln)
+    if cur:
+        steps.append("\n".join(cur))
+    return steps
+
+
+def test_workflow_drift_step_blocks_and_is_not_advisory() -> None:
+    """The real drift GATE (not the --root negative-control fixture) must run --fail-on-drift and must
+    NOT be continue-on-error — otherwise resolvable drift would be advisory again, the W3-8 regression."""
+    body = WORKFLOW.read_text(encoding="utf-8")
+    gate = [s for s in _workflow_steps(body)
+            if "image_pins.py" in s and "--drift --fail-on-drift" in s and "--root" not in s]
+    assert gate, "no blocking base-image drift step (`image_pins.py --drift --fail-on-drift`) in the A14 gate"
+    for step in gate:
+        assert "continue-on-error: true" not in step, (
+            "the base-image drift GATE is continue-on-error — resolvable drift would not block:\n" + step
+        )
+
+
+# ==========================================================================================
+# W3-10 (#433) — PEP 517 build backends are hash-locked, and the non-Python locks are verified.
+# ==========================================================================================
+
+
+def test_build_backends_lock_covers_every_declared_backend() -> None:
+    """Every backend any pyproject names in `[build-system].requires` (hatchling / setuptools / wheel /
+    setuptools-rust) must be pinned+hashed in the build-backends lock, so envs/build_envs.sh can
+    pre-install them and build members --no-build-isolation. Fails on a tree without the lock."""
+    _, lock = LOCKS["build-backends"]
+    _require_lock("build-backends", lock)
+    locked = {_canon(m.group(1)) for m in map(_PINNED_LINE.match, lock.read_text().splitlines()) if m}
+    declared = _pyproject_build_requires()
+    assert declared, "parsed no [build-system].requires from any pyproject — the scanner is broken"
+    missing = sorted({_canon(n) for names in declared.values() for n in names} - locked)
+    assert not missing, (
+        "these PEP 517 build backends are declared in a pyproject [build-system].requires but are not "
+        f"pinned in {lock.name}: {missing}. Add them to build-backends.in and regenerate (--allow-unsafe)."
+    )
+    # guard against a vacuous declared-set: the backends we KNOW are used must be present.
+    for expected in ("hatchling", "setuptools", "wheel", "setuptools-rust"):
+        assert _canon(expected) in locked, f"{expected} is not pinned in {lock.name}"
+
+
+def test_build_envs_installs_backends_hashed_and_builds_without_isolation() -> None:
+    """`the build uses them`: build_envs.sh installs the backends lock under --require-hashes AND builds
+    every member with --no-build-isolation, so no backend is ever fetched fresh under isolation."""
+    txt = BUILD_ENVS.read_text(encoding="utf-8")
+    assert "BUILD_BACKENDS_LOCK" in txt, "build_envs.sh does not reference the build-backends lock"
+    assert '--require-hashes -r "$BUILD_BACKENDS_LOCK"' in txt, (
+        "build_envs.sh does not install the build backends under --require-hashes"
+    )
+    assert "--no-build-isolation" in txt, (
+        "build_envs.sh does not build members with --no-build-isolation, so the pinned backends are unused"
+    )
+
+
+def test_native_locks_are_consistent_with_their_manifests() -> None:
+    """OFFLINE: every direct dep in vendor/strix/pyproject.toml and apps/sigil/kernel/Cargo.toml is
+    pinned in its lock. Imports verify_native_locks, absent on a tree without the W3-10 fix."""
+    nl = _load_native_locks()
+    problems = {x.lock: nl.check_lock_matches_manifest(x) for x in nl.NATIVE_LOCKS}
+    bad = {k: v for k, v in problems.items() if v}
+    assert not bad, f"non-Python locks drifted from their manifests: {json.dumps(bad, indent=2)}"
+    locks = {x.lock for x in nl.NATIVE_LOCKS}
+    assert "vendor/strix/uv.lock" in locks and "apps/sigil/kernel/Cargo.lock" in locks, (
+        "the non-Python lock audit set no longer covers both known locks"
+    )
+
+
+def test_native_lock_check_is_not_a_no_op() -> None:
+    """NEGATIVE CONTROL: a manifest declaring a dependency the lock does not pin is flagged, for both
+    ecosystems, and an empty/packageless lock is rejected (fail-closed) — asserted in the same run."""
+    nl = _load_native_locks()
+    pyproject = '[project]\nname="x"\nversion="0"\ndependencies=["flask>=3","requests"]\n'
+    uv_lock = '[[package]]\nname="requests"\nversion="2"\n'
+    assert nl.missing_from_lock("uv", pyproject, uv_lock) == ["flask"]
+
+    cargo_toml = '[package]\nname="k"\nversion="0"\n[dependencies]\nserde="1"\nmissingcrate="1"\n'
+    cargo_lock = '[[package]]\nname="serde"\nversion="1"\n'
+    assert nl.missing_from_lock("cargo", cargo_toml, cargo_lock) == ["missingcrate"]
+
+    with pytest.raises(ValueError):
+        nl.missing_from_lock("uv", pyproject, "# a lock that pins nothing\n")
+
+
+def test_workflow_regenerate_checks_the_native_locks() -> None:
+    """The A14 gate runs the LIVE regenerate-and-diff for the non-Python locks."""
+    body = _strip_comments(WORKFLOW.read_text(encoding="utf-8"))
+    assert "verify_native_locks.py" in body and "--regenerate-check" in body, (
+        "the A14 gate no longer runs the non-Python lock regenerate-and-diff (verify_native_locks.py "
+        "--regenerate-check)"
+    )
+
+
+def test_no_first_party_package_lock_json_only_a_cve_fixture() -> None:
+    """HONESTY (W3-10): the AC names package-lock.json, but this repo ships NO first-party one. The only
+    package.json is a deliberately-vulnerable CVE test fixture, which must NOT be locked or regenerated.
+    Assert that stays true, so a future real JS component is a deliberate act that updates the verifier
+    and the docs rather than shipping an unverified lock."""
+    pkg_jsons = [p for p in REPO_ROOT.rglob("package.json") if "node_modules" not in p.parts]
+    for p in pkg_jsons:
+        rel = p.relative_to(REPO_ROOT).as_posix()
+        assert "corpus_apps" in rel and "_cve" in rel, (
+            f"a package.json appeared outside the CVE test corpus: {rel}. If VIGIL now has a real JS "
+            "component, add a package-lock.json pair to infra/supply-chain/verify_native_locks.py and "
+            "update docs/SUPPLY-CHAIN.md — do not leave a real manifest unverified."
+        )
+    locks = [p for p in REPO_ROOT.rglob("package-lock.json") if "node_modules" not in p.parts]
+    assert not locks, (
+        f"a first-party package-lock.json exists but is not verified: {[str(p) for p in locks]}. "
+        "Add it to verify_native_locks.py."
     )

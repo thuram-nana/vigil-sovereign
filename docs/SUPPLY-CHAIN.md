@@ -81,13 +81,30 @@ runtime-check **logic** are covered offline against a fake docker.
 ### Re-pinning
 
 ```bash
-bash infra/supply-chain/resolve-image-digests.sh          # drift report (advisory)
-bash infra/supply-chain/resolve-image-digests.sh --check  # offline: is everything pinned?
+python3 infra/supply-chain/image_pins.py --drift          # drift report (resolvable drift is BLOCKING)
+python3 infra/supply-chain/image_pins.py --check          # offline: is everything pinned?
 ```
 
-Drift is **advisory** in CI. A tag moving upstream is not a defect in whatever change is under
-review, and a gate that goes red for reasons the author cannot fix is a gate that gets switched
-off. Re-pin deliberately, after reading the upstream changelog.
+**Drift is three-valued, and resolvable drift BLOCKS (W3-8, issue #431).** The old check was
+two-valued — a Docker Hub pin either matched or reported `??`, and `??` (any non-Hub registry, or a
+network blip) was *presented as a pass*. It is now three-valued:
+
+Resolvable base-image drift (a Docker Hub tag that has moved) BLOCKS the A14 gate under
+`--fail-on-drift`; a pin on any registry the resolver cannot query is reported as an explicit
+UNKNOWN — surfaced in the job summary, never a silent pass.
+
+- **resolvable & moved** → the A14 gate runs `image_pins.py --drift --fail-on-drift` and this fails
+  the job. Re-pinning is still a deliberate act (read the upstream changelog first), but it is now a
+  *required* one, not an advisory nudge.
+- **UNKNOWN (registry the resolver cannot query — anything but Docker Hub)** → written to
+  `$GITHUB_STEP_SUMMARY` and counted, never a silent `??` pass. It does not block by default (a gate
+  cannot honestly fail on a state it could not check); `--fail-on-unknown` makes it block for the
+  strictest posture.
+- **resolvable & up-to-date** → nothing to do.
+
+A live negative control in the A14 job points the exact blocking config at a fixture with a
+deliberately-wrong digest on Docker Hub and requires it to fail, so the gate is proven not a no-op;
+the pure drift logic has an offline negative control in `integration/tests/test_supply_chain.py`.
 
 ---
 
@@ -509,12 +526,24 @@ Stated plainly, because a hardening document that only lists wins is a marketing
   on the locks is `ci.yml` (first bullet): the test jobs still `pip install` loose ranges, so the
   tree CI *tests against* is not the locked tree. That switch is its own slice ([W3-2]) rather than
   a rider here.
-- **Cargo / npm ecosystems are scanned but not locked by us.** `apps/sigil/kernel/Cargo.lock`
-  and the corpus app's `package-lock.json` are their own upstream artifacts; trivy reads them, but
-  this gate does not regenerate or hash-verify them. (`vendor/strix/uv.lock` used to be in this
-  list. Its live-scan extras are now hash-locked *for install* — exported to
-  `infra/supply-chain/strix.lock` and installed `--require-hashes`, see §2 — though the gate still
-  does not *regenerate* the upstream `uv.lock` itself.)
+- **PEP 517 build backends are hash-locked, and the non-Python locks are verified (W3-10, #433).**
+  The PEP 517 build backends are hash-locked and the non-Python locks (`uv.lock`, `Cargo.lock`) are
+  verified against their manifests — regenerate-checked live in CI and consistency-checked offline;
+  there is no first-party `package-lock.json`.
+  Concretely: the build backends declared in every `pyproject [build-system].requires` (hatchling /
+  setuptools + wheel / setuptools-rust) are pinned with hashes in
+  `infra/supply-chain/build-backends.lock.txt`; `envs/build_envs.sh` installs that lock
+  `--require-hashes` and builds every member with `--no-build-isolation`, so a backend is never
+  fetched fresh under isolation. The non-Python locks are no longer merely *scanned*:
+  `infra/supply-chain/verify_native_locks.py` checks OFFLINE (stdlib `tomllib`, in the required
+  integration + A14 jobs) that every direct dependency in `vendor/strix/pyproject.toml` and
+  `apps/sigil/kernel/Cargo.toml` is pinned in its lock, and the A14 job runs the LIVE
+  regenerate-and-diff — `uv lock --check` (on a copy outside the uv workspace, the trick
+  `gen-strix-lock.sh` uses) and `cargo metadata --locked` — each of which fails if regenerating the
+  lock would change it. **`package-lock.json` honesty:** the acceptance criterion names it, but this
+  repo ships *no first-party* `package-lock.json` — the only `package.json` in the tree is a
+  deliberately-vulnerable CVE **test fixture** (`engine/crucible/.../corpus_apps/_cve/…`) that must
+  NOT be locked or regenerated; a test enforces that no other `package.json` appears unverified.
 - **Build signing — scoped to the release wheel.** Hashes prove an artifact did not change
   between lock time and install time; they do not prove *who* built it or *from what*. That gap
   is now closed for the one artifact this repo actually publishes: `.github/workflows/release.yml`
@@ -531,9 +560,12 @@ Stated plainly, because a hardening document that only lists wins is a marketing
   CycloneDX SBOM (`trivy sbom`, advisory) rather than a live image build. A live `trivy image` of the
   Strix sandbox needs a self-hosted / large runner and is a follow-up.
 - **Base-image digests are re-resolved against Docker Hub only.** An image on another registry
-  would report `??` in the drift report rather than being checked.
-- **Drift is advisory, and so are MEDIUM-and-below findings.** They are surfaced, not enforced.
-  That is a deliberate trade (see above), not an oversight. HIGH and CRITICAL now block.
+  cannot be resolved by the drift check, so it is reported as an explicit **UNKNOWN** in the drift
+  report and the job summary (never a silent `??` pass, W3-8). Resolvable (Docker Hub) drift blocks;
+  an UNKNOWN registry blocks only under `--fail-on-unknown`.
+- **MEDIUM-and-below vulnerability findings are advisory.** They are surfaced, not enforced — a
+  deliberate trade (see §4), not an oversight. HIGH and CRITICAL block; and resolvable base-image
+  drift now blocks too (W3-8).
 
 ## What is signed, and by which identity
 

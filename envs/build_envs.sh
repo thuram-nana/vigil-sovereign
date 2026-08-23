@@ -21,8 +21,13 @@
 #     Both layers install under `--require-hashes`; the strix lock is applied FIRST so the framework
 #     lock, applied next, wins any shared-dependency version (e.g. keeps cryptography>=50 — the
 #     CVE-2026-69247 fix — over strix's older transitive pin). The members go in --no-deps on top.
-#   * PEP 517 BUILD backends (setuptools-rust for the Rust WARDEN kernel; hatchling/setuptools) are
-#     fetched from the index under build isolation — build-time tools are not in the runtime locks.
+#   * PEP 517 BUILD backends (setuptools-rust for the Rust WARDEN kernel; hatchling/setuptools/wheel)
+#     are hash-locked too (W3-10): they are NOT in the RUNTIME locks (build-time tools would bloat a
+#     shipped deployment), but they have their own hash-pinned lock (infra/supply-chain/build-backends
+#     .lock.txt). It is installed FIRST under --require-hashes, then every member is built with
+#     --no-build-isolation, so a backend is never fetched fresh/unhashed under isolation. The only
+#     package shared with the runtime locks is `packaging`, pinned identically, so the runtime closure
+#     is unperturbed (`pip check` proves it).
 # If a required lock is absent on this checkout the build FAILS in production posture
 # (VIGIL_POSTURE=production) and otherwise warns LOUDLY and degrades to fresh, unlocked resolution —
 # never a SILENT fallback. That fail-closed posture is the control [W9-4] builds on.
@@ -39,6 +44,10 @@ fi
 SOVEREIGN_LOCK="infra/supply-chain/sovereign.lock.txt"
 OFFENSE_LOCK="engine/crucible/framework/v2/requirements.lock.txt"
 STRIX_LOCK="infra/supply-chain/strix.lock"   # vendor/strix's hash-pinned live-scan extras (env-offense only)
+# PEP 517 build backends (hatchling / setuptools+wheel / setuptools-rust), hash-pinned (W3-10 #433).
+# Installed FIRST, then members build with --no-build-isolation so the backend comes from these exact
+# pins instead of a fresh index fetch. See docs/SUPPLY-CHAIN.md §2 and this file's build() below.
+BUILD_BACKENDS_LOCK="infra/supply-chain/build-backends.lock.txt"
 
 venv_pip() {  # venv_pip <venv> <pip-args...>  — uv when present, else the venv's pip
   local venv="$1"; shift
@@ -88,11 +97,28 @@ build() {  # name  lock  reqs-file
   #    are deliberately NOT in the framework lock, so they come from the DEDICATED hash-pinned strix
   #    lock ($STRIX_LOCK) — installed under --require-hashes too, so strix's extras NEVER resolve fresh
   #    from PyPI. strix itself then installs editable --no-deps over those pinned extras.
-  local nodep=() strix=() m s framework_locked="" strix_locked=""
+  local nodep=() strix=() m s framework_locked="" strix_locked="" backends_locked="" nbi=()
   while IFS= read -r m; do
     [ -z "$m" ] && continue
     if [ "$m" = "./vendor/strix" ]; then strix+=("$m"); else nodep+=(-e "$m"); fi
   done < <(members_of "$reqs")
+
+  # 0. PEP 517 build backends FIRST, hash-pinned (W3-10 #433). Every member is built through a backend
+  #    declared in its pyproject `[build-system].requires` (hatchling / setuptools+wheel / setuptools-
+  #    rust). Under build isolation pip/uv would fetch those FRESH and UNHASHED from the index — a
+  #    build-time supply-chain hole. Install them here under --require-hashes, then build members with
+  #    --no-build-isolation (below) so the backend is exactly these pins. The only package shared with
+  #    the runtime locks is `packaging`, pinned identically, so this does not perturb the runtime
+  #    closure (`pip check` at the end proves it). A hashed CONSTRAINT can't be used instead: any hash
+  #    in PIP_CONSTRAINT flips the OUTER editable install into require-hashes mode, which rejects `-e`.
+  if [ -f "$BUILD_BACKENDS_LOCK" ]; then
+    echo "    PEP 517 build backends (reproducible, hash-locked): $BUILD_BACKENDS_LOCK"
+    venv_pip "$venv" --require-hashes -r "$BUILD_BACKENDS_LOCK"   # refuses ANY unpinned/unhashed package
+    backends_locked=1
+    nbi=(--no-build-isolation)   # members/strix build against the pins above, never a fresh backend fetch
+  else
+    lock_missing_or_die "$BUILD_BACKENDS_LOCK" "the PEP 517 build-backends lock"   # production: exits here
+  fi
 
   # 1. vendor/strix's live-scan extras FIRST (offense only), so the framework lock applied in step 2
   #    WINS every shared-dependency version — e.g. keeps cryptography>=50 (the CVE-2026-69247 fix) over
@@ -118,9 +144,12 @@ build() {  # name  lock  reqs-file
 
   # 3. First-party members. Their runtime deps are already satisfied by the framework lock -> --no-deps
   #    (except in the dev-only unlocked fallback, where the lock was absent and they pull deps fresh).
+  #    --no-build-isolation ($nbi, set in step 0) makes each member build against the hash-pinned
+  #    backends; empty in the unlocked fallback, so the member falls back to a fresh isolated build.
   if [ "${#nodep[@]}" -gt 0 ]; then
     if [ -n "$framework_locked" ]; then
-      echo "    members (editable, --no-deps): ${nodep[*]}"; venv_pip "$venv" --no-deps "${nodep[@]}"
+      echo "    members (editable, --no-deps${backends_locked:+, --no-build-isolation}): ${nodep[*]}"
+      venv_pip "$venv" --no-deps "${nbi[@]}" "${nodep[@]}"
     else
       echo "    members (editable, WITH deps — UNLOCKED dev fallback): ${nodep[*]}"; venv_pip "$venv" "${nodep[@]}"
     fi
@@ -130,8 +159,8 @@ build() {  # name  lock  reqs-file
   #    in the dev-only unlocked fallback (strix lock absent) it pulls its extras fresh.
   if [ "${#strix[@]}" -gt 0 ]; then
     if [ -n "$strix_locked" ]; then
-      echo "    strix (editable, --no-deps — extras satisfied by the strix lock): ${strix[*]}"
-      for s in "${strix[@]}"; do venv_pip "$venv" --no-deps -e "$s"; done
+      echo "    strix (editable, --no-deps${backends_locked:+, --no-build-isolation} — extras satisfied by the strix lock): ${strix[*]}"
+      for s in "${strix[@]}"; do venv_pip "$venv" --no-deps "${nbi[@]}" -e "$s"; done
     else
       echo "    [warn] strix (editable, WITH deps — UNLOCKED dev fallback): ${strix[*]}" >&2
       for s in "${strix[@]}"; do venv_pip "$venv" -e "$s"; done
