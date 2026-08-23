@@ -350,7 +350,11 @@ class Neo4jGraphStore(_BaseGraphStore):
         ``execute_read``) to exercise the client body without a service. ``database`` selects a named DB.
 
         With no injected driver and no ``neo4j`` package installed, construction raises a clear error —
-        the ``deploy`` residual — never a silent misbehaviour."""
+        the ``deploy`` residual — never a silent misbehaviour.
+
+        VIGIL-LIMIT:LIMIT-neo4j-deploy-gated — honest limit registered in docs/limitations/inventory.json
+        (W15-1 #393): the client body is BUILT, but its LIVE construction is deploy-gated on the neo4j
+        driver + a running service; EmbeddedGraphStore is the working default until then."""
         self._database = database
         if driver is not None:
             self._driver = driver

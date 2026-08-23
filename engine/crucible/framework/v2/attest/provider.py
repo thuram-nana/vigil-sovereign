@@ -134,7 +134,12 @@ class SoftwareAttestationProvider(AttestationProvider):
 
 
 class _HardwareGatedProvider(AttestationProvider):
-    """Shared base for the real-TEE stubs: every method fails closed with the activation runbook."""
+    """Shared base for the real-TEE stubs: every method fails closed with the activation runbook.
+
+    VIGIL-LIMIT:LIMIT-attest-tee-hardware — hardware-gated honest limit, registered in
+    docs/limitations/inventory.json (W15-1 #393). SEV-SNP/TDX attestation is a stub until the silicon
+    lands; SoftwareAttestationProvider proves integrity+origin, never hardware confidentiality.
+    """
 
     backend_name = "tee-hardware-gated"
 

@@ -1072,6 +1072,50 @@
       "ci_job": "the briefing explains every agent and capability",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W15-1",
+      "title": "The documented-limitation inventory is code-grounded and machine-checked",
+      "claim": "Every real-unfinished-code limitation in the inventory resolves to a real code anchor, every re-verified-closed item names real evidence, and an unregistered honest-limit marker turns the build red.",
+      "source": "docs/limitations/README.md:1",
+      "enforced_by": {
+        "file": "docs/tests/test_limitation_inventory.py",
+        "symbol": "validate_limitation"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_limitation_inventory.py",
+        "tests": [
+          "test_every_limitation_is_valid",
+          "test_twelve_reverified_closed_named_with_real_evidence",
+          "test_marker_bijection_forward_every_marker_is_registered",
+          "test_negative_control_stub_that_no_longer_raises_is_rejected"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W15-2",
+      "title": "The feature-wiring completeness audit is code-grounded and machine-checked",
+      "claim": "Every feature in the wiring-status registry carries a machine-readable status, each status is verified against the code, and the declared CLI-verb set must equal the parser's own contract or the build goes red.",
+      "source": "docs/features/wiring-status.md:1",
+      "enforced_by": {
+        "file": "docs/tests/test_feature_wiring_status.py",
+        "symbol": "validate_feature"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_feature_wiring_status.py",
+        "tests": [
+          "test_every_feature_is_valid",
+          "test_native_verb_coverage_is_exactly_the_parser_contract",
+          "test_passthrough_verb_coverage_is_exactly_the_dispatch_table",
+          "test_negative_control_stub_that_does_not_raise_rejected"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

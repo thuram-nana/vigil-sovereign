@@ -26,6 +26,15 @@ claiming `vigil authorize-destruction` opens its file `O_EXCL` when the code act
 (e.g. `vigil engage-instruct`, the `service_reachability` oracle, device revocation, `/api/inbox`,
 `vigil learn-drain`, the scoped remote/LAN gate).
 
+> **Machine-readable companions (W15).** Two registries make this catalog's honesty machine-checked:
+> [`docs/features/wiring-status.json`](features/wiring-status.md) assigns every CLI verb, subsystem
+> passthrough and deferred-infra subsystem a wiring status (LIVE / OPT-IN / GATED / BUILT-NOT-WIRED /
+> ORPHANED) verified against the code (W15-2 #394), and
+> [`docs/limitations/inventory.json`](limitations/README.md) is the code-grounded documented-limitation
+> inventory feeding the W16 burndown (W15-1 #393). Both are guarded in the required `the briefing explains
+> every agent and capability` CI job; when this prose and those registries disagree, the registries and
+> their guards win.
+
 ## Contents
 
 1. [CLI and orchestration](#1-cli-and-orchestration) — 56 features
@@ -495,7 +504,7 @@ Every oracle in `engine/crucible/framework/v2/verify/oracles.py` is **pure, dete
 
 20-22. **SQL/COMMAND/NOSQL_INJECTION_BREAKOUT** — request-side parse-proofs judged on the REQUEST alone (prove a *structured attempt*, never exploitation). `sql_injection_breakout_oracle` (`oracles.py:3277-3303`): a payload closes a quote AND introduces query structure *anchored to the break-out* (tautology/UNION/stacked/comment via `_sql_breakout_tails`/`_sql_structure_at_start`) — an apostrophe in prose (`O'Brien`) never fires. `command_injection_breakout_oracle` (`oracles.py:3332-3389`): a dangerous command **with a shell-argument indicator** inside `$(...)`/backticks or after a separator, skipping segment[0] (`python-requests/2.25.1`, `id > 1000`, `$(id)` do not fire). `nosql_injection_breakout_oracle` (`oracles.py:3485-3520`): a curated Mongo operator (`_NOSQL_OPERATORS`; `$type`/`$regex`/EJSON/JSON-Schema keys deliberately excluded as dual-use) appearing as a param-name bracket segment or a parsed-JSON object KEY — an operator string *value* or a price `$5.00` stays inert. All ctx `request_payload` (`verifier.py:729-743`).
 
-23. **K8S_POSTURE** — verifier dispatches `k8s_posture_oracle` (`oracles.py:1995-2081`): a kube-bench control that **hard-FAILED** *and* whose observed value literally carries a dangerous flag (`_INSECURE_SETTING_RULES` anonymous-auth/AlwaysAllow/insecure-port/etc., `oracles.py:1975-1992`) — a WARN or a FAIL showing the secure value does not fire. A sibling `k8s_workload_posture_oracle` (`oracles.py:2087-2142`, same `K8S_POSTURE` kind) fires only on an anonymous subject bound to a dangerous built-in ClusterRole, but **is NOT wired into `verifier._run`** — it is reachable only on the live-RBAC sensor path; only `k8s_posture_oracle` runs when the ctx carries `k8s_control` (`verifier.py:746-749`).
+23. **K8S_POSTURE** — verifier dispatches `k8s_posture_oracle` (`oracles.py:1995-2081`): a kube-bench control that **hard-FAILED** *and* whose observed value literally carries a dangerous flag (`_INSECURE_SETTING_RULES` anonymous-auth/AlwaysAllow/insecure-port/etc., `oracles.py:1975-1992`) — a WARN or a FAIL showing the secure value does not fire. A sibling `k8s_workload_posture_oracle` (`oracles.py:2087-2142`, same `K8S_POSTURE` kind) fires only on an anonymous subject bound to a dangerous built-in ClusterRole, and **is wired into `verifier._run`** — it fires when the ctx carries `k8s_workload_control` (`verifier.py:854-858`), while `k8s_posture_oracle` fires when the ctx carries `k8s_control` (`verifier.py:848-852`). *(Corrected under W15-1 #393: an earlier revision of this line claimed the workload oracle was NOT wired, which is false of the code — see the re-verified-closed item `RVC-k8s-workload-oracle-wired` in `docs/limitations/inventory.json`.)*
 
 24. **SSO_ASSERTION_FORGERY** — `jwt_forgery_oracle` (`oracles.py:3579-3669`). Offline structural forgeability of a captured JWT: (a) `alg=none` (conf 0.95); (b) HS* signature recomputable from a supplied/weak secret (`_WEAK_HS_SECRETS`, conf 0.99); (c) RS256→HS256 confusion (HS* verifies with a supplied RSA/EC public key as HMAC secret, conf 0.99). A normal RS256 token, an unknown HS* secret, or an embedded `jwk`/`x5c` (proven un-decidable offline — false-positives on real Azure/DPoP) do NOT fire. ctx `jwt_token` (+ opt-in `jwt_candidate_keys`, `verifier.py:787-790`).
 
