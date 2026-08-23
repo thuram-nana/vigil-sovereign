@@ -282,6 +282,15 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
+    # `--version` (W4-2, #442) short-circuits before the umask latch, dispatch and argparse, so an
+    # operator can ask any install what it is. vigil_core.build_info is the shared resolver every VIGIL
+    # CLI uses; the import is function-local (offense-process convention) and vigil_core is co-installed
+    # in the offense environment, so the two-env boundary is untouched.
+    if argv and argv[0] in ("--version", "-V"):
+        from vigil_core.build_info import version_line
+        print(version_line("framework.v2"))
+        return 0
+
     # At-rest protection (X2): latch an owner-only umask before anything writes to
     # disk, so every secret / integrity store / captured-evidence file this process
     # (and any child it spawns) creates is 0600 and every directory 0700. Only ever

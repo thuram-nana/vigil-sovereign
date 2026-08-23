@@ -1787,6 +1787,14 @@ def _checkpoint_witness(a, W, config, roster_path, owner_pub) -> None:
 
 
 def main(argv=None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # `--version` (W4-2, #442) short-circuits BEFORE logging setup and the install/migration gates: an
+    # operator must be able to ask a fresh or legacy-store install what it is. vigil_core.build_info is the
+    # shared, sovereign-safe resolver used identically by every VIGIL CLI.
+    if argv and argv[0] in ("--version", "-V"):
+        from vigil_core.build_info import version_line
+        print(version_line("sigil"))
+        return
     from .obs import configure_logging
     configure_logging()                      # one structured-logging setup at startup (level from VIGIL_LOG_LEVEL)
     p = argparse.ArgumentParser(prog="sigil")

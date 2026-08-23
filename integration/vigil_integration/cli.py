@@ -3996,6 +3996,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    # `--version` (W4-2, #442) short-circuits BEFORE the passthrough intercept, argparse, and the
+    # install-manifest gate: an operator must be able to ask a fresh or degraded install what it is. The
+    # shared vigil_core.build_info is sovereign-safe (vigil_core only — no framework/sigil), so this stays
+    # boundary-clean.
+    if argv and argv[0] in ("--version", "-V"):
+        from vigil_core.build_info import version_line
+        print(version_line("vigil"))
+        return 0
     # S1 control plane: a subsystem verb forwards to that subsystem's console-script, EXEC'd in its OWN
     # venv (sovereign or offense) — a separate process in the correct trust domain, never co-loaded here.
     # This intercept runs BEFORE argparse so all remaining args (incl. the sub-CLI's own flags) pass through

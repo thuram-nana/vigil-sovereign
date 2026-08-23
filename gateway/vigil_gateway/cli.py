@@ -48,6 +48,19 @@ async def _serve(config: GatewayConfig, host: str, port: int) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # `--version` (W4-2, #442) short-circuits before argparse (the subparser is `required`). vigil_core is
+    # co-installed in the offense environment the gateway runs in; the try/except keeps the gateway's
+    # zero-third-party-dependency startup contract — a missing shared core degrades to an honest "unknown"
+    # rather than failing to report a version.
+    if argv and argv[0] in ("--version", "-V"):
+        try:
+            from vigil_core.build_info import version_line
+
+            print(version_line("vigil-gateway"))
+        except Exception:  # noqa: BLE001 — never let version reporting depend on the shared core being present
+            print("vigil-gateway 0+unknown (build 0+unknown; git unknown)")
+        return 0
     parser = argparse.ArgumentParser(prog="vigil-gateway", description=__doc__)
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)

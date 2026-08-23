@@ -1162,6 +1162,48 @@
       "ci_job": "the briefing explains every agent and capability",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W4-2",
+      "title": "--version on every CLI reports version + build id + git sha (dirty-honest)",
+      "claim": "`--version` on every VIGIL CLI reports the product version, an honest build id and the git sha, and a build from a dirty tree reports a dirty build id rather than a clean sha",
+      "source": "docs/decisions/W4-2-version-and-release-tooling.md:42",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/build_info.py",
+        "symbol": "compose_build_id"
+      },
+      "proved_by": {
+        "file": "packages/core/vigil_core/tests/test_build_info.py",
+        "tests": [
+          "test_negative_control_dirty_tree_build_id_is_marked_dirty",
+          "test_negative_control_unknown_sha_build_id_is_unknown_not_clean",
+          "test_negative_control_dirty_repo_reports_dirty_end_to_end"
+        ]
+      },
+      "ci_job": "vigil_core — shared integrity substrate",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W4-4",
+      "title": "The release/upgrade/rollback runbook documents only real CLI commands",
+      "claim": "The release, upgrade and rollback runbook documents only real CLI subcommands, and a required doc test fails the build if a documented command name stops existing in the code",
+      "source": "docs/runbooks/RELEASE-UPGRADE-ROLLBACK.md:17",
+      "enforced_by": {
+        "file": "docs/tests/test_release_runbook.py",
+        "symbol": "undocumented_or_missing"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_release_runbook.py",
+        "tests": [
+          "test_every_documented_command_is_a_real_cli_subcommand",
+          "test_negative_control_renamed_command_in_source_turns_the_guard_red",
+          "test_negative_control_bogus_command_in_a_snippet_is_flagged"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

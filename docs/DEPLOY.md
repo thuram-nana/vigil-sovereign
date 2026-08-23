@@ -193,6 +193,27 @@ vigil strix --target ./local/path --mount            # a local codebase
 
 ---
 
+## Release, version & upgrade
+
+Ask any install what it is — before any gate, on a fresh or degraded store. All four entry points report
+the same product version, an honest build id (`.dirty` for an uncommitted tree, `+unknown` off a git
+checkout) and the git sha:
+
+```
+vigil --version          # product version + build id + git sha (dirty/unknown-aware)
+sigil --version
+vigil-gateway --version
+python3 -m framework.v2 --version
+```
+
+There is one product version (the repo-root `VERSION` file). To move an existing install to a new
+version: `vigil down`, check out the tag, re-run `./bootstrap.sh`, then run the crash-safe data migration
+(`vigil upgrade --check` then `vigil upgrade`, which rolls back to a verified backup on any failure). Full
+release, upgrade and rollback procedures — with exact commands and the CI that keeps them honest — are in
+**[`docs/runbooks/RELEASE-UPGRADE-ROLLBACK.md`](runbooks/RELEASE-UPGRADE-ROLLBACK.md)**.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Fix |
