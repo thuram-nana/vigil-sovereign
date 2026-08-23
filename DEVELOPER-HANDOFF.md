@@ -278,6 +278,21 @@ Map from invariant → code owner: (1) `envs/build_envs.sh` + every lazy `framew
 
 ---
 
+## 7. Release, version & upgrade
+
+- **One product version** lives in the repo-root `VERSION` file (W4-1, #441); every first-party package is
+  asserted equal to it in CI. Bump `VERSION` and every package together, and add the matching
+  `## [X.Y.Z]` section to `CHANGELOG.md` — both are guarded by required doc tests.
+- **`--version` on every CLI** (`vigil` / `sigil` / `vigil-gateway` / `python3 -m framework.v2`) reports
+  the product version, an honest build id (`.dirty`/`+unknown`-aware) and the git sha via the shared
+  `vigil_core.build_info` resolver.
+- **Release / upgrade / rollback** is one runbook:
+  [`docs/runbooks/RELEASE-UPGRADE-ROLLBACK.md`](docs/runbooks/RELEASE-UPGRADE-ROLLBACK.md). A tag push runs
+  `.github/workflows/release.yml` (build → cosign/SLSA/PEP 740 → publish a GitHub Release with the
+  changelog notes). `vigil upgrade` runs the crash-safe sovereign data migration and rolls back on failure.
+
+---
+
 *You are inheriting an anti-hallucination system. The highest form of respect for it is to be as honest in
 your commits as it is in its findings: prove, don't guess; label a lead a lead; and keep the four invariants
 true at every seam.*

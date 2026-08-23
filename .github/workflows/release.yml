@@ -168,27 +168,36 @@ jobs:
       - name: verify signatures + attestations (offline) + tamper negative control
         run: bash .github/scripts/verify-release-artifacts.sh dist
 
-      # DURABLE, retention-independent store for the signed SBOMs (W3-5 #428). The defect this closes
-      # is that the only bill of materials lived in a 90-day CI artifact; a GitHub RELEASE asset does
-      # not expire with CI retention, so a deployed artifact has a retrievable, signed SBOM for as long
-      # as the release exists. `gh` is first-party and pre-installed, so no third-party action is
-      # pinned here. `create ... || true` tolerates a release a maintainer already made from the tag
-      # (the UI path); `upload --clobber` then attaches/refreshes the assets idempotently.
-      - name: attach signed SBOMs to the GitHub Release (durable)
+      # PUBLISH the release (W4-2 #442) — the operator-facing publish step #442 named as missing. This is
+      # the DURABLE, retention-independent store for every signed artifact: a GitHub RELEASE asset does not
+      # expire with CI retention (unlike the 90-day CI artifact), so a deployed build has a retrievable,
+      # signed wheel + SBOM for as long as the release exists (W3-5 #428). The release NOTES are the
+      # committed CHANGELOG section for this version, extracted by tools/release/changelog.py (stdlib-only)
+      # — so the published notes ARE the changelog, not a second, drifting source. `gh` is first-party and
+      # pre-installed, so no third-party action is pinned here. `create ... || true` tolerates a release a
+      # maintainer already made from the tag (the UI path); `upload --clobber` attaches idempotently.
+      - name: publish the GitHub Release (signed artifacts + changelog notes, durable)
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(dist/*.cdx.json dist/*.cdx.json.cosign.bundle)
+          # Release notes = the committed CHANGELOG section for this tag's version (strip the leading "v").
+          # Fail closed: a tag whose version has no changelog section must not publish a note-less release
+          # (docs/tests/test_changelog_staleness.py keeps VERSION's section present on every PR).
+          python3 tools/release/changelog.py notes \
+            --version "${GITHUB_REF_NAME#v}" \
+            --changelog CHANGELOG.md \
+            --output release-notes.md
+          assets=(dist/*.whl dist/*.tar.gz dist/*.cosign.bundle dist/*.publish.attestation dist/*.cdx.json)
           if [ "${#assets[@]}" -eq 0 ]; then
-            echo "::error::no SBOM assets to attach — the SBOM generation step did not run" >&2
+            echo "::error::no release assets to attach — the build/sign steps did not run" >&2
             exit 1
           fi
-          gh release create "$TAG" --title "$TAG" --notes "Automated release ${TAG}. Signed SBOMs attached (W3-5)." --verify-tag || true
-          gh release upload "$TAG" "${assets[@]}" --clobber
-          echo "attached to release ${TAG}:"
+          gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --notes-file release-notes.md --verify-tag || true
+          gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+          echo "published release ${TAG} with assets:"
           printf '  %s\n' "${assets[@]}"
 
       - name: upload signed artifacts + attestations
