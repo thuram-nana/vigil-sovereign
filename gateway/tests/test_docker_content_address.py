@@ -213,3 +213,23 @@ def test_context_digest_matches_the_a14_checker(tmp_path):
     import pathlib
     real_ctx = pathlib.Path(__file__).resolve().parents[2] / "gateway"
     assert context_digest(real_ctx) == ip.context_digest(real_ctx)
+
+
+def test_content_addressed_tag_matches_the_a14_checker(tmp_path):
+    """W3-7 #430: the A14 supply-chain CI job tags the gateway image it builds via
+    infra/supply-chain/image_pins.py --context-tag; that tag MUST be byte-identical to the one
+    vigil_gateway.docker.content_addressed_tag produces (which `vigil services up` writes and the
+    #511 runtime check reads), or CI would scan an image under a tag the runtime never runs. The two
+    implementations live in trees that cannot import each other, so this pins them together — on a
+    toy context AND on the real gateway build context."""
+    ip = _load_a14_image_pins()
+    ctx = _ctx(tmp_path)
+    assert content_addressed_tag(ctx) == ip.content_addressed_tag(ctx)
+    assert ip.GATEWAY_IMAGE_REPO == dmod.IMAGE_REPO
+    import pathlib
+    real_ctx = pathlib.Path(__file__).resolve().parents[2] / "gateway"
+    tag = ip.content_addressed_tag(real_ctx)
+    assert content_addressed_tag(real_ctx) == tag
+    # The tag is content-addressed: repo:ctx-<16 hex>. A stale image is detectable by this tag alone.
+    assert tag.startswith("vigil-gateway:ctx-")
+    assert len(tag.rsplit("-", 1)[1]) == 16
