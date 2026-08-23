@@ -519,6 +519,8 @@ jobs:
               integration/tests/test_backup_push_transport.py \
               integration/tests/test_backup_recovery_drill.py \
               integration/tests/test_backup_targets_recovery.py \
+              integration/tests/test_backup_dr_objectives.py \
+              integration/tests/test_backup_dr_drill_coverage.py \
               integration/tests/test_livefire_harness_per_action_approval.py \
               integration/tests/test_panic.py \
               integration/tests/test_sovereign_bridge_offense.py \

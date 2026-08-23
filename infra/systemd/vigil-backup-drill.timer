@@ -8,9 +8,15 @@
 #   systemctl --user enable --now vigil-backup-drill.timer
 #   systemctl --user list-timers 'vigil-*'
 #
+# The drill also ASSERTS the DR objectives (W7-1): it times the restore and fails if it
+# exceeds the RTO (30m) or the backup it restored is staler than the RPO (24h). Set
+# VIGIL_DRILL_PUSH_DIR on the service to ALSO restore the off-host pushed copy (W7-3).
+#
 # HONEST RESIDUAL: the drill only proves the round-trip for the CURRENT state at the
 # moment it runs; it does not prove every past backup restores, and (as configured) it
-# drills the offense plane only — extend VIGIL_DRILL_SCOPE for both planes.
+# drills the offense plane only — extend VIGIL_DRILL_SCOPE for both planes. (Restoring a
+# RETAINED/pruned backup and a CORRUPTED-backup negative control, plus the sovereign
+# plane's chain re-verify, are drilled in CI — see docs/decisions/W7-3-*.md.)
 
 [Unit]
 Description=Weekly trigger for the VIGIL backup recovery drill
