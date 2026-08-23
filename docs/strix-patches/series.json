@@ -432,9 +432,9 @@
    "subject": "strix batch2: P8 fix \u2014 proof degradation recording must never trigger strix.report.__init__"
   },
   {
-   "commit": "cebaa5d868e15fec64ef237e0a5be0e1fd25d653",
+   "commit": "1148094beb044e93f2f14fbb40ff39faddc20853",
    "file": "028-s10-vendor-strix-synchronous-container-teardown.patch",
-   "sha256": "0e56e0287546a999173368069a559725e802824d89390755b64819c0887f2953",
+   "sha256": "215f2e2a676854e80bdb74a1d48412a92992b9a563609bf8ee3a294af05cec75",
    "subject": "S10 (vendor/strix): synchronous container teardown on the signal path"
   }
  ],
