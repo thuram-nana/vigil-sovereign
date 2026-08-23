@@ -344,6 +344,7 @@ def assemble_authority(*, enrollments: "list[tuple[str, str]]", threshold: int,
     signer's key stays on its own host."""
     from vigil_core import TrustRoot
     from vigil_core.posture import is_production_posture
+    from vigil_core.crypto import load_public_key
 
     from ..destruction_gate import production_multisigner_reason
 
@@ -361,10 +362,15 @@ def assemble_authority(*, enrollments: "list[tuple[str, str]]", threshold: int,
                 f"enrolment file mapped as {hint!r} but its PoP-signed key_id is {ak.key_id!r} (mis-mapped file)")
         if ak.key_id in seen_ids:
             raise ValueError(f"duplicate signer key_id {ak.key_id!r} in the enrolment set")
-        if ak.public_key_b64 in seen_pubs:
+        # Dedup by the DECODED 32-byte key, NOT the base64 STRING: two enrolments of ONE key under different
+        # base64 encodings (malleable trailing pad bits) decode to the SAME Ed25519 point and must count as
+        # ONE signer, or a single keyholder could assemble a costume "multi-signer" quorum. verify_enrollment
+        # already ran load_public_key (canonical/non-weak), so this decode cannot raise on an admitted key.
+        pub_bytes = load_public_key(ak.public_key_b64).public_bytes_raw()
+        if pub_bytes in seen_pubs:
             raise ValueError("duplicate signer PUBLIC key in the enrolment set (would collapse the quorum)")
         seen_ids.add(ak.key_id)
-        seen_pubs.add(ak.public_key_b64)
+        seen_pubs.add(pub_bytes)
         authorizers.append(ak)
     ids = [a.key_id for a in authorizers]
     if owner_id not in ids:

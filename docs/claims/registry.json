@@ -743,7 +743,7 @@
     {
       "id": "W9-5",
       "title": "Production posture requires a multi-signer destruction quorum (refuses 1-of-1)",
-      "claim": "the destruction authorization path REQUIRES a genuine multi-signer quorum and refuses a 1-of-1 (or pubkey-collapsed) authority, fail-closed",
+      "claim": "the destruction authorization path REQUIRES a genuine multi-signer quorum and refuses a 1-of-1 (or pubkey-collapsed) authority, fail-closed, where distinct signers are counted by their DECODED 32-byte Ed25519 key (not the base64 string) and non-canonical base64 encodings are rejected at the crypto core",
       "source": "docs/decisions/W9-5-cosigner-provisioning-multisigner-default.md:24",
       "enforced_by": {
         "file": "integration/vigil_integration/destruction_gate.py",
@@ -755,7 +755,9 @@
           "test_production_refuses_all_on_one_box_generate_authority",
           "test_production_refuses_building_a_1of1_authority",
           "test_production_accepts_a_genuine_multisigner_authority",
-          "test_forged_pubkey_without_a_valid_pop_is_refused"
+          "test_forged_pubkey_without_a_valid_pop_is_refused",
+          "test_encoding_variant_of_one_key_is_refused_everywhere",
+          "test_assemble_refuses_collapsed_or_threshold1_under_production"
         ]
       },
       "ci_job": "integration two-env boundary (P5)",

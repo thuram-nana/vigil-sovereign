@@ -37,6 +37,16 @@ def _b64decode_exact(value: str, expected_len: int, what: str) -> bytes:
         raise IntegrityError(f"{what} is not valid base64: {e}") from e
     if len(raw) != expected_len:
         raise IntegrityError(f"{what} decodes to {len(raw)} bytes, expected {expected_len}")
+    # Reject NON-CANONICAL base64 at the source. `validate=True` checks only the alphabet, not the trailing
+    # PAD bits, so one raw key/signature has several distinct base64 STRING encodings that all decode to the
+    # SAME bytes (a 32-byte key admits up to 4). Left unchecked, a single keyholder can enrol ONE key under
+    # several key_ids using different encodings and defeat any dedup that compares base64 strings, collapsing
+    # an m-of-n quorum to one holder. Canonicalise here: re-encode the decoded bytes and require the input to
+    # be EXACTLY the canonical form (base64.b64encode always zeroes the pad bits), so every alternate encoding
+    # is refused fail-closed. Legitimate material is always produced by base64.b64encode (canonical), so this
+    # rejects no honest caller.
+    if base64.b64encode(raw).decode("ascii") != value:
+        raise IntegrityError(f"{what} is not canonically base64-encoded (non-canonical pad bits)")
     return raw
 
 

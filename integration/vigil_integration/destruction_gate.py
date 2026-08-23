@@ -11,10 +11,14 @@ OWNER among them. The plan's shape (§6): offense-worker key + owner YubiKey/HSM
 Five properties, all fail-closed (first failure wins; any error or malformed input is a DENY):
 
   1. **m-of-n threshold** — admitted only if a quorum of DISTINCT trusted authorizers signed it
-     (``vigil_core.verify_threshold``; low-order keys and duplicate key_ids barred at the crypto core.
-     NOTE: distinct key_ids sharing one pubkey are NOT deduped there — see vigil_core.models.TrustRoot —
-     but the destruction ``authority`` trust root is immutable deployment config, never request data, so a
-     quorum-collapsing duplicate pubkey cannot be attacker-injected here).
+     (``vigil_core.verify_threshold``; low-order keys and duplicate key_ids barred at the crypto core, and
+     — W9-5 — non-canonical base64 rejected at the decode primitive so one raw key cannot masquerade as
+     several encodings). NOTE: ``verify_threshold`` still counts by key_id (distinct key_ids sharing one
+     pubkey are NOT deduped there — see vigil_core.models.TrustRoot, whose semantics the witness subsystem
+     relies on). The destruction ``authority`` trust root is immutable deployment config, never request data;
+     and under the production posture a pubkey-collapsed roster is refused at CONSTRUCTION and at ASSEMBLE by
+     ``production_multisigner_reason``, which dedups signer keys by their DECODED 32-byte value (not the base64
+     string), so a quorum-collapsing duplicate pubkey can neither be attacker-injected nor slip past here.
      This delivers the RFC-9591 *m-of-n authorization* security property; true FROST single-signature
      aggregation is a size/verification refinement that does NOT change the property, deferred like
      the I2 OpenTimestamps anchor.
@@ -74,6 +78,10 @@ from vigil_core import (
 # refuse-to-start gate (W9-4) or the running server (W10-7).
 from vigil_core.posture import is_production_posture
 
+# W9-5 BLOCK-1 fix: dedup/count DISTINCT signer keys by the DECODED 32-byte Ed25519 point (not the
+# malleable base64 STRING). load_public_key canonicalizes and rejects non-canonical/low-order keys.
+from vigil_core.crypto import load_public_key
+
 # The durable, ATOMIC single-use ledger (stdlib-only; import-clean — no framework/strix). Its ``O_EXCL``
 # marker create is the serialization point that turns the pure single-use CHECK into an atomic
 # check-and-consume in :func:`consume_authorization`.
@@ -91,12 +99,17 @@ _GATED_CLASSES = frozenset({DESTRUCTIVE, HIGH_BLAST})
 
 # W9-5 — the PRODUCTION posture makes MULTI-SIGNER the default and refuses an under-provisioned quorum.
 # "Genuine multi-signer" means (a) threshold >= PRODUCTION_MIN_THRESHOLD AND (b) at least `threshold`
-# DISTINCT signer PUBLIC keys — so the quorum can never be satisfied by ONE keyholder. This bars two
-# collapse modes: the 1-of-1 solo authority, and a duplicate-pubkey roster (verify_threshold dedups by
-# key_id, NOT by pubkey — see vigil_core.models.TrustRoot — so N distinct key_ids sharing one pubkey would
-# otherwise let a single private-key holder meet the threshold). Enforced fail-closed at BOTH the immutable
-# construction of a DestructionAuthority AND at the decision (authorize_destruction), so an under-provisioned
-# quorum can neither be LOADED nor ADJUDICATED once VIGIL_POSTURE selects production.
+# DISTINCT signer PUBLIC keys — so the quorum can never be satisfied by ONE keyholder. Distinctness is judged
+# by the DECODED, canonicalized 32-byte Ed25519 point (via load_public_key.public_bytes_raw()), NOT the base64
+# STRING: one raw key has up to 4 base64 encodings (malleable trailing pad bits), so a string comparison would
+# count one keyholder's single key as several "distinct" signers. This bars two collapse modes: the 1-of-1
+# solo authority, and a pubkey-collapsed roster (N distinct key_ids that decode to the SAME key — which
+# verify_threshold, counting by key_id per the witness subsystem's semantics, would otherwise let a single
+# private-key holder satisfy). Defense in depth: the decode primitive (_b64decode_exact) additionally rejects
+# non-canonical base64 outright, so the alternate-encoding form of a key cannot even enter a roster. Enforced
+# fail-closed at BOTH the immutable construction of a DestructionAuthority AND at the decision
+# (authorize_destruction) AND at assemble_authority, so a collapsed quorum can neither be ASSEMBLED, LOADED,
+# nor ADJUDICATED once VIGIL_POSTURE selects production.
 PRODUCTION_MIN_THRESHOLD = 2
 
 
@@ -107,8 +120,13 @@ def production_multisigner_reason(trust_root: TrustRoot) -> str:
     Fail-closed: an unreadable/introspection-hostile trust root is NOT a valid production quorum."""
     try:
         threshold = int(trust_root.threshold)
-        pubkeys = {a.public_key_b64 for a in trust_root.authorizers}
-    except Exception:  # noqa: BLE001 — an unreadable trust root is never a valid production quorum
+        # Count DISTINCT signer keys by the DECODED, canonicalized 32-byte Ed25519 point — NOT the base64
+        # STRING. One raw key has up to 4 base64 encodings (trailing pad bits are malleable, all decode to the
+        # same bytes), so a set of STRINGS would count ONE keyholder's single key as several "distinct" signers
+        # and let it collapse an m-of-n to itself. load_public_key canonicalizes and rejects non-canonical /
+        # low-order / malformed keys, so a poisoned authorizer key makes the whole trust root fail closed here.
+        pubkeys = {load_public_key(a.public_key_b64).public_bytes_raw() for a in trust_root.authorizers}
+    except Exception:  # noqa: BLE001 — an unreadable/poisoned trust root is never a valid production quorum
         return "trust root is unreadable — not a valid production multi-signer quorum"
     if threshold < PRODUCTION_MIN_THRESHOLD:
         return (f"production posture requires a multi-signer quorum (threshold >= {PRODUCTION_MIN_THRESHOLD}); "

@@ -24,12 +24,18 @@ holes that made its "quorum" a costume:
 <!-- CLAIM:W9-5 -->
 **Registered claim (W0-3 #398, id `W9-5`):** Under the production posture (`VIGIL_POSTURE=production`/`prod`,
 the one shared parse in `vigil_core.posture`) the destruction authorization path REQUIRES a genuine
-multi-signer quorum and refuses a 1-of-1 (or pubkey-collapsed) authority, fail-closed, at BOTH the immutable
-construction of a `DestructionAuthority` AND the authorization decision (`authorize_destruction`); with the
-posture unset the behaviour is byte-identical to before (a solo authority is still allowed — the change is
-strictly additive). "Genuine multi-signer" means threshold >= 2 AND at least `threshold` DISTINCT signer
-public keys, so neither a solo authority nor a duplicate-pubkey roster (which `verify_threshold` would count
-by key_id, not by pubkey) can satisfy the quorum with one keyholder.
+multi-signer quorum and refuses a 1-of-1 (or pubkey-collapsed) authority, fail-closed, where distinct signers
+are counted by their DECODED 32-byte Ed25519 key (not the base64 string) and non-canonical base64 encodings are
+rejected at the crypto core, at BOTH the immutable construction of a `DestructionAuthority` AND the
+authorization decision (`authorize_destruction`); with the posture unset the behaviour is byte-identical to
+before (a solo authority is still allowed — the change is strictly additive). "Genuine multi-signer" means
+threshold >= 2 AND at least `threshold` signers whose DECODED public keys are pairwise distinct, so neither a
+solo authority nor a pubkey-collapsed roster — N key_ids that decode to ONE key, which `verify_threshold`
+counts by key_id — can satisfy the quorum with one keyholder. The decoded-key dedup is what
+`production_multisigner_reason` enforces (at construction and at assemble); the crypto-core canonicalisation
+(`vigil_core.crypto._b64decode_exact`) is the defense-in-depth that stops an alternate encoding entering a
+roster at all. `verify_threshold` itself still counts by key_id (the witness subsystem relies on that), so
+the roster-distinctness invariant is enforced at construction/assemble, never left to `verify_threshold`.
 
 - The predicate is `destruction_gate.production_multisigner_reason(trust_root)` — pure over the trust root
   (it reads no env), returning `""` for a genuine multi-signer quorum or a DENY reason otherwise.
@@ -58,7 +64,9 @@ Provisioning is split into two phases so no co-signer private key ever transits 
   transmitted; only the enrolment request travels.
 - **PHASE 2 — on the MINTING box** (`assemble_authority` / `vigil assemble-destruction`): consume only the
   PUBLIC enrolment requests, VERIFY every proof-of-possession (`verify_enrollment`), refuse duplicate
-  key_ids AND duplicate public keys (quorum collapse), bind the owner as mandatory, and — under the
+  key_ids AND duplicate public keys — compared by their DECODED 32-byte value, so re-encoding one key under a
+  second key_id cannot slip past a base64-string comparison (and the non-canonical encoding is itself rejected
+  by `verify_enrollment`'s `load_public_key`) — (quorum collapse), bind the owner as mandatory, and — under the
   production posture — refuse anything that is not a genuine multi-signer quorum. The returned authority
   carries **no private keys** (`GeneratedAuthority.private_keys == ()`).
 
@@ -117,7 +125,10 @@ provisioning/gate only, no framework/strix/sigil — so it runs in the required 
   both succeed, so `test_production_refuses_all_on_one_box_generate_authority` and
   `test_production_refuses_building_a_1of1_authority` fail there (verified against `origin/main`);
 - **negative controls asserted in the same run**: a forged pubkey with no valid PoP, a tampered PoP, a weak
-  key, a duplicate-pubkey collapse, a mis-mapped enrolment file, and an owner-absent quorum are each refused;
+  key, a duplicate-pubkey collapse, an ENCODING-VARIANT collapse (one key enrolled under two key_ids with two
+  different base64 encodings, each with a valid PoP — refused by `production_multisigner_reason`, by
+  `__post_init__` under production, by `authorize_destruction`, and by `assemble_authority`), a mis-mapped
+  enrolment file, and an owner-absent quorum are each refused;
 - **positive controls (the gate is not a blanket no-op)**: a genuine 2-of-2 authority loads under production,
   the unset-posture 1-of-1 path is unchanged, and an end-to-end per-host detached-signature 2-of-3 quorum
   authorizes a PR through the same `build_destruction_quorum` the live path uses;
