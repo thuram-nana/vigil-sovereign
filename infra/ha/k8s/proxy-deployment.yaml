@@ -59,6 +59,25 @@ spec:
             # offense api would use, wherever the operator runs it.
             - name: CRUCIBLE_API_KEY
               valueFrom: { secretKeyRef: { name: vigil-secrets, key: crucible-api-key } }
+            # W8-6 (#472) — ENCRYPT THE PROXY->COCKPIT HOP. The `--sovereign-addr vigil-sovereign:8733`
+            # hop above crosses the pod network; the NetworkPolicy bounds WHO connects, not confidentiality.
+            # The proxy is a TLS client for the hop: verify the cockpit's cert (VIGIL_HOP_CA), and present a
+            # client cert for mutual TLS (the VIGIL_HOP_CLIENT_CERT/KEY pair). Under VIGIL_POSTURE=production
+            # the proxy REFUSES TO START with a plaintext hop to this remote cockpit (fail-closed).
+            #
+            # RESIDUAL, operator-provided: (a) the CA/cert/key MATERIAL (the `vigil-hop-tls` Secret mounted
+            # below), and (b) a TLS-TERMINATING cockpit — `sigil serve` binds plaintext, so front the
+            # sovereign StatefulSet with a TLS sidecar (or a service-mesh mTLS) that presents a cert whose
+            # SAN is `vigil-sovereign`. Left COMMENTED so the manifest applies before that material exists;
+            # uncomment (with the Secret + the volume mount below) to turn the hop on. Set VIGIL_POSTURE
+            # too, and the plaintext hop becomes a refuse-to-start rather than a silent cleartext leak.
+            # - { name: VIGIL_POSTURE,          value: "production" }
+            # - { name: VIGIL_HOP_TLS,          value: "require" }
+            # - { name: VIGIL_HOP_CA,           value: "/etc/vigil/hop-tls/ca.pem" }
+            # - { name: VIGIL_HOP_CLIENT_CERT,  value: "/etc/vigil/hop-tls/client-cert.pem" }
+            # - { name: VIGIL_HOP_CLIENT_KEY,   value: "/etc/vigil/hop-tls/client-key.pem" }
+          # volumeMounts:                       # uncomment together with the env + volume + Secret above
+          #   - { name: hop-tls, mountPath: /etc/vigil/hop-tls, readOnly: true }
           ports:
             - { name: http, containerPort: 8770 }
           # W6-2 (#453): readiness = /readyz, which LIVE-probes this replica's real dependency — the
@@ -80,6 +99,13 @@ spec:
           resources:
             requests: { cpu: "100m", memory: "256Mi" }
             limits:   { cpu: "1",    memory: "1Gi" }
+      # W8-6 (#472): the hop-TLS cert material as a read-only projected Secret. Uncomment together with the
+      # env + volumeMounts above and create the Secret, e.g.:
+      #   kubectl create secret generic vigil-hop-tls \
+      #     --from-file=ca.pem --from-file=client-cert.pem --from-file=client-key.pem
+      # volumes:
+      #   - name: hop-tls
+      #     secret: { secretName: vigil-hop-tls, defaultMode: 0400 }
 ---
 # Optional: an HPA can scale the stateless proxy tier on CPU. (The StatefulSet writer
 # is deliberately NOT autoscaled — it is single-writer by design.)

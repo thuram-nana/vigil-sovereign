@@ -116,9 +116,12 @@ _UP_ALLOWED_STDLIB = {
     # `secrets` is on this list for the S1 offense per-action RBAC: `secrets.token_urlsafe` mints the
     # per-`vigil up` VIGIL_CONSOLE_HOP_KEY (distinct from the session token) that the proxy uses to HMAC-stamp
     # the offense hop's role assertion. A stdlib CSPRNG primitive, not a dependency — crosses no env boundary.
+    # `ssl` is on this list for W8-6 (#472): the proxy→cockpit hop TLS client (HTTPSConnection + a
+    # cert-verifying SSLContext). A stdlib module, not a dependency — it crosses no env boundary; it is
+    # exactly the primitive that keeps the hop confidential without pulling in a service mesh.
     "__future__", "base64", "binascii", "hashlib", "hmac", "http", "ipaddress", "json", "os", "re",
-    "secrets", "signal", "socket", "socketserver", "subprocess", "sys", "threading", "time", "pathlib",
-    "queue", "typing", "urllib", "webbrowser", "zlib",
+    "secrets", "signal", "socket", "socketserver", "ssl", "subprocess", "sys", "threading", "time",
+    "pathlib", "queue", "typing", "urllib", "webbrowser", "zlib",
 }
 _BANNED = ("framework", "strix", "sigil")
 
@@ -146,14 +149,17 @@ def _module_imports(src: str) -> tuple[set[str], set[str]]:
 
 # The neutral shared core `vigil_core` is NOT a trust domain (it is neither the offense engine `framework`
 # nor the sovereign `sigil`) — both planes are built on it by design. uiproxy reaches exactly TWO of its
-# modules, each stdlib-only and zero-new-dependency:
-#   * `vigil_core.metrics` (W6-3 #454: the OpenMetrics `/metrics` registry the proxy serves for its own RED
-#     relay counters);
+# modules, each PINNED here and PROVEN below to itself import stdlib only, so "reaches the neutral core"
+# can never silently widen into "reaches a boundary-crossing core module":
+#   * `vigil_core.metrics` (W6-3 #454: the stdlib-only OpenMetrics `/metrics` registry the proxy serves for
+#     its own RED relay counters — a ZERO-new-dependency, stdlib-only core module);
 #   * `vigil_core.logging_setup` (W6-5 #456: the shared logging setup — used here for its
-#     `RotatingLineWriter`, which size-bounds + rotates the `.vigil-live/ui/logs/*.log` child captures).
-# Both are allowed, but PINNED to this set and PROVEN below to import stdlib only, so "reaches the neutral
-# core" can never silently widen into "reaches a boundary-crossing core module".
-_UP_ALLOWED_SHARED_CORE = {"vigil_core.metrics", "vigil_core.logging_setup"}
+#     `RotatingLineWriter`, which size-bounds + rotates the `.vigil-live/ui/logs/*.log` child captures);
+#   * `vigil_core.posture` (W8-6 #472: the ONE namespace-pure, pure-stdlib parse of `VIGIL_POSTURE` that
+#     BOTH planes share. The hop-TLS production fail-closed keys on `is_production_posture`; reusing this
+#     shared parse — rather than re-reading the env inline — is exactly what keeps the "is production armed?"
+#     rule from drifting between the start paths and the running server, per posture.py's own contract).
+_UP_ALLOWED_SHARED_CORE = {"vigil_core.metrics", "vigil_core.logging_setup", "vigil_core.posture"}
 
 
 def _vigil_core_submodules(src: str) -> set[str]:
