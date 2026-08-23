@@ -1,0 +1,251 @@
+{
+  "$schema_note": "VIGIL documented-limitation inventory (W15-1 #393, feeding the W16 burndown). Machine-checked by docs/tests/test_limitation_inventory.py, which runs in the required 'the briefing explains every agent and capability' CI job. JSON, not YAML, on purpose: that job installs only pytest, so PyYAML is unavailable and the guard parses this file with the stdlib json module. Every real-unfinished-code limitation names a code anchor the guard resolves by AST (no import); every re-verified-closed item names an evidence path the guard asserts exists. See docs/limitations/README.md for the schema, the LIMIT:<id> marker convention, and the twelve re-verified-closed items listed by name so nobody re-works them.",
+  "inventory_version": 1,
+  "classes": {
+    "doc-only": "The limitation is a property of the world (hardware absent, no external audit team, a record that can only accrue in the field), not unfinished code. There is nothing to build; the honest state is documented and must not be worded as completeness.",
+    "real-unfinished-code": "A capability whose software layer is present but deliberately incomplete: a stub that raises, an interface with no runtime, or a path gated on infra/credentials/tooling that is absent here. The anchor names the symbol that carries the honest limit."
+  },
+  "severities": {
+    "critical": "Would block a third-party (national-agency) deployment or is a security/safety defect.",
+    "high": "Materially limits a deployment; a deploying institution must plan around it.",
+    "medium": "A real gap a careful operator will hit, with a documented fallback.",
+    "low": "A narrow residual with a working default path; defense-in-depth or quality, not safety.",
+    "info": "A deliberate, correctly-deferred boundary (hardware/research/external-team). Not debt to burn down; recorded so it is never overclaimed."
+  },
+  "dispositions": {
+    "file-into-w16": "An open limitation to be tracked as an issue in the W16 milestone (DECLARED-LIMITATION BURNDOWN). w16_issue carries the issue number once filed, or null while filing is pending owner review.",
+    "re-verified-closed": "Named on an older audit list but re-verified against the current tree as already done. Listed here by name, with the evidence, so no one re-works it."
+  },
+  "re_verified_closed": [
+    {
+      "id": "RVC-governance-grant-replay",
+      "name": "Signed governance grants are replayable (promotion + capability latches)",
+      "summary": "The anti-replay pattern was present in one governor file and absent from its two siblings, so a revoked grant was replay-resurrectable. Re-verified closed: the replay guard is now enforced and pinned by a test.",
+      "evidence": "apps/sigil/tests/test_governance_replay_guard.py"
+    },
+    {
+      "id": "RVC-offense-backup-restore",
+      "name": "No backup or restore for offense-side state",
+      "summary": "There was no backup/restore path for any offense-side state. Re-verified closed: off-host backup and unit-scoped restore ship as vigil backup / vigil restore.",
+      "evidence": "integration/vigil_integration/backup.py"
+    },
+    {
+      "id": "RVC-use-library-ui-scan",
+      "name": "A UI-launched scan silently skipped ~93% of the check corpus",
+      "summary": "console.actions.launch_scan did not honour use_library, so a UI scan ran only the 11 default checks, not the ~172-check declarative library. Re-verified closed: it now passes use_library and appends --library.",
+      "evidence": "docs/decisions/W16-4-default-check-corpus.md"
+    },
+    {
+      "id": "RVC-crash-resume",
+      "name": "Engagement crash/restart resume",
+      "summary": "Re-verified closed: the live engine resumes from a signed checkpoint after a crash/restart, pinned by an in-process resume test and the crash-restart release-gate test.",
+      "evidence": "integration/tests/test_engine_resume.py"
+    },
+    {
+      "id": "RVC-k8s-rbac-livefire",
+      "name": "Kubernetes RBAC exploitation had no live-fire proof",
+      "summary": "Re-verified closed: the two K8s RBAC branches are adjudicated over bytes a real k3s API server produced by a harness VIGIL stands up, owns, and destroys.",
+      "evidence": "tools/livefire/k8s_rbac_livefire.py"
+    },
+    {
+      "id": "RVC-console-credential-gate",
+      "name": "The console/legacy-owner-token credential surface",
+      "summary": "Re-verified closed: the legacy owner token is gated for PRODUCTION posture and the UI proxy enforces per-user authentication.",
+      "evidence": "integration/tests/test_uiproxy_peruser_auth.py"
+    },
+    {
+      "id": "RVC-per-action-approval-token",
+      "name": "Signed per-action approval token",
+      "summary": "Re-verified closed: the signed per-action approval token and broker ship and are wired to vigil approve provision-authority|list|sign, despite an older doc marking it absent.",
+      "evidence": "integration/vigil_integration/live/approval_token.py"
+    },
+    {
+      "id": "RVC-sandbox-exec-wiring",
+      "name": "execute_sandbox / vigil sandbox wiring",
+      "summary": "Re-verified closed: the sandboxed executor and its vigil sandbox verb are wired and tested.",
+      "evidence": "integration/tests/test_executor_sandbox.py"
+    },
+    {
+      "id": "RVC-neo4j-client-body",
+      "name": "Neo4jGraphStore is only a scaffold",
+      "summary": "Re-verified closed: Neo4jGraphStore is a real, reviewable client body behind the same interface (its live construction is deploy-gated on the neo4j driver, which is a separate, honestly-recorded residual).",
+      "evidence": "engine/crucible/framework/v2/graph/store.py"
+    },
+    {
+      "id": "RVC-k8s-workload-oracle-wired",
+      "name": "k8s_workload_posture_oracle is not wired into the verifier",
+      "summary": "Re-verified closed: the oracle is wired into the verifier run path (gated on k8s_workload_control in the context); the doc claiming it unwired was the defect.",
+      "evidence": "engine/crucible/framework/v2/verify/verifier.py"
+    },
+    {
+      "id": "RVC-warden-strix-fail-closed",
+      "name": "The WARDEN gate on Strix's shell",
+      "summary": "Re-verified closed: the WARDEN gate on Strix's tool/shell surface is fail-closed (an unknown/unclassified tool is denied, not auto-run).",
+      "evidence": "integration/vigil_integration/warden_gate.py"
+    },
+    {
+      "id": "RVC-console-orphan-routes",
+      "name": "Console orphan routes",
+      "summary": "Re-verified closed: the orphan-route class was paid down (B7/A6) and is now guarded by the W17-14 orphan-route guard, so a new orphan route turns CI red.",
+      "evidence": "engine/crucible/framework/v2/console/tests/test_orphan_route_guard_w17_14.py"
+    }
+  ],
+  "limitations": [
+    {
+      "id": "LIMIT-attest-tee-hardware",
+      "title": "Hardware-backed (TEE) attestation is a hardware-gated stub",
+      "summary": "SEV-SNP / TDX attestation providers exist behind the AttestationProvider interface but every method fails closed with NotImplementedError. The SoftwareAttestationProvider proves integrity + origin, never hardware confidentiality; hardware_backed is always False on that path.",
+      "classification": "real-unfinished-code",
+      "severity": "info",
+      "anchor": {"file": "engine/crucible/framework/v2/attest/provider.py", "symbol": "_HardwareGatedProvider.attest"},
+      "marker": true,
+      "check": "stub-raises",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-symbolic-crash-repair",
+      "title": "General automated native-patch synthesis (cyber-reasoning system) is not built",
+      "summary": "SymbolicCrashRepairTier is a full stub behind the BinaryPatchTier interface; SanitizerSilenceTier proves a fix by oracle silence but its output-based synthesize_patch also raises. The narrow strcpy->strncpy source synthesiser is real; an unrecognised class fabricates no patch.",
+      "classification": "real-unfinished-code",
+      "severity": "info",
+      "anchor": {"file": "engine/crucible/framework/v2/remediation_binary/tier.py", "symbol": "SymbolicCrashRepairTier.synthesize_patch"},
+      "marker": true,
+      "check": "stub-raises",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-sanitizer-output-synthesis",
+      "title": "Output-based sanitizer patch synthesis is not built",
+      "summary": "SanitizerSilenceTier.synthesize_patch (the output-based synthesis interface) raises NotImplementedError; the tier's value is proving a fix by oracle silence, not generating it.",
+      "classification": "real-unfinished-code",
+      "severity": "info",
+      "anchor": {"file": "engine/crucible/framework/v2/remediation_binary/tier.py", "symbol": "SanitizerSilenceTier.synthesize_patch"},
+      "marker": true,
+      "check": "stub-raises",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-neo4j-deploy-gated",
+      "title": "The Neo4j graph store's live construction is deploy-gated",
+      "summary": "Neo4jGraphStore is a real client body, but constructing a LIVE store with no injected driver raises NotImplementedError until the neo4j driver package and a running service are provisioned. EmbeddedGraphStore is the working default.",
+      "classification": "real-unfinished-code",
+      "severity": "low",
+      "anchor": {"file": "engine/crucible/framework/v2/graph/store.py", "symbol": "Neo4jGraphStore.__init__"},
+      "marker": true,
+      "check": "stub-raises",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-agent-body-scaffold",
+      "title": "The pluggable next-gen agent-body is an interface-only scaffold",
+      "summary": "AgentBody formalises the think->propose->gate->execute->learn contract (gate-before-execute is structural) but wires no new runtime. The production Strix-based body is one implementation; a next-gen body is not built.",
+      "classification": "real-unfinished-code",
+      "severity": "info",
+      "anchor": {"file": "engine/crucible/framework/v2/agent_body/interface.py", "symbol": "AgentBody"},
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-llm-redteam-tools-deferred",
+      "title": "LLM red-team tool live-fire (garak / PyRIT / promptfoo) is tooling-gated",
+      "summary": "The external-tool runner is tool-agnostic and live-proven with nmap, but garak/PyRIT/promptfoo are absent from this environment, so their live-fire is deferred and no garak/PyRIT/promptfoo FACT is minted. A new ToolSpec (+ oracle mapping for a non-reachability signal) is all a new tool needs.",
+      "classification": "real-unfinished-code",
+      "severity": "medium",
+      "anchor": {"file": "integration/vigil_integration/live/external_tool.py", "symbol": "run_external_tool"},
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-cloud-exploit-fixture-proven",
+      "title": "Cloud exploitation branches (E1/E2/E3/E5) are fixture-proven, not live-fired",
+      "summary": "The IMDS-capture, IAM-escalation, GCP SA-impersonation and secret-validity branches are proven offline over fixtures; no live cloud FACT has been claimed and none exists in the evidence store. Each branch's limitation string in the evidence-branches registry governs admission, so the deferral is enforced, not merely described. Activation needs an operator-provisioned throwaway lab credential.",
+      "classification": "real-unfinished-code",
+      "severity": "medium",
+      "anchor": {"file": "docs/capability-matrix/evidence-branches.json"},
+      "marker": false,
+      "check": "doc-exists",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-audit-package-reproduction",
+      "title": "The offline audit package proves authenticity/binding/integrity, not oracle re-derivation",
+      "summary": "verify_offline.py re-verifies authenticity + binding + integrity + chain with no VIGIL runtime, but does not re-fire the oracle to re-derive each verdict (that is Step 2, which needs the oracle's code). After Step 1 you still trust the signer's honesty about each verdict until Step 2 removes it.",
+      "classification": "real-unfinished-code",
+      "severity": "low",
+      "anchor": {"file": "engine/crucible/framework/v2/evidence/audit_package.py", "symbol": "build_audit_package"},
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-evidence-empty-engagement-slug",
+      "title": "single_engagement guard discards an empty engagement_slug",
+      "summary": "A certificate with an empty engagement_slug can ride a named-engagement bundle without tripping the cross-engagement guard. Defense-in-depth only; it still requires a governance-signed head over the mixed chain. Deferred so uniform legacy empty-slug bundles under a named head keep verifying.",
+      "classification": "real-unfinished-code",
+      "severity": "low",
+      "anchor": {"file": "engine/crucible/framework/v2/evidence/certify.py"},
+      "marker": false,
+      "check": "file-exists",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-evidence-producer-refs-unique",
+      "title": "The evidence producer does not yet guarantee unique finding_refs",
+      "summary": "The verifier refuses a bundle with duplicate finding_refs (closing a context-lookup collision), but the producer can still fall back to bug_class, so a legitimately-minted bundle with two same-class findings would be refused (fail-closed). Follow-up: key/emit unique refs at the producer.",
+      "classification": "real-unfinished-code",
+      "severity": "low",
+      "anchor": {"file": "integration/vigil_integration/proof/bundle.py"},
+      "marker": false,
+      "check": "file-exists",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-field-record-accrual",
+      "title": "The field record accrues only over real authorized engagements",
+      "summary": "Deterministic-scanner recall is MEASURED (M1) on a planted loopback corpus; a genuine field record of finding real bugs on diverse authorized real targets is not manufacturable in a lab and this repo does not claim one exists. State the planted-corpus number and any field record separately; never word an accruing record as completeness.",
+      "classification": "doc-only",
+      "severity": "info",
+      "anchor": {"file": "docs/H3-FIELD-RECORD-RUNBOOK.md"},
+      "marker": false,
+      "check": "doc-exists",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-external-audit-team",
+      "title": "The independent third-party audit needs an external team",
+      "summary": "VIGIL prepares a reproducible, offline-verifiable audit package, but it cannot BE the independent third party. That conclusion is the external auditor's to write; it is a property of the world, not unfinished code.",
+      "classification": "doc-only",
+      "severity": "info",
+      "anchor": {"file": "docs/DEFERRED-INFRA.md"},
+      "marker": false,
+      "check": "doc-exists",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    }
+  ]
+}

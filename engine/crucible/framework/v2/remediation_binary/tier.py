@@ -94,6 +94,9 @@ class SanitizerSilenceTier(BinaryPatchTier):
         return bool(before.fired) and not bool(after.fired)
 
     def synthesize_patch(self, crash: CapturedCrash) -> BinaryPatch:  # pragma: no cover - stub
+        # VIGIL-LIMIT:LIMIT-sanitizer-output-synthesis — honest limit registered in
+        # docs/limitations/inventory.json (W15-1 #393): output-based sanitizer patch synthesis is not
+        # built; this tier proves a fix by oracle silence, it does not generate one.
         raise NotImplementedError(
             "research-gated: automated native patch synthesis (symbolic execution / cyber-reasoning "
             "system) is not built. This tier PROVES a fix by oracle silence but does not generate it — "
@@ -105,6 +108,9 @@ class SymbolicCrashRepairTier(BinaryPatchTier):
     """[research-gated] The full cyber-reasoning system behind the SAME interface — every method is a
     stub. This is the ROADMAP target: taproot the faulting input, drive symbolic execution to localise
     the memory-safety violation, synthesise + validate a patch, then confirm the fix by oracle silence.
+
+    VIGIL-LIMIT:LIMIT-symbolic-crash-repair — honest limit registered in docs/limitations/inventory.json
+    (W15-1 #393): general automated native-patch synthesis (a cyber-reasoning system) is not built.
 
     ACTIVATION RUNBOOK (docs/DEFERRED-INFRA.md → X2):
       1. Integrate a symbolic/concolic engine (e.g. angr) + a fuzzer harness for the target binary.

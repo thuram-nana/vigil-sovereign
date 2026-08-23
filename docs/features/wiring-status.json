@@ -1,0 +1,659 @@
+{
+  "$schema_note": "VIGIL feature-wiring completeness audit (W15-2 #394, feeding the W17 milestone). Machine-checked by docs/tests/test_feature_wiring_status.py, which runs in the required 'the briefing explains every agent and capability' CI job. JSON, not YAML, on purpose: that job installs only pytest. Every feature carries a machine-readable wiring status; the guard verifies each status against the code and extends the system-map drift invariant with a COVERAGE check over the enumerable CLI surface (native verbs == sub.add_parser set; passthrough verbs == the dispatch _ENV table), so no verb can be silently added, removed, or mis-declared. See docs/features/wiring-status.md.",
+  "audit_version": 1,
+  "statuses": {
+    "LIVE": "Shipped and unconditionally invokable; produces its effect on the default path.",
+    "OPT-IN": "Shipped but off by default; the operator turns it on explicitly.",
+    "GATED": "Shipped but its effect is behind an authorization/approval/quorum gate or is deploy-gated on infra.",
+    "BUILT-NOT-WIRED": "The symbol exists (interface/stub/scaffold) but no runtime reaches it; a stub raises NotImplementedError or a scaffold is an abstract interface only.",
+    "ORPHANED": "A registered surface (e.g. a console read route) that nothing consumes; detection is enforced by the W17-14 orphan-route guard. No feature is ORPHANED today."
+  },
+  "features": [
+    {
+      "id": "agent_body.pluggable",
+      "name": "Pluggable next-gen agent body",
+      "surface": "deferred-infra",
+      "status": "BUILT-NOT-WIRED",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/agent_body/interface.py",
+        "symbol": "AgentBody"
+      },
+      "check": "scaffold-abc",
+      "rationale": "An ABC interface only (think->propose->gate->execute->learn); the Strix-based body is the one shipping implementation, no next-gen body is wired."
+    },
+    {
+      "id": "attest.tee",
+      "name": "Hardware-backed (TEE) attestation",
+      "surface": "deferred-infra",
+      "status": "BUILT-NOT-WIRED",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/attest/provider.py",
+        "symbol": "_HardwareGatedProvider.attest"
+      },
+      "check": "stub-raises",
+      "rationale": "SEV-SNP/TDX providers exist behind the interface but every method raises NotImplementedError until the silicon lands; SoftwareAttestationProvider is the working default (integrity+origin, not hardware confidentiality)."
+    },
+    {
+      "id": "cli.alerts",
+      "name": "vigil alerts",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "alerts",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_alerts"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.approve",
+      "name": "vigil approve",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "approve",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_approve_sign"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Manages the signed per-action approval token (provision-authority|list|sign) — owner-gated."
+    },
+    {
+      "id": "cli.assemble-destruction",
+      "name": "vigil assemble-destruction",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "assemble-destruction",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_assemble_destruction"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Assembles the destruction request payload for signing."
+    },
+    {
+      "id": "cli.authorize-destruction",
+      "name": "vigil authorize-destruction",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "authorize-destruction",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_authorize_destruction"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Owner authorization leg of the m-of-n destruction quorum."
+    },
+    {
+      "id": "cli.backup",
+      "name": "vigil backup",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "backup",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_backup"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.combine-destruction",
+      "name": "vigil combine-destruction",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "combine-destruction",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_combine_destruction"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Combines m-of-n signatures into an executable destruction grant."
+    },
+    {
+      "id": "cli.detect",
+      "name": "vigil detect",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "detect",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_detect"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.doctor",
+      "name": "vigil doctor",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "doctor",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_doctor"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.dossier",
+      "name": "vigil dossier",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "dossier",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_dossier"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.down",
+      "name": "vigil down",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "down",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_down"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.emergency-stop",
+      "name": "vigil emergency-stop",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "emergency-stop",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_emergency_stop"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.engage",
+      "name": "vigil engage",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "engage",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_engage"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Runs the OODA engagement loop; offense actions pass the conjunctive gate and need --approve-offense (the human leg)."
+    },
+    {
+      "id": "cli.engage-instruct",
+      "name": "vigil engage-instruct",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "engage-instruct",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_engage_instruct"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.enroll-cosigner",
+      "name": "vigil enroll-cosigner",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "enroll-cosigner",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_enroll_cosigner"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Enrolls a cosigner into the multi-signer destruction set."
+    },
+    {
+      "id": "cli.floor",
+      "name": "vigil floor",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "floor",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_floor_witness"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.identity",
+      "name": "vigil identity",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "identity",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_identity"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.knowledge",
+      "name": "vigil knowledge",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "knowledge",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_knowledge"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.learn-drain",
+      "name": "vigil learn-drain",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "learn-drain",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_learn_drain"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.ledger",
+      "name": "vigil ledger",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "ledger",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_ledger"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.panic",
+      "name": "vigil panic",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "panic",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_panic"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.patch",
+      "name": "vigil patch",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "patch",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_patch"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Applies a code fix over a provenance-grounded finding through the gated executor."
+    },
+    {
+      "id": "cli.posture",
+      "name": "vigil posture",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "posture",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_posture"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.proof-export",
+      "name": "vigil proof-export",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "proof-export",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_proof_export"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.provision",
+      "name": "vigil provision",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "provision",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_provision"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.provision-destruction",
+      "name": "vigil provision-destruction",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "provision-destruction",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_provision_destruction"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Mints a DestructionAuthority; destructive actions require m-of-n quorum."
+    },
+    {
+      "id": "cli.remediate",
+      "name": "vigil remediate",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "remediate",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_remediate"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Drives the remediation ladder; the oracle stays the sole authority for 'fixed'."
+    },
+    {
+      "id": "cli.reprove",
+      "name": "vigil reprove",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "reprove",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_reprove"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.request-destruction",
+      "name": "vigil request-destruction",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "request-destruction",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_request_destruction"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Requests a destructive action bound to the authority (single-use nonce)."
+    },
+    {
+      "id": "cli.restore",
+      "name": "vigil restore",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "restore",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_restore"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.sandbox",
+      "name": "vigil sandbox",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "sandbox",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_sandbox"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Runs a command in the sandboxed executor (net-namespace unshared)."
+    },
+    {
+      "id": "cli.services",
+      "name": "vigil services",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "services",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_services"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.sign-destruction",
+      "name": "vigil sign-destruction",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "sign-destruction",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_sign_destruction"
+      },
+      "check": "cli-native-verb",
+      "rationale": "A cosigner's signature on a destruction request (threshold)."
+    },
+    {
+      "id": "cli.subsystem.aegis",
+      "name": "vigil aegis",
+      "surface": "cli-passthrough",
+      "status": "LIVE",
+      "verb": "aegis",
+      "anchor": {
+        "file": "integration/vigil_integration/dispatch.py",
+        "symbol": "_ENV"
+      },
+      "check": "cli-passthrough-verb",
+      "rationale": "Forwarded opaquely to the defensive dual (detect/gateway/demo), run in .venv-offense; routing is a hardcoded verb->environment table."
+    },
+    {
+      "id": "cli.subsystem.crucible",
+      "name": "vigil crucible",
+      "surface": "cli-passthrough",
+      "status": "LIVE",
+      "verb": "crucible",
+      "anchor": {
+        "file": "integration/vigil_integration/dispatch.py",
+        "symbol": "_ENV"
+      },
+      "check": "cli-passthrough-verb",
+      "rationale": "Forwarded opaquely to the raw CRUCIBLE offense arsenal, run in .venv-offense; routing is a hardcoded verb->environment table."
+    },
+    {
+      "id": "cli.subsystem.gateway",
+      "name": "vigil gateway",
+      "surface": "cli-passthrough",
+      "status": "LIVE",
+      "verb": "gateway",
+      "anchor": {
+        "file": "integration/vigil_integration/dispatch.py",
+        "symbol": "_ENV"
+      },
+      "check": "cli-passthrough-verb",
+      "rationale": "Forwarded opaquely to the host egress gate, run in .venv-offense; routing is a hardcoded verb->environment table."
+    },
+    {
+      "id": "cli.subsystem.sigil",
+      "name": "vigil sigil",
+      "surface": "cli-passthrough",
+      "status": "LIVE",
+      "verb": "sigil",
+      "anchor": {
+        "file": "integration/vigil_integration/dispatch.py",
+        "symbol": "_ENV"
+      },
+      "check": "cli-passthrough-verb",
+      "rationale": "Forwarded opaquely to the sovereign personal core (holds the owner key), run in .venv-sovereign; routing is a hardcoded verb->environment table."
+    },
+    {
+      "id": "cli.subsystem.strix",
+      "name": "vigil strix",
+      "surface": "cli-passthrough",
+      "status": "LIVE",
+      "verb": "strix",
+      "anchor": {
+        "file": "integration/vigil_integration/dispatch.py",
+        "symbol": "_ENV"
+      },
+      "check": "cli-passthrough-verb",
+      "rationale": "Forwarded opaquely to the agent body, routed through a VIGIL-owned runtime adapter in .venv-offense; routing is a hardcoded verb->environment table."
+    },
+    {
+      "id": "cli.telemetry",
+      "name": "vigil telemetry",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "telemetry",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_telemetry"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.terminal",
+      "name": "vigil terminal",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "terminal",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_terminal"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Governed local terminal behind the WARDEN gate."
+    },
+    {
+      "id": "cli.unit-heartbeat",
+      "name": "vigil unit-heartbeat",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "unit-heartbeat",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_unit_heartbeat"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.up",
+      "name": "vigil up",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "up",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_up"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.upgrade",
+      "name": "vigil upgrade",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "upgrade",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_upgrade"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.verify",
+      "name": "vigil verify",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "verify",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_verify"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.verify-integrity",
+      "name": "vigil verify-integrity",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "verify-integrity",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_verify_integrity"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.verify-ledger",
+      "name": "vigil verify-ledger",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "verify-ledger",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_verify_ledger"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "cli.witness",
+      "name": "vigil witness",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "witness",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_witness"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
+    },
+    {
+      "id": "graph.neo4j",
+      "name": "Neo4j property-graph store (live)",
+      "surface": "deferred-infra",
+      "status": "GATED",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/graph/store.py",
+        "symbol": "Neo4jGraphStore.__init__"
+      },
+      "check": "stub-raises",
+      "rationale": "A real client body whose LIVE construction is deploy-gated on the neo4j driver + a running service; EmbeddedGraphStore is the working default."
+    },
+    {
+      "id": "remediation.symbolic",
+      "name": "General native-patch synthesis (cyber-reasoning system)",
+      "surface": "deferred-infra",
+      "status": "BUILT-NOT-WIRED",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/remediation_binary/tier.py",
+        "symbol": "SymbolicCrashRepairTier.synthesize_patch"
+      },
+      "check": "stub-raises",
+      "rationale": "A full stub behind the BinaryPatchTier interface; the narrow strcpy->strncpy source synthesiser is the only real path."
+    }
+  ]
+}
