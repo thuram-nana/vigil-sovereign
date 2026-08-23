@@ -2064,3 +2064,294 @@ def brain_decision(run_id: "str | None" = None) -> dict[str, Any]:
             break
 
     return {"brain": brain, "proposal": proposal, "doctrine": _BRAIN_DECISION_DOCTRINE}
+
+
+# ---------------------------------------------------------------------------
+# S10 — Strix control state (read-only)
+# ---------------------------------------------------------------------------
+# The UI half of S10: surface the RUNTIME CONTROL STATE of the Strix offensive agent — its VIGIL egress
+# gateway, its sandbox, the pending owner-approval (WARDEN) queue, proof health (the S9 4-way degraded
+# state), the FACT/LEAD/CLEAN/INCONCLUSIVE verdict separation, model locality/residency, resume/recovery,
+# and the kill controls. It is a PURE READER: it composes the state from artifacts and the SAME read-only
+# providers the console already exposes (services_data, approvals, proof_list, list_runs, _killswitch_state).
+# It spawns nothing, mints nothing, and NEVER fabricates a datum — a source that does not exist on this
+# build renders as an honest "unavailable", never a placeholder number. Two runtime facts this reader is
+# careful about (verified in-tree): (1) the VIGIL egress gateway (`vigil-gateway`) is DISTINCT from the
+# AEGIS defense gateway (`aegis_status`) — only the former is surfaced here; (2) there is no VIGIL-side
+# persistent Strix container registry and no docker-stats reader, so live container status and live
+# resource consumption have NO source and are declared unavailable rather than invented.
+
+_STRIX_CONTROL_DOCTRINE = (
+    "Read-only control state. This screen SURFACES what the Strix runtime actually reports; it spawns "
+    "nothing and mints no FACT. Driving a chain / running a tool stays a checkpoint-gated action elsewhere. "
+    "A FACT is minted only when a deterministic VIGIL oracle fires over captured bytes; a Strix finding is "
+    "a LEAD until VIGIL independently re-drives it. Where a runtime source does not exist on this build "
+    "(a persistent container registry, a live per-tool feed, live cpu/mem/pids), the datum is shown as "
+    "UNAVAILABLE — never a fabricated number. A degraded proof subsystem is never read as CLEAN."
+)
+
+# A run is a Strix (agent-driven sandbox) run iff its recorded op type is strix or codebase — the two
+# `run_kind`/`mode` values `actions.launch_assessment` records for the vendored-Strix sandbox path.
+_STRIX_RUN_KINDS = ("strix", "codebase")
+
+
+def _is_strix_run_row(r: dict[str, Any]) -> bool:
+    return str(r.get("run_kind") or r.get("mode") or "") in _STRIX_RUN_KINDS
+
+
+def _strix_gateway_state() -> dict[str, Any]:
+    """The VIGIL EGRESS gateway (`vigil-gateway`) the Strix sandbox is pinned behind — NOT the AEGIS
+    defense gateway. Reads the SAME read-only docker probe the System screen uses (services_data →
+    doctor.collect → SandboxNetworking().status()). A down/absent gateway reads as down; a probe error
+    reads as unknown. Never fabricates."""
+    import os
+
+    svc = _safe(services_data, default={}) or {}
+    ds = svc.get("docker_services") if isinstance(svc, dict) else None
+    gw = ds.get("vigil-gateway") if isinstance(ds, dict) else None
+    pinned = bool((os.environ.get("STRIX_DOCKER_SANDBOX_NETWORK") or "").strip())
+    if not isinstance(gw, dict):
+        return {"available": False, "state": "unknown", "running": False, "sandbox_pinned": pinned,
+                "egress": "UNKNOWN",
+                "note": "The docker/gateway probe is unavailable (docker not installed or not reachable), "
+                        "so gateway liveness cannot be read."}
+    if "error" in gw:
+        return {"available": True, "state": "error", "running": False, "sandbox_pinned": pinned,
+                "egress": "UNKNOWN", "error": str(gw.get("error")),
+                "note": "The gateway probe failed — liveness is unknown (fail-closed: not treated as up)."}
+    state = str(gw.get("state") or "absent")
+    running = state == "running"
+    # Mirror doctor._posture_egress: egress is enforced ONLY if the gateway is running AND the sandbox is
+    # pinned onto the gated network. Anything else is OFF (default route to the LAN/internet/metadata).
+    if running and pinned:
+        egress, egress_note = "ON", "vigil-gateway running and the sandbox is pinned onto the gated net"
+    elif running and not pinned:
+        egress, egress_note = "OFF", ("vigil-gateway is running but STRIX_DOCKER_SANDBOX_NETWORK is unset — "
+                                      "the sandbox is NOT pinned onto the gated net, so egress is not routed")
+    else:
+        egress, egress_note = "OFF", (f"no vigil-gateway container running (state: {state!r}); "
+                                      f"STRIX_DOCKER_SANDBOX_NETWORK {'set' if pinned else 'unset'}")
+    return {"available": True, "state": state, "running": running,
+            "networks": gw.get("networks") or {}, "image": gw.get("image"),
+            "sandbox_pinned": pinned, "egress": egress, "note": egress_note}
+
+
+def _strix_sandbox_state(sel: dict[str, Any] | None) -> dict[str, Any]:
+    """Sandbox / container status. HONEST BOUND: this build persists no VIGIL-side Strix container
+    registry (container id / live status / network are held only in-memory by the vendored session
+    manager and as docker labels), so a queryable container status has NO source. We surface the run's
+    HOST-PROCESS liveness (its supervising pid/status, which IS recorded) and say plainly that the
+    container's own status is not persisted — never a fabricated container id/state."""
+    if not sel:
+        return {"container_status_available": False, "host_process": None,
+                "note": "No Strix run selected. This build does not persist a Strix container registry, so "
+                        "a container's id / live status / network cannot be read here."}
+    status = str(sel.get("status") or "unknown")
+    return {"container_status_available": False,
+            "host_process": {"status": status, "pid": sel.get("pid"), "running": status == "running"},
+            "note": "Container id / live status / network are not persisted by this build (no VIGIL-side "
+                    "container registry). Host-process liveness is shown instead; the sandbox network pin "
+                    "is under Gateway."}
+
+
+def _strix_resource_state() -> dict[str, Any]:
+    """Resource consumption. HONEST BOUND: there is no docker-stats reader anywhere in the tree, so LIVE
+    cpu/memory/pids usage has NO source and is declared unavailable. Only the container's CONFIGURED
+    limits (read from the same env the vendored sandbox reads at create time) are shown — clearly labelled
+    as configured, not live, with an honest 'default' where the env is unset. No fabricated numbers."""
+    import os
+
+    def _cfg(env: str, default_note: str) -> str:
+        v = (os.environ.get(env) or "").strip()
+        return v if v else default_note
+    return {"live_usage_available": False,
+            "note": "Live cpu/memory/pids consumption is not collected on this build (no docker-stats "
+                    "reader exists). Only the container's CONFIGURED limits are shown below.",
+            "configured_limits": {
+                "mem_limit": _cfg("STRIX_SANDBOX_MEM_LIMIT", "unset — docker default (unbounded)"),
+                "cpus": _cfg("STRIX_SANDBOX_CPUS", "unset — docker default (unbounded)"),
+                "pids_limit": _cfg("STRIX_SANDBOX_PIDS_LIMIT", "4096 (built-in default)"),
+                "shm_size": _cfg("STRIX_SANDBOX_SHM_SIZE", "1g (built-in default)"),
+            }}
+
+
+def _strix_verdicts(proof: dict[str, Any], sel: dict[str, Any] | None) -> dict[str, Any]:
+    """The FACT / LEAD / CLEAN / INCONCLUSIVE separation for the selected run, derived from proof_list (the
+    S9-aware provider) with ONE additional soundness gate: a run that did not COMPLETE can never read as
+    CLEAN. FACT/LEAD are counts of oracle-adjudicated proof records; CLEAN is a bool (a checked surface with
+    a sound negative — impossible while degraded, coverage-incomplete, OR the run did not finish);
+    INCONCLUSIVE counts the unassessed surfaces, plus the degraded run, plus a run that never completed.
+    Kept separate so a proposed or unverified Strix finding — or an interrupted run — can never be blurred
+    into a confirmed FACT or an optimistic CLEAN (invariant 12)."""
+    has_run = bool(sel)
+    status = str((sel or {}).get("status") or "")
+    # An in-flight or abnormally-ended run is not a completed assessment: its empty finding set is NOT a
+    # sound negative. Only a 'done' run can carry a CLEAN reading.
+    run_incomplete = has_run and status not in ("done",)
+    facts = int(proof.get("facts") or 0)
+    leads = int(proof.get("leads") or 0)
+    denied = int(proof.get("denied") or 0)
+    degraded = bool(proof.get("verification_degraded"))
+    coverage_incomplete = bool(proof.get("coverage_incomplete"))
+    surfaces = proof.get("inconclusive_surfaces") or []
+    clean = bool(proof.get("clean")) and not run_incomplete
+    inconclusive = len(surfaces) + (1 if degraded else 0) + (1 if run_incomplete else 0)
+    clean_blocked = None
+    if run_incomplete:
+        clean_blocked = f"the run did not complete (status: {status or 'unknown'})"
+    elif degraded:
+        clean_blocked = "the proof subsystem degraded on this run"
+    elif coverage_incomplete:
+        clean_blocked = "a declared surface went unassessed (coverage incomplete)"
+    return {"has_run": has_run, "run_status": status or None, "run_incomplete": run_incomplete,
+            "fact": facts, "lead": leads, "denied": denied,
+            "clean": clean, "clean_blocked_reason": clean_blocked,
+            "inconclusive": inconclusive, "inconclusive_surfaces": surfaces,
+            "verification_degraded": degraded, "disposition": proof.get("disposition"),
+            "degraded_causes": proof.get("degraded_causes") or [],
+            "coverage_incomplete": coverage_incomplete,
+            "total_proofs": int(proof.get("total") or 0)}
+
+
+def _strix_model_locality(run_id: str) -> dict[str, Any]:
+    """Local vs cloud model + data residency for one run, from RECORDED meta only (never inferred beyond
+    the fields the launch path wrote): `model_backend=='local'` or a `strix_llm` loopback pin ⇒ local;
+    otherwise a recorded `model` is a cloud pick; neither ⇒ unknown."""
+    from . import actions
+
+    if not run_id:
+        return {"locality": "unknown", "model": None, "endpoint": None,
+                "residency": "no run selected"}
+    meta = _safe(lambda: actions._read_run_meta(run_id), default=None) or {}
+    backend = str(meta.get("model_backend") or "")
+    strix_llm = str(meta.get("strix_llm") or "")
+    model = str(meta.get("model") or "")
+    if backend == "local" or strix_llm:
+        return {"locality": "local", "model": model or strix_llm or None,
+                "endpoint": strix_llm or None,
+                "residency": "on this host — nothing leaves the machine"}
+    if model:
+        return {"locality": "cloud", "model": model, "endpoint": None,
+                "residency": "sent to a third-party cloud provider (prompts + findings egress)"}
+    return {"locality": "unknown", "model": None, "endpoint": None,
+            "residency": "model locality was not recorded for this run"}
+
+
+def _strix_recovery_state(sel: dict[str, Any] | None) -> dict[str, Any]:
+    """Resume vs restart for the selected run, from its recorded `resumable` flag + status. A resumable
+    run continues from its last signed checkpoint (integration `vigil engage --resume`); anything else
+    restarts. Retry/resume is only meaningful once the run has ended."""
+    if not sel:
+        return {"present": False, "note": "No Strix run selected."}
+    status = str(sel.get("status") or "unknown")
+    resumable = bool(sel.get("resumable"))
+    ended = status in ("error", "interrupted", "cancelled")
+    return {"present": True, "run_id": sel.get("run_id"), "status": status,
+            "resumable": resumable, "action": "resume" if resumable else "restart",
+            "retryable": ended,
+            "interrupted_reason": str(sel.get("interrupted_reason") or ""),
+            "rc": sel.get("rc"),
+            "note": ("A resumable run continues from its last signed checkpoint; a non-resumable run "
+                     "restarts from the beginning." if ended else
+                     "Retry/resume becomes available once the run has ended (error/interrupted/cancelled).")}
+
+
+def _strix_killswitch_state(sel: dict[str, Any] | None) -> dict[str, Any]:
+    """The three DISTINCT stop controls, each honestly scoped:
+      * engagement — the engagement-authority kill-switch (halts the OODA loop within one poll); read via
+        the same fail-closed _killswitch_state the authority screens use.
+      * process_stop — SIGTERM->SIGKILL of the run's HOST pid (the existing, real /api/run/<id>/cancel).
+        It stops the process; it does NOT reap the sandbox container.
+      * container_kill — force-remove the sandbox container. NOT wired into the VIGIL plane on this build
+        (the vendored kill_run exists but has no VIGIL caller; orphans are reaped at the next launch), so
+        it is declared UNAVAILABLE rather than shown as a working control."""
+    slug = str((sel or {}).get("slug") or "")
+    status = str((sel or {}).get("status") or "")
+    eng = _killswitch_state(slug) if slug else {"tripped": None,
+                                                "reason": "no engagement slug recorded for this run"}
+    return {
+        "engagement": {"slug": slug, "tripped": eng.get("tripped"), "reason": eng.get("reason"),
+                       "trip_via": ("/api/killswitch/" + slug + "/trip") if slug else None},
+        "process_stop": {"available": bool(sel and status == "running" and (sel or {}).get("pid") is not None),
+                         "run_id": (sel or {}).get("run_id"),
+                         "cancel_via": ("/api/run/" + str((sel or {}).get("run_id")) + "/cancel") if sel else None,
+                         "note": "Stops the Strix HOST process; it does NOT reap the sandbox container."},
+        "container_kill": {"available": False,
+                           "note": "A container-level kill (force-remove the sandbox container) is not wired "
+                                   "into the VIGIL plane on this build. Orphaned containers are reaped at the "
+                                   "next launch. Use the engagement kill-switch to halt the loop and process "
+                                   "stop to end the run."},
+    }
+
+
+def _strix_run_row(r: dict[str, Any]) -> dict[str, Any]:
+    """A compact Strix run row for the picker/list, enriched with model locality (read from meta). Only
+    presentation fields already surfaced by list_runs plus the recorded locality — nothing invented."""
+    rid = str(r.get("run_id") or "")
+    return {"run_id": rid, "slug": r.get("slug"), "target": r.get("target"),
+            "status": r.get("status"), "run_kind": r.get("run_kind") or r.get("mode"),
+            "started_iso": r.get("started_iso"), "finished_iso": r.get("finished_iso"),
+            "resumable": bool(r.get("resumable")),
+            "label": r.get("label") or r.get("engagement_label") or "",
+            "model": _strix_model_locality(rid)}
+
+
+def strix_control(run_id: "str | None" = None, slug: str = "") -> dict[str, Any]:
+    """S10 — the Strix runtime CONTROL STATE, read-only.
+
+    Composes, from real artifacts + the console's own read-only providers, the surfaces the SPA lacked:
+    mode/target/scope, model locality + residency, the VIGIL egress gateway + sandbox status, the pending
+    WARDEN approval queue, proof health (the S9 4-way degraded state), the FACT/LEAD/CLEAN/INCONCLUSIVE
+    separation, resource state, the kill controls, and resume/recovery.
+
+    ``run_id`` scopes the per-run surfaces to ONE run (must be a Strix run; a bad/foreign id falls back to
+    the newest Strix run — never a 500, never a fabricated run). ``slug`` optionally scopes the run LIST to
+    one engagement (the console's active-engagement filter), exactly like list_runs. Gateway/approvals are
+    machine-wide by nature and are not slug-scoped. Fail-soft throughout: an empty tree yields honest empty
+    state, never a traceback."""
+    all_runs = _safe(lambda: list_runs(slug).get("runs", []), default=[]) or []
+    strix_runs = [r for r in all_runs if _is_strix_run_row(r)]
+
+    sel: dict[str, Any] | None = None
+    if run_id:
+        sel = next((r for r in strix_runs if str(r.get("run_id")) == str(run_id)), None)
+    if sel is None and strix_runs:
+        sel = strix_runs[0]
+    sel_id = str(sel.get("run_id")) if sel else ""
+
+    proof = (_safe(lambda: proof_list(sel_id), default={}) or {}) if sel_id else {}
+    appr = _safe(lambda: approvals(""), default={"pending": [], "base_dir": ""}) or {}
+    pending = appr.get("pending") or []
+
+    return {
+        "run_id": sel_id,
+        "selected": ({"run_id": sel_id, "slug": sel.get("slug"), "target": sel.get("target"),
+                      "status": sel.get("status"), "run_kind": sel.get("run_kind") or sel.get("mode"),
+                      "started_iso": sel.get("started_iso"), "finished_iso": sel.get("finished_iso"),
+                      "interrupted_reason": str(sel.get("interrupted_reason") or "")} if sel else None),
+        "runs": [_strix_run_row(r) for r in strix_runs],
+        "slug": str(slug or ""),
+        "model": _strix_model_locality(sel_id),
+        "gateway": _strix_gateway_state(),
+        "sandbox": _strix_sandbox_state(sel),
+        "approvals": {"count": len(pending), "pending": pending, "base_dir": appr.get("base_dir", ""),
+                      "note": "Every consequential Strix action queues here for an OUT-OF-BAND owner "
+                              "signature (`vigil approve sign`). This console is keyless — it lists, it "
+                              "never signs."},
+        "proof_health": {"verification_degraded": bool(proof.get("verification_degraded")),
+                         "disposition": proof.get("disposition"),
+                         "degraded_causes": proof.get("degraded_causes") or [],
+                         "coverage_incomplete": bool(proof.get("coverage_incomplete")),
+                         "inconclusive_surfaces": proof.get("inconclusive_surfaces") or [],
+                         "clean": bool(proof.get("clean")), "has_run": bool(sel_id)},
+        "verdicts": _strix_verdicts(proof, sel),
+        "activity": {"live_tool_feed_available": False,
+                     "note": "This build has no authoritative live per-tool activity feed for the Strix "
+                             "sandbox. The observable live signals are the pending-approval queue (each "
+                             "queued tool call appears there) and the minted-proof stream — both shown on "
+                             "this screen. The CRUCIBLE engage spine feed is on the Live screen."},
+        "resources": _strix_resource_state(),
+        "killswitch": _strix_killswitch_state(sel),
+        "recovery": _strix_recovery_state(sel),
+        "doctrine": _STRIX_CONTROL_DOCTRINE,
+    }

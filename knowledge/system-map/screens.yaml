@@ -48,6 +48,13 @@ screens:
     plane: unified
     description: Watch an active or recent run stream live — its findings, tools, and events as they happen.
     synonyms: [live, live run, watch, stream, current run, running]
+  - id: strix
+    label: Strix Control
+    group: DO
+    owner: false
+    plane: unified
+    description: The Strix agent's runtime control state — egress gateway, sandbox, the pending WARDEN approval queue, proof health (the S9 degraded state), the FACT/LEAD/CLEAN/INCONCLUSIVE verdicts, resource state, kill controls and resume/recovery. Read-only.
+    synonyms: [strix, strix control, sandbox, gateway, agent control, container, kill switch, approvals queue, proof health, verification manifest, resume, recovery]
 
   - id: findings
     label: Findings
