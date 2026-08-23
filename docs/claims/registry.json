@@ -767,8 +767,8 @@
     {
       "id": "W8-6",
       "title": "Proxy->cockpit hop refuses a plaintext remote hop under the production posture (fail-closed)",
-      "claim": "Under the PRODUCTION posture (VIGIL_POSTURE=production/prod) the reverse proxy REFUSES TO START with a plaintext proxy->backend hop to a remote (non-loopback) backend: resolve_hop_tls raises unless hop TLS is enabled, so the per-user bearer and the substituted owner console credential never cross a network in cleartext; a loopback hop stays plaintext because its bytes never traverse a network, and outside the production posture the default hop is unchanged (byte-identical).",
-      "source": "docs/decisions/W8-6-encrypt-proxy-cockpit-hop.md:37",
+      "claim": "Under the PRODUCTION posture (VIGIL_POSTURE=production/prod) the reverse proxy REFUSES TO START with a plaintext proxy->backend hop to a remote (non-loopback) backend: resolve_hop_tls raises unless hop TLS is enabled, so the per-user bearer and the substituted owner console credential never cross a network in cleartext; a loopback hop stays plaintext because its bytes never traverse a network, and outside the production posture the default hop is unchanged (byte-identical). When hop TLS is enabled, VIGIL_HOP_CA PINS certificate verification to that operator CA alone (ssl.SSLContext(PROTOCOL_TLS_CLIENT) does not load the system trust store, so a leaf mis-issued or coerced from any public CA is rejected); with VIGIL_HOP_CA unset the hop verifies against the system trust store (the documented, honestly-weaker default). check_hostname, CERT_REQUIRED and TLS 1.2+ are never relaxed.",
+      "source": "docs/decisions/W8-6-encrypt-proxy-cockpit-hop.md:45",
       "enforced_by": {
         "file": "integration/vigil_integration/uiproxy.py",
         "symbol": "resolve_hop_tls"
@@ -781,7 +781,9 @@
           "test_nonproduction_remote_plaintext_hop_is_allowed",
           "test_make_proxy_server_refuses_plaintext_remote_hop_in_production",
           "test_tls_hop_round_trips_via_hop_connection",
-          "test_mtls_client_cert_is_presented_and_absence_is_refused"
+          "test_mtls_client_cert_is_presented_and_absence_is_refused",
+          "test_operator_ca_pin_rejects_a_same_host_cert_from_a_DIFFERENT_ca",
+          "test_operator_ca_pin_does_not_trust_the_system_store"
         ]
       },
       "ci_job": "integration two-env boundary (P5)",

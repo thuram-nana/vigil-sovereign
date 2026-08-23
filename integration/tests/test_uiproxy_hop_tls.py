@@ -26,11 +26,15 @@ import shutil
 import ssl
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from vigil_integration import uiproxy
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # The three federation targets in the two shapes that matter to the production gate.
 _REMOTE = {"sovereign": ("vigil-sovereign", 8733), "console": ("127.0.0.1", 8787), "api": ("127.0.0.1", 8799)}
@@ -43,9 +47,12 @@ _LOOPBACK = {"sovereign": ("127.0.0.1", 8733), "console": ("127.0.0.1", 8787), "
 # server identity, the client identity for mTLS, AND its own CA (a self-signed cert verifies itself) — so a
 # single cert exercises server-auth, client-auth, and CA verification.
 # --------------------------------------------------------------------------------------------------
-def _selfsigned(dirpath: Path) -> "tuple[str, str]":
-    cert = dirpath / "hop-cert.pem"
-    key = dirpath / "hop-key.pem"
+def _selfsigned(dirpath: Path, name: str = "hop") -> "tuple[str, str]":
+    """Generate an INDEPENDENT self-signed cert (its own CA) for CN=localhost with SAN localhost+127.0.0.1.
+    ``name`` distinguishes multiple cert/key pairs in one dir — two calls with different names yield two
+    UNRELATED CAs for the SAME hostname, exactly what the trust-anchor / MITM tests need."""
+    cert = dirpath / f"{name}-cert.pem"
+    key = dirpath / f"{name}-key.pem"
     openssl = shutil.which("openssl")
     if not openssl:
         pytest.skip("openssl not available to generate a throwaway hop test cert")
@@ -78,13 +85,13 @@ class _TLSBackend:
     """A background HTTPS backend on 127.0.0.1. `require_client_cert=True` turns on mTLS (the server
     verifies the client's certificate against the same self-signed cert acting as CA)."""
 
-    def __init__(self, cert: str, key: str, *, require_client_cert: bool = False):
+    def __init__(self, cert: str, key: str, *, require_client_cert: bool = False, handler=None):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(certfile=cert, keyfile=key)
         if require_client_cert:
             ctx.verify_mode = ssl.CERT_REQUIRED
             ctx.load_verify_locations(cafile=cert)
-        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler or _Handler)
         self.httpd.socket = ctx.wrap_socket(self.httpd.socket, server_side=True)
         self.port = self.httpd.socket.getsockname()[1]
         self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -267,3 +274,182 @@ def test_invalid_client_cert_fails_closed(tmp_path):
     with pytest.raises((ssl.SSLError, OSError, ValueError)):
         uiproxy.build_hop_tls_context({"VIGIL_HOP_TLS": "on",
                                        "VIGIL_HOP_CLIENT_CERT": str(bad), "VIGIL_HOP_CLIENT_KEY": str(bad)})
+
+
+# ==================================================================================================
+# OBJ-1 (red-pen NEEDS-REWORK) — VIGIL_HOP_CA PINS to the operator CA; the system store is NOT trusted.
+# The old code did create_default_context() (system store) + load_verify_locations(operator_ca), so a leaf
+# mis-issued (or coerced) from ANY of the ~120 public CAs completed the handshake and MITM'd the hop. The
+# fix builds ssl.SSLContext(PROTOCOL_TLS_CLIENT) + load_verify_locations(operator_ca) — only that CA is
+# trusted. These two tests prove the pin at the handshake AND at the trust store.
+# ==================================================================================================
+def test_operator_ca_pin_rejects_a_same_host_cert_from_a_DIFFERENT_ca(tmp_path):
+    # Two UNRELATED self-signed CAs, BOTH valid for the SAME backend hostname (localhost / 127.0.0.1).
+    op_cert, op_key = _selfsigned(tmp_path, "operator-ca")
+    rogue_cert, rogue_key = _selfsigned(tmp_path, "rogue-ca")   # models a mis-issued/coerced public-CA leaf
+    pin_to_operator = {"VIGIL_HOP_TLS": "require", "VIGIL_HOP_CA": op_cert}
+
+    # POSITIVE: a cert issued by the OPERATOR CA is accepted.
+    with _TLSBackend(op_cert, op_key) as good:
+        ctx = uiproxy.build_hop_tls_context(pin_to_operator)
+        conn = uiproxy._hop_connection("localhost", good.port, timeout=5, tls_ctx=ctx)
+        try:
+            conn.request("GET", "/api/whoami")
+            assert conn.getresponse().status == 200
+        finally:
+            conn.close()
+
+    # THE MITM (the exact objection): the SAME operator pin must REJECT a leaf for the SAME hostname issued
+    # by a DIFFERENT CA. Under the OLD code, if `rogue-ca` were any public CA the OS trusts, this handshake
+    # would COMPLETE — the control-plane hop MITM'd. The pin makes it fail closed.
+    with _TLSBackend(rogue_cert, rogue_key) as evil:
+        ctx = uiproxy.build_hop_tls_context(pin_to_operator)
+        conn = uiproxy._hop_connection("localhost", evil.port, timeout=5, tls_ctx=ctx)
+        with pytest.raises((ssl.SSLError, ssl.SSLCertVerificationError, OSError)):
+            conn.request("GET", "/api/whoami")
+            conn.getresponse()
+        conn.close()
+
+    # CONTROL: pinning to the CA that ACTUALLY issued the rogue cert accepts it — proving the rejection
+    # above is a CA-specific trust decision, not the backend merely being unreachable.
+    with _TLSBackend(rogue_cert, rogue_key) as evil:
+        ctx = uiproxy.build_hop_tls_context({"VIGIL_HOP_TLS": "require", "VIGIL_HOP_CA": rogue_cert})
+        conn = uiproxy._hop_connection("localhost", evil.port, timeout=5, tls_ctx=ctx)
+        try:
+            conn.request("GET", "/api/whoami")
+            assert conn.getresponse().status == 200
+        finally:
+            conn.close()
+
+
+def test_operator_ca_pin_does_not_trust_the_system_store(tmp_path):
+    op_cert, _key = _selfsigned(tmp_path, "operator-ca")
+    pinned = uiproxy.build_hop_tls_context({"VIGIL_HOP_TLS": "require", "VIGIL_HOP_CA": op_cert})
+    op_der = pinned.get_ca_certs(binary_form=True)
+    # THE REGRESSION GUARD: exactly ONE trusted CA — the operator's. The ~120 public CAs of the system
+    # store are NOT loaded. The OLD code (create_default_context + add-the-operator-CA) trusted
+    # system ∪ {operator} (~121 CAs) here, so `len == 1` FAILS on that old code and passes only with the
+    # PROTOCOL_TLS_CLIENT pin. The never-relaxed invariants ride along.
+    assert len(op_der) == 1
+    assert pinned.verify_mode == ssl.CERT_REQUIRED and pinned.check_hostname is True
+    assert pinned.minimum_version >= ssl.TLSVersion.TLSv1_2
+
+    # UNSET CA + TLS enabled ⇒ the documented default: the SYSTEM trust store (create_default_context),
+    # honestly weaker. Where a real system CA bundle exists it loads many CAs and does NOT contain the
+    # throwaway operator CA — proving unset != pinned.
+    system = uiproxy.build_hop_tls_context({"VIGIL_HOP_TLS": "require"})
+    system_der = system.get_ca_certs(binary_form=True)
+    if system_der:                                   # a box with a real system CA bundle
+        assert len(system_der) > 1
+        assert op_der[0] not in system_der
+    assert system.verify_mode == ssl.CERT_REQUIRED and system.check_hostname is True
+
+
+# ==================================================================================================
+# OBJ-2 (default posture / honesty) — the shipped HA proxy manifest ARMS production posture, and a remote
+# plaintext hop is never SILENT even outside production.
+# ==================================================================================================
+def test_ha_proxy_manifest_arms_production_posture_by_default():
+    manifest = REPO_ROOT / "infra" / "ha" / "k8s" / "proxy-deployment.yaml"
+    docs = [d for d in yaml.safe_load_all(manifest.read_text(encoding="utf-8")) if isinstance(d, dict)]
+    deploy = next(d for d in docs if d.get("kind") == "Deployment")
+    container = deploy["spec"]["template"]["spec"]["containers"][0]
+    # This profile federates the credential-bearing hop to a REMOTE cockpit...
+    cmd = " ".join(container.get("command", []))
+    assert "--proxy-only" in cmd and "vigil-sovereign:8733" in cmd
+    # ...so VIGIL_POSTURE=production must be an ACTIVE (parsed, not commented-out) env var. A commented line
+    # never appears in the parsed env — this asserts the fix and would catch a regression to the shipped-
+    # commented-out state that let an operator run the remote hop in cleartext with no refusal.
+    env = {e["name"]: e.get("value") for e in container.get("env", []) if isinstance(e, dict) and "name" in e}
+    assert env.get("VIGIL_POSTURE") == "production", (
+        "the shipped HA proxy manifest MUST arm VIGIL_POSTURE=production so the remote credential-bearing "
+        "hop is fail-closed (refuse-to-start) by default (W8-6)")
+
+
+def test_remote_plaintext_hop_build_warns(tmp_path, monkeypatch, capsys):
+    # OUTSIDE production a remote plaintext hop is ALLOWED (default byte-identical) but must never be SILENT:
+    # make_proxy_server emits a structured start-time WARNING so the operator always sees the exposure.
+    monkeypatch.delenv("VIGIL_POSTURE", raising=False)
+    monkeypatch.delenv("VIGIL_HOP_TLS", raising=False)
+    httpd = uiproxy.make_proxy_server("127.0.0.1", 0, tmp_path, backends=_REMOTE)
+    try:
+        err = capsys.readouterr().err
+        assert "event=hop_plaintext_remote" in err and "vigil-sovereign:8733" in err
+    finally:
+        httpd.server_close()
+
+    # NEGATIVE CONTROL: a LOOPBACK-only build (the single-host default) does NOT warn — its bytes never
+    # traverse a network, so there is nothing to warn about.
+    httpd2 = uiproxy.make_proxy_server("127.0.0.1", 0, tmp_path)   # backends=None ⇒ loopback trio
+    try:
+        assert "hop_plaintext_remote" not in capsys.readouterr().err
+    finally:
+        httpd2.server_close()
+
+
+# ==================================================================================================
+# OBJ-3 (test gap) — the SSE re-auth streaming loop, exercised OVER THE TLS HOP through a re-auth interval.
+# ==================================================================================================
+class _SSEHandler(http.server.BaseHTTPRequestHandler):
+    # HTTP/1.0 + connection-close ⇒ a length-less body that ends at EOF (what read1 streams frame by frame).
+    def log_message(self, *_a):
+        pass
+
+    def do_GET(self):  # noqa: N802
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.write(b"data: one\n\n")
+        self.wfile.flush()
+        time.sleep(0.45)                 # a QUIET interval LONGER than the re-auth interval → timeout path
+        self.wfile.write(b"data: two\n\n")
+        self.wfile.flush()
+        # returning closes the connection ⇒ the client's read1 returns b"" and the loop ends.
+
+
+class _ReauthStub:
+    """Minimal stand-in for a ProxyHandler exercising _stream_with_reauth: a wfile sink, a re-auth hook that
+    counts calls (and stays authorized so the stream is NOT torn down), and a server with the tiny interval."""
+
+    def __init__(self, interval: float):
+        self.server = type("S", (), {"sse_reauth_interval": interval})()
+        self.written = bytearray()
+        self.reauth_calls = 0
+        stub = self
+        self.wfile = type("W", (), {"write": lambda _s, b: stub.written.extend(b),
+                                    "flush": lambda _s: None})()
+
+    def _authenticate(self, bearer: str, *, fresh: bool = False):
+        self.reauth_calls += 1
+        return {"username": "op"}          # stays authorized ⇒ the stream continues
+
+
+def test_sse_over_tls_streams_through_a_reauth_interval(tmp_path):
+    cert, key = _selfsigned(tmp_path)
+    with _TLSBackend(cert, key, handler=_SSEHandler) as srv:
+        ctx = uiproxy.build_hop_tls_context({"VIGIL_HOP_TLS": "require", "VIGIL_HOP_CA": cert})
+        conn = uiproxy._hop_connection("localhost", srv.port, timeout=10, tls_ctx=ctx)
+        conn.request("GET", "/sovereign/api/events")
+        # Mirror production (_proxy): CAPTURE the socket BEFORE getresponse — a `Connection: close` upstream
+        # (every SSE backend sets it) makes will_close true and getresponse() then NULLS conn.sock.
+        upstream_sock = conn.sock
+        resp = conn.getresponse()
+        stub = _ReauthStub(interval=0.2)               # < the 0.45s inter-frame gap ⇒ the loop re-auths live
+        done = threading.Event()
+
+        def run():
+            try:
+                uiproxy.ProxyHandler._stream_with_reauth(
+                    stub, resp, is_sse=True, reauth_bearer="a-bearer", upstream_sock=upstream_sock)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        finished = done.wait(timeout=10)               # if the loop HANGS this stays False
+        conn.close()
+
+    assert finished, "the SSE-over-TLS re-auth stream HUNG (did not complete within the timeout)"
+    body = bytes(stub.written)
+    assert b"data: one\n\n" in body and b"data: two\n\n" in body   # both frames streamed over the TLS hop
+    assert stub.reauth_calls >= 1                                   # the re-auth interval was actually crossed

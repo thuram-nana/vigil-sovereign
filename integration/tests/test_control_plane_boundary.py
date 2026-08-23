@@ -119,8 +119,12 @@ _UP_ALLOWED_STDLIB = {
     # `ssl` is on this list for W8-6 (#472): the proxy→cockpit hop TLS client (HTTPSConnection + a
     # cert-verifying SSLContext). A stdlib module, not a dependency — it crosses no env boundary; it is
     # exactly the primitive that keeps the hop confidential without pulling in a service mesh.
+    # `select` is on this list for the W9-3 SSE re-auth wake (W8-6 #472 hardening): the streaming relay waits
+    # up to the re-auth interval for upstream data with `select` instead of a socket read-timeout — a timeout
+    # poisons the makefile-wrapped socket (`_timeout_occurred`) so the next read raises and a quiet-but-valid
+    # SSE stream over TLS would be killed. A stdlib primitive, not a dependency — it crosses no env boundary.
     "__future__", "base64", "binascii", "hashlib", "hmac", "http", "ipaddress", "json", "os", "re",
-    "secrets", "signal", "socket", "socketserver", "ssl", "subprocess", "sys", "threading", "time",
+    "secrets", "select", "signal", "socket", "socketserver", "ssl", "subprocess", "sys", "threading", "time",
     "pathlib", "queue", "typing", "urllib", "webbrowser", "zlib",
 }
 _BANNED = ("framework", "strix", "sigil")
