@@ -420,6 +420,11 @@ def test_a14_workflow_declares_every_leg_of_the_gate() -> None:
         "the generated locks are actually scanned": "--file-patterns",
         # A gate that has never fired is indistinguishable from a gate that cannot fire.
         "negative control proving the gate fires": "negative control",
+        # W3-7 #430: the BUILT gateway image is scanned (not only the source tree), under a
+        # content-addressed tag, and the shipped Strix layer is scanned via its committed SBOM.
+        "the built gateway image is scanned": "trivy image",
+        "the image is tagged by content address": "--context-tag",
+        "the shipped Strix image layer is scanned via its SBOM": "trivy sbom",
     }
     missing = sorted(f"{why} ({needle!r})" for why, needle in required.items() if needle not in body)
     assert not missing, "the A14 workflow no longer declares:\n  " + "\n  ".join(missing)
@@ -1100,6 +1105,125 @@ def test_runtime_check_cli_advisory_vs_production(tmp_path) -> None:
     assert pins._runtime_check(ctx_root, pin_path=missing_pin, production=False) == 0
     # production (explicit flag) -> refuse
     assert pins._runtime_check(ctx_root, pin_path=missing_pin, production=True) == 1
+
+
+# ======================================================================================
+# 4b. Container IMAGE scan + content-addressed tags (W3-7 #430)
+#
+# `trivy fs` scans the SOURCE tree; it never sees a BUILT image, so the OS-package layer of the
+# image that actually ships went unscanned, and the images carried mutable local tags (`:latest`) —
+# a stale image was indistinguishable from a fresh build. This section proves the A14 gate now BUILDS
+# the first-party gateway image, tags it by its CONTENT ADDRESS, and `trivy image`-scans it at the
+# HIGH+CRITICAL threshold — with a negative control, exactly like the filesystem gate.
+# ======================================================================================
+
+
+def test_a14_workflow_builds_and_image_scans_the_gateway() -> None:
+    """FAILS WITHOUT THE FIX: the pre-W3-7 workflow ran `trivy fs` only (issue #430, supply-chain.yml).
+
+    Assert the A14 gate now BUILDS the gateway image and scans the BUILT image with `trivy image`,
+    at a blocking HIGH+CRITICAL threshold. Comment-stripped so a commented-out step cannot satisfy it.
+    """
+    body = _strip_comments(WORKFLOW.read_text(encoding="utf-8"))
+    assert "docker build" in body, (
+        "the A14 workflow does not build any image — the shipped image layer is never scanned (#430)"
+    )
+    assert "trivy image" in body, (
+        "the A14 workflow has no `trivy image` scan — only `trivy fs` (source), so the OS-package "
+        "layer of the image that ships is never scanned (#430)"
+    )
+    # The image scan must BLOCK on HIGH+CRITICAL — the same threshold the fs gate uses.
+    lines = body.splitlines()
+    image_blocks = []
+    i = 0
+    while i < len(lines):
+        if "trivy image" in lines[i]:
+            block = [lines[i]]
+            while block[-1].rstrip().endswith("\\") and i + 1 < len(lines):
+                i += 1
+                block.append(lines[i])
+            image_blocks.append(re.sub(r"\s+", " ", " ".join(s.rstrip().rstrip("\\") for s in block)))
+        i += 1
+    blocking = [c for c in image_blocks if "--exit-code 1" in c or "--exit-code=1" in c]
+    assert blocking, "no BLOCKING `trivy image` invocation (`--exit-code 1`) in the A14 workflow"
+    for c in blocking:
+        assert "HIGH" in c and "CRITICAL" in c, (
+            f"the blocking `trivy image` scan is not at HIGH,CRITICAL: {c}"
+        )
+
+
+def test_a14_workflow_tags_the_built_image_by_content_address() -> None:
+    """The built image must be tagged by its CONTENT ADDRESS, so a stale image is detectable by tag
+    alone (#430). The workflow derives that tag from the same checker the runtime uses."""
+    body = _strip_comments(WORKFLOW.read_text(encoding="utf-8"))
+    assert "--context-tag" in body, (
+        "the A14 workflow does not tag the gateway image by content address "
+        "(`image_pins.py --context-tag`) — a mutable `:latest` cannot distinguish a stale image (#430)"
+    )
+
+
+def test_a14_image_scan_has_a_negative_control() -> None:
+    """The image gate must carry its own negative control proving the blocking config actually fires,
+    exactly as the filesystem gate does — a gate that has never fired is indistinguishable from one
+    that cannot."""
+    body = _strip_comments(WORKFLOW.read_text(encoding="utf-8"))
+    lines = body.splitlines()
+    # An image negative control = a `trivy image` invocation near a "NEGATIVE CONTROL FAILED" guard.
+    idxs = [i for i, ln in enumerate(lines) if "NEGATIVE CONTROL FAILED" in ln]
+    assert idxs, "no `NEGATIVE CONTROL FAILED` guard anywhere in the A14 workflow"
+    near_image = any(
+        "trivy image" in "\n".join(lines[max(0, i - 25): i + 5]) for i in idxs
+    )
+    assert near_image, (
+        "the A14 workflow has no NEGATIVE CONTROL around a `trivy image` scan — the image gate is "
+        "not proven to be able to fail (#430)"
+    )
+
+
+def test_content_addressed_tag_is_content_sensitive(tmp_path) -> None:
+    """The content-addressed tag is the mechanism behind "a stale image is detectable by tag alone".
+
+    POSITIVE: byte-identical contexts yield the SAME tag (an unchanged build never spuriously
+    rebuilds). NEGATIVE CONTROL, asserted in the same run: a one-byte content change yields a
+    DIFFERENT tag — the tag is not a constant, so a stale image (built from older source) carries a
+    provably different tag. Both directions exercise infra/supply-chain/image_pins.content_addressed_tag,
+    the symbol the A14 CI build uses (#430)."""
+    pins = _load_image_pins()
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    for d in (a, b):
+        (d / "gateway").mkdir(parents=True)
+        (d / "gateway" / "Dockerfile").write_text("FROM scratch\nRUN true\n", encoding="utf-8")
+
+    tag_a = pins.content_addressed_tag(a / "gateway")
+    tag_b = pins.content_addressed_tag(b / "gateway")
+    assert tag_a == tag_b, "identical build contexts must yield the same content-addressed tag"
+    assert tag_a.startswith("vigil-gateway:ctx-"), f"unexpected tag shape: {tag_a}"
+    assert len(tag_a.rsplit("-", 1)[1]) == 16, f"tag digest is not 16 hex chars: {tag_a}"
+
+    # NEGATIVE CONTROL: change one byte of the context — the tag MUST move.
+    (b / "gateway" / "Dockerfile").write_text("FROM scratch\nRUN false\n", encoding="utf-8")
+    tag_b2 = pins.content_addressed_tag(b / "gateway")
+    assert tag_b2 != tag_a, (
+        "a content change did NOT change the content-addressed tag — a stale image would be "
+        "indistinguishable from a fresh one, defeating the whole point (#430)"
+    )
+
+
+def test_strix_image_layer_is_scanned_via_its_committed_sbom() -> None:
+    """The Strix sandbox image cannot be built on a PR runner (~7GB Kali), but the layer that ships is
+    enumerated by its committed CycloneDX SBOM. Assert the A14 workflow scans THAT with `trivy sbom`
+    — a real scan of the shipped OS-package layer, short of a live image build (#430; residual noted
+    in docs/SUPPLY-CHAIN.md §4a)."""
+    body = _strip_comments(WORKFLOW.read_text(encoding="utf-8"))
+    assert "trivy sbom" in body, (
+        "the A14 workflow does not `trivy sbom`-scan the committed Strix image SBOM — the shipped "
+        "Strix OS-package layer is unscanned (#430)"
+    )
+    assert "sbom-strix-sandbox.cdx.json" in body, (
+        "the `trivy sbom` scan does not target the committed Strix image SBOM"
+    )
+
 
 # ======================================================================================
 # 5. CI installs from the hash-locked files — the tested tree equals the locked tree (W3-2)

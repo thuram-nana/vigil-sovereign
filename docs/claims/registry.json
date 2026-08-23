@@ -900,6 +900,49 @@
       "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W3-5",
+      "title": "Every release carries a signed SBOM, retrievable independently of CI artifact retention",
+      "claim": "Every release attaches a cosign-signed CycloneDX SBOM to the GitHub Release (durable, independent of CI artifact retention), and the released SBOM is cross-checked against its hash-pinned lock so an SBOM that omits a shipped component fails.",
+      "source": "docs/decisions/W3-5-signed-sbom-attached-to-release.md:8",
+      "enforced_by": {
+        "file": "infra/supply-chain/sbom_crosscheck.py",
+        "symbol": "missing_components"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_release_sbom.py",
+        "tests": [
+          "test_release_workflow_generates_signs_and_durably_attaches_sboms",
+          "test_release_sbom_is_attached_to_the_release_not_only_a_ci_artifact",
+          "test_verifier_crosschecks_the_released_sbom_with_a_negative_control",
+          "test_crosscheck_passes_a_complete_sbom_and_fails_an_incomplete_one"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W3-7",
+      "title": "The built container images are scanned, and given content-addressed tags",
+      "claim": "The built gateway image is scanned with `trivy image` at the HIGH+CRITICAL threshold and tagged by its content address, so a stale image is detectable by tag alone.",
+      "source": "docs/decisions/W3-7-scan-built-images-content-addressed-tags.md:8",
+      "enforced_by": {
+        "file": "infra/supply-chain/image_pins.py",
+        "symbol": "content_addressed_tag"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_supply_chain.py",
+        "tests": [
+          "test_a14_workflow_builds_and_image_scans_the_gateway",
+          "test_a14_workflow_tags_the_built_image_by_content_address",
+          "test_content_addressed_tag_is_content_sensitive"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

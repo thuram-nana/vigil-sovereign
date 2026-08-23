@@ -315,6 +315,29 @@ installed), not the full `node_modules` transitive tree, and runtime-fetched dat
 templates is out of scope. The `compositions.aggregate` is marked `incomplete_first_party_only`
 accordingly, rather than claiming completeness it does not have.
 
+### 3b. A RELEASE carries a SIGNED SBOM, retrievable independently of CI retention (W3-5, #428)
+
+The two dependency SBOMs above are, on push/PR, uploaded as the `a14-sbom-cyclonedx` CI artifact —
+which expires with CI retention (90 days). That is fine for a PR gate, but it meant a **deployed**
+artifact had no retrievable bill of materials once retention lapsed. `.github/workflows/release.yml`
+(tag push only) closes that: for each shipped closure (offense + sovereign) it
+
+- **generates + cross-checks** the SBOM with the SAME mechanism the A14 gate uses
+  (`bin/verify-supply-chain.sh --sbom-out=…`) — so an SBOM that dropped a shipped component fails
+  before it is signed;
+- **signs** it with `cosign sign-blob` — the SAME keyless primitive the release wheel uses (a
+  `vigil_core` Ed25519/DSSE signature would need a long-lived key on the runner, which keyless OIDC
+  avoids), emitting an offline-verifiable `*.cosign.bundle`;
+- **attaches** it to the **GitHub Release** (`gh release upload`) — a release asset does not expire
+  with CI retention, so the signed SBOM is retrievable for as long as the release exists.
+
+`.github/scripts/verify-release-artifacts.sh` re-runs the component cross-check
+(`infra/supply-chain/sbom_crosscheck.py`) against the exact SBOM bytes about to be attached, verifies
+each SBOM signature offline, refuses a release with no SBOM, and carries an **omit-a-component
+negative control** (drop a component from a copy; the check must fail). The tag-triggered workflow's
+shape and the cross-check behaviour are pinned offline by
+`integration/tests/test_release_sbom.py` in the required *integration two-env boundary (P5)* job.
+
 ---
 
 ## 4. Vulnerability scanning — threshold and triage policy
@@ -339,6 +362,30 @@ change adds is hollow.
 
 Currently detected: `apps/sigil/kernel/Cargo.lock` (cargo), `apps/sigil/requirements.txt` (pip),
 `vendor/strix/uv.lock` (uv), plus the two locks.
+
+### 4a. The BUILT container images, not only the source tree (W3-7, #430)
+
+`trivy fs` scans the source tree; it never sees a **built image**, so the OS-package layer of the
+image that ships went unscanned, and the images carried mutable `:latest` tags (a stale image
+indistinguishable from a fresh build). The A14 gate now also:
+
+- **Builds the first-party gateway image** (`docker build ./gateway`) and tags it by its **content
+  address** — `image_pins.py --context-tag` → `vigil-gateway:ctx-<digest16>`, a sha256 over the build
+  context. A source change flips the tag; an unchanged context keeps it. So **a stale image is
+  detectable by tag alone** (this is the same tag `vigil services up` writes and the #511 runtime
+  check reads; a consistency test pins the two implementations together).
+- **Scans the built image** with `trivy image` at the same `HIGH,CRITICAL` blocking threshold as the
+  filesystem gate, with one deliberate difference — `--ignore-unfixed`: an *unfixable* upstream-base
+  CVE is not a defect the author can remediate under a red build (that is how an image gate gets
+  switched off), while a **fixable** HIGH/CRITICAL still blocks. A negative control builds a fixture
+  image with a deliberately vulnerable layer and requires the blocking config to FAIL on it.
+- **Scans the Strix sandbox layer via its committed SBOM** — `trivy sbom
+  infra/supply-chain/sbom-strix-sandbox.cdx.json`. The ~7GB Kali image cannot be built on a PR
+  runner, so it cannot be `trivy image`-scanned here; its committed CycloneDX SBOM enumerates the
+  shipped OS-package layer and `trivy sbom` scans those purls. **Advisory** on purpose: a
+  security-testing distro carries findings the author cannot fix, so blocking on it would switch the
+  gate off. **Residual:** a live `trivy image` build of the Strix sandbox needs a self-hosted / large
+  runner and is a follow-up.
 
 ### The gate is proved to fire
 
@@ -473,10 +520,16 @@ Stated plainly, because a hardening document that only lists wins is a marketing
   is now closed for the one artifact this repo actually publishes: `.github/workflows/release.yml`
   (tag push only, `v*`) builds the `packages/core/vigil_core` wheel + sdist and attaches to each
   a Sigstore/cosign signature, an SLSA build-provenance attestation, and a PEP 740 attestation
-  for the wheel. See *What is signed, and by which identity* below. The boundary: this does not
+  for the wheel; the same run also attaches the signed dependency SBOMs to the release (§3b, W3-5).
+  See *What is signed, and by which identity* below. The boundary: this does not
   cover the editable `-e ./…` install path an operator runs via `bootstrap.sh` (there is no
   registry artifact to sign there), nor the third-party dependency layer, which is guarded by the
   hash locks above and not by these signatures.
+- **Image scanning covers the gateway image live; the Strix sandbox via its SBOM only (W3-7, #430).**
+  The gateway image is BUILT and `trivy image`-scanned in the required gate (§4a). The ~7GB Strix
+  sandbox cannot be built on a PR runner, so its shipped layer is scanned through its committed
+  CycloneDX SBOM (`trivy sbom`, advisory) rather than a live image build. A live `trivy image` of the
+  Strix sandbox needs a self-hosted / large runner and is a follow-up.
 - **Base-image digests are re-resolved against Docker Hub only.** An image on another registry
   would report `??` in the drift report rather than being checked.
 - **Drift is advisory, and so are MEDIUM-and-below findings.** They are surfaced, not enforced.
@@ -487,9 +540,10 @@ Stated plainly, because a hardening document that only lists wins is a marketing
 The tag-triggered release workflow (`.github/workflows/release.yml`, `on: push: tags: [v*]`)
 signs the release build. It runs only on a version-tag push, so it does not report on ordinary
 pull requests; its shape is asserted offline on every PR by
-`integration/tests/test_release_provenance.py` (which runs in the required *integration two-env
-boundary (P5)* job). The workflow is advisory — a tag-triggered job cannot be a required PR
-check, and it is deliberately kept out of `.github/required-status-checks.txt`.
+`integration/tests/test_release_provenance.py` and `integration/tests/test_release_sbom.py` (which
+run in the required *integration two-env boundary (P5)* job). The workflow is advisory — a
+tag-triggered job cannot be a required PR check, and it is deliberately kept out of
+`.github/required-status-checks.txt`.
 
 For each artifact it builds (the `vigil-core` wheel and sdist):
 
@@ -502,7 +556,14 @@ For each artifact it builds (the `vigil-core` wheel and sdist):
   (and the sdist); when Trusted Publishing is enabled (`vars.PUBLISH_TO_PYPI == 'true'`),
   `pypa/gh-action-pypi-publish` also attaches attestations at upload time.
 
-**The identity.** All three are keyless (Sigstore), so the signer is not a long-lived key but the
+And, for the dependency SBOMs (W3-5, #428; §3b):
+
+- **Signed CycloneDX SBOMs, attached to the release** — the offense + sovereign SBOMs are
+  cross-checked against their locks, `cosign sign-blob`-signed (same keyless primitive), and attached
+  to the GitHub Release with their `*.cosign.bundle`, so a deployed artifact has a signed, retrievable
+  bill of materials independent of CI artifact retention.
+
+**The identity.** All are keyless (Sigstore), so the signer is not a long-lived key but the
 workflow's own GitHub OIDC identity:
 
 ```
@@ -510,10 +571,12 @@ issuer:   https://token.actions.githubusercontent.com
 identity: https://github.com/<owner>/<repo>/.github/workflows/release.yml@refs/tags/<tag>
 ```
 
-`verify-release-artifacts.sh` verifies each signature against exactly that issuer and a
-`certificate-identity-regexp` pinned to this workflow at a tag ref, and — as a negative control
-that fails the job if it does not hold — appends a byte to a copy of each artifact and requires
-the tampered copy to be **rejected** by the same offline verify path.
+`verify-release-artifacts.sh` verifies each signature (wheels, sdist AND SBOMs) against exactly that
+issuer and a `certificate-identity-regexp` pinned to this workflow at a tag ref, and carries two
+negative controls that fail the job if they do not hold: it appends a byte to a copy of each artifact
+and requires the tampered copy to be **rejected** by the same offline verify path; and it drops a
+component from a copy of each SBOM and requires the component cross-check to **fail** — so neither a
+tampered artifact nor an incomplete bill of materials can pass.
 
 ## Follow-ups
 

@@ -7,9 +7,11 @@
 #
 # WHAT RUNS WHERE. Everything that needs egress runs here, because it has to: hash-locking
 # resolves against PyPI, the vulnerability DB is downloaded, base-image digests are resolved
-# from a registry. The STATIC half — "is the result of that work committed, complete, and
-# still meaningful?" — is in integration/tests/test_supply_chain.py, so it also runs in the
-# ordinary `integration` job and holds even on a runner with no network.
+# from a registry, and (W3-7 #430) the first-party gateway image is BUILT and `trivy image`-scanned
+# — a built image can only be scanned where a docker daemon and network exist. The STATIC half —
+# "is the result of that work committed, complete, and still meaningful?" — is in
+# integration/tests/test_supply_chain.py, so it also runs in the ordinary `integration` job and holds
+# even on a runner with no network.
 #
 # THRESHOLD (see docs/SUPPLY-CHAIN.md for the full policy):
 #   HIGH + CRITICAL  -> BLOCK the pull request.
@@ -380,6 +382,103 @@ jobs:
             --exit-code 1 \
             --no-progress \
             .
+
+      # ------------------------------------------------------------------------------
+      # 4a. Container IMAGE scan (W3-7 #430).
+      #
+      # `trivy fs` above scans the SOURCE tree; it never scans a BUILT image, so the OS-package layer
+      # of the image that actually ships was never looked at. This section BUILDS the first-party
+      # gateway image, tags it by its CONTENT ADDRESS (so a stale image is detectable by tag alone —
+      # the same digest `vigil services up` and the #511 runtime check use), and `trivy image`-scans it
+      # at the SAME HIGH+CRITICAL threshold as the filesystem gate. `--ignore-unfixed` is the one
+      # deliberate difference: an unfixable CVE in the upstream base is not a defect the author can fix
+      # under a red build (the exact way an image gate gets switched off), while a FIXABLE HIGH/CRITICAL
+      # — where bumping the pinned base is the remedy — still blocks.
+      # ------------------------------------------------------------------------------
+
+      - name: build the gateway image (content-addressed tag)
+        if: always()
+        run: |
+          set -euo pipefail
+          # The tag encodes a sha256 of the build context, so a source change flips the tag and an
+          # unchanged context yields the same tag — a stale image is detectable BY TAG ALONE (#430).
+          TAG="$(python3 infra/supply-chain/image_pins.py --context-tag)"
+          echo "GATEWAY_IMAGE_TAG=${TAG}" >> "$GITHUB_ENV"
+          echo "building ${TAG} from ./gateway"
+          docker build -t "${TAG}" gateway
+          docker image inspect "${TAG}" --format 'built {{.RepoTags}} id={{.Id}}'
+
+      # NEGATIVE CONTROL, before the image gate, exactly as the filesystem gate has one. Build a tiny
+      # image carrying a deliberately vulnerable layer (a requirements.txt trivy's image analyzer reads,
+      # pinned to the same known-CRITICAL packages the fs control uses, both FIXED upstream so
+      # --ignore-unfixed still reports them) and require the EXACT blocking `trivy image` config to
+      # FAIL on it. If it passes, the image gate below is a no-op and this job says so. The fixture
+      # lives OUTSIDE the repo so the real scan never sees it, and reuses the already-pulled gateway
+      # base so it needs no extra registry pull.
+      - name: negative control — prove the image scan configuration actually fires
+        if: always()
+        run: |
+          set -euo pipefail
+          # Reuse the gateway's own pinned base (already pulled by the build step) so the fixture needs
+          # no extra registry pull. grep/cut, not a heredoc: an un-indented heredoc body breaks the YAML
+          # block scalar this step lives in.
+          BASE="$(grep -oE 'ARG PYTHON_BASE=\S+' gateway/Dockerfile | head -1 | cut -d= -f2-)"
+          if [ -z "${BASE}" ]; then echo "::error::could not read PYTHON_BASE from gateway/Dockerfile"; exit 1; fi
+          mkdir -p /tmp/a14-image-negative-control
+          printf 'pyyaml==5.3.1\npillow==8.2.0\n' > /tmp/a14-image-negative-control/requirements.txt
+          # Build the fixture Dockerfile with printf (no heredoc: an indented closing token inside a
+          # YAML block scalar is a foot-gun). A copied requirements.txt is a vulnerable image LAYER the
+          # trivy image analyzer reads.
+          printf 'FROM %s\nCOPY requirements.txt /app/requirements.txt\n' "${BASE}" \
+            > /tmp/a14-image-negative-control/Dockerfile
+          docker build -t vigil-a14-image-negctl:local /tmp/a14-image-negative-control
+          set +e
+          trivy image --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --ignorefile "${GITHUB_WORKSPACE}/.trivyignore" \
+            --exit-code 1 \
+            --no-progress \
+            vigil-a14-image-negctl:local
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::NEGATIVE CONTROL FAILED — the blocking \`trivy image\` configuration exited 0 on an image carrying known-CRITICAL packages. The image gate below cannot fail, so its green tick means nothing. Do not merge."
+            exit 1
+          fi
+          echo "image negative control OK — the blocking config exits ${rc} on a known-vulnerable image."
+
+      # THE IMAGE GATE. A non-zero exit here fails the job and blocks the pull request.
+      - name: image vulnerability GATE — HIGH + CRITICAL (fixable) block
+        if: always()
+        run: |
+          set -euo pipefail
+          : "${GATEWAY_IMAGE_TAG:?the gateway image build step did not run}"
+          trivy image --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --ignorefile .trivyignore \
+            --exit-code 1 \
+            --no-progress \
+            "${GATEWAY_IMAGE_TAG}"
+
+      # The Strix sandbox image (~7GB Kali + ~1000 deb packages) cannot be BUILT on a PR runner, so it
+      # cannot be `trivy image`-scanned here. Its committed CycloneDX SBOM (infra/supply-chain/
+      # sbom-strix-sandbox.cdx.json, drift-guarded offline against the Dockerfile) enumerates that
+      # OS-package layer, and `trivy sbom` scans those purls — a real scan of the layer that ships,
+      # short of a live image build. ADVISORY on purpose: a security-testing distro carries findings the
+      # author cannot fix, so blocking on it would switch the gate off. A live `trivy image` build of
+      # this image is a self-hosted/large-runner follow-up (see docs/SUPPLY-CHAIN.md §4a).
+      - name: Strix sandbox image SBOM scan (ADVISORY — the layer that ships, via its SBOM)
+        if: always()
+        continue-on-error: true
+        run: |
+          trivy sbom \
+            --severity HIGH,CRITICAL \
+            --ignorefile .trivyignore \
+            --exit-code 0 \
+            --no-progress \
+            infra/supply-chain/sbom-strix-sandbox.cdx.json
 
       # ------------------------------------------------------------------------------
       # 5. The static assertions, run here too so this one job is a self-contained

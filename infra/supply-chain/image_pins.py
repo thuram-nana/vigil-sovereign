@@ -109,6 +109,23 @@ def context_digest(context_dir) -> str:
     return manifest.hexdigest()
 
 
+#: The gateway image repository (mirror of vigil_gateway.docker.IMAGE_REPO). Kept here so the A14
+#: supply-chain job — which builds and `trivy image`-scans the gateway (W3-7 #430) — can compute the
+#: content-addressed tag with NOTHING but this stdlib module (it must not import the gateway package).
+GATEWAY_IMAGE_REPO = "vigil-gateway"
+
+
+def content_addressed_tag(context_dir, repo: str = GATEWAY_IMAGE_REPO) -> str:
+    """The content-addressed image reference for a build context: ``vigil-gateway:ctx-<digest[:16]>``.
+
+    BYTE-IDENTICAL to vigil_gateway.docker.content_addressed_tag (a consistency test pins the two
+    together, as it already does for ``context_digest``). Changing the build context changes this tag,
+    so a stale image — one built from older source — is detectable BY TAG ALONE (the W3-7 #430
+    acceptance criterion, and the tag the A14 CI build applies before `trivy image` scanning it).
+    """
+    return f"{repo}:ctx-{context_digest(context_dir)[:16]}"
+
+
 @dataclass(frozen=True)
 class RuntimePinResult:
     """The outcome of the runtime image-pin check. ``ok`` is the ONLY thing a gate should key on."""
@@ -489,9 +506,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--production", action="store_true",
                     help="treat a failed --runtime-check as fatal (exit non-zero) even outside VIGIL_POSTURE")
     ap.add_argument("--pin", default=None, help="runtime pin path (default: <root>/.vigil-live/gateway-image-pin.json)")
+    ap.add_argument(
+        "--context-tag",
+        action="store_true",
+        help="print the CONTENT-ADDRESSED gateway image tag (vigil-gateway:ctx-<digest16>) for the "
+             "current build context and exit. The A14 CI job (W3-7 #430) uses it to tag the image it "
+             "builds before `trivy image`-scanning it, so a stale image is detectable by tag alone.",
+    )
     args = ap.parse_args(argv)
 
     root = Path(args.root).resolve() if args.root else Path(__file__).resolve().parents[2]
+
+    if args.context_tag:
+        # Stdout is consumed by CI (`TAG=$(... --context-tag)`); keep it to the bare tag, nothing else.
+        print(content_addressed_tag(root / GATEWAY_CONTEXT_RELPATH))
+        return 0
 
     if args.runtime_check:
         return _runtime_check(root, pin_path=args.pin, production=args.production)
