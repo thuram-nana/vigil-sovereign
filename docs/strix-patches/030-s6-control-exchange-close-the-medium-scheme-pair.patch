@@ -1,0 +1,147 @@
+From 76e700566e8c16f0d1a558f213f47c928dfdf129 Mon Sep 17 00:00:00 2001
+Subject: [strix-patch 030] S6 control exchange: close the MEDIUM scheme-pairing residual (fail-closed twin scheme)
+X-VIGIL-Commit: 76e700566e8c16f0d1a558f213f47c928dfdf129
+X-VIGIL-Date: 2026-08-23T05:49:25-04:00
+
+diff --git a/vendor/strix/strix/report/proof_capture.py b/vendor/strix/strix/report/proof_capture.py
+index 8f847589..cad2a749 100644
+--- a/vendor/strix/strix/report/proof_capture.py
++++ b/vendor/strix/strix/report/proof_capture.py
+@@ -39,6 +39,7 @@ def build_error_signature_capture(
+     exploit_status: Optional[int] = None,
+     control_body: "bytes | str | None" = None,
+     exploit_request: "bytes | str | None" = None,
++    exploit_scheme: "str | None" = None,
+ ) -> Optional[dict]:
+     """Build the plain-dict ``_vigil_capture`` for an error-signature proof from already-fetched bytes.
+ 
+@@ -48,7 +49,14 @@ def build_error_signature_capture(
+     ``exploit_request`` are the raw REQUEST bytes the agent actually sent (inv 8): when present they are
+     bound as ``request_bytes_ref`` on the mutated exchange so the certificate records WHAT produced the
+     response, not only the response. Without them the mint declines a FACT (see ``proof.run``): a response
+-    alone, with no record of the request, is not something VIGIL can attribute — it stays a LEAD."""
++    alone, with no record of the request, is not something VIGIL can attribute — it stays a LEAD.
++
++    ``exploit_scheme`` ("http"/"https") is the OBSERVED exchange's transport scheme, from the proxy's TLS
++    flag (an origin-form request line carries none). It is recorded as a VIGIL-internal ``observed_scheme``
++    annotation on the mutated exchange (stripped before ``CapturedExchange`` in ``proof.run``) so the S6
++    benign CONTROL twin can be fetched over the SAME scheme as the observed exchange — never a silent http
++    default. Absent/invalid ⇒ omitted, and the mint pairs the scheme from the report endpoint only when it
++    exact-matches the observed host+path, else refuses the control to a LEAD (fail-closed)."""
+     if not str(bug_class or "").strip():
+         return None
+     ex_bytes = _as_bytes(exploit_body)
+@@ -58,6 +66,9 @@ def build_error_signature_capture(
+         "channel": _ERROR_SIGNATURE, "role": "mutated",
+         "response_bytes_ref": "resp", "status": exploit_status, "bug_class": bug_class,
+     }
++    if exploit_scheme in ("http", "https"):
++        mutated["observed_scheme"] = exploit_scheme   # S6: pair the benign control twin to the observed scheme
++
+     blobs: dict[str, bytes] = {"resp": ex_bytes}
+     req_bytes = _as_bytes(exploit_request)
+     if req_bytes:
+@@ -95,6 +106,22 @@ def _request_bytes(fetched: Any) -> "bytes | None":
+     return _as_bytes(raw)
+ 
+ 
++def _request_scheme(fetched: Any) -> "str | None":
++    """The OBSERVED exploit request's transport scheme ("https"/"http"), from Caido's connection TLS flag on
++    the SAME fetched object the request bytes come from (``result.request.is_tls``; ``get_request_with_client``
++    fetches the request half with the response). It is the authoritative, transport-derived scheme the benign
++    CONTROL twin must be fetched over — a request LINE is origin-form and carries none. Returns ``None`` when
++    the flag is absent (⇒ ``proof.run`` pairs the scheme from the report endpoint only when it exact-matches
++    the observed host+path, else refuses the control to a LEAD — never a silent http default)."""
++    req = getattr(fetched, "request", None)
++    is_tls = getattr(req, "is_tls", None) if req is not None else None
++    if is_tls is True:
++        return "https"
++    if is_tls is False:
++        return "http"
++    return None
++
++
+ def _response_body(fetched: Any, parse: Any) -> tuple["bytes | None", Optional[int]]:
+     """Extract (body_bytes, status) from a Caido ``view_request`` result, tolerating the SDK model shape.
+     Returns (None, None) when no response is present."""
+@@ -165,13 +192,14 @@ async def capture_for_report(
+         if not body:
+             return None
+         request_bytes = _request_bytes(exploit)
++        request_scheme = _request_scheme(exploit)
+         control_body = None
+         if control_id:
+             control = await caido.view_request(control_id, part="response")
+             control_body, _ = _response_body(control, caido.parse_raw_response)
+         return build_error_signature_capture(
+             bug_class=bug_class, exploit_body=body, exploit_status=status, control_body=control_body,
+-            exploit_request=request_bytes)
++            exploit_request=request_bytes, exploit_scheme=request_scheme)
+     except Exception as exc:  # noqa: BLE001 — capture is best-effort; it never raises into Strix
+         # inv 12 (S9): a capture was genuinely ATTEMPTED (a bug_class was present, past the guard
+         # above) and it FAILED (e.g. Caido raised) — NOT the same as "nothing to capture". Record a
+diff --git a/vendor/strix/tests_vigil/test_proof_capture.py b/vendor/strix/tests_vigil/test_proof_capture.py
+index c85d4879..837544b7 100644
+--- a/vendor/strix/tests_vigil/test_proof_capture.py
++++ b/vendor/strix/tests_vigil/test_proof_capture.py
+@@ -42,6 +42,20 @@ def test_build_capture_includes_a_control_when_present():
+     assert roles == ["mutated", "control"] and cap["blobs"]["ctrl"] == b"ok"
+ 
+ 
++def test_build_capture_records_the_observed_scheme_when_valid():
++    """S6 scheme-pairing: a valid ``exploit_scheme`` is recorded as ``observed_scheme`` on the mutated
++    exchange (proof.run pairs the benign control twin to it). An invalid/absent scheme is OMITTED — proof.run
++    then fails closed to a LEAD unless the report endpoint exact-matches the observed host+path."""
++    cap = pc.build_error_signature_capture(bug_class="error_based_sqli", exploit_body="err",
++                                           exploit_request=b"GET / HTTP/1.1\r\nHost: t\r\n\r\n",
++                                           exploit_scheme="https")
++    assert cap["exchanges"][0]["observed_scheme"] == "https"
++    assert "observed_scheme" not in pc.build_error_signature_capture(
++        bug_class="error_based_sqli", exploit_body="err", exploit_scheme="ftp")["exchanges"][0]
++    assert "observed_scheme" not in pc.build_error_signature_capture(
++        bug_class="error_based_sqli", exploit_body="err")["exchanges"][0]
++
++
+ class _Resp:
+     def __init__(self, raw):
+         self.raw = raw
+@@ -147,3 +161,39 @@ def test_capture_for_report_is_none_without_a_class_or_on_error():
+     # a Caido failure is swallowed → an honest None (no proof), never an exception into the reporting path
+     assert asyncio.run(pc.capture_for_report(
+         {"finding_class": "sqli", "endpoint": "/x"}, caido=_Boom(), explicit_ids=["r1"])) is None
++
++
++class _ReqTls:
++    """A fetched request half that also knows its transport (Caido's ``request.is_tls``)."""
++    def __init__(self, raw, is_tls):
++        self.raw = raw
++        self.is_tls = is_tls
++
++
++class _FetchedTls:
++    def __init__(self, resp_raw, req_raw, is_tls):
++        self.response = _Resp(resp_raw)
++        self.request = _ReqTls(req_raw, is_tls)
++
++
++def test_capture_carries_the_observed_transport_scheme_when_tls_is_known():
++    """S6: when the fetched exchange knows its transport (``request.is_tls``), the capture records it as
++    ``observed_scheme`` so proof.run can fetch the benign control twin over the SAME scheme (never a silent
++    http default). Absent the flag it is omitted (the existing ``_Fetched`` fake has no ``is_tls``)."""
++    raw = b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"
++    req = b"GET /api/search?q=%27 HTTP/1.1\r\nHost: t\r\n\r\n"
++
++    caido_https = _FakeCaido(by_id={"r": _FetchedTls(raw, req, is_tls=True)})
++    cap = asyncio.run(pc.capture_for_report(
++        {"finding_class": "sqli", "endpoint": "/api/search"}, caido=caido_https, explicit_ids=["r"]))
++    assert cap["exchanges"][0]["observed_scheme"] == "https"
++
++    caido_http = _FakeCaido(by_id={"r": _FetchedTls(raw, req, is_tls=False)})
++    cap_http = asyncio.run(pc.capture_for_report(
++        {"finding_class": "sqli", "endpoint": "/api/search"}, caido=caido_http, explicit_ids=["r"]))
++    assert cap_http["exchanges"][0]["observed_scheme"] == "http"
++
++    caido_none = _FakeCaido(by_id={"r": _Fetched(raw, request_raw=req)})   # .request has no is_tls
++    cap_none = asyncio.run(pc.capture_for_report(
++        {"finding_class": "sqli", "endpoint": "/api/search"}, caido=caido_none, explicit_ids=["r"]))
++    assert "observed_scheme" not in cap_none["exchanges"][0]
