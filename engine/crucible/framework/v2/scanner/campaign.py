@@ -397,10 +397,12 @@ class WebScanCampaign:
         # this only after checking the relay host is on the charter allowlist.
         self.oob_relay_url = oob_relay_url
         self.oob_relay_secret = oob_relay_secret
-        # Opt-in dynamic browser passes (loopback `scan` path). A headless browser
-        # navigates DIRECTLY (its requests do not flow through the injected gated
-        # `send`), so these are scoped to contained targets — the remote `engage`
-        # browser path is deferred until a CDP request-allowlist gates that egress.
+        # Opt-in dynamic browser passes. A headless browser navigates DIRECTLY
+        # (its requests do not flow through the injected gated `send`). On the
+        # loopback `scan` path these are scoped to contained targets; on the remote
+        # `engage` path the browser is confined by the CDP request-allowlist below
+        # (`_browser_allowed_hosts`, applied via `CdpBrowser(allowed_hosts=...)`),
+        # so that egress is now GATED at the resolver layer rather than deferred.
         # No browser present => both are silently skipped (a browser never guesses).
         self.enable_browser_xss = enable_browser_xss
         self.enable_spa_crawl = enable_spa_crawl

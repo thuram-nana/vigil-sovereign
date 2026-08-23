@@ -47,7 +47,7 @@ def _change_for(gap: CapabilityGap) -> ProposedChange:
         )
     if gap.kind is GapKind.UNREACHED_SURFACE:
         return ProposedChange(
-            target_artifact="framework/playbooks/03-surface-mapping.md",
+            target_artifact="framework/playbooks/03-attack-surface-mapping.md",
             change_type="extend_playbook",
             summary=(
                 f"Ensure surface enumeration reaches {gap.surface!r}-shaped endpoints; "

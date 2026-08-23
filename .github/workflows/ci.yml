@@ -145,7 +145,7 @@ jobs:
       # workflow's critical path (~8m, every other job <4m), so eval runs HERE, in
       # parallel — coverage added at ~zero wall-clock cost instead of dropped.
       #
-      # NOTE FOR THE OPERATOR: `main` is branch-protected with 13 required status
+      # NOTE FOR THE OPERATOR: `main` is branch-protected with 14 required status
       # checks (committed in .github/required-status-checks.txt), and this job —
       # `CRUCIBLE eval + benchmark corpus` — is now one of them, so it BLOCKS a merge.
       # crucible-core (also required) still carries the security-critical half —

@@ -103,7 +103,7 @@ Merged and green on `main` in the current program (see `git log` and `docs/DEFER
 
 | Area | Module(s) | What it is |
 |------|-----------|------------|
-| Embedded graph store (G1) | `engine/crucible/framework/v2/graph/store.py` | `EmbeddedGraphStore` — a file-backed, **one-way** projection of the append-only spine into nodes/edges (canonical JSON, no wallclock/RNG, byte-identical out for identical events in). No promote/grant/tier surface: a partition is disposable state, never an authority. `Neo4jGraphStore` sits behind the same interface as a `[SCAFFOLD]` (every method raises) — only the live external service is deferred. |
+| Embedded graph store (G1) | `engine/crucible/framework/v2/graph/store.py` | `EmbeddedGraphStore` — a file-backed, **one-way** projection of the append-only spine into nodes/edges (canonical JSON, no wallclock/RNG, byte-identical out for identical events in). No promote/grant/tier surface: a partition is disposable state, never an authority. `Neo4jGraphStore` sits behind the same interface as a **real client body** (its methods issue MERGE/read Cypher through an injected or lazily-imported driver); only **construction** raises, and only when no driver is injected and the `neo4j` package is absent — the live external service is what is deferred, not the client code. |
 | Moonshot scaffolds (X1/X2/X3) | `framework/v2/attest/provider.py`, `remediation_binary/tier.py`, `agent_body/interface.py` | `SoftwareAttestationProvider` (a working Ed25519/TPM quote proving integrity + origin, `hardware_backed=False`; SEV-SNP/TDX stubs raise — hardware-gated); `SanitizerSilenceTier` (crash-confirm + `remediated_if_silent` fix-by-oracle-silence over the **existing** sanitizer oracle work; `synthesize_patch` raises — research-gated); `AgentBody` (an interface-only contract, gate-before-execute structurally enforced — research-gated). Honest status matrix in `docs/DEFERRED-INFRA.md`. |
 | Report how-to (R1) | `engine/crucible/framework/v2/report/howto.py`, `export.py` | A deterministic per-finding **"how to verify / test / patch"** block (a pure function of the graded finding — no traffic, no RNG). A FACT points at the real re-executable `python3 -m framework.v2 verify` over its retained `reverifiable.json`; a LEAD says "how to CONFIRM" and never implies proof. Woven into the report **and** the SARIF 2.1.0 / structured-JSON export (a LEAD capped at `note` so it never blocks a CI gate). |
 | One-click dossier (R2/R3) | `report/dossier.py`, `integration/vigil_integration/cli.py` (`vigil dossier`), `framework/v2/console/server.py` (`POST /api/dossier/<run>/build`, `GET /api/dossier/<run>.zip`) | Compiles a whole run into ONE self-contained, tamper-evident `.zip` (reusing the report renderers + lazily the proof bundle) with an out-of-band-pinnable fingerprint. The GET route **streams a pre-built** file only (building is the CSRF-guarded POST); a bad run id fails closed. This is the **first real client download**. Red-pen fixes on merge: stop an evidence-symlink exfil; scrub secrets inside lists. |
@@ -261,8 +261,12 @@ fix → **adversarial re-check on the fixed branch** → PR → all CI green →
 fixed branch is load-bearing — it repeatedly surfaced the *next* defect one level deeper (e.g. the
 I2 chain: conditional-majority → distinct-key → base64-malleable → **low-order keyless forgery**;
 the emitter chain: no-progress false-fork → non-atomic brick → **honest-prune false is_split**).
-CI = 6 jobs: `vigil_core`, `CRUCIBLE-core`, `gateway`, `integration` (two runs: sovereign, then the
-framework-dependent oracle-adapter in its own process), `strix`, `sigil-governor`.
+CI = 12 jobs in `ci.yml` (`vigil-core`, `briefing-completeness`, `crucible-core`, `crucible-eval`,
+`loopback-engagement`, `gateway`, `integration` — two runs: sovereign, then the framework-dependent
+oracle-adapter in its own process — `strix-vigil`, `sigil-governor`, `sigil-lint`, `formal-verification`,
+`warden-kernel`), plus the `supply-chain` and `livefire` jobs in their own workflows. The full set of
+required status checks is enumerated in the protection table at the top of this file and in the committed
+source of truth [`.github/required-status-checks.txt`](../.github/required-status-checks.txt).
 
 ---
 
