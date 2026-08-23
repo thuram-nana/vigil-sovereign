@@ -65,6 +65,8 @@ from typing import Mapping, Optional, Sequence
 
 from .canonical import canonical_json, sha256_hex
 from .crypto import verify_threshold
+from .crypto import IntegrityError
+from .spine_domains import DOMAIN_TAGS as _DOMAIN_TAGS
 from .crypto import sign as _ed25519_sign
 from .models import Signature, TrustRoot
 
@@ -105,7 +107,7 @@ _MAX_BUILD_MANIFEST_SCHEMA = BUILD_MANIFEST_SCHEMA
 #: The domain tag over which the manifest content is signed. Distinct from the evidence-spine tag so a
 #: signature over one can never be replayed as a signature over the other. Never change without a schema
 #: bump (it invalidates every prior build signature).
-BUILD_MANIFEST_DOMAIN = b"vigil-build-manifest-v1\x00"
+BUILD_MANIFEST_DOMAIN = _DOMAIN_TAGS["build-manifest"]  # single source of truth (uniqueness-guarded in spine_domains)
 
 #: Conventional on-disk filenames, relative to an install/tree root.
 MANIFEST_FILENAME = "build-manifest.json"
@@ -562,7 +564,20 @@ def verify_build_integrity(manifest: "Optional[SignedBuildManifest]", *, tree_ro
                 artifacts=art_tuple, modified=tuple(modified), missing=tuple(missing),
                 attested_only=tuple(attested_only), **common)
 
-    thr = verify_threshold(manifest.signing_bytes(), list(manifest.signatures), trust_root)
+    try:
+        thr = verify_threshold(manifest.signing_bytes(), list(manifest.signatures), trust_root)
+    except IntegrityError as e:
+        # A signature or authoriser key that parsed structurally but is malformed at the byte level
+        # (non-canonical base64, wrong length, low-order/non-canonical pubkey) makes the crypto layer
+        # raise. This state machine's contract is NEVER-RAISES: a material we cannot decode is a material
+        # we cannot authenticate, so it fails closed to UNKNOWN_BUILD — never a crash, never a false VALID.
+        return BuildIntegrityResult(
+            state=BuildIntegrityState.UNKNOWN_BUILD,
+            detail=f"the manifest signatures could not be authenticated — malformed signature or key material: {e}",
+            signature={"checked": True, "satisfied": False,
+                       "reason": f"malformed signature/key material: {e}"},
+            artifacts=art_tuple, modified=tuple(modified), missing=tuple(missing),
+            attested_only=tuple(attested_only), **common)
     sig_block = {"checked": True, "satisfied": thr.satisfied, "threshold": thr.threshold,
                  "valid_signers": list(thr.valid_signers), "reason": thr.reason}
     if not thr.satisfied:

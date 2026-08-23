@@ -82,6 +82,7 @@ DOMAIN_TAGS: dict[str, bytes] = {
     "transparency": b"vigil-transparency-checkpoint-v2\x00",   # transparency checkpoint witness (v2: commits prune boundary base_seq/base_count)
     "highwater": b"vigil-highwater-v1\x00",                     # C.2 offense attestation-log anti-rollback floor
     "highwater-evidence": b"vigil-highwater-evidence-v1\x00",   # C.2 evidence-cli {last_seq} floor variant
+    "build-manifest": b"vigil-build-manifest-v1\x00",             # W9-7/W4-3 signed build manifest (signing-bytes domain)
     "destruction": b"vigil-destruction-authorization-v1\x00",  # m-of-n destruction authorization
     "identity": b"vigil-identity-attestation-v1\x00",          # VF owner-attested target identity policy
     "capability": b"vigil-capability-v1\x00",                  # VF re-verification capability (base)
