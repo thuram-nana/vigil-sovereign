@@ -399,6 +399,81 @@ def test_the_control_twin_scheme_is_paired_to_the_observed_not_defaulted_http(tm
         "not the observed https (the twin scheme must be paired to the observed exchange, never the endpoint's)")
 
 
+def test_no_endpoint_scheme_borrow_even_on_an_exact_host_path_match(tmp_path):
+    """OBJECTION-2 (doctrine): when the observed capture carries NO transport scheme (``observed_scheme``
+    absent), the twin scheme must NOT be borrowed from the free-text ``report['endpoint']`` — NOT EVEN when
+    that endpoint EXACT-matches the observed host+path. A host+path match does not witness the TRANSPORT the
+    response actually came back over (BLOCK-2 already distrusts the free-text endpoint); borrowing its http
+    here would fetch a (possibly divergent) clean http control of an always-erroring https page and mint a
+    FALSE FACT. The mint must fail closed to a LEAD and NEVER fetch over the guessed http.
+
+    FAILS on the pre-fix tree — its priority-3 borrow takes the exact-match endpoint's http scheme, fetches a
+    clean control, and mints a FACT."""
+    ora = b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"
+    asked: "list[str]" = []
+
+    def _clean(report):
+        asked.append(str(report.get("endpoint") or ""))
+        return _BENIGN_CONTROL                            # clean => if fetched at all, the oracle fires & mints
+
+    # origin-form request (no in-band scheme), NO observed_scheme; the endpoint EXACT-matches host+path.
+    cap = {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
+                          "request_bytes_ref": "req", "status": 500}],
+           "blobs": {"resp": ora, "req": b"GET /api/search?q=%27 HTTP/1.1\r\nHost: t\r\n\r\n"}}
+    mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="alpha", control_fetch=_clean)
+    res = mint({"id": "exact-match-no-borrow", "bug_class": "error_based_sqli",
+                "endpoint": "http://t/api/search", CAPTURE_KEY: cap})           # EXACT host+path match, http scheme
+    assert res is None or not getattr(res, "is_fact", False), (
+        "an absent observed_scheme borrowed the exact-match endpoint's http scheme, fetched a clean control, "
+        "and minted a FALSE FACT — the endpoint scheme must never CONFIRM the twin transport (objection-2)")
+    assert not asked, (
+        f"a control was fetched despite an unconfirmable transport scheme (endpoint-scheme borrow) - {asked!r}")
+
+    # OBJECTION-4 (honest telemetry): host+path WAS derivable here (only the transport scheme was
+    # unconfirmed), so the degradation cause must name the SCHEME reason, never the blanket "no host+path".
+    from vigil_integration.proof import degradation as _deg
+    _causes = {(c["kind"], c["where"]): c for c in _deg.read_degradations(tmp_path)}
+    _scheme_cause = _causes.get((_deg.REDRIVE_FAILED, "proof.run.mint.control_scheme_unconfirmed"))
+    assert _scheme_cause is not None, (
+        f"the unconfirmed-scheme degradation was not recorded under its own cause — got {list(_causes)!r} "
+        "(objection-4: the two None causes must be distinguished)")
+    assert "scheme" in _scheme_cause["detail"].lower() and "host+path" not in _scheme_cause["detail"], (
+        f"the degradation detail misreports the cause: {_scheme_cause['detail']!r} (objection-4)")
+    assert (_deg.REDRIVE_FAILED, "proof.run.mint.control_unpairable") not in _causes, (
+        "a scheme-unconfirmed twin was mislabelled as 'no derivable host+path' (objection-4)")
+
+
+def test_observed_scheme_overrides_a_conflicting_in_band_request_target_scheme(tmp_path):
+    """OBJECTION-3 (authority order): the transport TLS flag (``observed_scheme``) is the ground truth of HOW
+    the observed response was obtained and is AUTHORITATIVE over the in-band absolute-form request-target
+    scheme. A proxied ``GET http://t/api/search`` observed over TLS (``observed_scheme='https'``) is an HTTPS
+    exchange; its benign twin must be fetched over https, NEVER the in-band http. Fetching http could hit a
+    DIVERGENT clean http twin of an always-erroring https page and mint a FALSE FACT.
+
+    FAILS on the pre-fix tree — its ``scheme = sp.scheme or _obs`` lets the in-band http win and fetches the
+    control over http."""
+    ora = b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"
+    asked: "list[str]" = []
+
+    def _clean(report):
+        asked.append(str(report.get("endpoint") or ""))
+        return _BENIGN_CONTROL
+
+    # absolute-form request target carrying an in-band http scheme, but the transport flag says https.
+    cap = {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
+                          "request_bytes_ref": "req", "status": 500, "observed_scheme": "https"}],
+           "blobs": {"resp": ora, "req": b"GET http://t/api/search?q=%27 HTTP/1.1\r\nHost: t\r\n\r\n"}}
+    mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="alpha", control_fetch=_clean)
+    mint({"id": "obs-overrides-inband", "bug_class": "error_based_sqli",
+          "endpoint": "http://t/", CAPTURE_KEY: cap})
+    assert asked, "the twin was never fetched — the authoritative observed https scheme should produce a twin"
+    assert all(u.startswith("https://") for u in asked), (
+        "the in-band http request-target scheme overrode the authoritative observed https transport flag - the "
+        f"control was fetched over {asked!r}, not https (objection-3: observed_scheme must be authoritative)")
+    assert not any(u.startswith("http://") for u in asked), (
+        f"a control was fetched over http despite an observed https transport - {asked!r}")
+
+
 # =========================================================================================================
 # COLUMN 2 — CLASS LAUNDERING: a certificate must never rename the vulnerability class it describes (S6).
 # =========================================================================================================

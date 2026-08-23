@@ -52,7 +52,7 @@ def _mint_a_fact(run_dir: Path) -> None:
     res = mint({
         "id": "errsqli-001", "bug_class": "error_based_sqli", "poc_script_code": "print('benign')",
         CAPTURE_KEY: {"exchanges": [{"channel": "error_signature", "role": "mutated",
-                                     "response_bytes_ref": "resp", "request_bytes_ref": "req", "bug_class": "error_based_sqli"}],
+                                     "response_bytes_ref": "resp", "request_bytes_ref": "req", "bug_class": "error_based_sqli", "observed_scheme": "http"}],
                       "blobs": {"resp": _SQL_ERROR, "req": b"GET /items?id=1%27 HTTP/1.1\r\nHost: t\r\n\r\n"}},
     })
     assert res is not None and res.is_fact
