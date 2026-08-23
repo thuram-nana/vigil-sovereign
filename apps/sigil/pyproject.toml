@@ -51,7 +51,7 @@ dependencies = [
 voice = ["sounddevice", "faster-whisper", "openwakeword", "piper-tts"]
 secrets = ["keyring"]
 capture = ["mss"]                 # cross-platform screen capture (macOS/Windows backends)
-dev = ["pytest>=9.1.1", "ruff>=0.16.3", "mypy>=1.10"]
+dev = ["pytest>=9.1.1", "ruff>=0.16.3", "mypy>=2.3.1"]
 all = ["sounddevice", "faster-whisper", "openwakeword", "piper-tts", "keyring", "mss"]
 
 # The `sigil` console command + `python -m sigil` both resolve to the CLI.
