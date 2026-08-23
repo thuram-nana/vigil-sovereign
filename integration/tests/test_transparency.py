@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from vigil_core import AuthorizerKey, TrustRoot, generate_keypair
+from vigil_core import AuthorizerKey, IntegrityError, TrustRoot, generate_keypair
 from vigil_integration.transparency import (
     GENESIS_LINK,
     Checkpoint,
@@ -360,8 +360,10 @@ def _noncanonical_b64(pubkey_b64):
 
 def test_encoding_variant_of_one_key_is_not_split_view_resistant():
     # the SAME operator key encoded two DIFFERENT ways (non-canonical base64) must not forge a strict
-    # majority — dedup is over the decoded key, not the string. (Byte-identical dup is the easy case;
-    # this is the malleable-encoding case a deliberate adversary would use.)
+    # majority. Two independent defenses converge (W9-5 BLOCK-1 fix): (1) the crypto core now REJECTS
+    # non-canonical base64 at the decode primitive (_b64decode_exact), so an alternate encoding of a key can
+    # never be admitted; (2) is_split_view_resistant dedups over the DECODED key. Either alone defeats the
+    # encoding-variant collapse.
     op, other = generate_keypair(), generate_keypair()
     alt = _noncanonical_b64(op.public_key_b64)
     assert alt != op.public_key_b64  # a genuinely different string...
@@ -369,12 +371,16 @@ def test_encoding_variant_of_one_key_is_not_split_view_resistant():
         AuthorizerKey(key_id="w0", name="w0", public_key_b64=op.public_key_b64),
         AuthorizerKey(key_id="w1", name="w1", public_key_b64=alt),          # ...for the SAME key
         AuthorizerKey(key_id="w2", name="w2", public_key_b64=other.public_key_b64)])
-    assert is_split_view_resistant(tr) is False  # decoded-key dedup catches the encoding variant
+    assert is_split_view_resistant(tr) is False  # decoded-key dedup + non-canonical rejection catch it
     old = _cp(10, 10, "h-old")
     fa = _cp(20, 20, "head-A", prev=checkpoint_hash(old))
     q = WitnessedCheckpoint(fa, (Witness("w0", op.private_key_b64).cosign(fa),
                                  Witness("w1", op.private_key_b64).cosign(fa)))
-    assert verify_witnessed(q, witness_trust_root=tr) is True                # one key signs as w0 & w1
+    # the non-canonical variant key is refused at the crypto core, so verify_witnessed can no longer be
+    # "fooled" into counting the variant as a second signer — it fails CLOSED (raises) rather than returning
+    # True, which is strictly stronger than the pre-fix behaviour this test used to document.
+    with pytest.raises(IntegrityError):
+        verify_witnessed(q, witness_trust_root=tr)
     assert verify_split_view_resistant(q, witness_trust_root=tr) is False     # guarantee fails closed
 
 

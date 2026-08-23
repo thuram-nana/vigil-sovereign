@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from vigil_core import AuthorizerKey, TrustRoot, generate_keypair
+from vigil_core import AuthorizerKey, TrustRoot, generate_keypair, sign
 
 from vigil_integration.destruction_gate import (
     DestructionAuthority,
@@ -333,3 +333,102 @@ def test_cli_provision_destruction_refused_in_production(tmp_path, monkeypatch):
     from vigil_integration.cli import main
     rc = main(["provision-destruction", "--base-dir", str(tmp_path / "p"), "--threshold", "2", "--signers", "2"])
     assert rc == 2
+
+
+# --- BLOCK-1 regression: encoding-variant collapse of a one-key "multi-signer" quorum ----------------
+#
+# The distinct-signer defense counted base64 STRINGS, but a 32-byte Ed25519 key has up to 4 base64 encodings
+# (malleable trailing pad bits) that all decode to the SAME raw bytes and pass base64.b64decode(validate=True).
+# A solo keyholder could therefore enrol ONE key under two key_ids with two DIFFERENT encodings and be counted
+# as TWO distinct signers — unilaterally authorizing irreversible destruction while every gate reported a
+# healthy 2-of-2. The fix dedups by the DECODED key bytes AND rejects non-canonical base64 at the crypto core.
+
+def _noncanonical_b64(pubkey_b64: str) -> str:
+    """A DIFFERENT base64 STRING that decodes to the SAME 32-byte Ed25519 key (trailing pad bits are malleable).
+    All these encodings pass base64.b64decode(validate=True); only ONE is canonical."""
+    import base64
+    raw = base64.b64decode(pubkey_b64, validate=True)
+    for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/":
+        cand = pubkey_b64[:-2] + c + "="
+        if cand != pubkey_b64 and base64.b64decode(cand, validate=True) == raw:
+            return cand
+    raise AssertionError("no non-canonical variant found")
+
+
+def _enroll_encoding(kp, kid: str, encoding: str) -> str:
+    """A PUBLIC enrolment for ``kp`` under ``kid`` using the given ``encoding`` of its pubkey, with a VALID PoP
+    over that exact encoding (so the PoP itself is genuine — the only anomaly is the alternate encoding)."""
+    pop = sign(kp.private_key_b64, dp.enrollment_signing_bytes(kid, kid, encoding))
+    return dp.EnrollmentRequest(key_id=kid, name=kid, public_key_b64=encoding, pop_signature_b64=pop).to_json()
+
+
+def test_encoding_variant_of_one_key_is_refused_everywhere(monkeypatch, tmp_path):
+    """FAILS WITHOUT THE FIX (the central BLOCK-1 control). ONE private key, TWO key_ids, TWO different base64
+    encodings of its single pubkey — a costume 2-of-2. On the pre-fix tree the distinct-signer defense counts
+    base64 STRINGS, so ALL of the following pass and this test fails at the first assert:
+      (a) production_multisigner_reason returns "" (a genuine 2-of-2), (b) __post_init__ LOADS it under
+      production, (c) authorize_destruction authorizes it, (d) assemble_authority assembles it.
+    After the fix each point refuses: dedup is by DECODED key bytes, and non-canonical base64 is rejected at
+    _b64decode_exact so the alternate encoding cannot even be admitted."""
+    kp = generate_keypair()
+    e_a = kp.public_key_b64
+    e_b = _noncanonical_b64(e_a)
+    import base64
+    assert e_a != e_b                                                        # genuinely different STRINGS...
+    assert base64.b64decode(e_a, validate=True) == base64.b64decode(e_b, validate=True)  # ...for ONE key
+    tr = TrustRoot(threshold=2, authorizers=[
+        AuthorizerKey(key_id="owner", name="owner", public_key_b64=e_a),
+        AuthorizerKey(key_id="w1", name="w1", public_key_b64=e_b)])
+
+    # (a) the pure predicate no longer counts the two encodings as two distinct signers
+    assert production_multisigner_reason(tr) != ""
+
+    # (b) it cannot be LOADED as deployment config under production
+    _prod(monkeypatch)
+    with pytest.raises(ValueError):
+        DestructionAuthority(trust_root=tr, mandatory_signer_ids=frozenset({"owner"}))
+    _no_posture(monkeypatch)
+
+    # (c) defense in depth at the decision: the one key signs under BOTH key_ids, yet it is refused
+    auth = DestructionAuthority(trust_root=tr, mandatory_signer_ids=frozenset({"owner"}))  # built posture-unset
+    now = time.time()
+    doc = dp.sign_action(action_id="pr-x", engagement_slug="a", target="/r",
+                         signer_private_keys=[("owner", kp.private_key_b64), ("w1", kp.private_key_b64)],
+                         now=now, nonce=dp.fresh_nonce())
+    p = tmp_path / "s.json"
+    p.write_text(doc, encoding="utf-8")
+    signed = load_signed_authorization(str(p))
+    action = DestructiveAction(action_id="pr-x", engagement_slug="a", target="/r", blast_class="destructive")
+    dec = authorize_destruction(action, signed, authority=auth, now=now,
+                                is_consumed=lambda n: False, production=True)
+    assert dec.authorized is False
+
+    # (d) it cannot be ASSEMBLED from public enrolments under production — each encoding carries its OWN valid
+    #     PoP, but the one key collapses the quorum (the non-canonical encoding is refused at the crypto core)
+    _prod(monkeypatch)
+    with pytest.raises(ValueError):
+        dp.assemble_authority(
+            enrollments=[("owner", _enroll_encoding(kp, "owner", e_a)),
+                         ("w1", _enroll_encoding(kp, "w1", e_b))],
+            threshold=2, owner_id="owner")
+
+
+def test_assemble_refuses_collapsed_or_threshold1_under_production(monkeypatch):
+    """assemble_authority refuses a NON-multi-signer quorum under production: a 1-of-1 solo authority, and a
+    threshold-2 roster whose two enrolments decode to the SAME key (an encoding-variant collapse). The
+    collapsed case FAILS on the pre-fix tree (assemble deduped pubkeys by STRING, so it assembled a one-key
+    2-of-2)."""
+    _prod(monkeypatch)
+    _po, eo = dp.build_enrollment(key_id="owner")
+    # (i) a single enrolment at threshold 1 → refused (solo authority is not a multi-signer quorum)
+    with pytest.raises(ValueError):
+        dp.assemble_authority(enrollments=[("owner", eo)], threshold=1, owner_id="owner")
+    # (ii) threshold-2 but the second signer is the SAME key re-encoded → refused (collapsed quorum)
+    kp = generate_keypair()
+    e_a = kp.public_key_b64
+    e_b = _noncanonical_b64(e_a)
+    with pytest.raises(ValueError):
+        dp.assemble_authority(
+            enrollments=[("owner", _enroll_encoding(kp, "owner", e_a)),
+                         ("w1", _enroll_encoding(kp, "w1", e_b))],
+            threshold=2, owner_id="owner")
