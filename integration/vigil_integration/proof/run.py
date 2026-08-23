@@ -371,12 +371,60 @@ def _web_redrive_mint(report: dict, wclass: str, *, run_dir: "str | os.PathLike"
     return _WebMintResult(is_fact=(claimed == "FACT"), facts=list(wr.facts), family_verdict=claimed)
 
 
+def _benign_twin_url(request_bytes: "bytes | None", endpoint_hint: "str | None" = None) -> "str | None":
+    """Derive the benign CONTROL url from the OBSERVED exchange's OWN captured request — its request-target
+    (host+path) with the query/payload STRIPPED — so the control is the benign twin of the exact exchange the
+    error-signature oracle adjudicates.
+
+    The free-text ``report['endpoint']`` is NOT trusted to name the twin: nothing binds it to the observed
+    exchange's request line, so an observed always-erroring ``/api/search?q='`` paired with ``endpoint='/'``
+    would otherwise fetch a CLEAN control (error absent) and mint a FALSE FACT on the always-erroring path
+    (BLOCK-2). ``endpoint_hint`` is consulted ONLY for the URL SCHEME, and ONLY when it already names the SAME
+    host+path the request does — an origin-form request-target carries no scheme, and a wrong scheme merely
+    fails the fetch (⇒ no channel ⇒ LEAD), so borrowing the scheme is a convenience, never a trust of the
+    hint's identity. Returns ``None`` when the request cannot be parsed into a host+path (no derivable twin ⇒
+    the caller refuses to a LEAD). NEVER raises."""
+    from urllib.parse import urlsplit  # noqa: PLC0415 — stdlib
+    try:
+        if not request_bytes:
+            return None
+        head = bytes(request_bytes).split(b"\r\n\r\n", 1)[0]
+        lines = [ln for ln in head.split(b"\r\n") if ln.strip()]
+        if not lines:
+            return None
+        toks = lines[0].split()
+        if len(toks) < 2:
+            return None
+        target = toks[1].decode("latin-1", "replace")
+        if "://" in target:                                  # absolute-form target carries its own authority
+            sp = urlsplit(target)
+            authority, scheme, path = sp.netloc, (sp.scheme or "http"), (sp.path or "/")
+        else:                                                # origin-form: path here, host from the Host header
+            path = urlsplit(target).path or "/"
+            authority, scheme = "", "http"
+            for ln in lines[1:]:
+                if ln.lower().startswith(b"host:"):
+                    authority = ln.split(b":", 1)[1].strip().decode("latin-1", "replace")
+                    break
+            if endpoint_hint:                                # borrow the SCHEME only if the hint names the same page
+                hp = urlsplit(str(endpoint_hint))
+                if hp.netloc.lower() == authority.lower() and (hp.path or "/") == path:
+                    scheme = hp.scheme or "http"
+        if not authority:
+            return None
+        return f"{scheme}://{authority}{path}"               # query/payload stripped — a benign GET of the twin
+    except Exception:  # noqa: BLE001 — an unparseable request ⇒ no derivable twin ⇒ None (the caller LEADs)
+        return None
+
+
 def _fetch_control(report: dict, control_fetch: "Optional[Callable[[dict], bytes | None]]") -> "bytes | None":
     """Perform ONE VIGIL-owned benign CONTROL fetch for ``report`` — a second, benign fetch of the same
     endpoint (no payload/canary) whose response bytes are what the error-signature oracle compares the
-    exploit response against. Returns the control bytes, or ``None`` when no fetcher is wired or the fetch
-    captured no channel. NEVER raises: a control we could not fetch degrades to a LEAD, it never crashes the
-    mint (a raising fetcher must not become a false CLEAN)."""
+    exploit response against. The caller pins ``report['endpoint']`` to the benign twin of the OBSERVED
+    exchange (``_benign_twin_url``) BEFORE calling this, so the fetch is paired to the exchange the oracle
+    adjudicates, never a free-text endpoint. Returns the control bytes, or ``None`` when no fetcher is wired
+    or the fetch captured no channel. NEVER raises: a control we could not fetch degrades to a LEAD, it never
+    crashes the mint (a raising fetcher must not become a false CLEAN)."""
     if control_fetch is None:
         return None
     try:
@@ -405,10 +453,18 @@ def build_report_mint(
     ``None`` if the capture is unusable — the finding then stays a plain Strix report / LEAD).
 
     ``control_fetch`` is the CONTROL-exchange seam (S6): a callable ``(report) -> bytes | None`` that performs
-    a benign fetch of the finding's endpoint so the error-signature oracle's control-comparison guard is LIVE
-    (see the mint body). When a capture already carries an executor ``role="control"`` exchange that is used
-    directly and ``control_fetch`` is not called. When it is ``None`` and no executor control is present, an
-    error-signature capture cannot be attributed and stays a LEAD — the mint never invents a control."""
+    a benign fetch of the OBSERVED exchange's own twin (host+path, payload stripped — the mint pins
+    ``report['endpoint']`` to that twin via ``_benign_twin_url`` before calling, never a free-text endpoint;
+    BLOCK-2) so the error-signature oracle's control-comparison guard is LIVE (see the mint body). When a
+    capture already carries an executor ``role="control"`` exchange that is used directly and ``control_fetch``
+    is not called. When it is ``None`` and no executor control is present, an error-signature capture cannot be
+    attributed and stays a LEAD — the mint never invents a control.
+
+    HONESTY / scope of the guarantee: the "an always-erroring page cannot mint" property holds for the
+    VIGIL-FETCHED-control path (``control_fetch``), whose control VIGIL itself captures, pins to the observed
+    twin, and refuses when truncated/un-decodable (``benign_control_fetch``). An executor-supplied
+    ``role="control"`` exchange is trusted VERBATIM (never re-fetched here), so the property is only as sound
+    as that executor's capture — it is NOT re-established by this mint for the executor-supplied control."""
 
     def mint(report: dict) -> Any:
         # S7: a web-re-drivable finding is verified by traffic VIGIL ITSELF sends — its own gated, crafted
@@ -482,7 +538,20 @@ def build_report_mint(
             _ctrl_body = (_resolve(getattr(_ctrl_ex, "response_bytes_ref", "") or "")
                           if _ctrl_ex is not None else None)
             if not (_ctrl_body and _ctrl_body.strip()):
-                _fetched = _fetch_control(report, control_fetch)   # a second, benign fetch of the same endpoint
+                # S6 BLOCK-2: the benign control MUST be the twin of the OBSERVED exchange — derive its url
+                # from the observed request we resolved above (host+path, payload/query stripped) and route
+                # the fetch THERE, never a free-text ``report["endpoint"]`` that need not name the same page
+                # (an observed always-erroring path with a clean ``endpoint`` would otherwise fetch a clean
+                # control and mint a FALSE FACT). An observed request from which no host+path can be derived
+                # yields no pairable twin ⇒ LEAD.
+                _twin = _benign_twin_url(_req, report.get("endpoint"))
+                if _twin is None:
+                    if control_fetch is not None:
+                        record_degradation(run_dir, REDRIVE_FAILED,
+                                           where="proof.run.mint.control_unpairable",
+                                           detail="observed request has no derivable host+path for a benign control")
+                    return None
+                _fetched = _fetch_control({**report, "endpoint": _twin}, control_fetch)   # benign fetch of the OBSERVED twin
                 if not (_fetched and _fetched.strip()):
                     # No control could be captured ⇒ the error is NOT attributable ⇒ LEAD. Record the inv-12
                     # cause when a fetch was actually ATTEMPTED (a fetcher was wired) so an unverifiable
