@@ -55,8 +55,9 @@ def build_error_signature_capture(
     flag (an origin-form request line carries none). It is recorded as a VIGIL-internal ``observed_scheme``
     annotation on the mutated exchange (stripped before ``CapturedExchange`` in ``proof.run``) so the S6
     benign CONTROL twin can be fetched over the SAME scheme as the observed exchange — never a silent http
-    default. Absent/invalid ⇒ omitted, and the mint pairs the scheme from the report endpoint only when it
-    exact-matches the observed host+path, else refuses the control to a LEAD (fail-closed)."""
+    default. Absent/invalid ⇒ omitted, and the mint treats ``observed_scheme`` as the SOLE scheme authority:
+    when it is absent/invalid the benign control is refused to a LEAD (fail-closed) — the report endpoint's
+    scheme is never used to pair the twin."""
     if not str(bug_class or "").strip():
         return None
     ex_bytes = _as_bytes(exploit_body)
@@ -111,8 +112,8 @@ def _request_scheme(fetched: Any) -> "str | None":
     the SAME fetched object the request bytes come from (``result.request.is_tls``; ``get_request_with_client``
     fetches the request half with the response). It is the authoritative, transport-derived scheme the benign
     CONTROL twin must be fetched over — a request LINE is origin-form and carries none. Returns ``None`` when
-    the flag is absent (⇒ ``proof.run`` pairs the scheme from the report endpoint only when it exact-matches
-    the observed host+path, else refuses the control to a LEAD — never a silent http default)."""
+    the flag is absent (⇒ ``proof.run`` treats ``observed_scheme`` as the SOLE scheme authority and refuses
+    the benign control to a LEAD — never the report endpoint's scheme, never a silent http default)."""
     req = getattr(fetched, "request", None)
     is_tls = getattr(req, "is_tls", None) if req is not None else None
     if is_tls is True:
