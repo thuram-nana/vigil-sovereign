@@ -540,7 +540,7 @@ _ADVISORY_ROLLING_DRIFT: dict[str, str] = {
     # The Strix sandbox base: a rolling Kali distro tracked at :latest so the offensive toolchain stays
     # current. Its committed SBOM is regenerated deliberately (gen_image_sbom.py), never per-drift, and its
     # image vuln scan is already ADVISORY in the A14 job — so its drift is surfaced, not blocking.
-    "kalilinux/kali-rolling": "rolling Kali distro base (strix sandbox); tracked-latest by design, already advisory-vuln-scanned",
+    "kalilinux/kali-rolling": "rolling Kali distro base (strix sandbox); any tag of this rolling repo is tracked-latest by design, already advisory-vuln-scanned; SBOM regenerated deliberately, not per-drift",
 }
 
 

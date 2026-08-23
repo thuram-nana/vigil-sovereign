@@ -85,7 +85,7 @@ python3 infra/supply-chain/image_pins.py --drift          # drift report (resolv
 python3 infra/supply-chain/image_pins.py --check          # offline: is everything pinned?
 ```
 
-**Drift is three-valued, and resolvable drift BLOCKS (W3-8, issue #431).** The old check was
+**Drift is three-valued, and resolvable drift BLOCKS (W3-8, issue #431)** — except a documented, reasoned rolling-base allowlist (`_ADVISORY_ROLLING_DRIFT`, currently only `kalilinux/kali-rolling`) whose drift is advisory (surfaced, not blocking); every other resolvable drift blocks. The old check was
 two-valued — a Docker Hub pin either matched or reported `??`, and `??` (any non-Hub registry, or a
 network blip) was *presented as a pass*. It is now three-valued:
 
@@ -565,7 +565,7 @@ Stated plainly, because a hardening document that only lists wins is a marketing
   an UNKNOWN registry blocks only under `--fail-on-unknown`.
 - **MEDIUM-and-below vulnerability findings are advisory.** They are surfaced, not enforced — a
   deliberate trade (see §4), not an oversight. HIGH and CRITICAL block; and resolvable base-image
-  drift now blocks too (W3-8).
+  drift now blocks too (W3-8) — except the documented rolling-base allowlist (`_ADVISORY_ROLLING_DRIFT`, e.g. `kalilinux/kali-rolling`), whose drift is advisory.
 
 ## What is signed, and by which identity
 
