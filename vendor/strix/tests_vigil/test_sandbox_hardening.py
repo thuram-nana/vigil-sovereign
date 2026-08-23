@@ -259,3 +259,53 @@ def test_pid_alive_and_boot_id_basic():
     assert sh.pid_alive(os.getpid()) is True
     assert sh.pid_alive(-1) is False
     assert isinstance(sh.owner_boot_id(), str)
+
+
+# --- S10: kill switch by OWNER pid (the console's cross-process reap) ------------------------------
+
+def test_kill_containers_for_owner_removes_the_owners_box_and_spares_others():
+    # The console SIGKILLs the host pid, then reaps the container that pid spawned — addressed by the
+    # LABEL_OWNER_PID label (the console never holds the SDK session id). A container owned by a
+    # DIFFERENT pid is untouched.
+    mine = _FakeContainer({sh.LABEL_MANAGED: "1", sh.LABEL_OWNER_PID: "4242",
+                           sh.LABEL_OWNER_BOOT: "BOOT-A"}, "mine")
+    other = _FakeContainer({sh.LABEL_MANAGED: "1", sh.LABEL_OWNER_PID: "9999",
+                            sh.LABEL_OWNER_BOOT: "BOOT-A"}, "other")
+    client = _FakeClient([mine, other])
+    removed = sh.kill_containers_for_owner(client, owner_pid=4242, owner_boot="BOOT-A")
+    assert removed == 1
+    assert mine.removed and not other.removed          # only the target owner's box dies
+
+
+def test_kill_containers_for_owner_ignores_liveness_so_a_SIGKILLED_run_is_reaped(monkeypatch):
+    # The SIGKILL case: the owner pid is DEAD and never ran its own teardown. Unlike the reaper, this
+    # does NOT gate on liveness — the caller already decided this owner must die — so the stranded box
+    # is removed even though (here) we assert pid_alive is never consulted.
+    monkeypatch.setattr(sh, "pid_alive", lambda pid: (_ for _ in ()).throw(AssertionError("liveness must not be checked")))
+    dead = _FakeContainer({sh.LABEL_MANAGED: "1", sh.LABEL_OWNER_PID: "4242",
+                           sh.LABEL_OWNER_BOOT: "BOOT-A"}, "dead")
+    assert sh.kill_containers_for_owner(_FakeClient([dead]), owner_pid=4242) == 1
+    assert dead.removed
+
+
+def test_kill_containers_for_owner_spares_a_same_pid_from_a_different_boot():
+    # NEGATIVE CONTROL: a pid number recycled across a reboot must not be mistaken for the target when
+    # a boot id is supplied. Same LABEL_OWNER_PID, different LABEL_OWNER_BOOT -> spared.
+    recycled = _FakeContainer({sh.LABEL_MANAGED: "1", sh.LABEL_OWNER_PID: "4242",
+                               sh.LABEL_OWNER_BOOT: "BOOT-OLD"}, "recycled")
+    client = _FakeClient([recycled])
+    assert sh.kill_containers_for_owner(client, owner_pid=4242, owner_boot="BOOT-NOW") == 0
+    assert not recycled.removed
+
+
+def test_kill_containers_for_owner_bad_pid_and_broken_client_are_a_clean_zero():
+    # NEGATIVE CONTROL: a non-numeric / non-positive pid removes nothing, and a broken daemon never
+    # raises into the caller (a reap failure must not turn a successful cancel into an error).
+    assert sh.kill_containers_for_owner(_FakeClient([]), owner_pid=None) == 0
+    assert sh.kill_containers_for_owner(_FakeClient([]), owner_pid=0) == 0
+
+    class _Boom:
+        @property
+        def containers(self):
+            raise RuntimeError("daemon down")
+    assert sh.kill_containers_for_owner(_Boom(), owner_pid=4242) == 0

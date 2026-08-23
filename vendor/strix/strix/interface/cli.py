@@ -26,6 +26,30 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
+def _signal_teardown(run_name: str, report_state: "ReportState") -> None:
+    """S10 — synchronous teardown for a SIGINT/SIGTERM/SIGHUP.
+
+    Before this, the handler tore down only the REPORT STATE (status=interrupted) and left the
+    detached sandbox CONTAINER running — a signalled run stranded its box until the next launch's
+    reaper. Now it also tears the container down (``session_manager.kill_run_sync`` — synchronous,
+    because a signal handler cannot ``await`` the event loop it is interrupting), which force-removes
+    the container and drops the cached session so no later reuse can hand back a dead handle.
+
+    Both legs run even if one raises (ordered try/except), and nothing propagates: a signal handler
+    that raises would mask the exit. The two are complementary — report cleanup persists the
+    interrupted status + destroys the report's transient state; the container teardown destroys the
+    sandbox and everything inside it.
+    """
+    try:
+        report_state.cleanup(status="interrupted")
+    except Exception:  # noqa: BLE001 — a signal handler must never raise; still tear the box down
+        logger.debug("signal teardown: report_state.cleanup raised", exc_info=True)
+    try:
+        session_manager.kill_run_sync(run_name)
+    except Exception:  # noqa: BLE001 — best-effort; the next launch's reaper is the backstop
+        logger.debug("signal teardown: session_manager.kill_run_sync raised", exc_info=True)
+
+
 def _resolve_sandbox_image() -> str:
     image = load_settings().runtime.image
     if not image:
@@ -123,7 +147,7 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         report_state.cleanup()
 
     def signal_handler(_signum: int, _frame: Any) -> None:
-        report_state.cleanup(status="interrupted")
+        _signal_teardown(args.run_name, report_state)
         sys.exit(1)
 
     atexit.register(cleanup_on_exit)
