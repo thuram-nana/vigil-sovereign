@@ -393,7 +393,9 @@ CONFIG_META = {
     # --- Sovereign runtime (SIGIL) — NEVER delivered to offense ---
     "SIGIL_LOG_LEVEL": {"group": "sovereign", "type": "enum",
         "choices": ["DEBUG", "INFO", "WARNING", "ERROR"], "default": "INFO",
-        "label": "Log level", "plane": "sovereign", "purpose": "Sovereign process log verbosity."},
+        "label": "Log level (deprecated — use VIGIL_LOG_LEVEL)", "plane": "sovereign",
+        "purpose": "Deprecated alias for VIGIL_LOG_LEVEL (W6-5). Still honoured with a one-time deprecation "
+                   "warning when VIGIL_LOG_LEVEL is unset; prefer VIGIL_LOG_LEVEL, which governs every plane."},
     "SIGIL_ALWAYS_ON": {"group": "sovereign", "type": "bool", "default": "",
         "label": "Always-on agents", "plane": "sovereign",
         "purpose": "Keep the sovereign agent mesh running continuously."},
@@ -432,6 +434,13 @@ CONFIG_META = {
         "label": "Charter slug (scope)", "plane": "gateway", "placeholder": "the target whose signed charter scopes egress",
         "purpose": "The signed charter that defines what hosts the proxy may reach."},
     # --- System / bring-up ---
+    "VIGIL_LOG_LEVEL": {"group": "system", "type": "enum",
+        "choices": ["DEBUG", "INFO", "WARNING", "ERROR"], "default": "INFO",
+        "label": "Log level (all planes)", "plane": "system",
+        "purpose": "Unified log verbosity (W6-5). Every plane's shared logging setup reads VIGIL_LOG_LEVEL "
+                   "from its environment, so setting it in the service environment (systemd / shell / "
+                   "compose) governs the sovereign, offense and gateway planes together. Supersedes "
+                   "SIGIL_LOG_LEVEL, which is still honoured with a deprecation warning."},
     "VIGIL_UP_COCKPIT_TIMEOUT": {"group": "system", "type": "int", "min": 5, "max": 3600, "default": "120",
         "label": "Cockpit start timeout (s)", "plane": "system",
         "purpose": "How long `vigil up` waits for the cockpit to come up before giving up."},

@@ -1788,7 +1788,7 @@ def _checkpoint_witness(a, W, config, roster_path, owner_pub) -> None:
 
 def main(argv=None) -> None:
     from .obs import configure_logging
-    configure_logging()                      # one structured-logging setup at startup (level from SIGIL_LOG_LEVEL)
+    configure_logging()                      # one structured-logging setup at startup (level from VIGIL_LOG_LEVEL)
     p = argparse.ArgumentParser(prog="sigil")
     sub = p.add_subparsers(dest="cmd", required=True)
     pdoctor = sub.add_parser("doctor", help="self-check the install (SIGIL_HOME, kernel, Qdrant, keyring, claude) + the shared security posture")

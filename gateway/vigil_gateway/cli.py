@@ -22,10 +22,21 @@ from .docker import SandboxNetworking
 
 
 def _configure_logging(verbose: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s vigil-gateway %(levelname)s %(name)s: %(message)s",
-    )
+    """Install the ONE shared structured-JSON + redaction handler (W6-5), governed by the single
+    VIGIL_LOG_LEVEL (``-v`` forces DEBUG). ``vigil_core`` is co-installed in the offense environment the
+    gateway runs in; the try/except keeps the gateway's zero-third-party-dependency startup robust — if
+    the shared core is somehow unavailable it falls back to the stdlib basic config rather than failing to
+    start the egress gate."""
+    level = "DEBUG" if verbose else None
+    try:
+        from vigil_core.logging_setup import configure_logging as _shared_configure
+
+        _shared_configure(level, handler_name="vigil-gateway", force=True)
+    except Exception:  # noqa: BLE001 — never let logging setup stop the egress gate from starting
+        logging.basicConfig(
+            level=logging.DEBUG if verbose else logging.INFO,
+            format="%(asctime)s vigil-gateway %(levelname)s %(name)s: %(message)s",
+        )
 
 
 async def _serve(config: GatewayConfig, host: str, port: int) -> int:
