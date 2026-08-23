@@ -60,20 +60,30 @@ def test_spawn_end_to_end_bounds_a_chatty_child(tmp_path, monkeypatch):
     monkeypatch.setenv("VIGIL_LOG_BACKUP_COUNT", "3")
     log_path = tmp_path / "ui" / "logs" / "backend.log"
     argv = [sys.executable, "-c",
-            "import sys\n"
-            "for i in range(3000):\n"
-            "    print('L%06d ' % i + 'x' * 80)\n"
-            "sys.stdout.flush()\n"]
+            ("import sys\n"
+             "for i in range(3000):\n"
+             "    print('L%06d ' % i + 'x' * 80)\n"
+             "sys.stdout.flush()\n")]
     proc = uiproxy._spawn(argv, log_path)
     proc.wait(timeout=60)
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        if len(glob.glob(str(log_path) + "*")) >= 2:
-            break
-        time.sleep(0.1)
+    # Deterministic barrier: wait for the pump thread to FULLY drain the pipe and finish its final rotation
+    # before snapshotting the log set. proc.wait() only reaps the CHILD; the pump keeps draining the piped
+    # tail afterwards. Without this join, glob() can capture a file the pump then renames during rotation and
+    # the following getsize() races the rename (FileNotFoundError) — the flake this replaces. (The sibling
+    # test gets the same barrier from its EOF sentinel.)
+    pump = getattr(proc, "_vigil_pump_thread", None)
+    assert pump is not None, "spawn did not expose its pump thread"
+    pump.join(timeout=30)
+    assert not pump.is_alive(), "log pump did not finish draining within 30s"
     files = sorted(glob.glob(str(log_path) + "*"))
     assert len(files) >= 2, "a chatty child's log never rotated"
     assert len(files) <= 1 + 3, "retention window not enforced"
-    total = sum(os.path.getsize(f) for f in files)
+    # Pump has quiesced, so no file can vanish mid-read; the guard is pure defense-in-depth.
+    total = 0
+    for f in files:
+        try:
+            total += os.path.getsize(f)
+        except FileNotFoundError:
+            pass
     # bounded to ~(backup_count + 1) * max_bytes, with generous slack for the last unrotated write.
     assert total <= (1 + 3) * 1024 + 8192, f"child logs unbounded: {total} bytes across {files}"
