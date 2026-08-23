@@ -374,6 +374,7 @@ jobs:
               --ignore=integration/tests/test_ledger_head_pin.py \
               --ignore=integration/tests/test_cli_remediate.py \
               --ignore=integration/tests/test_posture_certificate.py \
+              --ignore=integration/tests/test_posture_coverage_incomplete.py \
               --ignore=integration/tests/test_posture_vf_differential.py \
               --ignore=integration/tests/test_posture_live.py \
               --ignore=integration/tests/test_posture_series.py \
@@ -475,6 +476,7 @@ jobs:
               integration/tests/test_cli_remediate.py \
               integration/tests/test_cli_patch_verify.py \
               integration/tests/test_posture_certificate.py \
+              integration/tests/test_posture_coverage_incomplete.py \
               integration/tests/test_posture_vf_differential.py \
               integration/tests/test_posture_live.py \
               integration/tests/test_posture_series.py \
