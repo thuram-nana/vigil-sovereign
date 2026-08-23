@@ -37,6 +37,15 @@ from .highwater import (
     read_highwater_dict, strict_highwater_enabled, verify_highwater_signature,
 )
 from .models import AuthorizerKey, ChainEntry, Signature, SignedChainHead, TrustRoot
+from .signed_build_manifest import (
+    ALL_STATES as BUILD_INTEGRITY_STATES,
+    BUILD_MANIFEST_DOMAIN, BUILD_MANIFEST_SCHEMA, BuildArtifact, BuildIntegrityResult,
+    BuildIntegrityState, BuildManifestError, MANIFEST_FILENAME as BUILD_MANIFEST_FILENAME,
+    SignedBuildManifest, TRUST_ROOT_FILENAME as BUILD_TRUST_ROOT_FILENAME,
+    build_manifest_from_specs, build_signed_manifest, digest_file, digest_tree,
+    evaluate_build_integrity, load_trust_root as load_build_trust_root,
+    parse_signed_manifest, read_signed_manifest, sign_manifest, verify_build_integrity,
+)
 from .rbac import (
     OFFENSE_ACTION_PERM, PERMISSIONS, ROLES, offense_perm_for, offense_route_key, role_can,
 )
@@ -61,6 +70,12 @@ __all__ = [
     "build_manifest", "ensure_operable", "manifest_path", "new_install_id", "read_manifest",
     "verify_manifest", "write_manifest",
     "AuthorizerKey", "ChainEntry", "Signature", "SignedChainHead", "TrustRoot",
+    "BUILD_INTEGRITY_STATES", "BUILD_MANIFEST_DOMAIN", "BUILD_MANIFEST_SCHEMA", "BuildArtifact",
+    "BuildIntegrityResult", "BuildIntegrityState", "BuildManifestError", "BUILD_MANIFEST_FILENAME",
+    "SignedBuildManifest", "BUILD_TRUST_ROOT_FILENAME", "build_manifest_from_specs",
+    "build_signed_manifest", "digest_file", "digest_tree", "evaluate_build_integrity",
+    "load_build_trust_root", "parse_signed_manifest", "read_signed_manifest", "sign_manifest",
+    "verify_build_integrity",
     "ROLES", "PERMISSIONS", "role_can", "OFFENSE_ACTION_PERM", "offense_perm_for", "offense_route_key",
     "seal", "unseal", "new_kek", "is_sealed", "SealError",
     "RotationError", "rewrap", "rewrap_or_seal", "verify_opens_to",

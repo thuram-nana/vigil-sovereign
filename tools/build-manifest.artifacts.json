@@ -1,0 +1,41 @@
+{
+  "$note": "The declarative set of SHIPPED artifacts the signed build manifest covers (W4-3 #443). Each entry is hashed against the tree root by tools/build_manifest.py at release time; the four artifact KINDS the plan names — Python, Rust, the browser bundle, the gateway image — are all present here, so none ships without an identity. A 'file'/'tree' path is content-addressed from disk; an 'image' digest is injected at generate time via --image NAME=sha256:<hex> (from `docker inspect --format '{{index .RepoDigests 0}}'`) because a container image is not on the filesystem. Paths are relative to the tree root passed to `generate`.",
+  "artifacts": [
+    {
+      "name": "python-core",
+      "kind": "tree",
+      "path": "packages/core/vigil_core/vigil_core",
+      "why": "the shared integrity substrate (the registry-shippable wheel) — Python"
+    },
+    {
+      "name": "python-integration",
+      "kind": "tree",
+      "path": "integration/vigil_integration",
+      "why": "the offense/integration control-plane package — Python"
+    },
+    {
+      "name": "python-sovereign",
+      "kind": "tree",
+      "path": "apps/sigil/sigil",
+      "why": "the sovereign SIGIL package — Python"
+    },
+    {
+      "name": "warden-kernel",
+      "kind": "file",
+      "path": "apps/sigil/kernel/target/release/sigil-kernel",
+      "why": "the compiled Rust WARDEN kernel binary — Rust (present only after `cargo build --release`)"
+    },
+    {
+      "name": "browser-bundle",
+      "kind": "tree",
+      "path": "packages/vigil-ui",
+      "why": "the command-console browser bundle — the artifact the old build id covered ALONE"
+    },
+    {
+      "name": "gateway-image",
+      "kind": "image",
+      "path": "vigil-gateway",
+      "why": "the sandbox gateway container image — identified by its content digest (injected at generate time)"
+    }
+  ]
+}

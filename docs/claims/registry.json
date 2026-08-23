@@ -983,6 +983,53 @@
       "ci_job": "gateway egress gate (P6)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W9-7",
+      "title": "Signed build manifest yields six explicit integrity states (fail-closed; hostile-admin-defeatable)",
+      "claim": "A running install verifies its own shipped files against a signed build manifest and reports one of six explicit integrity states — VALID, MODIFIED, MISSING, UNSIGNED_BUILD, UNKNOWN_BUILD or DEVELOPMENT_BUILD — never an optimistic default, failing closed to UNKNOWN_BUILD when nothing can be attested, and this is user-space self-verification that a hostile administrator can defeat.",
+      "source": "docs/decisions/W9-7-signed-build-manifest.md:78",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/signed_build_manifest.py",
+        "symbol": "verify_build_integrity"
+      },
+      "proved_by": {
+        "file": "packages/core/vigil_core/tests/test_signed_build_manifest.py",
+        "tests": [
+          "test_clean_signed_tree_is_VALID_and_offline_verifiable",
+          "test_modifying_a_shipped_file_yields_MODIFIED",
+          "test_deleting_a_shipped_file_yields_MISSING",
+          "test_unsigned_build_yields_UNSIGNED_BUILD",
+          "test_no_manifest_yields_UNKNOWN_BUILD",
+          "test_development_channel_yields_DEVELOPMENT_BUILD",
+          "test_a_signature_by_an_untrusted_key_is_not_authenticated"
+        ]
+      },
+      "ci_job": "vigil_core — shared integrity substrate",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W4-3",
+      "title": "One signed manifest carries a content-addressed build id for every shipped artifact (offline-verifiable)",
+      "claim": "One signed build manifest records a content-addressed build id for every shipped artifact — the Python code, the Rust WARDEN kernel, the browser bundle and the gateway image — and is verifiable offline, so a rebuilt artifact with different content produces a different id and fails verification against the old manifest.",
+      "source": "docs/decisions/W9-7-signed-build-manifest.md:81",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/signed_build_manifest.py",
+        "symbol": "build_manifest_from_specs"
+      },
+      "proved_by": {
+        "file": "packages/core/vigil_core/tests/test_signed_build_manifest.py",
+        "tests": [
+          "test_manifest_covers_all_four_shipped_artifact_kinds",
+          "test_rebuilt_artifact_changes_build_id_and_fails_old_manifest",
+          "test_two_builds_of_the_same_tree_are_byte_identical",
+          "test_clean_signed_tree_is_VALID_and_offline_verifiable"
+        ]
+      },
+      "ci_job": "vigil_core — shared integrity substrate",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
