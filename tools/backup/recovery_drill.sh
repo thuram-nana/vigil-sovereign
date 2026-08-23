@@ -39,6 +39,12 @@ trap cleanup EXIT
 
 echo "recovery_drill: work dir $WORK"
 
+# W7-6 (PR #630): the drill exercises the FULL trust-anchor round-trip (backup establishes the anchor →
+# restore pins the recorded governance key), but against a THROWAWAY anchor under $WORK so it changes nothing
+# real (~/.vigil is untouched). The backup below establishes it (trust-on-first-use); the restore then
+# authenticates against it by default — no --expect-governance-pubkey needed on this same-host round-trip.
+export VIGIL_BACKUP_TRUST_ANCHOR="$WORK/trust-anchor.json"
+
 # 1) BACK UP into the throwaway dir. Pass --crucible-root only if the operator set one.
 bk_args=(backup --out "$WORK/bk" --base-dir "$BASE_DIR")
 [ -n "${VIGIL_CRUCIBLE_ROOT:-}" ] && bk_args+=(--crucible-root "$VIGIL_CRUCIBLE_ROOT")

@@ -192,7 +192,7 @@ class OffenseBackupError(Exception):
 
 
 # --------------------------------------------------------------------------------------------------
-# ORCHESTRATOR MANIFEST signing (W7-6 #464)
+# ORCHESTRATOR MANIFEST signing + TOFU trust anchor (W7-6 #464; reworked in PR #630)
 # --------------------------------------------------------------------------------------------------
 # The two-plane `vigil backup` orchestrator writes a PLAINTEXT ``MANIFEST.json`` alongside the two encrypted
 # plane parts — the INDEX of what a backup contains (which file is which plane + each part's sha256, the values
@@ -204,48 +204,118 @@ class OffenseBackupError(Exception):
 # with the OFFENSE GOVERNANCE key (``live.governance_identity`` — the same stable keypair that signs the inner
 # offense manifest). FATAL-2: the orchestrator is an OFFENSE-venv process and uses ONLY the offense governance
 # key; the sovereign owner key never enters this process, so — exactly as for the inner offense manifest — the
-# index is governance-signed, not owner-signed. The signature is a SEPARATE ``MANIFEST.sig.json`` (a plaintext
-# sidecar; the manifest carries no secrets), a self-describing Ed25519 signature over the EXACT raw bytes of
-# ``MANIFEST.json`` — no wallclock/nonce enters the signature, so signing is deterministic and re-verifiable.
-_ORCH_MANIFEST_SIG_SCHEMA = 1
+# index is governance-signed, not owner-signed.
+#
+# HONEST posture of a bare signature (this is the point the PR #630 rework exists to make true, not just
+# claimed): a self-describing signature over the manifest, verified WITHOUT knowing which key to expect, proves
+# only INTEGRITY-since-signing. It does NOT authenticate the signer — an attacker who can reach the backup at
+# rest, holding NEITHER the governance key NOR the passphrase, can edit ``MANIFEST.json``, RE-SIGN it under a
+# key they generated, rewrite this self-describing sidecar, and an unpinned verify accepts it. Authenticity
+# therefore requires knowing the true governance key out of band. To make the DEFAULT restore authenticated
+# (not merely integrity-checked), backup records that key to a HOST-LOCAL trust anchor on first use (TOFU) and
+# restore pins the manifest signature against it by default (see the trust-anchor helpers below).
+#
+# The signature is a SEPARATE ``MANIFEST.sig.json`` (a plaintext sidecar; the manifest carries no secrets),
+# an Ed25519 signature over DOMAIN-SEPARATED bytes: the fixed tag ``vigil-orch-manifest-v1\x00`` followed by
+# the EXACT raw bytes of ``MANIFEST.json``. The domain tag (consistent with
+# ``vigil_core.canonical.evidence_signing_bytes``) binds the signature to "this is a vigil orchestrator
+# manifest", so a same-key signature minted by another emitter over any other artifact can never be replayed
+# as this one, and vice-versa. No wallclock/nonce enters the signature, so signing is deterministic and
+# re-verifiable; the monotonic ``backup_seq`` freshness marker the manifest carries is a PERSISTED counter
+# (from the trust anchor), never derived from the wallclock.
 _ORCH_MANIFEST_SIG_NAME = "MANIFEST.sig.json"
+# Bumped 1 -> 2 in the PR #630 rework: signed bytes are now domain-separated (LOW-4). A schema-1 sidecar (a
+# raw-byte signature, no domain tag) no longer verifies here — deliberate.
+_ORCH_MANIFEST_SIG_SCHEMA = 2
+# Never change without a schema bump (invalidates existing sidecars). The trailing NUL follows the vigil_core
+# evidence-domain convention (``b"crucible-evidence-v1\x00"``).
+_ORCH_MANIFEST_DOMAIN = b"vigil-orch-manifest-v1\x00"
+
+# TOFU (trust-on-first-use) backup trust anchor.
+# ----------------------------------------------
+# WHERE IT LIVES: a HOST-LOCAL file OUTSIDE the backup dir — by default ``~/.vigil/backup-trust-anchor.json``
+# (or ``$XDG_DATA_HOME/vigil/…``), overridable with ``$VIGIL_BACKUP_TRUST_ANCHOR``. It is NOT written into the
+# timestamped backup dir and is NEVER transported off-host by ``--push``.
+# WHY THE ATTACKER CANNOT WRITE IT: the MED-1 threat actor holds neither the governance key nor the passphrase
+# and can only reach the backup AT REST (the backup dir / an off-host replica). The anchor is in the operator's
+# private home data dir, not in that backup dir, so that actor cannot touch it. An actor who CAN write the
+# anchor already has the operator's UID — and therefore the offense governance PRIVATE key that lives under the
+# same base_dir — so the anchor's protection reduces exactly to the governance key's. That is the honest limit
+# (mirrors ``vigil_core.highwater``): this is a LOCAL, unsigned 0600 file; it defends against the reach-the-
+# backup-at-rest attacker, not a same-host root. Signing it would add nothing against the actor who could write
+# it, so it is deliberately unsigned.
+# WHAT IT STORES: the trusted offense-governance pubkey, a monotonic ``backup_seq`` (the latest recorded), and
+# the latest manifest sha256. Restore pins the signature against the pubkey (authenticity) and refuses a
+# backup whose ``backup_seq`` is older than the recorded latest (rollback resistance).
+# KEY ROTATION: rotating the governance key changes the pubkey; backup then REFUSES to overwrite the anchor
+# silently and requires the deliberate, logged ``--reset-trust-anchor`` to re-establish it.
+_TRUST_ANCHOR_SCHEMA = 1
+_TRUST_ANCHOR_ENV = "VIGIL_BACKUP_TRUST_ANCHOR"
+_TRUST_ANCHOR_DEFAULT_NAME = "backup-trust-anchor.json"
+
+
+def _orch_manifest_signing_bytes(manifest_bytes: bytes) -> bytes:
+    """The EXACT bytes signed/verified: the domain tag followed by the raw on-disk ``MANIFEST.json`` bytes."""
+    return _ORCH_MANIFEST_DOMAIN + bytes(manifest_bytes)
 
 
 def sign_orchestrator_manifest(manifest_bytes: bytes, *, base_dir) -> dict:
-    """Sign the orchestrator ``MANIFEST.json`` (its EXACT on-disk bytes) with the stable offense-governance
-    key under ``base_dir`` and return the ``MANIFEST.sig.json`` envelope dict.
+    """Sign the orchestrator ``MANIFEST.json`` (its EXACT on-disk bytes, under the domain tag) with the stable
+    offense-governance key under ``base_dir`` and return the ``MANIFEST.sig.json`` envelope dict.
 
     FATAL-2: uses ONLY the offense governance key (``live.governance_identity``) — never the sovereign owner
     key, which by construction never enters this offense process. The key is loaded (or created ``0600`` on
-    first use, sealed at rest when the vault is provisioned) exactly as ``create_offense_backup`` loads it, so
-    both the inner offense manifest and this orchestrator index are signed by ONE governance identity. The
-    envelope is self-describing (it carries the signer pubkey) and deterministic (Ed25519 over fixed bytes,
-    no wallclock/rng), so ``verify_orchestrator_manifest`` re-checks it offline byte-for-byte."""
+    first use, sealed at rest when the vault is provisioned) exactly as ``create_offense_backup`` loads it. The
+    envelope is self-describing (it carries the signer pubkey) and deterministic (Ed25519 over the domain-
+    tagged fixed bytes, no wallclock/rng), so ``verify_orchestrator_manifest`` re-checks it offline byte-for-
+    byte. NOTE: a self-describing signature proves only integrity to a verifier that does not know which key to
+    expect — authenticity comes from the trust anchor / an explicit pin at restore, not from this envelope."""
     base = Path(base_dir)
     vault = Vault(base / "vault")
     gov = load_or_create_governance_keypair(path=str(base / DEFAULT_GOVERNANCE_KEY_FILE), vault=vault)
     return {
         "schema": _ORCH_MANIFEST_SIG_SCHEMA,
         "algo": "ed25519",
-        "signs": "MANIFEST.json (raw bytes)",
+        "signs": "MANIFEST.json (raw bytes under the vigil-orch-manifest-v1 domain tag)",
         "manifest_sha256": sha256_hex(manifest_bytes),
         "pubkey": gov.public_key_b64,
-        "sig": sign(gov.private_key_b64, manifest_bytes),
+        "sig": sign(gov.private_key_b64, _orch_manifest_signing_bytes(manifest_bytes)),
     }
 
 
-def verify_orchestrator_manifest(manifest_bytes: bytes, sig_doc: object, *, expect_pubkey: str | None = None) -> str:
-    """Fail-closed verification of the orchestrator ``MANIFEST.json`` against its ``MANIFEST.sig.json``
-    envelope. Returns the verified signer pubkey (base64) on success; raises :class:`OffenseBackupError` on
-    ANY missing / malformed / mismatched / tampered / wrong-key signature. Never trusts an unsigned manifest.
+def offense_governance_pubkey(base_dir) -> str:
+    """The base64 public key of the stable offense-governance identity under ``base_dir`` (loaded/created +
+    sealed exactly as :func:`sign_orchestrator_manifest`). Used at backup time to compare against the recorded
+    trust anchor BEFORE doing work, so a key rotation refuses early rather than after a full backup."""
+    base = Path(base_dir)
+    vault = Vault(base / "vault")
+    gov = load_or_create_governance_keypair(path=str(base / DEFAULT_GOVERNANCE_KEY_FILE), vault=vault)
+    return gov.public_key_b64
 
-    Guarantee: an attacker who can reach the backup at rest but holds NEITHER the offense governance private
-    key NOR the passphrase cannot edit the index without invalidating this signature. When ``expect_pubkey``
-    is supplied (an out-of-band AUTHENTICITY pin, the same channel that told the operator which governance key
-    to trust), the envelope's signer MUST equal it — closing the residual that a self-describing signature
-    could otherwise be re-minted under an attacker-generated key. Without the pin, verification proves
-    INTEGRITY (no edit by a non-key-holder) but not full authenticity against a re-mint; that residual is the
-    operator-owned/rotated signing key tracked by [W9-1] #434."""
+
+def verify_orchestrator_manifest(manifest_bytes: bytes, sig_doc: object, *, expect_pubkey: str | None = None) -> str:
+    """Fail-closed signature check of ``MANIFEST.json`` against its ``MANIFEST.sig.json`` envelope, over the
+    DOMAIN-SEPARATED manifest bytes. Returns the verified signer pubkey (base64) on success; raises
+    :class:`OffenseBackupError` on ANY missing / malformed / mismatched / tampered / wrong-key signature.
+    Never trusts an unsigned manifest.
+
+    AUTHENTICITY depends on ``expect_pubkey`` — read this carefully, it is the MED-1 correction:
+
+    * With ``expect_pubkey`` set (the TOFU trust anchor's recorded key, or an operator-supplied
+      ``--expect-governance-pubkey``), the signer MUST equal it — a manifest re-signed under any OTHER key is
+      refused. This is the DEFAULT restore path once a trust anchor exists on the host, and the only mode that
+      delivers AUTHENTICITY.
+    * With ``expect_pubkey=None`` (INTEGRITY-ONLY), this proves only that the bytes were not altered after
+      signing by WHOEVER holds the private key named in the envelope. It does NOT authenticate the signer: an
+      attacker who can reach the backup at rest — holding neither the governance key nor the passphrase — can
+      edit ``MANIFEST.json``, RE-SIGN it under a key THEY generated, rewrite this self-describing sidecar, and
+      this call ACCEPTS it (returning the attacker's pubkey, no error). Do NOT rely on the unpinned path for
+      authenticity; callers obtain authenticity from the trust anchor or an explicit pin (see
+      :func:`resolve_manifest_pin` and ``cli._cmd_restore``).
+
+    FRESHNESS is out of scope of this function: NEITHER the signature NOR the pin stops a rollback to a genuine
+    OLDER signed backup — such a backup verifies here. Rollback-to-genuine-older is bounded separately by the
+    trust anchor's monotonic ``backup_seq`` marker (see :func:`check_backup_freshness`)."""
     if not isinstance(sig_doc, dict):
         raise OffenseBackupError("orchestrator manifest signature envelope is missing or malformed "
                                  "(refusing to trust an unsigned MANIFEST.json)")
@@ -254,27 +324,188 @@ def verify_orchestrator_manifest(manifest_bytes: bytes, sig_doc: object, *, expe
     if not isinstance(pub, str) or not pub or not isinstance(sig, str) or not sig:
         raise OffenseBackupError("orchestrator manifest signature is missing its pubkey/sig "
                                  "(refusing to trust an unsigned MANIFEST.json)")
-    # Out-of-band authenticity pin (optional but the only defence against a re-mint): reject an index NOT
-    # signed by the expected governance key BEFORE checking the signature. This mirrors the inner offense
-    # manifest's ``--expect-governance-pubkey`` pin — one key, one pin, both manifests.
+    # AUTHENTICITY pin (the only defence against a re-mint): reject an index NOT signed by the expected
+    # governance key BEFORE checking the signature. The pin is supplied by the trust anchor (default) or an
+    # explicit --expect-governance-pubkey; this mirrors the inner offense manifest's pin — one key, one pin.
     if expect_pubkey and pub != expect_pubkey:
         raise OffenseBackupError(
-            "orchestrator MANIFEST.json is not signed by the pinned --expect-governance-pubkey "
+            "orchestrator MANIFEST.json is not signed by the expected governance key "
             "(authenticity pin failed) — refusing to restore an index of unverified provenance")
     try:
-        ok = verify_one(pub, manifest_bytes, sig)
+        ok = verify_one(pub, _orch_manifest_signing_bytes(manifest_bytes), sig)
     except Exception as e:  # noqa: BLE001 — malformed key/sig material is a fail-closed refusal, not a crash
         raise OffenseBackupError(f"orchestrator manifest signature is malformed: {e}") from e
     if not ok:
-        raise OffenseBackupError("orchestrator MANIFEST.json signature does not verify (tamper) — refusing")
-    # Defence-in-depth: the envelope's advertised digest must match the bytes we actually verified. The
-    # signature already binds the exact bytes; a mismatch here is an unambiguous tamper signal with a clear
-    # message (and guards a future envelope whose digest and signature could disagree).
+        raise OffenseBackupError("orchestrator MANIFEST.json signature does not verify (tamper, or a sidecar "
+                                 "from before the domain-separation schema bump) — refusing")
+    # Defence-in-depth: the envelope's advertised digest must match the bytes we verified.
     declared = sig_doc.get("manifest_sha256")
     if isinstance(declared, str) and declared != sha256_hex(manifest_bytes):
         raise OffenseBackupError("orchestrator MANIFEST.json sha256 does not match its signed digest "
                                  "(tamper) — refusing")
     return pub
+
+
+# -- trust-anchor I/O + restore-time authenticity/freshness resolution -----------------------------
+
+def default_trust_anchor_path(env: "dict | None" = None) -> Path:
+    """The host-local trust-anchor path: ``$VIGIL_BACKUP_TRUST_ANCHOR`` if set, else
+    ``$XDG_DATA_HOME/vigil/backup-trust-anchor.json``, else ``~/.vigil/backup-trust-anchor.json``. Host-stable
+    and independent of ``--base-dir`` (which is a FRESH dir at restore), so the same-host TOFU pin survives a
+    backup(base=live)->restore(base=fresh) round-trip."""
+    e = os.environ if env is None else env
+    override = (e.get(_TRUST_ANCHOR_ENV, "") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    xdg = (e.get("XDG_DATA_HOME", "") or "").strip()
+    if xdg:
+        return Path(xdg).expanduser() / "vigil" / _TRUST_ANCHOR_DEFAULT_NAME
+    return Path.home() / ".vigil" / _TRUST_ANCHOR_DEFAULT_NAME
+
+
+def _atomic_write_0600(path: Path, data: bytes) -> None:
+    """Crash-safe, owner-only write: temp -> fsync -> os.replace -> dir-fsync, 0600 throughout (the vetted
+    ``vigil_core.highwater`` pattern; a file-write primitive, not crypto). A partial write can only ever leave
+    a ``.tmp-*`` file, and the rename is atomic."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:  # pragma: no cover — best-effort dir perms
+        pass
+    tmp = path.parent / f".{path.name}.tmp-{os.getpid()}"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(path))
+    try:
+        os.chmod(path, 0o600)
+    except OSError:  # pragma: no cover
+        pass
+    try:
+        dfd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:  # pragma: no cover — dir fsync unsupported; os.replace already committed the name
+        pass
+
+
+def load_trust_anchor(path: "str | os.PathLike | None" = None) -> "dict | None":
+    """Read the host-local backup trust anchor. Returns the parsed dict, or ``None`` when the file is ABSENT
+    (no prior backup on this host). FAIL-CLOSED: a present-but-corrupt/malformed anchor RAISES rather than
+    reads as ``None`` — silently treating a corrupt anchor as 'no anchor' would drop the default restore back
+    to integrity-only, exactly the downgrade this anchor exists to prevent."""
+    p = Path(path) if path is not None else default_trust_anchor_path()
+    try:
+        raw = p.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise OffenseBackupError(f"backup trust anchor {p} is unreadable: {e} — refusing (fail-closed)") from e
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except ValueError as e:
+        raise OffenseBackupError(f"backup trust anchor {p} is corrupt JSON: {e} — refusing (fail-closed)") from e
+    pub = doc.get("governance_pubkey") if isinstance(doc, dict) else None
+    if not isinstance(pub, str) or not pub:
+        raise OffenseBackupError(f"backup trust anchor {p} is malformed (no governance_pubkey) — refusing")
+    return doc
+
+
+def record_backup_trust_anchor(*, governance_pubkey: str, backup_seq: int, manifest_sha256: str,
+                               path: "str | os.PathLike | None" = None, reset: bool = False) -> "tuple[Path, str]":
+    """Establish or advance the host-local trust anchor after a backup. Atomic 0600 write. Returns
+    ``(path, action)`` with ``action`` in {``established``, ``advanced``, ``rotated``}.
+
+    * anchor ABSENT -> TOFU: record the current governance pubkey + seq (``established``).
+    * SAME key      -> advance the monotonic ``backup_seq`` (``advanced``); never lowers it.
+    * DIFFERENT key -> a governance-key ROTATION (or a different engine home). REFUSED unless ``reset`` (the
+      deliberate, logged ``--reset-trust-anchor`` path), so a divergent trust root is never adopted silently.
+      With ``reset`` the anchor is re-established under the new key, continuing the monotonic counter
+      (``rotated``)."""
+    p = Path(path) if path is not None else default_trust_anchor_path()
+    prior = load_trust_anchor(p)
+    prior_seq = int(prior.get("backup_seq", 0)) if prior else 0
+    if prior and prior.get("governance_pubkey") != governance_pubkey and not reset:
+        raise OffenseBackupError(
+            f"backup trust anchor {p} records a DIFFERENT governance key than the one now signing "
+            f"(recorded {str(prior.get('governance_pubkey'))[:16]}…, current {governance_pubkey[:16]}…). "
+            "This is a governance-key rotation or a different engine home. Re-establish the anchor "
+            "deliberately with `vigil backup --reset-trust-anchor` (a logged step) — refusing to overwrite "
+            "the trust root silently.")
+    action = "established" if not prior else ("rotated" if prior.get("governance_pubkey") != governance_pubkey else "advanced")
+    # Monotonic: the recorded seq never goes backwards even across a reset.
+    seq = max(int(backup_seq), prior_seq)
+    doc = {
+        "schema": _TRUST_ANCHOR_SCHEMA,
+        "governance_pubkey": governance_pubkey,
+        "backup_seq": seq,
+        "latest_manifest_sha256": manifest_sha256,
+    }
+    _atomic_write_0600(p, (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    return p, action
+
+
+def resolve_manifest_pin(anchor: "dict | None", explicit_pin: "str | None",
+                         is_production: bool) -> "tuple[str | None, str, str | None]":
+    """Decide the authenticity pin for a restore. Returns ``(expect_pubkey, mode, warning)`` where ``mode`` is
+    one of ``explicit`` / ``anchor`` / ``integrity-only``. Pure (no I/O) so it is unit-testable.
+
+    * an explicit ``--expect-governance-pubkey`` ALWAYS wins -> (that key, 'explicit', None).
+    * else, a present trust anchor pins the recorded key -> (anchor key, 'anchor', None): the DEFAULT
+      authenticated restore.
+    * else (no anchor on this host): FAIL-CLOSED under the production posture -> raises; outside production,
+      integrity-only with a LOUD warning -> (None, 'integrity-only', <warning>)."""
+    if explicit_pin:
+        return explicit_pin, "explicit", None
+    if anchor:
+        return str(anchor["governance_pubkey"]), "anchor", None
+    if is_production:
+        raise OffenseBackupError(
+            "no backup trust anchor on this host and no --expect-governance-pubkey given: refusing an "
+            "UNAUTHENTICATED restore under the production posture (VIGIL_POSTURE=production). A bare signature "
+            "here proves only integrity, not that the manifest was signed by YOUR governance key — an attacker "
+            "who reached the backup could have re-signed it under their own key. Establish/confirm authenticity "
+            "first: either run a `vigil backup` on this host (records the trust anchor), or re-run restore with "
+            "`--expect-governance-pubkey <the pubkey you trust, obtained out of band>`.")
+    return None, "integrity-only", (
+        "WARNING: no backup trust anchor on this host and no --expect-governance-pubkey — verifying the "
+        "manifest INTEGRITY-ONLY. This does NOT authenticate the signer: an attacker who reached the backup "
+        "could have re-signed a tampered manifest under their own key and this restore would accept it. Run a "
+        "`vigil backup` on this host to record the trust anchor, or pass --expect-governance-pubkey, to get an "
+        "AUTHENTICATED restore. (Refused outright under VIGIL_POSTURE=production.)")
+
+
+def check_backup_freshness(anchor: "dict | None", backup_seq: object, allow_rollback: bool) -> "str | None":
+    """Rollback resistance. When a trust anchor with a recorded ``backup_seq`` exists, REFUSE (raise) a backup
+    whose ``backup_seq`` is older than the recorded latest — a rollback/substitution to a genuine older signed
+    backup, which the signature and the pin do NOT catch. Returns an optional warning (the ``allow_rollback``
+    override path); raises :class:`OffenseBackupError` on a refused rollback. Pure (no I/O).
+
+    A missing/invalid ``backup_seq`` on the manifest is treated as older-than-any (fail-closed) when an anchor
+    counter exists. With no anchor (fresh host) there is no local counter to compare against, so freshness is
+    honestly UNVERIFIABLE here and this returns None (documented; the pin/production gate governs that case)."""
+    if not anchor or "backup_seq" not in anchor:
+        return None
+    recorded = int(anchor.get("backup_seq", 0))
+    seq = backup_seq if isinstance(backup_seq, int) and not isinstance(backup_seq, bool) else None
+    if seq is not None and seq >= recorded:
+        return None
+    detail = (f"this backup's backup_seq={seq} is older than the latest recorded on this host "
+              f"({recorded})" if seq is not None else
+              f"this backup carries no monotonic backup_seq while the trust anchor records {recorded}")
+    if allow_rollback:
+        return (f"WARNING: ROLLBACK OVERRIDE — {detail}. Restoring a SUPERSEDED backup because "
+                "--allow-rollback was given. This can reintroduce pre-revocation/pre-patch state; proceed only "
+                "if you are deliberately rolling back.")
+    raise OffenseBackupError(
+        f"rollback detected: {detail}. Refusing to restore a superseded backup (a genuine older signed backup "
+        "still verifies, so only this monotonic marker catches it). Pass --allow-rollback to override "
+        "deliberately.")
 
 
 def _derive_key(passphrase: str, salt: bytes) -> bytes:
