@@ -826,6 +826,7 @@ vigil/
 - **You own the keys.** The master "owner" key stays on your machine (and never on your phone or in the browser). Governance events, approvals, and kill-switches are all owner-signed and verified against your persisted key, so a forged grant grants nothing.
 - **Fail-closed, everywhere.** Unknown tool → strictest tier. Missing gate → deny. Malformed input → safest action. Approval timeout → reject. A crash in telemetry or the graph can never affect what's true.
 - **Offline-verifiable forever.** Every fact is a certificate a client, auditor, or court can check *with no network and no trust in VIGIL* — the append-only, tamper-evident logging that regimes such as the EU AI Act (Art. 12) call for.
+- **Found a flaw in VIGIL itself?** Report it privately through the coordinated-disclosure path in [`SECURITY.md`](SECURITY.md) — a security contact, a supported-versions policy, and an explicit **safe-harbour** statement for good-faith research. Please don't open a public issue for a security bug.
 
 ---
 

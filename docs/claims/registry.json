@@ -560,6 +560,30 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W12-2",
+      "title": "A root SECURITY.md publishes a contact, supported-versions, coordinated-disclosure and a safe-harbour statement",
+      "claim": "A root SECURITY.md publishes a working security contact, a supported-versions policy, a coordinated-disclosure process, and an explicit safe-harbour statement for good-faith research, and a required-CI guard fails the build if the file is missing or any of those four elements is absent.",
+      "source": "docs/decisions/W12-2-security-policy.md:34",
+      "enforced_by": {
+        "file": "docs/tests/test_security_policy_present.py",
+        "symbol": "security_policy_defects"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_security_policy_present.py",
+        "tests": [
+          "test_security_md_exists_at_root",
+          "test_security_md_has_a_contact_so_it_cannot_be_silently_gutted",
+          "test_security_md_has_all_required_elements",
+          "test_readme_references_the_disclosure_path",
+          "test_negative_control_missing_contact_is_rejected",
+          "test_negative_control_missing_safe_harbour_is_rejected"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
