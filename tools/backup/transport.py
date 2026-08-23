@@ -4,8 +4,10 @@ verification (W7-4, #462). Pure stdlib.
 The systemd LOCAL backup writes to ``~/vigil-backups`` on the SAME disk and runs air-gapped
 (``PrivateNetwork=yes``): it is a PORTABLE, passphrase-encrypted LOCAL backup, NOT off-HOST replication — a
 dead host takes both the engine and its local backups. ``vigil backup --push <dest>`` closes that gap: AFTER a
-successful local backup it copies the ENCRYPTED plane files (``*.vglbk`` / ``*.sglbk``) + ``MANIFEST.json`` to
-a transport backend, so a genuine second copy lives off the host.
+successful local backup it copies the ENCRYPTED plane files (``*.vglbk`` / ``*.sglbk``) + ``MANIFEST.json`` +
+its governance signature ``MANIFEST.sig.json`` (W7-6) to a transport backend, so a genuine second copy lives
+off the host — and, carrying the signature, the pushed copy is itself a signature-verifying ``vigil restore``
+source.
 
 Confidentiality across the wire: every plane file is passphrase-encrypted (scrypt-derived AEAD) BEFORE it is
 written locally, so transport moves CIPHERTEXT only — the remote never sees plaintext, and the remote's own

@@ -191,6 +191,92 @@ class OffenseBackupError(Exception):
     AFTER; it never reports success on an unverified restore."""
 
 
+# --------------------------------------------------------------------------------------------------
+# ORCHESTRATOR MANIFEST signing (W7-6 #464)
+# --------------------------------------------------------------------------------------------------
+# The two-plane `vigil backup` orchestrator writes a PLAINTEXT ``MANIFEST.json`` alongside the two encrypted
+# plane parts — the INDEX of what a backup contains (which file is which plane + each part's sha256, the values
+# ``vigil restore`` uses to locate and integrity-check each part BEFORE invoking any leg). Unsigned, that index
+# could be edited by anyone who can reach the backup at rest: redirect a part's ``file`` name, downgrade a
+# ``sha256`` to smuggle in an OLD legitimate part (a rollback/substitution to pre-revocation state), or tamper
+# the retention hint. Each encrypted part already carries its OWN inner governance signature (sealed inside the
+# body), but that protects the part, not the orchestrator's index of parts. So the index is itself signed here
+# with the OFFENSE GOVERNANCE key (``live.governance_identity`` — the same stable keypair that signs the inner
+# offense manifest). FATAL-2: the orchestrator is an OFFENSE-venv process and uses ONLY the offense governance
+# key; the sovereign owner key never enters this process, so — exactly as for the inner offense manifest — the
+# index is governance-signed, not owner-signed. The signature is a SEPARATE ``MANIFEST.sig.json`` (a plaintext
+# sidecar; the manifest carries no secrets), a self-describing Ed25519 signature over the EXACT raw bytes of
+# ``MANIFEST.json`` — no wallclock/nonce enters the signature, so signing is deterministic and re-verifiable.
+_ORCH_MANIFEST_SIG_SCHEMA = 1
+_ORCH_MANIFEST_SIG_NAME = "MANIFEST.sig.json"
+
+
+def sign_orchestrator_manifest(manifest_bytes: bytes, *, base_dir) -> dict:
+    """Sign the orchestrator ``MANIFEST.json`` (its EXACT on-disk bytes) with the stable offense-governance
+    key under ``base_dir`` and return the ``MANIFEST.sig.json`` envelope dict.
+
+    FATAL-2: uses ONLY the offense governance key (``live.governance_identity``) — never the sovereign owner
+    key, which by construction never enters this offense process. The key is loaded (or created ``0600`` on
+    first use, sealed at rest when the vault is provisioned) exactly as ``create_offense_backup`` loads it, so
+    both the inner offense manifest and this orchestrator index are signed by ONE governance identity. The
+    envelope is self-describing (it carries the signer pubkey) and deterministic (Ed25519 over fixed bytes,
+    no wallclock/rng), so ``verify_orchestrator_manifest`` re-checks it offline byte-for-byte."""
+    base = Path(base_dir)
+    vault = Vault(base / "vault")
+    gov = load_or_create_governance_keypair(path=str(base / DEFAULT_GOVERNANCE_KEY_FILE), vault=vault)
+    return {
+        "schema": _ORCH_MANIFEST_SIG_SCHEMA,
+        "algo": "ed25519",
+        "signs": "MANIFEST.json (raw bytes)",
+        "manifest_sha256": sha256_hex(manifest_bytes),
+        "pubkey": gov.public_key_b64,
+        "sig": sign(gov.private_key_b64, manifest_bytes),
+    }
+
+
+def verify_orchestrator_manifest(manifest_bytes: bytes, sig_doc: object, *, expect_pubkey: str | None = None) -> str:
+    """Fail-closed verification of the orchestrator ``MANIFEST.json`` against its ``MANIFEST.sig.json``
+    envelope. Returns the verified signer pubkey (base64) on success; raises :class:`OffenseBackupError` on
+    ANY missing / malformed / mismatched / tampered / wrong-key signature. Never trusts an unsigned manifest.
+
+    Guarantee: an attacker who can reach the backup at rest but holds NEITHER the offense governance private
+    key NOR the passphrase cannot edit the index without invalidating this signature. When ``expect_pubkey``
+    is supplied (an out-of-band AUTHENTICITY pin, the same channel that told the operator which governance key
+    to trust), the envelope's signer MUST equal it — closing the residual that a self-describing signature
+    could otherwise be re-minted under an attacker-generated key. Without the pin, verification proves
+    INTEGRITY (no edit by a non-key-holder) but not full authenticity against a re-mint; that residual is the
+    operator-owned/rotated signing key tracked by [W9-1] #434."""
+    if not isinstance(sig_doc, dict):
+        raise OffenseBackupError("orchestrator manifest signature envelope is missing or malformed "
+                                 "(refusing to trust an unsigned MANIFEST.json)")
+    pub = sig_doc.get("pubkey")
+    sig = sig_doc.get("sig")
+    if not isinstance(pub, str) or not pub or not isinstance(sig, str) or not sig:
+        raise OffenseBackupError("orchestrator manifest signature is missing its pubkey/sig "
+                                 "(refusing to trust an unsigned MANIFEST.json)")
+    # Out-of-band authenticity pin (optional but the only defence against a re-mint): reject an index NOT
+    # signed by the expected governance key BEFORE checking the signature. This mirrors the inner offense
+    # manifest's ``--expect-governance-pubkey`` pin — one key, one pin, both manifests.
+    if expect_pubkey and pub != expect_pubkey:
+        raise OffenseBackupError(
+            "orchestrator MANIFEST.json is not signed by the pinned --expect-governance-pubkey "
+            "(authenticity pin failed) — refusing to restore an index of unverified provenance")
+    try:
+        ok = verify_one(pub, manifest_bytes, sig)
+    except Exception as e:  # noqa: BLE001 — malformed key/sig material is a fail-closed refusal, not a crash
+        raise OffenseBackupError(f"orchestrator manifest signature is malformed: {e}") from e
+    if not ok:
+        raise OffenseBackupError("orchestrator MANIFEST.json signature does not verify (tamper) — refusing")
+    # Defence-in-depth: the envelope's advertised digest must match the bytes we actually verified. The
+    # signature already binds the exact bytes; a mismatch here is an unambiguous tamper signal with a clear
+    # message (and guards a future envelope whose digest and signature could disagree).
+    declared = sig_doc.get("manifest_sha256")
+    if isinstance(declared, str) and declared != sha256_hex(manifest_bytes):
+        raise OffenseBackupError("orchestrator MANIFEST.json sha256 does not match its signed digest "
+                                 "(tamper) — refusing")
+    return pub
+
+
 def _derive_key(passphrase: str, salt: bytes) -> bytes:
     if not passphrase:
         raise OffenseBackupError("an empty passphrase is refused — the backup would be trivially decryptable")
