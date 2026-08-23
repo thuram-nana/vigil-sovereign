@@ -47,7 +47,8 @@ if not _FIXTURES.is_dir():                       # running from the repo root
 
 
 def _mint_a_fact(run_dir: Path) -> None:
-    mint = build_report_mint(run_dir=run_dir, signers=SIGNERS, engagement_slug="acme")
+    mint = build_report_mint(run_dir=run_dir, signers=SIGNERS, engagement_slug="acme",
+                             control_fetch=lambda _r: b"HTTP/1.1 200 OK\r\n\r\nok")
     res = mint({
         "id": "errsqli-001", "bug_class": "error_based_sqli", "poc_script_code": "print('benign')",
         CAPTURE_KEY: {"exchanges": [{"channel": "error_signature", "role": "mutated",

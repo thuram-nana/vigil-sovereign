@@ -165,6 +165,41 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
     return send, state
 
 
+def benign_control_fetch(url: str, *, slug: str, timeout: float = 8.0) -> "bytes | None":
+    """One VIGIL-owned, GATED, benign GET of ``url`` (no payload, no canary) — the CONTROL an error-signature
+    proof is compared against (S6). Its response BODY bytes are what ``verify.oracles.error_signature_oracle``
+    checks the exploit response against: the same datastore/parser error present in BOTH the exploit and this
+    benign control means the page always errors ⇒ NOT attributable ⇒ the mint stays a LEAD.
+
+    It reuses the SAME charter-gated, DNS-pinned, proxy-free send as the web re-drive (kill-switch →
+    single-host → ACTIVE_RECON → charter scope), so a control is only ever fetched from an in-scope target.
+    Returns the decoded body bytes when a real channel was established, else ``None`` — a refusal (out of
+    scope / kill-switch), a transport error, or an un-decodable body all yield ``None`` (a control we could
+    NOT capture ⇒ the caller refuses the FACT to a LEAD). NEVER raises."""
+    if not str(url or "").strip():
+        return None
+    try:
+        from framework.v2.scanner.insertion import HttpRequest  # noqa: PLC0415 — FATAL-2 (offense plane)
+        from framework.v2.verify.reachability_cloud import _authorize  # noqa: PLC0415 — the URL-shaped gate
+
+        # PRE-FLIGHT the gate ONCE (mirrors ``web_redrive``): a refused engagement means VIGIL never observed
+        # the target, so there is no control to compare against — refuse rather than send.
+        if _authorize(url, slug) is not None:
+            return None
+        send, state = _gated_web_send(slug, timeout=timeout)
+        resp = send(HttpRequest(method="GET", url=url))
+        if state["channels"] <= 0:
+            return None   # no channel established (gate deny mid-run / transport error) ⇒ no control
+        body = resp.get("body")
+        if isinstance(body, (bytes, bytearray)):
+            return bytes(body) or None
+        if isinstance(body, str):
+            return body.encode("utf-8", errors="replace") or None
+        return None
+    except Exception:  # noqa: BLE001 — a control fetch must never raise into the mint; no channel ⇒ None
+        return None
+
+
 # The insertion points this re-drive ACTUALLY probes. It builds a bare GET template from the proposed URL,
 # whose only insertion points are the URL — so QUERY_VALUE and URL_PATH_SEG is the honest coverage today.
 # COOKIE_VALUE / BODY_FORM_VALUE / JSON_VALUE would need the runner to synthesise a cookie / a urlencoded

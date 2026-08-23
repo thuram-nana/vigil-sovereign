@@ -91,13 +91,18 @@ def test_env_activation_chain_end_to_end(fake_strix_state, tmp_path, monkeypatch
     monkeypatch.setenv("VIGIL_ENGAGEMENT", "acme")
     bootstrap.install_from_env()
 
-    # the error-signature capture the LIVE Strix path builds from Caido's raw response bytes
+    # the error-signature capture the LIVE Strix path builds from Caido's raw response bytes — WITH the
+    # benign CONTROL exchange (S6): the SQL error is present in the exploit response but ABSENT from a benign
+    # fetch of the same endpoint, so the oracle's control-comparison guard confirms it is attributable.
     report = {"id": "errsqli-live", "cwe": "CWE-89", "title": "SQL injection",
               "poc_script_code": "print('benign')",
               CAPTURE_KEY: {"exchanges": [{"channel": "error_signature", "role": "mutated",
                                            "response_bytes_ref": "resp", "request_bytes_ref": "req",
-                                           "bug_class": "error_based_sqli"}],
+                                           "bug_class": "error_based_sqli"},
+                                          {"channel": "error_signature", "role": "control",
+                                           "response_bytes_ref": "ctrl"}],
                             "blobs": {"resp": b"HTTP/1.1 500\r\n\r\nYou have an error in your SQL syntax near ''",
+                                      "ctrl": b"HTTP/1.1 200 OK\r\n\r\n{\"items\": []}",
                                       "req": b"GET /items?id=1%27 HTTP/1.1\r\nHost: t\r\n\r\n"}}}
     out = fake_strix_state.proof_sink(report)
     assert out.minted, "the env-installed sink must mint the reproducing capture"
