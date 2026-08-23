@@ -808,6 +808,13 @@ def retry_run(run_id: str) -> dict:
     # a Strix run needs its Proof Studio env re-pointed at the NEW run dir (else its proofs mis-locate).
     env_extra = None
     env_remove = None
+    # S9c: a retried ENGAGE run (a web/suite/tool engage, or a `--fuse-only` cloud/K8s/infra POSTURE run)
+    # is fusion-capable, so it too must be handed THIS run's dir — otherwise a retried cloud POSTURE run
+    # drops its `<run_dir>/_inconclusive.json` and renders CLEAN over an unassessed surface (the exact
+    # inert-wiring the launch path closes). The Strix branch below sets its own richer env_extra; this is
+    # the non-Strix engage default. A scan retry (no fusion) is unaffected either way.
+    if not _is_strix_run and "engage" in new_cmd:
+        env_extra = {"VIGIL_PROOF_RUN_DIR": new_rd, "VIGIL_ENGAGEMENT": slug}
     if _is_strix_run:
         # **strix_env is merged LAST so a re-resolved LOCAL pin OVERRIDES the global cloud default in the child;
         # for a cloud/no-pick retry it is {} → byte-identical to the pre-GAP-1 Proof-Studio-only env.
@@ -2076,7 +2083,14 @@ def launch_assessment(body: dict) -> dict:
     meta = {**base, "tools_applied": list(tools), "slug": slug, "cmd": cmd,
             "stream": "blackboard", "status": "running"}
     _write_meta(run_id, **meta)
-    _spawn_background(run_id, rd, cmd, meta, capture_report=False)
+    # S9c: hand the ENGAGE child THIS run's dir ($VIGIL_PROOF_RUN_DIR — the same handle the proof subsystem
+    # and the codebase/agentic branches use). Fusion auto-enables when targets/<slug>/fusion.json exists
+    # (engage.py `_resolve_fuse_sensors`), and `suite` adds `--autonomous` — either path can produce an
+    # INCONCLUSIVE-COVERAGE surface. Without this env the child cannot locate the run dir, its
+    # `<run_dir>/_inconclusive.json` is never written, and this run would render CLEAN over an unassessed
+    # surface. With it the framework writes the artifact here and the dossier/proof list consume it.
+    _spawn_background(run_id, rd, cmd, meta, capture_report=False,
+                      env_extra={"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug})
     # W17-9: echo the agentic fall-through note (a loopback suite/tool that requested the agentic engine
     # but resolved no `vigil`) to the caller — the runtime response names the engine that actually ran.
     return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "blackboard",

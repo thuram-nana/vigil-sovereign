@@ -266,12 +266,87 @@ def project_posture_claims(coverage_cert: dict) -> list[dict]:
     return claims
 
 
+# --------------------------------------------------------------------------------------------------
+# COVERAGE-INCOMPLETE disclosure (S9c). A posture certificate projects CLOSED/OPEN/UNPROVEN purely from
+# the coverage cert's per-probe verdicts — the REACHED WEB surface. A run may ALSO have declared a
+# non-web surface (cloud / K8s) that a fusion sensor could NOT assess (INCONCLUSIVE — a missing
+# prerequisite meant NOTHING was assessed there). Left unsaid, an all-CLOSED web cert reads as a clean
+# whole-target close while silent about that unassessed surface — the exact silent-CLEAN a sound-negative
+# a government acts on must never make.
+#
+# So the builder CARRIES the unassessed surfaces (fed in as data — the framework writes them to
+# ``<run_dir>/_inconclusive.json`` and a caller that holds the run dir reads them via the ONE shared
+# stdlib parser) into an explicit ``coverage_incomplete`` disclosure IN the signed bytes, appends a
+# NOT-ASSESSED clause to the residual naming each surface + its missing prerequisite, and downgrades the
+# certificate's overall verdict away from a clean whole-target CLOSED. It NEVER fabricates a CLOSED/OPEN
+# claim about the unassessed surface — it discloses it only as NOT-ASSESSED.
+#
+# HONEST BOUND: the disclosure is producer-supplied and lives in the signed bytes, so it is tamper-evident
+# via the out-of-band fingerprint pin exactly like every other field — a forger who STRIPS it must re-sign,
+# which changes the fingerprint the relying party pinned out of band and is rejected before any check. The
+# verifier cannot independently RECONSTRUCT a stripped disclosure (the run-dir manifest is not shipped in
+# the bundle); that is the same residual as the producer-supplied observed values (see POSTURE_RESIDUAL).
+
+_OVERALL_OPEN = "OPEN"                       # a finding fired — exploitable dominates everything
+_OVERALL_INCOMPLETE = "COVERAGE_INCOMPLETE"  # a declared surface went UNASSESSED — NOT a clean whole-target close
+_OVERALL_CLOSED = "CLOSED"                   # every assessed (surface,param,class) earned a clean negative; nothing left unproven
+_OVERALL_PARTIAL = "PARTIAL"                 # some CLOSED, some UNPROVEN — a bounded negative, not whole-target
+_OVERALL_UNPROVEN = "UNPROVEN"              # nothing was earned CLOSED
+
+# The disclosure clause appended to the residual so a reader of the signed bytes cannot miss it.
+_INCOMPLETE_RESIDUAL_PREFIX = (
+    " COVERAGE INCOMPLETE — this certificate's CLOSED claims cover ONLY the REACHED web surface; the "
+    "following DECLARED surface(s) were NOT ASSESSED (a fusion sensor's prerequisite was missing, so "
+    "NOTHING was looked at there) and are neither CLOSED nor OPEN, only NOT-ASSESSED: "
+)
+
+
+def _normalize_incomplete(coverage_incomplete: Any) -> list[dict]:
+    """Coerce the caller's unassessed-surface disclosure to a DETERMINISTIC (sorted, deduped) list of
+    ``{"sensor", "missing_prerequisite"}``. Accepts a list of dicts or ``(sensor, missing)`` pairs; a
+    None/empty/uncoercible input yields ``[]`` (no disclosure -> byte-identical certificate)."""
+    seen: set[tuple[str, str]] = set()
+    for item in coverage_incomplete or ():
+        try:
+            if isinstance(item, dict):
+                sensor = str(item.get("sensor") or "").strip()
+                missing = str(item.get("missing_prerequisite") or "").strip()
+            else:
+                sensor, missing = item
+                sensor, missing = str(sensor or "").strip(), str(missing or "").strip()
+        except Exception:
+            continue
+        if sensor:
+            seen.add((sensor, missing))
+    return [{"sensor": s, "missing_prerequisite": m} for (s, m) in sorted(seen)]
+
+
+def posture_overall_verdict(claims: list[dict], unassessed: list[dict]) -> str:
+    """The certificate's SINGLE overall verdict — deterministic function of the projected claims + the
+    coverage-incomplete disclosure, re-derivable by a verifier. An OPEN claim (a finding) dominates; else
+    an unassessed declared surface DOWNGRADES a would-be whole-target CLOSED to ``COVERAGE_INCOMPLETE``;
+    else CLOSED iff every assessed claim earned a clean negative with nothing left unproven, PARTIAL if some
+    were unproven, UNPROVEN if none were earned."""
+    if any(c.get("status") == _OPEN for c in claims):
+        return _OVERALL_OPEN
+    if unassessed:
+        return _OVERALL_INCOMPLETE
+    n_closed = sum(1 for c in claims if c.get("status") == _CLOSED)
+    n_unproven = sum(1 for c in claims if c.get("status") == _UNPROVEN)
+    if n_closed and not n_unproven:
+        return _OVERALL_CLOSED
+    if n_closed:
+        return _OVERALL_PARTIAL
+    return _OVERALL_UNPROVEN
+
+
 def build_posture_certificate(
     coverage_cert: dict,
     *,
     target_identity: IdentityAttestation | dict,
     target_sample: dict,
     residual: str = POSTURE_RESIDUAL,
+    coverage_incomplete: Any = None,
 ) -> dict:
     """Build the DETERMINISTIC posture certificate document (a plain dict).
 
@@ -279,7 +354,15 @@ def build_posture_certificate(
     function is pure). ``target_identity`` is the owner-signed ``IdentityAttestation`` binding the
     proof to a target; ``target_sample`` is the observed identity of the scanned target (e.g.
     ``{"host": "127.0.0.1"}``) — the verifier checks it satisfies the attestation's policy, closing
-    target-swap. No wall-clock / rng: byte-identical across two scans of one app."""
+    target-swap. No wall-clock / rng: byte-identical across two scans of one app.
+
+    ``coverage_incomplete`` (S9c, OPTIONAL) is the run's UNASSESSED declared surfaces — a list of
+    ``{"sensor", "missing_prerequisite"}`` (or ``(sensor, missing)`` pairs) a fusion sensor returned
+    INCONCLUSIVE for. When non-empty the certificate CARRIES them in an explicit ``coverage_incomplete``
+    disclosure, appends a NOT-ASSESSED clause to the residual, and downgrades the overall verdict away
+    from a clean whole-target CLOSED — WITHOUT ever fabricating a CLOSED/OPEN claim about the unassessed
+    surface. None/empty (the loopback web demo, and every pre-S9c caller) => the certificate is
+    BYTE-IDENTICAL to before (no disclosure block, no overall field, residual unchanged)."""
     att = _as_identity(target_identity)
     claims = project_posture_claims(coverage_cert)
     n_closed = sum(1 for c in claims if c["status"] == _CLOSED)
@@ -288,7 +371,11 @@ def build_posture_certificate(
     # How much of the negative is RE-EXECUTABLE (verdict re-derivable from the retained values) vs binding-only.
     n_reexecutable = sum(1 for c in claims if c["status"] == _CLOSED and c.get("verification") == "re-executable")
     n_binding = sum(1 for c in claims if c["status"] == _CLOSED and c.get("verification") != "re-executable")
-    return {
+    summary = {
+        "n_closed": n_closed, "n_open": n_open, "n_unproven": n_unproven,
+        "n_closed_re_executable": n_reexecutable, "n_closed_binding_only": n_binding,
+    }
+    cert = {
         "schema": POSTURE_SCHEMA,
         "target_identity": att.model_dump(mode="json"),
         "target_sample": {str(k): str(v) for k, v in dict(target_sample).items()},
@@ -296,12 +383,20 @@ def build_posture_certificate(
         "denominator": coverage_cert.get("denominator", {}),
         "scope": coverage_cert.get("scope", ""),
         "posture_claims": claims,
-        "summary": {
-            "n_closed": n_closed, "n_open": n_open, "n_unproven": n_unproven,
-            "n_closed_re_executable": n_reexecutable, "n_closed_binding_only": n_binding,
-        },
+        "summary": summary,
         "residual": residual,
     }
+    # S9c: a coverage-incomplete run carries the unassessed surfaces + a downgraded overall verdict + a
+    # residual clause naming them. Only when there IS an unassessed surface, so the web-only demo and every
+    # pre-S9c caller stay byte-identical. NEVER a fabricated CLOSED/OPEN — the surface is disclosed NOT-ASSESSED.
+    unassessed = _normalize_incomplete(coverage_incomplete)
+    if unassessed:
+        summary["overall"] = posture_overall_verdict(claims, unassessed)
+        cert["coverage_incomplete"] = {"incomplete": True, "unassessed_surfaces": unassessed}
+        named = "; ".join(f"{u['sensor']} (missing prerequisite: {u['missing_prerequisite'] or 'unknown'})"
+                          for u in unassessed)
+        cert["residual"] = residual + _INCOMPLETE_RESIDUAL_PREFIX + named + "."
+    return cert
 
 
 def canonical_posture_bytes(cert: dict) -> bytes:
@@ -350,6 +445,27 @@ def _reproject_matches(cert: dict) -> None:
             raise PostureError("a CLOSED claim names no conclusive oracle — refusing")
 
 
+def _verify_coverage_disclosure(cert: dict) -> None:
+    """S9c fail-closed: if the certificate declares an UNASSESSED surface (``coverage_incomplete``), its
+    overall verdict MUST equal the re-derived downgrade and MUST NOT read as a clean whole-target CLOSED —
+    so a producer cannot ship a coverage-incomplete cert that still presents a clean close. A cert with NO
+    disclosure block is a bounded/clean cert and is left exactly as pre-S9c (byte-identical, nothing to
+    enforce)."""
+    disc = cert.get("coverage_incomplete")
+    if not isinstance(disc, dict) or not disc.get("incomplete"):
+        return
+    unassessed = _normalize_incomplete(disc.get("unassessed_surfaces"))
+    if not unassessed:
+        raise PostureError("coverage_incomplete is set but names no unassessed surface — refusing")
+    expected = posture_overall_verdict(cert.get("posture_claims") or [], unassessed)
+    got = (cert.get("summary") or {}).get("overall")
+    if got != expected:
+        raise PostureError(f"posture overall verdict {got!r} disagrees with the coverage-incomplete "
+                           f"projection {expected!r} — refusing a clean reading over an unassessed surface")
+    if got == _OVERALL_CLOSED:
+        raise PostureError("a coverage-incomplete certificate must not read CLOSED (whole-target) — refusing")
+
+
 def verify_posture_certificate(
     path: str | Path,
     sig_env: dict,
@@ -385,6 +501,10 @@ def verify_posture_certificate(
 
     # 2. coverage binding (the claims cannot drift from their evidence)
     _reproject_matches(cert)
+
+    # 2a. S9c coverage-incomplete disclosure: a cert that declares an UNASSESSED surface must carry the
+    #     downgraded overall verdict — it cannot present a clean whole-target close over what it never assessed.
+    _verify_coverage_disclosure(cert)
 
     # 2b. RE-EXECUTION (the re-executable tier): re-run the oracle over every re-executable probe's
     #     retained values and refuse a forged negative/positive (re-derives the verdict, not a liveness proof); the standalone

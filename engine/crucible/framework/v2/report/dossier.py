@@ -688,37 +688,20 @@ def _read_proof_degradation(run_dir: Path) -> dict:
 
 
 def _read_sensor_inconclusive(run_dir: Path) -> dict:
-    """Read ``<run_dir>/_inconclusive.json`` (stdlib only; never trusts the producer) and derive whether a
-    declared surface went UNASSESSED (a fusion sensor returned INCONCLUSIVE — a missing prerequisite meant
-    NOTHING was assessed). A coverage-incomplete run is NEVER reported clean in the hand-off: an empty
-    finding/fact set over a surface we could not look at is not "nothing found". Fail-CLOSED — the mere
-    PRESENCE of a non-empty artifact we cannot parse still marks the run coverage-incomplete (a corrupt/
-    half-written manifest never falls back to the clean view). Distinct from proof degradation."""
-    surfaces: list[dict] = []
-    present = parsed = False
-    try:
-        path = run_dir / "_inconclusive.json"
-        if path.is_file():
-            raw = path.read_text(encoding="utf-8")
-            if raw.strip():
-                present = True
-                doc = json.loads(raw)
-                parsed = True
-                rows = (doc.get("inconclusive") or []) if isinstance(doc, dict) else []
-                for r in rows:
-                    if isinstance(r, dict) and r.get("sensor"):
-                        surfaces.append({
-                            "sensor": str(r.get("sensor")),
-                            "missing_prerequisite": str(r.get("missing_prerequisite", "")),
-                            "count": int(r.get("count", 1) or 1),
-                        })
-    except (OSError, ValueError):
-        pass  # a read/parse failure is handled by the fail-closed `present and not parsed` branch below
-    incomplete = bool(surfaces) or (present and not parsed)
+    """Read ``<run_dir>/_inconclusive.json`` and derive whether a declared surface went UNASSESSED (a fusion
+    sensor returned INCONCLUSIVE — a missing prerequisite meant NOTHING was assessed). A coverage-incomplete
+    run is NEVER reported clean in the hand-off: an empty finding/fact set over a surface we could not look at
+    is not "nothing found". Delegates to the ONE shared, fail-closed stdlib parser
+    (``framework.v2.inconclusive_manifest.read_manifest``) so producer and every reader cannot drift — the
+    mere PRESENCE of a non-empty artifact (even one we cannot parse or that is the wrong shape) marks the run
+    coverage-incomplete. Distinct from proof degradation. STDLIB ONLY (FATAL-2)."""
+    from ..inconclusive_manifest import read_manifest  # framework-owned, stdlib-only; no integration import
+
+    m = read_manifest(run_dir)
     return {
-        "coverage_incomplete": incomplete,
-        "unparsed": present and not parsed,
-        "surfaces": sorted(surfaces, key=lambda s: (s["sensor"], s["missing_prerequisite"])),
+        "coverage_incomplete": m["coverage_incomplete"],
+        "unparsed": m["unparsed"],
+        "surfaces": m["surfaces"],
     }
 
 

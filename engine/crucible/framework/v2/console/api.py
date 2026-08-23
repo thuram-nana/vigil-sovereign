@@ -956,38 +956,22 @@ def _proof_degradation_summary(run_dir: "Path", *, n_records: int) -> dict[str, 
 
 
 def _sensor_inconclusive_summary(run_dir: "Path") -> dict[str, Any]:
-    """Read ``<run_dir>/_inconclusive.json`` (stdlib only; never trusts the producer) and derive whether a
-    declared surface went UNASSESSED (a fusion sensor returned INCONCLUSIVE — a missing prerequisite meant
-    NOTHING was assessed). A FRAMEWORK-OWNED artifact (``engage_fusion.write_inconclusive_artifact``), the
-    twin of ``proofs/_degraded.json`` but a DISTINCT state: while coverage is incomplete a CLEAN reading is
-    impossible (an empty finding set over a surface we could not look at is not "nothing found"). Fail-CLOSED:
-    the mere PRESENCE of a non-empty artifact we cannot parse still marks the run coverage-incomplete."""
-    surfaces: list[dict[str, Any]] = []
-    state = {"present": False, "parsed": False}
+    """Derive whether a declared surface went UNASSESSED (a fusion sensor returned INCONCLUSIVE — a missing
+    prerequisite meant NOTHING was assessed) for this run. A FRAMEWORK-OWNED artifact
+    (``<run_dir>/_inconclusive.json``), the twin of ``proofs/_degraded.json`` but a DISTINCT state: while
+    coverage is incomplete a CLEAN reading is impossible (an empty finding set over a surface we could not
+    look at is not "nothing found"). Delegates to the ONE shared, fail-closed stdlib parser
+    (``framework.v2.inconclusive_manifest.read_manifest``) so producer and every reader cannot drift — a
+    present-but-unparseable / wrong-shape artifact still marks the run coverage-incomplete. STDLIB ONLY, no
+    framework->integration import (FATAL-2)."""
+    from ..inconclusive_manifest import read_manifest  # framework-owned, stdlib-only
 
-    def _read() -> None:
-        path = run_dir / "_inconclusive.json"
-        if not path.is_file():
-            return
-        raw = path.read_text(encoding="utf-8")
-        if not raw.strip():
-            return  # an empty file carries no coverage signal
-        state["present"] = True  # a non-empty artifact EXISTS — from here a parse failure fails CLOSED
-        doc = json.loads(raw)
-        state["parsed"] = True
-        rows = (doc.get("inconclusive") or []) if isinstance(doc, dict) else []
-        for r in rows:
-            if isinstance(r, dict) and r.get("sensor"):
-                surfaces.append({"sensor": str(r.get("sensor")),
-                                 "missing_prerequisite": str(r.get("missing_prerequisite", "")),
-                                 "count": int(r.get("count", 1) or 1)})
-
-    _safe(_read, default=None)
-    incomplete = bool(surfaces) or (state["present"] and not state["parsed"])
+    m = _safe(lambda: read_manifest(run_dir),
+              default={"coverage_incomplete": False, "unparsed": False, "surfaces": []})
     return {
-        "coverage_incomplete": incomplete,
-        "unparsed": state["present"] and not state["parsed"],
-        "surfaces": sorted(surfaces, key=lambda x: (x["sensor"], x["missing_prerequisite"])),
+        "coverage_incomplete": m["coverage_incomplete"],
+        "unparsed": m["unparsed"],
+        "surfaces": m["surfaces"],
     }
 
 

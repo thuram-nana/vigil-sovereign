@@ -64,6 +64,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import inconclusive_manifest as _inconclusive_manifest
+
 from .agents.tools import ToolContext
 from .agents.tools.base import ToolRegistry
 from .intel.ingest import IntelIngest
@@ -1080,70 +1082,42 @@ def _surface_inconclusive(sink: Any, task: FusionTask, res: Any) -> None:
 # (``report.dossier._read_proof_degradation``). This is the SAME contract for a DISTINCT state and a
 # FRAMEWORK-OWNED file: ``fuse_sensors`` collects every fusion sensor that returned INCONCLUSIVE (a
 # missing prerequisite meant NOTHING was assessed) onto ``ctx.inconclusive_surfaces``; the run level
-# persists them here so the dossier's clean/verdict determination MUST consult a declared-but-unassessed
-# surface and can NEVER fold it into a silent CLEAN. STDLIB ONLY — no framework->integration import
-# (FATAL-2): the dossier reads it back with a plain ``json.loads``, exactly as it reads ``_degraded.json``.
+# persists them so the dossier's clean/verdict determination MUST consult a declared-but-unassessed
+# surface and can NEVER fold it into a silent CLEAN.
 #
-# SCHEMA  <run_dir>/_inconclusive.json  ==  {"inconclusive": [
-#     {"sensor": "<sensor name>", "missing_prerequisite": "<prereq>", "count": <int>}, ...]}
-#   sorted by (sensor, missing_prerequisite) and deduped with a count — DETERMINISTIC (no wallclock/rng).
+# The schema + the writer + the fail-closed reader now live in ONE stdlib module,
+# ``framework.v2.inconclusive_manifest`` (S9c re-work), so the producer here and every consumer (the
+# dossier, the console proof list, the posture attestation) cannot drift. STDLIB ONLY, FATAL-2 clean —
+# no framework->integration import; the readers do a plain file read exactly as they read ``_degraded.json``.
 
-INCONCLUSIVE_ARTIFACT = "_inconclusive.json"
+# Back-compat alias — the artifact filename is owned by the shared module now.
+INCONCLUSIVE_ARTIFACT = _inconclusive_manifest.INCONCLUSIVE_ARTIFACT
 
 
 def _run_dir_from_env() -> str | None:
     """The console-exported run dir (``$VIGIL_PROOF_RUN_DIR``) — the SAME handle the proof subsystem's
     ``_degraded.json`` is located by (``vigil_integration.proof.degradation.record_from_env``). Absent it
-    there is no run to attach the artifact to, so nothing is written (a hand-run engage with no console)."""
+    there is no run to attach the artifact to, so nothing is written (a hand-run engage with no console).
+
+    This is the LAST-RESORT resolution only: the engage flow threads an explicit run dir into
+    ``persist_inconclusive_surfaces`` (the authoritative source); the env is the fallback for a child that
+    was handed a run dir but did not thread it (defence in depth, matching how the proof subsystem locates
+    its own run dir)."""
     rd = os.environ.get("VIGIL_PROOF_RUN_DIR")
     return rd or None
 
 
 def _coerce_surface(item: Any) -> tuple[str, str]:
-    """Coerce one collected surface — a ``(sensor, missing_prerequisite)`` pair or a
-    ``{"sensor", "missing_prerequisite"}`` dict — to a normalized string pair. Never raises."""
-    try:
-        if isinstance(item, dict):
-            return (str(item.get("sensor") or "").strip(),
-                    str(item.get("missing_prerequisite") or "").strip())
-        sensor, missing = item
-        return (str(sensor or "").strip(), str(missing or "").strip())
-    except Exception:
-        return ("", "")
+    """Coerce one collected surface to a normalized ``(sensor, missing)`` pair (shared parser)."""
+    return _inconclusive_manifest.coerce_surface(item)
 
 
 def write_inconclusive_artifact(run_dir: Any, surfaces: Any) -> bool:
-    """Persist the fusion pass's INCONCLUSIVE surfaces to ``<run_dir>/_inconclusive.json`` (see the SCHEMA
-    above). Written ONLY when there is at least one genuine inconclusive surface — a fully-assessed run
-    (empty ``surfaces``) writes NOTHING, so its dossier renders byte-identically to before. Deterministic
-    (sorted + deduped, no wallclock/rng) and atomic (tmp + ``os.replace``, so a torn write never leaves a
-    half-manifest the fail-closed reader would still treat as coverage-incomplete). Best-effort/total: any
-    error returns False and never raises into the fusion/engage pass. Returns True iff the file was written."""
-    try:
-        from pathlib import Path
-        counts: dict[tuple[str, str], int] = {}
-        for item in surfaces or ():
-            sensor, missing = _coerce_surface(item)
-            if not sensor:
-                continue
-            counts[(sensor, missing)] = counts.get((sensor, missing), 0) + 1
-        if not counts:
-            return False   # no genuine inconclusive surface -> no artifact (byte-identical clean path)
-        rows = [{"sensor": s, "missing_prerequisite": m, "count": counts[(s, m)]}
-                for (s, m) in sorted(counts)]
-        d = Path(run_dir)
-        d.mkdir(parents=True, exist_ok=True)
-        path = d / INCONCLUSIVE_ARTIFACT
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"inconclusive": rows}, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)         # atomic swap
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-        return True
-    except Exception:
-        return False
+    """Persist the fusion pass's INCONCLUSIVE surfaces to ``<run_dir>/_inconclusive.json`` via the shared,
+    deterministic, atomic, fail-closed writer (``inconclusive_manifest.write_manifest``). Written ONLY when
+    there is at least one genuine inconclusive surface — a fully-assessed run writes NOTHING (byte-identical).
+    Best-effort/total: never raises into the fusion/engage pass. Returns True iff the file was written."""
+    return _inconclusive_manifest.write_manifest(run_dir, surfaces)
 
 
 def _ctx_inconclusive_surfaces(ctx: Any) -> Any:
