@@ -1,6 +1,6 @@
-From 1148094beb044e93f2f14fbb40ff39faddc20853 Mon Sep 17 00:00:00 2001
+From d8b9fc818e6a406ce481c6b64bba64199a052460 Mon Sep 17 00:00:00 2001
 Subject: [strix-patch 028] S10 (vendor/strix): synchronous container teardown on the signal path
-X-VIGIL-Commit: 1148094beb044e93f2f14fbb40ff39faddc20853
+X-VIGIL-Commit: d8b9fc818e6a406ce481c6b64bba64199a052460
 X-VIGIL-Date: 2026-08-22T23:01:18-04:00
 
 diff --git a/vendor/strix/strix/interface/cli.py b/vendor/strix/strix/interface/cli.py

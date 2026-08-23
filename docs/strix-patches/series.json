@@ -432,10 +432,16 @@
    "subject": "strix batch2: P8 fix \u2014 proof degradation recording must never trigger strix.report.__init__"
   },
   {
-   "commit": "1148094beb044e93f2f14fbb40ff39faddc20853",
+   "commit": "d8b9fc818e6a406ce481c6b64bba64199a052460",
    "file": "028-s10-vendor-strix-synchronous-container-teardown.patch",
-   "sha256": "215f2e2a676854e80bdb74a1d48412a92992b9a563609bf8ee3a294af05cec75",
+   "sha256": "26f3ffe23fd4145c8329549a0e3543d65c26f688cbd4031a878bbae95e3df314",
    "subject": "S10 (vendor/strix): synchronous container teardown on the signal path"
+  },
+  {
+   "commit": "4966d1c4db78a08242022e9ca31be0699a1b80e9",
+   "file": "029-s10-lifecycle-fix-p8-collection-error-importorsk.patch",
+   "sha256": "a6c4be4e5df937e4870030b4f45bb55280d20850415f8d559f3f1b403cf95584",
+   "subject": "S10-lifecycle: fix P8 collection ERROR \u2014 importorskip the strix runtime chain"
   }
  ],
  "schema": 1,
@@ -676,7 +682,7 @@
   "vendor/strix/tests_vigil/conftest.py": "d80ca1178799ec22789164cec7afefcc9b3538147f77e10f55bbe8439cffbd48",
   "vendor/strix/tests_vigil/test_anthropic_pricing.py": "21df8733982f747cadb06f569d061a29ff2ec07a0661087de35b86e6f4716d2c",
   "vendor/strix/tests_vigil/test_dedupe_extract.py": "908371cfb9105f8c871152306f9116bdf7d2b817f00974ed585a873ed099e4da",
-  "vendor/strix/tests_vigil/test_lifecycle_teardown.py": "51ac70bd7d095094af331151b770c0fcedaddd1618d2a5fd108d94bf69e9baf9",
+  "vendor/strix/tests_vigil/test_lifecycle_teardown.py": "e34f90e1918955c60609591f52544f79d37b24bb9e924f3e76439a4a4b15a748",
   "vendor/strix/tests_vigil/test_proof_capture.py": "8353aab117c4f75970df48c103ef6822d076be74aee9816775133bb24dd3a828",
   "vendor/strix/tests_vigil/test_reasoning_thinking.py": "56365c986fa3bb04ca250e45f7f2b126732a1c0c4b827d224ea44c75d9d515b0",
   "vendor/strix/tests_vigil/test_sandbox_hardening.py": "c5a6cbb4e51c5a86d1c9f30785fa7234af47706015222a9323f420b8a2059be8",
