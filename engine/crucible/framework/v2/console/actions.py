@@ -499,6 +499,48 @@ def _boot_id() -> str:
         return ""
 
 
+#: S10 — cap the diagnostic ``stdout.txt`` a launched run writes. It was written UNBOUNDED
+#: (``write_text(out)``), while the sandbox CONTAINER log is capped (50m x 3, docker json-file
+#: rotation). A runaway or chatty child (a Strix codebase run, an hour-long engage) could write an
+#: arbitrarily large host file. We keep the TAIL — for a cancelled/errored run the end is the
+#: diagnostic part — and prepend a one-line truncation marker naming the dropped byte count. Matches
+#: one container log file (50 MiB); ``VIGIL_RUN_STDOUT_MAX_BYTES`` overrides (``0`` disables).
+_STDOUT_TAIL_BYTES_DEFAULT = 50 * 1024 * 1024
+
+
+def _stdout_tail_cap() -> int:
+    """The stdout.txt byte cap, from ``VIGIL_RUN_STDOUT_MAX_BYTES`` (``0``/``off`` ⇒ uncapped), else
+    the 50 MiB default. Total: a malformed value falls back to the default."""
+    raw = str(os.environ.get("VIGIL_RUN_STDOUT_MAX_BYTES", "")).strip().lower()
+    if raw in ("0", "off", "none", "unlimited"):
+        return 0
+    try:
+        return int(raw) if raw else _STDOUT_TAIL_BYTES_DEFAULT
+    except ValueError:
+        return _STDOUT_TAIL_BYTES_DEFAULT
+
+
+def _write_bounded_stdout(rd: Path, out: str) -> None:
+    """Write the child's stdout to ``<rd>/stdout.txt``, TAIL-bounded to :func:`_stdout_tail_cap`.
+
+    When the output fits the cap it is written verbatim (byte-identical to the old unbounded write).
+    When it exceeds the cap only the last ``cap`` bytes are kept, preceded by a marker line stating
+    how many bytes were dropped — so the file stays a bounded artifact instead of an unbounded host
+    file. Total; never raises out of the supervisor thread."""
+    text = out or ""
+    cap = _stdout_tail_cap()
+    try:
+        if cap and len(text.encode("utf-8", "surrogatepass")) > cap:
+            tail = text.encode("utf-8", "surrogatepass")[-cap:].decode("utf-8", "replace")
+            dropped = len(text.encode("utf-8", "surrogatepass")) - len(tail.encode("utf-8", "surrogatepass"))
+            marker = (f"[VIGIL: stdout truncated — {dropped} earlier byte(s) dropped, keeping the last "
+                      f"{cap} bytes; raise VIGIL_RUN_STDOUT_MAX_BYTES to keep more]\n")
+            text = marker + tail
+        (rd / "stdout.txt").write_text(text, encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
                       capture_report: bool, env_extra: "dict | None" = None,
                       env_remove: "list[str] | None" = None) -> None:
@@ -542,7 +584,7 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
                 out, err = proc.communicate()
             except Exception:  # noqa: BLE001
                 out, err = "", ""
-            (rd / "stdout.txt").write_text(out or "", encoding="utf-8")
+            _write_bounded_stdout(rd, out)
             _write_meta(run_id, **{**meta, "status": "error", "pid": proc.pid, "rc": None,
                                    "stderr": "timed out after 3600s", "finished": time.time()})
             return
@@ -556,7 +598,7 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
             (rd / "report.json").write_text(out, encoding="utf-8")
             _write_findings_json(rd)      # W16-7 (AC2): the reports' finding source, written in production
         else:
-            (rd / "stdout.txt").write_text(out or "", encoding="utf-8")
+            _write_bounded_stdout(rd, out)
         # A negative rc means the child was killed by a signal — the operator's Cancel (W4), not a genuine
         # error — so record it as 'cancelled', not 'error'. This supervisor thread is the SOLE terminal-status
         # writer for a live run: cancel_run signals and then waits for THIS write (it only writes the status
@@ -675,6 +717,52 @@ def _signal_pid(pid) -> bool:
     return _gone()
 
 
+def _kill_run_container(pid, boot: str = "") -> int:
+    """S10 — force-remove the Strix sandbox CONTAINER a just-signalled run spawned.
+
+    ``cancel_run`` signals only the HOST process (the ``vigil strix`` child). That child runs a
+    detached sandbox container (``tail -f /dev/null``); on a clean SIGTERM the child's own handler
+    tears it down (``strix/interface/cli.py``), but a SIGKILL (or a child that ignored SIGTERM)
+    leaves the container running with nothing to reap it until the next launch. The console is a
+    SEPARATE process with no sandbox session id, so it reaps by the ``vigil.strix.owner_pid`` label
+    the container carries — matching the host pid we recorded (and the boot id, so a recycled pid
+    from another boot is never hit).
+
+    Best-effort and total: a host without the docker SDK, a non-Strix run (no labelled container), or
+    a container the child already tore down is a clean no-op. Never raises — a reap failure must not
+    turn a successful cancel into an error. Returns the number of containers removed.
+    """
+    try:
+        client = _docker_client_or_none()
+        if client is None:
+            return 0
+        try:
+            from strix.runtime import sandbox_hardening  # offense-plane vendored tool; never sigil (FATAL-2)
+        except Exception:  # noqa: BLE001 — strix not importable here → rely on the next launch's reaper
+            return 0
+        try:
+            return sandbox_hardening.kill_containers_for_owner(
+                client, owner_pid=pid, owner_boot=(boot or None))
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001 — container reaping is defence-in-depth, never load-bearing
+        return 0
+
+
+def _docker_client_or_none():
+    """A best-effort docker-py client for container reaping, or None. Function-local ``import docker``
+    so the console never hard-depends on the docker SDK: a host without it simply relies on the next
+    Strix launch's in-process reaper. Never raises."""
+    try:
+        import docker  # type: ignore  # noqa: PLC0415 — optional dep, imported only when reaping
+        return docker.from_env()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def cancel_run(run_id: str) -> dict:
     """Stop a running run by signalling its recorded pid (SIGTERM→SIGKILL). Idempotent — a non-running run
     is a clean no-op. CSRF/rebind-gated by the caller. Never raises.
@@ -700,6 +788,16 @@ def cancel_run(run_id: str) -> dict:
     terminated = False
     if pid is not None and not rebooted:
         terminated = _signal_pid(pid)
+    # S10: the signalled child spawned a DETACHED sandbox container. A clean SIGTERM lets the child
+    # tear it down itself (strix/interface/cli.py); a SIGKILL — or a child that ignored SIGTERM, or a
+    # reboot — does not, stranding the container running ``tail -f /dev/null`` until the next launch's
+    # reaper. Reap it now by the owner-pid label we recorded. No-op for a non-Strix run (no labelled
+    # container) or a box the child already removed. In the rebooted branch we deliberately did NOT
+    # signal the (recycled) pid, but the container that prior-boot pid left is still addressable by
+    # pid+boot, so we still reap it.
+    reaped_container = 0
+    if pid is not None:
+        reaped_container = _kill_run_container(pid, boot)
     # Give a live supervisor a moment to record the terminal status itself; only close an ORPHANED run
     # (still 'running' after the grace) ourselves — never overwrite a status the supervisor already set.
     final = "running"
@@ -713,13 +811,33 @@ def cancel_run(run_id: str) -> dict:
         _write_meta(run_id, **{**meta, "status": "cancelled", "cancelled": True,
                                "finished": meta.get("finished") or time.time()})
         final = "cancelled"
-    return {"ok": True, "status": final, "terminated": terminated}
+    return {"ok": True, "status": final, "terminated": terminated, "reaped_container": reaped_container}
 
 
 def _cmd_supports_resume(cmd: "list[str]") -> bool:
-    """True iff relaunching this argv with --resume CONTINUES it. Only the integration `vigil engage` path
-    carries --resume (W2b); the offense `framework.v2 engage` scanner and every other CLI restart instead,
-    so appending --resume there would be an unrecognised-argument error, not a resume."""
+    """True iff relaunching this argv with a bare appended ``--resume`` CONTINUES it. Only the integration
+    ``vigil engage`` path takes ``--resume`` as a boolean that resumes the SAME argv (W2b); the offense
+    ``framework.v2 engage`` scanner and every other CLI RESTART instead, so appending ``--resume`` there
+    would be an unrecognised-argument error, not a resume.
+
+    Strix is deliberately excluded (its argv has no ``engage`` token), and a retry RESTARTS it. This is a
+    conscious S10 decision, not an oversight — Strix's native resume cannot be reached by appending a flag:
+
+      1. ``strix --resume`` takes the *strix-generated run name* as its VALUE (``main.py`` argparse), but
+         the console never learns that name: strix has no ``--run-name`` argument — it auto-generates the
+         name internally (``main.py`` ``args.run_name = args.resume or generate_run_name(...)``) — so the
+         console has no handle to address a prior strix run for resume.
+      2. ``--resume`` is mutually exclusive with ``--target``/``--target-list``/``--mount`` (``main.py``
+         hard-errors if combined), and the recorded strix argv always carries ``--target``/``--mount``.
+         Appending ``--resume`` would be a hard argparse error — the exact failure this guard prevents.
+      3. Even given the name, resume requires the prior run to have reached its first agent snapshot
+         (``runtime_state_dir(...)/agents.json``); a run cancelled before that has nothing to resume.
+
+    Wiring real strix resume would mean modifying the vendored agent to accept ``--run-name`` (a patch-
+    series change) plus capturing that name at launch and rebuilding an incompatible resume argv — out of
+    scope for the lifecycle slice and gated on precondition 3. Documented here + pinned by
+    ``test_run_control.py`` so the RESTART semantics are an intended, tested contract, not a silent gap.
+    """
     toks = [str(a) for a in cmd]
     return "engage" in toks and not any("framework.v2" in t for t in toks)
 

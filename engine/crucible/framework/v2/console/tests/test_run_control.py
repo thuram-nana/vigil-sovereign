@@ -179,3 +179,127 @@ def test_cmd_supports_resume_only_for_the_integration_vigil_engage():
     assert actions._cmd_supports_resume(["vigil", "engage", "x", "--slug", "s"])
     assert not actions._cmd_supports_resume([sys.executable, "-m", "framework.v2", "engage", "x"])
     assert not actions._cmd_supports_resume(["strix", "--target", "/x"])
+
+
+# --- S10: cancel reaps the sandbox CONTAINER, not just the host pid ------------------------------
+def test_cancel_reaps_the_strix_container_by_owner_pid(console_root, monkeypatch):
+    # Before S10 cancel signalled only the HOST pid, stranding the detached sandbox container. Now it
+    # also reaps that container by the owner-pid label it carries. Assert cancel passes the recorded
+    # pid + boot to the reaper and surfaces the count.
+    monkeypatch.setattr(actions.time, "sleep", lambda *_a: None)     # don't wait the grace
+    reaped = {}
+    monkeypatch.setattr(actions, "_kill_run_container",
+                        lambda pid, boot="": reaped.update(pid=pid, boot=boot) or 1)
+    _write(console_root, "k1", {"status": "running", "pid": 999_999_999, "boot_id": "boot-x"})
+    res = actions.cancel_run("k1")
+    assert res["ok"] is True
+    assert reaped == {"pid": 999_999_999, "boot": "boot-x"}          # reaper addressed the run's box
+    assert res["reaped_container"] == 1
+
+
+def test_cancel_of_a_finished_run_does_not_try_to_reap_a_container(console_root, monkeypatch):
+    # NEGATIVE CONTROL: a run that is not 'running' returns early — no signal, and no container reap
+    # (there is no live box to strand).
+    called = []
+    monkeypatch.setattr(actions, "_kill_run_container", lambda *a, **k: called.append(a) or 0)
+    _write(console_root, "k2", {"status": "done"})
+    res = actions.cancel_run("k2")
+    assert res["ok"] is True and res["status"] == "done"
+    assert called == []                                             # reaper never consulted
+
+
+def _labels_all_match(labels, want):
+    for lbl in want:
+        k, _, v = lbl.partition("=")
+        if labels.get(k) != v:
+            return False
+    return True
+
+
+def test_kill_run_container_removes_by_owner_pid_end_to_end(monkeypatch):
+    # Drive the real reap primitive through _kill_run_container with a fake docker client (no daemon).
+    sh = pytest.importorskip("strix.runtime.sandbox_hardening")   # strix not on path in crucible-core
+
+    class _C:
+        def __init__(self, labels, cid):
+            self.labels, self.id, self.short_id, self.removed = labels, cid, cid, False
+        def remove(self, force=False):
+            assert force is True
+            self.removed = True
+
+    class _Cs:
+        def __init__(self, cs): self._all = cs
+        def list(self, all=False, filters=None):  # noqa: A002 - docker-py signature (shadows builtin)
+            want = (filters or {}).get("label", [])
+            # NB: the docker-py kwarg name `all` shadows the builtin, so use a module helper
+            return [c for c in self._all if _labels_all_match(c.labels, want)]
+
+    class _Client:
+        def __init__(self, cs): self.containers, self.closed = _Cs(cs), False
+        def close(self): self.closed = True
+
+    mine = _C({sh.LABEL_MANAGED: "1", sh.LABEL_OWNER_PID: "4242", sh.LABEL_OWNER_BOOT: "b"}, "mine")
+    other = _C({sh.LABEL_MANAGED: "1", sh.LABEL_OWNER_PID: "1", sh.LABEL_OWNER_BOOT: "b"}, "other")
+    client = _Client([mine, other])
+    monkeypatch.setattr(actions, "_docker_client_or_none", lambda: client)
+
+    removed = actions._kill_run_container(4242, "b")
+    assert removed == 1 and mine.removed and not other.removed
+    assert client.closed
+    # NEGATIVE CONTROL: no docker client available -> a clean zero (rely on next launch's reaper).
+    monkeypatch.setattr(actions, "_docker_client_or_none", lambda: None)
+    assert actions._kill_run_container(4242, "b") == 0
+
+
+# --- S10: stdout.txt is bounded (was written unbounded) -----------------------------------------
+def test_spawn_background_bounds_a_large_stdout(console_root, monkeypatch):
+    monkeypatch.setenv("VIGIL_RUN_STDOUT_MAX_BYTES", "500")          # tiny cap for the test
+    rd = actions.run_dir("big")
+    rd.mkdir(parents=True, exist_ok=True)
+    # a child that writes far more than the cap, then exits 0 (non-capture path -> writes stdout.txt)
+    actions._spawn_background("big", rd,
+                              [sys.executable, "-c", "import sys; sys.stdout.write('A'*50000)"],
+                              {"slug": "s", "run_kind": "strix"}, capture_report=False)
+    _wait_until("big", lambda m: m.get("status") in ("done", "error"))
+    for _ in range(100):
+        if (rd / "stdout.txt").exists():
+            break
+        time.sleep(0.02)
+    data = (rd / "stdout.txt").read_text(encoding="utf-8")
+    assert len(data.encode("utf-8")) <= 500 + 400                    # tail cap + a short marker line
+    assert "stdout truncated" in data.splitlines()[0]               # the marker names the drop
+    assert data.rstrip().endswith("A")                              # the TAIL (recent output) is kept
+    assert "A" * 400 in data                                        # and it really is the child's bytes
+
+
+def test_spawn_background_writes_small_stdout_verbatim(console_root, monkeypatch):
+    # NEGATIVE CONTROL: output within the cap is written byte-identically — no marker, no truncation.
+    monkeypatch.setenv("VIGIL_RUN_STDOUT_MAX_BYTES", "500")
+    rd = actions.run_dir("small")
+    rd.mkdir(parents=True, exist_ok=True)
+    actions._spawn_background("small", rd,
+                              [sys.executable, "-c", "import sys; sys.stdout.write('hello world')"],
+                              {"slug": "s", "run_kind": "strix"}, capture_report=False)
+    _wait_until("small", lambda m: m.get("status") in ("done", "error"))
+    for _ in range(100):
+        if (rd / "stdout.txt").exists():
+            break
+        time.sleep(0.02)
+    assert (rd / "stdout.txt").read_text(encoding="utf-8") == "hello world"   # verbatim, no marker
+
+
+def test_strix_retry_restarts_even_when_marked_resumable_documented(console_root, monkeypatch):
+    # S10 gap-3 decision, pinned: a Strix retry RESTARTS, never resumes — even a run flagged
+    # resumable. Strix's native `--resume` takes the strix-generated run NAME as its value and is
+    # mutually exclusive with --target (which the recorded argv carries), and the console never
+    # captures that name (strix has no --run-name arg). So appending `--resume` here would be a hard
+    # argparse error, not a resume. Documented in _cmd_supports_resume; this is the executable pin.
+    captured = {}
+    monkeypatch.setattr(actions, "_spawn_background",
+                        lambda rid, rd, cmd, meta, **kw: captured.update(cmd=cmd))
+    _write(console_root, "sx", {"status": "interrupted", "resumable": True, "run_kind": "strix",
+                                "cmd": ["strix", "--non-interactive", "--target", "/src"], "slug": "s"})
+    res = actions.retry_run("sx")
+    assert res["ok"] is True and res["resumed"] is False           # RESTART, not resume
+    assert "--resume" not in captured["cmd"]                        # never appended to a strix argv
+    assert "--target" in captured["cmd"]                           # the restart keeps the real target
