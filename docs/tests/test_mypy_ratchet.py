@@ -45,7 +45,7 @@ WRAPPER = GUARD_DIR / "mypy_ratchet.sh"
 CI_YAML = REPO / ".github" / "workflows" / "ci.yml"
 CANONICAL = REPO / ".github" / "required-status-checks.txt"
 
-JOB_NAME = "SIGIL lint (ruff + mypy ratchet, blocking)"
+JOB_NAME = "SIGIL lint (ruff blocking + mypy can-complete)"
 
 sys.path.insert(0, str(GUARD_DIR))
 import mypy_ratchet

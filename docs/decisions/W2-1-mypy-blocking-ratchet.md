@@ -19,7 +19,7 @@ type errors across 22 modules, so this is the middle path: a **per-module ratche
 
 - **The allowlist.** `apps/sigil/mypy-ratchet.txt` lists the 22 modules that are NOT YET mypy-clean,
   plus a `ceiling:` that must equal the number of listed modules.
-- **The gate.** The required `SIGIL lint (ruff + mypy ratchet, blocking)` CI job runs
+- **The gate.** The required `SIGIL lint (ruff blocking + mypy can-complete)` CI job runs
   `tools/governance/mypy_ratchet.sh`, which runs `mypy sigil` and hands the output to
   `tools/governance/mypy_ratchet.py`. Its `evaluate()` fails the build when:
   - a module with a type error is **not** on the allowlist (a previously-clean or new module
@@ -56,7 +56,7 @@ environment is the source of truth for the baseline. The count above (93 errors 
 the CI-environment count.
 
 **Operator note (required-check rename).** This job was renamed from `SIGIL lint (ruff blocking +
-mypy can-complete)` to `SIGIL lint (ruff + mypy ratchet, blocking)`. The committed source of truth
+mypy can-complete)` to `SIGIL lint (ruff blocking + mypy can-complete)`. The committed source of truth
 (`.github/required-status-checks.txt`), `docs/AS-BUILT.md`, and the offline canonical test are all
 updated, but **live** branch protection must be re-synced with
 `bash tools/governance/require-checks.sh --apply` (admin-only), and until then the owner's
