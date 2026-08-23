@@ -718,9 +718,9 @@
     },
     {
       "id": "W7-6",
-      "title": "the orchestrator MANIFEST.json is governance-signed and restore refuses an unsigned/tampered/wrong-key one",
-      "claim": "The orchestrator `MANIFEST.json` is signed with the offense governance key, and `vigil restore` verifies that signature over the exact manifest bytes before trusting the index",
-      "source": "docs/decisions/W7-6-sign-the-orchestrator-manifest.md:29",
+      "title": "the orchestrator MANIFEST.json is governance-signed (domain-separated) and the DEFAULT restore is authenticated against a host trust anchor + rollback-resistant",
+      "claim": "The orchestrator `MANIFEST.json` is signed with the offense governance key over domain-separated bytes and `vigil restore` verifies it before trusting the index; the DEFAULT restore is AUTHENTICATED by pinning a host-local trust anchor recorded on first backup (production refuses fail-closed when neither the anchor nor `--expect-governance-pubkey` is present, and non-production falls back to integrity-only with a warning), and a rollback to a genuine older signed backup is refused via a monotonic `backup_seq` marker.",
+      "source": "docs/decisions/W7-6-sign-the-orchestrator-manifest.md:83",
       "enforced_by": {
         "file": "integration/vigil_integration/backup.py",
         "symbol": "verify_orchestrator_manifest"
@@ -728,10 +728,12 @@
       "proved_by": {
         "file": "integration/tests/test_backup_manifest_signature.py",
         "tests": [
-          "test_backup_writes_a_verifying_signature",
-          "test_restore_refuses_a_tampered_manifest",
-          "test_restore_refuses_an_unsigned_manifest",
-          "test_restore_pin_mismatch_refused_and_correct_pin_accepted"
+          "test_backup_writes_a_verifying_signature_and_establishes_the_anchor",
+          "test_default_restore_refuses_attacker_remint_once_anchor_exists",
+          "test_production_with_no_anchor_fails_closed",
+          "test_default_restore_refuses_rollback_to_an_older_backup",
+          "test_explicit_pin_mismatch_refused_and_correct_pin_accepted",
+          "test_restore_refuses_an_unsigned_manifest"
         ]
       },
       "ci_job": "integration two-env boundary (P5)",

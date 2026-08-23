@@ -6,8 +6,11 @@ The systemd LOCAL backup writes to ``~/vigil-backups`` on the SAME disk and runs
 dead host takes both the engine and its local backups. ``vigil backup --push <dest>`` closes that gap: AFTER a
 successful local backup it copies the ENCRYPTED plane files (``*.vglbk`` / ``*.sglbk``) + ``MANIFEST.json`` +
 its governance signature ``MANIFEST.sig.json`` (W7-6) to a transport backend, so a genuine second copy lives
-off the host — and, carrying the signature, the pushed copy is itself a signature-verifying ``vigil restore``
-source.
+off the host — and, carrying the signature, the pushed copy is a ``vigil restore`` source whose signature
+verifies. The host-local TRUST ANCHOR is deliberately NOT transported (it never leaves the origin host), so an
+off-host restore has no local anchor to pin against: authenticate it with ``--expect-governance-pubkey`` (the
+governance pubkey obtained out of band). Under ``VIGIL_POSTURE=production`` an off-host restore without that
+pin is refused fail-closed; outside production it proceeds integrity-only with a loud warning.
 
 Confidentiality across the wire: every plane file is passphrase-encrypted (scrypt-derived AEAD) BEFORE it is
 written locally, so transport moves CIPHERTEXT only — the remote never sees plaintext, and the remote's own

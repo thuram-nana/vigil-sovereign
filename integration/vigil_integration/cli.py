@@ -2571,7 +2571,14 @@ def _cmd_backup(args: argparse.Namespace) -> int:
     ENCRYPTED parts + MANIFEST off-HOST to a transport backend (ciphertext only — see tools/backup/transport)
     and then VERIFIES the copy AT THE DESTINATION (W7-4, #462): it re-reads the bytes that landed there and
     refuses a truncated/corrupted/tampered copy fail-closed (non-zero exit). Without ``--push`` the backup
-    lives only on this host's disk."""
+    lives only on this host's disk.
+
+    The orchestrator ``MANIFEST.json`` (the index of what the backup contains) is signed with the offense
+    governance key and, on first use, that key is recorded to a HOST-LOCAL trust anchor (``~/.vigil/…``, outside
+    the backup dir) together with a monotonic ``backup_seq``. That anchor is what makes the DEFAULT ``vigil
+    restore`` on this host AUTHENTICATED (it pins this exact key) and rollback-resistant — not the bare
+    signature alone. Rotating the governance key requires re-establishing the anchor with ``--reset-trust-
+    anchor`` (a deliberate, logged step)."""
     import json
     import socket
     import time
@@ -2587,6 +2594,34 @@ def _cmd_backup(args: argparse.Namespace) -> int:
     subdir = out_root / timestamp_name()
     subdir.mkdir(parents=True, exist_ok=True)
     planes: dict = {}
+
+    # TOFU trust anchor (W7-6 rework, PR #630). Read it UP FRONT so a governance-key ROTATION refuses BEFORE
+    # we do a full backup, and so the manifest can carry the next monotonic backup_seq. The anchor lives
+    # HOST-LOCAL (~/.vigil/…), outside the backup dir, so the reach-the-backup-at-rest attacker cannot touch
+    # it. FATAL-2: `backup` is an offense-plane module (no sigil import at load); the import stays local.
+    from .backup import (OffenseBackupError, default_trust_anchor_path, load_trust_anchor,
+                         offense_governance_pubkey, record_backup_trust_anchor)
+    anchor_path = default_trust_anchor_path()
+    try:
+        anchor = load_trust_anchor(anchor_path)
+    except OffenseBackupError as e:
+        print(f"vigil backup: {e}", file=sys.stderr)
+        return 1
+    reset_anchor = bool(getattr(args, "reset_trust_anchor", False))
+    try:
+        gov_pub = offense_governance_pubkey(args.base_dir)
+    except Exception as e:  # noqa: BLE001 — a keystore/vault error is a fail-closed refusal, not a crash
+        print(f"vigil backup: cannot load the offense governance key under {args.base_dir}: {e}",
+              file=sys.stderr)
+        return 1
+    if anchor and anchor.get("governance_pubkey") != gov_pub and not reset_anchor:
+        print(f"vigil backup: REFUSED — the recorded backup trust anchor ({anchor_path}) names a DIFFERENT "
+              f"governance key ({str(anchor.get('governance_pubkey'))[:16]}…) than the one now signing "
+              f"({gov_pub[:16]}…). This is a governance-key rotation or a different engine home. Re-establish "
+              "the anchor deliberately with --reset-trust-anchor (a logged step) — refusing to overwrite the "
+              "trust root silently.", file=sys.stderr)
+        return 1
+    next_seq = int(anchor.get("backup_seq", 0)) + 1 if anchor else 1
 
     if not getattr(args, "sovereign_only", False):
         from .backup import OffenseBackupError, create_offense_backup
@@ -2617,8 +2652,12 @@ def _cmd_backup(args: argparse.Namespace) -> int:
         print(f"sovereign → {sov_dest}")
 
     manifest = {
-        "schema": 1, "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "schema": 2, "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "host": socket.gethostname(), "planes": planes,
+        # Monotonic freshness marker (from the host trust anchor, NOT the wallclock): restore refuses a backup
+        # whose backup_seq is older than the latest recorded on this host — closing rollback-to-genuine-older,
+        # which neither the signature nor the pin catches.
+        "backup_seq": next_seq,
         "retention_hint": {"keep_days": args.keep_days, "keep_last": args.keep_last},
         "note": ("TWO SEPARATE encrypted files, one per plane — never a merged archive (a merged archive = "
                  "one process holding both plane secrets = FATAL-2). One passphrase per file; lose it → "
@@ -2628,16 +2667,32 @@ def _cmd_backup(args: argparse.Namespace) -> int:
     # MANIFEST.json is byte-identical to what MANIFEST.sig.json is computed over.
     manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
     (subdir / "MANIFEST.json").write_bytes(manifest_bytes)
-    # SIGN the orchestrator manifest with the offense governance key (W7-6 #464). The index of what a backup
-    # contains is now governance-signed; `vigil restore` refuses an unsigned/tampered/wrong-key manifest, so it
-    # can no longer be edited by anyone who can reach the backup at rest (part redirect, sha256 downgrade for a
-    # rollback substitution, retention tamper). FATAL-2: offense governance key only, never the owner key.
+    # SIGN the orchestrator manifest with the offense governance key over DOMAIN-SEPARATED bytes (W7-6 #464 /
+    # PR #630). FATAL-2: offense governance key only, never the owner key.
     from .backup import sign_orchestrator_manifest
     sig_doc = sign_orchestrator_manifest(manifest_bytes, base_dir=args.base_dir)
     (subdir / "MANIFEST.sig.json").write_text(json.dumps(sig_doc, indent=2, sort_keys=True), encoding="utf-8")
     print(f"manifest → {subdir / 'MANIFEST.json'}")
-    print(f"signature → {subdir / 'MANIFEST.sig.json'}  (offense-governance key {sig_doc['pubkey'][:16]}…; "
-          "restore refuses an unsigned/tampered manifest)")
+    # HONEST wording (MED-2): the sidecar is a signature, not authenticity by itself. Say what it is; the
+    # trust-anchor line below is what actually makes the default restore authenticated.
+    print(f"signature → {subdir / 'MANIFEST.sig.json'}  (offense-governance key {sig_doc['pubkey'][:16]}…, "
+          "ed25519, domain-separated over the exact manifest bytes)")
+    # Record/advance the host-local TOFU trust anchor AFTER the backup landed (a crash only ever leaves the
+    # anchor lagging — fail-safe: it never refuses a genuine newer backup). This is what makes the DEFAULT
+    # restore authenticated + rollback-resistant, per PR #630.
+    try:
+        ap, action = record_backup_trust_anchor(
+            governance_pubkey=sig_doc["pubkey"], backup_seq=next_seq,
+            manifest_sha256=sig_doc["manifest_sha256"], path=anchor_path, reset=reset_anchor)
+    except OffenseBackupError as e:
+        print(f"vigil backup: local backup OK, but the trust anchor could not be updated: {e}", file=sys.stderr)
+        return 1
+    _verb = {"established": "established (trust-on-first-use)", "advanced": "advanced",
+             "rotated": "RE-ESTABLISHED after a deliberate key rotation"}.get(action, action)
+    print(f"trust anchor → {ap} {_verb}; backup_seq={next_seq}. On THIS host, a default `vigil restore` now "
+          f"PINS this governance key (authenticated) and refuses an older backup. To restore on ANOTHER host, "
+          f"pass --expect-governance-pubkey {sig_doc['pubkey'][:16]}… (obtained out of band); an "
+          "unauthenticated restore is refused under VIGIL_POSTURE=production.")
     print("KEEP THE PASSPHRASE SAFE — it is the ONLY key to these backups (never stored; lose it → unrecoverable).")
 
     # TRUE off-HOST transport (opt-in): after a SUCCESSFUL local backup, replicate the ENCRYPTED parts +
@@ -2685,11 +2740,27 @@ def _cmd_backup(args: argparse.Namespace) -> int:
 
 
 def _cmd_restore(args: argparse.Namespace) -> int:
-    """Inverse of ``vigil backup``: VERIFY the MANIFEST.json GOVERNANCE SIGNATURE (W7-6 #464) and then each
-    plane part's manifest sha256 BEFORE invoking any leg, then restore the offense leg IN THIS venv and the
-    sovereign leg as a ``sigil restore`` SUBPROCESS. Two encrypted files, never a merged archive — the same
-    FATAL-2 boundary as backup. Fail-closed: an unsigned/tampered/wrong-key manifest, or a plane whose part is
-    missing or sha256-mismatched, refuses with a non-zero exit — an unsigned manifest is never trusted."""
+    """Inverse of ``vigil backup``: VERIFY the MANIFEST.json GOVERNANCE SIGNATURE and then each plane part's
+    manifest sha256 BEFORE invoking any leg, then restore the offense leg IN THIS venv and the sovereign leg as
+    a ``sigil restore`` SUBPROCESS. Two encrypted files, never a merged archive — the same FATAL-2 boundary as
+    backup.
+
+    AUTHENTICITY (W7-6 rework, PR #630). An unsigned manifest is always refused. Beyond that, how the signature
+    is trusted depends on what is known about the signing key:
+
+    * DEFAULT, once a `vigil backup` has run on this host: the signature is PINNED against the governance key
+      recorded in the host trust anchor (``~/.vigil/…``). A manifest re-signed under any other key is refused —
+      this is an AUTHENTICATED restore.
+    * ``--expect-governance-pubkey <b64>`` ALWAYS overrides the anchor: the signer must equal it.
+    * NO anchor on this host (e.g. an off-host disaster recovery) and no pin: refused fail-closed under
+      ``VIGIL_POSTURE=production`` (establish/confirm the anchor first, or pass the pin out of band); outside
+      production it proceeds INTEGRITY-ONLY with a LOUD warning — integrity-only does NOT authenticate the
+      signer, so an attacker who reached the backup could have re-signed it under their own key.
+
+    ROLLBACK. When the anchor is present, a backup whose monotonic ``backup_seq`` is older than the latest
+    recorded is refused (rollback to a genuine older signed backup, which the signature/pin do not catch);
+    ``--allow-rollback`` overrides deliberately. A plane whose part is missing or sha256-mismatched refuses
+    with a non-zero exit."""
     import json
 
     if getattr(args, "sovereign_only", False) and getattr(args, "offense_only", False):
@@ -2708,9 +2779,13 @@ def _cmd_restore(args: argparse.Namespace) -> int:
         return 2
     # FAIL-CLOSED: verify the orchestrator manifest's governance signature BEFORE trusting ANY value in it
     # (the file names + sha256s used below to locate and integrity-check every plane part). A missing sidecar
-    # is an UNSIGNED manifest and is refused; a bad signature or a pin mismatch is refused. The same
-    # ``--expect-governance-pubkey`` out-of-band pin used for the inner offense manifest pins this one too.
-    from .backup import OffenseBackupError, verify_orchestrator_manifest
+    # is an UNSIGNED manifest and is refused. AUTHENTICITY (PR #630): the DEFAULT pins the signature against the
+    # host trust anchor's recorded governance key; an explicit --expect-governance-pubkey overrides; with no
+    # anchor and no pin, production refuses fail-closed while non-production proceeds integrity-only + a loud
+    # warning. The resolved pin is used for BOTH the orchestrator index AND the inner offense manifest.
+    from .backup import (OffenseBackupError, check_backup_freshness, default_trust_anchor_path,
+                         load_trust_anchor, resolve_manifest_pin, verify_orchestrator_manifest)
+    from vigil_core.posture import is_production_posture
     try:
         sig_doc = json.loads((src / "MANIFEST.sig.json").read_bytes().decode("utf-8"))
     except (OSError, ValueError) as e:
@@ -2718,12 +2793,40 @@ def _cmd_restore(args: argparse.Namespace) -> int:
               f"UNSIGNED manifest (W7-6). Re-fetch the backup from a source that carries its signature.",
               file=sys.stderr)
         return 2
-    expect_pub = getattr(args, "expect_governance_pubkey", "") or None
+    explicit_pin = getattr(args, "expect_governance_pubkey", "") or None
+    anchor_path = default_trust_anchor_path()
+    try:
+        anchor = load_trust_anchor(anchor_path)
+    except OffenseBackupError as e:
+        print(f"vigil restore: {e}", file=sys.stderr)
+        return 2
+    try:
+        expect_pub, pin_mode, pin_warning = resolve_manifest_pin(anchor, explicit_pin, is_production_posture())
+    except OffenseBackupError as e:
+        print(f"vigil restore: {e}", file=sys.stderr)
+        return 2
+    if pin_warning:
+        print(f"vigil restore: {pin_warning}", file=sys.stderr)
     try:
         verify_orchestrator_manifest(manifest_bytes, sig_doc, expect_pubkey=expect_pub)
     except OffenseBackupError as e:
         print(f"vigil restore: {e}", file=sys.stderr)
         return 2
+    # ROLLBACK RESISTANCE: refuse a backup older than the latest recorded in the anchor (unless --allow-rollback).
+    try:
+        roll_warning = check_backup_freshness(anchor, (manifest.get("backup_seq") if isinstance(manifest, dict)
+                                                       else None), bool(getattr(args, "allow_rollback", False)))
+    except OffenseBackupError as e:
+        print(f"vigil restore: {e}", file=sys.stderr)
+        return 2
+    if roll_warning:
+        print(f"vigil restore: {roll_warning}", file=sys.stderr)
+    if pin_mode == "anchor":
+        print(f"vigil restore: manifest AUTHENTICATED against the host trust anchor "
+              f"(governance key {str(expect_pub)[:16]}…).", file=sys.stderr)
+    elif pin_mode == "explicit":
+        print(f"vigil restore: manifest AUTHENTICATED against --expect-governance-pubkey "
+              f"({str(expect_pub)[:16]}…).", file=sys.stderr)
     planes = manifest.get("planes", {}) if isinstance(manifest, dict) else {}
     pw = _orchestrator_passphrase(args)
 
@@ -2754,7 +2857,9 @@ def _cmd_restore(args: argparse.Namespace) -> int:
             if croot is None:
                 cr = _resolve_crucible_root()
                 croot = str(cr) if cr else None
-            expect_pub = getattr(args, "expect_governance_pubkey", "") or None
+            # Pin the INNER offense manifest with the SAME resolved key as the orchestrator index (the anchor's
+            # recorded key by default, an explicit --expect-governance-pubkey if given, or None in the
+            # integrity-only non-production path) — one governance key, one pin, both manifests.
             try:
                 res = restore_offense_backup(off, args.base_dir, pw, crucible_root=croot,
                                              expect_pubkey=expect_pub, force=getattr(args, "force", False))
@@ -3533,13 +3638,21 @@ def build_parser() -> argparse.ArgumentParser:
     pbk.add_argument("--passphrase-env", dest="passphrase_env", default="VIGIL_BACKUP_PASSPHRASE",
                      help="env var holding the backup passphrase (never passed on argv; default "
                           "VIGIL_BACKUP_PASSPHRASE)")
+    pbk.add_argument("--reset-trust-anchor", dest="reset_trust_anchor", action="store_true",
+                     help="RE-ESTABLISH the host-local backup trust anchor under the CURRENT governance key. "
+                          "Backup normally REFUSES when the recorded anchor names a different key (a rotation "
+                          "or a different engine home); pass this — the deliberate, logged rotation step — to "
+                          "adopt the new key as the trusted one. The monotonic backup_seq is preserved. After "
+                          "a reset, a default restore on this host pins the NEW key.")
     pbk.set_defaults(func=_cmd_backup)
 
     prs = sub.add_parser(
         "restore",
-        help="restore a two-plane `vigil backup` dir — verifies the MANIFEST governance SIGNATURE then each "
-             "plane part's MANIFEST sha256 BEFORE invoking either leg; refuses an unsigned/tampered manifest; "
-             "the sovereign leg is a sigil subprocess (fail-closed, two-file boundary)")
+        help="restore a two-plane `vigil backup` dir — refuses an UNSIGNED manifest, and AUTHENTICATES it by "
+             "default against the host trust anchor (an explicit --expect-governance-pubkey overrides; with no "
+             "anchor + no pin, production refuses fail-closed, non-production is integrity-only + a warning); "
+             "refuses a rollback to an older backup; then verifies each plane part's sha256 before invoking "
+             "either leg (fail-closed, two-file boundary; the sovereign leg is a sigil subprocess)")
     prs.add_argument("src", help="the timestamped backup dir (holding MANIFEST.json + MANIFEST.sig.json + the "
                                  "encrypted parts)")
     prs.add_argument("--base-dir", default=".vigil-live", help="offense base_dir to restore INTO (fresh)")
@@ -3549,11 +3662,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help="a FRESH SIGIL_HOME dir to restore the sovereign plane into (required for that leg)")
     prs.add_argument("--expect-governance-pubkey", dest="expect_governance_pubkey", default="",
                      help="out-of-band AUTHENTICITY pin: the expected offense-governance pubkey (base64). When "
-                          "set, BOTH the orchestrator MANIFEST.json signature (W7-6) AND the inner offense "
-                          "backup manifest MUST be signed by it — else restore refuses. Without it, the "
-                          "orchestrator manifest signature still proves INTEGRITY (no edit by a non-key-holder) "
-                          "but authenticity against a full re-mint reduces to passphrase-possession; the "
-                          "operator-owned/rotated signing key that closes that residual is W9-1 #434.")
+                          "set it ALWAYS overrides the host trust anchor, and BOTH the orchestrator "
+                          "MANIFEST.json signature AND the inner offense backup manifest MUST be signed by it — "
+                          "else restore refuses. This is the way to authenticate an OFF-HOST recovery, where no "
+                          "trust anchor exists locally. When it is NOT set, the DEFAULT is to pin against the "
+                          "governance key recorded in this host's trust anchor (an authenticated restore); if "
+                          "there is no anchor either, production (VIGIL_POSTURE=production) refuses fail-closed "
+                          "and non-production falls back to integrity-only with a loud warning (which does NOT "
+                          "authenticate the signer).")
     prs.add_argument("--force", action="store_true",
                      help="REPLACE existing state at the destination. The base-dir is a WHOLE-tree capture, so "
                           "--force whole-replaces it (only re-creatable transients are dropped). The "
@@ -3572,6 +3688,12 @@ def build_parser() -> argparse.ArgumentParser:
                       help="restore ONLY the offense plane")
     prs.add_argument("--passphrase-env", dest="passphrase_env", default="VIGIL_BACKUP_PASSPHRASE",
                      help="env var holding the backup passphrase (never passed on argv)")
+    prs.add_argument("--allow-rollback", dest="allow_rollback", action="store_true",
+                     help="deliberately restore a backup OLDER than the latest recorded in the host trust "
+                          "anchor. Restore normally refuses this (a rollback/substitution to a genuine older "
+                          "signed backup, which the signature and the pin do not catch); pass this to override "
+                          "when you are intentionally rolling back (e.g. the latest backup is unusable). "
+                          "Reintroduces pre-revocation/pre-patch state — used loudly, logged.")
     prs.set_defaults(func=_cmd_restore)
 
     ppos = sub.add_parser(

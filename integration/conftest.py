@@ -78,3 +78,17 @@ def _isolate_attestation_state_dir(tmp_path_factory, monkeypatch):
         return
     monkeypatch.setattr(_anchor, "DEFAULT_STATE_DIR", tmp_path_factory.mktemp("attest-state"))
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_backup_trust_anchor(tmp_path_factory, monkeypatch):
+    """Keep the HOST-LEVEL backup trust anchor hermetic per test. W7-6 (PR #630) records the trusted
+    governance pubkey + a monotonic backup_seq to ``~/.vigil/backup-trust-anchor.json`` (the same ``~/.vigil``
+    host-state convention as the attestation anchor above). Without this redirect, any test that drives a real
+    ``vigil backup`` (e.g. the push-transport CLI tests) would write the real user's home anchor AND read a
+    key/seq carried over from prior runs — polluting the home dir and letting one test's key rotation refuse
+    the next. Point it at a throwaway per test via the documented override env. A test that needs a specific
+    location sets ``VIGIL_BACKUP_TRUST_ANCHOR`` in its own body (applied after this fixture, so it wins)."""
+    monkeypatch.setenv("VIGIL_BACKUP_TRUST_ANCHOR",
+                       str(tmp_path_factory.mktemp("backup-anchor") / "trust-anchor.json"))
+    yield
