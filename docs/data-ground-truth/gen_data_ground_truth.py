@@ -144,8 +144,17 @@ def _find_symbol(body: list, parts: list[str]) -> bool:
     return False
 
 
-def symbol_defined(engine: Path, file_rel: str, dotted: str) -> bool:
+def _cited_path(engine: Path, file_rel: str) -> Path:
+    """Resolve a cited source file. Citations are ENGINE-ROOT-relative by default; a symbol PROMOTED to
+    the neutral shared core (``vigil_core``, which lives outside engine/crucible) is cited REPO-ROOT-
+    relative. Prefer the engine-root path; fall back to the repo root so a shared-core symbol can be
+    grounded to its real definition site."""
     p = engine / file_rel
+    return p if p.is_file() else (_REPO / file_rel)
+
+
+def symbol_defined(engine: Path, file_rel: str, dotted: str) -> bool:
+    p = _cited_path(engine, file_rel)
     if not p.is_file():
         return False
     try:
@@ -156,7 +165,7 @@ def symbol_defined(engine: Path, file_rel: str, dotted: str) -> bool:
 
 
 def _text_contains(engine: Path, file_rel: str, needle: str) -> bool:
-    p = engine / file_rel
+    p = _cited_path(engine, file_rel)
     return p.is_file() and needle in p.read_text(encoding="utf-8")
 
 

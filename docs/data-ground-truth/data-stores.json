@@ -20,7 +20,7 @@
       "symbols": [
         {"file": "framework/v2/common/paths.py", "symbol": "evidence_archive_dir"},
         {"file": "framework/v2/common/paths.py", "symbol": "evidence_dir"},
-        {"file": "framework/v2/common/redact.py", "symbol": "redact_header"}
+        {"file": "packages/core/vigil_core/vigil_core/redact.py", "symbol": "redact_header"}
       ],
       "cli_verbs": ["erase-evidence"]
     },
