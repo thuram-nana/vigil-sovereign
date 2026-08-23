@@ -87,8 +87,8 @@ FORBIDDEN: list[tuple[Path, str]] = [
 ]
 
 ANCHORS: list[tuple[Path, str]] = [
-    (HANDOFF, "the 12 CI jobs"),
-    (AS_BUILT, "CI = 12 jobs in `ci.yml`"),
+    (HANDOFF, "the 13 CI jobs"),
+    (AS_BUILT, "CI = 13 jobs in `ci.yml`"),
     (FEATURES, "is wired into `verifier._run`** (`verifier.py:854-858`)"),
     (FEATURES, "owner_rooted=True AND file_backed=True**"),
     (FEATURES, "a real client body behind a deploy gate, NOT an every-method-raises stub"),
@@ -114,13 +114,13 @@ def code_fact_violations() -> list[str]:
     """Every code fact the corrections now cite must be TRUE in the tree."""
     errs: list[str] = []
 
-    # 16.2/16.16 — ci.yml really has 12 jobs (count the top-level job keys).
+    # 16.2/16.16 — ci.yml really has 13 jobs (count the top-level job keys).
     ci = CI_YAML.read_text(encoding="utf-8")
     # Job keys sit at exactly two-space indent under `jobs:`; the `on:` triggers are deeper/other.
     in_jobs = ci.split("\njobs:", 1)[-1]
     job_keys = re.findall(r"^  ([A-Za-z0-9_-]+):\s*$", in_jobs, re.MULTILINE)
-    if len(job_keys) != 12:
-        errs.append(f"16.2: expected 12 ci.yml jobs, found {len(job_keys)}: {job_keys}")
+    if len(job_keys) != 13:
+        errs.append(f"16.2: expected 13 ci.yml jobs, found {len(job_keys)}: {job_keys}")
 
     # 16.3 — verifier._run really fires k8s_workload_posture_oracle on the workload ctx key.
     if "k8s_workload_posture_oracle(ctx[" not in VERIFIER.read_text(encoding="utf-8"):
@@ -202,7 +202,7 @@ def test_all_drift_corrections_hold():
 # ---------------------------------------------------------------------------
 def test_negative_control_a_returned_forbidden_phrase_is_flagged():
     # A phrase that IS still present in the tree (an anchor) stands in for a re-introduced false claim.
-    bogus = [(HANDOFF, "the 12 CI jobs")]
+    bogus = [(HANDOFF, "the 13 CI jobs")]
     assert present_forbidden(bogus), "present_forbidden failed to flag a phrase that is in the file — no-op"
 
 

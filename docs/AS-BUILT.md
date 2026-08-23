@@ -261,10 +261,10 @@ fix → **adversarial re-check on the fixed branch** → PR → all CI green →
 fixed branch is load-bearing — it repeatedly surfaced the *next* defect one level deeper (e.g. the
 I2 chain: conditional-majority → distinct-key → base64-malleable → **low-order keyless forgery**;
 the emitter chain: no-progress false-fork → non-atomic brick → **honest-prune false is_split**).
-CI = 12 jobs in `ci.yml` (`vigil-core`, `briefing-completeness`, `crucible-core`, `crucible-eval`,
+CI = 13 jobs in `ci.yml` (`vigil-core`, `briefing-completeness`, `crucible-core`, `crucible-eval`,
 `loopback-engagement`, `gateway`, `integration` — two runs: sovereign, then the framework-dependent
 oracle-adapter in its own process — `strix-vigil`, `sigil-governor`, `sigil-lint`, `formal-verification`,
-`warden-kernel`), plus the `supply-chain` and `livefire` jobs in their own workflows. The full set of
+`warden-kernel`, `python-compat`), plus the `supply-chain` and `livefire` jobs in their own workflows. The full set of
 required status checks is enumerated in the protection table at the top of this file and in the committed
 source of truth [`.github/required-status-checks.txt`](../.github/required-status-checks.txt).
 
