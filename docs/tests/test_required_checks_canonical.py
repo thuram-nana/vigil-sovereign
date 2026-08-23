@@ -160,6 +160,13 @@ KNOWN_NONPR_ADVISORY: dict[str, str] = {
         "issue) over the chaos suite whose blocking per-PR guarantee is the REQUIRED "
         "'SIGIL governor gates (P7 — offense gate + authn)' job (which runs apps/sigil/tests/ in whole)."
     ),
+    "soak full run (nightly)": (
+        "soak.yml — schedule/workflow_dispatch only (W11-6 #487); the FULL multi-minute sustained soak "
+        "at the SLA throughput floor is too slow for a per-PR runner, so it reports on a schedule and "
+        "never on a PR. Its per-PR blocking subset — the leak detector with its leaking-fixture negative "
+        "control and a scaled throughput-floor run — IS required inside 'CRUCIBLE eval + benchmark corpus' "
+        "via framework/v2/eval/tests/test_soak_leak.py."
+    ),
 }
 
 # W0-2 (#397): "Where a job is legitimately non-blocking (nightly), split the blocking subset out into

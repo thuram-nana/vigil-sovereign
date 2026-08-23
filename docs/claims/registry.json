@@ -1721,6 +1721,31 @@
       "ci_job": "CRUCIBLE core on vigil_core",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W11-6",
+      "title": "The soak harness holds a documented throughput floor and detects memory leaks",
+      "claim": "The soak harness drives a real sustained-load scan that holds a documented throughput floor (a run below it fails) and tracks process RSS across the whole run (a detected memory leak fails); an artificially-leaking fixture is DETECTED by the same leak check, and its clean twin is not. The fast, scaled half — the leak detector with its leaking-fixture negative control and a scaled run against a conservative CI floor — runs in the required CRUCIBLE eval job; the full multi-minute sustained soak at the SLA floor is the scheduled soak.yml workflow, not a per-PR gate.",
+      "source": "docs/decisions/W11-6-load-soak-throughput-leak.md:8",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/eval/soak.py",
+        "symbol": "run_soak_sustained"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/eval/tests/test_soak_leak.py",
+        "tests": [
+          "test_detect_leak_flags_a_rising_series",
+          "test_leaking_fixture_is_detected",
+          "test_clean_fixture_is_not_flagged",
+          "test_throughput_floor_predicate_rejects_below_and_accepts_at_or_above",
+          "test_scaled_sustained_soak_holds_the_ci_floor_and_stays_deterministic",
+          "test_sustained_pass_roll_up_fails_below_floor",
+          "test_full_soak_is_a_scheduled_job_not_a_pr_gate"
+        ]
+      },
+      "ci_job": "CRUCIBLE eval + benchmark corpus",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
