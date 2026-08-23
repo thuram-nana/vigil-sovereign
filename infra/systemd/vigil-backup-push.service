@@ -5,9 +5,14 @@
 # unit takes a two-plane backup AND replicates it OFF the host: `vigil backup
 # --push ${VIGIL_PUSH_DEST}` copies the already-ENCRYPTED plane files (*.vglbk /
 # *.sglbk) + MANIFEST.json to a configured transport destination after a
-# successful backup. Only CIPHERTEXT is transported — no plaintext and no
-# passphrase ever leave the host; the pushed copy is itself a valid restore
-# source. The remote's own access control is the operator's responsibility.
+# successful backup, then VERIFIES the copy AT THE DESTINATION (re-reads the
+# landed bytes — a remote `sha256sum` over rsync+ssh, or a byte-for-byte
+# read-back — and refuses a truncated/corrupted/tampered copy, fail-closed:
+# W7-4 #462). Only CIPHERTEXT is transported — no plaintext and no passphrase
+# ever leave the host; the pushed copy is itself a valid restore source. A
+# destination-integrity failure makes this unit fail, which the ExecStopPost
+# heartbeat below turns into a W8-1 (#467) alert. The remote's own access
+# control is the operator's responsibility.
 #
 # This unit therefore needs the NETWORK (PrivateNetwork=no) — the ONE deliberate
 # difference from vigil-backup.service. It is kept SEPARATE so the routine backup
@@ -17,9 +22,11 @@
 #     ~/.config/vigil/backup-push.env
 #       VIGIL_BACKUP_PASSPHRASE=…    (the ONLY key to the encrypted files; never on argv)
 #       VIGIL_BASE_DIR=.vigil-live   (the offense engine home)
-#       VIGIL_PUSH_DEST=…            (transport dest: a bare path / local:<path> for the shipped
-#                                     local-directory backend — a mounted remote FS, sshfs, or a
-#                                     removable disk. rsync/scp/object-store backends slot in later.)
+#       VIGIL_PUSH_DEST=…            (transport dest: a bare path / local:<path> for the local-directory
+#                                     backend — a mounted remote FS, sshfs, or a removable disk — or
+#                                     rsync:[user@]host:path / rsync://host/module/path for the real
+#                                     rsync backend (over ssh or an rsync daemon). scp/object-store
+#                                     backends slot in later.)
 #
 # Manual run / logs:
 #     systemctl --user start vigil-backup-push.service

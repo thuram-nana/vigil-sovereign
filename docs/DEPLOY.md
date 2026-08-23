@@ -46,7 +46,10 @@ daily two-plane backup and proves the restore round-trip weekly. Enabling a time
 doctor` shows the `backups` control as `PENDING` and — under the production posture — refuses to start. Set
 the backup passphrase in `~/.config/vigil/backup.env`, then seed the first backup now with
 `systemctl --user start vigil-backup.service`. The off-host push (`vigil-backup-push.timer`) stays opt-in:
-configure `VIGIL_PUSH_DEST` in `~/.config/vigil/backup-push.env` and enable it in place of the local backup.
+configure `VIGIL_PUSH_DEST` in `~/.config/vigil/backup-push.env` (a mounted path/`local:` dir, or the real
+`rsync:[user@]host:path` / `rsync://host/module/path` backend) and enable it in place of the local backup.
+The push copies ciphertext only and then verifies the copy **at the destination** — a truncated, corrupted,
+or tampered remote copy fails the run (fail-closed) and raises the push-unit alert.
 
 ### Prerequisites
 

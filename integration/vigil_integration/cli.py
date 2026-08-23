@@ -2568,8 +2568,10 @@ def _cmd_backup(args: argparse.Namespace) -> int:
     via env/argument, never argv, and is never stored — lose it and the backups are unrecoverable by design.
 
     This writes a PORTABLE, passphrase-encrypted LOCAL backup. With ``--push <dest>`` it ALSO replicates the
-    ENCRYPTED parts + MANIFEST off-HOST to a transport backend (ciphertext only — see tools/backup/transport);
-    without it, the backup lives only on this host's disk."""
+    ENCRYPTED parts + MANIFEST off-HOST to a transport backend (ciphertext only — see tools/backup/transport)
+    and then VERIFIES the copy AT THE DESTINATION (W7-4, #462): it re-reads the bytes that landed there and
+    refuses a truncated/corrupted/tampered copy fail-closed (non-zero exit). Without ``--push`` the backup
+    lives only on this host's disk."""
     import json
     import socket
     import time
@@ -2636,12 +2638,29 @@ def _cmd_backup(args: argparse.Namespace) -> int:
         from tools.backup.transport import TransportError, get_transport
         parts = [subdir / info["file"] for info in planes.values()] + [subdir / "MANIFEST.json"]
         try:
-            pushed = get_transport(push_dest).push(parts, subdir.name)
+            transport = get_transport(push_dest)
+            pushed = transport.push(parts, subdir.name)
         except TransportError as e:
             print(f"vigil backup: local backup OK, but --push failed: {e}", file=sys.stderr)
             return 1
         print(f"pushed → {pushed['target']} ({len(pushed['files'])} encrypted part(s) + manifest; "
               f"ciphertext only, no plaintext leaves the host)")
+        # DESTINATION-side integrity verification (W7-4, #462), fail-closed. Re-read the bytes AT THE
+        # DESTINATION and confirm each matches the sha256 of exactly what we sent — NOT a second local
+        # checksum. The transport hashes the remote copy's own bytes (a remote sha256sum over ssh, or a
+        # byte-for-byte re-read of a mounted / rsync target). A truncated, corrupted, or tampered remote
+        # copy is DETECTED here and the whole backup verb FAILS (exit 1) — which the vigil-backup-push
+        # systemd unit's ExecStopPost heartbeat turns into a W8-1 (#467) failure alert. We never report an
+        # off-host copy as good without proving it landed intact.
+        expected = {p.name: _sha256_file(p) for p in parts}
+        try:
+            verified = transport.verify(subdir.name, expected)
+        except TransportError as e:
+            print(f"vigil backup: local backup OK, PUSH copied but DESTINATION INTEGRITY CHECK FAILED "
+                  f"(fail-closed, off-host copy refused): {e}", file=sys.stderr)
+            return 1
+        print(f"verified → {len(verified['verified'])} file(s) hash-match at the destination "
+              f"(re-read off-host, not a local checksum)")
 
     if getattr(args, "prune", False):
         deleted = prune(out_root, keep_days=args.keep_days, keep_last=args.keep_last)
@@ -3462,11 +3481,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="back up ONLY the offense plane (this venv)")
     pbk.add_argument("--push", default="",
                      help="TRUE off-HOST replication (opt-in): after a successful backup, copy the ENCRYPTED "
-                          "parts + MANIFEST to a transport backend. A bare path or local:<path> uses the "
-                          "shipped local-directory backend (a mounted remote FS / removable disk / test dir); "
-                          "unbuilt schemes (rsync://, scp://, s3://) error with the contract to implement. Only "
-                          "ciphertext is transported — no plaintext leaves the host. Needs network (run via "
-                          "vigil-backup-push.service, PrivateNetwork=no), unlike the air-gapped local timer.")
+                          "parts + MANIFEST to a transport backend AND verify them at the destination. A bare "
+                          "path or local:<path> uses the local-directory backend (a mounted remote FS / "
+                          "removable disk / test dir); rsync:[user@]host:path or rsync://host/module/path uses "
+                          "the real rsync backend (over ssh / an rsync daemon); still-unbuilt schemes (scp://, "
+                          "s3://) error with the contract to implement. The push then re-reads the copy AT THE "
+                          "DESTINATION and FAILS CLOSED (non-zero exit) if a truncated/corrupted/tampered copy "
+                          "does not hash-match what was sent. Only ciphertext is transported — no plaintext "
+                          "leaves the host. Needs network (run via vigil-backup-push.service, "
+                          "PrivateNetwork=no), unlike the air-gapped local timer.")
     pbk.add_argument("--prune", action="store_true", help="after the backup, prune old backups per the policy")
     pbk.add_argument("--keep-days", dest="keep_days", type=int, default=None,
                      help="retention: keep backups within N days (with --prune)")
