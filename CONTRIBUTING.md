@@ -21,7 +21,10 @@ Maintainer), who keeps an explicit override — see "What the ruleset actually e
 1. **Fork** the repository (or, if you are a collaborator, create a **branch** — never commit
    to `main`).
 2. Make your change on a feature branch, then `git push origin <branch>`.
-3. **Open a pull request** against `main`. Fill in the PR template honestly.
+3. **Open a pull request** against `main`. Fill in the
+   [PR template](./.github/pull_request_template.md) honestly — GitHub loads it from
+   [`.github/pull_request_template.md`](./.github/pull_request_template.md), the repository-root
+   path it reads, and pre-fills it into your pull request.
 4. The Maintainer reviews and merges. That is the way your code lands on `main`.
 
 ## What the ruleset actually enforces

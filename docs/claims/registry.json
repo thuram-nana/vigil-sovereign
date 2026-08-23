@@ -789,6 +789,49 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "opt-in-stated-as-default",
       "default": "off"
+    },
+    {
+      "id": "W1-8",
+      "title": "No .github/workflows or pull-request template exists outside the repo root (nested inert copies are guarded out)",
+      "claim": "No `.github/workflows/` and no pull-request template exists outside the repository root (vendored third-party trees under `vendor/` excepted), and a required-CI guard fails the build when a nested one is reintroduced.",
+      "source": "docs/decisions/W1-8-no-nested-github-outside-root.md:9",
+      "enforced_by": {
+        "file": "integration/tests/test_nested_github_guard.py",
+        "symbol": "nested_github_offenses"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_nested_github_guard.py",
+        "tests": [
+          "test_no_nested_github_workflows_or_templates_outside_root",
+          "test_negative_control_scanner_flags_a_nested_workflow",
+          "test_negative_control_scanner_flags_a_nested_pr_template",
+          "test_negative_control_vendored_github_tree_is_exempt"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W12-1",
+      "title": "A pull-request template exists at the root path GitHub reads, and CONTRIBUTING points to it",
+      "claim": "A pull-request template exists at the repository-root path GitHub reads (`.github/pull_request_template.md`), and CONTRIBUTING.md directs contributors to that real path.",
+      "source": "docs/decisions/W12-1-root-pull-request-template.md:8",
+      "enforced_by": {
+        "file": "integration/tests/test_nested_github_guard.py",
+        "symbol": "root_pr_template_defect"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_nested_github_guard.py",
+        "tests": [
+          "test_root_pull_request_template_exists",
+          "test_contributing_points_to_the_real_pr_template_path",
+          "test_negative_control_missing_root_template_is_rejected"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
