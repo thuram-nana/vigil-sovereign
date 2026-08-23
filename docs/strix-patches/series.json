@@ -551,7 +551,7 @@
   "vendor/strix/strix/report/anthropic_pricing.py": "114175e67481568fb7ab08105a10abe1afcc0edee90ee4698de5752e4b50d093",
   "vendor/strix/strix/report/dedupe.py": "f4094770da0dd5616912685269098620f57d7df8c107e1600336a92cb303adb4",
   "vendor/strix/strix/report/degradation_hook.py": "7b80de0574c779802595f70b3188995780123aaf475ed05ed4a1f8a123781f7f",
-  "vendor/strix/strix/report/proof_capture.py": "8b50327c8d5054b3a0b1103253d1ea05bcb05a4f4afc540b23f97779e6cb1a52",
+  "vendor/strix/strix/report/proof_capture.py": "467c06149b76fff48970907f0ffa9d3bb2aad5b4a3be72df741606504aba231d",
   "vendor/strix/strix/report/sarif.py": "2b32368c31a36628bae7dd6154b9a7190c979ab74ffdfe8ec72ce1c555773cb6",
   "vendor/strix/strix/report/state.py": "f0c5c3a9de13e4bf1519776e85ed879de963b83f73e341883757ff23957d85c8",
   "vendor/strix/strix/report/usage.py": "3a526249ca46f9ab28d273f028a6f1327b52671887c909e3609ce48532e5aa27",
