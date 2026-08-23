@@ -715,6 +715,28 @@
       "ci_job": "vigil_core — shared integrity substrate",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W7-6",
+      "title": "the orchestrator MANIFEST.json is governance-signed and restore refuses an unsigned/tampered/wrong-key one",
+      "claim": "The orchestrator `MANIFEST.json` is signed with the offense governance key, and `vigil restore` verifies that signature over the exact manifest bytes before trusting the index",
+      "source": "docs/decisions/W7-6-sign-the-orchestrator-manifest.md:29",
+      "enforced_by": {
+        "file": "integration/vigil_integration/backup.py",
+        "symbol": "verify_orchestrator_manifest"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_backup_manifest_signature.py",
+        "tests": [
+          "test_backup_writes_a_verifying_signature",
+          "test_restore_refuses_a_tampered_manifest",
+          "test_restore_refuses_an_unsigned_manifest",
+          "test_restore_pin_mismatch_refused_and_correct_pin_accepted"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

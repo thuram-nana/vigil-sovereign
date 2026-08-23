@@ -46,10 +46,16 @@ bk_args=(backup --out "$WORK/bk" --base-dir "$BASE_DIR")
 echo "recovery_drill: backup → $WORK/bk"
 $VIGIL_CMD "${bk_args[@]}"
 
-# 2) locate the single timestamped backup subdir (holding MANIFEST.json + the encrypted parts).
+# 2) locate the single timestamped backup subdir (holding MANIFEST.json + MANIFEST.sig.json + the parts).
 subdir="$(find "$WORK/bk" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
 if [ -z "$subdir" ] || [ ! -f "$subdir/MANIFEST.json" ]; then
   echo "recovery_drill: FAIL — no backup dir with MANIFEST.json under $WORK/bk" >&2
+  exit 1
+fi
+# W7-6: the manifest must be SIGNED (restore refuses an unsigned one, but assert it up front so a drop of the
+# signer surfaces as a clear drill failure, not an opaque restore refusal).
+if [ ! -f "$subdir/MANIFEST.sig.json" ]; then
+  echo "recovery_drill: FAIL — backup dir $subdir has no MANIFEST.sig.json (unsigned manifest)" >&2
   exit 1
 fi
 

@@ -2624,8 +2624,20 @@ def _cmd_backup(args: argparse.Namespace) -> int:
                  "one process holding both plane secrets = FATAL-2). One passphrase per file; lose it → "
                  "unrecoverable by design."),
     }
-    (subdir / "MANIFEST.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    # Write the EXACT bytes we sign (write_bytes, not write_text — no newline translation), so the on-disk
+    # MANIFEST.json is byte-identical to what MANIFEST.sig.json is computed over.
+    manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
+    (subdir / "MANIFEST.json").write_bytes(manifest_bytes)
+    # SIGN the orchestrator manifest with the offense governance key (W7-6 #464). The index of what a backup
+    # contains is now governance-signed; `vigil restore` refuses an unsigned/tampered/wrong-key manifest, so it
+    # can no longer be edited by anyone who can reach the backup at rest (part redirect, sha256 downgrade for a
+    # rollback substitution, retention tamper). FATAL-2: offense governance key only, never the owner key.
+    from .backup import sign_orchestrator_manifest
+    sig_doc = sign_orchestrator_manifest(manifest_bytes, base_dir=args.base_dir)
+    (subdir / "MANIFEST.sig.json").write_text(json.dumps(sig_doc, indent=2, sort_keys=True), encoding="utf-8")
     print(f"manifest → {subdir / 'MANIFEST.json'}")
+    print(f"signature → {subdir / 'MANIFEST.sig.json'}  (offense-governance key {sig_doc['pubkey'][:16]}…; "
+          "restore refuses an unsigned/tampered manifest)")
     print("KEEP THE PASSPHRASE SAFE — it is the ONLY key to these backups (never stored; lose it → unrecoverable).")
 
     # TRUE off-HOST transport (opt-in): after a SUCCESSFUL local backup, replicate the ENCRYPTED parts +
@@ -2636,7 +2648,10 @@ def _cmd_backup(args: argparse.Namespace) -> int:
     push_dest = getattr(args, "push", "") or ""
     if push_dest:
         from tools.backup.transport import TransportError, get_transport
-        parts = [subdir / info["file"] for info in planes.values()] + [subdir / "MANIFEST.json"]
+        # Push the signature sidecar too — without it the pushed copy would be an unsigned manifest that
+        # `vigil restore` fails-closed on, making the off-host replica unrestorable (W7-6 #464).
+        parts = ([subdir / info["file"] for info in planes.values()]
+                 + [subdir / "MANIFEST.json", subdir / "MANIFEST.sig.json"])
         try:
             transport = get_transport(push_dest)
             pushed = transport.push(parts, subdir.name)
@@ -2670,10 +2685,11 @@ def _cmd_backup(args: argparse.Namespace) -> int:
 
 
 def _cmd_restore(args: argparse.Namespace) -> int:
-    """Inverse of ``vigil backup``: verify the MANIFEST.json sha256 of each plane part BEFORE invoking any leg,
-    then restore the offense leg IN THIS venv and the sovereign leg as a ``sigil restore`` SUBPROCESS. Two
-    encrypted files, never a merged archive — the same FATAL-2 boundary as backup. Fail-closed: a plane whose
-    part is missing or sha256-mismatched refuses that plane with a non-zero exit."""
+    """Inverse of ``vigil backup``: VERIFY the MANIFEST.json GOVERNANCE SIGNATURE (W7-6 #464) and then each
+    plane part's manifest sha256 BEFORE invoking any leg, then restore the offense leg IN THIS venv and the
+    sovereign leg as a ``sigil restore`` SUBPROCESS. Two encrypted files, never a merged archive — the same
+    FATAL-2 boundary as backup. Fail-closed: an unsigned/tampered/wrong-key manifest, or a plane whose part is
+    missing or sha256-mismatched, refuses with a non-zero exit — an unsigned manifest is never trusted."""
     import json
 
     if getattr(args, "sovereign_only", False) and getattr(args, "offense_only", False):
@@ -2685,9 +2701,28 @@ def _cmd_restore(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 2
     try:
-        manifest = json.loads((src / "MANIFEST.json").read_text(encoding="utf-8"))
+        manifest_bytes = (src / "MANIFEST.json").read_bytes()   # EXACT signed bytes — no newline translation
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
     except (OSError, ValueError) as e:
         print(f"vigil restore: cannot read {src / 'MANIFEST.json'}: {e}", file=sys.stderr)
+        return 2
+    # FAIL-CLOSED: verify the orchestrator manifest's governance signature BEFORE trusting ANY value in it
+    # (the file names + sha256s used below to locate and integrity-check every plane part). A missing sidecar
+    # is an UNSIGNED manifest and is refused; a bad signature or a pin mismatch is refused. The same
+    # ``--expect-governance-pubkey`` out-of-band pin used for the inner offense manifest pins this one too.
+    from .backup import OffenseBackupError, verify_orchestrator_manifest
+    try:
+        sig_doc = json.loads((src / "MANIFEST.sig.json").read_bytes().decode("utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"vigil restore: {src} has no verifiable MANIFEST.sig.json ({e}) — refusing to trust an "
+              f"UNSIGNED manifest (W7-6). Re-fetch the backup from a source that carries its signature.",
+              file=sys.stderr)
+        return 2
+    expect_pub = getattr(args, "expect_governance_pubkey", "") or None
+    try:
+        verify_orchestrator_manifest(manifest_bytes, sig_doc, expect_pubkey=expect_pub)
+    except OffenseBackupError as e:
+        print(f"vigil restore: {e}", file=sys.stderr)
         return 2
     planes = manifest.get("planes", {}) if isinstance(manifest, dict) else {}
     pw = _orchestrator_passphrase(args)
@@ -3481,15 +3516,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="back up ONLY the offense plane (this venv)")
     pbk.add_argument("--push", default="",
                      help="TRUE off-HOST replication (opt-in): after a successful backup, copy the ENCRYPTED "
-                          "parts + MANIFEST to a transport backend AND verify them at the destination. A bare "
-                          "path or local:<path> uses the local-directory backend (a mounted remote FS / "
-                          "removable disk / test dir); rsync:[user@]host:path or rsync://host/module/path uses "
-                          "the real rsync backend (over ssh / an rsync daemon); still-unbuilt schemes (scp://, "
-                          "s3://) error with the contract to implement. The push then re-reads the copy AT THE "
-                          "DESTINATION and FAILS CLOSED (non-zero exit) if a truncated/corrupted/tampered copy "
-                          "does not hash-match what was sent. Only ciphertext is transported — no plaintext "
-                          "leaves the host. Needs network (run via vigil-backup-push.service, "
-                          "PrivateNetwork=no), unlike the air-gapped local timer.")
+                          "parts + MANIFEST + its signature sidecar to a transport backend AND verify them at "
+                          "the destination. A bare path or local:<path> uses the local-directory backend (a "
+                          "mounted remote FS / removable disk / test dir); rsync:[user@]host:path or "
+                          "rsync://host/module/path uses the real rsync backend (over ssh / an rsync daemon); "
+                          "still-unbuilt schemes (scp://, s3://) error with the contract to implement. The push "
+                          "then re-reads the copy AT THE DESTINATION and FAILS CLOSED (non-zero exit) if a "
+                          "truncated/corrupted/tampered copy does not hash-match what was sent. Only ciphertext "
+                          "is transported — no plaintext leaves the host. Needs network (run via "
+                          "vigil-backup-push.service, PrivateNetwork=no), unlike the air-gapped local timer.")
     pbk.add_argument("--prune", action="store_true", help="after the backup, prune old backups per the policy")
     pbk.add_argument("--keep-days", dest="keep_days", type=int, default=None,
                      help="retention: keep backups within N days (with --prune)")
@@ -3502,9 +3537,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     prs = sub.add_parser(
         "restore",
-        help="restore a two-plane `vigil backup` dir — verifies each plane part's MANIFEST sha256 BEFORE "
-             "invoking either leg; the sovereign leg is a sigil subprocess (fail-closed, two-file boundary)")
-    prs.add_argument("src", help="the timestamped backup dir (holding MANIFEST.json + the encrypted parts)")
+        help="restore a two-plane `vigil backup` dir — verifies the MANIFEST governance SIGNATURE then each "
+             "plane part's MANIFEST sha256 BEFORE invoking either leg; refuses an unsigned/tampered manifest; "
+             "the sovereign leg is a sigil subprocess (fail-closed, two-file boundary)")
+    prs.add_argument("src", help="the timestamped backup dir (holding MANIFEST.json + MANIFEST.sig.json + the "
+                                 "encrypted parts)")
     prs.add_argument("--base-dir", default=".vigil-live", help="offense base_dir to restore INTO (fresh)")
     prs.add_argument("--crucible-root", dest="crucible_root", default="",
                      help="CRUCIBLE root to restore .blackboard/.console into (default: $CRUCIBLE_ROOT or in-repo)")
@@ -3512,8 +3549,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="a FRESH SIGIL_HOME dir to restore the sovereign plane into (required for that leg)")
     prs.add_argument("--expect-governance-pubkey", dest="expect_governance_pubkey", default="",
                      help="out-of-band AUTHENTICITY pin: the expected offense-governance pubkey (base64). When "
-                          "set, the offense backup's manifest MUST be signed by it — else restore refuses. "
-                          "Without it, offense restore authenticity is passphrase-possession only.")
+                          "set, BOTH the orchestrator MANIFEST.json signature (W7-6) AND the inner offense "
+                          "backup manifest MUST be signed by it — else restore refuses. Without it, the "
+                          "orchestrator manifest signature still proves INTEGRITY (no edit by a non-key-holder) "
+                          "but authenticity against a full re-mint reduces to passphrase-possession; the "
+                          "operator-owned/rotated signing key that closes that residual is W9-1 #434.")
     prs.add_argument("--force", action="store_true",
                      help="REPLACE existing state at the destination. The base-dir is a WHOLE-tree capture, so "
                           "--force whole-replaces it (only re-creatable transients are dropped). The "
