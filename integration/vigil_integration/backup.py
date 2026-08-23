@@ -91,6 +91,7 @@ import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from vigil_core import canonical_json, sha256_hex, sign, verify_one
+from vigil_core.install_manifest import MANIFEST_FILENAME as _INSTALL_MANIFEST_FILENAME
 from vigil_core.sealing import SealError, seal, unseal
 from vigil_core.vault import Vault
 
@@ -229,6 +230,22 @@ def _dir_is_nonempty(p: Path) -> bool:
     """True iff ``p`` exists as a directory that already holds at least one entry (the guard for a
     restore-would-overlay-stale-state refusal). A missing path or an empty dir is a clean target."""
     return p.is_dir() and any(p.iterdir())
+
+
+def _restore_target_is_dirty(p: Path) -> bool:
+    """True iff ``p`` already holds real prior state a restore must NOT overlay (the fail-closed guard behind
+    ``restore_offense_backup``'s refuse-non-empty-without-force).
+
+    A target that holds ONLY the per-install marker ``install-manifest.json`` is treated as CLEAN: the W5-4
+    (#448) startup gate writes that marker into the data dir the instant ANY ``vigil`` verb runs against it
+    (``restore`` included), so a genuinely fresh restore target is never truly empty by the time restore runs.
+    That marker is THIS host's own, just (re)created — not stale operational state — and the whole-tree swap
+    discards it anyway (the restored tree carries no manifest; the next startup re-stamps the host's own). Any
+    OTHER entry ⇒ dirty (refuse without ``--force``). This does not weaken the guard: real prior state (a spine,
+    keys, targets, any other file/dir) still trips it."""
+    if not p.is_dir():
+        return False
+    return any(entry.name != _INSTALL_MANIFEST_FILENAME for entry in p.iterdir())
 
 
 def _new_staging_dir(dest: Path) -> Path:
@@ -420,6 +437,12 @@ def _iter_base_files(base: Path, *, evidence_keys_dir: Path | None = None):
         if rel.endswith(".lock") or parts[0] in ("vault", "live-ui") or rel.startswith("ui/pids/"):
             continue
         if rel in skip_names:
+            continue
+        # W5-4 (#448) × W7-4 (#462): the top-level install manifest is a per-INSTALL/host marker the startup
+        # gate WRITES into whatever data dir this binary runs against — it describes the operating install,
+        # not the captured data. Never package it: a restored host must establish its OWN marker at startup,
+        # never inherit the source host's install id / build. (Restore's overlay guard likewise ignores it.)
+        if rel == _INSTALL_MANIFEST_FILENAME:
             continue
         if evidence_keys_dir is not None and _under(p, evidence_keys_dir):   # never package a DEK (W16-8)
             continue
@@ -615,7 +638,9 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
     Two destinations with DIFFERENT capture scopes, so DIFFERENT replace semantics:
       * ``new_base`` is a WHOLE-tree capture (the whole base_dir minus re-creatable transients). A non-empty
         ``new_base`` is REFUSED unless ``force=True``; with ``force`` it is whole-replaced (only stale /
-        re-creatable state is dropped).
+        re-creatable state is dropped). A target holding ONLY the per-install ``install-manifest.json`` marker
+        (W5-4 #448 — written by the startup gate the instant any verb, restore included, runs against the dir)
+        counts as clean: it is this host's own fresh marker, not stale state, and the whole-tree swap drops it.
       * ``crucible_root`` is a strict SUBSET capture — the proof-db (``.blackboard/store.sqlite``), the runs
         subtree (``.console/runs``), the ``targets/`` engagement tree, the entitlement TRUST ROOT
         (``framework/v2/.entitlement``) and the DestructionAuthority (``framework/v2/.authority``). Restore
@@ -700,7 +725,7 @@ def restore_offense_backup(src, new_base, passphrase: str, *, crucible_root=None
 
     # STAGED / ATOMIC restore: refuse to OVERLAY a non-empty destination unless force, then build + re-verify
     # the WHOLE tree in a sibling temp dir and swap it into place at the very end (no half-written mix on crash).
-    if not force and _dir_is_nonempty(new_base):
+    if not force and _restore_target_is_dirty(new_base):
         raise OffenseBackupError(
             f"refusing to restore into a NON-EMPTY base dir {new_base} (a restore must not overlay stale "
             f"state) — pass force=True (--force) to REPLACE it, or restore into a fresh/empty dir")
