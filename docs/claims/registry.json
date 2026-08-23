@@ -1208,7 +1208,7 @@
     {
       "id": "W3-8",
       "title": "Base-image drift is BLOCKING where resolvable; other registries are an explicit UNKNOWN",
-      "claim": "Resolvable base-image drift (a Docker Hub tag that has moved) BLOCKS the A14 gate under `--fail-on-drift`; a pin on any registry the resolver cannot query is reported as an explicit UNKNOWN — surfaced in the job summary, never a silent pass.",
+      "claim": "Resolvable base-image drift (a Docker Hub tag that has moved) BLOCKS the A14 gate under `--fail-on-drift` — except a documented, reasoned rolling-base allowlist (`image_pins.py::_ADVISORY_ROLLING_DRIFT`, currently only `kalilinux/kali-rolling`) whose drift is ADVISORY (surfaced, never blocking); every other resolvable drift blocks. A pin on any registry the resolver cannot query is reported as an explicit UNKNOWN — surfaced in the job summary, never a silent pass.",
       "source": "docs/decisions/W3-8-image-drift-blocking.md:8",
       "enforced_by": {
         "file": "infra/supply-chain/image_pins.py",
@@ -1221,7 +1221,11 @@
           "test_unresolvable_registry_is_explicit_unknown_not_a_pass",
           "test_drift_gate_negative_control_can_fail",
           "test_drift_summary_makes_unknowns_visible",
-          "test_workflow_drift_step_blocks_and_is_not_advisory"
+          "test_workflow_drift_step_blocks_and_is_not_advisory",
+          "test_allowlisted_rolling_drift_is_advisory_not_blocking",
+          "test_non_allowlisted_moved_digest_still_blocks_negative_control",
+          "test_reverting_the_allowlist_makes_the_rolling_drift_block",
+          "test_every_rolling_drift_allowlist_entry_carries_a_reason"
         ]
       },
       "ci_job": "integration two-env boundary (P5)",
