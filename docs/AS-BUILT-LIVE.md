@@ -125,8 +125,9 @@ oracle; timeout → REJECT).
 - **A running *external* graph DB / telemetry collector**: an **embedded, file-backed graph store is now
   BUILT** — `framework/v2/graph/store.py`'s `EmbeddedGraphStore` projects the spine one-way into
   nodes/edges (canonical, no wallclock/RNG, no authority surface) and needs no external database. Only the
-  **live external** service is deferred: `Neo4jGraphStore` sits behind the same interface as a `[SCAFFOLD]`
-  (every method raises) and the OTLP exporter (`live/otel_export.py`) still wants a running collector. The
+  **live external** service is deferred: `Neo4jGraphStore` sits behind the same interface as a **real client
+  body** (its methods issue Cypher; only construction raises, and only with no injected driver and no
+  `neo4j` package) and the OTLP exporter (`live/otel_export.py`) still wants a running collector. The
   engine degrades these seams to no-op without affecting a run's truth.
 - **Live *external* network-egress engagement — DONE (2026-07-30).** *(Reconciled: this bullet previously said
   the external run was "outstanding" — stale; the README/AS-BUILT record it as done. Corrected here in
@@ -145,9 +146,15 @@ oracle; timeout → REJECT).
 - **Live-API-key Claude think-step**: genuinely not exercised live — used in **replay** (keyless) mode here
   (no `ANTHROPIC_API_KEY`). The live path (`live/think_claude.think`) builds a real client when a key is
   present; the provable layer never depends on the model.
-- **Signed per-action operator approval token**: genuinely not built — `--approve-offense` encodes the
-  operator's *standing* approval for their own chartered loopback. The cryptographic per-action
-  signed-approval mechanism (the I4 destruction-gate quorum) plugs into the same seam unchanged.
+- **Signed per-action operator approval token**: **built** (M2) — `live/approval_token.py` mints a
+  per-action, single-use, owner-signed token bound to `(tool_name, target, action_digest)`, verified against
+  the deployment-pinned `ApprovalAuthority` owner key, valid only inside a bounded window, and burned exactly
+  once via the `O_EXCL` `NonceLedger`; `live/approval_broker.py` and `vigil approve
+  provision-authority|list|sign` drive it. It upgrades a WARDEN `queue` to `allow` for ONE action only — it
+  never lifts the kill-switch or widens scope. The coarse `--approve-offense` flag remains as the
+  *standing*-approval path for a chartered loopback. What still needs **owner infra** here is only the m-of-n
+  cosigner provisioning for the irreversible-action quorum (`live/destruction_gate.py`; see the W9-5
+  multi-signer default), not the per-action token itself.
 - **TEE / confidential-computing hardware** (I4): hardware-gated — the software/TPM attestation provider is
   built (§5); SEV-SNP/TDX stay stubbed.
 

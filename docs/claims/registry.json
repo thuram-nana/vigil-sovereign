@@ -1116,6 +1116,52 @@
       "ci_job": "the briefing explains every agent and capability",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W16-STD-7-cli-coverage",
+      "title": "The briefing documents every CRUCIBLE subcommand and subsystem",
+      "claim": "Every CRUCIBLE subcommand and every CRUCIBLE subsystem is listed here with a one-line, code-grounded description.",
+      "source": "docs/CLI-REFERENCE.md:1",
+      "enforced_by": {
+        "file": "docs/tests/test_briefing_documents_every_subcommand.py",
+        "symbol": "undocumented_subcommands"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_briefing_documents_every_subcommand.py",
+        "tests": [
+          "test_every_subcommand_is_documented",
+          "test_no_documented_subcommand_is_fictional",
+          "test_every_subsystem_is_documented",
+          "test_negative_control_a_new_undocumented_subcommand_is_caught",
+          "test_negative_control_removing_a_documented_subcommand_from_code_turns_red",
+          "test_negative_control_a_new_undocumented_subsystem_is_caught"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-7-drift",
+      "title": "The §16 doc-vs-code drifts are corrected and cannot re-open",
+      "claim": "The §16 doc-vs-code drifts named in the limitations inventory are corrected to match the code, and a required test fails the build if any of them re-opens",
+      "source": "docs/decisions/W16-STD-7-doc-drifts.md:1",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_doc_drifts_corrected.py",
+        "symbol": "drift_violations"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_w16_std7_doc_drifts_corrected.py",
+        "tests": [
+          "test_no_forbidden_false_phrase_returned",
+          "test_every_corrected_anchor_is_present",
+          "test_every_cited_code_fact_is_true_in_tree",
+          "test_all_drift_corrections_hold"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

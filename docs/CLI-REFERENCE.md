@@ -1,0 +1,113 @@
+<!-- CLAIM:W16-STD-7-cli-coverage -->
+# CRUCIBLE CLI & subsystem reference (W16-STD-7 #533)
+
+This page is the briefing's answer to two questions an operator and a reviewer both ask, and which the
+prose chapters left unanswered (limitations inventory §17.16 / §17.17): **what can I actually run, and
+what are the parts?** Every CRUCIBLE subcommand and every CRUCIBLE subsystem is listed here with a
+one-line, code-grounded description. It is kept honest by
+[`docs/tests/test_briefing_documents_every_subcommand.py`](tests/test_briefing_documents_every_subcommand.py),
+a **required** CI check (`the briefing explains every agent and capability`) that enumerates the
+subcommand table (`_DISPATCH` in `engine/crucible/framework/v2/__main__.py`) and the subsystem set (the
+importable sub-packages of `framework/v2`) **from the code** and fails the build when a new one is not
+documented here — or when this page documents one the code does not have.
+
+## How to invoke a subcommand
+
+Every subcommand below runs two equivalent ways:
+
+```
+vigil crucible <subcommand> [args]          # via the vigil super-CLI passthrough
+python3 -m framework.v2 <subcommand> [args] # directly, from engine/crucible with PYTHONPATH=.
+```
+
+`vigil <subcommand>` (without `crucible`) is **not** the same: only the native `vigil` verbs run that way;
+CRUCIBLE subcommands are reached only through the `crucible` passthrough. (This is the exact trap
+[`docs/tests/test_documented_commands_and_screen_count.py`](tests/test_documented_commands_and_screen_count.py)
+locks shut.)
+
+## A. CRUCIBLE subcommands (`crucible <name>`)
+
+| Subcommand | What it does |
+|---|---|
+| `crucible intake` | Normalise an external report / input into the intel graph (the intake pipeline). |
+| `crucible memory` | Query and maintain the semantic memory store (embeddings + recall). |
+| `crucible intel` | The reason-over-intelligence engine: entity resolution, gated live collectors (crt.sh / DoH / RDAP), the VOI recon planner. |
+| `crucible knowledge` | The knowledge / grants engine over the knowledge base. |
+| `crucible kernel` | Inspect the low-level engine backends and resolved paths (the CRUCIBLE kernel). |
+| `crucible entitlement` | The licence / entitlement system — what a copied or stolen build is allowed to do. |
+| `crucible eval` | The evaluation harness: corpus runs, the committed recall/precision baselines, determinism, soak. |
+| `crucible improve` | Self-improvement: propose playbook / kernel changes from observed coverage gaps. |
+| `crucible defender` | Defensive-analysis surface (the blue-team read of a target). |
+| `crucible analysis` | Post-run analysis utilities over an engagement's world model. |
+| `crucible authority` | The charter / scope / authority objects that bound every engagement. |
+| `crucible socialdefense` | Social-engineering defence analysis. |
+| `crucible scan` | The contained / loopback scanner (checks, campaign, opt-in CDP browser passes). |
+| `crucible engage` | The full autonomous engagement (the OODA loop) against a chartered target. |
+| `crucible plan` | READ-ONLY planner projection over a prior `engage --spine` engagement's world model. Sends no traffic. |
+| `crucible verify` | Offline re-verify a signed evidence bundle by **re-firing the oracle** over its retained material. |
+| `crucible plan-integrity` | Offline-verify a signed plan-integrity attestation (committed / discovered / skipped / steer-signals). |
+| `crucible drift` | Continuous drift: diff the oracle-CONFIRMED fact set between two runs (re-firing each run's certs). |
+| `crucible capabilities` | List / manage the capability plugins (the plugin registry). |
+| `crucible aegis` | The AEGIS defensive dual (embeddable runtime-defence oracles). |
+| `crucible evidence` | Inspect / export / verify the signed evidence tree. |
+| `crucible erase-evidence` | W16-8 right-to-erasure: crypto-shred an engagement's at-rest credential-bearing evidence without breaking the append-only spine. |
+| `crucible report` | Assemble the executive / technical / remediation reports from the findings. |
+| `crucible attack-paths` | READ-ONLY graph triage over the asset topology: shortest attack path, chokepoints, blast radius. |
+| `crucible collaborator` | The out-of-band (OOB) collaborator relay used by blind SSRF/XXE/RCE/deserialization checks. |
+| `crucible benchmark` | Run the signed benchmark corpus. |
+| `crucible calibration` | The confidence-calibration report (predicted vs measured). |
+| `crucible console` | The local read-only Ops Console web UI (loopback). |
+| `crucible mcp` | The MCP server exposing engine tools over the Model Context Protocol. |
+| `crucible api` | The HTTP API server exposing engine operations over HTTP. |
+| `crucible imports` | Import external scan outputs / artifacts into the engine. |
+| `crucible status` | One-shot environment summary: reachable backends, resolved paths, installed optional deps. |
+
+## B. CRUCIBLE subsystems (the importable sub-packages of `framework/v2`)
+
+Some of these are the module behind a subcommand above; others are internal seams a reader still needs
+named so the briefing is not silent about half the system.
+
+| Subsystem (`framework/v2/<pkg>`) | What it is |
+|---|---|
+| `aegis` | The AEGIS defensive dual — embeddable runtime-defence oracles (`crucible aegis`). |
+| `agent_body` | The pluggable agent-body interface (X3) — an interface only; no runtime wired yet. |
+| `agents` | The autonomous engagement agents: the OODA `engage` runner, the HTTP executor, the reporter. |
+| `analysis` | Post-run analysis utilities (`crucible analysis`). |
+| `api` | The HTTP API server (`crucible api`). |
+| `attest` | Attestation providers (software/TPM built; SEV-SNP/TDX stubbed) and the monotonic time anchor. |
+| `authority` | Charter / scope / authority objects that bound every engagement (`crucible authority`). |
+| `calibration` | The confidence-calibration report (`crucible calibration`). |
+| `common` | Shared internal plumbing (paths, canonical-JSON helpers, errors, umask) used across the engine. |
+| `confidence` | The confidence model that scores a finding before the oracle adjudicates the bytes. |
+| `console` | The local read-only Ops Console web UI (`crucible console`). |
+| `defender` | The defensive-analysis surface (`crucible defender`). |
+| `entitlement` | The licence / entitlement system (`crucible entitlement`). |
+| `eval` | The evaluation harness — corpus, baselines, determinism, soak (`crucible eval` / `crucible benchmark`). |
+| `evidence` | The signed evidence tree — inspect / export / verify (`crucible evidence`). |
+| `graph` | The embedded graph store projecting the append-only spine into nodes/edges (`EmbeddedGraphStore`; Neo4j sits behind a deploy gate). |
+| `imports` | Import external scan outputs / artifacts (`crucible imports`). |
+| `improve` | Self-improvement — propose playbook / kernel changes from coverage gaps (`crucible improve`). |
+| `intake` | Normalise external inputs into the intel graph (`crucible intake`). |
+| `intel` | The reason-over-intelligence engine: entities, gated live collectors, recon planner (`crucible intel`). |
+| `intruder` | The request-fuzzing / payload-iteration surface (a Burp-Intruder analogue). |
+| `kernel` | The low-level engine backends and paths (`crucible kernel`). |
+| `knowledge` | The knowledge-base content and assets the engine reads. |
+| `knowledge_engine` | The knowledge / grants engine (`crucible knowledge`). |
+| `mcp` | The MCP server exposing engine tools over the Model Context Protocol (`crucible mcp`). |
+| `memory` | The semantic memory store — embeddings + recall (`crucible memory`). |
+| `planner` | The read-only planner projection over an engagement's world model (drives `crucible plan`). |
+| `plugins` | The capability-plugin registry (`crucible capabilities`). |
+| `remediation_binary` | The binary / memory-safety auto-patch tier (X2: one narrow real class; symbolic repair stubbed). |
+| `repeater` | The single-request replay surface (a Burp-Repeater analogue; `repeat_request`). |
+| `report` | Assemble the executive / technical / remediation reports (`crucible report`). |
+| `scanner` | The contained scanner — checks, campaign, CDP browser passes, lateral movement (`crucible scan`). |
+| `sensors` | The universal sensors / oracle feed (Nmap / TLS / cloud-IAM / SBOM / threat-intel). |
+| `socialdefense` | Social-engineering defence analysis (`crucible socialdefense`). |
+| `tools` | Internal tooling / generators used by the engine and its tests. |
+| `veracity` | The veracity (anti-hallucination) firewall — RE-EXECUTION, not string trust. |
+| `verify` | Offline re-verification — re-fire the oracle over retained certs (`crucible verify` / `drift` / `plan-integrity` / `collaborator`). |
+| `worldmodel` | The asset topology / world model projected from the signed spine (drives `crucible attack-paths`). |
+
+For the full behaviour and honest scope of each, see [`docs/FEATURES.md`](FEATURES.md) and
+[`docs/AS-BUILT.md`](AS-BUILT.md); for the deferred pieces and their activation runbooks see
+[`docs/DEFERRED-INFRA.md`](DEFERRED-INFRA.md).

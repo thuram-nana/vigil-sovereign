@@ -164,21 +164,29 @@ keyless "replay" runs and *the provable layer never depends on the model*).
 
 ---
 
-## 3. Build / test / CI workflow — the 6 CI jobs
+## 3. Build / test / CI workflow — the 12 CI jobs
 
-CI (`.github/workflows/ci.yml`) runs **six jobs on Python 3.13**, one per trust seam. Run the matching
-commands locally before you push. The key discipline: **framework (offense) and `sigil.governor` (sovereign)
-tests run in separate processes** — running them in one process trips the `assert_no_offense` boundary
-check (which is the boundary *working*).
+CI (`.github/workflows/ci.yml`) runs **12 jobs** (Python 3.13 for the Python seams; Rust for the WARDEN
+kernel), one per trust seam or gate. Run the matching commands locally before you push. The key discipline:
+**framework (offense) and `sigil.governor` (sovereign) tests run in separate processes** — running them in
+one process trips the `assert_no_offense` boundary check (which is the boundary *working*). Two further jobs
+run in their own workflows (`supply-chain.yml`, `livefire.yml`); the complete set of **required status
+checks** is enumerated in [`.github/required-status-checks.txt`](.github/required-status-checks.txt).
 
 | # | Job (`ci.yml`) | Covers | Local command |
 |---|---|---|---|
 | 1 | `vigil-core` | shared signed core: v1 byte-identical signing, threshold, tamper | `pip install -e packages/core/vigil_core pytest` then `pytest packages/core/vigil_core/tests -q` |
-| 2 | `crucible-core` | offense engine: evidence, verify, worldmodel, confidence, authority, console/api, knowledge_engine | `cd engine/crucible && PYTHONPATH=. pytest framework/v2/{evidence,entitlement,common,verify,confidence,worldmodel,calibration,authority,console,api,report,knowledge_engine} -q` |
-| 3 | `gateway` | egress gate: denylist, proxy socket refusals, nft render + netns ruleset load | `PYTHONPATH=gateway python -m pytest gateway/tests -q` |
-| 4 | `integration` | **two-env boundary**, inert receiver, keyless worker, oracle adapter, live engine, scoped executor, proof suite — **run in two processes** (sovereign-path suite ignores the framework-dependent tests; those run with `engine/crucible` on the path) | see `ci.yml` lines ~97 and ~110 for the exact two invocations |
-| 5 | `strix-vigil` | Strix Claude runtime: Anthropic price table + reasoning + dedup fallback | `PYTHONPATH=vendor/strix python -m pytest vendor/strix/tests_vigil -q` |
-| 6 | `sigil-governor` | SIGIL governor: offense gate, hardening, finding receiver (two-anchor ingest), capabilities, spine seal, UI, voice/gesture/HUD nav, knowledge grants | `PYTHONPATH=apps/sigil:integration python -m pytest apps/sigil/tests/<listed> -q` |
+| 2 | `briefing-completeness` | docs-truth: every agent, capability, subcommand and subsystem the code declares is explained to a reader, and no doc drifts from the code | `pytest docs/tests -q` |
+| 3 | `crucible-core` | offense engine: evidence, verify, worldmodel, confidence, authority, console/api, knowledge_engine | `cd engine/crucible && PYTHONPATH=. pytest framework/v2/{evidence,entitlement,common,verify,confidence,worldmodel,calibration,authority,console,api,report,knowledge_engine} -q` |
+| 4 | `crucible-eval` | offense accuracy: the eval corpus, the committed recall/precision baselines, the determinism re-run and the soak harness | `cd engine/crucible && CRUCIBLE_EVAL_SUITES=framework/v2/eval PYTHONPATH=. pytest framework/v2/eval -q` |
+| 5 | `gateway` | egress gate: denylist, proxy socket refusals, nft render + netns ruleset load | `PYTHONPATH=gateway python -m pytest gateway/tests -q` |
+| 6 | `integration` | **two-env boundary**, inert receiver, keyless worker, oracle adapter, live engine, scoped executor, proof suite — **run in two processes** (sovereign-path suite ignores the framework-dependent tests; those run with `engine/crucible` on the path) | see `ci.yml` lines ~97 and ~110 for the exact two invocations |
+| 7 | `loopback-engagement` | end-to-end: scan a live loopback target, confirm a real finding, then offline re-verify the signed evidence | `bash tools/loopback-engagement/run_loopback_engagement.sh` (+ `pytest tools/loopback-engagement/tests -q`) |
+| 8 | `strix-vigil` | Strix Claude runtime: Anthropic price table + reasoning + dedup fallback | `PYTHONPATH=vendor/strix python -m pytest vendor/strix/tests_vigil -q` |
+| 9 | `sigil-governor` | SIGIL governor: offense gate, hardening, finding receiver (two-anchor ingest), capabilities, spine seal, UI, voice/gesture/HUD nav, knowledge grants | `PYTHONPATH=apps/sigil:integration python -m pytest apps/sigil/tests/<listed> -q` |
+| 10 | `sigil-lint` | lint/type gate: `ruff` (blocking) + `mypy` (can-complete) over the sovereign tree | `ruff check sigil` |
+| 11 | `formal-verification` | TLA+ (TLC) model-check of the four core invariants + their mutants (F1) | `bash formal/check.sh` |
+| 12 | `warden-kernel` | Rust WARDEN kernel durability (A10): chain/head/anti-rollback/tiers/router/registry/crypto | `cd apps/sigil/kernel && cargo test` |
 
 The exact, copy-pasteable per-component command list is also in [`README.md`](README.md) §Setup and is the
 authority; `ci.yml` is the machine source. When you add a test, add it to the job for its trust seam — never
