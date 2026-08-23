@@ -41,10 +41,10 @@ trades away correlatability, which is the property that lets an operator attribu
 engagement.
 
 **Where it lives in the code.**
-- The clean-room decision brain forbids evasion knobs by construction: `_EVASION_TOKENS`
-  (`integration/vigil_integration/brains/hexstrike_brain.py`) rejects any proposed parameter carrying
-  `stealth | tamper | --proxy | vpn | rotate | evade | obfuscat | space2comment | …` — a fail-closed
-  `EvasionKnobRejected`.
+- The clean-room decision brain forbids evasion knobs by construction: `_assert_drift_free`
+  (`integration/vigil_integration/brains/hexstrike_brain.py`) searches every proposed tool + params
+  with the `_EVASION_TOKENS` regex — `stealth | tamper | --proxy | vpn | rotate | evade | obfuscat |
+  space2comment | …` — and raises a fail-closed `DriftError` if any slipped in.
 - The live tool executor presents one stable, recognizable identity and does **no** rotation
   (`integration/vigil_integration/live/live_transport.py`: "No rotation, no evasion.";
   `imds_runner.py`: "correlatable, NO evasion").

@@ -31,6 +31,7 @@ capability from merely naming a tool, and is not a no-op.
 from __future__ import annotations
 
 import ast
+import re
 import textwrap
 from pathlib import Path
 
@@ -272,6 +273,83 @@ def test_deliberate_refusals_doc_is_surfaced_from_readme_and_posture():
     posture = (_REPO / "docs" / "POSTURE.md").read_text(encoding="utf-8")
     assert "DELIBERATE-REFUSALS" in readme, "README does not surface DELIBERATE-REFUSALS.md"
     assert "DELIBERATE-REFUSALS" in posture, "POSTURE.md does not surface DELIBERATE-REFUSALS.md"
+
+
+# --------------------------------------------------------------------------------------------------
+# Every backticked ENFORCING CODE SYMBOL the doc cites must actually EXIST in the source (grep). The
+# doc's whole thesis is "every refusal paired with the EXACT code that makes it true" — a cited symbol
+# a verifying reviewer cannot find is the drift this guard exists to prevent (red-pen MED: the doc once
+# cited a fail-closed exception name that exists nowhere; the real evasion guard is the _assert_drift_free
+# method searching with the _EVASION_TOKENS regex and raising DriftError). A "symbol" here is a backticked
+# identifier that is either underscore- or camel/upper-cased — i.e. a code name a reviewer would grep for,
+# not a plain English word, a file path, a CLI flag, or a lowercase string value like observe / jwk / x5c.
+# GUARANTEE + BOUND: this proves each cited symbol appears SOMEWHERE in first-party .py (a reviewer can
+# grep and find it); the two REGISTERED enforcing symbols are additionally AST-verified as real
+# definitions by docs/tests/test_claims_registry.py. NOTE: to avoid self-poisoning the corpus (which
+# includes THIS test file), phantom/fictional symbol names are never written here as contiguous literals.
+# --------------------------------------------------------------------------------------------------
+_SYMBOL_LIKE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Source trees searched for a cited symbol (tests INCLUDED — a cited enforcing symbol may itself be a
+# guard function like scan_tree_for_offense_capability; vendor/ excluded — quarantined by design).
+_SOURCE_ROOTS = (
+    _REPO / "integration",
+    _REPO / "engine" / "crucible" / "framework" / "v2",
+    _REPO / "gateway",
+    _REPO / "packages" / "core" / "vigil_core",
+    _REPO / "apps" / "sigil" / "sigil",
+    _REPO / "tools",
+)
+_source_corpus_cache: str | None = None
+
+
+def _first_party_source_corpus() -> str:
+    """Every first-party .py file concatenated once (memoised). The corpus is CODE only — never the doc
+    — so a symbol counts as 'existing' only when it is in the source, not merely named in the doc."""
+    global _source_corpus_cache
+    if _source_corpus_cache is None:
+        parts: list[str] = []
+        for root in _SOURCE_ROOTS:
+            if not root.is_dir():
+                continue
+            for p in root.rglob("*.py"):
+                if "__pycache__" in p.parts:
+                    continue
+                parts.append(p.read_text(encoding="utf-8", errors="ignore"))
+        _source_corpus_cache = "\n".join(parts)
+    return _source_corpus_cache
+
+
+def _doc_cited_symbols(doc_text: str) -> set[str]:
+    out: set[str] = set()
+    for span in re.findall(r"`([^`]+)`", doc_text):
+        s = span.strip()
+        if "/" in s or "." in s or " " in s or s.startswith("-"):  # paths / dotted / prose / CLI flags
+            continue
+        if _SYMBOL_LIKE.match(s) and ("_" in s or any(c.isupper() for c in s)):
+            out.add(s)
+    return out
+
+
+def cited_symbols_missing_from_source(doc_text: str) -> list[str]:
+    corpus = _first_party_source_corpus()
+    return sorted(s for s in _doc_cited_symbols(doc_text) if s not in corpus)
+
+
+def test_every_enforcing_symbol_the_doc_cites_exists_in_the_source():
+    missing = cited_symbols_missing_from_source(_DOC.read_text(encoding="utf-8"))
+    assert missing == [], (
+        "docs/DELIBERATE-REFUSALS.md cites code symbol(s) that exist NOWHERE in first-party source — a "
+        "reviewer cannot verify the refusal against real code (the exact drift #534 exists to prevent): "
+        + ", ".join(missing))
+
+
+def test_negative_control_a_fictional_cited_symbol_is_reported_missing():
+    # built by concatenation so this literal never lands in the source corpus (which includes THIS file)
+    fake = "Totally_Fictional_Enforcer_" + "zzz"
+    missing = cited_symbols_missing_from_source(f"the guard is `{fake}` in the tree.")
+    assert fake in missing, "the symbol-existence guard is a no-op — it did not flag a fictional symbol"
+    # and a genuinely-present symbol in the same shape is NOT reported missing
+    assert cited_symbols_missing_from_source("the guard is `jwt_forgery_oracle`.") == []
 
 
 # --------------------------------------------------------------------------------------------------
