@@ -415,9 +415,15 @@ class _ReauthStub:
         self.server = type("S", (), {"sse_reauth_interval": interval})()
         self.written = bytearray()
         self.reauth_calls = 0
+        self.first_write_at = None          # monotonic time of the first non-empty write (prompt-delivery probe)
         stub = self
-        self.wfile = type("W", (), {"write": lambda _s, b: stub.written.extend(b),
-                                    "flush": lambda _s: None})()
+
+        def _write(_s, b):
+            if b and stub.first_write_at is None:
+                stub.first_write_at = time.monotonic()
+            stub.written.extend(b)
+
+        self.wfile = type("W", (), {"write": _write, "flush": lambda _s: None})()
 
     def _authenticate(self, bearer: str, *, fresh: bool = False):
         self.reauth_calls += 1
@@ -453,3 +459,85 @@ def test_sse_over_tls_streams_through_a_reauth_interval(tmp_path):
     body = bytes(stub.written)
     assert b"data: one\n\n" in body and b"data: two\n\n" in body   # both frames streamed over the TLS hop
     assert stub.reauth_calls >= 1                                   # the re-auth interval was actually crossed
+
+
+# --------------------------------------------------------------------------------------------------
+# OBJ-3 (regression un-mask) — a first SSE event CO-DELIVERED with the response headers must be forwarded
+# PROMPTLY, and the stream must still survive a quiet interval. This one test fails on BOTH broken relays.
+# --------------------------------------------------------------------------------------------------
+class _CoBufferedSSEHandler(http.server.BaseHTTPRequestHandler):
+    """Emit the status line, the headers AND the first SSE event in ONE write+flush, so they co-arrive in a
+    single TLS record: the http.client reader pulls the event into its OWN BufferedReader while parsing the
+    headers, where ``select`` on the raw fd cannot see it. Then IDLE longer than the re-auth interval before
+    the second event, so the SAME stream also exercises the quiet-interval re-auth path."""
+
+    idle_s = 3.0
+
+    def log_message(self, *_a):
+        pass
+
+    def do_GET(self):  # noqa: N802
+        self.wfile.write(b"HTTP/1.0 200 OK\r\n"
+                         b"Content-Type: text/event-stream\r\n"
+                         b"Connection: close\r\n\r\n"
+                         b"data: one\n\n")            # first event CO-BUFFERED with the headers
+        self.wfile.flush()
+        time.sleep(self.idle_s)                       # a quiet interval LONGER than the re-auth interval
+        self.wfile.write(b"data: two\n\n")
+        self.wfile.flush()
+        # returning closes the connection ⇒ the client's read1 returns b"" and the loop ends.
+
+
+def test_sse_over_tls_delivers_the_cobuffered_first_event_promptly(tmp_path):
+    """UN-MASK the streaming regression the earlier rework introduced. A first SSE event co-delivered with
+    the response headers sits in the http.client reader's OWN buffer, invisible to ``select`` on the raw fd.
+    The fixed (drain-then-select) relay forwards it IMMEDIATELY; the two broken relays do not, so this test
+    FAILS on both and passes only on the fix:
+
+      * the SELECT-STALL rework waits on ``select`` — blind to the buffered bytes — and delivers the first
+        event only when the NEXT upstream byte arrives (~``idle_s`` ≈ 3.0 s later): the tight latency bound
+        below FAILS.
+      * the SETTIMEOUT-original delivers the first event promptly, but its read-timeout POISONS the
+        makefile-wrapped socket on the quiet interval (``_timeout_occurred`` → the next read raises
+        ``OSError('cannot read from timed out object')``), so the SECOND event is lost: the ``data: two``
+        assertion FAILS.
+
+    Asserting BOTH a tight first-event bound AND survival of the idle interval therefore pins the exact
+    behaviour only drain-then-select provides."""
+    cert, key = _selfsigned(tmp_path)
+    with _TLSBackend(cert, key, handler=_CoBufferedSSEHandler) as srv:
+        ctx = uiproxy.build_hop_tls_context({"VIGIL_HOP_TLS": "require", "VIGIL_HOP_CA": cert})
+        conn = uiproxy._hop_connection("localhost", srv.port, timeout=10, tls_ctx=ctx)
+        conn.request("GET", "/sovereign/api/events")
+        upstream_sock = conn.sock                     # capture BEFORE getresponse (Connection: close nulls conn.sock)
+        resp = conn.getresponse()
+        stub = _ReauthStub(interval=1.0)              # < idle_s ⇒ the quiet gap crosses the re-auth boundary
+        done = threading.Event()
+        started = time.monotonic()
+
+        def run():
+            try:
+                uiproxy.ProxyHandler._stream_with_reauth(
+                    stub, resp, is_sse=True, reauth_bearer="a-bearer", upstream_sock=upstream_sock)
+            finally:
+                done.set()
+
+        threading.Thread(target=run, daemon=True).start()
+        finished = done.wait(timeout=10)              # if the loop HANGS this stays False
+        conn.close()
+
+    assert finished, "the SSE-over-TLS stream HUNG (did not complete within the timeout)"
+    assert stub.first_write_at is not None, "the first co-buffered event was never delivered"
+    first_latency = stub.first_write_at - started
+    # PROMPT: the co-buffered first event must land well before the next upstream byte (~idle_s away). The
+    # select-stall rework delivers it at ~idle_s (≈3.0 s) and FAILS this bound.
+    assert first_latency < 0.5, (
+        f"the co-buffered first SSE event stalled {first_latency:.3f}s — select() on the raw fd is blind to "
+        f"bytes already buffered by the http.client reader; drain-then-select must forward them at once")
+    body = bytes(stub.written)
+    assert b"data: one\n\n" in body                 # the co-buffered first event
+    # SURVIVES THE IDLE: the settimeout-original poisons the socket on the quiet interval and loses this.
+    assert b"data: two\n\n" in body, (
+        "the second event was lost — the stream did not survive the quiet interval (settimeout poisons the "
+        "makefile-wrapped socket; select/drain-then-select does not)")
+    assert stub.reauth_calls >= 1                     # the quiet interval actually crossed the re-auth boundary

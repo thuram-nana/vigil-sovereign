@@ -880,6 +880,46 @@ def _hop_connection(host: str, port: int, *, timeout: "Optional[float]",
     return http.client.HTTPConnection(host, port, timeout=timeout)
 
 
+def _stream_bytes_ready(resp: "http.client.HTTPResponse",
+                        sock: "Optional[socket.socket]") -> bool:
+    """True iff body bytes are readable from ``resp`` RIGHT NOW, with no network wait — so ``select`` on
+    the raw fd (which cannot see them) must be SKIPPED and the bytes forwarded immediately. Two sources are
+    invisible to ``select``:
+
+      * TLS app-data already DECRYPTED into the SSL layer  (``SSLSocket.pending()``); and
+      * body bytes the ``http.client`` reader already pulled into its OWN ``BufferedReader`` (``resp.fp``)
+        alongside the response headers — the classic first SSE event co-delivered in the same record as the
+        headers — or the tail of a prior over-long read.
+
+    Without this check a co-buffered first event stalls until the NEXT upstream byte arrives (select never
+    wakes for bytes that are already local), which for a live control-plane feed is a multi-second gap.
+
+    The ``BufferedReader`` has no public "bytes buffered" query, so we ``peek`` it — but a ``peek`` on an
+    EMPTY buffer does one raw read and would BLOCK. We therefore peek under a TEMPORARY non-blocking socket:
+    a non-empty buffer returns instantly without touching the socket; an empty buffer's raw read only raises
+    want-read / would-block (caught → not ready). Non-blocking mode is not a read TIMEOUT, so it never arms
+    CPython's one-way ``_timeout_occurred`` flag (the thing that poisons the makefile-wrapped socket); the
+    original timeout is always restored in ``finally``, leaving the socket blocking and re-usable for the
+    subsequent ``read1``."""
+    if isinstance(sock, ssl.SSLSocket) and sock.pending():
+        return True
+    fp = getattr(resp, "fp", None)
+    if fp is None or sock is None:
+        return False
+    saved = sock.gettimeout()
+    try:
+        sock.setblocking(False)
+        try:
+            return bool(fp.peek())
+        except (BlockingIOError, ssl.SSLWantReadError, ssl.SSLWantWriteError, OSError):
+            return False                                    # empty buffer, nothing decrypted yet → not ready
+    finally:
+        try:
+            sock.settimeout(saved)                          # restore blocking; never leave it non-blocking
+        except OSError:
+            pass
+
+
 def route(path: str, backends: "Optional[dict]" = None) -> Optional[tuple[str, int, str]]:
     """Map a request path to ``(backend_host, backend_port, upstream_path)`` or ``None`` (serve
     static). Strips the mount prefix so the upstream sees its own path; the query is preserved by the
@@ -1973,24 +2013,31 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         resolves (account revoked, edge force-purged, role dropped) the stream is torn down (we stop writing
         and the connection is closed).
 
-        To wake and re-check even when NO event is flowing, we WAIT on the upstream with ``select`` (plus
-        ``SSLSocket.pending()`` for TLS app-data already decrypted into the SSL buffer) rather than arming a
-        socket READ TIMEOUT. A read timeout on the makefile-wrapped socket sets CPython's one-way
-        ``_timeout_occurred`` flag, after which the NEXT read raises ``OSError('cannot read from timed out
-        object')`` — so a merely-quiet-but-valid stream (every SSE stream over TLS that idles a single
-        interval) would be KILLED instead of re-checked. ``select`` leaves the socket blocking and re-usable.
-        When events flow, the periodic re-check also rides a wall-clock deadline after each write. A non-SSE
-        length-less body (no bearer / not SSE) streams exactly as before — no wait, no re-auth."""
+        DRAIN-THEN-SELECT. To wake and re-check even when NO event is flowing, we WAIT on the upstream with
+        ``select`` rather than arming a socket READ TIMEOUT: a read timeout on the makefile-wrapped socket
+        sets CPython's one-way ``_timeout_occurred`` flag, after which the NEXT read raises
+        ``OSError('cannot read from timed out object')`` — so a merely-quiet-but-valid stream (every SSE
+        stream that idles a single interval) would be KILLED instead of re-checked. But ``select`` on the
+        raw fd is BLIND to bytes that are already local: TLS app-data decrypted into the SSL layer, and body
+        bytes the ``http.client`` reader pulled into its own buffer alongside the headers (a first SSE event
+        co-delivered with them). So on every pass we FIRST deliver any immediately-available bytes
+        (``_stream_bytes_ready``) with no wait; ONLY when nothing is local do we ``select`` for up to
+        ``interval`` — on readable we read+forward, on a genuinely-quiet interval we re-authenticate. This
+        keeps the co-buffered first event prompt, still survives a real idle interval (re-auth fires), and
+        never poisons the socket. When events flow, the re-check also rides a wall-clock deadline after each
+        write. A non-SSE length-less body (no bearer / not SSE) streams exactly as before — no wait, no
+        re-auth."""
         interval = getattr(self.server, "sse_reauth_interval", _SSE_REAUTH_INTERVAL_S) or 0.0
         do_reauth = bool(is_sse and reauth_bearer and interval > 0 and upstream_sock is not None)
         deadline = time.monotonic() + interval if do_reauth else None
         while True:
             if do_reauth and upstream_sock is not None:     # (`is not None` also narrows for the checker)
-                # Wait up to `interval` for upstream data WITHOUT arming a read-timeout (which would poison
-                # the socket — see the docstring). TLS app-data already buffered in the SSL layer is invisible
-                # to select, so consult pending() first; only a genuinely quiet interval falls through.
-                pending = upstream_sock.pending() if isinstance(upstream_sock, ssl.SSLSocket) else 0
-                if not pending:
+                # DRAIN before we ever wait: forward bytes that are already local (SSL-decrypted or in the
+                # reader's buffer) immediately — select on the raw fd cannot see them, so waiting would stall
+                # a co-buffered event until the next upstream byte. Only a genuinely quiet interval falls
+                # through to select, which waits WITHOUT arming a read-timeout (which would poison the
+                # socket — see the docstring).
+                if not _stream_bytes_ready(resp, upstream_sock):
                     try:
                         ready, _, _ = select.select([upstream_sock], [], [], interval)
                     except (OSError, ValueError):

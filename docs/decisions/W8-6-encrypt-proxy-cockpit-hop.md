@@ -87,6 +87,39 @@ The following is the operator/deployment residual, wired but not self-provided:
   start-time WARNING to stderr (`event=hop_plaintext_remote …`) whenever it builds a server that federates
   to a remote backend with hop TLS disabled — so a cleartext remote hop can never go unnoticed.
 
+## The SSE streaming path (`_stream_with_reauth`) — from `settimeout` to drain-then-select
+
+Adding TLS to the hop exposed a latent fragility in the W9-3 SSE re-auth relay, so this change also reworked
+how that relay waits for upstream bytes. `_stream_with_reauth` is a **load-bearing production streaming
+path** — every live control-plane event feed the cockpit serves rides it — so the reasoning is recorded here
+rather than left to the diff.
+
+The relay must wake even when NO event is flowing, so it can periodically RE-AUTHENTICATE the stream's
+bearer and tear the stream down the moment the credential no longer resolves (revoked / force-purged / role
+dropped). Two earlier approaches were each wrong in a different way:
+
+- **`settimeout(interval)` + a blocking `read1` (the original).** A read timeout on the makefile-wrapped
+  socket sets CPython's one-way `_timeout_occurred` flag; after the FIRST quiet interval the NEXT read
+  raises `OSError('cannot read from timed out object')`. Over the (now-TLS) hop, a stream that merely idles
+  a single interval — the common case for an event feed — was therefore KILLED instead of re-checked: the
+  socket was **poisoned**.
+- **A naive `select(interval)` before each `read1` (the first rework).** `select` leaves the socket blocking
+  and re-usable (fixing the poison), but `select` on the raw fd is **blind to bytes that are already local**:
+  TLS app-data decrypted into the SSL layer, and — the case that regressed — a first SSE event the
+  `http.client` reader had pulled into its OWN `BufferedReader` alongside the response headers. Such a
+  co-buffered first event was then delivered only when the NEXT upstream byte arrived — a multi-second stall
+  on an otherwise-idle feed (measured ≈3.0 s for an event the original delivered in ≈0.0002 s).
+
+**What ships — drain-then-select.** On each pass the relay FIRST forwards any immediately-available bytes
+with no wait, via `_stream_bytes_ready`: `SSLSocket.pending()` for TLS-buffered app-data, plus a
+non-blocking `peek` of the reader's buffer under a *temporarily* non-blocking socket (never a read timeout,
+so `_timeout_occurred` is never armed and the socket is never poisoned; the original blocking state is
+always restored). ONLY when nothing is local does it `select` for up to the re-auth interval: readable →
+read + forward; a genuinely-quiet interval → re-authenticate, fail-closed. This delivers the co-buffered
+first event promptly, still survives a real idle interval (the re-auth fires), and never poisons the socket.
+The deadline-after-write re-auth, the revoke-teardown, and the valid-stream-continues behaviours are
+unchanged, and `select` + `ssl` are both stdlib, so the FATAL-2 boundary is untouched.
+
 ## Alternatives considered
 
 - **Refuse ALL plaintext in production, loopback included.** Rejected: it would break the supported single-
@@ -122,4 +155,9 @@ the same run:
   `event=hop_plaintext_remote` WARNING (and a loopback build does not);
 - **SSE over the TLS hop.** `test_sse_over_tls_streams_through_a_reauth_interval` streams an SSE response
   over the TLS hop across a quiet re-auth interval and asserts both frames arrive, the bearer is re-checked,
-  and the stream does not hang.
+  and the stream does not hang; **`test_sse_over_tls_delivers_the_cobuffered_first_event_promptly`** pins
+  the drain-then-select fix above — it asserts a first event CO-DELIVERED with the response headers is
+  forwarded in well under 0.5 s AND that the same stream then survives a quiet interval past the re-auth
+  boundary to deliver the second event. It therefore **fails on both broken relays** (the `settimeout`
+  original loses the second event to socket poisoning; the naive-`select` rework stalls the first event
+  ≈3 s) and passes only on drain-then-select.
