@@ -104,7 +104,7 @@ FAMILY_REGISTRY: tuple[OracleFamily, ...] = (
         name="network_discovery",
         verifier="SERVICE_REACHABILITY",
         fact_capable=True,
-        tools=("nmap", "masscan", "rustscan", "naabu", "arp-scan", "nbtscan",
+        tools=("nmap", "masscan", "rustscan", "naabu", "zmap", "unicornscan", "arp-scan", "nbtscan",
                "subfinder", "amass", "autorecon", "enum4linux-ng", "smbmap"),
         notes="Proposers of open ports / live hosts / subdomains / SMB services; VIGIL re-proves each with "
               "its own gated TCP handshake (capture_handshake). FACT-capable via the runner's re-drive.",
