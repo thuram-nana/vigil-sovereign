@@ -23,7 +23,7 @@
 # Re-pin with: bash infra/supply-chain/resolve-image-digests.sh   (see docs/SUPPLY-CHAIN.md)
 # python:3.11-slim, resolved 2026-08-12.
 
-FROM python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff
+FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4
 
 # --- build + install the package (the repo-root pyproject delivers importable framework.v2) ---
 WORKDIR /src
