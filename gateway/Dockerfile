@@ -33,13 +33,20 @@ WORKDIR /app
 # L3/L4 backstop into the host netns. The proxy service never uses it (it drops all caps), so it is inert
 # there. --no-install-recommends keeps the layer small; the apt lists are removed to keep the image lean.
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends nftables \
     && rm -rf /var/lib/apt/lists/*
 
 # Install the package (provides the `vigil-gateway` console script). No third-party python deps → nothing to fetch.
+# The runtime is stdlib-only (pyproject `dependencies = []`), so pip itself is not needed after install. We
+# remove it (W3-7 #430): pip bundles vendored copies under pip/_vendor/ (msgpack, setuptools, ...) that the
+# `trivy image` gate reports as FIXABLE HIGH though they are never on the gateway's runtime path. Uninstalling
+# pip removes those findings AND shrinks the runtime attack surface; the `apt-get upgrade` above pulls the
+# distro security fixes (util-linux et al.). Verified: the HIGH+CRITICAL fixable image gate then exits 0.
 COPY pyproject.toml README.md ./
 COPY vigil_gateway ./vigil_gateway
-RUN pip install --no-cache-dir . && rm -rf /root/.cache/pip
+RUN pip install --no-cache-dir . && rm -rf /root/.cache/pip \
+    && python -m pip uninstall -y pip
 
 USER vigil
 # Bind host/port + the charter slug + the proxy token come from the environment at run time (the compose
