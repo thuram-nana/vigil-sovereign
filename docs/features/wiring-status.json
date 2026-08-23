@@ -1,6 +1,6 @@
 {
-  "$schema_note": "VIGIL feature-wiring completeness audit (W15-2 #394, feeding the W17 milestone). Machine-checked by docs/tests/test_feature_wiring_status.py, which runs in the required 'the briefing explains every agent and capability' CI job. JSON, not YAML, on purpose: that job installs only pytest. Every feature carries a machine-readable wiring status; the guard verifies each status against the code and extends the system-map drift invariant with a COVERAGE check over the enumerable CLI surface (native verbs == sub.add_parser set; passthrough verbs == the dispatch _ENV table), so no verb can be silently added, removed, or mis-declared. See docs/features/wiring-status.md.",
-  "audit_version": 1,
+  "$schema_note": "VIGIL feature-wiring completeness audit (W15-2 #394, feeding the W17 milestone). Machine-checked by docs/tests/test_feature_wiring_status.py, which runs in the required 'the briefing explains every agent and capability' CI job. JSON, not YAML, on purpose: that job installs only pytest. Every feature carries a machine-readable wiring status; the guard verifies each status against the code and EXTENDS the system-map drift invariant with three set-equality/AST coverage checks: (1) the CLI surface (native verbs == sub.add_parser set; passthrough verbs == the dispatch _ENV table); (2) the UI surface (the declared ui-screen set == the app.js NAV ids == the app.js route() ids, reusing tools/system-map/generate.py's own extraction); and (3) the subsystem seams (chat, fireteam, brain, the MCP tool-governance boundary, and the not-yet-wired MCP live-client seam), each anchored to a real AST symbol. So no verb, screen, or subsystem seam can be silently added, removed, or mis-declared. See docs/features/wiring-status.md.",
+  "audit_version": 2,
   "statuses": {
     "LIVE": "Shipped and unconditionally invokable; produces its effect on the default path.",
     "OPT-IN": "Shipped but off by default; the operator turns it on explicitly.",
@@ -654,6 +654,450 @@
       },
       "check": "stub-raises",
       "rationale": "A full stub behind the BinaryPatchTier interface; the narrow strcpy->strncpy source synthesiser is the only real path."
+    },
+    {
+      "id": "ui.activity",
+      "name": "UI screen — Activity",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "activity",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.apikeys",
+      "name": "UI screen — API Keys",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "apikeys",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.assess",
+      "name": "UI screen — New Assessment",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "assess",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.assurance",
+      "name": "UI screen — Assurance",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "assurance",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.brain",
+      "name": "UI screen — Brain Planner",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "brain",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.budgets",
+      "name": "UI screen — Budgets",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "budgets",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.charter",
+      "name": "UI screen — Charter",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "charter",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.chat",
+      "name": "UI screen — Chat",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "chat",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.compliance",
+      "name": "UI screen — Compliance",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "compliance",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.defense",
+      "name": "UI screen — Defense (AEGIS)",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "defense",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.findings",
+      "name": "UI screen — Findings",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "findings",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.fixes",
+      "name": "UI screen — Fixes",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "fixes",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.governance",
+      "name": "UI screen — Governance",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "governance",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.home",
+      "name": "UI screen — Home",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "home",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.knowledge",
+      "name": "UI screen — Knowledge",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "knowledge",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.library",
+      "name": "UI screen — Engagement Library",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "library",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.live",
+      "name": "UI screen — Live",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "live",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.manual",
+      "name": "UI screen — Manual",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "manual",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.mcp",
+      "name": "UI screen — MCP Servers",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "mcp",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.posture",
+      "name": "UI screen — Posture",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "posture",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.proof",
+      "name": "UI screen — Proof Studio",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "proof",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.replay",
+      "name": "UI screen — Replay",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "replay",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.report",
+      "name": "UI screen — Report",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "report",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.safety",
+      "name": "UI screen — Safety",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "safety",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.sessions",
+      "name": "UI screen — Sessions",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "sessions",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.settings",
+      "name": "UI screen — Settings",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "settings",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.strix",
+      "name": "UI screen — Strix Control",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "strix",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.system",
+      "name": "UI screen — System",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "system",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.terminal",
+      "name": "UI screen — Terminal",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "terminal",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.tools",
+      "name": "UI screen — Tools",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "tools",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.trust",
+      "name": "UI screen — Trust Root",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "trust",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "ui.users",
+      "name": "UI screen — Users",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "users",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
+      "id": "brain.hexstrike",
+      "name": "Homegrown decision brain (vigil engage --brain hexstrike)",
+      "surface": "subsystem",
+      "status": "OPT-IN",
+      "anchor": {
+        "file": "integration/vigil_integration/brains/hexstrike_brain.py",
+        "symbol": "HexstrikeBrain"
+      },
+      "check": "symbol-exists",
+      "rationale": "Off by default: `--brain` defaults to \"\" (cli.py add_argument choices ('', 'hexstrike')); passing `--brain hexstrike` drives `think` with the drift-free, propose-only planner. The gate + governed executor + oracle are unchanged (the brain only proposes)."
+    },
+    {
+      "id": "chat.orchestrator",
+      "name": "Command-UI chat orchestrator (/api/chat/send)",
+      "surface": "subsystem",
+      "status": "LIVE",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/console/chat.py",
+        "symbol": "chat_send"
+      },
+      "check": "symbol-exists",
+      "rationale": "The agentic chat operator behind the `chat` UI screen; wired into the console API at POST /api/chat/send (console/server.py). Every action it launches routes the SAME gate/oracle/two-env boundary as a CLI engage."
+    },
+    {
+      "id": "fireteam.orchestrator",
+      "name": "Fireteam multi-agent fan-out (run_fireteam)",
+      "surface": "subsystem",
+      "status": "GATED",
+      "anchor": {
+        "file": "integration/vigil_integration/fireteam/orchestrator.py",
+        "symbol": "run_fireteam"
+      },
+      "check": "symbol-exists",
+      "rationale": "Wired into the live engine via live/wiring.py's `deploy_fireteam`, but only on an APPROVED deploy decision: members are capped, reuse the parent's gate/oracle (never a privileged copy), and run_fireteam validates the plan fail-closed (a malformed / over-cap / mutex plan spawns nothing)."
+    },
+    {
+      "id": "mcp.tool_governance",
+      "name": "Sovereign MCP tool-call boundary (authorize_tool_call)",
+      "surface": "subsystem",
+      "status": "LIVE",
+      "anchor": {
+        "file": "integration/vigil_integration/tools/governance.py",
+        "symbol": "authorize_tool_call"
+      },
+      "check": "symbol-exists",
+      "rationale": "Every tool call is subordinated to the sovereign core: the manifest phase maps onto the WARDEN tier, a destructive tool floors at A3 + the m-of-n leg, and the whole thing routes through the injected conjunctive gate. Reached at runtime by live/executor.py and the fireteam members (fail-closed)."
+    },
+    {
+      "id": "mcp.server_client",
+      "name": "Live external-MCP-server client (the manifest's consumer)",
+      "surface": "subsystem",
+      "status": "BUILT-NOT-WIRED",
+      "anchor": {
+        "file": "integration/vigil_integration/tools/mcp_registry.py",
+        "symbol": "to_client_config"
+      },
+      "check": "symbol-exists",
+      "rationale": "The pluggable MCP-server MANIFEST layer is built and validated (least-privilege phases, fail-closed cross-server validation, secret redaction) and to_client_config produces the transport config a live client would consume — but NO runtime consumes it: the client that actually speaks to an MCP server is a later slice (see the module docstring). test_mcp_live_client_seam_is_still_unwired asserts to_client_config has zero runtime call-sites, so wiring it forces this status off BUILT-NOT-WIRED. W17 milestone item."
     }
   ]
 }
