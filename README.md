@@ -61,6 +61,17 @@ The AI is only ever allowed to *propose*. A separate **oracle** must *prove*. A 
 > `targets/<name>/charter.md`, and the license: [`LICENSE`](LICENSE) (PolyForm Noncommercial 1.0.0 — free for
 > noncommercial non-government use) + [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
 
+> ## 🏛️ Government & public-sector buyers — read this first
+>
+> **Government & public-sector use is EXCLUDED from the free noncommercial grant.** Use by, for, on behalf
+> of, or funded by any government / agency / ministry / military / law-enforcement / public-authority /
+> state-owned entity requires a **Commercial License** — even for an otherwise-noncommercial purpose. This
+> is a Government-Use Supplemental Term VIGIL adds on top of the PolyForm Noncommercial License.
+>
+> Evaluating VIGIL for an agency or a national deployment? Contact **thuram@thuramnana.com**
+> (subject: `VIGIL commercial license`). See [`LICENSING.md`](LICENSING.md), [`LICENSE`](LICENSE), and
+> [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
+
 ---
 
 ## Table of contents
@@ -187,7 +198,7 @@ flowchart TB
       EGRESS{{"Egress gate<br/>deny-by-default, pinned to the target only"}}
       EXEC["Governed tool executor<br/>nmap · httpx · sqlmap · …"]
       TARGET[/"Authorized target<br/>e.g. 127.0.0.1 loopback"/]
-      ORACLE[["Deterministic oracle (~33 kinds)<br/>re-proves over the REAL output<br/>the ONLY thing that mints a FACT"]]
+      ORACLE[["Deterministic oracle (~38 kinds)<br/>re-proves over the REAL output<br/>the ONLY thing that mints a FACT"]]
       DET["Detection Mirror<br/>proves the attack from the target's own logs"]
       SPINE[("Signed, append-only spine / record<br/>Ed25519 hash-chain + anti-rollback")]
     end
@@ -675,7 +686,7 @@ Security posture (informational — off-by-default controls; does NOT affect the
   .. key-sealing: ABSENT  — no trust-root key files present yet (owner.priv=ABSENT, spine.dek=ABSENT, warden.key=ABSENT)
   .. sovereignty: PERMISSIVE  — dev default — the sovereignty ladder binds but admits cloud LLM egress; set CRUCIBLE_SOVEREIGNTY_TIER (AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD) to raise it
   .. entitlement: UNGOVERNED  — no trust root at ~/vigil/engine/crucible/framework/v2/.entitlement/trust-root.json — gated capabilities are permitted (logged at WARNING) but NOT enforced
-  .. backups:     OFF  — 0/7 systemd timers enabled — backup durability NOT running; need one of vigil-backup/vigil-backup-push + vigil-backup-drill enabled and fired (disabled: vigil-backup.timer, vigil-backup-push.timer, vigil-backup-drill.timer)
+  .. backups:     OFF  — 0/9 systemd timers enabled — backup durability NOT running; need one of vigil-backup/vigil-backup-push + vigil-backup-drill enabled and fired (disabled: vigil-backup.timer, vigil-backup-push.timer, vigil-backup-drill.timer)
   .. charter:     ABSENT  — no active VIGIL_ENGAGEMENT and no chartered engagement under targets/
   .. egress-supervisor: OFF  — the seccomp connect/sendto/sendmsg egress supervisor is not enabled — set VIGIL_EGRESS_GUARD=require, or run under VIGIL_POSTURE=production which forces it on
 ```

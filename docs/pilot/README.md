@@ -1,4 +1,11 @@
+<!-- CLAIM:W16-STD-7-licensing-surface -->
 # docs/pilot — Pilot runbooks
+
+> **🏛️ Before you pilot — licensing for public-sector evaluators.** Government & public-sector use of VIGIL
+> is **EXCLUDED from the free noncommercial grant** and requires a **Commercial License** — including a
+> pilot run by, for, on behalf of, or funded by any government / agency / ministry / military /
+> law-enforcement / public-authority / state-owned entity. Arrange licensing before a pilot:
+> **thuram@thuramnana.com** (subject: `VIGIL commercial license`). See [`LICENSING.md`](../../LICENSING.md).
 
 Operator-facing runbooks for controlled pilots. Each phase has a goal, the commands, and the expected result
 that constitutes a pass — grounded in the actual CLI verbs so it cannot drift.
