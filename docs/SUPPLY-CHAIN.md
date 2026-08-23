@@ -414,19 +414,33 @@ a sentence of explanation; entries with no reason are how a gate quietly becomes
 ## 5. GitHub Actions are SHA-pinned
 
 `actions/checkout@v4` is a mutable tag on someone else's repository, executing with the
-workflow's token. The A14 workflow pins every action to a full commit SHA, with the version in a
-trailing comment, and a test asserts this stays true.
+workflow's token. **Every action in every workflow** under `.github/workflows/` is pinned to a
+full 40-char commit SHA, with the version kept in a trailing `# vX.Y.Z` comment, and a drift
+check asserts this stays true across all of them (W3-3, #426).
 
 ```bash
-gh api repos/actions/checkout/git/ref/tags/v4 --jq .object.sha
+gh api repos/actions/checkout/commits/v4 --jq .sha   # → the SHA to pin; keep `# v4.4.0` as a comment
 ```
+
+### The drift check
+
+`integration/tests/test_every_workflow_action_is_sha_pinned` (in
+`integration/tests/test_supply_chain.py`) enumerates every `uses:` in every workflow file and
+FAILS on any ref that is not a 40-hex commit SHA — a tag (`@v4`) or a branch (`@main`). Local
+first-party actions (`uses: ./…`) are exempt (there is no upstream SHA to pin). It runs in the
+required **A14 supply-chain gate** and **integration two-env boundary (P5)** jobs, so an unpinned
+action cannot merge. Its negative control (`test_sha_pin_gate_rejects_a_tag_pinned_workflow`)
+points the same detector at a throwaway workflow pinning `@v4` and asserts it is flagged, and at a
+SHA-pinned twin and a local action and asserts neither is — proving the gate is not a no-op.
 
 ### Honest scope
 
-**The eight pre-existing jobs in `.github/workflows/ci.yml` are still tag-pinned.** Converting
-them is a separate change with a wider blast radius — if a SHA is wrong, every job in the repo
-fails at once — and it was kept out of this one deliberately rather than smuggled in. It is the
-first follow-up below.
+- The check verifies the ref is a 40-hex SHA; it does not (and cannot, offline) re-resolve each
+  SHA against its upstream tag. The pins were resolved once with `gh api …/commits/<tag>` and the
+  trailing `# vX.Y.Z` comment records the human-readable version each SHA corresponded to at pin
+  time. The comment is advisory — the SHA is the thing that binds.
+- `github/codeql-action/*` carries its version as `# codeql-action v3 (codeql-bundle-…)` rather
+  than a bare `# vX.Y.Z`; the drift check keys on the SHA, not the comment shape, so that is fine.
 
 ---
 
@@ -503,7 +517,10 @@ the tampered copy to be **rejected** by the same offline verify path.
 
 ## Follow-ups
 
-1. SHA-pin the actions in `.github/workflows/ci.yml`.
+1. ~~SHA-pin the actions in `.github/workflows/ci.yml`~~ — **DONE (W3-3, #426).** Every `uses:`
+   in every workflow (`ci.yml`, `livefire.yml`, `branch-protection-verify.yml` were the last
+   tag-pinned holdouts — 32 refs) is now pinned to a full commit SHA, and a widened drift check
+   in a required job (§5) fails on any future tag/branch ref.
 2. Install from the locks in `ci.yml` so the tested tree is the locked tree.
 3. ~~**Install from the locks in `envs/build_envs.sh`** so the operator's install is the locked
    install, not only CI's~~ — **DONE.** `build_envs.sh` installs the framework closure and

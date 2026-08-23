@@ -9,7 +9,7 @@ proven here is that the RESULT of that work is committed, complete and cannot si
   * every container base image in the repo is digest-pinned (a tag is a mutable pointer);
   * every committed dependency lock is genuinely hash-pinned and covers its own input;
   * the A14 workflow still declares the SBOM step, the artifact upload and a BLOCKING scan;
-  * the workflow's third-party actions are SHA-pinned;
+  * every third-party action in EVERY workflow is SHA-pinned (W3-3, #426), not a mutable tag;
   * every vulnerability suppression carries a written justification.
 
 The last one is the point of the whole exercise. A scan gate is only worth having if a
@@ -571,23 +571,106 @@ def test_vendored_strix_lock_cleared_the_high_backlog() -> None:
     assert not _ge("46.0.7", (50, 0, 0)), "comparator accepts the vulnerable cryptography 46.0.7"
 
 
-def test_a14_workflow_actions_are_sha_pinned() -> None:
-    """A GitHub Action reference is a supply-chain dependency like any other.
+#: A `uses:` ref is SHA-pinned iff its `@`-ref is exactly 40 lowercase hex (a full commit SHA).
+#: A mutable tag (`@v4`) or a branch (`@main`) is not: it is third-party code that can change
+#: under a pin the workflow token already trusts. A subdirectory action such as
+#: `github/codeql-action/init@<sha>` keeps the sha at the END of the ref, so anchoring on `$` is
+#: correct for those too. (`WORKFLOWS_DIR` is defined once, further down, in §5.)
+_SHA_PINNED_USE = re.compile(r"@[0-9a-f]{40}$")
 
-    `actions/checkout@v4` is a mutable TAG on someone else's repository, executing with the
-    workflow's token. Pin the new workflow's actions to full commit SHAs.
 
-    HONEST SCOPE: this asserts it for the A14 workflow only. The pre-existing jobs in ci.yml
-    are still tag-pinned; converting them is a separate change with a wider blast radius and
-    is recorded as a follow-up in docs/SUPPLY-CHAIN.md rather than smuggled in here.
+def _workflow_files_in(workflows_dir: Path) -> list[Path]:
+    """Every workflow file under `workflows_dir`, both `.yml` and `.yaml`.
+
+    Distinct from the 0-arg `_workflow_files()` in §5 (which globs the repo's own `*.yml` only):
+    this one takes a directory so the negative-control test can point it at a throwaway tree, and
+    it also matches `.yaml` so a future workflow with that extension cannot slip the drift check.
     """
-    body = _strip_comments(WORKFLOW.read_text(encoding="utf-8"))
-    uses = re.findall(r"uses:\s*(\S+)", body)
-    assert uses, "the A14 workflow uses no actions at all — did the file get truncated?"
-    unpinned = [u for u in uses if not re.search(r"@[0-9a-f]{40}$", u)]
+    return sorted(p for ext in ("*.yml", "*.yaml") for p in workflows_dir.glob(ext))
+
+
+def _unpinned_action_uses(workflows_dir: Path) -> list[tuple[str, str]]:
+    """Every `uses:` in every workflow under `workflows_dir` that is NOT pinned to a commit SHA.
+
+    Whole-line comments are stripped first, so a commented-out `uses:` can neither trip the gate
+    nor satisfy it. A local composite action or reusable workflow (`uses: ./…`) is first-party and
+    has no upstream SHA to pin, so it is exempt — the check is about third-party code.
+    """
+    out: list[tuple[str, str]] = []
+    for wf in _workflow_files_in(workflows_dir):
+        body = _strip_comments(wf.read_text(encoding="utf-8"))
+        for ref in re.findall(r"uses:\s*(\S+)", body):
+            if ref.startswith((".", "/")):  # local action / reusable workflow — no upstream SHA
+                continue
+            if not _SHA_PINNED_USE.search(ref):
+                out.append((wf.name, ref))
+    return out
+
+
+def test_every_workflow_action_is_sha_pinned() -> None:
+    """[W3-3] #426 — EVERY `uses:` in EVERY workflow pins a full 40-char commit SHA.
+
+    A GitHub Action reference is a supply-chain dependency like any other: `actions/checkout@v4`
+    is a mutable TAG on someone else's repository, executing with the workflow's token. The
+    previous gate asserted this for `supply-chain.yml` alone (three more per-workflow tests cover
+    release.yml, security-scan.yml and scheduled-supply-chain-scan.yml), which left ci.yml,
+    livefire.yml and branch-protection-verify.yml — 32 tag-pinned refs — outside any check at all.
+
+    This is the drift check: it FAILS the moment any workflow (re)introduces a tag or branch ref.
+    It runs in the required 'A14 supply-chain gate' and 'integration two-env boundary (P5)' jobs,
+    so an unpinned action cannot merge. Its negative control lives in the test below.
+    """
+    assert WORKFLOWS_DIR.is_dir(), f"missing {WORKFLOWS_DIR}"
+    # Guard against a vacuous pass: if the glob or parser broke and found no actions, an empty
+    # `unpinned` list would be a false green. The repo's workflows reference dozens of actions.
+    all_uses = [
+        ref
+        for wf in _workflow_files_in(WORKFLOWS_DIR)
+        for ref in re.findall(r"uses:\s*(\S+)", _strip_comments(wf.read_text(encoding="utf-8")))
+    ]
+    assert len(all_uses) >= 30, (
+        f"expected the repo's workflows to reference many actions, found only {len(all_uses)} — "
+        "did the workflows dir get truncated or the `uses:` parser break?"
+    )
+    unpinned = _unpinned_action_uses(WORKFLOWS_DIR)
     assert not unpinned, (
-        "these action references are not pinned to a full commit SHA: "
-        f"{unpinned}\nPin with:  gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha"
+        "these action references are not pinned to a full commit SHA (a tag or branch ref runs "
+        "third-party code the workflow token trusts):\n  "
+        + "\n  ".join(f"{name}: {ref}" for name, ref in unpinned)
+        + "\nPin with:  gh api repos/<owner>/<repo>/commits/<tag> --jq .sha"
+        + "   (keep the version as a trailing '# vX.Y.Z' comment)"
+    )
+
+
+def test_sha_pin_gate_rejects_a_tag_pinned_workflow(tmp_path: Path) -> None:
+    """NEGATIVE CONTROL — prove the drift check is not a no-op.
+
+    Point the SAME detector at a throwaway workflow that pins a mutable tag and assert it IS
+    flagged; then at a SHA-pinned twin and a first-party local action and assert NEITHER is. A
+    gate that never rejects anything is indistinguishable from no gate at all, and one that flags
+    a correctly-pinned ref would be an unmergeable false alarm — both failure modes are asserted
+    against here, in the same run.
+    """
+    good_sha = "11d5960a326750d5838078e36cf38b85af677262"  # a real 40-hex commit sha
+    (tmp_path / "bad.yml").write_text(
+        "on: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n",
+        encoding="utf-8",
+    )
+    assert ("bad.yml", "actions/checkout@v4") in _unpinned_action_uses(tmp_path), (
+        "the drift check FAILED to flag a tag-pinned action — the gate is a no-op"
+    )
+
+    # And it must not cry wolf: a SHA-pinned ref and a local composite action are both acceptable.
+    (tmp_path / "bad.yml").unlink()
+    (tmp_path / "good.yml").write_text(
+        "on: push\njobs:\n  g:\n    runs-on: ubuntu-latest\n    steps:\n"
+        f"      - uses: actions/checkout@{good_sha}  # v4.4.0\n"
+        "      - uses: ./.github/actions/local-thing\n",
+        encoding="utf-8",
+    )
+    assert _unpinned_action_uses(tmp_path) == [], (
+        "the drift check flagged a SHA-pinned ref or a first-party local action — false positive"
     )
 
 
