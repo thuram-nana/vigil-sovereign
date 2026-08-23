@@ -21,6 +21,8 @@ from typing import Any
 
 import structlog
 
+from vigil_core.logging_setup import resolve_level_name
+
 from . import paths, redact
 
 # W16-STD-6(a): an engagement log ROTATES with RETENTION when it exceeds the size
@@ -144,7 +146,11 @@ def _emit_json(_logger: Any, _name: str, event_dict: Any) -> Any:
     raise structlog.DropEvent
 
 
-def configure(level: str = "INFO") -> None:
+def configure(level: str | None = None) -> None:
+    # W6-5: the level is resolved through the ONE shared resolver, so the single VIGIL_LOG_LEVEL (with
+    # the deprecated SIGIL_LOG_LEVEL still honoured) governs the offense plane exactly as it governs the
+    # sovereign and gateway planes. An explicit ``level`` argument still wins (used by tests).
+    level_name = resolve_level_name(level)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
@@ -156,7 +162,7 @@ def configure(level: str = "INFO") -> None:
             _emit_json,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(_stdlib_logging, level.upper())
+            getattr(_stdlib_logging, level_name)
         ),
         cache_logger_on_first_use=False,
     )

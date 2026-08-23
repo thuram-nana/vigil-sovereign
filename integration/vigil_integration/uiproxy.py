@@ -69,6 +69,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from . import dispatch
+from vigil_core.logging_setup import RotatingLineWriter
 from vigil_core.metrics import CONTENT_TYPE as _OPENMETRICS_CT, set_plane
 
 # ---- ports (fixed; the proxy is the only human-facing listener) -----------------------------------
@@ -2017,14 +2018,6 @@ def _child_env() -> dict:
     return env
 
 
-def _secure_log(log_path: Path):
-    """Open a backend log 0600 under a 0700 dir — child stdout may include the cockpit's token line."""
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(log_path.parent, 0o700)
-    fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    return fd
-
-
 def _port_free(host: str, port: int) -> bool:
     """True if (host, port) is bindable right now (no ACTIVE listener). The bring-up preflight uses this so
     a port collision REFUSES before any backend is spawned — never orphaning children (B1). We set
@@ -2060,12 +2053,50 @@ def _wait_listening(host: str, port: int, deadline: float) -> bool:
     return False
 
 
+def _pump_child_output(proc: subprocess.Popen, log_path: Path,
+                       *, on_line: "Optional[Callable[[str], None]]" = None) -> None:
+    """Drain a child's merged stdout/stderr into a SIZE-BOUNDED, retention-rotating log file (W6-5).
+
+    Before this, ``.vigil-live/ui/logs/*.log`` were opened for raw append and handed to the child's fd —
+    unbounded, so a long-running or chatty backend could fill the disk with no size bound or rotation. The
+    output is now piped and pumped by a daemon thread through a ``RotatingLineWriter`` (0600 file, 0700
+    dir, ``VIGIL_LOG_MAX_BYTES`` / ``VIGIL_LOG_BACKUP_COUNT`` — the SAME bounds every plane's logging
+    uses). ``on_line`` lets a caller ALSO tee each line (the cockpit token scan). If the pump thread can't
+    start after the child forked, the child is torn down and the failure re-raised as OSError so the
+    caller's spawn-failure path applies (nothing is left orphaned)."""
+    writer = RotatingLineWriter(log_path)
+
+    def _pump() -> None:
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                writer.write(line)
+                if on_line is not None:
+                    on_line(line)
+        finally:
+            writer.close()
+            if on_line is not None:
+                on_line("")  # sentinel — the stream ended
+
+    try:
+        threading.Thread(target=_pump, daemon=True).start()
+    except (RuntimeError, OSError) as exc:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        writer.close()
+        raise OSError(f"could not start the log pump thread: {exc}") from exc
+
+
 def _spawn(argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None) -> subprocess.Popen:
-    log = open(_secure_log(log_path), "ab", buffering=0)  # noqa: SIM115 — closed when the child is reaped
     env = _child_env()
     if extra_env:
         env.update(extra_env)
-    return subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+                            text=True, bufsize=1, errors="replace")
+    _pump_child_output(proc, log_path)  # rotating, size-bounded capture (W6-5)
+    return proc
 
 
 def _spawn_tracked(procs: list, name: str, argv: list[str], log_path: Path, cleanup,
@@ -2284,40 +2315,13 @@ def _console_vigil_bin(crucible_bin: Path) -> "Optional[str]":
 
 
 def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "Queue[str]"]:
-    """Spawn a child whose stdout we both TEE to a log file and scan (for the cockpit token). Returns
-    the process and a queue of its stdout lines."""
-    _fd = _secure_log(log_path)
+    """Spawn a child whose stdout we both TEE to a SIZE-BOUNDED, rotating log file (W6-5) and scan (for the
+    cockpit token). Returns the process and a queue of its stdout lines. The rotating capture is shared
+    with ``_spawn`` via ``_pump_child_output``; ``on_line`` tees each line onto the token queue."""
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            env=_child_env(), text=True, bufsize=1)
+                            env=_child_env(), text=True, bufsize=1, errors="replace")
     q: "Queue[str]" = Queue()
-
-    def _pump():
-        log = os.fdopen(_fd, "a", encoding="utf-8")
-        try:
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                log.write(line)
-                log.flush()
-                q.put(line)
-        finally:
-            log.close()
-            q.put("")  # sentinel — the stream ended
-
-    # If the pump thread can't start (thread/RLIMIT_NPROC exhaustion) AFTER the child already forked, the
-    # child would be left running but never returned — an orphan. Tear it down + close the log fd and
-    # re-raise, so the caller's spawn-failure path applies (nothing is left running).
-    try:
-        threading.Thread(target=_pump, daemon=True).start()
-    except (RuntimeError, OSError):
-        try:
-            proc.kill()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            os.close(_fd)
-        except OSError:
-            pass
-        raise
+    _pump_child_output(proc, log_path, on_line=q.put)
     return proc, q
 
 

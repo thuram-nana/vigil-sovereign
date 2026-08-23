@@ -145,12 +145,15 @@ def _module_imports(src: str) -> tuple[set[str], set[str]]:
 
 
 # The neutral shared core `vigil_core` is NOT a trust domain (it is neither the offense engine `framework`
-# nor the sovereign `sigil`) — both planes are built on it by design. uiproxy reaches exactly ONE of its
-# modules, `vigil_core.metrics` (W6-3 #454: the stdlib-only OpenMetrics `/metrics` registry the proxy serves
-# for its own RED relay counters — the decision doc records it as a ZERO-new-dependency, stdlib-only core
-# module). It is allowed, but PINNED to that one submodule and PROVEN to itself import stdlib only, so
-# "reaches the neutral core" can never silently widen into "reaches a boundary-crossing core module".
-_UP_ALLOWED_SHARED_CORE = {"vigil_core.metrics"}
+# nor the sovereign `sigil`) — both planes are built on it by design. uiproxy reaches exactly TWO of its
+# modules, each stdlib-only and zero-new-dependency:
+#   * `vigil_core.metrics` (W6-3 #454: the OpenMetrics `/metrics` registry the proxy serves for its own RED
+#     relay counters);
+#   * `vigil_core.logging_setup` (W6-5 #456: the shared logging setup — used here for its
+#     `RotatingLineWriter`, which size-bounds + rotates the `.vigil-live/ui/logs/*.log` child captures).
+# Both are allowed, but PINNED to this set and PROVEN below to import stdlib only, so "reaches the neutral
+# core" can never silently widen into "reaches a boundary-crossing core module".
+_UP_ALLOWED_SHARED_CORE = {"vigil_core.metrics", "vigil_core.logging_setup"}
 
 
 def _vigil_core_submodules(src: str) -> set[str]:

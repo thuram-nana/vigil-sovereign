@@ -670,6 +670,29 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W6-5",
+      "title": "Unified structured logging: JSON + shared redaction across every plane",
+      "claim": "Every VIGIL plane emits structured JSON logs through one shared redaction processor that masks secret-keyed fields and credential shapes before any line is written.",
+      "source": "docs/decisions/W6-5-unified-structured-logging.md:8",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/logging_setup.py",
+        "symbol": "RedactingJsonFormatter"
+      },
+      "proved_by": {
+        "file": "packages/core/vigil_core/tests/test_logging_unified.py",
+        "tests": [
+          "test_scrub_masks_credentials_and_preserves_telemetry",
+          "test_json_line_redacts_secret_message_and_extra",
+          "test_vigil_log_level_takes_effect",
+          "test_legacy_var_honoured_with_deprecation_warning",
+          "test_rotating_line_writer_bounds_and_retains"
+        ]
+      },
+      "ci_job": "vigil_core — shared integrity substrate",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

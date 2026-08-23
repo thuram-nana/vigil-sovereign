@@ -225,3 +225,43 @@ is applied. The body carries no token, path, or backend address. Registered as c
 **Artifacts.** Example alert rules (`infra/observability/vigil-alerts.yml`) and a Grafana dashboard
 (`infra/observability/vigil-dashboard.json`) ship with the product — a starting point for [W8-1] #467
 alerting.
+
+---
+
+## Unified structured logging (W6-5, #456)
+
+Before W6-5, three logging stacks disagreed: the offense engine had structlog JSON + redaction +
+rotation, the sovereign SIGIL plane logged **plain text to stderr with no redaction**, and the host
+gateway used a bare `logging.basicConfig`. The `.vigil-live/ui/logs/*.log` child-capture files were
+unbounded, and only `SIGIL_LOG_LEVEL` existed — governing one of the three planes.
+
+W6-5 unifies them on ONE setup, reused across every plane because it lives in `vigil_core` (a member of
+BOTH isolated environments, importing no `framework.*` / `strix.*` / `sigil.*`, so FATAL-2 is intact):
+
+- **`vigil_core.redact`** — the single shared redaction helper. `scrub_log_event` masks secret-keyed
+  structured fields (recursing into nested dicts/lists); `redact_log_message` masks credential SHAPES in
+  a free-text message (a `Bearer` token, an `Authorization`/`Cookie` header line, a `secret=value`
+  assignment). The offense engine's `framework/v2/common/redact.py` is now a thin re-export of this
+  module, so offense behaviour is byte-identical and the masker is maintained once.
+- **`vigil_core.logging_setup`** — the single stdlib-only setup: a `RedactingJsonFormatter` (JSON lines;
+  the message and every structured `extra=` field pass through the shared redactor before emission), a
+  secure rotating file handler, a `RotatingLineWriter` for subprocess-output capture, and one
+  `VIGIL_LOG_LEVEL` resolver. Stdlib-only because the gateway declares zero third-party runtime deps and
+  structlog is not in the sovereign environment.
+- **The sovereign** (`apps/sigil/sigil/obs.py`) and **gateway** (`gateway/vigil_gateway/cli.py`) install
+  the shared handler; the **offense** engine keeps its structlog pipeline but now resolves its level from
+  `VIGIL_LOG_LEVEL` and redacts through the same shared helper.
+- **Rotation everywhere.** Every log destination — the offense engagement log, the sovereign/gateway
+  handlers (when file-backed), and the previously-unbounded `.vigil-live/ui/logs/*.log` child captures —
+  is size-bounded with retention via `VIGIL_LOG_MAX_BYTES` (default 64 MiB) and `VIGIL_LOG_BACKUP_COUNT`
+  (default 16). The UI child logs are piped and pumped through a `RotatingLineWriter` (0600 file, 0700
+  dir) instead of an unbounded append, so a chatty backend can no longer fill the disk.
+
+**One level variable.** `VIGIL_LOG_LEVEL` governs all planes; the deprecated `SIGIL_LOG_LEVEL` is still
+honoured, with a one-time deprecation warning, when `VIGIL_LOG_LEVEL` is unset. Set it in the service
+environment (systemd / shell / compose) so every child `vigil up` spawns inherits it.
+
+Registered as claim `W6-5` in `docs/claims/registry.json` ([W0-3] #398); see
+`docs/decisions/W6-5-unified-structured-logging.md`. Proven by
+`packages/core/vigil_core/tests/test_logging_unified.py` (required `vigil_core` CI job), with per-plane
+negative controls in the sovereign, offense, gateway and integration test suites.
