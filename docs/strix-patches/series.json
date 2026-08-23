@@ -259,6 +259,7 @@
   "vendor/strix/tests_vigil/conftest.py",
   "vendor/strix/tests_vigil/test_anthropic_pricing.py",
   "vendor/strix/tests_vigil/test_dedupe_extract.py",
+  "vendor/strix/tests_vigil/test_lifecycle_teardown.py",
   "vendor/strix/tests_vigil/test_proof_capture.py",
   "vendor/strix/tests_vigil/test_reasoning_thinking.py",
   "vendor/strix/tests_vigil/test_sandbox_hardening.py",
@@ -419,16 +420,22 @@
    "subject": "Strix+HexStrike sx-s5: harden the Strix runtime container (least-privilege + pinned image + reaper)"
   },
   {
-   "commit": "8db697360f558c5290f1d0655e83ae1f6d558bc0",
+   "commit": "910c5ff4ab1c98b041a65368794414680329b724",
    "file": "026-sx-inv12-s9-surface-proof-degradation-verificati.patch",
-   "sha256": "ab8d2ffc5da1846b431d27339a6150c4f5f732f8002fe74679b0972d9f5c835a",
+   "sha256": "952f99e8a0874a2f3591731cdd4b78180f67c1350a7d580be97b591e1cd02096",
    "subject": "sx-inv12 (S9): surface proof degradation \u2014 verification_degraded is first-class (inv 12 MET)"
   },
   {
-   "commit": "46b7ee3878d64d5b8069a760baa15b3cd024e50d",
+   "commit": "ae094f56e5050f50e6beb4d15bc725ce9feeec4c",
    "file": "027-strix-batch2-p8-fix-proof-degradation-recording.patch",
-   "sha256": "e800fc3370c8f6ddcdedc95aec596b0d6aec76c7b0d5fb87760bed7cb5c3cf29",
+   "sha256": "813388da6eefb6beb01c5be9a5efd996148731c1ffccdb3ac0d7590e0ebef353",
    "subject": "strix batch2: P8 fix \u2014 proof degradation recording must never trigger strix.report.__init__"
+  },
+  {
+   "commit": "cebaa5d868e15fec64ef237e0a5be0e1fd25d653",
+   "file": "028-s10-vendor-strix-synchronous-container-teardown.patch",
+   "sha256": "0e56e0287546a999173368069a559725e802824d89390755b64819c0887f2953",
+   "subject": "S10 (vendor/strix): synchronous container teardown on the signal path"
   }
  ],
  "schema": 1,
@@ -504,7 +511,7 @@
   "vendor/strix/strix/core/sessions.py": "c2b4caf9a28d14b826a694ed5ad627ad6bb6d57d6bf29282a2defc764295621d",
   "vendor/strix/strix/interface/__init__.py": "c30db7b0539084808422b228d0cb705afdaa1d6e6a529aef3e3f10563bf748cd",
   "vendor/strix/strix/interface/assets/tui_styles.tcss": "1cc02119ce18b2c00a72c9e4622019e7c0068fa2c6ff1936da28defa0dd1bcb9",
-  "vendor/strix/strix/interface/cli.py": "72adc5230c30c05ac9f3e124c5a35ee1bf540622d46bfadbe1a8511ba4f550cc",
+  "vendor/strix/strix/interface/cli.py": "d033fda1ec94a8db04a29702ca7ff1e8ed3e927be5a3488c5ac6a0b995ccbcce",
   "vendor/strix/strix/interface/main.py": "a63d6d502da9d935099ff7e76f3f484a09c83e0b93aa570d400a079fd8d3261a",
   "vendor/strix/strix/interface/tui/__init__.py": "d3156f293b5aeba9c04f1e79bdfd42b33b28ff3b0665e2026f9872e9adb8c7e5",
   "vendor/strix/strix/interface/tui/app.py": "d859438fb30878c45c6d60d049441fe0fcec2dd3df56ce4348e641687dfdccf5",
@@ -542,8 +549,8 @@
   "vendor/strix/strix/runtime/caido_bootstrap.py": "e8e03b8cdf0ee2760161d72ba173fa8aca5dbda0fa203b8a50bd4cfa293c00c6",
   "vendor/strix/strix/runtime/docker_client.py": "c03c88ad2f4d69a7dc804d1f5c93f007486759d556e457d4868b6a670f58fba8",
   "vendor/strix/strix/runtime/local_dir_staging.py": "4f8bc84226fb42cf816376e1706cecbe72dd633c69bf4a39eb2489f84b7fdabc",
-  "vendor/strix/strix/runtime/sandbox_hardening.py": "409cfd0c4b5b665b08741b69c9411ea64b1d745bf32b0ffe62b5d8dd484ac418",
-  "vendor/strix/strix/runtime/session_manager.py": "90c133dfdfdbc1318d92f7bf6095c5e36312377aceed56b47bf4620af03c163f",
+  "vendor/strix/strix/runtime/sandbox_hardening.py": "29f8bdaa6fe7d62249b524a00ac4d5c1edea2f262a1f0aec9dbc01a4c2dfb8a4",
+  "vendor/strix/strix/runtime/session_manager.py": "1fe3f419a4b29f4a2f810a9e23cd5a66316dd368adc79e08b1a9a5c1eaea77a0",
   "vendor/strix/strix/runtime/vigil_upstream.py": "8b83cd8f6fb3f11969e7883ee9fe9f0f86f49c0836de88c2d24fb2d7368cb42d",
   "vendor/strix/strix/skills/README.md": "0f9834d74d33d20a1985189a2dc7e090c090cd4ea3111522fdfdc359c7540177",
   "vendor/strix/strix/skills/__init__.py": "9402336b992269e3668a11cd863b177718bd66af9455e003cf07c329bd8a7f0a",
@@ -669,9 +676,10 @@
   "vendor/strix/tests_vigil/conftest.py": "d80ca1178799ec22789164cec7afefcc9b3538147f77e10f55bbe8439cffbd48",
   "vendor/strix/tests_vigil/test_anthropic_pricing.py": "21df8733982f747cadb06f569d061a29ff2ec07a0661087de35b86e6f4716d2c",
   "vendor/strix/tests_vigil/test_dedupe_extract.py": "908371cfb9105f8c871152306f9116bdf7d2b817f00974ed585a873ed099e4da",
+  "vendor/strix/tests_vigil/test_lifecycle_teardown.py": "51ac70bd7d095094af331151b770c0fcedaddd1618d2a5fd108d94bf69e9baf9",
   "vendor/strix/tests_vigil/test_proof_capture.py": "8353aab117c4f75970df48c103ef6822d076be74aee9816775133bb24dd3a828",
   "vendor/strix/tests_vigil/test_reasoning_thinking.py": "56365c986fa3bb04ca250e45f7f2b126732a1c0c4b827d224ea44c75d9d515b0",
-  "vendor/strix/tests_vigil/test_sandbox_hardening.py": "73db3dd1f8bfeaaa798a9181dae7ace88f11f39c4a77005d1795a00c1ed41180",
+  "vendor/strix/tests_vigil/test_sandbox_hardening.py": "c5a6cbb4e51c5a86d1c9f30785fa7234af47706015222a9323f420b8a2059be8",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
   "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "e3de57c3f4a12ac48f08815597d3c70ee959867bc52b4642470b341052ff55c1",
   "vendor/strix/uv.lock": "ef01a512cf243a9b7084e4724a89c52ef8567e6a144057219e72940280716a26"
