@@ -21,6 +21,7 @@ as before.
 
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -179,14 +180,64 @@ def sign_certificate(cert: EvidenceCertificate, signers: list[tuple[str, str]]) 
 SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 
 
+class OracleVersionStatus(str, Enum):
+    """Whether the certificate's stamped oracle *id@version* could be confirmed against the CURRENT oracle body
+    (re-derived at verify time from the pure oracle source). This is the honest three-way answer PCF requires:
+
+      * ``MATCH``       — stamped and current are BOTH known and EQUAL: re-verification ran the SAME decision
+                          procedure the issuer signed. The only status that earns a bare SOUND tier.
+      * ``CHANGED``     — stamped and current are BOTH known and DIFFER: the oracle body changed since mint, so
+                          reproduction re-ran a DIFFERENT procedure than the one certified.
+      * ``UNCONFIRMED`` — one or both are empty (a legacy/source-less MINT stamped nothing, or this verifier
+                          runs on a frozen/zipped deployment and cannot derive a current version): the versions
+                          cannot be compared, so currency is NOT asserted (never silently claimed 'current')."""
+
+    MATCH = "match"
+    CHANGED = "changed"
+    UNCONFIRMED = "unconfirmed"
+
+
+class VerificationTier(str, Enum):
+    """The government-facing HEADLINE verdict on one certificate — the first-class field callers render instead
+    of a bare boolean. A bare ``SOUND`` is reserved for a certificate that reproduces AND was signed under the
+    SAME oracle procedure now running; any oracle-version skew or unconfirmable version DOWNGRADES the tier so a
+    version-skewed cert is never reported as fully SOUND:
+
+      * ``SOUND``                           — cryptographically sound AND oracle version confirmed MATCHing.
+      * ``SOUND_ORACLE_VERSION_CHANGED``    — sound + reproduces, but under a DIFFERENT oracle version than
+                                              minted. The finding still holds under today's oracle; it is NOT
+                                              the exact-procedure re-execution the certificate attests.
+      * ``SOUND_ORACLE_VERSION_UNCONFIRMED``— sound + reproduces, but the minted-vs-current oracle version
+                                              could not be confirmed (empty stamp / frozen deployment).
+      * ``UNSOUND``                         — a hard failure (authenticity/binding/artifact/reproduction/
+                                              grounding/schema): ``ok`` is False."""
+
+    SOUND = "sound"
+    SOUND_ORACLE_VERSION_CHANGED = "sound_oracle_version_changed"
+    SOUND_ORACLE_VERSION_UNCONFIRMED = "sound_oracle_version_unconfirmed"
+    UNSOUND = "unsound"
+
+
 class EvidenceVerification(BaseModel):
-    """The layered verdict on one signed certificate. ``ok`` (SOUNDNESS) requires authenticity + binding +
-    artifact integrity + reproduction + claim grounding + a known schema. Two orthogonal signals are
-    reported but NOT folded into ``ok`` — a certificate stays cryptographically sound past them:
-      * ``oracle_version_current`` — the stamped oracle version matches the CURRENT oracle body. False means
-        the oracle code changed since mint (the reproduction below re-ran the CURRENT oracle, so ``reproduced``
-        tells you whether the finding still holds); it is NOT a soundness failure — rejecting every old cert
-        after an upgrade would destroy long-term reproducibility.
+    """The layered verdict on one signed certificate. ``ok`` (CRYPTOGRAPHIC SOUNDNESS) requires authenticity +
+    binding + artifact integrity + reproduction + claim grounding + a known schema. It is DELIBERATELY kept as
+    the low-level soundness signal (a version-skewed but authentic + reproducing certificate is still
+    cryptographically sound) so that an oracle upgrade does not MASS-INVALIDATE the whole retained corpus. The
+    government-facing headline is ``tier`` / ``fully_sound`` (below), NOT the bare ``ok``.
+
+      * ``tier`` (FIRST-CLASS headline) — a bare ``SOUND`` ONLY when the oracle version is confirmed to match
+        what was minted; oracle-version skew or an unconfirmable version DOWNGRADES it (see ``VerificationTier``).
+        A verifier/CLI must render the TIER, never a bare "SOUND" derived from ``ok`` alone.
+      * ``fully_sound`` — the strict re-executability gate: ``ok`` AND oracle version MATCH. This is the "gate
+        it" behaviour the PCF re-execution claim needs, available WITHOUT changing ``ok`` (so old certs are
+        handled honestly, not mass-invalidated).
+      * ``oracle_version_status`` / ``stamped_oracle_version`` / ``current_oracle_version`` — the oracle-version
+        comparison surfaced LOUDLY as first-class fields (no longer buried in ``reason``). The current version
+        is RE-DERIVED at verify time from the pure oracle source.
+      * ``oracle_version_current`` (back-compat bool) — ``False`` iff the status is CHANGED. Retained for
+        callers written before ``oracle_version_status`` existed; it CANNOT distinguish CHANGED from
+        UNCONFIRMED (an UNCONFIRMED cert reports ``True`` here for back-compat, which is why the STATUS/TIER —
+        not this bool — is authoritative). Prefer ``oracle_version_status`` / ``tier``.
       * ``currently_fresh`` — present-tense posture validity against an AUTHENTICATED time (a verified RFC3161
         anchor's genTime vs the declared TTL). ``None`` when no authenticated time was supplied (freshness is
         then simply NOT asserted — a TTL without an authenticated start cannot expire). Authenticity survives
@@ -202,7 +253,10 @@ class EvidenceVerification(BaseModel):
     reproduced: bool = False       # the pure oracle re-fires and matches the claim
     claims_grounded: bool = True   # every fact-bound report sentence re-admits as a fact
     schema_ok: bool = True         # the certificate schema version is one this verifier models
-    oracle_version_current: bool = True   # stamped oracle version == current (else: oracle body changed)
+    oracle_version_current: bool = True   # BACK-COMPAT: False iff status is CHANGED (see oracle_version_status)
+    oracle_version_status: OracleVersionStatus = OracleVersionStatus.UNCONFIRMED  # LOUD first-class comparison
+    stamped_oracle_version: str = ""   # the oracle id@version the certificate was MINTED + signed under ("" = none)
+    current_oracle_version: str = ""   # the oracle id@version RE-DERIVED now ("" = frozen/source-less verifier)
     currently_fresh: "bool | None" = None  # posture validity vs an authenticated time (None = not asserted)
     valid_signers: tuple[str, ...] = ()
     # D2 (Wave #4): the non-empty artifact-identity / scope / freshness / completeness fields the certificate
@@ -213,10 +267,31 @@ class EvidenceVerification(BaseModel):
 
     @property
     def ok(self) -> bool:
-        # SOUNDNESS — authenticity/binding/artifacts/reproduction/grounding/known-schema. Deliberately NOT
-        # gated on oracle_version_current (reproducibility) or currently_fresh (a separate posture signal).
+        # CRYPTOGRAPHIC SOUNDNESS — authenticity/binding/artifacts/reproduction/grounding/known-schema.
+        # Deliberately NOT gated on the oracle-version status (that is surfaced via ``tier`` / ``fully_sound``
+        # so an oracle upgrade does not mass-invalidate old certs) or ``currently_fresh`` (a separate posture
+        # signal). CALLERS THAT NEED THE RE-EXECUTABILITY GUARANTEE MUST CHECK ``fully_sound`` / ``tier`` —
+        # ``ok`` alone reports a version-skewed cert as (crypto-)sound, which is honest only alongside the tier.
         return (self.authentic and self.bound and self.artifacts_ok and self.primary_artifact_ok
                 and self.reproduced and self.claims_grounded and self.schema_ok)
+
+    @property
+    def tier(self) -> VerificationTier:
+        # The headline verdict. A version-skewed or version-unconfirmable cert NEVER reports a bare SOUND.
+        if not self.ok:
+            return VerificationTier.UNSOUND
+        if self.oracle_version_status is OracleVersionStatus.MATCH:
+            return VerificationTier.SOUND
+        if self.oracle_version_status is OracleVersionStatus.CHANGED:
+            return VerificationTier.SOUND_ORACLE_VERSION_CHANGED
+        return VerificationTier.SOUND_ORACLE_VERSION_UNCONFIRMED
+
+    @property
+    def fully_sound(self) -> bool:
+        """The strict re-executability gate for a government 're-executable' claim: cryptographically sound AND
+        reproduced under the SAME oracle procedure the issuer signed (stamped version confirmed == current). A
+        version-skewed or version-unconfirmable cert is NOT fully sound even though ``ok`` (crypto) holds."""
+        return self.tier is VerificationTier.SOUND
 
 
 def _claims_grounded(cert: EvidenceCertificate, oracle_context: dict) -> tuple[bool, str]:
@@ -343,15 +418,33 @@ def verify_certificate(
 
     claims_grounded, claims_note = _claims_grounded(cert, oracle_context)
 
-    # ORACLE-VERSION drift (informational, NOT gating): compare the stamped id@version to the CURRENT oracle
-    # body. Only flag when BOTH are known and differ — a legacy cert with no stamp ("") or a frozen
-    # deployment that cannot compute a current version ("") can't be compared, so it is not flagged.
+    # ORACLE-VERSION currency (surfaced LOUDLY as first-class fields; DOWNGRADES the tier, does NOT gate the
+    # crypto ``ok``). RE-DERIVE the current oracle id@version from the pure oracle source and compare it to the
+    # version stamped + signed at MINT. Three honest outcomes (see OracleVersionStatus):
+    #   * both known and differ   → CHANGED     (reproduction below re-ran a DIFFERENT procedure than certified)
+    #   * both known and equal     → MATCH       (same procedure — the only bare-SOUND case)
+    #   * either empty             → UNCONFIRMED (legacy/source-less mint OR frozen verifier — cannot compare;
+    #                                             reported honestly, NOT as a pass — never silently 'current')
     from ..verify.oracle_version import oracle_version as _oracle_version
+    stamped_ov = cert.oracle_version or ""
     current_ov = _oracle_version(cert.confirmed_by) if cert.confirmed_by else ""
-    oracle_version_current = not (cert.oracle_version and current_ov and cert.oracle_version != current_ov)
-    ov_note = ("" if oracle_version_current
-               else f"; ORACLE-VERSION CHANGED since mint (stamped {cert.oracle_version}, current "
-                    f"{current_ov}) — reproduction re-ran the current oracle")
+    if not stamped_ov or not current_ov:
+        ov_status = OracleVersionStatus.UNCONFIRMED
+    elif stamped_ov == current_ov:
+        ov_status = OracleVersionStatus.MATCH
+    else:
+        ov_status = OracleVersionStatus.CHANGED
+    oracle_version_current = ov_status is not OracleVersionStatus.CHANGED   # back-compat bool (see the model)
+    if ov_status is OracleVersionStatus.CHANGED:
+        ov_note = (f"; ORACLE-VERSION CHANGED since mint (stamped {stamped_ov}, current {current_ov}) — "
+                   f"reproduction re-ran a DIFFERENT oracle procedure than the issuer signed; tier DOWNGRADED "
+                   f"to {VerificationTier.SOUND_ORACLE_VERSION_CHANGED.value} (NOT a bare SOUND)")
+    elif ov_status is OracleVersionStatus.UNCONFIRMED:
+        ov_note = (f"; ORACLE-VERSION UNCONFIRMED (stamped {stamped_ov or 'none'}, current "
+                   f"{current_ov or 'unavailable'}) — cannot confirm the minted oracle procedure; tier "
+                   f"{VerificationTier.SOUND_ORACLE_VERSION_UNCONFIRMED.value} (NOT a bare SOUND)")
+    else:
+        ov_note = ""
 
     # FRESHNESS (3-state posture validity): only against an AUTHENTICATED time. None when no verified anchor
     # genTime + now were supplied — a TTL without an authenticated start cannot expire, so freshness is NOT
@@ -379,6 +472,7 @@ def verify_certificate(
         finding_ref=cert.finding_ref, authentic=authentic, bound=bound,
         artifacts_ok=artifacts_ok, primary_artifact_ok=primary_artifact_ok, reproduced=rr.ok,
         claims_grounded=claims_grounded, schema_ok=schema_ok, oracle_version_current=oracle_version_current,
+        oracle_version_status=ov_status, stamped_oracle_version=stamped_ov, current_oracle_version=current_ov,
         currently_fresh=currently_fresh, valid_signers=thr.valid_signers, bound_identity=bound_identity,
         reason=reason)
 
@@ -426,6 +520,14 @@ class BundleVerification(BaseModel):
                 and self.head_anchored and self.refs_unique and self.single_engagement
                 and all(r.ok for r in self.certificate_results)
                 and all(p.ok for p in self.path_results))
+
+    @property
+    def fully_sound(self) -> bool:
+        """The strict re-executability gate at bundle scope: ``ok`` AND every finding certificate is
+        ``fully_sound`` (crypto-sound AND its oracle version confirmed to MATCH what was minted). ``ok`` stays
+        the crypto-soundness signal (no mass-invalidation on an oracle upgrade); a caller that must assert
+        every finding re-executes under the SAME oracle procedure the issuer signed checks THIS."""
+        return self.ok and all(r.fully_sound for r in self.certificate_results)
 
 
 def _verify_paths(path_certs: list[PathCertificate], verified_finding_digests: set[str],
