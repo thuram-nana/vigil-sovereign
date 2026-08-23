@@ -134,6 +134,21 @@ class BrainThink:
                                             posture=self._posture)
         return self._body
 
+    def body(self):
+        """The ONE canonical ``HexstrikeAgentBody`` this adapter drives — the SAME instance used for
+        PLANNING (``_ensure_body().plan``). Public so the engine's ``run_tool`` seam can route a
+        gate-authorized tool through the body's own ``execute`` when the operator opts into
+        ``--brain-execute-via-body`` (H1x-1 — execute-path convergence).
+
+        FACT SEAM CLOSED by construction here: the body is built with NO ``RunnerDeps`` (runner defaults
+        to None), so ``HexstrikeAgentBody.execute`` returns an unexecuted LEAD ("runner not provisioned")
+        and can mint no FACT. Provisioning the runner so a tool mints its first live FACT (nmap
+        SERVICE_REACHABILITY) is the SEPARATE, operator-checkpoint-gated H8f slice — not this one.
+
+        Import is function-local (via ``_ensure_body``) for the same FATAL-2 reason as planning: the body
+        pulls the framework agent-body interface, available only in the offense leg where a run is driven."""
+        return self._ensure_body()
+
     def _observation(self, state: Any):
         """Normalize the engine's AgentState + the caller's charter/sensor seeds into the body's read-only
         ``Observation``. Target resolution is unchanged: the explicit ``target``, else the engagement's
