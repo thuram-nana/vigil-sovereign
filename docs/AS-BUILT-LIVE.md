@@ -175,8 +175,8 @@ vigil ledger who ; vigil ledger when ; vigil verify-ledger
 ```
 
 CI validates the whole loop: the injected-seam engine tests run in the main integration process
-(`test_engine.py`, 17 tests), and the live validation over the REAL gate + oracle runs in the offense
-process (`test_engine_live.py`, 5 tests, `PYTHONPATH=integration:engine/crucible:gateway`).
+(`test_engine.py`), and the live validation over the REAL gate + oracle runs in the offense
+process (`test_engine_live.py`, `PYTHONPATH=integration:engine/crucible:gateway`).
 
 ---
 
@@ -241,7 +241,8 @@ allowlist + WARDEN gate + owner approval decide.**
   parsed, gated, and **QUEUED** but never run; `--approve` upgrades the A2 queue to allow. Prints the
   `ExecResult` JSON and returns 0 iff it ran. **UI** — the **Terminal** screen (`renderTerminal`, DO group)
   with an *Ask in plain English* card (AI proposes → Run / Edit / Cancel), an *Or type a command* card (live
-  dryrun badge), a *SIGNED* output pane, and a read-only signed *history* — the **22nd** screen.
+  dryrun badge), a *SIGNED* output pane, and a read-only signed *history* — one of the UI's screens (the
+  authoritative count lives in the `NAV` allowlist and is pinned by `test_documented_commands_and_screen_count.py`).
 - **WARDEN-gating of the Strix `exec_command` shell** (T3): the vendored Strix agent's arbitrary shell is
   WARDEN-gated. T3 shipped it opt-in via `VIGIL_WARDEN_STRIX_GATE`; **#178 made it ON BY DEFAULT** and
   **#296 made it FAIL-CLOSED** — a wiring failure now raises `WardenGateUnavailable` and stops the run

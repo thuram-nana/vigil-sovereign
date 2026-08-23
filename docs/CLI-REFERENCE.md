@@ -3,13 +3,23 @@
 
 This page is the briefing's answer to two questions an operator and a reviewer both ask, and which the
 prose chapters left unanswered (limitations inventory §17.16 / §17.17): **what can I actually run, and
-what are the parts?** Every CRUCIBLE subcommand and every CRUCIBLE subsystem is listed here with a
-one-line, code-grounded description. It is kept honest by
-[`docs/tests/test_briefing_documents_every_subcommand.py`](tests/test_briefing_documents_every_subcommand.py),
-a **required** CI check (`the briefing explains every agent and capability`) that enumerates the
-subcommand table (`_DISPATCH` in `engine/crucible/framework/v2/__main__.py`) and the subsystem set (the
-importable sub-packages of `framework/v2`) **from the code** and fails the build when a new one is not
-documented here — or when this page documents one the code does not have.
+what are the parts?** Every command the product exposes is listed here with a one-line, code-grounded
+description, in three groups: the **`vigil` native verbs** (§C, 41 of them), the **passthrough verbs**
+that route into a subsystem's own CLI (§D, 5 of them — including `crucible`), and the **CRUCIBLE
+subcommands** reached through the `crucible` passthrough (§A, 32) plus the CRUCIBLE **subsystems** (§B).
+Together they are the ~78 invokable commands the acceptance criteria for W16-STD-7 name. Every CRUCIBLE
+subcommand and every CRUCIBLE subsystem is listed here with a one-line, code-grounded description.
+
+Both directions are kept honest by required CI checks (`the briefing explains every agent and capability`)
+that enumerate the command sets **from the code** and fail the build when a new one is undocumented — or
+when this page documents one the code does not have:
+
+- [`docs/tests/test_briefing_documents_every_subcommand.py`](tests/test_briefing_documents_every_subcommand.py)
+  pins §A/§B against the CRUCIBLE `_DISPATCH` dict (`engine/crucible/framework/v2/__main__.py`) and the
+  importable sub-packages of `framework/v2`.
+- [`docs/tests/test_w16_std7_docs_completeness.py`](tests/test_w16_std7_docs_completeness.py) pins §C/§D
+  against the `vigil` argparse sub-parsers (`integration/vigil_integration/cli.py`) and the passthrough
+  table (`integration/vigil_integration/dispatch.py` `PASSTHROUGH_VERBS`).
 
 ## How to invoke a subcommand
 
@@ -108,6 +118,80 @@ named so the briefing is not silent about half the system.
 | `verify` | Offline re-verification — re-fire the oracle over retained certs (`crucible verify` / `drift` / `plan-integrity` / `collaborator`). |
 | `worldmodel` | The asset topology / world model projected from the signed spine (drives `crucible attack-paths`). |
 
+<!-- CLAIM:W16-STD-7-vigil-cli-coverage -->
+## C. `vigil` native verbs (`vigil <name>`)
+
+These are the verbs the `vigil` super-CLI implements itself (the sub-parsers of
+`integration/vigil_integration/cli.py`). They run in-process on the sovereign/integration side (unlike the
+`crucible …` passthrough, which forwards to the offense engine). The set below is the authoritative list;
+a new sub-parser that is not documented here turns the required check red.
+
+| Verb | What it does |
+|---|---|
+| `vigil engage` | Run an engagement against an owner-authorized target (loopback or remote). |
+| `vigil engage-instruct` | Add a mid-run, natural-language instruction to a LIVE engagement (advisory). |
+| `vigil ledger` | Query the usage-attestation ledger (who / when). |
+| `vigil verify-ledger` | Verify the usage-attestation ledger's integrity. |
+| `vigil verify` | Verify the offense spine segments (per-segment, owner-tie-aware). |
+| `vigil verify-integrity` | Continuously verify the spine hash-chain integrity (chain, signed-head freshness, anti-rollback floor, clock skew). |
+| `vigil provision` | Mint + sign a CRUCIBLE authority for a loopback slug. |
+| `vigil identity` | Export the offense stable identity PUBLIC keys (spine + governance) for owner delegation. |
+| `vigil patch` | Run the gated auto-patch ladder over a provenance-grounded confirmed finding. |
+| `vigil remediate` | Run the four-state live remediation proof (`--prove`) over a provenance-grounded finding. |
+| `vigil reprove` | The continuous re-proof service — loop the four-state live re-proof on a cadence, appending signed results. |
+| `vigil floor` | The offense anti-rollback floor ↔ witnessed-checkpoint anchor (`floor witness …`). |
+| `vigil witness` | The deployable loopback witness co-sign service (`witness serve --port … --key …`). |
+| `vigil approve` | Per-action owner approval for offense tools — sub-verbs `provision-authority` \| `list` \| `sign`. |
+| `vigil enroll-cosigner` | (W9-5) Phase 1 — generate a destruction key locally + emit a PUBLIC enrolment request (pubkey + proof-of-possession). |
+| `vigil assemble-destruction` | (W9-5) Phase 2 — assemble the m-of-n trust root from public enrolment requests. |
+| `vigil request-destruction` | (W9-5) Coordinator — mint the shared unsigned authorization each signer signs detached. |
+| `vigil sign-destruction` | (W9-5) Per-signer — sign the shared request DETACHED with this host's key. |
+| `vigil combine-destruction` | (W9-5) Coordinator — combine per-host detached signatures into the single-use signed authorization. |
+| `vigil provision-destruction` | Mint the m-of-n destruction quorum keys for `vigil patch --open-pr` (prints keys once). |
+| `vigil authorize-destruction` | Sign ONE destructive action (from a `vigil patch` dry run) into the single-use signed authorization. |
+| `vigil proof-export` | Assemble a client-verifiable proof bundle from a run's oracle-confirmed FACTs (offline, zero-trust re-verify). |
+| `vigil dossier` | Compile everything a run produced into one self-contained, tamper-evident `.zip`. |
+| `vigil posture` | Certificate of Non-Exploitability — mint (`attest`), `verify` offline, or `serve` a signed posture bundle. |
+| `vigil detect` | Run the Detection Mirror over log files (the defensive oracle plane). |
+| `vigil up` | Bring the whole unified UI up at one origin (self-contained reverse proxy). |
+| `vigil down` | CONTAIN a running `vigil up`: stop + disable the systemd unit, then kill the backends + proxy. |
+| `vigil services` | Docker bring-up: create the egress gateway + qdrant/neo4j/otel services if none exist (idempotent). |
+| `vigil doctor` | Read-only readiness report: prerequisites (binaries, both venvs, writable dirs), UI ports, docker services. |
+| `vigil alerts` | Heartbeat-staleness alarms for every HA / scheduled unit (backup, off-host push, drill, HA sync, integrity, posture, reprove). |
+| `vigil unit-heartbeat` | Record that a scheduled unit ran (a systemd `ExecStopPost` hook the alerts monitor reads). |
+| `vigil telemetry` | Live assurance/metrics collector over the signed spine (G2): fact/lead/refusal/tool snapshots. |
+| `vigil panic` | EMERGENCY HARD-STOP: trip every engagement's kill-switch, then mask + stop the command unit and every cadence sidecar. |
+| `vigil emergency-stop` | Enter RESTRICTED MODE — a safe landing state between fully-operational and `vigil panic`. |
+| `vigil backup` | Off-box backup of BOTH planes → two SEPARATE encrypted files (never a merged archive). |
+| `vigil restore` | Restore a two-plane `vigil backup` dir — refuses an unsigned manifest, authenticates against the host trust anchor by default. |
+| `vigil upgrade` | Automated crash-safe data migration of the sovereign spine: backup → verify → migrate → verify → report, with rollback. |
+| `vigil knowledge` | Operator-gated sync of the living `knowledge/` folder to git (regenerate + secret-scan + commit). |
+| `vigil learn-drain` | Drain the sovereign→offense learn-grant spool (the K2b→K3 deep-learn bridge; fail-closed). |
+| `vigil sandbox` | Run an arbitrary command inside a network-isolated, workspace-confined bwrap sandbox (A3 → queued for approval). |
+| `vigil terminal` | Run a governed LOCAL read/inspect command through the gate (A2 → queued for approval, never auto). |
+
+## D. Passthrough verbs (route into a subsystem's own CLI)
+
+`vigil <verb> …` for these five verbs does not run in-process — it EXECs the subsystem's own console-script
+in that subsystem's isolated environment (`integration/vigil_integration/dispatch.py` `PASSTHROUGH_VERBS`),
+so the two trust domains are never co-loaded in one interpreter.
+
+| Verb | Routes to |
+|---|---|
+| `vigil crucible` | The offense engine — every CRUCIBLE subcommand in §A (`vigil crucible engage`, `vigil crucible scan`, …). |
+| `vigil sigil` | The sovereign personal core (holds the owner key). |
+| `vigil aegis` | The AEGIS defensive dual (`detect` / `gateway` / `demo`). |
+| `vigil strix` | The vendored agent body, run through the VIGIL runtime adapter (sandbox-net pin, model/sovereignty gate). |
+| `vigil gateway` | The host egress gate. |
+
+## E. The HTTP API and the web surfaces
+
+CRUCIBLE also exposes an HTTP surface (`crucible api`, the loopback gated API) and several dedicated web
+surfaces (the `vigil up` command-UI proxy, the Ops Console, the AEGIS gateway, the posture endpoint, the
+witness service, the MCP server). All of them are documented in [`docs/HTTP-API.md`](HTTP-API.md).
+
 For the full behaviour and honest scope of each, see [`docs/FEATURES.md`](FEATURES.md) and
 [`docs/AS-BUILT.md`](AS-BUILT.md); for the deferred pieces and their activation runbooks see
-[`docs/DEFERRED-INFRA.md`](DEFERRED-INFRA.md).
+[`docs/DEFERRED-INFRA.md`](DEFERRED-INFRA.md). For a map of the whole documentation set see
+[`docs/INDEX.md`](INDEX.md); for a plain-language dictionary of the terms above see
+[`docs/GLOSSARY.md`](GLOSSARY.md).

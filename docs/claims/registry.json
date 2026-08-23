@@ -1371,6 +1371,134 @@
       "ci_job": "the briefing explains every agent and capability",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W16-STD-7-http-api",
+      "title": "The HTTP API chapter documents exactly the routes the code serves",
+      "claim": "Every route the server actually declares is listed below with its method and effect.",
+      "source": "docs/HTTP-API.md:1",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "symbol": "documented_http_routes"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "tests": [
+          "test_every_http_route_is_documented",
+          "test_no_documented_http_route_is_fictional",
+          "test_negative_control_removing_a_documented_http_route_from_code_turns_red",
+          "test_negative_control_a_new_undocumented_http_route_is_caught"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-7-docs-index",
+      "title": "The docs INDEX links every top-level doc and every link resolves",
+      "claim": "every top-level `docs/*.md` must be linked here, and every top-level `*.md` this page links to must exist",
+      "source": "docs/INDEX.md:1",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "symbol": "index_bare_md_links"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "tests": [
+          "test_index_lists_every_top_level_doc",
+          "test_index_links_resolve",
+          "test_negative_control_a_new_undocumented_top_level_doc_is_caught",
+          "test_negative_control_a_broken_index_link_is_caught"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-7-glossary",
+      "title": "The GLOSSARY defines the core terms the docs rely on",
+      "claim": "A floor set of the core terms is pinned by [`docs/tests/test_w16_std7_docs_completeness.py`](tests/test_w16_std7_docs_completeness.py) so this page cannot silently lose a term the rest of the docs rely on.",
+      "source": "docs/GLOSSARY.md:1",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "symbol": "_glossary_missing"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "tests": [
+          "test_glossary_defines_the_core_terms",
+          "test_negative_control_glossary_missing_term_is_caught"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-7-vigil-cli-coverage",
+      "title": "Every vigil native verb and passthrough verb is documented (bidirectional)",
+      "claim": "The set below is the authoritative list;\na new sub-parser that is not documented here turns the required check red.",
+      "source": "docs/CLI-REFERENCE.md:121",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "symbol": "documented_vigil_verbs"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "tests": [
+          "test_every_vigil_native_verb_is_documented",
+          "test_every_passthrough_verb_is_documented",
+          "test_no_documented_vigil_verb_is_fictional",
+          "test_negative_control_a_new_undocumented_vigil_verb_is_caught",
+          "test_negative_control_a_fictional_vigil_verb_is_caught"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-7-licensing-surface",
+      "title": "The public-sector licensing exclusion is surfaced where a buyer sees it",
+      "claim": "Government & public-sector use of VIGIL\n> is **EXCLUDED from the free noncommercial grant** and requires a **Commercial License**",
+      "source": "docs/pilot/README.md:1",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "symbol": "_licensing_violations"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "tests": [
+          "test_public_sector_exclusion_is_surfaced_for_buyers",
+          "test_negative_control_licensing_absence_is_caught"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-7-rederived-drift",
+      "title": "The re-derived doc-vs-code drift batch stays corrected",
+      "claim": "A further batch of doc-vs-code drifts, re-derived by auditing README/AS-BUILT against\nthe code at this HEAD, is corrected to match the code, and a required test fails the build if any re-opens",
+      "source": "docs/decisions/W16-STD-7-docs-completeness.md:1",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "symbol": "drift_code_fact_violations"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "tests": [
+          "test_no_rederived_drift_reopened",
+          "test_negative_control_a_returned_forbidden_phrase_is_flagged",
+          "test_negative_control_a_missing_anchor_is_flagged"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
