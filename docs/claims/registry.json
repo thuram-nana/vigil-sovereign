@@ -1255,6 +1255,34 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W11-7",
+      "title": "A chaos-and-failover suite pins the spine's documented behaviour; a byzantine witness that violates quorum-intersection is rejected",
+      "claim": "The chaos-and-failover suite proves the single-writer sovereign spine's DOCUMENTED behaviour under network partition, clock skew, a byzantine witness, and torn-page injection; in particular a byzantine witness set that meets a signing quorum but violates the strict-majority quorum-intersection rule is REJECTED by is_split_view_resistant, so verify_witnessed can pass while verify_split_view_resistant fails.",
+      "source": "docs/decisions/W11-7-chaos-failover-suite.md:57",
+      "enforced_by": {
+        "file": "integration/vigil_integration/transparency.py",
+        "symbol": "is_split_view_resistant"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_chaos_failover.py",
+        "tests": [
+          "test_partition_split_brain_fork_is_detected_and_refused",
+          "test_clock_skew_future_dated_anchor_refused",
+          "test_clock_skew_stale_anchor_refused_fresh_accepted",
+          "test_byzantine_witness_equivocation_is_refused_by_an_honest_witness",
+          "test_byzantine_witness_violating_quorum_intersection_is_rejected",
+          "test_torn_page_tail_is_repaired_and_append_not_lost",
+          "test_torn_page_middle_is_rejected_not_silently_short_read",
+          "test_chaos_suite_runs_on_a_schedule",
+          "test_scheduled_chaos_failure_alerts",
+          "test_ha_profile_non_claim_and_symbols_are_true_of_the_code"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
