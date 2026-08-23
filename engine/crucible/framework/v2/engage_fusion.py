@@ -1208,7 +1208,7 @@ def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
         if isinstance(ctx, dict):
             ctx["inconclusive_surfaces"] = inconclusive_surfaces
         else:
-            setattr(ctx, "inconclusive_surfaces", inconclusive_surfaces)
+            ctx.inconclusive_surfaces = inconclusive_surfaces
     except Exception:
         pass   # a read-only/exotic ctx never sinks the fusion pass
     return minted
