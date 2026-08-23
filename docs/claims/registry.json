@@ -584,6 +584,26 @@
       "ci_job": "the briefing explains every agent and capability",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W3-3",
+      "title": "Every GitHub Action in every workflow is SHA-pinned (drift-checked)",
+      "claim": "Every `uses:` in every workflow under `.github/workflows/` is pinned to a full 40-char commit SHA, and a drift check fails on any tag or branch ref",
+      "source": "docs/decisions/W3-3-sha-pin-every-workflow-action.md:8",
+      "enforced_by": {
+        "file": "integration/tests/test_supply_chain.py",
+        "symbol": "_unpinned_action_uses"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_supply_chain.py",
+        "tests": [
+          "test_every_workflow_action_is_sha_pinned",
+          "test_sha_pin_gate_rejects_a_tag_pinned_workflow"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
