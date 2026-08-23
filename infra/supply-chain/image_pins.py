@@ -13,9 +13,14 @@ This module is the single source of truth for that rule. It has four users:
   2. ``python3 infra/supply-chain/image_pins.py --check`` — the same assertion as a CLI, run by
      the "A14 supply-chain gate" CI job.
   3. ``python3 infra/supply-chain/image_pins.py --drift`` — the only networked mode. Re-resolves
-     each pinned TAG against the registry and reports where upstream has moved on. Advisory by
-     design: upstream retagging is not the fault of the PR being tested, so it must not turn a
-     contributor's build red. It exits 0 unless it is asked to do otherwise.
+     each pinned TAG against the registry and reports where upstream has moved on. Its outcome is
+     three-valued, never two (W3-8, issue #431): a pin whose registry the resolver CAN query and
+     which has MOVED is real, resolvable drift; a pin on a registry the resolver CANNOT query
+     (anything but Docker Hub) is an explicit UNKNOWN, surfaced and counted, NEVER a silent pass.
+     With ``--fail-on-drift`` (what the "A14 supply-chain gate" runs) resolvable drift BLOCKS the
+     job; the UNKNOWNs are reported — to stdout and to the GitHub step summary — but do not block,
+     because a gate cannot honestly fail on a state it could not check. ``--fail-on-unknown``
+     tightens that for an operator who wants the strictest posture.
   4. ``python3 infra/supply-chain/image_pins.py --runtime-check`` — the RUNTIME visibility gate
      (issue #511 / W5-6). The two scanners above see only DECLARED images; they cannot see the
      image the gateway is ACTUALLY running. This mode content-addresses the gateway build context,
@@ -56,6 +61,39 @@ _SCRATCH = "scratch"
 FIRST_PARTY_IMAGE_PREFIXES = ("vigil-gateway", "vigil/")
 
 DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
+
+#: The registry hosts the drift resolver can query. Docker Hub is the ONLY registry with a stable,
+#: unauthenticated tag->digest endpoint this module uses; anything else is honestly reported UNKNOWN
+#: rather than presented as a pass (W3-8, issue #431). These are the canonical spellings of Hub.
+_HUB_HOSTS = frozenset({"docker.io", "registry-1.docker.io", "index.docker.io"})
+
+
+def _parse_ref(ref: str) -> tuple[str, str | None, str, str, str | None]:
+    """Split a container reference into (ref, registry_host, repo_path, tag, digest).
+
+    ``[registry[:port]/]repository[:tag][@digest]``. The registry host is the first ``/``-separated
+    component IFF it looks like a host (contains ``.`` or ``:``, or is ``localhost``); otherwise the
+    ref is a Docker Hub name with no explicit registry. The tag is the last ``:``-delimited segment
+    of what remains AFTER the registry (so a registry port is never mistaken for a tag). Pure/stdlib.
+    """
+    rest = ref
+    digest: str | None = None
+    m = DIGEST_RE.search(rest)
+    if m:
+        digest = m.group(0)[1:]
+        rest = rest[: m.start()]
+
+    registry: str | None = None
+    if "/" in rest:
+        first, remainder = rest.split("/", 1)
+        if first == "localhost" or "." in first or ":" in first:
+            registry, rest = first, remainder
+
+    if ":" in rest:
+        repo_path, tag = rest.rsplit(":", 1)
+    else:
+        repo_path, tag = rest, "latest"
+    return ref, registry, repo_path, tag, digest
 
 # --------------------------------------------------------------------------------------
 # Runtime image visibility (issue #511 / W5-6)
@@ -239,20 +277,42 @@ class ImageRef:
         return self.ref.startswith(FIRST_PARTY_IMAGE_PREFIXES)
 
     @property
+    def registry_host(self) -> str | None:
+        """The registry hostname, or None when the ref uses Docker Hub's implicit default.
+
+        A reference is ``[registry[:port]/]repository[:tag][@digest]``. The first ``/``-separated
+        component is a REGISTRY only if it looks like a host — it contains a ``.`` or a ``:`` (a
+        port), or is literally ``localhost``. ``ghcr.io/o/i`` and ``myreg:5000/i`` have a registry;
+        ``python`` and ``owner/image`` do not (they are Docker Hub)."""
+        _, host, _, _, _ = _parse_ref(self.ref)
+        return host
+
+    @property
+    def is_docker_hub(self) -> bool:
+        """True iff this ref resolves on Docker Hub — the only registry the drift resolver queries."""
+        host = self.registry_host
+        return host is None or host in _HUB_HOSTS
+
+    @property
     def repository(self) -> str:
-        """`python:3.13-slim@sha256:..` -> `library/python` (Docker Hub form)."""
-        name = self.ref.split("@", 1)[0].split(":", 1)[0]
-        return name if "/" in name else f"library/{name}"
+        """`python:3.13-slim@sha256:..` -> `library/python` (Docker Hub form).
+
+        For a non-Hub ref the registry host is stripped and the path returned verbatim; it is not a
+        Hub repository and the drift resolver never queries it (it is reported UNKNOWN instead)."""
+        _, host, path, _, _ = _parse_ref(self.ref)
+        if host is not None and host not in _HUB_HOSTS:
+            return path
+        return path if "/" in path else f"library/{path}"
 
     @property
     def tag(self) -> str:
-        name = self.ref.split("@", 1)[0]
-        return name.split(":", 1)[1] if ":" in name else "latest"
+        _, _, _, tag, _ = _parse_ref(self.ref)
+        return tag
 
     @property
     def digest(self) -> str | None:
-        m = DIGEST_RE.search(self.ref)
-        return m.group(0)[1:] if m else None
+        _, _, _, _, digest = _parse_ref(self.ref)
+        return digest
 
 
 # --------------------------------------------------------------------------------------
@@ -455,6 +515,166 @@ def resolve_hub_digest(repository: str, tag: str, timeout: int = 30) -> str | No
         return None
 
 
+# --------------------------------------------------------------------------------------
+# Drift EVALUATION — three-valued, resolver-injected, and pure (so it is testable OFFLINE).
+# The live resolver is the only networked seam; `evaluate_drift` never touches the network, so a
+# negative control can prove the gate fires with a fake resolver and no PyPI/registry dependency.
+# --------------------------------------------------------------------------------------
+
+#: A pinned tag's drift outcome. Exactly one applies to each pinned, non-first-party ref.
+DRIFT_MATCH = "match"                       # pin equals the live digest — nothing to do
+DRIFT_MOVED = "drifted"                     # RESOLVABLE registry, pin no longer matches — this BLOCKS
+DRIFT_UNKNOWN_REGISTRY = "unknown-registry"  # registry the resolver cannot query — explicit UNKNOWN
+DRIFT_UNKNOWN_NETWORK = "unknown-network"    # resolver-capable registry it could not reach — UNKNOWN
+
+_UNKNOWN = (DRIFT_UNKNOWN_REGISTRY, DRIFT_UNKNOWN_NETWORK)
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """What a resolver could determine about one pinned tag's CURRENT digest.
+
+    ``supported`` answers "can this resolver even query this ref's registry?" — the distinction the old
+    two-valued ``??`` collapsed. A False ``supported`` is a KNOWN limitation (non-Hub registry), not a
+    transient failure; ``supported`` True with ``digest`` None is a transient/lookup failure.
+    """
+
+    supported: bool
+    digest: str | None = None
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class DriftResult:
+    """The per-ref verdict `evaluate_drift` produces. ``status`` is one of the DRIFT_* constants."""
+
+    ref: ImageRef
+    status: str
+    current: str | None = None
+    detail: str = ""
+
+    @property
+    def is_drift(self) -> bool:
+        return self.status == DRIFT_MOVED
+
+    @property
+    def is_unknown(self) -> bool:
+        return self.status in _UNKNOWN
+
+
+def hub_resolver(ref: ImageRef, timeout: int = 30) -> Resolution:
+    """The live resolver: Docker Hub only. A non-Hub ref is UNSUPPORTED (an honest UNKNOWN), never a
+    silent pass; a Hub ref that fails to resolve is a network/lookup UNKNOWN."""
+    if not ref.is_docker_hub:
+        return Resolution(
+            supported=False,
+            error=f"registry {ref.registry_host!r} is not queryable by the drift resolver "
+                  "(Docker Hub only); pin currency for this registry is UNKNOWN, re-checked offline "
+                  "against the committed digest by --check",
+        )
+    digest = resolve_hub_digest(ref.repository, ref.tag, timeout=timeout)
+    if digest is None:
+        return Resolution(
+            supported=True,
+            error="Docker Hub returned no digest for this tag (a deleted/renamed tag, rate-limiting, "
+                  "or a network error)",
+        )
+    return Resolution(supported=True, digest=digest)
+
+
+def evaluate_drift(refs, resolver) -> list[DriftResult]:
+    """Classify every pinned, non-first-party ref into MATCH / DRIFTED / UNKNOWN. Pure: all network
+    lives in ``resolver`` (``hub_resolver`` in production, a stub in tests)."""
+    out: list[DriftResult] = []
+    for r in refs:
+        if r.is_first_party or not r.is_digest_pinned:
+            continue
+        res = resolver(r)
+        if not res.supported:
+            out.append(DriftResult(r, DRIFT_UNKNOWN_REGISTRY, detail=res.error))
+        elif res.digest is None:
+            out.append(DriftResult(r, DRIFT_UNKNOWN_NETWORK, detail=res.error))
+        elif res.digest == r.digest:
+            out.append(DriftResult(r, DRIFT_MATCH, current=res.digest))
+        else:
+            out.append(DriftResult(r, DRIFT_MOVED, current=res.digest,
+                                   detail="pinned digest no longer matches the live tag"))
+    return out
+
+
+def _drift_summary_markdown(results: list[DriftResult]) -> str:
+    """A GitHub step-summary block: resolvable drift and — the point of W3-8 — the explicit UNKNOWNs,
+    so an unqueryable registry is VISIBLE in the run, never a silent pass."""
+    drifted = [d for d in results if d.is_drift]
+    unknown = [d for d in results if d.is_unknown]
+    matched = [d for d in results if d.status == DRIFT_MATCH]
+    lines = ["## A14 base-image drift (W3-8)", ""]
+    lines.append(f"- resolvable & up-to-date: **{len(matched)}**")
+    lines.append(f"- resolvable & DRIFTED (blocking): **{len(drifted)}**")
+    lines.append(f"- UNKNOWN (registry not queryable / unreachable): **{len(unknown)}**")
+    if drifted:
+        lines += ["", "### Resolvable drift — BLOCKING", ""]
+        for d in drifted:
+            lines.append(f"- `{d.ref.source}:{d.ref.line}` {d.ref.repository}:{d.ref.tag} — "
+                         f"pinned `{d.ref.digest}` → live `{d.current}`")
+    if unknown:
+        lines += ["", "### UNKNOWN — not a pass, could not be checked", ""]
+        for d in unknown:
+            lines.append(f"- `{d.ref.source}:{d.ref.line}` {d.ref.ref} — {d.detail}")
+    return "\n".join(lines) + "\n"
+
+
+def run_drift(refs, resolver, *, fail_on_drift: bool, fail_on_unknown: bool = False,
+              summary_path=None) -> int:
+    """Print the three-valued drift report, optionally append a GitHub step summary, and return the
+    exit code: resolvable drift blocks under ``--fail-on-drift``; UNKNOWNs block only under
+    ``--fail-on-unknown`` — otherwise they are surfaced loudly but do not fail a build for a check
+    that could not run."""
+    results = evaluate_drift(refs, resolver)
+    drifted = [d for d in results if d.is_drift]
+    unsupported = [d for d in results if d.status == DRIFT_UNKNOWN_REGISTRY]
+    unresolved = [d for d in results if d.status == DRIFT_UNKNOWN_NETWORK]
+    matched = [d for d in results if d.status == DRIFT_MATCH]
+
+    print("\nA14 image-pin DRIFT report — resolvable drift BLOCKS; other registries are explicit "
+          "UNKNOWN, never a silent pass (W3-8)\n")
+    for d in results:
+        if d.status == DRIFT_MATCH:
+            print(f"  ok  {d.ref.source}:{d.ref.line} {d.ref.repository}:{d.ref.tag} — pin matches the live tag")
+        elif d.is_drift:
+            print(f"  !!  {d.ref.source}:{d.ref.line} {d.ref.repository}:{d.ref.tag} has MOVED (resolvable — BLOCKING)")
+            print(f"        pinned:  {d.ref.digest}")
+            print(f"        current: {d.current}")
+        else:
+            label = "UNKNOWN (registry not queryable)" if d.status == DRIFT_UNKNOWN_REGISTRY \
+                else "UNKNOWN (could not reach registry)"
+            print(f"  ??  {d.ref.source}:{d.ref.line} {d.ref.ref} — {label}: {d.detail}")
+
+    print(f"\nresolvable up-to-date: {len(matched)}   resolvable DRIFTED: {len(drifted)}   "
+          f"UNKNOWN: {len(unsupported) + len(unresolved)} "
+          f"({len(unsupported)} unqueryable registry, {len(unresolved)} unreachable)")
+
+    if summary_path:
+        try:
+            with open(summary_path, "a", encoding="utf-8") as fh:
+                fh.write(_drift_summary_markdown(results))
+        except OSError as exc:
+            print(f"  [warn] could not write drift summary to {summary_path}: {exc}", file=sys.stderr)
+
+    code = 0
+    if drifted:
+        print("\nResolvable drift is BLOCKING: re-pin deliberately (read the upstream changelog first), "
+              "then commit the new image:tag@sha256:<digest>.")
+        if fail_on_drift:
+            code = 1
+    if unsupported or unresolved:
+        print("UNKNOWN registries are reported, not silently passed. They cannot be auto-checked; verify "
+              "their pins by hand or set --fail-on-unknown for the strictest posture.")
+        if fail_on_unknown:
+            code = 1
+    return code
+
+
 def _runtime_check(root: Path, *, pin_path=None, production: bool = False) -> int:
     """The A14 RUNTIME-visibility gate (issue #511). Re-derive the gateway context digest, read the recorded
     pin, read the running container's image id, and prove they line up. LOUD on failure; fatal (non-zero)
@@ -494,7 +714,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--fail-on-drift",
         action="store_true",
-        help="make --drift exit non-zero (NOT used by CI: upstream retags are not the PR's fault)",
+        help="make --drift exit non-zero on RESOLVABLE drift (a Docker Hub pin that has moved). This "
+             "IS what the A14 gate runs (W3-8): resolvable drift blocks; UNKNOWN registries do not.",
+    )
+    ap.add_argument(
+        "--fail-on-unknown",
+        action="store_true",
+        help="also exit non-zero when any pin's registry could not be queried (strictest posture). "
+             "Off by default: a gate cannot honestly fail on a state it could not check.",
+    )
+    ap.add_argument(
+        "--summary-file",
+        default=None,
+        help="append a markdown drift summary here (default: $GITHUB_STEP_SUMMARY when set), so "
+             "UNKNOWN registries are visible in the job summary and never a silent pass.",
     )
     ap.add_argument(
         "--runtime-check",
@@ -548,26 +781,15 @@ def main(argv: list[str] | None = None) -> int:
         print("\nAll registry images are digest-pinned.")
 
     if args.drift:
-        print("\nA14 image-pin DRIFT report (advisory — upstream retags are not this PR's fault)\n")
-        drifted = 0
-        for r in refs:
-            if r.is_first_party or not r.is_digest_pinned:
-                continue
-            current = resolve_hub_digest(r.repository, r.tag)
-            if current is None:
-                print(f"  ??  {r.source}:{r.line} {r.repository}:{r.tag} — could not resolve (non-Hub registry, or network)")
-            elif current == r.digest:
-                print(f"  ok  {r.source}:{r.line} {r.repository}:{r.tag} — pin matches the live tag")
-            else:
-                drifted += 1
-                print(f"  !!  {r.source}:{r.line} {r.repository}:{r.tag} has MOVED")
-                print(f"        pinned:  {r.digest}")
-                print(f"        current: {current}")
-        print(f"\n{drifted} tag(s) have moved since they were pinned.")
-        if drifted:
-            print("This is informational. Re-pin deliberately (and read the upstream changelog first).")
-            if args.fail_on_drift:
-                return 1
+        summary_path = args.summary_file or os.environ.get("GITHUB_STEP_SUMMARY")
+        drift_code = run_drift(
+            refs, hub_resolver,
+            fail_on_drift=args.fail_on_drift,
+            fail_on_unknown=args.fail_on_unknown,
+            summary_path=summary_path,
+        )
+        if drift_code:
+            return drift_code
     return 0
 
 

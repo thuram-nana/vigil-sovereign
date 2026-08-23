@@ -1,0 +1,34 @@
+# env-build-backends — the PEP 517 BUILD backends, hash-locked (W3-10 #433).
+#
+# THE GAP THIS CLOSES. Every first-party member is built through a PEP 517 backend declared in its
+# pyproject.toml `[build-system].requires`: hatchling (integration, gateway, vigil_core, vendor/strix),
+# setuptools + wheel (engine/crucible), and setuptools + wheel + setuptools-rust (apps/sigil — the Rust
+# WARDEN kernel). Under build isolation pip/uv fetch those backends FRESH from the index, unpinned and
+# unhashed — a build-time supply-chain hole every bit as real as an unpinned runtime dep, and one that
+# executes code (the backend runs to produce the wheel). This file is the source spec; the fully
+# resolved, hash-pinned closure lives beside it at build-backends.lock.txt and is what the build uses.
+#
+# HOW THE BUILD USES IT. envs/build_envs.sh installs this lock FIRST under `pip/uv --require-hashes`
+# (which refuses the whole file if a single line is unpinned or unhashed), then builds every member with
+# `--no-build-isolation` so the backend comes from these exact pins instead of a fresh index fetch. A
+# hashed CONSTRAINT was the obvious mechanism but is wrong here: any hash in PIP_CONSTRAINT flips pip
+# into require-hashes mode for the OUTER install too, which then refuses the editable member ("no single
+# file to hash"). Pre-install + `--no-build-isolation` pins the backends with hashes AND keeps `-e`.
+#
+# `editables` is listed because hatchling pulls it to produce an editable (`pip install -e`) install.
+# `setuptools` is pinned via --allow-unsafe (pip-tools treats it as "unsafe" and skips it by default),
+# because it IS a declared build backend here and must be hash-locked like any other. Regenerate from
+# the repo root under Python 3.13 (the minor the runtime locks target):
+#
+#     pip install pip-tools==7.6.1
+#     pip-compile --generate-hashes --no-header --no-annotate --strip-extras --allow-unsafe \
+#        --output-file=infra/supply-chain/build-backends.lock.txt infra/supply-chain/build-backends.in
+#
+# integration/tests/test_supply_chain.py asserts this lock is fully hash-pinned and covers every backend
+# declared in every pyproject `[build-system].requires`; the "A14 supply-chain gate" proves it installs
+# under --require-hashes.
+hatchling
+editables
+setuptools>=61
+wheel
+setuptools-rust>=1.9
