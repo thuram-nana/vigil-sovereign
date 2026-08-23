@@ -1,0 +1,152 @@
+# Scheduled CHAOS AND FAILOVER suite (W11-7, #488) — the cadence + alerting layer.
+#
+# WHAT THIS ADDS. The deterministic chaos/failover suite (apps/sigil/tests/test_chaos_failover.py) already
+# runs REQUIRED per-PR inside "SIGIL governor gates (P7 — offense gate + authn)". This workflow adds the two
+# things a per-PR gate cannot give a live-running system:
+#   1. a CADENCE — it runs nightly, so a regression in the single-writer spine's partition / clock-skew /
+#      byzantine-witness / torn-page behaviour surfaces on its own, with no PR needed; and
+#   2. an ALERT — when the suite FAILS, it OPENS A GITHUB ISSUE (#467: a failing scheduled guardrail must
+#      surface, never sit silently red). The alert DECISION is the pure, unit-tested
+#      .github/scripts/chaos_alert.py, so "failures alert" is falsifiable in code, not buried in an `if:`.
+#
+# SCHEDULE/DISPATCH ONLY — NOT a PR check. It never reports on a pull_request (so it is registered in the
+# KNOWN_NONPR_ADVISORY ledger of docs/tests/test_required_checks_canonical.py, not required); the blocking
+# per-PR guarantee is the P7 job. Third-party actions are pinned to full commit SHAs (the same pins the
+# other workflows use; integration/tests/test_supply_chain.py asserts every `uses:` stays SHA-pinned).
+#
+# HONEST SPLIT. The FAST, deterministic, negative-controlled suite runs here AND in the required P7 job.
+# The genuinely HEAVIER chaos — a multi-process split-brain (VIGIL_CHAOS_HEAVY=1, deselected on the PR
+# runner) and the SIGKILL crash-fuzz torn-page harness — runs ONLY here, honestly labelled as the heavy leg.
+
+name: scheduled-chaos-failover
+
+on:
+  schedule:
+    - cron: "0 4 * * *"        # nightly, 04:00 UTC (distinct from livefire 03:00 and supply-chain 06:00)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "run the suite and decide, but never open an issue"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+  issues: write               # only exercised on the schedule/dispatch alert step (see its `if:`)
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  scheduled-chaos:
+    name: scheduled chaos + failover suite (nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SIGIL_HOME: /tmp/sigil-chaos
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: install vigil_core + SIGIL deps (hash-locked) — mirrors the required P7 install
+        run: |
+          set -euo pipefail
+          # Same install the required SIGIL governor (P7) job uses, so the suite imports identically here.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+
+      # ------------------------------------------------------------------------------
+      # NEGATIVE CONTROL — prove the ALERT path fires on a KNOWN failure, before trusting a green run.
+      # chaos_alert with a nonzero exit MUST decide to alert; --expect-alert makes this step fail if it
+      # does not. This never opens an issue (it only exercises the decision), so it is safe on every run.
+      # ------------------------------------------------------------------------------
+      - name: negative control — the alert decision fires on a failed run
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/chaos_alert.py --exit-code 1 --expect-alert
+          # and the converse: a passing run must NOT alert (asserted by the required unit test too).
+          if python3 .github/scripts/chaos_alert.py --exit-code 0 --expect-alert; then
+            echo "::error::alert decision fired on a PASSING run (exit 0) — negative control failed"; exit 1
+          fi
+          echo "alert-decision negative control OK: fail→alert, pass→no-alert"
+
+      # ------------------------------------------------------------------------------
+      # THE DETERMINISTIC SUITE — the same four-scenario, negative-controlled suite the P7 job runs.
+      # Capture its exit code (do not fail the job yet) so the alert decision + issue-open can run first.
+      # ------------------------------------------------------------------------------
+      - name: run the deterministic chaos + failover suite
+        id: suite
+        run: |
+          set +e
+          mkdir -p /tmp/sigil-chaos
+          PYTHONPATH=apps/sigil:integration python -m pytest apps/sigil/tests/test_chaos_failover.py -rs -q
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      # ------------------------------------------------------------------------------
+      # THE HEAVY LEG — scheduled-only. A real multi-process split-brain (VIGIL_CHAOS_HEAVY=1 selects the
+      # test that is deselected on the PR runner) plus the SIGKILL crash-fuzz torn-page harness. Best-effort
+      # and honestly labelled: a heavy-leg failure is folded into the alert decision below, not hidden.
+      # ------------------------------------------------------------------------------
+      - name: run the heavy chaos leg (multi-process split-brain + crash-fuzz torn-page)
+        id: heavy
+        run: |
+          set +e
+          VIGIL_CHAOS_HEAVY=1 PYTHONPATH=apps/sigil:integration python -m pytest -rs -q \
+            apps/sigil/tests/test_chaos_failover.py::test_partition_multiprocess_split_brain_heavy \
+            apps/sigil/tests/test_spine_crashfuzz.py
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      # ------------------------------------------------------------------------------
+      # DECIDE whether to alert (any leg nonzero → alert), and build the issue title/body.
+      # ------------------------------------------------------------------------------
+      - name: decide whether to alert
+        id: decide
+        run: |
+          set -euo pipefail
+          worst=${{ steps.suite.outputs.exit_code }}
+          if [ "${{ steps.heavy.outputs.exit_code }}" != "0" ]; then worst=${{ steps.heavy.outputs.exit_code }}; fi
+          python3 .github/scripts/chaos_alert.py \
+            --exit-code "$worst" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      # Open the issue ONLY on the schedule (or a non-dry-run dispatch) AND only when a leg failed. gh is
+      # first-party and pre-installed on the runner.
+      - name: open an alert issue on a chaos failure
+        if: >-
+          (github.event_name == 'schedule' ||
+           (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true')) &&
+          steps.decide.outputs.alert == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_TITLE: ${{ steps.decide.outputs.issue_title }}
+          ISSUE_BODY: ${{ steps.decide.outputs.issue_body }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${ISSUE_BODY}" > /tmp/chaos-issue-body.md
+          gh label create chaos-failover --repo "${{ github.repository }}" --color b60205 \
+            --description "chaos + failover scheduled suite" --force >/dev/null 2>&1 || true
+          gh label create ha --repo "${{ github.repository }}" --color ededed \
+            --description "high availability" --force >/dev/null 2>&1 || true
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "${ISSUE_TITLE}" \
+            --body-file /tmp/chaos-issue-body.md \
+            --label "chaos-failover" \
+            --label "ha"
+
+      # Finally, make the WORKFLOW itself red if any leg failed, so a re-run/history shows the failure too
+      # (the issue is the push alert; a red run is the pull signal).
+      - name: fail the job if any chaos leg failed
+        if: steps.decide.outputs.alert == 'true'
+        run: |
+          echo "::error::a chaos/failover leg failed (suite=${{ steps.suite.outputs.exit_code }}, heavy=${{ steps.heavy.outputs.exit_code }})"
+          exit 1

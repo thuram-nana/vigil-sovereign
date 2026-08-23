@@ -139,6 +139,12 @@ KNOWN_NONPR_ADVISORY: dict[str, str] = {
     "publish to PyPI (opt-in, trusted publishing)": (
         "release.yml — push-triggered and opt-in (vars.PUBLISH_TO_PYPI); it never reports on a PR."
     ),
+    "scheduled chaos + failover suite (nightly)": (
+        "scheduled-chaos-failover.yml (W11-7 #488) — schedule/workflow_dispatch only; it never reports on "
+        "a PR, so requiring it would block every PR. It adds a nightly cadence + failure alerting (opens an "
+        "issue) over the chaos suite whose blocking per-PR guarantee is the REQUIRED "
+        "'SIGIL governor gates (P7 — offense gate + authn)' job (which runs apps/sigil/tests/ in whole)."
+    ),
 }
 
 # W0-2 (#397): "Where a job is legitimately non-blocking (nightly), split the blocking subset out into
