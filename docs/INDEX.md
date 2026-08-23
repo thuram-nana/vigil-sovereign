@@ -42,6 +42,8 @@ then the [CLI & subsystem reference](CLI-REFERENCE.md) (what you can run), then 
 | [POSTURE.md](POSTURE.md) | The security posture of the system. |
 | [ENFORCEMENT-COVERAGE-MATRIX.md](ENFORCEMENT-COVERAGE-MATRIX.md) | Which claims are enforced by which required check. |
 | [CLAIM-DISCIPLINE.md](CLAIM-DISCIPLINE.md) | The rule: an audited overclaim is built up, never softened. |
+| [claim-audit.md](claim-audit.md) | The claim-vs-enforcement audit — every enforcement-flavoured claim graded TRUE / SCOPED / FALSE / UNVERIFIABLE against the code. |
+| [DELIBERATE-REFUSALS.md](DELIBERATE-REFUSALS.md) | The seven deliberate refusals, stated as strengths, each paired with the code that enforces it. |
 | [TRUTHENOVATION.md](TRUTHENOVATION.md) | The programme that turns every overclaim into a verified fact. |
 | [CLAIM-6-RBAC.md](CLAIM-6-RBAC.md) | The Claim-6 multi-user RBAC design. |
 | [SUPPLY-CHAIN.md](SUPPLY-CHAIN.md) | The supply-chain integrity controls. |
