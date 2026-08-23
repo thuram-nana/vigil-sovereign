@@ -1,0 +1,425 @@
+From cebaa5d868e15fec64ef237e0a5be0e1fd25d653 Mon Sep 17 00:00:00 2001
+Subject: [strix-patch 028] S10 (vendor/strix): synchronous container teardown on the signal path
+X-VIGIL-Commit: cebaa5d868e15fec64ef237e0a5be0e1fd25d653
+X-VIGIL-Date: 2026-08-22T23:01:18-04:00
+
+diff --git a/vendor/strix/strix/interface/cli.py b/vendor/strix/strix/interface/cli.py
+index 0aef0f94..b5116bd1 100644
+--- a/vendor/strix/strix/interface/cli.py
++++ b/vendor/strix/strix/interface/cli.py
+@@ -26,6 +26,30 @@ from .utils import (
+ logger = logging.getLogger(__name__)
+ 
+ 
++def _signal_teardown(run_name: str, report_state: "ReportState") -> None:
++    """S10 — synchronous teardown for a SIGINT/SIGTERM/SIGHUP.
++
++    Before this, the handler tore down only the REPORT STATE (status=interrupted) and left the
++    detached sandbox CONTAINER running — a signalled run stranded its box until the next launch's
++    reaper. Now it also tears the container down (``session_manager.kill_run_sync`` — synchronous,
++    because a signal handler cannot ``await`` the event loop it is interrupting), which force-removes
++    the container and drops the cached session so no later reuse can hand back a dead handle.
++
++    Both legs run even if one raises (ordered try/except), and nothing propagates: a signal handler
++    that raises would mask the exit. The two are complementary — report cleanup persists the
++    interrupted status + destroys the report's transient state; the container teardown destroys the
++    sandbox and everything inside it.
++    """
++    try:
++        report_state.cleanup(status="interrupted")
++    except Exception:  # noqa: BLE001 — a signal handler must never raise; still tear the box down
++        logger.debug("signal teardown: report_state.cleanup raised", exc_info=True)
++    try:
++        session_manager.kill_run_sync(run_name)
++    except Exception:  # noqa: BLE001 — best-effort; the next launch's reaper is the backstop
++        logger.debug("signal teardown: session_manager.kill_run_sync raised", exc_info=True)
++
++
+ def _resolve_sandbox_image() -> str:
+     image = load_settings().runtime.image
+     if not image:
+@@ -123,7 +147,7 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
+         report_state.cleanup()
+ 
+     def signal_handler(_signum: int, _frame: Any) -> None:
+-        report_state.cleanup(status="interrupted")
++        _signal_teardown(args.run_name, report_state)
+         sys.exit(1)
+ 
+     atexit.register(cleanup_on_exit)
+diff --git a/vendor/strix/strix/runtime/sandbox_hardening.py b/vendor/strix/strix/runtime/sandbox_hardening.py
+index 2c86a914..542d7b35 100644
+--- a/vendor/strix/strix/runtime/sandbox_hardening.py
++++ b/vendor/strix/strix/runtime/sandbox_hardening.py
+@@ -374,3 +374,43 @@ def kill_scan_container(
+     if removed:
+         lg.info("kill switch removed %d Strix container(s) for session %s", removed, sid)
+     return removed
++
++
++def kill_containers_for_owner(
++    docker_client: Any,
++    *,
++    owner_pid: Any,
++    owner_boot: str | None = None,
++    log: logging.Logger | None = None,
++) -> int:
++    """S10 kill switch by OWNER pid — force-remove the managed container(s) an owning process spawned.
++
++    This is the cross-process complement to :func:`kill_scan_container` (which needs the SDK
++    ``session_id``, known only inside the spawning process). The VIGIL console, a SEPARATE process,
++    holds only the host pid it recorded and the boot id — never the sandbox session id — so after its
++    kill switch ``SIGKILL``s that host pid it reaps the stranded container by the ``LABEL_OWNER_PID``
++    the container carries.
++
++    Unlike :func:`reap_orphan_containers`, this does NOT gate on pid liveness: the caller has already
++    decided this owner's container must die (the console just killed that owner, or this very process
++    is tearing itself down in a signal handler where its own pid is still alive). When ``owner_boot``
++    is given a container is removed only if its boot label ALSO matches, so a recycled pid from a
++    different boot is never mistaken for the target. Returns the number removed. Never raises.
++    """
++    lg = log or logger
++    try:
++        pid_s = str(int(owner_pid))
++    except (TypeError, ValueError):
++        return 0
++    if int(pid_s) <= 0:
++        return 0
++    boot = str(owner_boot) if owner_boot else ""
++    removed = 0
++    for container in _list_managed(docker_client, [f"{LABEL_OWNER_PID}={pid_s}"]):
++        if boot and _labels_of(container).get(LABEL_OWNER_BOOT, "") != boot:
++            continue  # same pid number, different boot — not the container we mean
++        if _force_remove(container):
++            removed += 1
++    if removed:
++        lg.info("kill switch removed %d Strix container(s) for owner pid %s", removed, pid_s)
++    return removed
+diff --git a/vendor/strix/strix/runtime/session_manager.py b/vendor/strix/strix/runtime/session_manager.py
+index 71d2c34e..735f9e5b 100644
+--- a/vendor/strix/strix/runtime/session_manager.py
++++ b/vendor/strix/strix/runtime/session_manager.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import logging
++import os
+ import shutil
+ from pathlib import Path
+ from typing import Any
+@@ -213,3 +214,53 @@ async def kill_run(scan_id: str) -> int:
+             removed = sandbox_hardening.kill_scan_container(docker_client, session_id, log=logger)
+     await cleanup(scan_id)
+     return removed
++
++
++def kill_run_sync(scan_id: str) -> int:
++    """SYNCHRONOUS container teardown for a SIGNAL handler — S10.
++
++    The SIGINT/SIGTERM/SIGHUP handler in ``strix/interface/cli.py`` runs in the main thread and
++    CANNOT ``await``; the async :func:`cleanup` / :func:`kill_run` paths need the running event loop
++    (which the signal is tearing down). Before this, a signalled run destroyed its report state but
++    left its detached sandbox container running ``tail -f /dev/null`` — the exact strand the reaper
++    exists to catch, but only on the NEXT launch.
++
++    This tears the container down NOW, synchronously, from the same process that spawned it (so the
++    in-memory session cache is live): force-remove by the SDK session label when it is readable,
++    else — because the label read reaches into SDK internals — fall back to removing by THIS process's
++    own owner-pid label (``kill_containers_for_owner``); then reap any sibling orphan and close the
++    docker client. It never touches the event loop, never awaits, and never raises: a teardown
++    failure must not stop the process from exiting. Returns the number of containers removed.
++    """
++    bundle = _SESSION_CACHE.pop(scan_id, None)
++    if bundle is None:
++        return 0
++    removed = 0
++    client = bundle.get("client")
++    docker_client = getattr(client, "docker_client", None)
++    if docker_client is None:
++        return 0
++    try:
++        state = getattr(getattr(bundle.get("session"), "_inner", None), "state", None)
++        session_id = getattr(state, "session_id", None)
++        if session_id is not None:
++            removed = sandbox_hardening.kill_scan_container(docker_client, session_id, log=logger)
++        if removed == 0:
++            # Session id unreadable (or already gone): this very process owns the container, and its
++            # pid is still alive inside the handler, so reap_orphan_containers would SPARE it. Remove
++            # by our own owner-pid label instead — unconditional, exactly what the console does to us.
++            removed = sandbox_hardening.kill_containers_for_owner(
++                docker_client,
++                owner_pid=os.getpid(),
++                owner_boot=sandbox_hardening.owner_boot_id(),
++                log=logger,
++            )
++        sandbox_hardening.reap_orphan_containers(docker_client, log=logger)
++    except Exception:  # noqa: BLE001 — a signal handler must never raise
++        logger.debug("kill_run_sync(%s): teardown raised", scan_id, exc_info=True)
++    finally:
++        try:
++            docker_client.close()
++        except Exception:  # noqa: BLE001
++            logger.debug("kill_run_sync(%s): docker_client.close() raised", scan_id, exc_info=True)
++    return removed
+diff --git a/vendor/strix/tests_vigil/test_lifecycle_teardown.py b/vendor/strix/tests_vigil/test_lifecycle_teardown.py
+new file mode 100644
+index 00000000..ffc93eba
+--- /dev/null
++++ b/vendor/strix/tests_vigil/test_lifecycle_teardown.py
+@@ -0,0 +1,198 @@
++"""VIGIL S10 — signal-path lifecycle teardown.
++
++Before S10 a signalled Strix run (SIGINT/SIGTERM/SIGHUP) tore down only its REPORT STATE and left the
++detached sandbox CONTAINER running with nothing to reap it until the next launch. These assert the two
++closures of that gap:
++
++  * ``session_manager.kill_run_sync`` — a SYNCHRONOUS container teardown a signal handler can call
++    (it cannot ``await`` the event loop it is interrupting): remove by SDK session label, else fall
++    back to this process's own owner-pid label, then drop the cached session.
++  * ``cli._signal_teardown`` — the handler now tears down BOTH the report state AND the container, and
++    does so robustly (one leg failing still runs the other).
++
++The container-removal PRIMITIVES are covered SDK-free in ``test_sandbox_hardening.py``; this file
++exercises the session-cache orchestration + the handler, which import the Agents SDK, so it
++``importorskip``s it and skips cleanly where the SDK is absent (the strix-vigil CI job installs it).
++"""
++from __future__ import annotations
++
++import os
++
++import pytest
++
++pytest.importorskip("agents.sandbox.entries")  # session_manager / cli import the SDK at module load
++
++from strix.runtime import sandbox_hardening as sh
++from strix.runtime import session_manager
++
++
++# --- duck-typed fake docker client (matches sandbox_hardening's use) -------------------------------
++
++class _FakeContainer:
++    def __init__(self, labels, cid):
++        self.labels = labels
++        self.id = cid
++        self.short_id = cid[:12]
++        self.removed = False
++
++    def remove(self, force=False):
++        assert force is True
++        self.removed = True
++
++
++class _FakeContainers:
++    def __init__(self, containers):
++        self._all = containers
++
++    def list(self, all=False, filters=None):  # noqa: A002,ARG002 - docker-py signature
++        want = (filters or {}).get("label", [])
++        if isinstance(want, str):
++            want = [want]
++        out = []
++        for c in self._all:
++            matches = True
++            for lbl in want:                    # every requested "k=v" must match
++                k, _, v = lbl.partition("=")
++                if c.labels.get(k) != v:
++                    matches = False
++                    break
++            if matches:
++                out.append(c)
++        return out
++
++
++class _FakeDockerClient:
++    def __init__(self, containers):
++        self.containers = _FakeContainers(containers)
++        self.closed = False
++
++    def close(self):
++        self.closed = True
++
++
++class _Inner:
++    def __init__(self, session_id):
++        self.state = type("S", (), {"session_id": session_id})()
++
++
++class _FakeSession:
++    def __init__(self, session_id):
++        self._inner = _Inner(session_id)
++
++
++class _FakeSdkClient:
++    def __init__(self, docker_client):
++        self.docker_client = docker_client
++
++
++class _Sid:
++    def __init__(self, hexs):
++        self.hex = hexs
++
++
++@pytest.fixture(autouse=True)
++def _clean_cache():
++    session_manager._SESSION_CACHE.clear()
++    yield
++    session_manager._SESSION_CACHE.clear()
++
++
++# --- kill_run_sync ------------------------------------------------------------------------------
++
++def test_kill_run_sync_removes_by_session_label_and_drops_the_cache():
++    target = _FakeContainer({sh.LABEL_MANAGED: "1", sh.LABEL_SESSION: "abc123"}, "t")
++    other = _FakeContainer({sh.LABEL_MANAGED: "1", sh.LABEL_SESSION: "zzz999"}, "o")
++    dc = _FakeDockerClient([target, other])
++    session_manager._SESSION_CACHE["scan-1"] = {
++        "client": _FakeSdkClient(dc), "session": _FakeSession(_Sid("abc123")),
++    }
++    removed = session_manager.kill_run_sync("scan-1")
++    assert removed == 1
++    assert target.removed and not other.removed        # the run's own box, not a sibling's
++    assert "scan-1" not in session_manager._SESSION_CACHE   # cache dropped -> no dead-handle reuse
++    assert dc.closed                                    # docker client closed
++
++
++def test_kill_run_sync_falls_back_to_owner_pid_when_session_id_is_unreadable(monkeypatch):
++    # If the SDK session id cannot be read, the process still owns the box (its pid label). Since the
++    # process is alive inside the handler, the plain reaper would SPARE it, so kill_run_sync removes by
++    # its own owner-pid label instead. (Session id None -> label removal finds nothing -> fallback.)
++    monkeypatch.setattr(sh, "owner_boot_id", lambda: "BOOT-NOW")
++    mine = _FakeContainer({sh.LABEL_MANAGED: "1", sh.LABEL_OWNER_PID: str(os.getpid()),
++                           sh.LABEL_OWNER_BOOT: "BOOT-NOW"}, "mine")
++    dc = _FakeDockerClient([mine])
++    session_manager._SESSION_CACHE["scan-2"] = {
++        "client": _FakeSdkClient(dc), "session": _FakeSession(None),
++    }
++    removed = session_manager.kill_run_sync("scan-2")
++    assert removed == 1 and mine.removed
++    assert dc.closed
++
++
++def test_kill_run_sync_no_cached_session_is_a_clean_zero():
++    # NEGATIVE CONTROL: nothing cached (a run that never created a sandbox, or a double signal) -> 0,
++    # no raise, no cache mutation.
++    assert session_manager.kill_run_sync("never-started") == 0
++
++
++def test_kill_run_sync_never_raises_on_a_broken_client():
++    # NEGATIVE CONTROL: a broken docker client must not let a teardown exception escape a signal handler.
++    class _BoomDocker:
++        @property
++        def containers(self):
++            raise RuntimeError("daemon down")
++
++        def close(self):
++            pass
++    session_manager._SESSION_CACHE["scan-3"] = {
++        "client": _FakeSdkClient(_BoomDocker()), "session": _FakeSession(_Sid("x")),
++    }
++    assert session_manager.kill_run_sync("scan-3") == 0          # swallowed, not raised
++    assert "scan-3" not in session_manager._SESSION_CACHE        # still dropped
++
++
++# --- cli._signal_teardown -----------------------------------------------------------------------
++
++class _FakeReportState:
++    def __init__(self, raises=False):
++        self.raises = raises
++        self.cleanup_calls = []
++
++    def cleanup(self, status=None):
++        self.cleanup_calls.append(status)
++        if self.raises:
++            raise RuntimeError("report cleanup boom")
++
++
++def test_signal_teardown_tears_down_both_report_state_and_container(monkeypatch):
++    from strix.interface import cli
++
++    killed = []
++    monkeypatch.setattr(cli.session_manager, "kill_run_sync", lambda name: killed.append(name) or 1)
++    rs = _FakeReportState()
++    cli._signal_teardown("run-x", rs)
++    assert rs.cleanup_calls == ["interrupted"]          # report state closed as interrupted (pre-existing)
++    assert killed == ["run-x"]                           # AND the container is now torn down (the S10 gap)
++
++
++def test_signal_teardown_still_kills_the_container_if_report_cleanup_raises(monkeypatch):
++    # NEGATIVE CONTROL for the ordering/robustness: a signal handler must never let one leg's failure
++    # mask the other. Report cleanup raising must NOT prevent the container teardown.
++    from strix.interface import cli
++
++    killed = []
++    monkeypatch.setattr(cli.session_manager, "kill_run_sync", lambda name: killed.append(name) or 1)
++    rs = _FakeReportState(raises=True)
++    cli._signal_teardown("run-y", rs)                   # must not raise
++    assert killed == ["run-y"]                           # container still reaped despite the report failure
++
++
++def test_signal_teardown_does_not_raise_if_container_teardown_raises(monkeypatch):
++    from strix.interface import cli
++
++    def _boom(_name):
++        raise RuntimeError("kill boom")
++    monkeypatch.setattr(cli.session_manager, "kill_run_sync", _boom)
++    rs = _FakeReportState()
++    cli._signal_teardown("run-z", rs)                   # swallowed — a handler must never raise
++    assert rs.cleanup_calls == ["interrupted"]
+diff --git a/vendor/strix/tests_vigil/test_sandbox_hardening.py b/vendor/strix/tests_vigil/test_sandbox_hardening.py
+index ceffe5c7..22f1ece7 100644
+--- a/vendor/strix/tests_vigil/test_sandbox_hardening.py
++++ b/vendor/strix/tests_vigil/test_sandbox_hardening.py
+@@ -259,3 +259,53 @@ def test_pid_alive_and_boot_id_basic():
+     assert sh.pid_alive(os.getpid()) is True
+     assert sh.pid_alive(-1) is False
+     assert isinstance(sh.owner_boot_id(), str)
++
++
++# --- S10: kill switch by OWNER pid (the console's cross-process reap) ------------------------------
++
++def test_kill_containers_for_owner_removes_the_owners_box_and_spares_others():
++    # The console SIGKILLs the host pid, then reaps the container that pid spawned — addressed by the
++    # LABEL_OWNER_PID label (the console never holds the SDK session id). A container owned by a
++    # DIFFERENT pid is untouched.
++    mine = _FakeContainer({sh.LABEL_MANAGED: "1", sh.LABEL_OWNER_PID: "4242",
++                           sh.LABEL_OWNER_BOOT: "BOOT-A"}, "mine")
++    other = _FakeContainer({sh.LABEL_MANAGED: "1", sh.LABEL_OWNER_PID: "9999",
++                            sh.LABEL_OWNER_BOOT: "BOOT-A"}, "other")
++    client = _FakeClient([mine, other])
++    removed = sh.kill_containers_for_owner(client, owner_pid=4242, owner_boot="BOOT-A")
++    assert removed == 1
++    assert mine.removed and not other.removed          # only the target owner's box dies
++
++
++def test_kill_containers_for_owner_ignores_liveness_so_a_SIGKILLED_run_is_reaped(monkeypatch):
++    # The SIGKILL case: the owner pid is DEAD and never ran its own teardown. Unlike the reaper, this
++    # does NOT gate on liveness — the caller already decided this owner must die — so the stranded box
++    # is removed even though (here) we assert pid_alive is never consulted.
++    monkeypatch.setattr(sh, "pid_alive", lambda pid: (_ for _ in ()).throw(AssertionError("liveness must not be checked")))
++    dead = _FakeContainer({sh.LABEL_MANAGED: "1", sh.LABEL_OWNER_PID: "4242",
++                           sh.LABEL_OWNER_BOOT: "BOOT-A"}, "dead")
++    assert sh.kill_containers_for_owner(_FakeClient([dead]), owner_pid=4242) == 1
++    assert dead.removed
++
++
++def test_kill_containers_for_owner_spares_a_same_pid_from_a_different_boot():
++    # NEGATIVE CONTROL: a pid number recycled across a reboot must not be mistaken for the target when
++    # a boot id is supplied. Same LABEL_OWNER_PID, different LABEL_OWNER_BOOT -> spared.
++    recycled = _FakeContainer({sh.LABEL_MANAGED: "1", sh.LABEL_OWNER_PID: "4242",
++                               sh.LABEL_OWNER_BOOT: "BOOT-OLD"}, "recycled")
++    client = _FakeClient([recycled])
++    assert sh.kill_containers_for_owner(client, owner_pid=4242, owner_boot="BOOT-NOW") == 0
++    assert not recycled.removed
++
++
++def test_kill_containers_for_owner_bad_pid_and_broken_client_are_a_clean_zero():
++    # NEGATIVE CONTROL: a non-numeric / non-positive pid removes nothing, and a broken daemon never
++    # raises into the caller (a reap failure must not turn a successful cancel into an error).
++    assert sh.kill_containers_for_owner(_FakeClient([]), owner_pid=None) == 0
++    assert sh.kill_containers_for_owner(_FakeClient([]), owner_pid=0) == 0
++
++    class _Boom:
++        @property
++        def containers(self):
++            raise RuntimeError("daemon down")
++    assert sh.kill_containers_for_owner(_Boom(), owner_pid=4242) == 0

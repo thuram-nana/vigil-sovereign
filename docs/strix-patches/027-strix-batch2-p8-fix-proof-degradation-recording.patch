@@ -1,6 +1,6 @@
-From 46b7ee3878d64d5b8069a760baa15b3cd024e50d Mon Sep 17 00:00:00 2001
+From ae094f56e5050f50e6beb4d15bc725ce9feeec4c Mon Sep 17 00:00:00 2001
 Subject: [strix-patch 027] strix batch2: P8 fix — proof degradation recording must never trigger strix.report.__init__
-X-VIGIL-Commit: 46b7ee3878d64d5b8069a760baa15b3cd024e50d
+X-VIGIL-Commit: ae094f56e5050f50e6beb4d15bc725ce9feeec4c
 X-VIGIL-Date: 2026-08-22T06:28:02-04:00
 
 diff --git a/vendor/strix/strix/interface/cli.py b/vendor/strix/strix/interface/cli.py
