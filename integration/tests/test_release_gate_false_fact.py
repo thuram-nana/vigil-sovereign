@@ -159,11 +159,16 @@ def test_a_report_with_no_capture_at_all_mints_nothing(tmp_path):
 # of the same endpoint. A page that ALWAYS errors — the error present in BOTH observed and control — can no
 # longer mint; a missing control refuses to a LEAD; a genuine payload-only error still mints.
 # =========================================================================================================
-def test_an_always_erroring_page_same_signature_in_control_mints_no_fact(tmp_path):
+def test_an_always_erroring_page_same_signature_in_control_mints_no_fact(monkeypatch, tmp_path):
     """THE key false-FACT negative control this slice closes: the error is present in the exploit response AND
     in a benign CONTROL of the same endpoint (an always-erroring page), so it is NOT attributable to the
     payload. The oracle's control-comparison guard suppresses the fire ⇒ the finding stays a LEAD, never a
-    signed FACT."""
+    signed FACT.
+
+    Strengthened (BLOCK-1) with the case where the always-erroring page is LARGE and its datastore error sits
+    PAST the benign-fetch read cap: a live control fetch captures only a truncated (error-free) PREFIX, so the
+    control cannot be adjudicated over — ``benign_control_fetch`` refuses it (None) and the finding stays a
+    LEAD. Returning the prefix would fire the oracle on a benign always-erroring page and mint a FALSE FACT."""
     mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="alpha")
     # the control carries the SAME datastore error as the exploit response
     always_erroring = b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"
@@ -172,6 +177,28 @@ def test_an_always_erroring_page_same_signature_in_control_mints_no_fact(tmp_pat
     assert res is None or not getattr(res, "is_fact", False), (
         "an always-erroring page (same error in observed AND control) minted a FACT — the control guard is "
         "still dead: this is exactly the false-FACT this slice must close"
+    )
+
+    # BLOCK-1: the SAME always-erroring page, but LARGE — the datastore error sits PAST the benign-fetch read
+    # cap, so a live control fetch captures only a truncated (error-free) prefix. It must be refused (None),
+    # keeping the finding a LEAD; returning the prefix fires the oracle on a benign always-erroring page.
+    from vigil_integration.live.body_decode import MAX_RAW_BYTES
+    from vigil_integration.proof.bootstrap import _live_control_fetch
+    _grant(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    huge_err = b"A" * (MAX_RAW_BYTES + 4096) + b"ORA-00933: SQL command not properly ended"
+    port = _serve_map({"/err": (200, "text/plain; charset=utf-8", huge_err)}).server_address[1]
+    cap2 = {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
+                           "request_bytes_ref": "req", "status": 500}],
+            "blobs": {"resp": always_erroring,
+                      "req": f"GET /err?x=1 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode()}}
+    mint2 = build_report_mint(run_dir=tmp_path / "huge", signers=SIGNERS, engagement_slug="alpha",
+                              control_fetch=_live_control_fetch("alpha"))
+    res2 = mint2({"id": "always-err-huge", "bug_class": "error_based_sqli",
+                  "endpoint": f"http://127.0.0.1:{port}/err", CAPTURE_KEY: cap2})
+    assert res2 is None or not getattr(res2, "is_fact", False), (
+        "a LARGE always-erroring page (error past the read cap) minted a FACT — a truncated control prefix "
+        "must be refused, not adjudicated over (BLOCK-1)"
     )
 
 
@@ -222,6 +249,102 @@ def test_the_control_gated_mint_is_deterministic(tmp_path):
     recs_a = {r["proof_id"] for r in read_proofs(tmp_path / "a")}
     recs_b = {r["proof_id"] for r in read_proofs(tmp_path / "b")}
     assert recs_a == recs_b and recs_a, "the control-gated mint is not deterministic across runs"
+
+
+def _serve_map(routes):
+    """A loopback server for the CONTROL-fetch tests. ``routes`` maps a path -> ``(status, content_type, body)``;
+    any other path is a 404. A short write when the client caps its read (the truncation tests) is expected and
+    swallowed."""
+    class _App(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            hit = routes.get(urlsplit(self.path).path)
+            if hit is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+            status, ctype, body = hit
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except Exception:  # noqa: BLE001 — the client caps its read at MAX_RAW_BYTES; a short write is expected
+                pass
+
+        def log_message(self, *a):
+            return
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _App)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_a_truncated_benign_control_refuses_and_stays_a_lead(monkeypatch, tmp_path):
+    """BLOCK-1 (oracle soundness): the benign control is fetched under a ``MAX_RAW_BYTES`` read cap while the
+    observed side is the UNCAPPED retained blob — an asymmetric capture. An always-erroring page whose datastore
+    error sits PAST the cap yields a truncated-but-decodable control PREFIX with the error absent; returning it
+    let the oracle fire (error in observed, not in the truncated control) and mint a FALSE FACT.
+    ``benign_control_fetch`` must REFUSE a truncated body (None) so the mint degrades to a LEAD. This FAILS on
+    the pre-fix tree (the prefix is returned and a FACT is minted)."""
+    from vigil_integration.live.body_decode import MAX_RAW_BYTES
+    from vigil_integration.live.web_redrive import benign_control_fetch
+    from vigil_integration.proof.bootstrap import _live_control_fetch
+    _grant(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    huge_err = b"A" * (MAX_RAW_BYTES + 4096) + b"ORA-00933: SQL command not properly ended"  # error past the cap
+    port = _serve_map({"/err": (200, "text/plain; charset=utf-8", huge_err),
+                       "/small": (200, "application/json", b'{"items": []}')}).server_address[1]
+    base = f"http://127.0.0.1:{port}"
+
+    # unit: the guard REFUSES a truncated body, but STILL returns a fully-read benign body (non-vacuity — the
+    # guard is not simply "always None").
+    assert benign_control_fetch(f"{base}/err", slug="alpha") is None, (
+        "benign_control_fetch returned a truncated control PREFIX instead of refusing (None) — BLOCK-1")
+    assert benign_control_fetch(f"{base}/small", slug="alpha") is not None, (
+        "benign_control_fetch refused a fully-read benign body — the truncation guard is over-broad/vacuous")
+
+    # end-to-end: observed datastore error present + a wired LIVE control fetcher whose control is truncated.
+    ora = b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"
+    cap = {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
+                          "request_bytes_ref": "req", "status": 500}],
+           "blobs": {"resp": ora,
+                     "req": f"GET /err?x=1 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode()}}
+    mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="alpha",
+                             control_fetch=_live_control_fetch("alpha"))
+    res = mint({"id": "trunc-ctrl", "bug_class": "error_based_sqli",
+                "endpoint": f"{base}/err", CAPTURE_KEY: cap})
+    assert res is None or not getattr(res, "is_fact", False), (
+        "a truncated benign control (error past the read cap) minted a FALSE FACT — observed and control were "
+        "captured asymmetrically and the oracle fired on a benign always-erroring page (BLOCK-1)")
+
+
+def test_the_control_is_paired_to_the_observed_exchange_not_a_free_text_endpoint(tmp_path):
+    """BLOCK-2 (control-selection correctness): the benign control MUST be the twin of the OBSERVED exchange's
+    own captured request, not a separate free-text ``report['endpoint']``. Here the observed exchange is an
+    always-erroring ``/api/search?q='`` but ``endpoint`` names a DIFFERENT, clean page ``/``. A control keyed to
+    the free-text endpoint fetches the clean page (error absent) and mints a FALSE FACT; the mint must instead
+    fetch the observed twin (``/api/search``, always-erroring) and stay a LEAD. FAILS on the pre-fix tree (the
+    fetcher is asked for ``/`` and a FACT is minted)."""
+    ora = b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"
+    asked: "list[str]" = []
+
+    def _spy(report):
+        url = str(report.get("endpoint") or "")
+        asked.append(url)
+        # the observed twin (/api/search) always errors; the free-text endpoint (/) is a clean, different page
+        return ora if "/api/search" in url else _BENIGN_CONTROL
+
+    cap = {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
+                          "request_bytes_ref": "req", "status": 500}],
+           "blobs": {"resp": ora, "req": b"GET /api/search?q=%27 HTTP/1.1\r\nHost: t\r\n\r\n"}}
+    mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="alpha", control_fetch=_spy)
+    res = mint({"id": "paired", "bug_class": "error_based_sqli", "endpoint": "http://t/", CAPTURE_KEY: cap})
+    assert res is None or not getattr(res, "is_fact", False), (
+        "the control was fetched from the free-text endpoint (a different, clean page) instead of the observed "
+        f"twin — an always-erroring path minted a FALSE FACT (BLOCK-2). the fetcher was asked for: {asked!r}")
+    assert asked and all("/api/search" in u for u in asked), (
+        f"the control fetch was not paired to the observed exchange /api/search; the fetcher was asked for {asked!r}")
 
 
 # =========================================================================================================

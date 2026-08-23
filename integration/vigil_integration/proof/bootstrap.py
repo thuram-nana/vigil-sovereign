@@ -43,11 +43,15 @@ def _run_signers(engagement_slug: str, scope: Sequence[str], base_dir: Optional[
 
 
 def _live_control_fetch(engagement_slug: str) -> "Callable[[dict], bytes | None]":
-    """The production CONTROL-exchange fetcher (S6) for this run: a benign, charter-GATED fetch of a
-    finding's endpoint, so the error-signature oracle's control-comparison guard is LIVE (an always-erroring
-    page cannot mint). ``framework`` is pulled only lazily (inside ``benign_control_fetch``), so this keeps
-    the offense/sovereign import boundary (FATAL-2). Never raises — no endpoint / no channel ⇒ ``None`` ⇒ the
-    finding stays a LEAD."""
+    """The production CONTROL-exchange fetcher (S6) for this run: a benign, charter-GATED fetch of the
+    endpoint the mint hands it, so the error-signature oracle's control-comparison guard is LIVE (an
+    always-erroring page cannot mint on this VIGIL-FETCHED-control path). ``report['endpoint']`` here is the
+    benign twin of the OBSERVED exchange, pinned by ``proof.run.build_report_mint`` (``_benign_twin_url``)
+    before this fetcher is called — this callable does not itself choose the target from a free-text field
+    (BLOCK-2). ``benign_control_fetch`` refuses a truncated/un-decodable body (BLOCK-1), so the control is
+    only ever bytes VIGIL fully read. ``framework`` is pulled only lazily (inside ``benign_control_fetch``),
+    so this keeps the offense/sovereign import boundary (FATAL-2). Never raises — no endpoint / no channel ⇒
+    ``None`` ⇒ the finding stays a LEAD."""
     def _fetch(report: dict) -> "bytes | None":
         from ..live.web_redrive import benign_control_fetch  # noqa: PLC0415 — import-clean at call time (FATAL-2)
         url = str((report or {}).get("endpoint") or "").strip()

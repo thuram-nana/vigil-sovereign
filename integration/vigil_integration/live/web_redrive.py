@@ -173,9 +173,16 @@ def benign_control_fetch(url: str, *, slug: str, timeout: float = 8.0) -> "bytes
 
     It reuses the SAME charter-gated, DNS-pinned, proxy-free send as the web re-drive (kill-switch →
     single-host → ACTIVE_RECON → charter scope), so a control is only ever fetched from an in-scope target.
-    Returns the decoded body bytes when a real channel was established, else ``None`` — a refusal (out of
-    scope / kill-switch), a transport error, or an un-decodable body all yield ``None`` (a control we could
-    NOT capture ⇒ the caller refuses the FACT to a LEAD). NEVER raises."""
+    Returns the decoded body bytes when a real channel was established AND the whole document was read and
+    soundly decoded, else ``None`` — a refusal (out of scope / kill-switch), a transport error, an
+    un-decodable body, OR a body the send could only capture as a PREFIX (``truncated``: the document was
+    longer than ``MAX_RAW_BYTES``) all yield ``None``. The truncated-but-decodable case is the load-bearing
+    one: the send caps the control at ``MAX_RAW_BYTES`` while the observed side is the (uncapped) retained
+    blob, so returning a decoded PREFIX would let the oracle compare an error present in the full observed
+    response against a control from which that error was merely truncated away — an always-erroring page
+    whose datastore error sits past the cap would then mint a FALSE FACT. A control we cannot soundly
+    adjudicate over (``not body_semantically_available``) is therefore refused: the caller degrades the FACT
+    to a LEAD (fail-closed), never adjudicates over bytes it never read. NEVER raises."""
     if not str(url or "").strip():
         return None
     try:
@@ -190,6 +197,14 @@ def benign_control_fetch(url: str, *, slug: str, timeout: float = 8.0) -> "bytes
         resp = send(HttpRequest(method="GET", url=url))
         if state["channels"] <= 0:
             return None   # no channel established (gate deny mid-run / transport error) ⇒ no control
+        # Refuse a control the module cannot soundly adjudicate OVER THE WHOLE DOCUMENT. ``send`` reads only
+        # ``MAX_RAW_BYTES`` and sets ``body_semantically_available = decoded and not truncated``; the observed
+        # side (proof/run.py::_resolve) is the UNCAPPED retained blob. A truncated (or un-decodable) control
+        # would be captured ASYMMETRICALLY against the observed bytes — an error past the cap absent from the
+        # prefix would fail to suppress a fire — so mirror the web_redrive runner's INCONCLUSIVE handling
+        # (``state["body_unavailable"]``) and refuse. A None control ⇒ the caller keeps the mint fail-closed.
+        if not resp.get("body_semantically_available"):
+            return None
         body = resp.get("body")
         if isinstance(body, (bytes, bytearray)):
             return bytes(body) or None
