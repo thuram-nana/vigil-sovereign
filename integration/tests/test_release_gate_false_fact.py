@@ -86,7 +86,7 @@ def _errsig_capture(*, with_request: bool, control: "bytes | None" = _BENIGN_CON
     default it carries a benign CONTROL exchange (S6); pass ``control=None`` to omit it, or ``control=<error
     bytes>`` for an always-erroring page."""
     ex = {"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
-          "status": 500, "bug_class": "error_based_sqli"}
+          "status": 500, "bug_class": "error_based_sqli", "observed_scheme": "http"}
     exchanges = [ex]
     blobs = {"resp": b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"}
     if with_request:
@@ -336,7 +336,7 @@ def test_the_control_is_paired_to_the_observed_exchange_not_a_free_text_endpoint
         return ora if "/api/search" in url else _BENIGN_CONTROL
 
     cap = {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
-                          "request_bytes_ref": "req", "status": 500}],
+                          "request_bytes_ref": "req", "status": 500, "observed_scheme": "http"}],
            "blobs": {"resp": ora, "req": b"GET /api/search?q=%27 HTTP/1.1\r\nHost: t\r\n\r\n"}}
     mint = build_report_mint(run_dir=tmp_path, signers=SIGNERS, engagement_slug="alpha", control_fetch=_spy)
     res = mint({"id": "paired", "bug_class": "error_based_sqli", "endpoint": "http://t/", CAPTURE_KEY: cap})
@@ -345,6 +345,58 @@ def test_the_control_is_paired_to_the_observed_exchange_not_a_free_text_endpoint
         f"twin — an always-erroring path minted a FALSE FACT (BLOCK-2). the fetcher was asked for: {asked!r}")
     assert asked and all("/api/search" in u for u in asked), (
         f"the control fetch was not paired to the observed exchange /api/search; the fetcher was asked for {asked!r}")
+
+
+def test_the_control_twin_scheme_is_paired_to_the_observed_not_defaulted_http(tmp_path):
+    """MEDIUM residual (S6 scheme soundness): the benign control twin must be fetched over the SAME transport
+    SCHEME as the OBSERVED exchange, never a silent http default. An origin-form request line carries no
+    scheme; the free-text ``report['endpoint']`` scheme is NOT trusted unless it exact-matches the observed
+    host+path. For an https observed always-erroring page whose endpoint does not name the same host+path, a
+    defaulted-http control could be fetched from a DIVERGENT clean http twin (error absent) and mint a FALSE
+    FACT. Two arms, both FAIL on the pre-fix tree (which derives an http twin and mints):
+
+      * scheme UNCONFIRMABLE => the twin is REFUSED (LEAD); the control is never fetched over a guessed http;
+      * a CARRIED observed https scheme => the twin is fetched over https, paired to the observed exchange."""
+    ora = b"HTTP/1.1 500\r\n\r\nORA-00933: SQL command not properly ended"
+
+    # ARM 1 - scheme UNCONFIRMABLE: an origin-form request whose ``endpoint`` names a DIFFERENT host, with no
+    # carried scheme. A clean control returned for ANY fetch would fire the oracle and mint; the mint must
+    # instead refuse the twin (LEAD) and NEVER fetch over a silently-defaulted http.
+    asked1: "list[str]" = []
+
+    def _clean1(report):
+        asked1.append(str(report.get("endpoint") or ""))
+        return _BENIGN_CONTROL                                # clean => if fetched at all, the oracle fires & mints
+
+    cap1 = {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
+                           "request_bytes_ref": "req", "status": 500}],
+            "blobs": {"resp": ora, "req": b"GET /api/search?q=%27 HTTP/1.1\r\nHost: t\r\n\r\n"}}
+    mint1 = build_report_mint(run_dir=tmp_path / "u", signers=SIGNERS, engagement_slug="alpha", control_fetch=_clean1)
+    res1 = mint1({"id": "unconfirmable", "bug_class": "error_based_sqli",
+                  "endpoint": "http://other-host/", CAPTURE_KEY: cap1})
+    assert res1 is None or not getattr(res1, "is_fact", False), (
+        "an unconfirmable twin scheme silently defaulted to http, fetched a clean http control, and minted a "
+        "FALSE FACT - the twin scheme must be paired to the observed exchange or refused to a LEAD")
+    assert not any(u.startswith("http://") for u in asked1), (
+        f"a control was fetched over a silently-defaulted http scheme - {asked1!r}")
+
+    # ARM 2 - the observed scheme IS carried (https, e.g. from the proxy's TLS flag on the capture). The twin
+    # must be fetched over https, PAIRED to the observed exchange, even though the free-text endpoint says http.
+    asked2: "list[str]" = []
+
+    def _clean2(report):
+        asked2.append(str(report.get("endpoint") or ""))
+        return _BENIGN_CONTROL
+
+    cap2 = {"exchanges": [{"channel": "error_signature", "role": "mutated", "response_bytes_ref": "resp",
+                           "request_bytes_ref": "req", "status": 500, "observed_scheme": "https"}],
+            "blobs": {"resp": ora, "req": b"GET /api/search?q=%27 HTTP/1.1\r\nHost: t\r\n\r\n"}}
+    mint2 = build_report_mint(run_dir=tmp_path / "s", signers=SIGNERS, engagement_slug="alpha", control_fetch=_clean2)
+    mint2({"id": "confirmed-https", "bug_class": "error_based_sqli",
+           "endpoint": "http://t/", CAPTURE_KEY: cap2})
+    assert asked2 and all(u.startswith("https://") for u in asked2), (
+        f"a carried observed https scheme was not used for the twin - the control was fetched over {asked2!r}, "
+        "not the observed https (the twin scheme must be paired to the observed exchange, never the endpoint's)")
 
 
 # =========================================================================================================

@@ -371,19 +371,31 @@ def _web_redrive_mint(report: dict, wclass: str, *, run_dir: "str | os.PathLike"
     return _WebMintResult(is_fact=(claimed == "FACT"), facts=list(wr.facts), family_verdict=claimed)
 
 
-def _benign_twin_url(request_bytes: "bytes | None", endpoint_hint: "str | None" = None) -> "str | None":
+def _benign_twin_url(request_bytes: "bytes | None", endpoint_hint: "str | None" = None,
+                     observed_scheme: "str | None" = None) -> "str | None":
     """Derive the benign CONTROL url from the OBSERVED exchange's OWN captured request — its request-target
-    (host+path) with the query/payload STRIPPED — so the control is the benign twin of the exact exchange the
-    error-signature oracle adjudicates.
+    (host+path) with the query/payload STRIPPED, over the OBSERVED exchange's OWN transport SCHEME — so the
+    control is the benign twin of the exact exchange the error-signature oracle adjudicates, fetched the same
+    way (http vs https).
 
-    The free-text ``report['endpoint']`` is NOT trusted to name the twin: nothing binds it to the observed
-    exchange's request line, so an observed always-erroring ``/api/search?q='`` paired with ``endpoint='/'``
-    would otherwise fetch a CLEAN control (error absent) and mint a FALSE FACT on the always-erroring path
-    (BLOCK-2). ``endpoint_hint`` is consulted ONLY for the URL SCHEME, and ONLY when it already names the SAME
-    host+path the request does — an origin-form request-target carries no scheme, and a wrong scheme merely
-    fails the fetch (⇒ no channel ⇒ LEAD), so borrowing the scheme is a convenience, never a trust of the
-    hint's identity. Returns ``None`` when the request cannot be parsed into a host+path (no derivable twin ⇒
-    the caller refuses to a LEAD). NEVER raises."""
+    Neither the twin's host+path NOR its scheme is taken from the free-text ``report['endpoint']`` on trust:
+    nothing binds that field to the observed request line, so an observed always-erroring ``/api/search?q='``
+    paired with ``endpoint='/'`` (host+path mismatch) — or with a wrong-scheme endpoint — would otherwise
+    fetch a DIFFERENT page / a DIFFERENT transport whose error is absent and mint a FALSE FACT (BLOCK-2, and
+    this scheme residual).
+
+    Scheme resolution — the twin scheme is PAIRED to the observed exchange, it is NOT assumed http:
+      1. an absolute-form request-target (``GET https://host/path``) carries the scheme in-band → use it;
+      2. else ``observed_scheme`` — the transport scheme recorded on the capture (the proxy's TLS flag);
+      3. else the ``endpoint_hint`` scheme, but ONLY when the hint already names the SAME host+path the
+         request does (the exact-match rule — then it demonstrably describes the observed exchange);
+      4. else the scheme cannot be CONFIRMED for this exchange → return ``None`` so the caller REFUSES the
+         control (⇒ LEAD). A wrong scheme does NOT merely fail the fetch: if the target serves DIVERGENT
+         content on http vs https for this path (clean http, erroring https), a defaulted-http control would
+         be clean while the observed https page errors — minting a FALSE FACT on an always-erroring page.
+
+    Returns ``None`` when the request cannot be parsed into a host+path, OR when the scheme cannot be
+    confirmed (no derivable/pairable twin ⇒ the caller LEADs). NEVER raises."""
     from urllib.parse import urlsplit  # noqa: PLC0415 — stdlib
     try:
         if not request_bytes:
@@ -396,21 +408,24 @@ def _benign_twin_url(request_bytes: "bytes | None", endpoint_hint: "str | None" 
         if len(toks) < 2:
             return None
         target = toks[1].decode("latin-1", "replace")
-        if "://" in target:                                  # absolute-form target carries its own authority
+        _obs = observed_scheme if observed_scheme in ("http", "https") else None
+        if "://" in target:                                  # absolute-form target carries its own authority + scheme
             sp = urlsplit(target)
-            authority, scheme, path = sp.netloc, (sp.scheme or "http"), (sp.path or "/")
+            authority, path = sp.netloc, (sp.path or "/")
+            scheme = sp.scheme or _obs                       # in-band scheme wins; else the recorded transport scheme
         else:                                                # origin-form: path here, host from the Host header
             path = urlsplit(target).path or "/"
-            authority, scheme = "", "http"
+            authority, scheme = "", _obs                     # NO http default — the scheme must be CONFIRMED below
             for ln in lines[1:]:
                 if ln.lower().startswith(b"host:"):
                     authority = ln.split(b":", 1)[1].strip().decode("latin-1", "replace")
                     break
-            if endpoint_hint:                                # borrow the SCHEME only if the hint names the same page
+            if scheme is None and endpoint_hint:             # borrow the hint SCHEME only if it names the same page
                 hp = urlsplit(str(endpoint_hint))
-                if hp.netloc.lower() == authority.lower() and (hp.path or "/") == path:
-                    scheme = hp.scheme or "http"
-        if not authority:
+                if (hp.netloc.lower() == authority.lower() and (hp.path or "/") == path
+                        and hp.scheme in ("http", "https")):
+                    scheme = hp.scheme
+        if not authority or scheme not in ("http", "https"):  # no host, or an UNCONFIRMED scheme ⇒ refuse (LEAD)
             return None
         return f"{scheme}://{authority}{path}"               # query/payload stripped — a benign GET of the twin
     except Exception:  # noqa: BLE001 — an unparseable request ⇒ no derivable twin ⇒ None (the caller LEADs)
@@ -484,7 +499,8 @@ def build_report_mint(
         if not ex_dicts:
             return None
         try:
-            exchanges = [CapturedExchange(**{k: v for k, v in ex.items() if k != "blob"}) for ex in ex_dicts]
+            exchanges = [CapturedExchange(**{k: v for k, v in ex.items() if k not in ("blob", "observed_scheme")})
+                         for ex in ex_dicts]
         except Exception as exc:  # noqa: BLE001 — a malformed/hostile capture drops the mint (LEAD), never raises
             # inv 12 (S9): building the executor exchanges from the attached capture RAISED — the capture was
             # present but unusable, so this finding cannot reach a FACT and its absence must not read as clean.
@@ -523,6 +539,17 @@ def build_report_mint(
             if not (_req and _req.strip()):
                 return None
 
+            # S6 scheme-pairing: the benign twin CONTROL must be fetched over the SAME transport SCHEME as the
+            # observed exchange (an origin-form request line carries none; the free-text ``report['endpoint']``
+            # scheme is not trusted unless it exact-matches the observed host+path). Read the transport scheme
+            # recorded on the observed capture (``observed_scheme``, from the proxy TLS flag — stripped above
+            # before CapturedExchange). Mirror the oracle's observed-exchange selection over the RAW dicts so
+            # ``_observed_scheme`` belongs to the exchange the oracle adjudicates.
+            _errsig_dicts = [d for d in ex_dicts if isinstance(d, dict) and d.get("channel") == "error_signature"]
+            _observed_dict = next((d for d in _errsig_dicts if (d.get("role") or "") == "mutated"),
+                                  _errsig_dicts[0] if _errsig_dicts else {})
+            _observed_scheme = _observed_dict.get("observed_scheme")
+
             # S6 — the CONTROL exchange (this slice). An error-signature FACT is attributable ONLY when the
             # SAME datastore/parser error is ABSENT from a benign CONTROL of the same endpoint. Without a
             # control the oracle's control-comparison guard (``verify.oracles.error_signature_oracle``, the
@@ -544,7 +571,7 @@ def build_report_mint(
                 # (an observed always-erroring path with a clean ``endpoint`` would otherwise fetch a clean
                 # control and mint a FALSE FACT). An observed request from which no host+path can be derived
                 # yields no pairable twin ⇒ LEAD.
-                _twin = _benign_twin_url(_req, report.get("endpoint"))
+                _twin = _benign_twin_url(_req, report.get("endpoint"), observed_scheme=_observed_scheme)
                 if _twin is None:
                     if control_fetch is not None:
                         record_degradation(run_dir, REDRIVE_FAILED,
