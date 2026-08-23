@@ -527,7 +527,21 @@ DRIFT_MOVED = "drifted"                     # RESOLVABLE registry, pin no longer
 DRIFT_UNKNOWN_REGISTRY = "unknown-registry"  # registry the resolver cannot query — explicit UNKNOWN
 DRIFT_UNKNOWN_NETWORK = "unknown-network"    # resolver-capable registry it could not reach — UNKNOWN
 
+DRIFT_MOVED_ADVISORY = "drifted-advisory"   # a ROLLING tag moved — surfaced, NOT blocking (see below)
+
 _UNKNOWN = (DRIFT_UNKNOWN_REGISTRY, DRIFT_UNKNOWN_NETWORK)
+
+# Rolling-tag drift that is ADVISORY, not blocking. A repository listed here is tracked-latest BY DESIGN,
+# so a moved digest is expected upkeep, not a defect — and it is ALREADY advisory-vuln-scanned in the A14
+# job, so gating a per-PR build on its daily movement would be a category error. BLOCKING drift still
+# applies to every other (stable, pinned-intent) tag; only these documented rolling bases are advisory.
+# Re-pin them deliberately on a cadence (read the changelog), not under a red build. Each entry needs a reason.
+_ADVISORY_ROLLING_DRIFT: "dict[str, str]" = {
+    # The Strix sandbox base: a rolling Kali distro tracked at :latest so the offensive toolchain stays
+    # current. Its committed SBOM is regenerated deliberately (gen_image_sbom.py), never per-drift, and its
+    # image vuln scan is already ADVISORY in the A14 job — so its drift is surfaced, not blocking.
+    "kalilinux/kali-rolling": "rolling Kali distro base (strix sandbox); tracked-latest by design, already advisory-vuln-scanned",
+}
 
 
 @dataclass(frozen=True)
@@ -556,6 +570,10 @@ class DriftResult:
     @property
     def is_drift(self) -> bool:
         return self.status == DRIFT_MOVED
+
+    @property
+    def is_advisory_drift(self) -> bool:
+        return self.status == DRIFT_MOVED_ADVISORY
 
     @property
     def is_unknown(self) -> bool:
@@ -596,6 +614,9 @@ def evaluate_drift(refs, resolver) -> list[DriftResult]:
             out.append(DriftResult(r, DRIFT_UNKNOWN_NETWORK, detail=res.error))
         elif res.digest == r.digest:
             out.append(DriftResult(r, DRIFT_MATCH, current=res.digest))
+        elif r.repository in _ADVISORY_ROLLING_DRIFT:
+            out.append(DriftResult(r, DRIFT_MOVED_ADVISORY, current=res.digest,
+                                   detail=f"rolling tag moved (advisory — {_ADVISORY_ROLLING_DRIFT[r.repository]})"))
         else:
             out.append(DriftResult(r, DRIFT_MOVED, current=res.digest,
                                    detail="pinned digest no longer matches the live tag"))
@@ -643,6 +664,10 @@ def run_drift(refs, resolver, *, fail_on_drift: bool, fail_on_unknown: bool = Fa
             print(f"  ok  {d.ref.source}:{d.ref.line} {d.ref.repository}:{d.ref.tag} — pin matches the live tag")
         elif d.is_drift:
             print(f"  !!  {d.ref.source}:{d.ref.line} {d.ref.repository}:{d.ref.tag} has MOVED (resolvable — BLOCKING)")
+            print(f"        pinned:  {d.ref.digest}")
+            print(f"        current: {d.current}")
+        elif d.is_advisory_drift:
+            print(f"  ~~  {d.ref.source}:{d.ref.line} {d.ref.repository}:{d.ref.tag} has MOVED (rolling — ADVISORY, not blocking)")
             print(f"        pinned:  {d.ref.digest}")
             print(f"        current: {d.current}")
         else:
