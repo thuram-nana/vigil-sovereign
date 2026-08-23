@@ -693,6 +693,28 @@
       "ci_job": "vigil_core — shared integrity substrate",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W5-4",
+      "title": "Every data directory carries an install manifest, verified fail-closed at startup",
+      "claim": "Every VIGIL data directory (`~/.sigil` and `.vigil-live`) carries an install manifest recording the product version, the schema versions this build writes, and a persisted install id; a fresh install writes it with no operator action, and startup verifies it and REFUSES to run (fail closed) against a data directory this build does not understand — a manifest whose format or any tracked schema is newer than, or unknown to, this build, or whose self-integrity content hash does not match its bytes.",
+      "source": "docs/decisions/W5-4-install-manifest.md:17",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/install_manifest.py",
+        "symbol": "ensure_operable"
+      },
+      "proved_by": {
+        "file": "packages/core/vigil_core/tests/test_install_manifest.py",
+        "tests": [
+          "test_fresh_install_writes_manifest_without_operator_action",
+          "test_newer_tracked_schema_is_refused",
+          "test_corrupt_or_tampered_manifest_is_refused",
+          "test_generation_is_reproducible_byte_identical"
+        ]
+      },
+      "ci_job": "vigil_core — shared integrity substrate",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
