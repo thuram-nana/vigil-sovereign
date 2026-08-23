@@ -371,8 +371,14 @@ def _web_redrive_mint(report: dict, wclass: str, *, run_dir: "str | os.PathLike"
     return _WebMintResult(is_fact=(claimed == "FACT"), facts=list(wr.facts), family_verdict=claimed)
 
 
-def _benign_twin_url(request_bytes: "bytes | None", endpoint_hint: "str | None" = None,
-                     observed_scheme: "str | None" = None) -> "str | None":
+# _benign_twin_url None-reasons (objection-4 honest telemetry): the two distinct causes a twin cannot be
+# derived, so the caller's degradation detail states the TRUE reason rather than always "no host+path".
+_TWIN_NO_HOSTPATH = "no_host_path"              # the observed request yields no derivable host+path at all
+_TWIN_UNCONFIRMED_SCHEME = "unconfirmed_scheme"  # host+path derived, but the transport scheme is unconfirmed
+
+
+def _benign_twin_url(request_bytes: "bytes | None",
+                     observed_scheme: "str | None" = None) -> "tuple[str | None, str | None]":
     """Derive the benign CONTROL url from the OBSERVED exchange's OWN captured request — its request-target
     (host+path) with the query/payload STRIPPED, over the OBSERVED exchange's OWN transport SCHEME — so the
     control is the benign twin of the exact exchange the error-signature oracle adjudicates, fetched the same
@@ -382,54 +388,58 @@ def _benign_twin_url(request_bytes: "bytes | None", endpoint_hint: "str | None" 
     nothing binds that field to the observed request line, so an observed always-erroring ``/api/search?q='``
     paired with ``endpoint='/'`` (host+path mismatch) — or with a wrong-scheme endpoint — would otherwise
     fetch a DIFFERENT page / a DIFFERENT transport whose error is absent and mint a FALSE FACT (BLOCK-2, and
-    this scheme residual).
+    the scheme residual).
 
-    Scheme resolution — the twin scheme is PAIRED to the observed exchange, it is NOT assumed http:
-      1. an absolute-form request-target (``GET https://host/path``) carries the scheme in-band → use it;
-      2. else ``observed_scheme`` — the transport scheme recorded on the capture (the proxy's TLS flag);
-      3. else the ``endpoint_hint`` scheme, but ONLY when the hint already names the SAME host+path the
-         request does (the exact-match rule — then it demonstrably describes the observed exchange);
-      4. else the scheme cannot be CONFIRMED for this exchange → return ``None`` so the caller REFUSES the
-         control (⇒ LEAD). A wrong scheme does NOT merely fail the fetch: if the target serves DIVERGENT
-         content on http vs https for this path (clean http, erroring https), a defaulted-http control would
-         be clean while the observed https page errors — minting a FALSE FACT on an always-erroring page.
+    Scheme resolution — the twin scheme is the transport GROUND TRUTH of how the observed response was
+    obtained, and ONLY that ground truth may CONFIRM it (the in-band request-target scheme and the free-text
+    endpoint scheme are NOT trusted to confirm a scheme on their own — neither is bound to the transport the
+    response actually came back over):
+      * if ``observed_scheme`` (the transport TLS flag recorded on the capture) is ``http`` or ``https``,
+        it is AUTHORITATIVE — use it, even when an absolute-form request-target carries a DIFFERENT in-band
+        scheme (objection-3: a proxied ``GET http://h/p`` observed over TLS is an https exchange);
+      * else the scheme cannot be CONFIRMED for this exchange → refuse (``(None, unconfirmed_scheme)``) so the
+        caller REFUSES the control (⇒ LEAD). A wrong scheme does NOT merely fail the fetch: if the target
+        serves DIVERGENT content on http vs https for this path (clean http, erroring https), a defaulted- or
+        guessed-http control would be clean while the observed https page errors — minting a FALSE FACT on an
+        always-erroring page. In production a Caido capture always carries the TLS flag, so this only refuses
+        hand-crafted captures that omit it — which is correct: an unconfirmable scheme is not a proof.
 
-    Returns ``None`` when the request cannot be parsed into a host+path, OR when the scheme cannot be
-    confirmed (no derivable/pairable twin ⇒ the caller LEADs). NEVER raises."""
+    The absolute-form request-target still supplies the twin's AUTHORITY + PATH (WHERE), just never the
+    SCHEME (HOW). Returns ``(url, None)`` on success; ``(None, reason)`` when no twin can be derived, where
+    ``reason`` is ``_TWIN_NO_HOSTPATH`` (the request yields no host+path) or ``_TWIN_UNCONFIRMED_SCHEME``
+    (host+path derived but the transport scheme is unconfirmed) so the caller reports the true cause. NEVER
+    raises."""
     from urllib.parse import urlsplit  # noqa: PLC0415 — stdlib
     try:
         if not request_bytes:
-            return None
+            return None, _TWIN_NO_HOSTPATH
         head = bytes(request_bytes).split(b"\r\n\r\n", 1)[0]
         lines = [ln for ln in head.split(b"\r\n") if ln.strip()]
         if not lines:
-            return None
+            return None, _TWIN_NO_HOSTPATH
         toks = lines[0].split()
         if len(toks) < 2:
-            return None
+            return None, _TWIN_NO_HOSTPATH
         target = toks[1].decode("latin-1", "replace")
-        _obs = observed_scheme if observed_scheme in ("http", "https") else None
-        if "://" in target:                                  # absolute-form target carries its own authority + scheme
+        if "://" in target:                                  # absolute-form target carries its own authority + path
             sp = urlsplit(target)
-            authority, path = sp.netloc, (sp.path or "/")
-            scheme = sp.scheme or _obs                       # in-band scheme wins; else the recorded transport scheme
+            authority, path = sp.netloc, (sp.path or "/")    # scheme deliberately IGNORED — see docstring
         else:                                                # origin-form: path here, host from the Host header
             path = urlsplit(target).path or "/"
-            authority, scheme = "", _obs                     # NO http default — the scheme must be CONFIRMED below
+            authority = ""
             for ln in lines[1:]:
                 if ln.lower().startswith(b"host:"):
                     authority = ln.split(b":", 1)[1].strip().decode("latin-1", "replace")
                     break
-            if scheme is None and endpoint_hint:             # borrow the hint SCHEME only if it names the same page
-                hp = urlsplit(str(endpoint_hint))
-                if (hp.netloc.lower() == authority.lower() and (hp.path or "/") == path
-                        and hp.scheme in ("http", "https")):
-                    scheme = hp.scheme
-        if not authority or scheme not in ("http", "https"):  # no host, or an UNCONFIRMED scheme ⇒ refuse (LEAD)
-            return None
-        return f"{scheme}://{authority}{path}"               # query/payload stripped — a benign GET of the twin
-    except Exception:  # noqa: BLE001 — an unparseable request ⇒ no derivable twin ⇒ None (the caller LEADs)
-        return None
+        if not authority:                                    # no derivable host+path ⇒ no twin (LEAD)
+            return None, _TWIN_NO_HOSTPATH
+        # The transport TLS flag is the SOLE authority for the scheme; absent/invalid ⇒ refuse (LEAD).
+        scheme = observed_scheme if observed_scheme in ("http", "https") else None
+        if scheme is None:
+            return None, _TWIN_UNCONFIRMED_SCHEME
+        return f"{scheme}://{authority}{path}", None         # query/payload stripped — a benign GET of the twin
+    except Exception:  # noqa: BLE001 — an unparseable request ⇒ no derivable twin ⇒ LEAD; never raises
+        return None, _TWIN_NO_HOSTPATH
 
 
 def _fetch_control(report: dict, control_fetch: "Optional[Callable[[dict], bytes | None]]") -> "bytes | None":
@@ -571,12 +581,24 @@ def build_report_mint(
                 # (an observed always-erroring path with a clean ``endpoint`` would otherwise fetch a clean
                 # control and mint a FALSE FACT). An observed request from which no host+path can be derived
                 # yields no pairable twin ⇒ LEAD.
-                _twin = _benign_twin_url(_req, report.get("endpoint"), observed_scheme=_observed_scheme)
+                _twin, _twin_reason = _benign_twin_url(_req, observed_scheme=_observed_scheme)
                 if _twin is None:
                     if control_fetch is not None:
-                        record_degradation(run_dir, REDRIVE_FAILED,
-                                           where="proof.run.mint.control_unpairable",
-                                           detail="observed request has no derivable host+path for a benign control")
+                        # Objection-4: report the TRUE cause. A twin fails to derive either because the
+                        # observed request yields no host+path, or because host+path IS derivable and only the
+                        # transport SCHEME was unconfirmable (no TLS flag on a hand-crafted capture) — distinct
+                        # (kind, where) rows so the audit detail is honest, never a blanket "no host+path".
+                        if _twin_reason == _TWIN_UNCONFIRMED_SCHEME:
+                            record_degradation(
+                                run_dir, REDRIVE_FAILED,
+                                where="proof.run.mint.control_scheme_unconfirmed",
+                                detail="observed transport scheme (TLS flag) unconfirmed for the benign control "
+                                       "twin — refusing to guess http")
+                        else:
+                            record_degradation(
+                                run_dir, REDRIVE_FAILED,
+                                where="proof.run.mint.control_unpairable",
+                                detail="observed request has no derivable host+path for a benign control")
                     return None
                 _fetched = _fetch_control({**report, "endpoint": _twin}, control_fetch)   # benign fetch of the OBSERVED twin
                 if not (_fetched and _fetched.strip()):
