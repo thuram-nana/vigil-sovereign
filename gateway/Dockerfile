@@ -47,5 +47,15 @@ USER vigil
 ENV VIGIL_GATEWAY_PROXY_HOST=127.0.0.1 \
     VIGIL_GATEWAY_PROXY_PORT=48081
 EXPOSE 48081
+
+# W6-2 (#453): the gate is only "up" when the proxy is actually LISTENING on its bind. This is a CONNECT
+# forward proxy, not an HTTP-routes server, so it has no /readyz (W6-1 deliberately excluded it) — its
+# readiness surface IS the listening socket. A bare TCP connect to the configured bind (the same check
+# infra/docker/docker-compose.yml uses) surfaces a serve-proxy that fail-closed and exited (bad/missing
+# charter scope) as UNHEALTHY instead of a silent exit-0-but-dead container. Stdlib-only python, read-only
+# safe (connect + close, no writes), reads the run-time bind from the env the compose file supplies.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["python", "-c", "import os,socket; socket.create_connection((os.environ.get('VIGIL_GATEWAY_PROXY_HOST','127.0.0.1'), int(os.environ.get('VIGIL_GATEWAY_PROXY_PORT','48081'))), 2).close()"]
+
 ENTRYPOINT ["vigil-gateway"]
 CMD ["serve-proxy"]

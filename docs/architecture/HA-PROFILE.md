@@ -379,9 +379,9 @@ single writer scheduled); a comment block in that file states plainly that
   Qdrant (2-node note), one active sovereign backend + a labeled passive under
   `--profile passive` that does NOT auto-write. All host ports loopback/VIP-only.
 - `infra/ha/k8s/` — `proxy-deployment.yaml` (replicas 3, `vigil up --proxy-only`
-  federating to `vigil-sovereign:8733`, `--host $(POD_IP)` bind, readiness probe),
+  federating to `vigil-sovereign:8733`, `--host $(POD_IP)` bind, `/readyz` readiness + `/healthz` liveness probes — W6-2),
   `sovereign-statefulset.yaml` (replicas 1 by design, PDB, anti-rollback readiness
-  gate, `sigil serve --host $(POD_IP)`), `qdrant-statefulset.yaml`,
+  gate, `sigil serve --host $(POD_IP)`, `/readyz` readiness + `/healthz` liveness probes), `qdrant-statefulset.yaml`,
   `neo4j-statefulset.yaml` (community caveat), `otel-deployment.yaml`, `services.yaml`
   (headless for the StatefulSet), `networkpolicy.yaml` (**required** — cockpit ingress
   restricted to the proxy pods, §1.2), and a `README.md`. Both tiers bind the pod's own

@@ -7,8 +7,9 @@
 #   (c) the target cluster has a NetworkPolicy controller (CNI) that will ENFORCE it — a NetworkPolicy
 #       object with no enforcing controller is silently unenforced, which is exactly the owner-token-leak
 #       vector this closes.
-# The refusal is done by tools/ha/require_networkpolicy.py (exit 3 on any of the above). Only after it
-# passes do we apply — and we then confirm the policy actually landed in the cluster.
+# The refusal is done by tools/ha/require_networkpolicy.py (exit 3 on any of the above). A second
+# preflight, tools/ha/require_probes.py (W6-2), then REFUSES to apply unless every workload declares real
+# liveness+readiness probes wired to /healthz + /readyz. Only after both pass do we apply — and we then confirm the policy actually landed in the cluster.
 #
 # If your cluster enforces NetworkPolicy via a CNI this script cannot auto-detect, attest it out of band:
 #     VIGIL_NETPOL_CONTROLLER_CONFIRMED=1 tools/ha/deploy.sh
@@ -29,6 +30,12 @@ echo "==> preflight: the NetworkPolicy is REQUIRED — verifying BEFORE any appl
 # Exits 3 (refuse) if the policy is absent, does not deny the cross-workload path, is not in the
 # kustomization, or no NetworkPolicy controller is present. `set -e` aborts the deploy on that non-zero.
 python3 "$REPO/tools/ha/require_networkpolicy.py" --manifests "$MANIFESTS" "${confirm_args[@]}"
+
+echo "==> preflight: REAL health probes are REQUIRED (W6-2) — verifying BEFORE any apply"
+# Exits 3 (refuse) if any workload ships without BOTH a liveness and a readiness probe, if a VIGIL-owned
+# workload's probes are not wired to /readyz (readiness) + /healthz (liveness) — never a shallow `GET /`
+# on the static bundle — or if a shipped server Dockerfile declares no HEALTHCHECK. `set -e` aborts.
+python3 "$REPO/tools/ha/require_probes.py" --manifests "$MANIFESTS" --repo-root "$REPO"
 
 echo "==> applying the HA stack via kustomize (the NetworkPolicy is the first resource, applied first)"
 kubectl apply -k "$MANIFESTS"

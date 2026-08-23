@@ -29,10 +29,17 @@ spec:
             - { name: rest, containerPort: 6333 }
             - { name: grpc, containerPort: 6334 }
             - { name: p2p,  containerPort: 6335 }
+          # W6-2 (#453): both probes on Qdrant's OWN native health surface — liveness = /livez (the
+          # process is up), readiness = /readyz (it can serve). No workload ships without both.
           readinessProbe:
             httpGet: { path: /readyz, port: rest }
             initialDelaySeconds: 5
             periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /livez, port: rest }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
           volumeMounts:
             - { name: qdrant-data, mountPath: /qdrant/storage }
   volumeClaimTemplates:
