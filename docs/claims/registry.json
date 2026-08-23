@@ -739,6 +739,28 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W9-5",
+      "title": "Production posture requires a multi-signer destruction quorum (refuses 1-of-1)",
+      "claim": "the destruction authorization path REQUIRES a genuine multi-signer quorum and refuses a 1-of-1 (or pubkey-collapsed) authority, fail-closed",
+      "source": "docs/decisions/W9-5-cosigner-provisioning-multisigner-default.md:24",
+      "enforced_by": {
+        "file": "integration/vigil_integration/destruction_gate.py",
+        "symbol": "DestructionAuthority.__post_init__"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_cosigner_enrollment.py",
+        "tests": [
+          "test_production_refuses_all_on_one_box_generate_authority",
+          "test_production_refuses_building_a_1of1_authority",
+          "test_production_accepts_a_genuine_multisigner_authority",
+          "test_forged_pubkey_without_a_valid_pop_is_refused"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "opt-in-stated-as-default",
+      "default": "off"
     }
   ]
 }

@@ -69,6 +69,11 @@ from vigil_core import (
     verify_threshold,
 )
 
+# The ONE shared parse of the deployment posture (namespace-pure stdlib; import-clean — no framework/strix/
+# sigil). W9-5 keys the production multi-signer requirement on this so the arming rule cannot drift from the
+# refuse-to-start gate (W9-4) or the running server (W10-7).
+from vigil_core.posture import is_production_posture
+
 # The durable, ATOMIC single-use ledger (stdlib-only; import-clean — no framework/strix). Its ``O_EXCL``
 # marker create is the serialization point that turns the pure single-use CHECK into an atomic
 # check-and-consume in :func:`consume_authorization`.
@@ -83,6 +88,38 @@ _DESTRUCTION_DOMAIN = b"vigil-destruction-authorization-v1\x00"
 DESTRUCTIVE = "destructive"
 HIGH_BLAST = "high-blast"
 _GATED_CLASSES = frozenset({DESTRUCTIVE, HIGH_BLAST})
+
+# W9-5 — the PRODUCTION posture makes MULTI-SIGNER the default and refuses an under-provisioned quorum.
+# "Genuine multi-signer" means (a) threshold >= PRODUCTION_MIN_THRESHOLD AND (b) at least `threshold`
+# DISTINCT signer PUBLIC keys — so the quorum can never be satisfied by ONE keyholder. This bars two
+# collapse modes: the 1-of-1 solo authority, and a duplicate-pubkey roster (verify_threshold dedups by
+# key_id, NOT by pubkey — see vigil_core.models.TrustRoot — so N distinct key_ids sharing one pubkey would
+# otherwise let a single private-key holder meet the threshold). Enforced fail-closed at BOTH the immutable
+# construction of a DestructionAuthority AND at the decision (authorize_destruction), so an under-provisioned
+# quorum can neither be LOADED nor ADJUDICATED once VIGIL_POSTURE selects production.
+PRODUCTION_MIN_THRESHOLD = 2
+
+
+def production_multisigner_reason(trust_root: TrustRoot) -> str:
+    """Return "" if ``trust_root`` is a genuine multi-signer quorum fit for the production posture, else a
+    human-readable DENY reason. PURE over the trust root — it does NOT read the env (the caller decides
+    whether the production posture is armed), so it is deterministic and unit-testable in isolation.
+    Fail-closed: an unreadable/introspection-hostile trust root is NOT a valid production quorum."""
+    try:
+        threshold = int(trust_root.threshold)
+        pubkeys = {a.public_key_b64 for a in trust_root.authorizers}
+    except Exception:  # noqa: BLE001 — an unreadable trust root is never a valid production quorum
+        return "trust root is unreadable — not a valid production multi-signer quorum"
+    if threshold < PRODUCTION_MIN_THRESHOLD:
+        return (f"production posture requires a multi-signer quorum (threshold >= {PRODUCTION_MIN_THRESHOLD}); "
+                f"got threshold {threshold} (a 1-of-1 solo authority is refused)")
+    if len(pubkeys) < PRODUCTION_MIN_THRESHOLD:
+        return ("production posture requires >= 2 DISTINCT signer keys; a duplicate-pubkey roster collapses "
+                "the quorum to a single keyholder")
+    if len(pubkeys) < threshold:
+        return (f"production posture: only {len(pubkeys)} distinct signer key(s) for threshold {threshold} "
+                "(the quorum collapses to fewer holders than the threshold)")
+    return ""
 
 
 def _is_real(x: object) -> bool:
@@ -109,6 +146,14 @@ class DestructionAuthority:
         missing = self.mandatory_signer_ids - registered
         if missing:
             raise ValueError(f"mandatory signer(s) not registered in the trust root: {sorted(missing)}")
+        # W9-5 — under the production posture an under-provisioned (1-of-1 / collapsed) quorum can never be
+        # LOADED as deployment config. This is the construction chokepoint every real path flows through
+        # (live.trusted_finding.load_destruction_authority, provisioning), so a solo authority is refused at
+        # deploy time, not merely at decision time. Inert when the posture is not armed (add-only).
+        if is_production_posture():
+            reason = production_multisigner_reason(self.trust_root)
+            if reason:
+                raise ValueError(reason)
 
 
 @dataclass(frozen=True)
@@ -236,6 +281,7 @@ def authorize_destruction(
     now: float,
     is_consumed: Callable[[str], bool],
     policy: DestructionPolicy = DEFAULT_POLICY,
+    production: "bool | None" = None,
 ) -> DestructionDecision:
     """Fail-closed decision on whether ``action`` is threshold-authorized right now. First failure
     wins; any error (malformed material, etc.) is a DENY, never an exception a caller might swallow
@@ -252,6 +298,16 @@ def authorize_destruction(
     #     caller cannot mislabel a destructive action as benign to dodge the threshold.
     if action.blast_class not in _GATED_CLASSES:
         return DestructionDecision(False, f"blast class {action.blast_class!r} is not threshold-gated")
+
+    # (W9-5) production posture requires a genuine MULTI-SIGNER quorum on the authorization path — refuse a
+    #     1-of-1 / pubkey-collapsed authority fail-closed. Defense-in-depth over the same check at
+    #     construction (an authority object built before the posture was armed cannot slip a solo quorum
+    #     past the live decision). ``production`` defaults to the one shared env parse; tests inject it.
+    prod = is_production_posture() if production is None else bool(production)
+    if prod:
+        reason = production_multisigner_reason(authority.trust_root)
+        if reason:
+            return DestructionDecision(False, reason)
 
     # (1) action binding — the quorum signed THIS exact action, not a broader/other one.
     if not auth.matches(action):
@@ -302,6 +358,7 @@ def consume_authorization(
     now: float,
     ledger: NonceLedger,
     policy: DestructionPolicy = DEFAULT_POLICY,
+    production: "bool | None" = None,
 ) -> DestructionDecision:
     """Atomic check-AND-burn: run the full pure :func:`authorize_destruction` decision, then ATOMICALLY
     spend its nonce via ``ledger`` — the ``O_EXCL`` marker create is the SINGLE serialization point, so
@@ -323,7 +380,8 @@ def consume_authorization(
     if type(ledger) is not NonceLedger:
         return DestructionDecision(False, "malformed nonce ledger")
     decision = authorize_destruction(
-        action, signed, authority=authority, now=now, is_consumed=ledger.is_consumed, policy=policy
+        action, signed, authority=authority, now=now, is_consumed=ledger.is_consumed, policy=policy,
+        production=production,
     )
     if not decision.authorized:
         return decision

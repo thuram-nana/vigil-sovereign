@@ -175,6 +175,13 @@ On top of the conjunctive gate, a destructive/high-blast action requires a quoru
 4. **Dead-man's-switch** — a policy-capped validity window; a long-lived pre-signed *sleeper* is void.
 5. **Single-use** — one nonce, `is_consumed` **required** (no fail-open default); the caller commits
    consumption atomically to the spine.
+6. **Production multi-signer default (W9-5)** — under `VIGIL_POSTURE=production` the authorization path
+   REQUIRES a genuine multi-signer quorum (threshold ≥ 2 with ≥ threshold distinct keys) and refuses a
+   1-of-1 / pubkey-collapsed authority, fail-closed at both `DestructionAuthority` construction and the
+   decision. Co-signer keys are provisioned per-host: `vigil enroll-cosigner` generates each key on its own
+   host and emits a PUBLIC enrolment request with a proof-of-possession; `vigil assemble-destruction` builds
+   the trust root from public material only (no private key on the minting box). See
+   `docs/decisions/W9-5-cosigner-provisioning-multisigner-default.md`.
 
 Wired into `conjunctive_gate.build_offense_gate`, which cross-binds `(slug, target_url)` to the
 quorum-signed action's target/engagement (else DENY).
