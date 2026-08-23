@@ -54,7 +54,7 @@ SERVER_SRC = Path(server.__file__).read_text(encoding="utf-8")
 _SPECIAL_GET_ROUTES = (
     "/api/events", "/api/blackboard", "/api/chat/sessions", "/api/chat/session/",
     "/api/chat/hypotheses", "/api/chat/models", "/api/aegis/verdicts", "/api/dossier/",
-    "/api/brain/decision",
+    "/api/brain/decision", "/api/strix/control",
 )
 
 

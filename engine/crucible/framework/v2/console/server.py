@@ -517,6 +517,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 q = parse_qs(parts.query)
                 self._json(api.brain_decision((q.get("run") or [""])[0] or None))
                 return
+            if path == "/api/strix/control":
+                # S10: the Strix runtime CONTROL STATE (read-only) — gateway/sandbox status, the pending
+                # WARDEN approval queue, proof health (the S9 4-way degraded state), the FACT/LEAD/CLEAN/
+                # INCONCLUSIVE separation, model locality, resume/recovery, kill controls. `?run=<id>`
+                # scopes the per-run surfaces to ONE Strix run (bad/foreign id → newest Strix run, never a
+                # 500); `?slug=<eng>` scopes the run LIST to the active engagement (gateway/approvals stay
+                # machine-wide). Pure reader — it spawns nothing and mints nothing.
+                q = parse_qs(parts.query)
+                self._json(api.strix_control((q.get("run") or [""])[0] or None,
+                                             (q.get("slug") or [""])[0]))
+                return
             # Scoped routes are matched BEFORE the zero-arg exact table, so re-listing one of them
             # there by accident could never silently drop the engagement scope back to "all".
             if path in _SCOPED_ROUTES:

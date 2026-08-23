@@ -77,6 +77,8 @@ FORBIDDEN = [
     # 4. the stale screen count.
     (README, "21 screens"),
     (README, "21-screen NAV"),
+    (README, "31 screens"),
+    (README, "31-screen NAV"),
     # 5. the unread-field claim.
     (MANIFEST, "each server derives its static filename allowlist from static_allowlist"),
     # 6. the supply-chain under-claim.
@@ -100,7 +102,7 @@ REQUIRED_ANCHORS = [
     (EXPLAINED, ".vigil-live/operator.key"),
     (PARTS, "A documented, purpose-built backup-and-restore procedure **does** ship"),
     (TOOLS, "The offensive half is covered by the same tooling"),
-    (README, "31 screens"),
+    (README, "32 screens"),
     (MANIFEST, "no code reads static_allowlist"),
     # W0-4's SUPPLY-CHAIN correction (operator install now installs from the locks) was superseded on main by
     # the more complete W3-6/W3-4/W3-9 supply-chain work (PR #565); anchor on that current, equivalent text.

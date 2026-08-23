@@ -111,6 +111,7 @@
       { id: "chat", label: "Chat", icon: "brain", ready: true },
       { id: "terminal", label: "Terminal", icon: "bolt", ready: true },
       { id: "live", label: "Live", icon: "live", ready: true },
+      { id: "strix", label: "Strix Control", icon: "bolt", ready: true },
       { id: "findings", label: "Findings", icon: "find", ready: true },
       { id: "proof", label: "Proof Studio", icon: "shield", ready: true },
       { id: "report", label: "Report", icon: "book", ready: true },
@@ -6104,6 +6105,218 @@
     return { close: close, card: card };
   }
 
+  // ---- Strix Control (S10): the Strix runtime CONTROL STATE, read-only --------------------------
+  // Surfaces what the Strix runtime actually reports — mode/target/scope, model locality + data
+  // residency, the VIGIL egress gateway + sandbox status, the pending WARDEN approval queue, proof
+  // health (the S9 4-way degraded state), the FACT/LEAD/CLEAN/INCONCLUSIVE verdict separation,
+  // resource state, the kill controls and resume/recovery. It reads /api/strix/control (a PURE
+  // reader): it spawns nothing and mints no FACT (the run/execute path stays checkpoint-gated
+  // elsewhere, as H10). Where a runtime source does not exist on this build (a live per-tool feed,
+  // live cpu/mem/pids, an on-demand container kill) the surface says UNAVAILABLE — never a
+  // fabricated number. The kill controls it DOES wire are STOPS (host-pid cancel + engagement
+  // kill-switch), never a spawn.
+  var STX = { run: "", data: null, loaded: false, _body: null };
+  function renderStrix(screen) {
+    var body = V.mount(screen, [h("div.screen-head", null, [h("h1", null, "Strix Control"),
+      h("span.sub", null, "The Strix agent's runtime control state — gateway, sandbox, approvals, "
+        + "proof health and the FACT/LEAD/CLEAN/INCONCLUSIVE verdicts. Read-only: nothing here spawns "
+        + "a run or mints a fact.")])]);
+    loadStrix(body);
+  }
+  function loadStrix(body) {
+    STX._body = body;
+    var slug = activeEngagement();
+    var url = OFF("/api/strix/control"
+      + (STX.run ? ("?run=" + encodeURIComponent(STX.run)) : "")
+      + (slug ? ((STX.run ? "&" : "?") + "slug=" + encodeURIComponent(slug)) : ""));
+    V.getJSON(url).then(function (d) {
+      STX.data = d; STX.loaded = true; STX.run = d.run_id || "";   // reflect the server's selection
+      drawStrix(body);
+    }).catch(function () { STX.data = null; STX.loaded = true; drawStrix(body); });
+  }
+  function strixLocalityChip(model) {
+    var m = model || {};
+    if (m.locality === "local") return V.pill("model: local", "sm ok", null);
+    if (m.locality === "cloud") return V.pill("model: cloud", "sm warn", null);
+    return V.pill("model: unknown", "sm", null);
+  }
+  function strixPicker(d) {
+    var runs = d.runs || [];
+    return h("div.card", null, [h("label", { style: { marginRight: "8px" } }, "Strix run"),
+      h("select", { onChange: function (e) { STX.run = e.target.value; loadStrix(STX._body); } },
+        [h("option", { value: "", selected: !STX.run }, runs.length ? "— newest Strix run —" : "— none —")].concat(
+          runs.map(function (r) {
+            var lab = (r.label || r.slug || r.run_id) + " · " + (r.run_kind || "") + " · " + (r.status || "");
+            return h("option", { value: r.run_id, selected: r.run_id === d.run_id }, lab);
+          }))),
+      h("span", { style: { marginLeft: "8px" } }, strixLocalityChip(d.model))]);
+  }
+  function strixOverviewCard(d) {
+    var sel = d.selected; var m = d.model || {};
+    if (!sel) return V.card("Overview", "NO STRIX RUN", h("div.hint", null,
+      "No Strix run recorded" + (d.slug ? " for this engagement" : "") + ". Start a Strix (codebase / "
+      + "agentic) assessment from New Assessment; its control state appears here."), false);
+    return V.card("Overview", "STRIX RUN", h("div", null, [
+      h("div.grid.cols-2", null, [
+        h("div", null, [
+          trustKv("Mode", String(sel.run_kind || "—")),
+          trustKv("Target", String(sel.target || "—")),
+          trustKv("Scope (engagement)", String(sel.slug || "—")),
+          trustKv("Status", String(sel.status || "—"))]),
+        h("div", null, [
+          trustKv("Model", (m.model || "—") + " · " + (m.locality || "unknown")),
+          trustKv("Data residency", String(m.residency || "—")),
+          (m.endpoint ? trustKv("Endpoint", String(m.endpoint)) : null),
+          (sel.interrupted_reason ? trustKv("Interrupted", String(sel.interrupted_reason)) : null)])])]), false);
+  }
+  function strixGatewayCard(gw) {
+    gw = gw || {}; var running = !!gw.running; var eg = gw.egress || "UNKNOWN";
+    var egCls = eg === "ON" ? "ok" : (eg === "OFF" ? "warn" : null);
+    return V.card("Egress gateway + sandbox network", "VIGIL", h("div", null, [
+      h("div.grid.cols-3", null, [
+        V.tile("Gateway", gw.available ? (running ? "RUNNING" : String(gw.state || "absent").toUpperCase()) : "UNKNOWN",
+          gw.available ? (running ? "vigil-gateway container up" : "not running") : "docker probe unavailable",
+          running ? "ok" : (gw.available ? "warn" : null)),
+        V.tile("Sandbox pin", gw.sandbox_pinned ? "PINNED" : "UNPINNED",
+          gw.sandbox_pinned ? "pinned onto the gated net" : "NOT pinned onto the gated net",
+          gw.sandbox_pinned ? "ok" : "warn"),
+        V.tile("Egress", eg, eg === "ON" ? "routed through the gateway" : "NOT gated", egCls)]),
+      h("div.hint", { style: { marginTop: "8px" } }, gw.note || ""),
+      (gw.error ? h("div.hint", { style: { marginTop: "4px", color: "var(--st-blocked)" } }, "probe error: " + gw.error) : null)]), false);
+  }
+  function strixSandboxCard(sb) {
+    sb = sb || {}; var hp = sb.host_process;
+    return V.card("Sandbox / container", "STATUS", h("div", null, [
+      trustKv("Container status", sb.container_status_available ? "available" : "not persisted by this build (no container registry)"),
+      (hp ? trustKv("Host process", (hp.running ? "running" : (hp.status || "—"))
+        + (hp.pid != null ? (" (pid " + hp.pid + ")") : "")) : null),
+      h("div.hint", { style: { marginTop: "8px" } }, sb.note || "")]), false);
+  }
+  function strixVerdictCard(v) {
+    v = v || {};
+    function chip(label, val, cls, desc) {
+      return h("div.fix-card", { style: { padding: "8px 10px" } }, [
+        h("div.row-flex", { style: { gap: "6px", alignItems: "center" } }, [V.pill(label, cls, null), h("b", null, String(val))]),
+        h("div.dim", { style: { fontSize: "var(--fs-micro)", marginTop: "4px" } }, desc)]);
+    }
+    var cleanVal = !v.has_run ? "—" : (v.clean ? "yes" : "no");
+    return V.card("Verdicts — the verification manifest", "FACT / LEAD / CLEAN / INCONCLUSIVE", h("div", null, [
+      h("div.grid.cols-4", null, [
+        chip("FACT", v.has_run ? v.fact : "—", "sm ok", "oracle FIRED over captured bytes — never a Strix claim alone."),
+        chip("LEAD", v.has_run ? v.lead : "—", "sm warn", "reported but not VIGIL-verified — a Strix finding is a LEAD until re-driven."),
+        chip("CLEAN", cleanVal, "sm", "a checked surface with a sound negative — impossible while degraded/incomplete."),
+        chip("INCONCLUSIVE", v.has_run ? v.inconclusive : "—", "sm", "a missing channel, a degraded subsystem, or a run that did not complete.")]),
+      (v.clean_blocked_reason ? h("div.hint", { style: { marginTop: "8px" } }, "CLEAN is blocked: " + v.clean_blocked_reason) : null),
+      (v.denied ? h("div.hint", { style: { marginTop: "4px" } }, String(v.denied) + " dangerous PoC(s) refused before any mint.") : null)]), false);
+  }
+  function strixProofCard(ph) {
+    ph = ph || {}; var degraded = !!ph.verification_degraded;
+    var banner = degraded ? h("div.card.verification-degraded", { role: "alert" }, [
+      h("div.card-h", null, [h("h3", { style: { color: "var(--st-blocked)" } }, [V.icon("info"), " Verification degraded — this run is NOT clean"]),
+        h("span.pill.sm.danger", { style: { marginLeft: "auto" } }, String(ph.disposition || "degraded"))]),
+      h("p", null, PROOF_DEG_LABEL[ph.disposition] || "The proof subsystem degraded on this run, so an empty proof list does NOT mean the target is clean."),
+      ((ph.degraded_causes || []).length ? h("div.kv", null, [h("div.k", null, "Causes"),
+        h("div.v", null, (ph.degraded_causes || []).map(function (c) { return h("span.pill.sm.danger", null, String(c.kind) + " ×" + String(c.count || 1)); }))]) : null)]) : null;
+    var covRows = (ph.inconclusive_surfaces || []).length ? h("div.kv", null, [h("div.k", null, "Unassessed surfaces"),
+      h("div.v", null, (ph.inconclusive_surfaces || []).map(function (s) { return h("span.pill.sm.warn", null, String(s)); }))]) : null;
+    return h("div", null, [banner, V.card("Proof health", "S9", h("div", null, [
+      trustKv("Disposition", String(ph.disposition || (ph.has_run ? "—" : "no run selected"))),
+      trustKv("Degraded", degraded ? "yes" : "no"),
+      trustKv("Coverage", ph.coverage_incomplete ? "INCOMPLETE — a declared surface went unassessed" : "complete"),
+      covRows,
+      h("div.hint", { style: { marginTop: "8px" } }, "Distinguishes nothing-found from proof-subsystem-unavailable / capture-failed / redrive-failed / mint-failed. See Proof Studio for the records.")]), false)]);
+  }
+  function strixApprovalsCard(ap) {
+    ap = ap || {}; var pend = ap.pending || [];
+    var rows = pend.length ? pend.map(function (p) {
+      return h("div.fix-card", { style: { padding: "8px 10px", marginTop: "6px" } }, [
+        h("div.row-flex", { style: { gap: "8px", alignItems: "center", flexWrap: "wrap" } }, [
+          V.pill(String(p.tool_name || "?"), "sm warn", null), h("b.mono", null, String(p.target || "—")),
+          h("span.dim", { style: { marginLeft: "auto", fontSize: "var(--fs-micro)" } }, String(p.created_at_iso || ""))]),
+        (p.args_preview ? h("div.dim", { style: { fontSize: "var(--fs-micro)", marginTop: "4px" } }, "args: " + String(p.args_preview)) : null)]);
+    }) : [h("div.empty", null, "No Strix action is waiting for an owner signature.")];
+    return V.card("Pending WARDEN approvals", (pend.length ? String(pend.length) + " WAITING" : "0 WAITING"), h("div", null, [
+      h("div.hint", null, ap.note || ""),
+      h("div", { style: { marginTop: "6px" } }, rows),
+      (ap.base_dir ? h("div.hint", { style: { marginTop: "8px" } }, ["Sign out-of-band: ",
+        h("code", null, "vigil approve sign --base-dir " + ap.base_dir + " <request-id>")]) : null)]), false);
+  }
+  function strixActivityCard(a) {
+    a = a || {};
+    return V.card("Live tool activity", a.live_tool_feed_available ? "LIVE" : "NO LIVE FEED", h("div", null, [
+      h("div.hint", null, a.note || ""),
+      h("div.row-flex", { style: { gap: "8px", marginTop: "8px", flexWrap: "wrap" } }, [
+        h("button.btn.sm", { onClick: function () { location.hash = "#/live"; } }, [V.icon("live"), "Live spine feed"]),
+        h("button.btn.sm", { onClick: function () { location.hash = "#/proof"; } }, [V.icon("shield"), "Proof Studio"])])]), false);
+  }
+  function strixResourceCard(rs) {
+    rs = rs || {}; var lim = rs.configured_limits || {};
+    return V.card("Resource consumption", rs.live_usage_available ? "LIVE" : "LIMITS ONLY", h("div", null, [
+      h("div.hint", null, rs.note || ""),
+      h("div", { style: { marginTop: "8px" } }, [
+        trustKv("Memory limit", String(lim.mem_limit || "—")),
+        trustKv("CPU limit", String(lim.cpus || "—")),
+        trustKv("PID limit", String(lim.pids_limit || "—")),
+        trustKv("shm size", String(lim.shm_size || "—"))])]), false);
+  }
+  function strixTripKill(slug) {
+    if (!slug) return;
+    if (!window.confirm("Trip the engagement kill-switch?\n\nThe engagement will HALT on its next poll. This is the offense-side hard stop.")) return;
+    V.postJSON(OFF("/api/killswitch/" + encodeURIComponent(slug) + "/trip"), { reason: "tripped from Strix Control" })
+      .then(function (r) { if (r && r.error) { V.toast(r.error, true); return; } V.toast("Kill-switch tripped — the engagement will halt."); loadStrix(STX._body); })
+      .catch(function (e) { V.toast((e && e.message) || "Could not trip the kill-switch", true); });
+  }
+  function strixKillCard(ks) {
+    ks = ks || {}; var eng = ks.engagement || {}; var ps = ks.process_stop || {}; var ck = ks.container_kill || {};
+    var engTripped = eng.tripped === true; var canTrip = !!eng.slug && !engTripped;
+    var stopBtn = h("button.btn.danger", { disabled: !ps.available,
+      title: ps.available ? "Stop the Strix host process (SIGTERM->SIGKILL)" : "No running Strix run to stop",
+      onClick: function () { if (ps.run_id) runCancel(ps.run_id, function () { loadStrix(STX._body); }); } }, [V.icon("x"), "Stop Strix process"]);
+    var tripBtn = h("button.btn.danger", { disabled: !canTrip,
+      title: canTrip ? "Trip this engagement's kill-switch (offense-side hard stop)" : (engTripped ? "Already tripped" : "No engagement slug for this run"),
+      onClick: function () { strixTripKill(eng.slug); } }, [V.icon("x"), "Trip engagement kill-switch"]);
+    var containerBtn = h("button.btn", { disabled: true, title: ck.note || "not available" }, [V.icon("x"), "Kill container"]);
+    return V.card("Kill controls", "SAFETY", h("div", null, [
+      h("div.grid.cols-3", null, [
+        V.tile("Engagement kill-switch", engTripped ? "TRIPPED" : (eng.slug ? "released" : "—"),
+          eng.reason || (eng.slug ? "offense-side hard stop" : "no slug"), engTripped ? "danger" : null),
+        V.tile("Process stop", ps.available ? "available" : "—", "host pid SIGTERM->SIGKILL", null),
+        V.tile("Container kill", "UNAVAILABLE", "not wired in this build", "warn")]),
+      h("div.row-flex", { style: { gap: "8px", marginTop: "10px", flexWrap: "wrap" } },
+        [stopBtn, tripBtn, containerBtn, V.pill("container-reap: checkpoint-gated", "sm warn", null)]),
+      h("div.hint", { style: { marginTop: "8px" } }, ck.note || ""),
+      h("div.hint", { style: { marginTop: "4px" } }, ps.note || "")]), false);
+  }
+  function strixRecoveryCard(rc) {
+    rc = rc || {};
+    if (!rc.present) return V.card("Resume / recovery", "—", h("div.hint", null, rc.note || "No Strix run selected."), false);
+    var retryable = !!rc.retryable;
+    var btn = h("button.btn", { disabled: !retryable,
+      title: retryable ? (rc.action === "resume" ? "Resume this run from its last signed checkpoint" : "Restart this run from the beginning")
+        : "Retry/resume becomes available once the run has ended",
+      onClick: function () { if (rc.run_id) runRetry(rc.run_id, function () { loadStrix(STX._body); }); } },
+      [V.icon("play"), rc.action === "resume" ? "Resume run" : "Restart run"]);
+    return V.card("Resume / recovery", rc.resumable ? "RESUMABLE" : "RESTART-ONLY", h("div", null, [
+      h("div.grid.cols-3", null, [
+        V.tile("Run status", String(rc.status || "—"), rc.interrupted_reason || "", rc.status === "error" ? "danger" : null),
+        V.tile("Recovery", rc.action === "resume" ? "RESUME" : "RESTART", rc.resumable ? "continues from last checkpoint" : "restarts from the beginning", null),
+        V.tile("Return code", rc.rc == null ? "—" : String(rc.rc), "", null)]),
+      h("div.row-flex", { style: { gap: "8px", marginTop: "10px" } }, [btn]),
+      h("div.hint", { style: { marginTop: "8px" } }, rc.note || "")]), false);
+  }
+  function drawStrix(body) {
+    var d = STX.data;
+    if (!d) { V.mount(body, h("div.card", null, h("div.empty", null,
+      "Could not load the Strix control state (the offense plane may be offline)."))); return; }
+    STX._body = body;
+    V.mount(body, [
+      strixPicker(d), strixOverviewCard(d), strixGatewayCard(d.gateway), strixSandboxCard(d.sandbox),
+      strixVerdictCard(d.verdicts), strixProofCard(d.proof_health), strixApprovalsCard(d.approvals),
+      strixActivityCard(d.activity), strixResourceCard(d.resources), strixKillCard(d.killswitch),
+      strixRecoveryCard(d.recovery),
+      h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
+  }
+
   // A file dropped NEXT TO the transcript (on the nav, the top bar, the margin) would otherwise make the
   // browser navigate away to that file and take the console with it. Same function reference every time,
   // so re-entering the screen cannot stack duplicate listeners, and it unhooks itself once the chat
@@ -9219,6 +9432,7 @@
     if (id === "defense") { renderDefense(screen); return; }
     if (id === "fixes") { renderFixes(screen); return; }
     if (id === "brain") { renderBrain(screen); return; }
+    if (id === "strix") { renderStrix(screen); return; }
     if (id === "mcp") { renderMcp(screen); return; }
     if (id === "system") { renderSystem(screen); return; }
     if (id === "budgets") { renderBudgets(screen); return; }

@@ -460,6 +460,28 @@
       ]
     },
     {
+      "description": "The Strix agent's runtime control state — egress gateway, sandbox, the pending WARDEN approval queue, proof health (the S9 degraded state), the FACT/LEAD/CLEAN/INCONCLUSIVE verdicts, resource state, kill controls and resume/recovery. Read-only.",
+      "group": "DO",
+      "id": "strix",
+      "label": "Strix Control",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "strix",
+        "strix control",
+        "sandbox",
+        "gateway",
+        "agent control",
+        "container",
+        "kill switch",
+        "approvals queue",
+        "proof health",
+        "verification manifest",
+        "resume",
+        "recovery"
+      ]
+    },
+    {
       "description": "The whole system's readiness at a glance (the `vigil doctor` report surfaced in the UI) — prerequisites (binaries + both venvs + writable dirs), the four UI ports (free / in-use), and every docker service's live state (gateway + qdrant / neo4j / otel). Read-only; create the absent services with `vigil services up`.",
       "group": "MANAGE",
       "id": "system",
@@ -559,5 +581,5 @@
       ]
     }
   ],
-  "source_sha": "15f3ad14a7a79977e165a856f6e8d52827550c7c29e2e664b146bfa894910646"
+  "source_sha": "cf712cb1468d94314827cf29beae3239a9452460603fd67e8b4d37f8c3c733d7"
 }
