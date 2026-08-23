@@ -432,16 +432,22 @@
    "subject": "strix batch2: P8 fix \u2014 proof degradation recording must never trigger strix.report.__init__"
   },
   {
-   "commit": "c0cdb95a9258be16c4791977a5bd100baf0e1290",
+   "commit": "d94c4ca60162965b870c9a7e1f0524601c011c44",
    "file": "028-s10-vendor-strix-synchronous-container-teardown.patch",
-   "sha256": "e6b05465bcfa24fcb54beca8f2d4b1791577c15ce6ac9438c6b3e7cba755597f",
+   "sha256": "8c61b8b775cf1512532e028c47da67dc98e71e092fa31143686ad1832cba25cf",
    "subject": "S10 (vendor/strix): synchronous container teardown on the signal path"
   },
   {
-   "commit": "185e5a43e56cdfd75d1bbec9e5294cb38c0170fb",
+   "commit": "f1c946a8843fac3e6e8d795b4f38e4ba69532f18",
    "file": "029-s10-lifecycle-fix-p8-collection-error-importorsk.patch",
-   "sha256": "b5d049b73e2f7e6012da0dec35d1c5a4383cfa0caed33c5c7ec136f0ad9cefd5",
+   "sha256": "3c779ae85e9b63d1dd6677522bf6a9457928a3f4914ca3ec2276baf864bf319f",
    "subject": "S10-lifecycle: fix P8 collection ERROR \u2014 importorskip the strix runtime chain"
+  },
+  {
+   "commit": "76e700566e8c16f0d1a558f213f47c928dfdf129",
+   "file": "030-s6-control-exchange-close-the-medium-scheme-pair.patch",
+   "sha256": "b4eea9b43372fa2919e59818c053e8d82f5f696b18ed1d1a3609ebe0b70adb70",
+   "subject": "S6 control exchange: close the MEDIUM scheme-pairing residual (fail-closed twin scheme)"
   }
  ],
  "schema": 1,
@@ -545,7 +551,7 @@
   "vendor/strix/strix/report/anthropic_pricing.py": "114175e67481568fb7ab08105a10abe1afcc0edee90ee4698de5752e4b50d093",
   "vendor/strix/strix/report/dedupe.py": "f4094770da0dd5616912685269098620f57d7df8c107e1600336a92cb303adb4",
   "vendor/strix/strix/report/degradation_hook.py": "7b80de0574c779802595f70b3188995780123aaf475ed05ed4a1f8a123781f7f",
-  "vendor/strix/strix/report/proof_capture.py": "618ef582e0f3b5b796416f48fae84109953bd19df97d0a074749332602559b29",
+  "vendor/strix/strix/report/proof_capture.py": "8b50327c8d5054b3a0b1103253d1ea05bcb05a4f4afc540b23f97779e6cb1a52",
   "vendor/strix/strix/report/sarif.py": "2b32368c31a36628bae7dd6154b9a7190c979ab74ffdfe8ec72ce1c555773cb6",
   "vendor/strix/strix/report/state.py": "f0c5c3a9de13e4bf1519776e85ed879de963b83f73e341883757ff23957d85c8",
   "vendor/strix/strix/report/usage.py": "3a526249ca46f9ab28d273f028a6f1327b52671887c909e3609ce48532e5aa27",
@@ -683,7 +689,7 @@
   "vendor/strix/tests_vigil/test_anthropic_pricing.py": "21df8733982f747cadb06f569d061a29ff2ec07a0661087de35b86e6f4716d2c",
   "vendor/strix/tests_vigil/test_dedupe_extract.py": "908371cfb9105f8c871152306f9116bdf7d2b817f00974ed585a873ed099e4da",
   "vendor/strix/tests_vigil/test_lifecycle_teardown.py": "e34f90e1918955c60609591f52544f79d37b24bb9e924f3e76439a4a4b15a748",
-  "vendor/strix/tests_vigil/test_proof_capture.py": "8353aab117c4f75970df48c103ef6822d076be74aee9816775133bb24dd3a828",
+  "vendor/strix/tests_vigil/test_proof_capture.py": "790f3652a81033c7ac6455076b53932bab381136fb50fc6866b9fb53f3638720",
   "vendor/strix/tests_vigil/test_reasoning_thinking.py": "56365c986fa3bb04ca250e45f7f2b126732a1c0c4b827d224ea44c75d9d515b0",
   "vendor/strix/tests_vigil/test_sandbox_hardening.py": "c5a6cbb4e51c5a86d1c9f30785fa7234af47706015222a9323f420b8a2059be8",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
