@@ -1,0 +1,84 @@
+name: soak
+
+# W11-6 (#487). THE GAP THIS CLOSES. `eval/soak.py` measured a single scan's scale metrics and a
+# determinism fingerprint, but nothing drove SUSTAINED load or watched memory over a long run — calling
+# that a "soak" was itself a claim problem. The soak now has two honestly-split halves:
+#
+#   * the FAST, DETERMINISTIC core — the leak detector with its artificially-leaking-fixture NEGATIVE
+#     CONTROL, and a SCALED sustained run against a deliberately conservative throughput floor — rides
+#     the REQUIRED `CRUCIBLE eval + benchmark corpus` job on every PR (framework/v2/eval/tests/
+#     test_soak_leak.py). It is genuinely falsifiable: a broken detector or an order-of-magnitude
+#     throughput regression turns that required job red.
+#
+#   * THIS workflow is the OTHER half: the FULL multi-minute sustained soak at the SLA throughput floor
+#     over a long run, which is too slow for a per-PR runner. It runs on a schedule (and on demand), is
+#     NOT a required status check, and reports rather than blocks a PR — the same smoke-vs-nightly split
+#     livefire.yml already makes. It is honestly labelled "(nightly)" and enumerated in
+#     docs/tests/test_required_checks_canonical.py's KNOWN_NONPR_ADVISORY with this reason.
+#
+# The run needs NO docker, NO network and NO root: the target is this module's own stdlib HTTP app bound
+# to 127.0.0.1 (framework/v2/eval/soak.py::serve_soak). `python3 -m framework.v2.eval.soak --sustained`
+# exits non-zero — turning this job red — if the documented throughput floor is breached, a memory leak
+# is detected across the run, or the scan fingerprint diverges across iterations.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"        # nightly, 04:00 UTC (distinct from livefire 03:00 and supply-chain 06:00)
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "minimum sustained iterations (blank = 200)"
+        required: false
+        default: "200"
+      min_duration_s:
+        description: "minimum wall-clock seconds of sustained load (blank = 180)"
+        required: false
+        default: "180"
+      floor_rps:
+        description: "documented throughput floor in audit-requests/sec (blank = the module default)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  soak-full:
+    name: soak full run (nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: install the engine's python deps
+        run: |
+          # W3-2: the engine's runtime deps come from the committed HASH LOCK so the soak runs against
+          # the same tree it ships. vigil_core is first-party -> editable --no-deps. No pytest here: this
+          # job drives the engine directly, not a test suite.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+
+      - name: drive the full sustained soak (throughput floor + leak detection)
+        working-directory: engine/crucible
+        env:
+          PYTHONPATH: .
+          # A real multi-minute soak: at least ITER iterations AND at least DURATION seconds of load.
+          ITER: ${{ github.event.inputs.iterations || '200' }}
+          DURATION: ${{ github.event.inputs.min_duration_s || '180' }}
+          FLOOR: ${{ github.event.inputs.floor_rps }}
+        run: |
+          set -euo pipefail
+          floor_arg=""
+          if [ -n "${FLOOR:-}" ]; then floor_arg="--floor-rps ${FLOOR}"; fi
+          # The module default floor is SUSTAINED_THROUGHPUT_FLOOR_RPS; --sustained defaults endpoints to
+          # 8 (a soak drives DURATION, not breadth). Exits non-zero on a floor breach, a detected leak, or
+          # a determinism divergence, which fails this job.
+          python3 -m framework.v2.eval.soak --sustained \
+            --iterations "${ITER}" --min-duration-s "${DURATION}" ${floor_arg}
