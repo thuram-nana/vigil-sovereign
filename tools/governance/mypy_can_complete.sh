@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # mypy "can-complete" gate for the SIGIL package (W2-5, #422).
 #
-# The fast mypy subset used by the pre-commit gate. It mirrors the existing `sigil-lint` CI job exactly:
-# mypy must be able to FINISH. Exit 2 — a parse / type-comment / config abort, the class of failure that
-# once silently disabled type-checking for the entire package (a "# type:" PROSE comment parsed as a PEP
-# 484 type comment) — FAILS the hook. Exit 0 (clean) or exit 1 (pre-existing type-error debt, tracked as
-# a follow-on and NOT gated here) PASSES. This keeps mypy RUNNABLE; it does not claim type-cleanliness.
+# The fast mypy CAN-COMPLETE subset used by the pre-commit gate: mypy must be able to FINISH. Exit 2 —
+# a parse / type-comment / config abort, the class of failure that once silently disabled type-checking
+# for the entire package (a "# type:" PROSE comment parsed as a PEP 484 type comment) — FAILS the hook.
+# Exit 0 (clean) or exit 1 (type-error debt) PASSES. It keeps mypy RUNNABLE and is deliberately cheap so
+# the local hook stays fast. The BLOCKING per-module ratchet — a type error in a non-allowlisted module
+# fails, and the not-yet-clean allowlist may only shrink — is enforced by the required `SIGIL lint (ruff
+# + mypy ratchet, blocking)` CI job via tools/governance/mypy_ratchet.sh (W2-1 #418), not here.
 set -u
 
 root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"

@@ -5,6 +5,9 @@ venv/
 .claude/
 /scratch-demo/
 .coverage
+# W2-4 (#421): per-package coverage reports pytest-cov writes at the repo root in CI (ephemeral).
+/coverage-*.xml
+/coverage-*.json
 *.egg-info/
 dist/
 build/

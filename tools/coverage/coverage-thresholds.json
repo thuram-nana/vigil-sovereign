@@ -1,0 +1,10 @@
+{
+  "$note": "Committed per-package line + branch coverage floors, enforced by tools/coverage/coverage_ratchet.py (W2-4, #421). CI fails if a package's measured line or branch coverage drops below its floor. Floors are a review-enforced high-water baseline: raise them as coverage improves (run `coverage_ratchet.py update`); lowering one is an explicit, reviewable loosening. A package with no entry here is NOT gated -- see docs/decisions/W2-4-coverage-ratchet.md for the roll-out plan to the remaining packages and the measured baseline behind each floor.",
+  "packages": {
+    "vigil_core": {
+      "branch": 75.0,
+      "line": 85.0,
+      "source": "packages/core/vigil_core"
+    }
+  }
+}

@@ -35,8 +35,35 @@ jobs:
           pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
           pip install -e packages/core/vigil_core --no-deps
           pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
-      - name: migration-safety tests (v1 byte-identical signing, threshold, tamper)
-        run: pytest packages/core/vigil_core/tests -q
+      - name: migration-safety tests + line/branch coverage (measured) — W2-4 #421
+        run: |
+          # W2-4 (#421): measure REAL line+branch coverage of the security-critical vigil_core
+          # substrate while running its migration-safety suite, and emit a machine-readable (json/xml)
+          # + human (term) report. --cov-branch turns on branch coverage; pytest-cov does NOT fail the
+          # job on low coverage here (no --cov-fail-under) — the ratchet step below is the gate, so a
+          # test failure and a coverage regression stay distinguishable.
+          pytest packages/core/vigil_core/tests -q \
+            --cov=vigil_core --cov-branch \
+            --cov-report=term-missing:skip-covered \
+            --cov-report=xml:coverage-vigil_core.xml \
+            --cov-report=json:coverage-vigil_core.json
+      - name: coverage ratchet — vigil_core line+branch floors must hold (W2-4 #421)
+        run: |
+          # Fails the build if measured line OR branch coverage drops below the committed floor in
+          # tools/coverage/coverage-thresholds.json. Deleting a test that covers vigil_core reddens CI.
+          python tools/coverage/coverage_ratchet.py check \
+            --thresholds tools/coverage/coverage-thresholds.json \
+            --package vigil_core \
+            --report coverage-vigil_core.json
+      - name: publish the vigil_core coverage report (artifact) — W2-4 #421
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-vigil_core
+          path: |
+            coverage-vigil_core.xml
+            coverage-vigil_core.json
+          if-no-files-found: warn
 
   briefing-completeness:
     name: the briefing explains every agent and capability
@@ -643,16 +670,19 @@ jobs:
           fi
 
   sigil-lint:
-    name: SIGIL lint (ruff blocking + mypy can-complete)
+    name: SIGIL lint (ruff + mypy ratchet, blocking)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # ruff and mypy were declared as dev extras but NEVER run in CI. A "# type:" PROSE comment in
     # settings.py was parsed as a PEP 484 type comment and ABORTED mypy for the whole package ("mypy cannot
     # complete") while ruff stayed green — it shipped precisely because neither tool ran here. This job
-    # wires both in: ruff is FULLY BLOCKING (E9/F/B real bug classes, green today); mypy is a CAN-COMPLETE
-    # gate — it fails ONLY if mypy cannot finish (exit 2: a parse/type-comment/config abort, the class just
-    # fixed), NOT on the pre-existing type errors it now surfaces (exit 1). Reducing that type-error debt is
-    # a tracked follow-on; this gate keeps mypy RUNNABLE, it does not claim type-cleanliness.
+    # wires both in as BLOCKING gates: ruff is FULLY BLOCKING (E9/F/B real bug classes, green today); mypy
+    # is now blocking behind a PER-MODULE RATCHET (W2-1 #418). The old advisory `exit 0` swallow — mypy ran
+    # and its exit code was discarded — is gone. tools/governance/mypy_ratchet.sh runs `mypy sigil` and
+    # tools/governance/mypy_ratchet.py fails the job if any module NOT on apps/sigil/mypy-ratchet.txt has a
+    # type error, if a listed module is now clean (the allowlist only shrinks), or if the ceiling is
+    # inconsistent. A parse/config abort (exit 2) or a missing mypy still fails closed. The 22 not-yet-clean
+    # modules are burned down over time; the list can never silently grow back.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -669,17 +699,14 @@ jobs:
       - name: ruff (BLOCKING — E9/F/B real bug classes)
         working-directory: apps/sigil
         run: ruff check sigil
-      - name: mypy must be able to COMPLETE (guards the parse-abort class; type-error debt not gated here)
-        working-directory: apps/sigil
+      - name: mypy — BLOCKING per-module ratchet (W2-1 #418)
         run: |
-          set +e
-          python -m mypy sigil; rc=$?
-          if [ "$rc" -eq 2 ]; then
-            echo "::error::mypy could NOT complete (exit 2) — a parse/type-comment/config abort regressed"
-            exit 1
-          fi
-          echo "mypy completed (exit $rc). Pre-existing type-error debt is surfaced above and tracked as a follow-on, not gated here."
-          exit 0
+          # Runs `mypy sigil` and hands the output to the ratchet guard. FAILS the job on: a type error
+          # in any module not on apps/sigil/mypy-ratchet.txt; a listed module that is now clean (the list
+          # only shrinks); an inconsistent ceiling; or mypy failing to run (exit 2 / not installed). No
+          # `exit 0` swallow. The guard's own unit tests + this wiring run in the required docs/tests job
+          # (docs/tests/test_mypy_ratchet.py).
+          bash tools/governance/mypy_ratchet.sh
 
   formal-verification:
     name: formal (TLA+ core-invariant model check, F1)

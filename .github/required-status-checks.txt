@@ -38,7 +38,7 @@ integration two-env boundary (P5)
 livefire smoke (per-PR subset)
 loopback engagement (end-to-end + offline re-verify)
 SIGIL governor gates (P7 — offense gate + authn)
-SIGIL lint (ruff blocking + mypy can-complete)
+SIGIL lint (ruff + mypy ratchet, blocking)
 strix Claude-runtime (P8)
 the briefing explains every agent and capability
 vigil_core — shared integrity substrate

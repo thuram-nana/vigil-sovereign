@@ -1,0 +1,36 @@
+# Per-module mypy ratchet for the SIGIL package (W2-1, #418) — enforced by
+# tools/governance/mypy_ratchet.py, run blocking in the required `SIGIL lint (ruff + mypy ratchet,
+# blocking)` CI job (see .github/workflows/ci.yml) and mirrored by the pre-commit hook.
+#
+# Each line below is a module that is NOT YET mypy-clean under apps/sigil's [tool.mypy] config.
+# Every module NOT listed here is BLOCKING: one new type error in it reddens CI. This list may only
+# SHRINK — fix a module's type errors and remove its line (run `mypy_ratchet.py update` to do it for
+# you). Adding a line requires raising `ceiling:` in the same commit; the guard fails until you do,
+# so a loosening is always an explicit, reviewed change. Do not edit by hand to silence a regression:
+# fix the type error instead.
+#
+# `ceiling:` MUST equal the number of module lines below. It is the debt high-water mark; it goes
+# DOWN as modules are cleaned and can only go UP through an explicit, reviewable commit.
+ceiling: 22
+sigil/backup.py
+sigil/cli.py
+sigil/gesture/session.py
+sigil/governor/accounts.py
+sigil/governor/integrity.py
+sigil/governor/key_history.py
+sigil/inbound/spool_watcher.py
+sigil/platform/secret_probes.py
+sigil/spine/dek_rotation.py
+sigil/spine/floor.py
+sigil/spine/manifest.py
+sigil/spine/merkle.py
+sigil/spine/prune.py
+sigil/spine/schema_guard.py
+sigil/spine/tail.py
+sigil/spine/verify.py
+sigil/ui/actions.py
+sigil/ui/oidc.py
+sigil/ui/server.py
+sigil/ui/settings.py
+sigil/voice/components.py
+sigil/warden_key.py
