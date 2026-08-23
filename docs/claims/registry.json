@@ -648,6 +648,28 @@
       "ci_job": "the briefing explains every agent and capability",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W7-4",
+      "title": "Backup push verifies the copy at the destination + a real remote transport ships (fail-closed)",
+      "claim": "`vigil backup --push` verifies the pushed copy AT THE DESTINATION — it re-reads the bytes that actually landed on the destination (a remote `sha256sum` over rsync+ssh, or a byte-for-byte read-back) and matches each against the sha256 of exactly what was sent, refusing a truncated, corrupted, or tampered copy fail-closed (non-zero exit); this is not a second local checksum. At least one real remote transport (rsync, over ssh or an rsync daemon) ships and is exercised end to end against the real `rsync` binary.",
+      "source": "docs/decisions/W7-4-destination-integrity-and-real-transport.md:20",
+      "enforced_by": {
+        "file": "tools/backup/transport.py",
+        "symbol": "Transport.verify"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_backup_push_transport.py",
+        "tests": [
+          "test_local_verify_catches_a_TRUNCATED_destination_copy",
+          "test_local_verify_catches_a_TAMPERED_destination_copy",
+          "test_rsync_transport_roundtrips_via_the_real_binary",
+          "test_cli_push_FAILS_CLOSED_when_the_destination_is_corrupted"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

@@ -772,11 +772,18 @@ Four honest limits on the backup:
    run `vigil backup --push <dest>` (or the shipped, network-enabled `vigil-backup-push.service` /
    `.timer`, kept separate from the air-gapped local unit). Push copies **only the already-encrypted
    files** (ciphertext) plus the fingerprint manifest — no plaintext and no passphrase ever leave
-   the host — and the pushed copy is itself a valid restore source. Only a local-directory transport
-   ships today (a mounted remote filesystem, an sshfs mount, or a removable disk); rsync/scp/object-
-   store backends are structured to slot in behind the same contract. The **remote's** own security
-   (who can read that directory) is the operator's responsibility, and an assessor should confirm a
-   test restore has been done *from the pushed copy*, not only the local one.
+   the host — and the pushed copy is itself a valid restore source. Two real transports ship: a
+   **local-directory** transport (a mounted remote filesystem, an sshfs mount, or a removable disk),
+   and a real **rsync** transport (`rsync://…` or `rsync:[user@]host:path`) that copies over ssh or
+   to an rsync daemon; scp/object-store backends are structured to slot in behind the same contract.
+   **After** copying, the push **verifies the copy at the destination**: it re-reads the bytes that
+   actually landed there — over rsync-and-ssh it asks the *remote* to hash its own copy with
+   `sha256sum`, otherwise it reads the copy back byte for byte — and checks each hash against exactly
+   what was sent. A truncated, corrupted, or tampered remote copy is **detected and refused** (the
+   backup command exits non-zero, which the push timer turns into an alert); a good off-host copy is
+   never reported without proving it landed intact. The **remote's** own security (who can read that
+   directory) is still the operator's responsibility, and an assessor should confirm a test restore
+   has been done *from the pushed copy*, not only the local one.
 
 ### 6.3 What to do when a specific key is lost
 
