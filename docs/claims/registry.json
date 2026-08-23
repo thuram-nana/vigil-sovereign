@@ -1305,6 +1305,49 @@
       "ci_job": "the briefing explains every agent and capability",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W16-STD-8b",
+      "title": "Deliberate refusals hold: no evasion/C2/persistence/lateral-movement capability in first-party code",
+      "claim": "VIGIL ships no detection-evasion, C2/persistence, lateral-movement, or credential-theft execution capability in its own first-party code, and a capability-absence test fails the build if such a capability is added.",
+      "source": "docs/DELIBERATE-REFUSALS.md:190",
+      "enforced_by": {
+        "file": "integration/tests/test_deliberate_refusals.py",
+        "symbol": "scan_tree_for_offense_capability"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_deliberate_refusals.py",
+        "tests": [
+          "test_first_party_code_has_no_evasion_c2_or_lateral_capability",
+          "test_negative_control_a_planted_capability_is_flagged",
+          "test_negative_control_benign_gating_and_detection_is_not_flagged",
+          "test_negative_control_planting_into_a_real_first_party_style_tree"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-8",
+      "title": "The rejected JWT embedded-key (jwk/x5c) forgery oracle stays rejected",
+      "claim": "The JWT embedded-key (jwk/x5c) forgery oracle was built and rejected in review as unsound; jwt_forgery_oracle deliberately does not fire on a token whose own embedded key verifies it, and a regression test keeps that refusal true.",
+      "source": "docs/DELIBERATE-REFUSALS.md:200",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/verify/oracles.py",
+        "symbol": "jwt_forgery_oracle"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/verify/tests/test_jwt_forgery.py",
+        "tests": [
+          "test_does_not_fire_on_rs256_with_a_self_verifying_embedded_jwk",
+          "test_does_not_fire_on_rs256_with_a_self_verifying_embedded_x5c",
+          "test_x5c_refusal_has_a_live_control_the_oracle_is_not_globally_silent"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
