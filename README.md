@@ -75,6 +75,7 @@ The AI is only ever allowed to *propose*. A separate **oracle** must *prove*. A 
 - [Verifiable remediation — proving a fix, not just claiming one](#verifiable-remediation--proving-a-fix-not-just-claiming-one)
 - [How it works, end to end](#how-it-works-end-to-end)
 - [What's live vs. what's still deferred](#whats-live-vs-whats-still-deferred)
+- [Deliberate refusals — what VIGIL will not build](#deliberate-refusals--what-vigil-will-not-build)
 - [Setup](#setup)
 - [Running it](#running-it)
 - [The unified web UI — `vigil up`](#the-unified-web-ui--vigil-up)
@@ -559,6 +560,36 @@ VIGIL is scrupulous about this (it would be ironic for an anti-hallucination sys
 > *session-omniscient* advanced layer (T2b) is roadmap — see [`docs/VISION.md`](docs/VISION.md).
 
 The full, itemized breakdown lives in [`docs/AS-BUILT-LIVE.md`](docs/AS-BUILT-LIVE.md) and [`docs/AS-BUILT.md`](docs/AS-BUILT.md).
+
+---
+
+## Deliberate refusals — what VIGIL will not build
+
+A reviewer usually has to *discover* an offensive tool's limits. VIGIL states them up front, because in
+this product they are **design strengths, not gaps** — capabilities within easy reach that were
+consciously declined, each grounded in code and held by a test that fails the build if it reappears:
+
+1. **No detection-evasion / anti-defender / stealth.** VIGIL's traffic is correlatable on purpose; a
+   tool that evades the customer's own detection is not a tool a customer should buy. (No stealth/proxy/
+   tamper knobs — `hexstrike_brain._EVASION_TOKENS` rejects them fail-closed.)
+2. **No C2 / persistence / implants.** An owner-test proves exploitability; it must not leave a foothold
+   behind. (Hard-excluded in `agents/tier3_validation.py`; the proof-content gate DENYs such payloads.)
+3. **No lateral movement.** VIGIL *reasons about* lateral-movement routes (`scanner/lateral.py` — pure,
+   fact-free path analysis) but executes none — no psexec/pivot/relay, no offense-exec library imported.
+4. **AEGIS is defensive-only.** It protects the operator's own app, defaults to read-only `observe`, and
+   a hard block rides only on a fired oracle — never attacks anyone.
+5. **The scan stays serial.** Predictable, throttled, correlatable traffic respects the customer's
+   production over raw speed (recon parallelism is opt-in and byte-identical to serial).
+6. **hexstrike-ai is vendored NON-RUNNABLE.** The ungated upstream server exists only as `.reference`
+   blobs; VIGIL reuses its *decision model* clean-room and propose-only.
+7. **A JWT x5c (embedded-key) forgery oracle was built and REJECTED in review as unsound** — a
+   legitimate CA-chained `x5c` (RFC 7515 §4.1.6) is indistinguishable offline from a forgery, so it
+   would false-positive on real Azure/DPoP tokens. Killing it pre-merge is the anti-hallucination
+   discipline working as designed.
+
+The reasoning behind each, the exact enforcing code, and the guarding tests are in
+**[`docs/DELIBERATE-REFUSALS.md`](docs/DELIBERATE-REFUSALS.md)** (two of them are machine-checked claims
+in [`docs/claims/registry.json`](docs/claims/registry.json)).
 
 ---
 

@@ -154,6 +154,80 @@ def test_does_not_fire_on_malformed_or_garbage() -> None:
 
 
 # ---------------------------------------------------------------------------
+# REFUSAL #7 (issue #534 / docs/DELIBERATE-REFUSALS.md §7). A JWT embedded-key (jwk/x5c) forgery oracle
+# was BUILT and REJECTED in review as unsound: an embedded self-verifying key is NOT offline-provable as
+# a forgery — a legitimate CA-chained x5c is the RFC 7515 §4.1.6 norm, and DPoP/SIOP embed a self-
+# verifying jwk BY DESIGN — so it would false-positive on real Azure/enterprise/DPoP tokens. The rejected
+# branch must STAY rejected: jwt_forgery_oracle must NOT fire merely because a token's own embedded key
+# verifies it. These are the regression guards that keep the refusal true of the code.
+# ---------------------------------------------------------------------------
+
+
+def _b64u_uint(n: int) -> str:
+    return _b64(n.to_bytes((n.bit_length() + 7) // 8 or 1, "big"))
+
+
+def _rsa_public_jwk(priv) -> dict:
+    nums = priv.public_key().public_numbers()
+    return {"kty": "RSA", "n": _b64u_uint(nums.n), "e": _b64u_uint(nums.e)}
+
+
+def _rs256_with_header(payload: dict, priv, extra_header: dict) -> str:
+    header = _seg({"alg": "RS256", "typ": "JWT", **extra_header})
+    body = _seg(payload)
+    sig = priv.sign(f"{header}.{body}".encode("ascii"), padding.PKCS1v15(), hashes.SHA256())
+    return f"{header}.{body}." + _b64(sig)
+
+
+def _self_signed_x5c(priv) -> str:
+    """A base64 (standard, not url) DER cert whose key IS priv's public key — the exact shape a self-
+    signed x5c forgery AND a legitimate leaf both present. RFC 7515 x5c uses standard base64 DER."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "idp.example")])
+    now = datetime.datetime(2024, 1, 1)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject).issuer_name(issuer)
+        .public_key(priv.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now).not_valid_after(now + datetime.timedelta(days=3650))
+        .sign(priv, hashes.SHA256())
+    )
+    return base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode("ascii")
+
+
+def test_does_not_fire_on_rs256_with_a_self_verifying_embedded_jwk() -> None:
+    # DPoP proofs / SIOP id_tokens embed a self-verifying jwk BY DESIGN. The embedded key verifies the
+    # token, but that is not a forgery — the oracle must stay silent (a LEAD at most, never a FACT).
+    priv, _pub = _rsa_keypair()
+    tok = _rs256_with_header({"sub": "admin", "htu": "https://api/x"}, priv, {"jwk": _rsa_public_jwk(priv)})
+    sig = jwt_forgery_oracle(tok)
+    assert not sig.fired, "the REJECTED jwk embedded-key forgery branch has been re-added (unsound FP)"
+
+
+def test_does_not_fire_on_rs256_with_a_self_verifying_embedded_x5c() -> None:
+    # A legitimate CA-chained x5c is the RFC 7515 §4.1.6 norm; offline it is indistinguishable from a
+    # self-signed one. Firing here would false-positive on real Azure/enterprise tokens.
+    priv, _pub = _rsa_keypair()
+    tok = _rs256_with_header({"sub": "admin"}, priv, {"x5c": [_self_signed_x5c(priv)]})
+    sig = jwt_forgery_oracle(tok)
+    assert not sig.fired, "the REJECTED x5c embedded-cert forgery branch has been re-added (unsound FP)"
+
+
+def test_x5c_refusal_has_a_live_control_the_oracle_is_not_globally_silent() -> None:
+    # the negative control that proves the two non-fire assertions above are not vacuous: a token that
+    # IS genuinely structurally forgeable (alg=none) DOES fire. Silence on an embedded-key token is a
+    # deliberate refusal, not a dead oracle. And embedding a jwk does not suppress a real alg=none proof.
+    assert jwt_forgery_oracle(_none({"sub": "admin"})).fired
+    header = _seg({"alg": "none", "typ": "JWT", "jwk": {"kty": "oct"}})
+    assert jwt_forgery_oracle(f"{header}.{_seg({'a': 1})}.").fired
+
+
+# ---------------------------------------------------------------------------
 # routing + the FROZEN-fallback invariant (gate safety)
 # ---------------------------------------------------------------------------
 

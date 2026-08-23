@@ -100,7 +100,7 @@ named so the briefing is not silent about half the system.
 | `remediation_binary` | The binary / memory-safety auto-patch tier (X2: one narrow real class; symbolic repair stubbed). |
 | `repeater` | The single-request replay surface (a Burp-Repeater analogue; `repeat_request`). |
 | `report` | Assemble the executive / technical / remediation reports (`crucible report`). |
-| `scanner` | The contained scanner — checks, campaign, CDP browser passes, lateral movement (`crucible scan`). |
+| `scanner` | The contained scanner — checks, campaign, CDP browser passes, lateral-path analysis (fact-free attack-path reasoning, not lateral-movement execution — see [`docs/DELIBERATE-REFUSALS.md`](DELIBERATE-REFUSALS.md) §3) (`crucible scan`). |
 | `sensors` | The universal sensors / oracle feed (Nmap / TLS / cloud-IAM / SBOM / threat-intel). |
 | `socialdefense` | Social-engineering defence analysis (`crucible socialdefense`). |
 | `tools` | Internal tooling / generators used by the engine and its tests. |

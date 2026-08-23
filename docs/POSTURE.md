@@ -42,6 +42,13 @@ layer, so the certificate core stays byte-deterministic.
   re-run, and true independence of the *observation* from the producer would require a channel-bound live
   capture (not embedded here).
 
+## The companion honesty artifact — deliberate refusals
+The same discipline that makes VIGIL state its coverage *denominator* also makes it state, up front, the
+capabilities it **deliberately did not build** — no detection-evasion, no C2/persistence, no lateral
+movement, AEGIS defensive-only, a serial scan, hexstrike vendored non-runnable, and a JWT x5c forgery
+oracle built-then-rejected as unsound. Each is a strength grounded in code and held by a test; see
+[`docs/DELIBERATE-REFUSALS.md`](DELIBERATE-REFUSALS.md).
+
 ## The honest boundary (this is the feature, not a footnote)
 CLOSED means *non-exploitability by the oracle family, over the reached surface, as of the freshness
 bound* — **never** "secure against everything." Undiscovered endpoints/parameters are discovery/recall
