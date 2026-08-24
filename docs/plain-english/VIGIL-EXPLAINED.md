@@ -16,7 +16,7 @@ against the exact software it describes.*
 *What changed at the current version, so that a reader comparing editions can see it at a glance: a
 second cloud capability was fired at something real, and it is the first of them to have judged
 material from a genuinely outside system; an honest count appeared of how strong
-the evidence behind each of the system's 38 confirming checkers actually is; a plain-language case
+the evidence behind each of the system's 41 confirming checkers actually is; a plain-language case
 file became part of every delivered archive; an anti-replay guard was added to the owner's signed
 decisions; the interface reached twenty-nine screens; and Chapter 14 was added, covering the half of
 the product that holds the owner's key rather than the half that attacks.*
@@ -167,7 +167,7 @@ are carried forward in Chapter 1 and should be read with it. One live external r
 vendor-published deliberately vulnerable test site is recorded.
 
 The sharpest question to ask of a system like this is not how many things it can check for, but how
-much of that has ever been tried against something real. Of its 38 kinds of confirming checker,
+much of that has ever been tried against something real. Of its 41 kinds of confirming checker,
 **three** have judged material a real outside system produced, **two** material from real
 infrastructure the system builds and destroys for the purpose, **thirteen** material a real program
 on the project's own machine produced, and **twenty** only saved sample material. Chapter 1 sets that
@@ -287,7 +287,7 @@ technically true.
 
 - [What this chapter is](#what-this-chapter-is)
 - [How to read every entry in this chapter](#how-to-read-every-entry-in-this-chapter)
-- [Part 1 — The 85 named types of weakness](#part-1--the-85-named-types-of-weakness)
+- [Part 1 — The 88 named types of weakness](#part-1--the-85-named-types-of-weakness)
 - [Part 2 — The 38 tests that turn a suspicion into a proven finding](#part-2--the-38-tests-that-turn-a-suspicion-into-a-proven-finding)
 - [Part 3 — Defensive detection: proving an attack happened from the customer's own logs](#part-3--defensive-detection-proving-an-attack-happened-from-the-customers-own-logs)
 - [Part 4 — Which claims may be stated as a proven negative](#part-4--which-claims-may-be-stated-as-a-proven-negative)
@@ -582,7 +582,7 @@ confirmations is a deliberate permanent exception: the identity privilege-escala
 carries out the escalation it is establishing, so what it awaits is a real set of permission rules to
 read, not a live attack. Section 9.3 sets all of this out capability by capability.
 
-Across the system as a whole the honest count is this. Of the 38 kinds of checker, **3** have been
+Across the system as a whole the honest count is this. Of the 41 kinds of checker, **3** have been
 run over material that a real outside system produced, **2** over material from real infrastructure
 the system creates and destroys itself, **13** over material a real program on the system's own
 machine produced, and **20** only over saved sample material. Section 9.2 sets that count out in
@@ -805,10 +805,10 @@ says how.
 
 | Count | What it counts |
 |---|---|
-| **38** | Distinct kinds of checker. |
-| **40** | Individual checking functions implementing those 38 kinds. |
-| **85** | Named categories of security weakness the system recognises. |
-| **275** | Names it will accept in total for those 85 categories — the 85 proper names plus 190 alternative spellings used by other vendors and standards bodies, each mapped onto one of the 85 so nothing is double-counted. |
+| **41** | Distinct kinds of checker. |
+| **43** | Individual checking functions implementing those 41 kinds. |
+| **88** | Named categories of security weakness the system recognises. |
+| **294** | Names it will accept in total for those 88 categories — the 88 proper names plus 206 alternative spellings used by other vendors and standards bodies, each mapped onto one of the 88 so nothing is double-counted. |
 
 No checker may claim complete certainty. Its confidence figure is capped at 0.99, on the project's
 stated principle that "a deterministic oracle never claims certainty it cannot have."
@@ -1588,7 +1588,7 @@ than quietly tidying it away, is what the project's own rules require.
   three have only ever been run over saved sample material: the two that reach their verdict by
   statistics rather than by direct observation, and the one that checks whether an installed version
   falls inside a published advisory's affected range. Section 9.2 gives the equivalent count for all
-  38 checker types, and names the one of these twelve where a stricter reader would reasonably
+  41 checker types, and names the one of these twelve where a stricter reader would reasonably
   disagree — a cloud checker exercised against a simulator rather than a real cloud account. The
   project ships a negative control for this: pointed at a deliberately *safe*
   version of the same application, the confirmation step returns nothing — demonstrating that the
@@ -1651,7 +1651,7 @@ of them fails.
 
 **The honest count, checker by checker.** The sharpest question to ask about a system like this is
 not "how many things can it check for" but "how much of that has ever been tried against something
-real". Each of the 38 checker types is counted below exactly once, at the strongest evidence it has
+real". Each of the 41 checker types is counted below exactly once, at the strongest evidence it has
 ever been run over, so the four figures add up to 38.
 
 | How strong the evidence behind it is | Count | Which ones |
@@ -2356,7 +2356,7 @@ table below says how.
 
 | Claim | How to re-check it |
 |---|---|
-| 38 checker kinds, 85 weakness categories, 190 alternative spellings, 275 accepted names, frozen fallback set of exactly 15 | Run the extraction script recorded in the project's own inventory notes against the verification module. |
+| 41 checker kinds, 88 weakness categories, 206 alternative spellings, 294 accepted names, frozen fallback set of exactly 15 | Run the extraction script recorded in the project's own inventory notes against the verification module. |
 | 26 evidence sources, 26 able to produce a proven fact, 6 able to produce a proven "clean" | Read `docs/capability-matrix/evidence-branches.json`. |
 | 186 named intergovernmental domains on the categorical refusal list | Count the entries in the blocked-domain set in `integration/vigil_integration/safety/hard_guardrail.py`. |
 | The build-and-release safeguards are in the released version (section 9.4) | Confirm that the change delivering them has been merged into the released version of the software, and that `docs/SUPPLY-CHAIN.md`, `.github/workflows/supply-chain.yml` and `.trivyignore` are present there. |
@@ -2400,7 +2400,7 @@ each and can be read in any order.
 | **2** | The parts of the system, and how they fit together | What CRUCIBLE, AEGIS, SIGIL, STRIX, the gateway and the shared core each are; the wall between the offensive and personal halves; what runs where. |
 | **3** | How a security assessment runs, from start to finish | The eleven stages of a job, from the written authorisation through discovery, testing, confirmation and reporting to re-testing after the fix. |
 | **4** | Leads and facts: how the system decides something is real | The single most important distinction in the product, examined closely: the four verdicts, the journey of a claim, and exactly what this approach cannot do. |
-| **5** | Every type of weakness the system can find | The full catalogue of the 85 named categories and the 38 checkers, with what each can and cannot prove. |
+| **5** | Every type of weakness the system can find | The full catalogue of the 88 named categories and the 41 checkers, with what each can and cannot prove. |
 | **6** | Evidence: how it is collected, shown, and independently re-checked | What counts as evidence, how it is sealed, the four checks a certificate must pass, and how to hand a package to an independent third party. |
 | **7** | Signatures and keys: who vouches for a result | What a digital signature is, what exactly gets signed, who holds which key, the trust root, and rotation and revocation. |
 | **8** | Safety, authorisation, and what the system refuses to do | The written authorisation, scope enforcement, permission tiers, approvals, the emergency stop, and the audit trail. **The authoritative account of the government-host refusal discussed in section 6.2 is here, in its section 2.5.** |
@@ -4952,9 +4952,9 @@ operator must plan for.
 Beyond the eleven:
 
 - **172 further tests are defined as data**, not code, in a library of description files.
-- **85 canonical categories of weakness** are recognised — "canonical" meaning one agreed
+- **88 canonical categories of weakness** are recognised — "canonical" meaning one agreed
   master name for each — and each is mapped to the mechanical checks that are allowed to
-  confirm it. A further 190 alternative spellings map onto those master names, so a finding
+  confirm it. A further 206 alternative spellings map onto those master names, so a finding
   cannot be double-counted under two vocabularies.
 - Additional modules exist for specific surfaces — modern single-page applications,
   application programming interfaces of the GraphQL kind, single sign-on, race conditions,
@@ -6214,8 +6214,8 @@ flattered, and it does not know what answer anyone was hoping for.
 
 #### There are 38 of them, and each proves one narrow thing
 
-In the version of the software read for this briefing there are **38 kinds of
-checker**, implemented by **40 distinct procedures** — two of the kinds have two
+In the version of the software read for this briefing there are **41 kinds of
+checker**, implemented by **43 distinct procedures** — two of the kinds have two
 procedures each, chosen by which evidence is present. Each one answers a single,
 tightly defined question.
 
@@ -7568,7 +7568,7 @@ from documentation.
 |---|---|
 | 4 | Permitted verdicts — FACT, LEAD, CLEAN, INCONCLUSIVE |
 | 38 | Kinds of checker |
-| 40 | Distinct checker procedures implementing those 38 kinds |
+| 43 | Distinct checker procedures implementing those 41 kinds |
 | 15 | Checkers in the frozen core set used for an unrecognised category |
 | 85 | Canonical weakness categories |
 | 275 | Recognised spellings mapping onto those 85 |
@@ -7726,9 +7726,9 @@ not bolted on afterwards. The tables below reproduce them.
 
 ---
 
-### Part 1 — The 85 named types of weakness
+### Part 1 — The 88 named types of weakness
 
-The 85 types are grouped below into fourteen families a non-specialist can follow. Every one of the
+The 88 types are grouped below into fourteen families a non-specialist can follow. Every one of the
 85 appears exactly once. The "Proved by" column names the automatic test or tests that are permitted
 to confirm that type; Part 2 explains each test.
 
@@ -7739,7 +7739,7 @@ the 85. It is included here because a chapter titled "every type of weakness the
 would be misleading without it.
 
 Two further measurements appear as clearly-marked boxes inside families 3 and 8. They are real
-capabilities in the software, they are reported, and they are honestly *not* among the 85 named types
+capabilities in the software, they are reported, and they are honestly *not* among the 88 named types
 because no automatic decision procedure confirms them. They are shown where a reader auditing coverage
 against a standard checklist would look for them.
 
@@ -8049,7 +8049,7 @@ that a server **will accept** a classically vulnerable key exchange when an ordi
 is the right question for the record-now-decrypt-later risk, because ordinary clients are what generate
 the traffic being recorded. It **cannot** prove that a server lacks quantum-resistant support for
 clients that can ask for it. Anyone quoting this output inside an assurance or approval decision must
-respect that distinction. Because no automatic decision procedure adjudicates it, this is not one of the 85 named
+respect that distinction. Because no automatic decision procedure adjudicates it, this is not one of the 88 named
 types and its output is a report, not a proven finding.
 
 ---
@@ -8361,7 +8361,7 @@ never be described in the same words.
 
 ---
 
-#### The 190 alternative names the system also understands
+#### The 206 alternative names the system also understands
 
 Security teams, tool vendors and standards bodies all use different words for the same weakness. One
 supplier's report says "SQL injection", another says `sqli`, a third says `sql_injection`. The system
@@ -8412,9 +8412,9 @@ The counts add up exactly, and are stated here so the sections that follow can b
 | **Total** | **38** | |
 
 Two further structural facts, both re-derived from the registry for this chapter rather than taken
-from a document. Every one of the 38 is reachable by at least one of the 85 weakness types — there are
+from a document. Every one of the 41 is reachable by at least one of the 88 weakness types — there are
 no orphaned procedures sitting unused in the code. And the mapping is far from one-to-one: the
-achieved-state test alone is the confirming procedure for **28** of the 85 types, which is why so many
+achieved-state test alone is the confirming procedure for **28** of the 88 types, which is why so many
 entries in Part 1 name it.
 
 #### The core 15 — the general-purpose set
@@ -8715,7 +8715,7 @@ credential.
 | **Total detector kinds** | **41** |
 <!-- END GENERATED coverage-tiers -->
 
-They sum to 38. If the question asked is instead "how many have ever judged bytes from a real network
+They sum to 41. If the question asked is instead "how many have ever judged bytes from a real network
 connection of any kind", the answer is 18 — the thirteen local ones, plus all five graded above them.
 Response differencing and achieved state were exercised locally as well as externally; exposed-secret
 validity ran over a real connection to the code-hosting provider; and the two Kubernetes ones read from
@@ -9065,7 +9065,7 @@ Because AI models are involved in parts of the system, the boundary deserves sta
 
 ### Part 6 — The attack library behind the catalogue
 
-The 85 types describe *what* can be found. Three further inventories describe the concrete attacks the
+The 88 types describe *what* can be found. Three further inventories describe the concrete attacks the
 system actually sends: a small set of checks that always run, a large library of individual attack
 definitions held as data, and a separate engine for sending *many* variations of one attack.
 
@@ -9262,7 +9262,7 @@ supplier's report. **A general reader does not need it.**
 The left-hand column is the master name the system files a weakness under — the software's own
 spelling, reproduced exactly, which is why it is written in lower case with underscores. The middle
 column says what it means. The right-hand column lists the other spellings the system accepts and
-converts to that master name. There are 57 master names with alternatives, 190 alternatives in total,
+converts to that master name. There are 57 master names with alternatives, 206 alternatives in total,
 and every alternative resolves to a master name; none is left pointing at nothing. The remaining 28
 master names have no registered alternatives and appear only under their own name in Part 1.
 
@@ -9457,7 +9457,7 @@ inputs and the calculation can re-run it and must get the same answer. That is w
 turns a claim into a proof. It is a recipe, not a chef.
 
 In the version of the software read for this briefing, the system has **38 distinct
-kinds of automatic test** and a vocabulary of **85 named weakness classes**, each mapped
+kinds of automatic test** and a vocabulary of **88 named weakness classes**, each mapped
 to the specific tests that are allowed to confirm it.[^rev]
 
 [^rev]: Software is identified by a short code for the exact snapshot of the source it was
@@ -11574,7 +11574,7 @@ as a cross-check.
   is not a standing identity.
 - The downloadable **case file** now carries nine numbered plain-language documents alongside the
   machine records and the proof bundle, a front page that accounts for **every file in the
-  archive**, a catalogue of all 85 weakness categories the engine can confirm with this
+  archive**, a catalogue of all 88 weakness categories the engine can confirm with this
   engagement's position against each — and no "examined and found clean" state, because the run
   record does not support one. Three checks are set out with their exact commands, and each is
   stated with what a pass does *not* mean. A third party can run all three offline and with no
@@ -28033,7 +28033,7 @@ fixed, closed set in the code, so a phrase like "probably fine" cannot reach the
 
 ### 9. The vocabulary of weaknesses
 
-The full catalogue of 85 named categories is in chapter 5, with a plain meaning for each. These are
+The full catalogue of 88 named categories is in chapter 5, with a plain meaning for each. These are
 the terms that recur throughout the rest of the briefing.
 
 | Term | What it means |

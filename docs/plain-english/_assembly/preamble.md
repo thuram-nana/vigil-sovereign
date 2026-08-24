@@ -16,7 +16,7 @@ against the exact software it describes.*
 *What changed at the current version, so that a reader comparing editions can see it at a glance: a
 second cloud capability was fired at something real, and it is the first of them to have judged
 material from a genuinely outside system; an honest count appeared of how strong
-the evidence behind each of the system's 38 confirming checkers actually is; a plain-language case
+the evidence behind each of the system's 41 confirming checkers actually is; a plain-language case
 file became part of every delivered archive; an anti-replay guard was added to the owner's signed
 decisions; the interface reached twenty-nine screens; and Chapter 14 was added, covering the half of
 the product that holds the owner's key rather than the half that attacks.*
@@ -167,7 +167,7 @@ are carried forward in Chapter 1 and should be read with it. One live external r
 vendor-published deliberately vulnerable test site is recorded.
 
 The sharpest question to ask of a system like this is not how many things it can check for, but how
-much of that has ever been tried against something real. Of its 38 kinds of confirming checker,
+much of that has ever been tried against something real. Of its 41 kinds of confirming checker,
 **three** have judged material a real outside system produced, **two** material from real
 infrastructure the system builds and destroys for the purpose, **thirteen** material a real program
 on the project's own machine produced, and **twenty** only saved sample material. Chapter 1 sets that
@@ -287,7 +287,7 @@ technically true.
 
 - [What this chapter is](#what-this-chapter-is)
 - [How to read every entry in this chapter](#how-to-read-every-entry-in-this-chapter)
-- [Part 1 — The 85 named types of weakness](#part-1--the-85-named-types-of-weakness)
+- [Part 1 — The 88 named types of weakness](#part-1--the-85-named-types-of-weakness)
 - [Part 2 — The 38 tests that turn a suspicion into a proven finding](#part-2--the-38-tests-that-turn-a-suspicion-into-a-proven-finding)
 - [Part 3 — Defensive detection: proving an attack happened from the customer's own logs](#part-3--defensive-detection-proving-an-attack-happened-from-the-customers-own-logs)
 - [Part 4 — Which claims may be stated as a proven negative](#part-4--which-claims-may-be-stated-as-a-proven-negative)

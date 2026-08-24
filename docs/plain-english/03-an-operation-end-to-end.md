@@ -808,9 +808,9 @@ operator must plan for.
 Beyond the eleven:
 
 - **172 further tests are defined as data**, not code, in a library of description files.
-- **85 canonical categories of weakness** are recognised — "canonical" meaning one agreed
+- **88 canonical categories of weakness** are recognised — "canonical" meaning one agreed
   master name for each — and each is mapped to the mechanical checks that are allowed to
-  confirm it. A further 190 alternative spellings map onto those master names, so a finding
+  confirm it. A further 206 alternative spellings map onto those master names, so a finding
   cannot be double-counted under two vocabularies.
 - Additional modules exist for specific surfaces — modern single-page applications,
   application programming interfaces of the GraphQL kind, single sign-on, race conditions,

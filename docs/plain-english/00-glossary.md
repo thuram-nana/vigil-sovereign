@@ -307,7 +307,7 @@ fixed, closed set in the code, so a phrase like "probably fine" cannot reach the
 
 ## 9. The vocabulary of weaknesses
 
-The full catalogue of 85 named categories is in chapter 5, with a plain meaning for each. These are
+The full catalogue of 88 named categories is in chapter 5, with a plain meaning for each. These are
 the terms that recur throughout the rest of the briefing.
 
 | Term | What it means |

@@ -120,9 +120,9 @@ not bolted on afterwards. The tables below reproduce them.
 
 ---
 
-## Part 1 — The 85 named types of weakness
+## Part 1 — The 88 named types of weakness
 
-The 85 types are grouped below into fourteen families a non-specialist can follow. Every one of the
+The 88 types are grouped below into fourteen families a non-specialist can follow. Every one of the
 85 appears exactly once. The "Proved by" column names the automatic test or tests that are permitted
 to confirm that type; Part 2 explains each test.
 
@@ -133,7 +133,7 @@ the 85. It is included here because a chapter titled "every type of weakness the
 would be misleading without it.
 
 Two further measurements appear as clearly-marked boxes inside families 3 and 8. They are real
-capabilities in the software, they are reported, and they are honestly *not* among the 85 named types
+capabilities in the software, they are reported, and they are honestly *not* among the 88 named types
 because no automatic decision procedure confirms them. They are shown where a reader auditing coverage
 against a standard checklist would look for them.
 
@@ -443,7 +443,7 @@ that a server **will accept** a classically vulnerable key exchange when an ordi
 is the right question for the record-now-decrypt-later risk, because ordinary clients are what generate
 the traffic being recorded. It **cannot** prove that a server lacks quantum-resistant support for
 clients that can ask for it. Anyone quoting this output inside an assurance or approval decision must
-respect that distinction. Because no automatic decision procedure adjudicates it, this is not one of the 85 named
+respect that distinction. Because no automatic decision procedure adjudicates it, this is not one of the 88 named
 types and its output is a report, not a proven finding.
 
 ---
@@ -755,7 +755,7 @@ never be described in the same words.
 
 ---
 
-### The 190 alternative names the system also understands
+### The 206 alternative names the system also understands
 
 Security teams, tool vendors and standards bodies all use different words for the same weakness. One
 supplier's report says "SQL injection", another says `sqli`, a third says `sql_injection`. The system
@@ -806,9 +806,9 @@ The counts add up exactly, and are stated here so the sections that follow can b
 | **Total** | **38** | |
 
 Two further structural facts, both re-derived from the registry for this chapter rather than taken
-from a document. Every one of the 38 is reachable by at least one of the 85 weakness types — there are
+from a document. Every one of the 41 is reachable by at least one of the 88 weakness types — there are
 no orphaned procedures sitting unused in the code. And the mapping is far from one-to-one: the
-achieved-state test alone is the confirming procedure for **28** of the 85 types, which is why so many
+achieved-state test alone is the confirming procedure for **28** of the 88 types, which is why so many
 entries in Part 1 name it.
 
 ### The core 15 — the general-purpose set
@@ -1109,7 +1109,7 @@ credential.
 | **Total detector kinds** | **41** |
 <!-- END GENERATED coverage-tiers -->
 
-They sum to 38. If the question asked is instead "how many have ever judged bytes from a real network
+They sum to 41. If the question asked is instead "how many have ever judged bytes from a real network
 connection of any kind", the answer is 18 — the thirteen local ones, plus all five graded above them.
 Response differencing and achieved state were exercised locally as well as externally; exposed-secret
 validity ran over a real connection to the code-hosting provider; and the two Kubernetes ones read from
@@ -1459,7 +1459,7 @@ Because AI models are involved in parts of the system, the boundary deserves sta
 
 ## Part 6 — The attack library behind the catalogue
 
-The 85 types describe *what* can be found. Three further inventories describe the concrete attacks the
+The 88 types describe *what* can be found. Three further inventories describe the concrete attacks the
 system actually sends: a small set of checks that always run, a large library of individual attack
 definitions held as data, and a separate engine for sending *many* variations of one attack.
 
@@ -1656,7 +1656,7 @@ supplier's report. **A general reader does not need it.**
 The left-hand column is the master name the system files a weakness under — the software's own
 spelling, reproduced exactly, which is why it is written in lower case with underscores. The middle
 column says what it means. The right-hand column lists the other spellings the system accepts and
-converts to that master name. There are 57 master names with alternatives, 190 alternatives in total,
+converts to that master name. There are 57 master names with alternatives, 206 alternatives in total,
 and every alternative resolves to a master name; none is left pointing at nothing. The remaining 28
 master names have no registered alternatives and appear only under their own name in Part 1.
 

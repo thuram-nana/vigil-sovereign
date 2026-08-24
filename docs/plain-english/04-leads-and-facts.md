@@ -250,8 +250,8 @@ flattered, and it does not know what answer anyone was hoping for.
 
 ### There are 38 of them, and each proves one narrow thing
 
-In the version of the software read for this briefing there are **38 kinds of
-checker**, implemented by **40 distinct procedures** — two of the kinds have two
+In the version of the software read for this briefing there are **41 kinds of
+checker**, implemented by **43 distinct procedures** — two of the kinds have two
 procedures each, chosen by which evidence is present. Each one answers a single,
 tightly defined question.
 
@@ -1604,7 +1604,7 @@ from documentation.
 |---|---|
 | 4 | Permitted verdicts — FACT, LEAD, CLEAN, INCONCLUSIVE |
 | 38 | Kinds of checker |
-| 40 | Distinct checker procedures implementing those 38 kinds |
+| 43 | Distinct checker procedures implementing those 41 kinds |
 | 15 | Checkers in the frozen core set used for an unrecognised category |
 | 85 | Canonical weakness categories |
 | 275 | Recognised spellings mapping onto those 85 |
