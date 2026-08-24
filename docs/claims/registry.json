@@ -1789,6 +1789,29 @@
       "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W5-7",
+      "title": "N-1 -> N upgrade/rollback + schema-compat harness (falsifiable, additive-only)",
+      "claim": "The N-1 to N upgrade/rollback harness proves that realistic owner-signed build-(N-1) spine data upgrades to build N and rolls back to N-1 with its owner signature and the N-1 record set intact, and that the spine's schema changes are additive-only in both directions so a non-additive schema change makes the harness fail.",
+      "source": "docs/decisions/W5-7-upgrade-rollback-harness.md:8",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/upgrade_harness.py",
+        "symbol": "run_full_harness"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_upgrade_harness.py",
+        "tests": [
+          "test_roundtrip_signature_survives_upgrade_and_rollback_with_data_intact",
+          "test_compat_matrix_is_all_green_on_the_live_tree",
+          "test_full_harness_verdict_is_green_on_the_live_tree",
+          "test_negative_control_a_non_additive_schema_change_makes_the_harness_FAIL",
+          "test_negative_control_schema_version_exclusion_is_load_bearing"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

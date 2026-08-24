@@ -179,6 +179,12 @@ KNOWN_NONPR_ADVISORY: dict[str, str] = {
         "two-engagement spine stress; its deterministic, plugin-free per-PR subset runs in the required "
         "'SIGIL governor gates' job (test_spine_concurrency_stress.py + a shell-loop repeat)."
     ),
+    "upgrade-harness soak (scheduled)": (
+        "upgrade-harness-soak.yml — schedule/workflow_dispatch only; the HEAVY multi-segment soak of the "
+        "N-1->N upgrade/rollback harness (W5-7 #451). The FAST falsifiable core runs on every PR in the "
+        "required 'SIGIL governor gates (P7 — offense gate + authn)' job; this soak is too slow for a PR "
+        "runner and never reports on a PR, so requiring it would block every PR."
+    ),
 }
 
 # W0-2 (#397): "Where a job is legitimately non-blocking (nightly), split the blocking subset out into

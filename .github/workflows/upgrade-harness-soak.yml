@@ -1,0 +1,61 @@
+# Scheduled SOAK for the N-1 -> N upgrade/rollback harness (W5-7 #451).
+#
+# THE SPLIT THIS IMPLEMENTS. The required `SIGIL governor gates (P7 ...)` job runs the FAST, deterministic
+# core of the upgrade/rollback + schema-compat harness (apps/sigil/tests/test_upgrade_harness.py) on every
+# PR — that is where the falsifiability lives (a non-additive schema change makes the harness fail, the
+# owner signature must survive the migration + rollback, the compat matrix must be all-green). This
+# scheduled job runs the HEAVIER full-stack SOAK variant that is too slow for a PR runner: a large
+# multi-segment spine (~3000 records) that forces real segment sealing + gzip compaction across the
+# migration, exercising the same properties at scale.
+#
+# HONESTLY LABELLED, NOT REQUIRED. This never runs on a pull_request, so it can never be (and is never
+# claimed to be) a merge-blocking check — it is enumerated in KNOWN_NONPR_ADVISORY of
+# docs/tests/test_required_checks_canonical.py. The soak test is `@pytest.mark.skipif`'d unless
+# VIGIL_UPGRADE_HARNESS_SOAK is set, so in the required PR job it SKIPS (never a silent green) and only
+# this job actually runs it. The blocking guarantee is the required core, not this soak.
+#
+# The true cross-git-TAG full-stack install (check out the previous RELEASED tag, install it, write data,
+# upgrade to HEAD) is deferred until a released N-1 tag exists (the repo is pre-1.0); see
+# docs/decisions/W5-7-upgrade-rollback-harness.md. This soak is the heaviest variant available today.
+
+name: upgrade-harness-soak
+
+on:
+  schedule:
+    - cron: "30 4 * * 1"        # weekly, Monday 04:30 UTC (off-peak; distinct from the nightly livefire)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  upgrade-harness-soak:
+    name: upgrade-harness soak (scheduled)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: install vigil_core + SIGIL deps (hash-locked) — same closure as the required P7 job
+        run: |
+          # Runtime third-party deps from the committed HASH LOCK (== the shipped tree), pytest from the
+          # pinned CI toolchain lock; vigil_core editable, no deps. This is the SAME light runtime closure
+          # the `SIGIL governor gates (P7 ...)` job installs, so the soak runs the exact cryptography/
+          # pydantic the sovereign spine ships with.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+      - name: full-stack soak — large multi-segment N-1 -> N -> rollback on signed data
+        env:
+          SIGIL_HOME: /tmp/sigil-soak
+          VIGIL_UPGRADE_HARNESS_SOAK: "1"
+        run: |
+          mkdir -p /tmp/sigil-soak
+          PYTHONPATH=apps/sigil:integration python -m pytest -rA \
+            apps/sigil/tests/test_upgrade_harness.py::test_fullstack_soak_large_multisegment_spine -q
