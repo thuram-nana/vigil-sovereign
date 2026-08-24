@@ -69,6 +69,24 @@ def test_planted_no_collect_fields_are_absent_from_the_payload():
     assert "some_new_field" not in out
 
 
+def test_planted_no_collect_field_inside_a_nested_list_is_absent():
+    """RED-PEN MED regression: a dict nested inside a list-of-lists (or any list/tuple element that is itself
+    a list/tuple) under an allowlisted key must STILL be scrubbed — the scrub recurses into nested sequences,
+    so no-collect fields cannot escape by hiding one extra list-level deep."""
+    # list-of-lists
+    out = build_telemetry_payload({"events": 1, "engagements": [[{"credential": "LEAK", "slug": "e"}]]})
+    assert "credential" not in repr(out), out
+    assert out == {"events": 1, "engagements": [[{"slug": "e"}]]}
+
+    # deeper still, plus a tuple level, plus an unknown field that must also be dropped at depth
+    deep = build_telemetry_payload(
+        {"schema": 1, "engagements": ([[{"token": "X", "facts": 2, "slug": "s", "target_url": "http://x"}]],)}
+    )
+    for banned in ("token", "target_url"):
+        assert banned not in repr(deep), (banned, deep)
+    assert deep == {"schema": 1, "engagements": [[[{"facts": 2, "slug": "s"}]]]}
+
+
 def test_allowlisted_fields_survive_so_the_scrubber_is_not_a_no_op():
     out = build_telemetry_payload(_source_with_planted_secrets())
     assert out["schema"] == 1

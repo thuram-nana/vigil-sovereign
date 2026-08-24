@@ -111,8 +111,24 @@ def _scrub_value(norm_key: str, value: Any) -> Any:
     if isinstance(value, Mapping):
         return _scrub_mapping(value)
     if isinstance(value, (list, tuple)):
-        return [_scrub_mapping(e) if isinstance(e, Mapping) else e for e in value]
+        return _scrub_list(value)
     return value
+
+
+def _scrub_list(seq) -> list:
+    """Scrub a list/tuple recursively so a dict at ANY depth is allowlist-scrubbed — including inside a
+    list-of-lists. A Mapping element is scrubbed; a nested list/tuple recurses; a scalar (never a field name)
+    passes through. Without this recursion a dict nested under a list element that is itself a list/tuple
+    would bypass BOTH the allowlist and the no-collect scrub (the "every nesting level" guarantee)."""
+    out: list = []
+    for e in seq:
+        if isinstance(e, Mapping):
+            out.append(_scrub_mapping(e))
+        elif isinstance(e, (list, tuple)):
+            out.append(_scrub_list(e))
+        else:
+            out.append(e)
+    return out
 
 
 def _scrub_mapping(m: Mapping) -> dict:
