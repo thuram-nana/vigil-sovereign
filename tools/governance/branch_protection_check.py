@@ -44,9 +44,10 @@ def compare_protection(protection: dict, canonical: list[str]) -> list[str]:
     """Return a list of human-readable problems; empty == the live protection matches the committed
     policy. Pure over its inputs, so a test can perturb either side in-process.
 
-    Checks, identical to the workflow's original inline logic:
+    Checks:
       * required_status_checks.contexts, compared as a SET, equals `canonical`;
       * required_status_checks.strict is True (branch must be up to date);
+      * required signed commits are enabled (W12-4 #493);
       * force-pushes are not allowed;
       * branch deletions are not allowed.
     """
@@ -67,6 +68,15 @@ def compare_protection(protection: dict, canonical: list[str]) -> list[str]:
     if rsc.get("strict") is not True:
         problems.append(
             f"required_status_checks.strict is {rsc.get('strict')!r}, expected True (branch must be up to date)"
+        )
+
+    # W12-4 (#493): require signed commits. The GET-protection body carries a `required_signatures`
+    # object ({url, enabled}); the flip is applied via the dedicated required_signatures sub-resource.
+    if (protection.get("required_signatures") or {}).get("enabled") is not True:
+        problems.append(
+            "required_signatures.enabled is "
+            f"{(protection.get('required_signatures') or {}).get('enabled')!r}, expected True "
+            "(W12-4 #493 — unsigned commits must be rejected on main)"
         )
 
     if (protection.get("allow_force_pushes") or {}).get("enabled") is True:

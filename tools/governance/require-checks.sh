@@ -18,8 +18,10 @@
 #   - required_status_checks.contexts = the canonical file, strict = true (branch must be up to date);
 #   - enforce_admins = false — DELIBERATE: the owner keeps an explicit, attributable admin override;
 #     every other contributor and every automated agent is bound unconditionally;
-#   - required_pull_request_reviews = none, and signed commits are not required — a scheduled handoff,
-#     not a shipped control. This tool does not turn them on;
+#   - required signed commits = TRUE (W12-4 #493) — every commit that lands on main must carry a
+#     signature GitHub can verify. GitHub signs squash/merge-commit merges with its web-flow key, so
+#     the normal PR-merge flow keeps working; a direct UNSIGNED push to main is rejected (the point);
+#   - required_pull_request_reviews = none — a scheduled handoff, not yet a shipped control;
 #   - force-pushes and deletions blocked.
 #
 #   bash tools/governance/require-checks.sh            # show what would change, change nothing
@@ -117,7 +119,14 @@ print(json.dumps({
     "restrictions": None,
 }))' > /tmp/vigil-protect-body.json
 gh api -X PUT "$API" --input /tmp/vigil-protect-body.json >/dev/null
-info "applied"
+info "applied status-checks + strict + no-force/delete"
+
+# W12-4 (#493): require signed commits. This is a separate sub-resource from the protection PUT above,
+# so it must be enabled explicitly. Once on, GitHub rejects any commit on main that it cannot verify;
+# GitHub signs squash/merge-commit merges with its web-flow key, so the normal PR-merge flow is fine.
+gh api -X POST "$API/required_signatures" \
+  -H "Accept: application/vnd.github+json" >/dev/null
+info "applied required signed commits (W12-4 #493)"
 
 bold "Verifying against the live API"
 gh api "$API" --jq '.required_status_checks.contexts[],
