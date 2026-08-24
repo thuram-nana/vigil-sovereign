@@ -102,6 +102,27 @@ def test_filter_resolved_hits_partitions(tmp_path):
     assert {h["seq"] for h in refused} == {99999, 6}
 
 
+def test_grounded_after_refusal_drops_high_score_drift(tmp_path):
+    """The exact memory_search decision (issue #530): a DRIFTED point that scores ABOVE the grounding
+    threshold must NOT ground the answer — it is refused first, and grounding is judged on the resolved
+    set. Without refusal-first, this drifted top hit would be rendered with an unresolvable citation."""
+    s = _store_with_records(tmp_path, 16)
+    drifted_top = {"seq": 99999, "entry_hash": "ab" * 32, "score": 0.99, "text": "hallucinated top hit"}
+    real_low = {"seq": 4, "entry_hash": s.get(4).entry_hash, "score": 0.40, "text": "real but weak"}
+    resolved, refused, is_grounded = health.grounded_after_refusal(s, [drifted_top, real_low], 0.66)
+    assert [h["seq"] for h in refused] == [99999]
+    assert [h["seq"] for h in resolved] == [4]
+    assert not is_grounded, "grounding must be judged AFTER refusal, on the resolved set only"
+
+
+def test_grounded_after_refusal_grounds_on_real_strong_hit(tmp_path):
+    """Negative control: a real, strongly-scored, resolvable hit DOES ground (the gate is not stuck-refusing)."""
+    s = _store_with_records(tmp_path, 16)
+    strong = {"seq": 7, "entry_hash": s.get(7).entry_hash, "score": 0.80, "text": "real strong"}
+    resolved, refused, is_grounded = health.grounded_after_refusal(s, [strong], 0.66)
+    assert is_grounded and refused == [] and [h["seq"] for h in resolved] == [7]
+
+
 # ── (2) projection-drift detection ──────────────────────────────────────────────────────────────────────
 def test_projection_drift_trips_on_reference_host_shape():
     """13,667 vector points over a signed 16-record chain (tip seq 15): drift on BOTH signals — the

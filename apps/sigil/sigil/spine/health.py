@@ -82,6 +82,22 @@ def filter_resolved_hits(store: SpineStore, hits: list[dict], *, seq_key: str = 
     return resolved, refused
 
 
+def grounded_after_refusal(store: SpineStore, raw_hits: list[dict],
+                           grounded_score: float) -> tuple[list[dict], list[dict], bool]:
+    """The read-time recall decision made SOUND against the signed spine: refuse every unresolvable hit
+    FIRST, then judge grounding on the surviving (resolved) set only. Returns ``(resolved, refused,
+    is_grounded)``.
+
+    Order matters and is the fix: the pre-#530 path judged grounding on the RAW top hit, so a drifted
+    projection point with a high similarity score would ground the answer and be rendered with a citation
+    the signed chain does not hold. Refusing first means a drifted top hit can never masquerade as grounded.
+    ``raw_hits`` is assumed score-descending (as a vector search returns), so ``resolved[0]`` is the
+    top-scoring hit that actually resolves."""
+    resolved, refused = filter_resolved_hits(store, raw_hits)
+    is_grounded = bool(resolved) and float(resolved[0].get("score", 0.0)) >= grounded_score
+    return resolved, refused, is_grounded
+
+
 # --------------------------------------------------------------------------------------------------
 # (2) projection-drift detection — REPORT, never silently serve.
 # --------------------------------------------------------------------------------------------------
