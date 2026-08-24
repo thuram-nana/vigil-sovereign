@@ -668,6 +668,32 @@ jobs:
             # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.
             echo "::error::apps/sigil/tests/test_offense_gate.py missing from the checkout"; exit 1
           fi
+      - name: spine concurrency REPEAT-STRESS + flake record (W11-5 #486)
+        env:
+          SIGIL_HOME: /tmp/sigil-ci
+          # DETERMINISTIC repeat stress in the REQUIRED job. pytest-xdist / pytest-repeat are NOT in the
+          # pinned hash-lock (--require-hashes above installs neither), so repetition is driven by a fresh
+          # interpreter per repeat via run_and_record.py — no plugin. The whole-dir step above already ran
+          # the suite once; this repeats it and RECORDS every per-test outcome into a flake ledger, so a
+          # scheduler-timing flake in the threaded two-engagement test surfaces across repeats and the CI
+          # run's outcomes join the historical pass-rate record. The HEAVY (TSan Rust + high-iteration
+          # Python) variant is the scheduled concurrency-race workflow, honestly labelled there — NOT here.
+        run: |
+          # Accumulate onto a COPY of the committed ledger in RUNNER_TEMP so the tracked file stays clean
+          # (no dirty-tree), then publish the enriched ledger as an artifact (a PR runner cannot push).
+          cp docs/flake/ledger.jsonl "$RUNNER_TEMP/flake-ledger.jsonl"
+          PYTHONPATH=apps/sigil python tools/flake/run_and_record.py \
+            --target apps/sigil/tests/test_spine_concurrency_stress.py \
+            --repeat "${SIGIL_STRESS_REPEAT:-5}" \
+            --run-id "ci-${GITHUB_RUN_ID:-local}" \
+            --ledger "$RUNNER_TEMP/flake-ledger.jsonl"
+      - name: publish the flake ledger (historical pass rates) — W11-5 #486
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flake-ledger-sigil-governor
+          path: ${{ runner.temp }}/flake-ledger.jsonl
+          if-no-files-found: warn
 
   sigil-lint:
     name: SIGIL lint (ruff blocking + mypy can-complete)

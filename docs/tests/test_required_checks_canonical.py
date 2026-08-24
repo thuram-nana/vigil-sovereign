@@ -167,6 +167,18 @@ KNOWN_NONPR_ADVISORY: dict[str, str] = {
         "control and a scaled throughput-floor run — IS required inside 'CRUCIBLE eval + benchmark corpus' "
         "via framework/v2/eval/tests/test_soak_leak.py."
     ),
+    "TSan — WARDEN Rust kernel concurrency (scheduled, heavy)": (
+        "concurrency-race.yml — schedule/workflow_dispatch only (W11-5 #486). ThreadSanitizer installs a "
+        "nightly toolchain + rust-src and rebuilds std with the sanitizer (minutes, network), too heavy for "
+        "every PR. The deterministic per-PR race coverage is the required 'WARDEN Rust kernel (A10 "
+        "durability)' (cargo test, incl. the concurrent-append flock test) and 'SIGIL governor gates' "
+        "(the two-engagement spine stress + the deterministic C-1/#392 interleaving)."
+    ),
+    "Python heavy two-engagement spine stress (scheduled)": (
+        "concurrency-race.yml — schedule/workflow_dispatch only (W11-5 #486). High-iteration soak of the "
+        "two-engagement spine stress; its deterministic, plugin-free per-PR subset runs in the required "
+        "'SIGIL governor gates' job (test_spine_concurrency_stress.py + a shell-loop repeat)."
+    ),
 }
 
 # W0-2 (#397): "Where a job is legitimately non-blocking (nightly), split the blocking subset out into

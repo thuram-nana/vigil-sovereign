@@ -1,0 +1,5 @@
+{
+  "$schema_note": "W11-5 (#486) EXPLICIT flake quarantine registry. A test may be skipped as known-flaky ONLY if it is listed here. tools/flake/flake_tracker.py::require_registered_quarantine RAISES for any unregistered id, so a silent (unregistered) quarantine is impossible. Each entry: test_id (nodeid or unique substring), reason, issue (tracking issue), since (ISO date). Duplicate test_ids are rejected on load. An empty list means NOTHING is quarantined today.",
+  "version": 1,
+  "quarantined": []
+}
