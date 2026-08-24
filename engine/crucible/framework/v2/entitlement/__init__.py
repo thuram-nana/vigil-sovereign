@@ -49,6 +49,16 @@ from .models import (
     SignedRevocation,
     TrustRoot,
 )
+from .deployment import (
+    DeploymentClass,
+    DeploymentLifecycle,
+    DeploymentProfileDocument,
+    SignedDeploymentProfile,
+    is_operable,
+    require_operable_deployment,
+    sign_deployment_profile,
+    verify_deployment_profile,
+)
 from .policy import (
     EntitlementPolicy,
     current_policy,
@@ -74,4 +84,13 @@ __all__ = [
     "reset_policy",
     "require_capability",
     "is_capability_available",
+    # W13-3 — deployment class + lifecycle EXTEND this layer (no duplicated policy)
+    "DeploymentClass",
+    "DeploymentLifecycle",
+    "DeploymentProfileDocument",
+    "SignedDeploymentProfile",
+    "sign_deployment_profile",
+    "verify_deployment_profile",
+    "is_operable",
+    "require_operable_deployment",
 ]

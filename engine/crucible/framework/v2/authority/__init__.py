@@ -35,7 +35,24 @@ Public surface:
 
 from __future__ import annotations
 
+from .authorization import (
+    EngagementAuthorization,
+    EngagementAuthorizationDecision,
+    EngagementExecutor,
+    SignedEngagementAuthorization,
+    action_danger,
+    authorization_signing_bytes,
+    authorize_engagement_action,
+    sign_authorization,
+    verify_authorization,
+)
 from .charter import authority_from_charter, authority_from_scope
+from .crosscheck import (
+    ScopeCrossCheck,
+    assert_scope_consistent,
+    crosscheck_scope,
+    parse_scope_table,
+)
 from .gate import authorize_action, require_authorization
 from .killswitch import KillSwitch
 from .models import (
@@ -62,4 +79,18 @@ __all__ = [
     "verify_authority",
     "authority_from_charter",
     "authority_from_scope",
+    # W13-3 — signed EngagementAuthorization + executor + three-leg cross-check
+    "EngagementAuthorization",
+    "SignedEngagementAuthorization",
+    "EngagementAuthorizationDecision",
+    "EngagementExecutor",
+    "authorize_engagement_action",
+    "action_danger",
+    "sign_authorization",
+    "verify_authorization",
+    "authorization_signing_bytes",
+    "ScopeCrossCheck",
+    "crosscheck_scope",
+    "assert_scope_consistent",
+    "parse_scope_table",
 ]
