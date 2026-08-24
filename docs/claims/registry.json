@@ -1962,6 +1962,27 @@
       "ci_job": "CRUCIBLE core on vigil_core",
       "failure_class": "n-a",
       "default": "off"
+    },
+    {
+      "id": "W17-7",
+      "title": "The fireteam Tier-B escalation resolve loop is wired to a production caller",
+      "claim": "The sovereign Tier-B escalation resolve loop is wired to a production caller: an over-cap fireteam member escalation reaches an OPERATOR DECISION — the registry's signed-only resolve() applied over an owner-signed approval envelope read back from the per-engagement inbox — instead of only ever auto-rejecting at its deadline, while a pending escalation with NO decision still fails closed (EXPIRED) at its deadline_seq and, within the deadline, stays PENDING and visible — the safe default preserved, not replaced.",
+      "source": "docs/decisions/W17-7-fireteam-tierb-resolve-loop.md:22",
+      "enforced_by": {
+        "file": "integration/vigil_integration/fireteam/resolver.py",
+        "symbol": "resolve_pending"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_fireteam_resolve_loop.py",
+        "tests": [
+          "test_signed_operator_approval_reaches_approved_via_resolve_loop",
+          "test_no_decision_still_fails_closed_at_deadline",
+          "test_forged_untrusted_key_approval_never_approves"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

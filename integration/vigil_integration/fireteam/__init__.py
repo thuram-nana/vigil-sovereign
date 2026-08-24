@@ -29,6 +29,7 @@ from .confirmation import (
     PendingConfirmation,
     escalation_approval_bytes,
     sign_escalation_approval,
+    sign_escalation_approval_with,
 )
 from .member import (
     FORBIDDEN_MEMBER_ACTIONS,
@@ -62,6 +63,15 @@ from .orchestrator import (
     MemberRunner,
     run_fireteam,
 )
+from .resolver import (
+    escalation_ledger_path,
+    find_signed_approval,
+    open_registry,
+    pending_escalations,
+    resolve_pending,
+    signed_inbox_dir,
+    write_signed_approval,
+)
 from .spine_queue import QueuedWrite, SingleWriterSpineQueue
 from .wave_progress import MemberProgress, WaveProgressStore
 
@@ -76,7 +86,11 @@ __all__ = [
     "authorize_member_edge", "run_member_step", "parse_member_decision", "FORBIDDEN_MEMBER_ACTIONS",
     # confirmation
     "ConfirmationRegistry", "ConfirmationOutcome", "ConfirmationResolution", "PendingConfirmation",
-    "ApproverFn", "EscalationLedger", "sign_escalation_approval", "escalation_approval_bytes",
+    "ApproverFn", "EscalationLedger", "sign_escalation_approval", "sign_escalation_approval_with",
+    "escalation_approval_bytes",
+    # resolver (Tier-B resolve loop + signed-approval inbox)
+    "resolve_pending", "pending_escalations", "open_registry", "write_signed_approval",
+    "find_signed_approval", "escalation_ledger_path", "signed_inbox_dir",
     # spine queue
     "SingleWriterSpineQueue", "QueuedWrite",
     # wave-resume checkpoint

@@ -790,17 +790,35 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         # RE-VERIFIED against the owner key on every rehydrate (a forged/unsigned/replayed/flipped allow
         # degrades to REJECTED). The offense engine holds NO private key, so it can only READ BACK a
         # sovereign-signed approval — it cannot mint one; a resolve() here without a valid signed envelope
-        # fail-closes. The sovereign Tier-B resolve loop (which supplies owner-signed envelopes over pending
-        # escalations, behind the existing gate/ceiling, never auto) is the remaining wiring step.
+        # fail-closes. W17-7 (#541): the sovereign Tier-B resolve loop is now WIRED (see resolve_pending
+        # below) — the operator signs an approval envelope with `vigil fireteam approve` (owner key), and each
+        # wave DRAINS the signed inbox, so an over-cap escalation reaches an OPERATOR DECISION instead of only
+        # ever auto-rejecting at its deadline. The fail-closed deadline auto-reject is PRESERVED, not replaced.
         # Tier-B ADVISORY-1: bind the ENGAGEMENT (config.slug) into the signed approval bytes so isolation is
         # INTRINSIC, not transitive via the wave_id convention — an owner approval signed for this engagement
         # fails closed if replayed into another engagement's registry, even with a colliding bare wave_id.
         fireteam_registry = ConfirmationRegistry(spine=fireteam_spine, ledger=escalation_ledger,
                                                  trusted_approvers=effective_authority,
                                                  engagement=config.slug)
-        return asyncio.run(run_fireteam(plan, runner, phase=state.phase, gate=gate, oracle=oracle,
-                                        spine=fireteam_spine, registry=fireteam_registry,
-                                        seq_start=int(seq), blackboard=bb, engagement=config.slug))
+        outcome = asyncio.run(run_fireteam(plan, runner, phase=state.phase, gate=gate, oracle=oracle,
+                                           spine=fireteam_spine, registry=fireteam_registry,
+                                           seq_start=int(seq), blackboard=bb, engagement=config.slug))
+        # W17-7 (#541): drive the Tier-B RESOLVE LOOP over every pending escalation (this wave's + any that
+        # survived a prior wave in the durable ledger). resolve_pending() reads back sovereign-signed approval
+        # envelopes from the inbox and calls the registry's signed-only resolve() — an OPERATOR DECISION —
+        # while still auto-REJECTING (fail-closed) any past its deadline_seq, and surfacing the rest to the
+        # live UI feed so the operator can decide before they expire. `now_seq=int(seq)` never expires a
+        # just-registered escalation (its deadline is seq+index+600 > seq). Total + best-effort: the whole
+        # pass is guarded so a resolver error never perturbs the wave outcome (a stranded escalation simply
+        # stays PENDING for the next pass / `vigil fireteam resolve`).
+        try:
+            from ..fireteam.resolver import resolve_pending
+            resolve_pending(fireteam_registry, base_dir=config.base_dir, slug=config.slug,
+                            now_seq=int(seq), feed=spine_post)
+            fireteam_spine.flush()   # write the resolve loop's redacted pending/terminal events to the feed
+        except Exception:  # noqa: BLE001 — the Tier-B resolve pass NEVER perturbs the wave (fail-safe)
+            pass
+        return outcome
 
     # -- knowledge-graph projection (F1) — mirror the run's oracle-CONFIRMED facts into a cloud/remote
     # Neo4j read-model, when the operator has connected one (Settings → Knowledge graph). Honest omission:
