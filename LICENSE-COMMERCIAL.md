@@ -1,6 +1,6 @@
 # VIGIL — Commercial License
 
-**Copyright © 2026 Junior Thuram Nana (the "Licensor"). All rights reserved.**
+**Copyright © 2026 SIGIL Limited (Sovereign Integrity Governance Infrastructure Labs) (the "Licensor"). All rights reserved.**
 
 VIGIL's first-party code is **dual-licensed**. You may use it under **either**:
 
@@ -84,8 +84,9 @@ Contact the Licensor:
 - Please include: your company, the product / use case, deployment model (internal /
   SaaS / distributed), and expected scale.
 
-*(Maintainer: confirm the copyright-holder line reflects your legal name/entity, and that
-`thuram@thuramnana.com` is a monitored mailbox, before relying on this for commercial sales.)*
+*(Maintainer: the Licensor entity is **SIGIL Limited** (founder & CEO: Junior Thuram Nana);
+confirm the copyright-holder line reflects that entity, and that `thuram@thuramnana.com` is a
+monitored mailbox, before relying on this for commercial sales.)*
 
 ---
 
@@ -132,3 +133,29 @@ These licenses are unaffected by VIGIL's dual license.
 "VIGIL" and any associated logos are marks of the Licensor. Neither license grants rights
 in the Licensor's **name or marks**. You may state that your product "uses VIGIL," but you
 may not imply endorsement or use the marks as your own.
+
+---
+
+## Governing law & IP jurisdiction
+
+The Licensor is **SIGIL Limited, a private limited company registered in the Republic of
+Cameroon** (a GovTech/RegTech company; founder & CEO: Junior Thuram Nana). The Licensor's
+current jurisdiction is the **Republic of Cameroon** (a move to **Delaware, USA** is planned;
+this section will be updated when that move completes). Unless a signed Commercial License
+states otherwise:
+
+- the enforcement of the Licensor's **copyright, other intellectual-property rights, and
+  trademarks** in VIGIL's first-party code, and any dispute arising out of the
+  noncommercial grant, are governed by the **laws of the Republic of Cameroon**, with the
+  competent courts of **Yaoundé, Republic of Cameroon** as the forum; and
+- a **Commercial License** is governed by the law and forum set out in that signed
+  agreement — which, absent a contrary term, is the Republic of Cameroon.
+
+Nothing here waives any right or remedy the Licensor holds under any applicable law,
+including the laws of a jurisdiction into which the Licensor later moves.
+
+> This section explains the model in plain language; it is **not legal advice** and is
+> **not itself a license**. The binding governing-law term of any Commercial License is the
+> one in your signed agreement. The maintainer should have qualified counsel confirm the
+> governing-law, venue and IP-enforcement wording for the Republic of Cameroon (and for the
+> planned Delaware, USA entity) before relying on it commercially.

@@ -46,7 +46,7 @@ Report a concern to the maintainer:
 - **Fallback (published maintainer address):** `thuram@thuramnana.com`, subject
   `VIGIL code of conduct`
 
-Reports are read by the maintainer, Junior Thuram Nana. They are handled as confidentially
+Reports are read by the maintainer, Junior Thuram Nana, Founder & CEO of SIGIL Limited. They are handled as confidentially
 as is practical; your identity is not disclosed to the person reported without your
 agreement, except where the maintainer is legally required to disclose it.
 

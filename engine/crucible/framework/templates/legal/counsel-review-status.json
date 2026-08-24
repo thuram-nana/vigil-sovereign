@@ -9,27 +9,27 @@
       "governing_law_resolved": false,
       "reviewer": null,
       "review_date": null,
-      "notes": "PENDING. Human action: counsel to review the letter terms and resolve the per-engagement placeholders. Cross-checked against charter.md and the signed EngagementAuthorization by authority.crosscheck (W13-3)."
+      "notes": "PENDING counsel review. The authorization letter carries no inline governing-law clause; its governing law is inherited from the signed EngagementAuthorization under the operator's jurisdiction, the Republic of Cameroon (a move to Delaware, USA is planned), so governing_law_resolved is recorded false (there is no inline clause to resolve). Human action: counsel to review the letter terms and resolve the per-engagement placeholders. Cross-checked against charter.md and the signed EngagementAuthorization by authority.crosscheck (W13-3)."
     },
     {
       "id": "nda",
       "title": "Mutual non-disclosure agreement (NDA)",
       "path": "nda.md",
       "reviewed_by_counsel": false,
-      "governing_law_resolved": false,
+      "governing_law_resolved": true,
       "reviewer": null,
       "review_date": null,
-      "notes": "PENDING. Human action: counsel to review the NDA and resolve the [GOVERNING LAW] / [VENUE] placeholders and the party/date fill-ins."
+      "notes": "PENDING counsel review. Governing law and venue resolved by the operator to the Republic of Cameroon (operator's current jurisdiction; a move to Delaware, USA is planned) — governing_law_resolved is true. The party/date fill-ins remain per-engagement and reviewed_by_counsel is still false, so the ship gate still refuses this instrument. Human action: a qualified lawyer must review the NDA (and confirm the Cameroonian venue/wording) before it ships."
     },
     {
       "id": "dpa",
       "title": "Data processing agreement (DPA)",
       "path": "dpa.md",
       "reviewed_by_counsel": false,
-      "governing_law_resolved": false,
+      "governing_law_resolved": true,
       "reviewer": null,
       "review_date": null,
-      "notes": "PENDING. Human action: counsel to review the DPA and resolve the [GOVERNING LAW] / [DATA PROTECTION REGIME] / [VENUE] placeholders and the party/date fill-ins."
+      "notes": "PENDING counsel review. Governing law, data-protection regime and venue resolved by the operator to the Republic of Cameroon (operator's current jurisdiction; a move to Delaware, USA is planned) — governing_law_resolved is true. The party/region/date fill-ins remain per-engagement and reviewed_by_counsel is still false, so the ship gate still refuses this instrument. Human action: a qualified lawyer must review the DPA (and confirm the exact Cameroonian data-protection statute, venue and wording) before it ships."
     }
   ]
 }

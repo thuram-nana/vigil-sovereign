@@ -1,6 +1,6 @@
 # CRUCIBLE — Licensing
 
-**Copyright © 2026 Junior Thuram Nana (the "Licensor"). All rights reserved.**
+**Copyright © 2026 SIGIL Limited (Sovereign Integrity Governance Infrastructure Labs) (the "Licensor"). All rights reserved.**
 
 CRUCIBLE is **dual-licensed** — the same model as the rest of VIGIL. You may use it
 under **either**:

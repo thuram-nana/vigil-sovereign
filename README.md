@@ -920,7 +920,7 @@ See [`docs/AS-BUILT-LIVE.md`](docs/AS-BUILT-LIVE.md) for the honest, itemized st
 ## License & attribution
 
 **VIGIL's first-party code is dual-licensed: [PolyForm Noncommercial License 1.0.0](LICENSE) OR a
-[Commercial License](LICENSE-COMMERCIAL.md)** (© 2026 Junior Thuram Nana). In plain language:
+[Commercial License](LICENSE-COMMERCIAL.md)** (© 2026 SIGIL Limited — Sovereign Integrity Governance Infrastructure Labs). In plain language:
 
 - **Noncommercial use is free** — use, run, study, modify, and share VIGIL for any noncommercial purpose,
   under [PolyForm Noncommercial 1.0.0](LICENSE). You may **not** sell it or deploy it commercially/in

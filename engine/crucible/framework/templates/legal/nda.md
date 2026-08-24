@@ -7,11 +7,14 @@
 
 > **DRAFT — PENDING COUNSEL REVIEW.** This is a framework *template*, not an
 > executed agreement. Its terms have **not** been reviewed by qualified legal
-> counsel, and the governing-law and party placeholders below are **not yet
-> resolved**. Both are HUMAN actions. The counsel-review manifest
-> (`counsel-review-status.json`) records this instrument as PENDING, and the
-> ship gate (`authority.counsel_review`) refuses to assemble it into any
-> deliverable until counsel has reviewed it and every placeholder is resolved.
+> counsel. The **governing law is set to the Republic of Cameroon** — the
+> operator's current jurisdiction; a move to Delaware, USA is planned — while the
+> **party and date fill-ins are resolved per engagement**. Resolving those, and
+> the counsel review itself, are HUMAN actions. The counsel-review manifest
+> (`counsel-review-status.json`) records this instrument as **PENDING counsel
+> review**, and the ship gate (`authority.counsel_review`) refuses to assemble it
+> into any deliverable until counsel has reviewed it and every placeholder is
+> resolved.
 
 This mutual NDA governs the exchange of confidential information between the
 parties in connection with a security engagement. Both directions are covered:
@@ -21,7 +24,7 @@ methods, findings, and unreleased tooling on the other.
 ## 1. Parties
 
 - **Customer:** `<customer legal name>`
-- **Operator:** `<operator legal name>`
+- **Operator:** SIGIL Limited (Sovereign Integrity Governance Infrastructure Labs), a private limited company registered in the Republic of Cameroon
 
 Signed (customer): `<name>`   Date: `__________`
 Signed (operator): `<name>`   Date: `__________`
@@ -58,9 +61,11 @@ confidentiality obligations survive for `<survival period>` after its end.
 ## 6. Governing law
 
 This Agreement is governed by, and construed in accordance with, the laws of
-**[GOVERNING LAW]**, and the parties submit to the exclusive jurisdiction of the
-courts of **[VENUE]**.
+**the Republic of Cameroon**, and the parties submit to the exclusive
+jurisdiction of the competent courts of **Yaoundé, Republic of Cameroon**.
 
-<!-- The governing law and venue above are UNRESOLVED placeholders. Resolving
-     them is a human (counsel) action; until then the ship gate refuses this
-     instrument. -->
+<!-- Governing law and venue are set to the operator's standing jurisdiction —
+     the Republic of Cameroon (a move to Delaware, USA is planned) — NOT a
+     per-engagement fill-in. Counsel must still confirm the exact venue and the
+     wording for this jurisdiction before use; independently, the ship gate
+     refuses this instrument until reviewed_by_counsel is recorded true. -->

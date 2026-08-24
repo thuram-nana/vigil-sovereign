@@ -1,6 +1,6 @@
 # VIGIL — Licensing
 
-**Copyright © 2026 Junior Thuram Nana (the "Licensor"). All rights reserved.**
+**Copyright © 2026 SIGIL Limited (Sovereign Integrity Governance Infrastructure Labs) (the "Licensor"). All rights reserved.**
 
 VIGIL's first-party code is **dual-licensed**. You may use it under **either**:
 
