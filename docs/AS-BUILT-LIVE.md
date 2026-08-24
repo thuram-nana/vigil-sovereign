@@ -127,14 +127,15 @@ oracle; timeout → REJECT).
   nodes/edges (canonical, no wallclock/RNG, no authority surface) and needs no external database. Only the
   **live external** service is deferred: `Neo4jGraphStore` sits behind the same interface as a **real client
   body** (its methods issue Cypher; only construction raises, and only with no injected driver and no
-  `neo4j` package). For telemetry the export path is now **exercised end-to-end** (W6-4 #455): a real span
-  goes through the real `OTLPSpanExporter` over real HTTP to a loopback OTLP endpoint, VIGIL ships a
-  **real-backend collector profile** (`infra/sidecars/otel-config-backend.yaml`, selectable via `OTEL_CONFIG`,
-  forwarding to Jaeger/Tempo/any OTLP endpoint — see `docs/decisions/W6-4-otlp-collector-and-backends.md`),
-  and an **unreachable backend is now VISIBLE** (`live/otel_export.probe_collector` returns a failure + logs a
-  WARNING) rather than a silent drop. Only standing up a **live external** backend (a real Jaeger/Tempo
-  instance) remains deferred to owner infra. The engine degrades these seams to no-op without affecting a
-  run's truth.
+  `neo4j` package). For telemetry (W6-4 #455) VIGIL now ships a **real-backend collector profile**
+  (`infra/sidecars/otel-config-backend.yaml`, selectable via `OTEL_CONFIG`, forwarding to Jaeger/Tempo/any
+  OTLP endpoint — see `docs/decisions/W6-4-otlp-collector-and-backends.md`), and an **unreachable backend is
+  now VISIBLE** (`live/otel_export.probe_collector` returns a failure + logs a WARNING) rather than a silent
+  drop — both exercised in the required P5 CI leg (otel-free). Two telemetry pieces remain deferred, and are
+  **NOT** claimed as exercised here: the real-`OTLPSpanExporter` span-arrival e2e is otel-gated and **SKIPS in
+  CI** (`opentelemetry` is absent from the runtime locks, so `test_live_otel_export.py` module-skips), and
+  standing up a **live external** backend (a real Jaeger/Tempo instance) is left to owner infra. The engine
+  degrades these seams to no-op without affecting a run's truth.
 - **Live *external* network-egress engagement — DONE (2026-07-30).** *(Reconciled: this bullet previously said
   the external run was "outstanding" — stale; the README/AS-BUILT record it as done. Corrected here in
   TRUTHENOVATION T7.)* The governed engine ran live against the vendor-published `testasp.vulnweb.com` and minted
