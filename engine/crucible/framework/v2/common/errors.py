@@ -173,6 +173,17 @@ class ScopeDrift(EthicsViolation):
     an ambiguous authorization."""
 
 
+class EnvelopeDrift(EthicsViolation):
+    """The enforcement envelope the customer signed in the authorization letter
+    (danger ceiling, validity window, rate limit, concurrency limit) does not
+    match the signed EngagementAuthorization the executor honours. The customer
+    could otherwise sign one envelope while the executor enforces a looser one;
+    fail closed rather than honour an envelope the customer did not sign. A
+    missing or unparseable letter declaration is itself drift (fail closed) — a
+    letter that omits the envelope cannot silently agree with any signed
+    object."""
+
+
 class EntitlementError(CrucibleError, IntegrityError):
     """Recoverable entitlement-layer error (file parse, store I/O) that
     is NOT itself an authorization decision. Also a vigil_core `IntegrityError`
