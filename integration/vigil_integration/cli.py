@@ -1698,13 +1698,30 @@ def _cmd_approve_sign(args: argparse.Namespace) -> int:
     import os
     import time
 
+    from vigil_core.key_backend import (
+        BACKEND_ENV, HardwareKeyUnavailable, KeyBackendError, select_owner_backend,
+    )
+
     from .live.approval_broker import approvals_root, list_pending, load_authority, write_signed_token
     from .live.approval_token import DEFAULT_POLICY, ApprovalAction, mint_token
 
     owner_priv = os.environ.get("VIGIL_APPROVAL_OWNER_KEY", "").strip()
-    if not owner_priv:
+    backend_kind = os.environ.get(BACKEND_ENV, "").strip().lower()
+    # Default (file) backend with no key: keep the exact original operator guidance.
+    if backend_kind in ("", "file") and not owner_priv:
         print("vigil approve sign: no owner signing key — set VIGIL_APPROVAL_OWNER_KEY (run "
               "`vigil approve provision-authority`).", file=sys.stderr)
+        return 2
+    # W9-6: the owner key may live in a hardware (PKCS#11) token that signs so the private material never
+    # enters this process. FAIL CLOSED — a selected-but-absent token REFUSES here; it never signs with a
+    # file key (that would defeat holding the key off the box).
+    try:
+        backend = select_owner_backend(file_private_key_b64=(owner_priv or None))
+    except HardwareKeyUnavailable as exc:
+        print(f"vigil approve sign: hardware owner-key backend unavailable — {exc}", file=sys.stderr)
+        return 2
+    except KeyBackendError as exc:
+        print(f"vigil approve sign: {exc}", file=sys.stderr)
         return 2
     root = approvals_root(args.base_dir)
     match = next((r for r in list_pending(root) if r.request_id == args.request_id), None)
@@ -1718,10 +1735,11 @@ def _cmd_approve_sign(args: argparse.Namespace) -> int:
     ttl = max(1.0, min(float(args.ttl), DEFAULT_POLICY.max_token_lifetime))
     now = time.time()
     action = ApprovalAction(match.tool_name, match.target, match.action_digest)
-    token = mint_token(action, owner_private_key_b64=owner_priv, key_id=args.key_id,
+    token = mint_token(action, signer=backend.sign, key_id=args.key_id,
                        nonce=match.nonce, not_before=now, not_after=now + ttl)
     path = write_signed_token(root, match.request_id, token)
-    print(f"=== vigil approve sign — {args.request_id} ({match.tool_name} @ {match.target}) ===")
+    print(f"=== vigil approve sign — {args.request_id} ({match.tool_name} @ {match.target}) "
+          f"[owner-key backend: {backend.name}] ===")
     print(f"signed by : {args.key_id}   window: {int(ttl)}s (single-use; within the 900s dead-man's-switch)")
     print(f"written   : {path}")
     print("The offense worker spends this token ONCE the next time it authorizes that exact action.")

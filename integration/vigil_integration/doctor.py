@@ -653,12 +653,22 @@ def _posture_witness(repo: Path) -> "tuple[str, str]":
     return _wp.roster_posture(_wp.roster_path(repo))
 
 
+def _posture_owner_key_backend() -> "tuple[str, str]":
+    """Which backend holds the OWNER key (W9-6, #439): a FILE-based Ed25519 key loaded into the process
+    (the default), or a PKCS#11 HARDWARE token that signs so the private key never enters the process. When
+    the hardware backend is selected but its module/token is absent this reports the FAIL-CLOSED state —
+    owner signing REFUSES rather than silently using a file key. Reads env only (no token open, no PIN, no
+    side-effects); imports only vigil_core (FATAL-2)."""
+    from vigil_core.key_backend import describe_owner_backend
+    return describe_owner_backend()
+
+
 def _collect_posture(repo: Path, services: dict) -> list:
     """The security-posture block: one honest line PER control, its CURRENT state read from real on-disk /
     env state (never an optimistic default). INFORMATIONAL — never flips `ok`. Every probe fails soft to
     UNKNOWN. FATAL-2: the sovereign-plane vault and the framework entitlement are read from DISK, importing
     neither sigil nor framework. The order is the plan's: egress-gate, vault, sovereignty, entitlement,
-    backups, charter, egress-supervisor, witness."""
+    backups, charter, egress-supervisor, witness, owner-key-backend."""
     def _entry(control: str, fn) -> dict:
         try:
             state, detail = fn()
@@ -676,6 +686,7 @@ def _collect_posture(repo: Path, services: dict) -> list:
         _entry("charter", lambda: _posture_charter(repo)),
         _entry("egress-supervisor", _posture_egress_supervisor),
         _entry("witness", lambda: _posture_witness(repo)),
+        _entry("owner-key-backend", _posture_owner_key_backend),
     ]
 
 

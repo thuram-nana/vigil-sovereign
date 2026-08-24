@@ -166,14 +166,21 @@ def token_signing_bytes(token: ApprovalToken) -> bytes:
 def mint_token(
     action: ApprovalAction,
     *,
-    owner_private_key_b64: str,
+    owner_private_key_b64: "str | None" = None,
     key_id: str,
     nonce: str,
     not_before: float,
     not_after: float,
+    signer: "Callable[[bytes], str] | None" = None,
 ) -> ApprovalToken:
-    """Provisioning/test helper (SOVEREIGN-side — needs the private key): build + owner-sign a token for
-    ``action``. The private key is used ONLY here; it never crosses to the offense verifier."""
+    """Provisioning/test helper (SOVEREIGN-side): build + owner-sign a token for ``action``.
+
+    The owner signature comes from EITHER an injected ``signer`` (a ``Callable[[bytes], str]`` — the
+    pluggable :class:`vigil_core.key_backend.KeyBackend.sign`, so a HARDWARE token can sign without the
+    private material ever entering this process — W9-6) OR a raw ``owner_private_key_b64`` (the file
+    backend / today's callers; the private key is used ONLY here and never crosses to the offense
+    verifier). Exactly one must be supplied. A ``signer`` that does not return a ``str`` is a fail-closed
+    error (never a token with a non-string signature)."""
     token = ApprovalToken(
         tool_name=action.tool_name,
         target=action.target,
@@ -184,7 +191,15 @@ def mint_token(
         key_id=str(key_id),
         signature_b64="",
     )
-    sig = sign(owner_private_key_b64, token_signing_bytes(token))
+    payload = token_signing_bytes(token)
+    if signer is not None:
+        sig = signer(payload)
+        if not isinstance(sig, str):
+            raise ValueError("mint_token signer must return a base64 signature string")
+    elif owner_private_key_b64:
+        sig = sign(owner_private_key_b64, payload)
+    else:
+        raise ValueError("mint_token requires either a signer callable or owner_private_key_b64")
     return ApprovalToken(**{**token.__dict__, "signature_b64": sig})
 
 
