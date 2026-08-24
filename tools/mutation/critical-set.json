@@ -1,0 +1,57 @@
+{
+  "id": "W11-3",
+  "issue": 484,
+  "note": "The enumerated security-critical set for mutation testing (mutmut / cosmic-ray) and coverage-guided fuzzing (cargo-fuzz + atheris). THIS FILE IS THE SINGLE SOURCE OF TRUTH: the mutmut config (pyproject.toml [tool.mutmut]) and the cosmic-ray config (tools/mutation/cosmic-ray.toml) must mutate exactly the python files marked mutation=true here, and integration/tests/test_mutation_critical_set.py fails the build if any listed file is missing or the configs drift from this list. Categories: gate (WARDEN authorization), oracle (defensive detection/confirmation), verifier (tamper-evidence), signing (cryptographic authenticity), parser (attacker-controlled-input decoders — the fuzz targets).",
+  "critical_set": [
+    {"path": "packages/core/vigil_core/vigil_core/warden_tiers.py", "lang": "python", "category": "gate", "mutation": true, "reason": "The WARDEN tool->tier classifier + gate decision (sovereign port of tiers.rs). Lowering a dangerous tool below A3, or reaching A0 without a positive allowlist, is a fail-open."},
+    {"path": "integration/vigil_integration/warden_gate.py", "lang": "python", "category": "gate", "mutation": true, "reason": "The offense-side WARDEN gate: classifies + fail-closes every tool invocation before it can run."},
+    {"path": "engine/crucible/framework/v2/aegis/inspect.py", "lang": "python", "category": "oracle", "mutation": true, "reason": "The AEGIS gateway inline request/response inspector: parses the HTTP attack surface and runs the request-side oracles. A weakened check is a missed block; a broadened one is a false block."},
+    {"path": "engine/crucible/framework/v2/verify/confirmation.py", "lang": "python", "category": "oracle", "mutation": true, "reason": "confirm_finding: turns a lead into a CONFIRMED verdict only with a re-runnable certificate (prove-don't-guess). A mutation that confirms without proof manufactures evidence."},
+    {"path": "engine/crucible/framework/v2/verify/verifier.py", "lang": "python", "category": "oracle", "mutation": true, "reason": "OracleVerifier: the deterministic re-execution authority behind every confirmation."},
+    {"path": "packages/core/vigil_core/vigil_core/chain.py", "lang": "python", "category": "verifier", "mutation": true, "reason": "The tamper-evident hash-linked spine verifier (verify_chain / verify_head / anti-rollback). A mutation that verifies a tampered chain destroys audit integrity."},
+    {"path": "packages/core/vigil_core/vigil_core/canonical.py", "lang": "python", "category": "verifier", "mutation": true, "reason": "Deterministic canonical-JSON bytes + digest every signature is computed over. Non-determinism here silently breaks tamper-evidence."},
+    {"path": "packages/core/vigil_core/vigil_core/crypto.py", "lang": "python", "category": "signing", "mutation": true, "reason": "Ed25519 sign / verify_one / verify_threshold: the cryptographic authenticity substrate. A verify that fails open is catastrophic."},
+    {"path": "packages/core/vigil_core/vigil_core/models.py", "lang": "python", "category": "parser", "mutation": false, "reason": "pydantic spine-record models (ChainEntry / SignedChainHead). Data definitions with little branch logic; the record PARSER is exercised by the spine fuzz harness rather than mutation."},
+    {"path": "apps/sigil/kernel/src/tiers.rs", "lang": "rust", "category": "gate", "mutation": false, "reason": "The Rust WARDEN classifier (source of truth for warden_tiers.py). Covered by cargo test + the cargo-fuzz warden_classify target, not by the python mutation run."},
+    {"path": "apps/sigil/kernel/src/crypto.rs", "lang": "rust", "category": "signing", "mutation": false, "reason": "The kernel's Ed25519 + SHA-256 substrate. Covered by cargo test."},
+    {"path": "apps/sigil/kernel/src/actionlog.rs", "lang": "rust", "category": "verifier", "mutation": false, "reason": "The signed, hash-chained WARDEN action log + anti-rollback head. Covered by cargo test (A10 durability)."}
+  ],
+  "fuzz_targets": {
+    "warden_kernel": {
+      "family": "warden-classifier",
+      "lang": "rust",
+      "target": "apps/sigil/kernel/src/tiers.rs",
+      "harness": "apps/sigil/kernel/fuzz/fuzz_targets/warden_classify.rs",
+      "corpus": "apps/sigil/kernel/fuzz/corpus/warden_classify",
+      "fast_required_test": "apps/sigil/kernel/tests/fuzz_smoke.rs",
+      "engine": "cargo-fuzz (libFuzzer)"
+    },
+    "http": {
+      "family": "HTTP request",
+      "lang": "python",
+      "target": "engine/crucible/framework/v2/aegis/inspect.py",
+      "harness": "tools/fuzz/atheris/fuzz_http.py",
+      "corpus": "tools/fuzz/atheris/corpus/http",
+      "fast_required_test": "integration/tests/test_fuzz_corpus_replay.py",
+      "engine": "atheris"
+    },
+    "json": {
+      "family": "JSON canonicalisation",
+      "lang": "python",
+      "target": "packages/core/vigil_core/vigil_core/canonical.py",
+      "harness": "tools/fuzz/atheris/fuzz_json.py",
+      "corpus": "tools/fuzz/atheris/corpus/json",
+      "fast_required_test": "integration/tests/test_fuzz_corpus_replay.py",
+      "engine": "atheris"
+    },
+    "spine": {
+      "family": "spine records",
+      "lang": "python",
+      "target": "packages/core/vigil_core/vigil_core/chain.py",
+      "harness": "tools/fuzz/atheris/fuzz_spine.py",
+      "corpus": "tools/fuzz/atheris/corpus/spine",
+      "fast_required_test": "integration/tests/test_fuzz_corpus_replay.py",
+      "engine": "atheris"
+    }
+  }
+}

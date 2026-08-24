@@ -1,0 +1,128 @@
+# Mutation testing + coverage-guided fuzzing — the HEAVY, SCHEDULED half of W11-3 (issue #484).
+#
+# WHY THIS IS NOT A REQUIRED PR CHECK. mutmut and cosmic-ray re-run the security-critical test suite
+# ONCE PER MUTANT (minutes-to-hours), cargo-fuzz needs a nightly Rust toolchain + the libFuzzer runtime,
+# and atheris needs native libFuzzer instrumentation (clang) — none of which belong on the ordinary
+# pull_request runner. So this workflow runs on a weekly SCHEDULE and on manual dispatch, and is
+# DELIBERATELY absent from .github/required-status-checks.txt. It is accounted for as a non-PR job in
+# docs/tests/test_required_checks_canonical.py (KNOWN_NONPR_ADVISORY).
+#
+# WHAT PROVES THE DISCIPLINE ON EVERY PR INSTEAD (the required, fast counterparts):
+#   * integration/tests/test_mutation_gate_sensitivity.py — proves a mutation KILL/SURVIVE verdict
+#     measures something real (an adequate test kills a boundary mutant of the real WARDEN gate; a weak
+#     test lets it survive), using only the stdlib probe tools/mutation/mutation_probe.py.
+#   * apps/sigil/kernel/tests/fuzz_smoke.rs — replays the committed WARDEN fuzz corpus through the SAME
+#     invariant oracle the cargo-fuzz target asserts, plus a broken-classifier negative control.
+#   * integration/tests/test_fuzz_corpus_replay.py — replays every committed atheris seed corpus through
+#     its harness and asserts each parser/verifier has teeth.
+#   * integration/tests/test_mutation_critical_set.py — pins the mutmut/cosmic-ray target sets to the
+#     tools/mutation/critical-set.json manifest so this workflow and the manifest cannot drift.
+#
+# The engines below run on the ENUMERATED security-critical set (tools/mutation/critical-set.json). This
+# job is best-effort by design: a red run here is a signal to investigate a surviving mutant / a fuzz
+# crash, never a merge blocker.
+
+name: mutation-fuzz
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"          # weekly, Monday 04:00 UTC (distinct from the daily/nightly crons)
+  workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: "per-target coverage-guided fuzz budget (seconds)"
+        required: false
+        default: "300"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '300' }}
+
+jobs:
+  mutation-fuzz:
+    name: mutation-testing + coverage-fuzzing (scheduled, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      # Third-party actions pinned to full commit SHAs (the same SHAs the required workflows pin).
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # --------------------------------------------------------------------------------------------
+      # PYTHON MUTATION TESTING — mutmut (primary) over the manifest's mutation=true set.
+      # --------------------------------------------------------------------------------------------
+      - name: install the python mutation + fuzz toolchain
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # These tools are intentionally NOT in the committed hash-locks (they never run on a PR); a
+          # scheduled job may install from the index. atheris needs clang/libFuzzer headers.
+          sudo apt-get update && sudo apt-get install -y clang
+          pip install mutmut cosmic-ray atheris
+          # the security-critical modules must be importable for the suites the mutants are scored against
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt || true
+
+      - name: mutmut run over the security-critical set (config: pyproject [tool.mutmut])
+        run: |
+          set -euo pipefail
+          # paths_to_mutate + runner come from pyproject.toml, pinned to the manifest by the required
+          # drift guard. `|| true` so a surviving mutant reports below rather than aborting the job.
+          mutmut run || true
+          mutmut results || true
+          echo "::notice::mutmut complete — investigate any SURVIVED mutant above."
+
+      - name: cosmic-ray cross-check (config: tools/mutation/cosmic-ray.toml)
+        run: |
+          set -euo pipefail
+          # A different operator set over the same files. init builds the mutation work-db, exec runs it.
+          cosmic-ray init tools/mutation/cosmic-ray.toml /tmp/cr-session.sqlite || true
+          cosmic-ray exec tools/mutation/cosmic-ray.toml /tmp/cr-session.sqlite || true
+          cr-report /tmp/cr-session.sqlite || true
+
+      # --------------------------------------------------------------------------------------------
+      # PYTHON COVERAGE-GUIDED FUZZING — atheris over each committed corpus (json / spine / http).
+      # --------------------------------------------------------------------------------------------
+      - name: atheris fuzz — JSON canonicalisation, spine records, HTTP request surface
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="integration:engine/crucible:gateway:packages/core/vigil_core"
+          for fam in json spine http; do
+            echo "=== atheris: ${fam} (${FUZZ_SECONDS}s) ==="
+            python tools/fuzz/atheris/fuzz_${fam}.py \
+              -max_total_time="${FUZZ_SECONDS}" \
+              -timeout=25 \
+              tools/fuzz/atheris/corpus/${fam} || true
+          done
+          echo "::notice::atheris fuzz complete — any crash artifact is a finding to triage."
+
+      # --------------------------------------------------------------------------------------------
+      # RUST COVERAGE-GUIDED FUZZING — cargo-fuzz over the WARDEN classifier.
+      # --------------------------------------------------------------------------------------------
+      - name: install nightly Rust + cargo-fuzz
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly --profile minimal
+          rustup component add --toolchain nightly rust-src
+          cargo install cargo-fuzz --locked || cargo install cargo-fuzz
+
+      - name: cargo-fuzz — WARDEN tool-name classifier
+        working-directory: apps/sigil/kernel
+        run: |
+          set -euo pipefail
+          # Seed from the committed corpus; the target asserts tiers::invariant_violation on every input.
+          cargo +nightly fuzz run warden_classify -- \
+            -max_total_time="${FUZZ_SECONDS}" \
+            -timeout=25 || true
+          echo "::notice::cargo-fuzz warden_classify complete — a crash here is a real fail-open bug."

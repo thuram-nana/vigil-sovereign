@@ -177,6 +177,42 @@ pub fn gate(tier: Tier) -> Decision {
     }
 }
 
+/// Fuzz/invariant ORACLE for the WARDEN classifier (W11-3). Given a tool NAME and the tier a
+/// classifier ASSIGNED it, return `Some(reason)` iff a fail-closed SAFETY invariant is violated,
+/// else `None`. It is deliberately parameterised on `assigned` (rather than calling `classify`
+/// itself) so it can judge ANY classifier — the real one, a mutant, or a deliberately-broken one —
+/// which is exactly what lets it be a NEGATIVE CONTROL: an always-`A0` classifier must be flagged on
+/// any danger-token name. The cargo-fuzz target (`fuzz/fuzz_targets/warden_classify.rs`) and the fast
+/// corpus-replay smoke test (`tests/fuzz_smoke.rs`) BOTH call this one function over `classify`, so the
+/// property the slow fuzzer explores and the property the required job checks cannot drift apart.
+///
+/// The invariants are the classifier's whole reason to exist:
+///   1. FAIL-CLOSED on danger — a name carrying any A3 danger token MUST be A3.
+///   2. A0 is a POSITIVE allowlist — A0 is reachable only via an exact A0 tool name or an A0 safe verb.
+///   3. GATE monotonicity — an A2/A3 tier must never be auto-runnable.
+///   4. EMPTY / token-less names fail closed to A3.
+pub fn invariant_violation(tool: &str, assigned: Tier) -> Option<String> {
+    let tk = tokens(tool);
+    if tk.is_empty() && assigned != Tier::A3 {
+        return Some(format!("token-less name {tool:?} assigned {assigned} (must fail closed to A3)"));
+    }
+    let has_danger = tk.iter().any(|t| A3_TOKENS.contains(&t.as_str()));
+    if has_danger && assigned != Tier::A3 {
+        return Some(format!("danger-token name {tool:?} assigned {assigned} (must be A3)"));
+    }
+    if assigned == Tier::A0 {
+        let full = tool.to_ascii_lowercase();
+        let positive = A0_TOOLS.contains(&full.as_str()) || tk.iter().any(|t| A0_VERBS.contains(&t.as_str()));
+        if !positive {
+            return Some(format!("A0 for {tool:?} with no positive safe-verb / exact-tool match"));
+        }
+    }
+    if matches!(assigned, Tier::A2 | Tier::A3) && gate(assigned).may_run() {
+        return Some(format!("tier {assigned} for {tool:?} must not be auto-runnable"));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
