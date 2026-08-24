@@ -135,7 +135,7 @@ jobs:
       # (1) Sigstore/cosign keyless signature for every artifact, emitted as an offline-
       # verifiable bundle (certificate + signature + Rekor inclusion proof in one file).
       - name: install cosign
-        uses: sigstore/cosign-installer@c56c2d3e59e4281cc41dea2217323ba5694b171e # v3.8.0
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: cosign sign every artifact (keyless)
         env:
