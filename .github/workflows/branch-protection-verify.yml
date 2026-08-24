@@ -83,51 +83,12 @@ jobs:
             exit 1
           fi
 
+      # The comparison logic lives in tools/governance/branch_protection_check.py (NOT inline here), so
+      # the exact code this job runs is unit-tested offline by docs/tests/test_branch_protection_verify.py
+      # — including the negative control that dropping a required check from the committed policy makes
+      # the compare fail. A copy inline could green-wash; the extracted module is the single source.
       - name: compare live settings against the committed canonical policy
         if: steps.gate.outputs.armed == 'true'
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json, pathlib, sys
-
-          prot = json.load(open("protection.json"))
-          canon_path = pathlib.Path(".github/required-status-checks.txt")
-          canonical = sorted(
-              l.strip() for l in canon_path.read_text(encoding="utf-8").splitlines()
-              if l.strip() and not l.lstrip().startswith("#")
-          )
-
-          problems = []
-
-          rsc = prot.get("required_status_checks") or {}
-          live = sorted(rsc.get("contexts") or [])
-          if live != canonical:
-              missing = sorted(set(canonical) - set(live))
-              extra = sorted(set(live) - set(canonical))
-              problems.append(
-                  "required_status_checks.contexts drifted from .github/required-status-checks.txt:\n"
-                  f"    missing from live (committed but not required): {missing}\n"
-                  f"    extra on live (required but not committed):    {extra}"
-              )
-
-          if rsc.get("strict") is not True:
-              problems.append(f"required_status_checks.strict is {rsc.get('strict')!r}, expected True (branch must be up to date)")
-
-          if (prot.get("allow_force_pushes") or {}).get("enabled") is True:
-              problems.append("allow_force_pushes is enabled — main history can be rewritten to sidestep the checks")
-
-          if (prot.get("allow_deletions") or {}).get("enabled") is True:
-              problems.append("allow_deletions is enabled — main can be deleted to sidestep the checks")
-
-          # Informational: enforce_admins is deliberately off (owner keeps an attributable override).
-          ea = (prot.get("enforce_admins") or {}).get("enabled")
-          print(f"enforce_admins.enabled = {ea} (informational; deliberately false in the audited config)")
-          print(f"live required checks ({len(live)}): {live}")
-
-          if problems:
-              print("::error::live branch protection does not match the committed policy:")
-              for p in problems:
-                  print("::error::" + p.replace("\n", "%0A"))
-              sys.exit(1)
-          print("OK — live branch protection matches the committed canonical policy.")
-          PY
+          python3 tools/governance/branch_protection_check.py protection.json .github/required-status-checks.txt
