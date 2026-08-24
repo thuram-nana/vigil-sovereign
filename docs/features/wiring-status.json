@@ -1098,6 +1098,32 @@
       },
       "check": "symbol-exists",
       "rationale": "The pluggable MCP-server MANIFEST layer is built and validated (least-privilege phases, fail-closed cross-server validation, secret redaction) and to_client_config produces the transport config a live client would consume — but NO runtime consumes it: the client that actually speaks to an MCP server is a later slice (see the module docstring). test_mcp_live_client_seam_is_still_unwired asserts to_client_config has zero runtime call-sites, so wiring it forces this status off BUILT-NOT-WIRED. W17 milestone item."
+    },
+    {
+      "id": "cli.escrow-passphrase",
+      "name": "vigil escrow-passphrase",
+      "surface": "cli-native",
+      "status": "OPT-IN",
+      "verb": "escrow-passphrase",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_escrow_passphrase"
+      },
+      "check": "cli-native-verb",
+      "rationale": "W7-7 optional m-of-n passphrase escrow; off by default, run explicitly to split the backup passphrase into shares."
+    },
+    {
+      "id": "cli.recover-passphrase",
+      "name": "vigil recover-passphrase",
+      "surface": "cli-native",
+      "status": "OPT-IN",
+      "verb": "recover-passphrase",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_recover_passphrase"
+      },
+      "check": "cli-native-verb",
+      "rationale": "W7-7 recovery half; reconstruct an escrowed backup passphrase from a threshold set of share files (fail-closed below threshold)."
     }
   ]
 }

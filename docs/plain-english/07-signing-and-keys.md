@@ -703,6 +703,16 @@ ask to see it.
 or in any recovery service. That is a deliberate property: a copy held by someone else is a
 copy that can be compelled or stolen.
 
+**One optional exception, and it is about the backup *passphrase*, not any key (W7-7).** The
+off-box backup passphrase is normally unrecoverable if forgotten (5, honest limit). A deployment
+that cannot afford to lose it to one person's memory *may* opt into **m-of-n passphrase escrow**:
+the passphrase is split into *n* shares under a threshold *m*, one share to each of *n* holders, so
+that **any *m* holders together** can reconstruct it and **any *m-1* cannot**. This is **opt-in and
+off by default** — a deployment that declines it changes nothing — and it is a **named trust
+concession**: any *m* share-holders can collectively recover the passphrase, so sole-owner custody
+is knowingly traded for survivability of passphrase loss. No private key is ever escrowed. See
+`docs/decisions/W7-7-passphrase-escrow.md`.
+
 **There is a portable, passphrase-encrypted backup**, and it exists precisely because the
 hardware sealing of section 5 binds secrets to one physical machine. The code's own opening
 line names the problem: sealing to a machine's chip means "a dead disk is unrecoverable from
@@ -875,8 +885,11 @@ grants; it can never create one.
 ### 6.6 What does not exist, stated plainly
 
 - **There is no key escrow and no vendor-held recovery copy.** The encrypted off-box backup of
-  6.2 is the only recovery route, it is created by an explicit operator command, and its
-  passphrase is unrecoverable if forgotten.
+  6.2 is the only recovery route, and it is created by an explicit operator command. Its passphrase
+  is unrecoverable if forgotten — **unless** the operator has opted into the optional m-of-n
+  passphrase escrow (6.2, W7-7), in which case any *m* of the *n* share-holders can reconstruct it
+  and any *m-1* cannot. Escrow is off by default; no private key is ever escrowed, only the backup
+  passphrase, and only when explicitly chosen.
 - **A delegation cannot be cancelled before it expires.** The code says so in its own words:
   *"a delegation has no pre-expiry revocation, so [the expiry time] is its only bound — the
   owner sizes that window to the shortest practical horizon."* If a working key is compromised, the
@@ -1459,7 +1472,7 @@ governance root plus witnesses, which the project describes in-repo as stronger.
 | Withdrawing a capability grant before it expires | **Working** — a signed revocation list, protected against an older list being replayed over a newer one, and a grant may be issued so that a missing list denies it outright. Two honest limits: the issuing institution must deliver the new list to the deployment (nothing fetches it), and the decision is re-evaluated when the software next starts, not mid-run. |
 | Build and release safeguards: exact-version and fingerprint locking of every third-party package, content-pinned base images, a generated parts list checked back against the lock, and a gate that blocks on critical published flaws | **Working and part of the released software**, enforced automatically on every proposed change, with a deliberately planted failing case run first to prove the gate can still refuse. Honestly bounded: it blocks on **critical** findings only. High findings are reported and tracked rather than suppressed — including one in this chapter's own signature library, whose fix **has now been delivered** across every first-party declaration. Two residuals, both stated rather than smoothed over: the vendored copy of the third-party agent still names an older release, and on the machine this was written on the sovereign virtual environment had not yet been rebuilt onto the fixed one. |
 | Encrypted, signed, off-machine backup of the owner key and the owner-side record (and now the permission-kernel dir) | **Working**, verified before anything is written on restore. A shipped systemd user timer (`vigil-backup.timer`) now schedules `vigil backup` daily across both planes with retention; the standalone `sigil backup` remains available manually. |
-| Key escrow or a vendor-held recovery copy | **Does not exist, by design.** The backup and its passphrase are the only recovery path. |
+| Key escrow or a vendor-held recovery copy | **No *key* escrow, by design** — no private key is ever copied out. The backup passphrase may **optionally** be escrowed m-of-n (W7-7): opt-in, off by default, and a named trust concession (any *m* holders can then recover it). Declining it leaves the backup and its passphrase as the only recovery path. |
 | Documented replacement procedure for each key | **Supported by the commands described in section 6.4**; the owner key has no rotation command and is replaced by re-issuing every delegation from a new identity. |
 | Anti-rollback floor | **Working**, with a clearly stated limit against a same-host attacker holding owner privileges. |
 | Witness protocol and deployable witness service | **Working.** Genuine independence of witnesses is a **deployment assumption**, not a proven property. Trust document marked DRAFT. |
@@ -1486,8 +1499,10 @@ a deployment rather than about code:
 4. **Do you keep the historical fingerprints published after you rotate a key?** If not, an
    older evidence package will look unverifiable to a recipient who checks it later (6.1).
 5. **When did you last take the encrypted off-box backup, where is that file, and who holds
-   the passphrase?** There is no escrow: that file and that passphrase are the whole recovery
-   plan. Ask to see evidence of a test restore, not just of a backup.
+   the passphrase?** Unless the operator opted into m-of-n passphrase escrow (6.2, W7-7), there is
+   no escrow: that file and that passphrase are the whole recovery plan. If they *did* opt in, ask
+   **who holds the shares and what the threshold is** — any *m* of them can recover the passphrase.
+   Ask to see evidence of a test restore, not just of a backup.
 6. **What is your written procedure if the owner key or the machine is lost?** The honest
    answer, if there is no backup, is that there is no recovery — and the delegation windows
    should be sized accordingly.

@@ -1622,6 +1622,31 @@
       "ci_job": "vigil_core — shared integrity substrate",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W7-7",
+      "title": "Optional m-of-n passphrase escrow reconstructs at threshold and never below (fail-closed)",
+      "claim": "the optional m-of-n passphrase escrow reconstructs the passphrase only when at least the threshold `m` genuine shares are supplied and NEVER from fewer, fail-closed: below threshold — or from a mismatched or tampered share set — the reconstructed master fails the sealed-passphrase AEAD and `recover_passphrase` raises, so no passphrase (not even a wrong one) is ever returned; the shares are information-theoretically indistinguishable below threshold; and escrow is opt-in and off by default, so declining it changes nothing.",
+      "source": "docs/decisions/W7-7-passphrase-escrow.md:47",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/escrow.py",
+        "symbol": "recover_passphrase"
+      },
+      "proved_by": {
+        "file": "packages/core/vigil_core/tests/test_escrow.py",
+        "tests": [
+          "test_reconstruct_at_threshold_succeeds",
+          "test_m_minus_one_shares_are_refused_for_every_subset",
+          "test_recover_passphrase_below_threshold_fails_closed",
+          "test_forged_share_below_threshold_fails_closed_never_returns_wrong_passphrase",
+          "test_shares_indistinguishable_below_threshold_exhaustive",
+          "test_maybe_escrow_is_opt_in_and_off_by_default",
+          "test_committed_known_answer_vector"
+        ]
+      },
+      "ci_job": "vigil_core — shared integrity substrate",
+      "failure_class": "n-a",
+      "default": "off"
     }
   ]
 }

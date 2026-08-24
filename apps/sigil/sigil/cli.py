@@ -1585,7 +1585,8 @@ def cmd_backup(a) -> None:
         sys.exit(1)
     print(f"backup written: {res['dest']} ({res['files']} files; owner_key={res['owner_key']}, dek={res['dek']}, "
           f"secrets_kv={res.get('secrets_kv')})")
-    print("KEEP THE PASSPHRASE SAFE — it is the ONLY key to this backup (never stored; lose it → unrecoverable).")
+    print("KEEP THE PASSPHRASE SAFE — it is the ONLY key to this backup (never stored; lose it → unrecoverable,")
+    print("  unless you opt into m-of-n passphrase escrow: `vigil escrow-passphrase --threshold M --shares N`).")
 
 
 def cmd_restore(a) -> None:

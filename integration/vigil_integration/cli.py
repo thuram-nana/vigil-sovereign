@@ -1521,6 +1521,76 @@ def _cmd_assemble_destruction(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_escrow_passphrase(args: argparse.Namespace) -> int:
+    """W7-7 (#465) — OPT-IN m-of-n escrow of the off-box backup passphrase (split-knowledge recovery).
+
+    Escrow is OFF by default; running this verb is the explicit opt-in. It splits the passphrase into
+    ``--shares`` shares recoverable at ``--threshold`` (Shamir over GF(2^8) + a sealed random master, so
+    recovery is fail-closed) and writes one SECRET share file per holder (0600, O_EXCL — the reused #438
+    writer) plus a PUBLIC metadata file. The passphrase is read from ``$VIGIL_BACKUP_PASSPHRASE`` or an
+    interactive prompt — NEVER argv — and is never stored. SOVEREIGNTY TRADE-OFF: any ``m`` holders can
+    then COLLECTIVELY recover it (a named trust concession — docs/decisions/W7-7-passphrase-escrow.md)."""
+    from vigil_core.escrow import EscrowError
+
+    from .live.escrow_provision import distribute_escrow
+
+    pw = _orchestrator_passphrase(args)
+    holders = [h for h in (args.holder or []) if str(h or "").strip()]
+    try:
+        dist = distribute_escrow(passphrase=pw, threshold=args.threshold, share_count=args.shares,
+                                 out_dir=args.out_dir, holders=holders or None)
+    except EscrowError as exc:
+        print(f"vigil escrow-passphrase: {exc}", file=sys.stderr)
+        return 2
+    print("=== vigil escrow-passphrase — OPT-IN m-of-n passphrase escrow (W7-7) ===")
+    print(f"threshold          : {dist.threshold}-of-{dist.share_count}   group_id: {dist.group_id}")
+    print(f"PUBLIC metadata     : {dist.metadata_path}   <- store WITH the backup (ciphertext; safe to keep)")
+    print("SECRET shares (0600):")
+    for holder, path in dist.share_paths:
+        print(f"    {holder:<16} -> {path}   <- give to {holder}; keep on THEIR host, off any central box")
+    print()
+    print("SOVEREIGNTY TRADE-OFF (read before you rely on this):")
+    print(f"    Any {dist.threshold} of these {dist.share_count} holders can COLLECTIVELY recover the passphrase")
+    print("    and thus decrypt the backup. This is a named trust concession: sole-owner custody is traded")
+    print("    for survivability of passphrase loss. Choose WHO holds shares accordingly. Declining escrow")
+    print("    (simply not running this) keeps the original lose-it-and-it-is-gone guarantee, unchanged.")
+    print()
+    print("Recover later at threshold:")
+    print(f"    vigil recover-passphrase --metadata {dist.metadata_path} "
+          "--share <p1> --share <p2> ...   # need at least the threshold")
+    return 0
+
+
+def _cmd_recover_passphrase(args: argparse.Namespace) -> int:
+    """W7-7 (#465) — recover an escrowed backup passphrase from a THRESHOLD set of share files. Fail-closed
+    below threshold (a below-threshold / mismatched / tampered set is refused — a wrong passphrase is NEVER
+    surfaced). Writes the recovered passphrase to a 0600 file by default (so it does not land in shell logs);
+    ``--print`` echoes it to stdout for an interactive recovery."""
+    from vigil_core.escrow import EscrowError
+
+    from .live.escrow_provision import recover_from_files
+
+    try:
+        pw = recover_from_files(metadata_path=args.metadata, share_paths=list(args.share or []))
+    except EscrowError as exc:
+        print(f"vigil recover-passphrase: {exc}", file=sys.stderr)
+        return 2
+    if args.print_passphrase:
+        print(pw)
+        return 0
+    out = args.out or "recovered-passphrase.txt"
+    from .live.destruction_provision import write_cosigner_private_key  # reuse: 0600, O_EXCL secret write
+    try:
+        write_cosigner_private_key(out, pw)
+    except ValueError as exc:
+        print(f"vigil recover-passphrase: {exc}", file=sys.stderr)
+        return 2
+    print("=== vigil recover-passphrase — threshold reached, passphrase recovered (W7-7) ===")
+    print(f"recovered passphrase written 0600 to: {out}")
+    print("    (use it to `vigil restore`/`sigil restore`, then DELETE this file). --print echoes instead.")
+    return 0
+
+
 def _cmd_request_destruction(args: argparse.Namespace) -> int:
     """W9-5 coordinator step — mint the SHARED, unsigned destruction authorization (one nonce + bounded
     window) each signer will sign detached on their own host. Written O_EXCL (single-use slot)."""
@@ -2928,7 +2998,8 @@ def _cmd_backup(args: argparse.Namespace) -> int:
           f"PINS this governance key (authenticated) and refuses an older backup. To restore on ANOTHER host, "
           f"pass --expect-governance-pubkey {sig_doc['pubkey'][:16]}… (obtained out of band); an "
           "unauthenticated restore is refused under VIGIL_POSTURE=production.")
-    print("KEEP THE PASSPHRASE SAFE — it is the ONLY key to these backups (never stored; lose it → unrecoverable).")
+    print("KEEP THE PASSPHRASE SAFE — it is the ONLY key to these backups (never stored; lose it → unrecoverable,")
+    print("  unless you opt into m-of-n passphrase escrow: `vigil escrow-passphrase --threshold M --shares N`).")
 
     # TRUE off-HOST transport (opt-in): after a SUCCESSFUL local backup, replicate the ENCRYPTED parts +
     # MANIFEST to a transport backend so a real second copy lives off the host. The parts are passphrase-
@@ -3546,6 +3617,34 @@ def build_parser() -> argparse.ArgumentParser:
                       help="m in m-of-n — how many signers must sign. Under VIGIL_POSTURE=production must be >=2")
     pasm.add_argument("--owner-id", default="owner", help="the mandatory owner signer's key id")
     pasm.set_defaults(func=_cmd_assemble_destruction)
+
+    # W7-7 (#465) — OPTIONAL m-of-n passphrase escrow (split-knowledge recovery of the off-box backup
+    # passphrase). OPT-IN; off by default — declining (not running these) changes nothing.
+    pesc = sub.add_parser(
+        "escrow-passphrase",
+        help="(W7-7) OPT-IN: split the off-box backup passphrase m-of-n so any m holders can recover it "
+             "(sovereignty trade-off — see the printed note). Passphrase from $VIGIL_BACKUP_PASSPHRASE/prompt, "
+             "never argv")
+    pesc.add_argument("--threshold", type=int, required=True, help="m in m-of-n — holders needed to recover (>=2)")
+    pesc.add_argument("--shares", type=int, required=True, help="n in m-of-n — total shares to hand out")
+    pesc.add_argument("--holder", action="append", default=[],
+                      help="a holder name for a share (repeatable; give exactly --shares of them, or none to auto-name)")
+    pesc.add_argument("--out-dir", default="escrow-shares", help="where the metadata + per-holder share files land")
+    pesc.add_argument("--passphrase-env", dest="passphrase_env", default="VIGIL_BACKUP_PASSPHRASE",
+                      help="env var holding the passphrase (default VIGIL_BACKUP_PASSPHRASE; never argv)")
+    pesc.set_defaults(func=_cmd_escrow_passphrase)
+
+    prec = sub.add_parser(
+        "recover-passphrase",
+        help="(W7-7) recover an escrowed backup passphrase from a THRESHOLD set of share files (fail-closed "
+             "below threshold)")
+    prec.add_argument("--metadata", required=True, help="the PUBLIC escrow-metadata.json written by escrow-passphrase")
+    prec.add_argument("--share", action="append", default=[],
+                      help="a holder's share file (repeatable; supply at least the threshold)")
+    prec.add_argument("--out", default="", help="write the recovered passphrase 0600 here (default recovered-passphrase.txt)")
+    prec.add_argument("--print", dest="print_passphrase", action="store_true",
+                      help="echo the recovered passphrase to stdout instead of writing a file (interactive recovery)")
+    prec.set_defaults(func=_cmd_recover_passphrase)
 
     preq = sub.add_parser(
         "request-destruction",

@@ -61,6 +61,10 @@ from .target_classification import (
     TargetClass, classify_target, is_authorized, normalize_target,
 )
 from .vault import Vault, VaultLocked
+from .escrow import (
+    EscrowBundle, EscrowError, EscrowRequest, Share, escrow_passphrase, maybe_escrow,
+    parse_public_metadata, recover_passphrase, recover_secret, split_secret,
+)
 
 __all__ = [
     "canonical_json", "digest_payload", "evidence_signing_bytes", "sha256_hex",
@@ -94,4 +98,6 @@ __all__ = [
     "CapabilityError", "sign_identity_attestation", "verify_identity_attestation", "identity_digest",
     "identity_matches", "sign_capability", "attenuate", "verify_capability", "authorize_reverification",
     "prove_wielder", "verify_wielder_proof",
+    "EscrowBundle", "EscrowError", "EscrowRequest", "Share", "escrow_passphrase", "maybe_escrow",
+    "parse_public_metadata", "recover_passphrase", "recover_secret", "split_secret",
 ]

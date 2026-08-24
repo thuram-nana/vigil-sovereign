@@ -186,6 +186,16 @@ On top of the conjunctive gate, a destructive/high-blast action requires a quoru
 Wired into `conjunctive_gate.build_offense_gate`, which cross-binds `(slug, target_url)` to the
 quorum-signed action's target/engagement (else DENY).
 
+**Optional m-of-n passphrase escrow (W7-7).** The same split-knowledge idea is offered, opt-in and
+off by default, for the off-box backup **passphrase** (`vigil_core.escrow`; `vigil escrow-passphrase` /
+`vigil recover-passphrase`). A forgotten backup passphrase is otherwise unrecoverable by design; escrow
+splits it m-of-n over GF(2^8) (a fresh random master is split; the passphrase is sealed under it with the
+reviewed AEAD, so recovery is **fail-closed** — a below-threshold or tampered share set never yields a
+wrong passphrase), reusing the W9-5 `0600`/`O_EXCL` per-host secret-file writer for the shares. It is a
+**named trust concession**: any `m` share-holders can collectively recover the passphrase and thus the
+backup; no private key is ever escrowed. Registered claim id `W7-7`; decision record
+`docs/decisions/W7-7-passphrase-escrow.md`.
+
 ---
 
 ## 4. The transparency log (`transparency.py`)

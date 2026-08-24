@@ -149,6 +149,8 @@ a new sub-parser that is not documented here turns the required check red.
 | `vigil combine-destruction` | (W9-5) Coordinator — combine per-host detached signatures into the single-use signed authorization. |
 | `vigil provision-destruction` | Mint the m-of-n destruction quorum keys for `vigil patch --open-pr` (prints keys once). |
 | `vigil authorize-destruction` | Sign ONE destructive action (from a `vigil patch` dry run) into the single-use signed authorization. |
+| `vigil escrow-passphrase` | (W7-7) OPT-IN — split the off-box backup passphrase m-of-n (Shamir split-knowledge) so any `m` of `n` holders can recover it; off by default (a named sovereignty trade-off). |
+| `vigil recover-passphrase` | (W7-7) Recover an escrowed backup passphrase from a THRESHOLD set of share files; fail-closed below threshold. |
 | `vigil proof-export` | Assemble a client-verifiable proof bundle from a run's oracle-confirmed FACTs (offline, zero-trust re-verify). |
 | `vigil dossier` | Compile everything a run produced into one self-contained, tamper-evident `.zip`. |
 | `vigil posture` | Certificate of Non-Exploitability — mint (`attest`), `verify` offline, or `serve` a signed posture bundle. |
