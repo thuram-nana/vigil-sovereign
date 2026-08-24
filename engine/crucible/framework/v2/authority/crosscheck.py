@@ -21,14 +21,31 @@ By design the authorization letter and the charter use the SAME
 ``## 2. In-scope systems`` table format, parsed by the SAME row logic, so the
 two documents cannot express scope in ways that only *look* equivalent. The
 signed object carries the scope as an explicit list.
+
+**The enforcement envelope, too, is cross-checked.** Scope (WHICH hosts) is only
+half the authorization; the other half is the ENVELOPE (how dangerous, how long,
+how fast, how many at once). The authorization letter declares that envelope in a
+machine-checked ``<!-- ENVELOPE:BEGIN -->`` block, and
+:func:`crosscheck_envelope` / :func:`assert_envelope_consistent` compare the
+letter's declared danger ceiling, validity window, rate limit and concurrency
+limit against the signed :class:`EngagementAuthorization` — raising
+:class:`~common.errors.EnvelopeDrift` on any mismatch (and treating a missing or
+unparseable declaration as drift, fail closed). Without this a customer could
+sign one envelope while the executor honours a looser one, with nothing to catch
+it.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
-from ..common.errors import ScopeDrift
+from ..common.errors import EnvelopeDrift, ScopeDrift
+
+if TYPE_CHECKING:
+    from .authorization import EngagementAuthorization
 
 # The scope-table header the charter template uses (``## 2. In-scope systems``)
 # and the authorization letter mirrors verbatim. Same header, same parser, so a
@@ -169,4 +186,175 @@ def assert_scope_consistent(
     result = crosscheck_scope(letter=letter, charter=charter, authorization=authorization)
     if not result.agree:
         raise ScopeDrift(result.reason)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# The enforcement envelope — letter's declared bounds vs the signed object
+# ---------------------------------------------------------------------------
+
+# The machine-checked declaration in the authorization letter. HTML-comment
+# delimited so it is invisible in the rendered document but unambiguous to parse.
+_ENVELOPE_BLOCK = re.compile(
+    r"<!--\s*ENVELOPE:BEGIN\s*-->(?P<body>.*?)<!--\s*ENVELOPE:END\s*-->",
+    re.DOTALL,
+)
+# The envelope fields the letter declares and the signed object carries. Both the
+# letter block and the EngagementAuthorization are compared field-by-field.
+_ENVELOPE_FIELDS = (
+    "danger_ceiling",
+    "not_before",
+    "not_after",
+    "rate_limit",
+    "rate_window_seconds",
+    "concurrency_limit",
+)
+
+
+def parse_envelope_declaration(text: str) -> dict[str, str] | None:
+    """Extract the ``<!-- ENVELOPE:BEGIN -->…<!-- ENVELOPE:END -->`` block from a
+    filled authorization letter and return its ``key: value`` lines as a dict of
+    raw strings, or ``None`` if the block is absent. Values are returned verbatim
+    (not coerced) — :func:`crosscheck_envelope` does the typed comparison, so a
+    placeholder or malformed value surfaces there as drift rather than being
+    silently dropped here."""
+    m = _ENVELOPE_BLOCK.search(text)
+    if not m:
+        return None
+    out: dict[str, str] = {}
+    for raw in m.group("body").splitlines():
+        line = raw.strip()
+        if not line or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip().lower()
+        if key:
+            out[key] = value.strip()
+    return out
+
+
+@dataclass(frozen=True)
+class EnvelopeCrossCheck:
+    """The result of comparing the letter's declared enforcement envelope against
+    the signed EngagementAuthorization. ``agree`` is True iff every envelope field
+    matches. ``mismatches`` maps each diverging field to ``(letter, signed)`` so a
+    drift names exactly which bound the customer signed differently."""
+
+    agree: bool
+    reason: str = ""
+    mismatches: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+
+def _as_utc(dt: datetime) -> datetime:
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def _parse_dt(value: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp (tolerating a trailing ``Z``) to aware UTC, or
+    None if it is not a valid timestamp (e.g. a template placeholder)."""
+    try:
+        dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return _as_utc(dt)
+
+
+def _signed_envelope(authorization: "EngagementAuthorization") -> dict[str, str]:
+    """The signed object's envelope rendered as the canonical comparison strings
+    the letter is checked against."""
+    return {
+        "danger_ceiling": str(authorization.danger_ceiling).strip().upper(),
+        "not_before": _as_utc(authorization.not_before).isoformat(),
+        "not_after": _as_utc(authorization.not_after).isoformat(),
+        "rate_limit": str(int(authorization.rate_limit)),
+        "rate_window_seconds": repr(float(authorization.rate_window_seconds)),
+        "concurrency_limit": str(int(authorization.concurrency_limit)),
+    }
+
+
+def _letter_field_repr(name: str, raw: str) -> str | None:
+    """Coerce a raw letter value to the SAME canonical comparison string
+    ``_signed_envelope`` uses, or None if it does not parse (a placeholder /
+    malformed value — which is drift, never a silent match)."""
+    raw = raw.strip()
+    if name == "danger_ceiling":
+        up = raw.upper()
+        return up if re.fullmatch(r"A[0-3]", up) else None
+    if name in ("not_before", "not_after"):
+        dt = _parse_dt(raw)
+        return dt.isoformat() if dt is not None else None
+    if name in ("rate_limit", "concurrency_limit"):
+        try:
+            return str(int(raw))
+        except (ValueError, TypeError):
+            return None
+    if name == "rate_window_seconds":
+        try:
+            return repr(float(raw))
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def crosscheck_envelope(
+    *,
+    letter: dict[str, str] | None,
+    authorization: "EngagementAuthorization",
+) -> EnvelopeCrossCheck:
+    """Compare the letter's declared enforcement envelope (from
+    :func:`parse_envelope_declaration`) against the signed EngagementAuthorization.
+    Every field (danger ceiling, both window endpoints, rate limit + window,
+    concurrency limit) must match. Fail closed: a missing block, a missing field,
+    or an unparseable value is drift — the letter cannot vacuously agree with any
+    signed object."""
+    if letter is None:
+        return EnvelopeCrossCheck(
+            agree=False,
+            reason="authorization letter carries no machine-checked ENVELOPE block "
+            "(fail closed — a letter that omits the envelope cannot be reconciled "
+            "with the signed authorization the executor honours)",
+        )
+    signed = _signed_envelope(authorization)
+    mismatches: dict[str, tuple[str, str]] = {}
+    for name in _ENVELOPE_FIELDS:
+        signed_repr = signed[name]
+        if name not in letter:
+            mismatches[name] = ("<absent>", signed_repr)
+            continue
+        letter_repr = _letter_field_repr(name, letter[name])
+        if letter_repr is None:
+            mismatches[name] = (f"<unparseable:{letter[name]!r}>", signed_repr)
+        elif letter_repr != signed_repr:
+            mismatches[name] = (letter_repr, signed_repr)
+    if not mismatches:
+        return EnvelopeCrossCheck(
+            agree=True,
+            reason="letter envelope matches the signed authorization on all "
+            f"{len(_ENVELOPE_FIELDS)} fields",
+        )
+    return EnvelopeCrossCheck(
+        agree=False,
+        reason=(
+            "envelope drift: "
+            + "; ".join(
+                f"{name} letter={lv} signed={sv}" for name, (lv, sv) in mismatches.items()
+            )
+        ),
+        mismatches=mismatches,
+    )
+
+
+def assert_envelope_consistent(
+    *,
+    letter: dict[str, str] | None,
+    authorization: "EngagementAuthorization",
+) -> EnvelopeCrossCheck:
+    """Cross-check the letter's declared envelope against the signed object and
+    RAISE :class:`EnvelopeDrift` on any mismatch (or a missing/unparseable
+    declaration). The typed violation must not be silently caught — it is the
+    framework refusing to honour an envelope the customer did not sign. Returns
+    the (agreeing) result otherwise."""
+    result = crosscheck_envelope(letter=letter, authorization=authorization)
+    if not result.agree:
+        raise EnvelopeDrift(result.reason)
     return result

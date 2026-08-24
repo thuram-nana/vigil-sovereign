@@ -48,9 +48,13 @@ from .authorization import (
 )
 from .charter import authority_from_charter, authority_from_scope
 from .crosscheck import (
+    EnvelopeCrossCheck,
     ScopeCrossCheck,
+    assert_envelope_consistent,
     assert_scope_consistent,
+    crosscheck_envelope,
     crosscheck_scope,
+    parse_envelope_declaration,
     parse_scope_table,
 )
 from .gate import authorize_action, require_authorization
@@ -93,4 +97,8 @@ __all__ = [
     "crosscheck_scope",
     "assert_scope_consistent",
     "parse_scope_table",
+    "EnvelopeCrossCheck",
+    "crosscheck_envelope",
+    "assert_envelope_consistent",
+    "parse_envelope_declaration",
 ]

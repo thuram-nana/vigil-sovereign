@@ -62,6 +62,23 @@ executor enforces:
 | **Rate limit** | `<N>` actions per `<W>` s | No more than N actions in any W-second sliding window. |
 | **Concurrency limit** | `<C>` | No more than C actions in flight at once. |
 
+The table above is for the human reader; the block below is the **machine-checked**
+declaration `authority.crosscheck` compares against the signed
+`EngagementAuthorization`. Fill every field with the SAME value carried by the
+signed object — `authority.crosscheck.assert_envelope_consistent` raises
+`EnvelopeDrift` on any mismatch, and a missing or unparseable block is itself
+drift (fail closed), so the customer cannot sign one envelope while the executor
+honours a looser one. Keep the two representations equal.
+
+<!-- ENVELOPE:BEGIN -->
+    danger_ceiling: <A0 | A1 | A2 | A3>
+    not_before: <YYYY-MM-DDThh:mm:ssZ>
+    not_after: <YYYY-MM-DDThh:mm:ssZ>
+    rate_limit: <N>
+    rate_window_seconds: <W>
+    concurrency_limit: <C>
+<!-- ENVELOPE:END -->
+
 ## 4. Out of scope (explicit)
 
 - `<third parties: payment processors, upstream APIs, IdPs, CDNs, WAFs>`
