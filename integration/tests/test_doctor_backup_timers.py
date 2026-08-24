@@ -30,7 +30,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from vigil_core import generate_keypair
 from vigil_integration import doctor as dmod
+from vigil_integration import witness_provision as wp
 
 _REPO = pathlib.Path(dmod.__file__).resolve().parents[2]
 
@@ -246,6 +248,14 @@ def _all_other_controls_satisfied(monkeypatch, tmp_path) -> pathlib.Path:
     os.chmod(guard, 0o755)
     monkeypatch.setenv("VIGIL_EGRESS_GUARD", "require")
     monkeypatch.setenv("VIGIL_EGRESS_GUARD_BIN", str(guard))
+    # witness DISTINCT-QUORUM (W8-3 control, added to the gate after this suite was written): provision two
+    # distinct witnesses via the SAME tooling an operator runs, so the witness precondition is MET and the
+    # gate outcome is driven ONLY by the `backups` control.
+    roster = tmp_path / "witness-roster.json"
+    for i in range(2):
+        kp = generate_keypair()
+        wp.register_authorizer(roster, key_id=f"w{i}", public_key_b64=kp.public_key_b64)
+    monkeypatch.setenv("VIGIL_WITNESS_ROSTER", str(roster))
     _systemctl_present(monkeypatch)
     return repo
 
