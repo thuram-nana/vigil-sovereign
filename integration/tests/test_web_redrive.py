@@ -10,6 +10,7 @@ the server. No external tool is installed or run — the transport is VIGIL's ow
 from __future__ import annotations
 
 import http.server
+import json
 import pathlib
 import threading
 from pathlib import Path
@@ -491,3 +492,176 @@ def test_family_verdict_survives_a_benign_insertion_point_after_the_firing_one(m
         assert res.n_facts >= 1, f"{path}: expected a signed FACT"
         assert res.family_verdict("open_redirect") == "FACT", (
             f"{path}: family collapsed to {res.family_verdict('open_redirect')} despite a live FACT")
+
+
+# ---- W16-STD-1: insertion coverage — cookie / urlencoded-body / JSON-body redirect params ----------
+#
+# Before this slice the re-drive built a bare GET template, so a redirect reachable ONLY via a cookie, a
+# urlencoded body, or a JSON body was NEVER probed — invisible to adjudication, which reads to a consumer as
+# "nothing there". These tests drive each of those surfaces LIVE and prove (a) the vuln is FOUND when it is
+# there, and (b) a target with none is a bounded CLEAN whose coverage statement NAMES every surface examined.
+_REDIRECT_SURFACES = {"query_value", "url_path_seg", "cookie_value", "body_form_value", "json_value"}
+
+
+class _BodyRedirect(http.server.BaseHTTPRequestHandler):
+    """A target that redirects to whatever host it is handed — but on exactly ONE surface, chosen by the
+    handler subclass. Every other surface must be examined and found clean. The redirect parameter name is
+    ``next`` (in the fixed candidate set AND grounded when the URL carries it)."""
+
+    surface = ""   # one of: cookie / form / json
+
+    def _maybe_redirect(self, nxt: str) -> None:
+        if nxt and nxt.startswith("http"):
+            self.send_response(302)
+            self.send_header("Location", nxt)
+            self.end_headers()
+        else:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+    def _read_body(self) -> bytes:
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        return self.rfile.read(n) if n > 0 else b""
+
+    def do_GET(self):  # noqa: N802
+        _HITS["n"] += 1
+        nxt = ""
+        if self.surface == "cookie":
+            for part in (self.headers.get("Cookie", "") or "").split(";"):
+                k, _s, v = part.strip().partition("=")
+                if k.strip() == "next":
+                    nxt = v.strip()
+        self._maybe_redirect(nxt)
+
+    def do_POST(self):  # noqa: N802
+        _HITS["n"] += 1
+        raw = self._read_body()
+        ct = (self.headers.get("Content-Type", "") or "").split(";")[0].strip().lower()
+        nxt = ""
+        if self.surface == "form" and ct == "application/x-www-form-urlencoded":
+            nxt = parse_qs(raw.decode("utf-8", "replace")).get("next", [""])[0]
+        elif self.surface == "json" and ct == "application/json":
+            try:
+                nxt = str((json.loads(raw.decode("utf-8")) or {}).get("next", ""))
+            except Exception:  # noqa: BLE001
+                nxt = ""
+        self._maybe_redirect(nxt)
+
+    def log_message(self, *a):
+        return
+
+
+def _serve_body_redirect(surface: str):
+    _HITS["n"] = 0
+    handler = type(f"_BR_{surface}", (_BodyRedirect,), {"surface": surface})
+    srv = http.server.HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+@pytest.mark.parametrize("surface,marker", [
+    ("cookie", "cookie_value"),
+    ("form", "body_form_value"),
+    ("json", "json_value"),
+])
+def test_a_redirect_reachable_only_via_cookie_form_or_json_body_is_found(monkeypatch, tmp_path, surface, marker):
+    """Each non-query surface, driven LIVE: a target that redirects to the attacker host ONLY when the
+    redirect parameter arrives via a Cookie / urlencoded body / JSON body must be FOUND. The runner
+    synthesises the matching carrier (correct method + Content-Type), injects the canary into that insertion
+    point, and the oracle fires on the real 302→canary host. The FACT is attributed to the exact surface."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from framework.v2.evidence.certify import verify_certificate
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, tr = _signers_and_trust()
+    srv = _serve_body_redirect(surface)
+    try:
+        res = web_redrive(f"http://127.0.0.1:{srv.server_address[1]}/login",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    facts = [x for x in res.facts if "open_redirect" in x.finding_ref]
+    assert facts, f"a {surface}-only open redirect was not found; leads={res.leads} notes={res.notes}"
+    assert any(marker in x.finding_ref for x in facts), (
+        f"the FACT was not attributed to the {marker} insertion surface: {[f.finding_ref for f in facts]}")
+    ctx = res.contexts[facts[0].finding_ref]
+    assert verify_certificate(facts[0].signed, oracle_context=ctx, trust_root=tr).ok is True
+
+
+class _NeverRedirect(http.server.BaseHTTPRequestHandler):
+    """Answers every method 200 and NEVER redirects to the canary — a genuinely clean target on every
+    surface, so a bounded negative is legitimately earned."""
+
+    def _ok(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"<html><body>ok</body></html>")
+
+    def do_GET(self):  # noqa: N802
+        _HITS["n"] += 1
+        self._ok()
+
+    def do_POST(self):  # noqa: N802
+        _HITS["n"] += 1
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        if n:
+            self.rfile.read(n)
+        self._ok()
+
+    def log_message(self, *a):
+        return
+
+
+def test_clean_target_is_bounded_clean_and_names_every_insertion_surface(monkeypatch, tmp_path):
+    """The negative half of criterion (b): a target with NO redirect on any surface reports the header-derived
+    open_redirect.location_header branch CLEAN, and that CLEAN is a BOUNDED negative whose coverage statement
+    NAMES every insertion surface examined (query, path, cookie, urlencoded body, JSON body). Naming the
+    coverage is what makes it 'examined here and found nothing' rather than an unbounded 'nothing there'."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+    _HITS["n"] = 0
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _NeverRedirect)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        res = web_redrive(f"http://127.0.0.1:{srv.server_address[1]}/app/page?next=orig",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert _HITS["n"] > 0, "the target must actually be probed on every surface"
+    assert res.n_facts == 0, f"a clean target minted a FACT: {[f.finding_ref for f in res.facts]}"
+    # the header-derived branch earns a bounded negative (CLEAN) — surfaced as a channel-confirmed clean lead
+    assert res.branch_verdicts.get("open_redirect", {}).get("open_redirect.location_header") == "CLEAN", (
+        f"the header branch did not reach a bounded CLEAN: {res.branch_verdicts.get('open_redirect')}")
+    # ... and the CLEAN is bounded to the NAMED insertion surfaces — all five were examined
+    probed = set(res.surfaces_probed("open_redirect"))
+    assert probed == _REDIRECT_SURFACES, f"coverage did not span every insertion surface: {sorted(probed)}"
+    statement = res.coverage_statement("open_redirect")
+    for surface in _REDIRECT_SURFACES:
+        assert surface in statement, f"coverage statement omits {surface!r}: {statement}"
+
+
+def test_insertion_coverage_went_from_two_surfaces_to_five(monkeypatch, tmp_path):
+    """The count criterion (d), made concrete: the live re-drive now EXAMINES all five redirect insertion
+    surfaces, not the two (QUERY_VALUE, URL_PATH_SEG) it used to. Each of the three added surfaces is what
+    lets the corresponding evidence branch assert a bounded negative it could not assert before."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+    _HITS["n"] = 0
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _NeverRedirect)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        res = web_redrive(f"http://127.0.0.1:{srv.server_address[1]}/app/page?next=orig",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    probed = set(res.surfaces_probed("open_redirect"))
+    assert probed == _REDIRECT_SURFACES, f"expected 5 surfaces, got {sorted(probed)}"
+    added = {"cookie_value", "body_form_value", "json_value"}
+    assert added <= probed, f"the three newly-covered surfaces are missing: {sorted(added - probed)}"

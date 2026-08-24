@@ -208,6 +208,39 @@ def test_negative_control_a_healthy_zero_finding_run_IS_clean(tmp_path):
 # =========================================================================================================
 # The scoreboard itself.
 # =========================================================================================================
+def test_the_negatives_capable_branch_count_is_pinned_and_named():
+    """W16-STD-1 criterion (d): the number of evidence branches that CAN assert a bounded negative (a CLEAN)
+    is asserted in a test, so the ladder cannot silently gain or lose absence-authority.
+
+    The issue framed this as '6 of 26': at issue time the ladder held 26 branches, 6 of them clean-capable
+    (20 could not assert a negative). The ladder has since grown — the total is NOT 26 any more, and pinning a
+    total would be brittle churn — so the load-bearing number is the count of CLEAN-CAPABLE branches, pinned
+    to the exact 6 named below. The insertion-coverage slice did NOT add a clean-capable branch (a
+    body-derived CLEAN still needs the render_dom / streaming-decoder work); what it changed is that the three
+    redirect HEADER branches below can now assert their bounded negative across the cookie / urlencoded-body /
+    JSON-body insertion surfaces too — before it, a redirect reachable only from those surfaces was
+    unexamined, so their CLEAN was a latent false-CLEAN. The re-drive proving that in test_web_redrive.py
+    (a JSON-body-only redirect is FOUND; a clean target names all five surfaces) is what makes these six a
+    SOUND six rather than a nominal one."""
+    clean = sorted(b["id"] for b in _branches() if b.get("clean_capable"))
+    expected = sorted([
+        "open_redirect.location_header",
+        "cors.reflected_origin_with_credentials",
+        "host_header.location_header",
+        "oidc_redirect_uri.location_header",
+        "service_reachability.tcp_handshake",
+        "tls_weakness.tls_handshake",
+    ])
+    assert clean == expected, (
+        f"the set of CLEAN-capable branches changed to {clean}; if this is intended, update the pin AND the "
+        f"reasoning — a clean-capable branch is one that may assert absence, the most safety-sensitive claim")
+    assert len(clean) == 6, f"expected exactly 6 negatives-capable branches, found {len(clean)}"
+    # the three redirect HEADER branches whose bounded negative the insertion coverage made sound
+    for made_sound in ("open_redirect.location_header", "host_header.location_header",
+                       "oidc_redirect_uri.location_header"):
+        assert made_sound in clean, f"{made_sound} must remain a negatives-capable branch"
+
+
 def test_no_row_is_a_non_strict_xfail():
     """A non-strict xfail would swallow an XPASS and the board would stop self-updating."""
     module = __import__(__name__, fromlist=["*"])

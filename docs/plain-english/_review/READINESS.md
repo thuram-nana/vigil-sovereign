@@ -362,14 +362,16 @@ strongest soundness argument in the registry (`evidence-branches.json:464`).
 > "A defensive verification oracle never executes the escalation. We prove the grant path exists; we do
 > not use it. That is a design commitment, not a missing feature."
 
-**3.3 — Insertion-point coverage is query and path only.** `web_redrive.py:168-178` builds a bare GET
-template, so cookie, urlencoded-body and JSON-body parameters are unexamined — declared as
-`blocking_work` on seven branches.
-> "Our web re-drive currently probes query-string and URL-path insertion points. Cookie and request-body
-> parameters are declared unexamined in the capability registry rather than silently skipped — if you
-> have a redirect on a POST body, we will report it as uncovered, not as clean."
-This is the **highest-ROI closeable gap** in the registry; consider closing it before the meeting if
-time allows.
+**3.3 — Insertion-point coverage now spans five surfaces (W16-STD-1, DONE).** The `open_redirect` re-drive
+synthesises cookie / urlencoded-body / JSON-body carriers (`web_redrive.py:_redirect_templates`) and probes
+all five insertion surfaces — query value, URL path segment, cookie value, urlencoded-body value, JSON-body
+value — through the same admission path. A redirect reachable ONLY from a JSON body is found and minted as a
+signed FACT; a clean target reports a bounded CLEAN whose coverage statement names every surface examined.
+> "Our web re-drive probes query-string, URL-path, cookie, urlencoded-body and JSON-body insertion points.
+> A redirect on a POST body is found and confirmed; when we report a redirect surface clean, that CLEAN
+> names the surfaces we examined, so it means 'looked here and found nothing', not 'did not look'."
+RESIDUAL: the CLEAN over the synthesised cookie/body surfaces is bounded to the probed candidate
+redirect-parameter names, and the opt-in OIDC `redirect_uri` check remains query-only — both named residuals.
 
 **3.4 — CLEAN over an operator-supplied artifact is scoped to that artifact.** Ten branches
 (version_range, CIS controls, RBAC bindings, mesh/CI-CD/IaC posture, live cloud posture).

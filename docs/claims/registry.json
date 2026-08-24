@@ -2197,6 +2197,67 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W16-STD-1a",
+      "title": "The live web re-drive probes cookie / urlencoded-body / JSON-body redirect parameters, not only the URL",
+      "claim": "The live web re-drive probes redirect parameters across five insertion surfaces (URL query value, URL path segment, Cookie value, urlencoded-body value and JSON-body value), synthesising the cookie, urlencoded and JSON carriers with the correct method and Content-Type, so a redirect reachable ONLY from a cookie, urlencoded body or JSON body is found and minted as a signed FACT, and a clean target's CLEAN is bounded to the named insertion surfaces.",
+      "source": "docs/decisions/W16-STD-1-insertion-coverage.md:14",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/web_redrive.py",
+        "symbol": "_redirect_templates"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_web_redrive.py",
+        "tests": [
+          "test_a_redirect_reachable_only_via_cookie_form_or_json_body_is_found",
+          "test_clean_target_is_bounded_clean_and_names_every_insertion_surface",
+          "test_insertion_coverage_went_from_two_surfaces_to_five"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-1b",
+      "title": "WHATWG charset determination is a fixed label table (not a regex), pinned by a conformance corpus",
+      "claim": "The WHATWG charset determination is a fixed label table, not a regex, pinned by an independent conformance corpus: every label resolves to the byte-faithful codec the WHATWG Encoding Standard prescribes or is refused as INCONCLUSIVE, labels a browser rejects such as utf-7 and EBCDIC are refused rather than decoded, and the latin1 family resolves to windows-1252, proven against docs/capability-matrix/whatwg-encoding-conformance.json.",
+      "source": "docs/decisions/W16-STD-1-insertion-coverage.md:29",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/body_decode.py",
+        "symbol": "_whatwg_codec"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_whatwg_encoding_conformance.py",
+        "tests": [
+          "test_every_corpus_label_resolves_exactly_as_the_spec_prescribes",
+          "test_decode_vectors_produce_the_characters_a_browser_would",
+          "test_every_non_ok_label_is_refused_by_the_decoder_not_silently_decoded"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-1c",
+      "title": "The count of negatives-capable (CLEAN-capable) evidence branches is pinned by name in a test",
+      "claim": "Exactly six evidence branches are declared able to assert a bounded negative (a CLEAN), pinned by name in a test, so the ladder cannot silently gain or lose absence-authority; the three redirect header branches among them assert their bounded negative across the cookie, urlencoded-body and JSON-body insertion surfaces as well as query and path.",
+      "source": "docs/decisions/W16-STD-1-insertion-coverage.md:38",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/verdict.py",
+        "symbol": "admit"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_release_gate_false_clean.py",
+        "tests": [
+          "test_the_negatives_capable_branch_count_is_pinned_and_named"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

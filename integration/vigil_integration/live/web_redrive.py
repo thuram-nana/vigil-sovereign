@@ -36,12 +36,37 @@ class WebRedriveResult:
     admissions: list = field(default_factory=list)    # (branch, verdict, reason) — the audit trail
     branch_verdicts: dict = field(default_factory=dict)  # bug_class -> {branch: verdict}
     contexts: dict = field(default_factory=dict)  # finding_ref -> oracle_context (offline re-verify)
+    insertion_surfaces: dict = field(default_factory=dict)  # bug_class -> set(surface) actually EXAMINED
     refused: bool = False
     notes: list = field(default_factory=list)
 
     @property
     def n_facts(self) -> int:
         return len(self.facts)
+
+    def surfaces_probed(self, bug_class: str) -> list:
+        """The insertion surfaces on which ``bug_class`` was ACTUALLY examined (a channel was established),
+        in a stable order. A surface only appears here if a real HTTP response came back on it — a
+        gate-refused or transport-errored probe examined nothing and is deliberately excluded."""
+        return sorted(self.insertion_surfaces.get(bug_class, set()))
+
+    def coverage_statement(self, bug_class: str) -> str:
+        """Name the insertion surfaces a CLEAN for ``bug_class`` is BOUNDED to.
+
+        The product thesis is a SOUND negative: a CLEAN must mean "examined here and found nothing", never
+        "did not look". So a family CLEAN is only honest when it also names WHERE it looked. An empty
+        coverage set is not a clean bill of health — it is INCONCLUSIVE (nothing was examined)."""
+        surfaces = self.surfaces_probed(bug_class)
+        if not surfaces:
+            return (f"{bug_class}: no insertion surface established a channel — INCONCLUSIVE, not CLEAN "
+                    f"(nothing was examined)")
+        return (f"{bug_class}: examined across insertion surfaces [{', '.join(surfaces)}]; any CLEAN is "
+                f"bounded to these surfaces and the probed redirect-parameter names, never a claim of "
+                f"absence on a surface or parameter name not examined")
+
+    def family_coverage(self) -> dict:
+        """Every examined family -> the insertion surfaces it was examined on (for persisted reporting)."""
+        return {bug: self.surfaces_probed(bug) for bug in self.insertion_surfaces}
 
     def family_verdict(self, bug_class: str) -> str:
         """The conservative composition over every branch of ``bug_class`` (see verdict.compose).
@@ -215,24 +240,87 @@ def benign_control_fetch(url: str, *, slug: str, timeout: float = 8.0) -> "bytes
         return None
 
 
-# The insertion points this re-drive ACTUALLY probes. It builds a bare GET template from the proposed URL,
-# whose only insertion points are the URL — so QUERY_VALUE and URL_PATH_SEG is the honest coverage today.
-# COOKIE_VALUE / BODY_FORM_VALUE / JSON_VALUE would need the runner to synthesise a cookie / a urlencoded
-# body / a JSON body with the correct method + Content-Type and a benign-twin baseline; listing them while
-# the template makes them inert was an overclaim (the adversarial round caught it), so they are declared as
-# blocking_work on the branches instead. QUERY_NAME / BODY_FORM_NAME / JSON_KEY stay out as an ORACLE
-# BOUNDARY: a URL injected as a parameter NAME does not model the redirect-value property under test.
+# The insertion surfaces this re-drive probes for open-redirect. A redirect parameter is NOT only a query
+# value: apps read next/returnTo from a URL PATH segment, a COOKIE, a urlencoded BODY, or a JSON BODY just as
+# often. A bare GET template exposes only the URL, so restricting the re-drive to QUERY_VALUE / URL_PATH_SEG
+# meant those other surfaces were ABSENT from adjudication — not reported unexamined, simply missing, which
+# reads to a consumer as "nothing there" and let a redirect reachable ONLY via a cookie/body param be
+# reported CLEAN (a latent false-CLEAN). The runner therefore SYNTHESISES the cookie / urlencoded / JSON
+# carriers (each with the correct method + Content-Type) so those insertion points EXIST to be rendered into
+# and adjudicated by the SAME admission path. No benign-twin baseline is needed for soundness: the
+# OpenRedirectCheck predicate fires ONLY on a real navigation to the UNIQUE canary HOST — which the app can
+# only reach by using the injected value as a redirect target — so a benign reflection never false-FACTs.
+# QUERY_NAME / BODY_FORM_NAME / JSON_KEY stay OUT as an ORACLE BOUNDARY: a canary injected as a parameter
+# NAME does not model the redirect-VALUE property under test.
+#
 # Named by VALUE, not by enum member: the framework import is function-local (FATAL-2), so this module must
-# not reference InsertionKind at import time. _redrive_kinds() resolves them where the enum is available.
-_REDRIVE_INSERTION_KIND_NAMES = (
-    "QUERY_VALUE", "URL_PATH_SEG",
+# not reference InsertionKind at import time. _redirect_templates() resolves them where the enum is available.
+
+# Well-known redirect-parameter names tried on the synthesised cookie/body/JSON carriers, in addition to any
+# name the proposed URL itself carries. A CLEAN over the synthesised surfaces is BOUNDED to this candidate
+# set — stated honestly in the coverage statement — never a claim that no body/cookie redirect exists under
+# some other name. Kept small so the re-drive's request footprint stays bounded.
+_REDIRECT_PARAM_NAMES = (
+    "next", "url", "redirect", "redirect_uri", "redirect_url", "returnto", "return_url",
+    "returnurl", "return", "dest", "destination", "continue",
 )
+_MAX_CANDIDATE_REDIRECT_NAMES = 12
 
 
-def _redrive_kinds(insertion_kind):
-    """The InsertionKind members this re-drive probes, resolved against the caller's enum."""
-    return tuple(getattr(insertion_kind, name) for name in _REDRIVE_INSERTION_KIND_NAMES
-                 if hasattr(insertion_kind, name))
+def _candidate_redirect_names(url: str) -> "list[str]":
+    """Redirect-parameter names to try on the synthesised cookie/body/JSON carriers.
+
+    GROUNDED first in the names the proposed URL actually carries (so an endpoint's real redirect parameter
+    is exercised on EVERY surface, not only the query), then a small fixed set of well-known names for
+    breadth, de-duplicated case-insensitively and capped. Purely lexical over the URL — no network."""
+    from urllib.parse import parse_qsl, urlsplit  # noqa: PLC0415 — stdlib, function-local (style parity)
+    names: "list[str]" = []
+    seen: "set[str]" = set()
+    try:
+        for k, _v in parse_qsl(urlsplit(url).query, keep_blank_values=True):
+            low = k.lower()
+            if k and low not in seen:
+                names.append(k)
+                seen.add(low)
+    except Exception:  # noqa: BLE001 — a malformed URL simply contributes no grounded names
+        pass
+    for n in _REDIRECT_PARAM_NAMES:
+        if n not in seen:
+            names.append(n)
+            seen.add(n)
+    return names[:_MAX_CANDIDATE_REDIRECT_NAMES]
+
+
+def _redirect_templates(url, http_request, insertion_kind, request_template):
+    """The ``(RequestTemplate, insertion-kinds)`` carriers the open-redirect re-drive probes.
+
+    Four carriers, each restricted to the surface it introduces so the URL query/path is not re-probed by the
+    body carriers: the bare GET (URL query + path), a GET with a synthesised Cookie header, a POST with a
+    urlencoded body, and a POST with a JSON body. Every carrier feeds the identical admission path, so each
+    surface's outcome is attributed and capability-checked like any other. Returns a list; never raises."""
+    import json  # noqa: PLC0415 — stdlib, function-local
+    templates = [
+        (request_template(http_request(method="GET", url=url)),
+         (insertion_kind.QUERY_VALUE, insertion_kind.URL_PATH_SEG)),
+    ]
+    names = _candidate_redirect_names(url)
+    if names:
+        cookie = "; ".join(f"{n}=redir" for n in names)
+        templates.append((
+            request_template(http_request(method="GET", url=url, headers=[("Cookie", cookie)])),
+            (insertion_kind.COOKIE_VALUE,)))
+        form = "&".join(f"{n}=redir" for n in names)
+        templates.append((
+            request_template(http_request(
+                method="POST", url=url,
+                headers=[("Content-Type", "application/x-www-form-urlencoded")], body=form)),
+            (insertion_kind.BODY_FORM_VALUE,)))
+        js = json.dumps({n: "redir" for n in names}, separators=(",", ":"))
+        templates.append((
+            request_template(http_request(
+                method="POST", url=url, headers=[("Content-Type", "application/json")], body=js)),
+            (insertion_kind.JSON_VALUE,)))
+    return templates
 
 
 def _oracle_signal(context: "dict"):
@@ -324,17 +412,23 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
     send, state = _gated_web_send(slug, timeout=timeout)
     template = RequestTemplate(HttpRequest(method="GET", url=url))
 
-    def _run(probe_fn, bug_class: str, item: str) -> None:
+    def _run(probe_fn, bug_class: str, item: str, *, surface: str = "") -> None:
         """Run one check, but adjudicate ONLY if the probe established a real channel. A probe whose every
         send was gate-refused (kill-switch tripped mid-run) or errored (connection refused / timeout)
         observed NOTHING — it is INCONCLUSIVE, never a 'channel-confirmed CLEAN' (the 'found nothing !=
-        CLEAN' invariant). We snapshot the channel counter around the probe to decide."""
+        CLEAN' invariant). We snapshot the channel counter around the probe to decide.
+
+        ``surface`` names the insertion surface this probe examined (e.g. ``json_value``); it is recorded as
+        EXAMINED only when a channel was established, so the coverage statement can bound a CLEAN to the
+        surfaces actually reached and never count a no-channel probe as coverage."""
         before, before_bodies = state["channels"], state["body_unavailable"]
         ctx = probe_fn()
         had_channel = state["channels"] > before
         if not had_channel:
             res.inconclusive.append((bug_class, item))   # no observation → do NOT let it become CLEAN
             return
+        if surface:
+            res.insertion_surfaces.setdefault(bug_class, set()).add(surface)
         body_unreadable = state["body_unavailable"] > before_bodies
         if ctx is None:
             return
@@ -381,17 +475,20 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
 
     try:
         # request-level checks (add an evil Origin / Host to the whole request)
-        _run(lambda: CorsActiveCheck().probe(template, send), "cors", url)
-        _run(lambda: HostHeaderCheck().probe(template, send), "host_header_injection", url)
-        # per-insertion-point: open-redirect injects the canary into each query-value point
+        _run(lambda: CorsActiveCheck().probe(template, send), "cors", url, surface="origin_header")
+        _run(lambda: HostHeaderCheck().probe(template, send), "host_header_injection", url,
+             surface="host_header")
+        # per-insertion-point: open-redirect injects the canary into each redirect insertion point, across
+        # EVERY surface a redirect parameter is really taken from — the URL query/path, a Cookie, a
+        # urlencoded body, and a JSON body. The runner synthesises the cookie/body/JSON carriers (see
+        # _redirect_templates) so those insertion points EXIST to be rendered into; each carrier is restricted
+        # to the surface it introduces so the URL is not re-probed. Every outcome flows through the SAME
+        # admission path, so each surface is attributed and capability-checked like any other.
         orc = OpenRedirectCheck()
-        # A redirect parameter is not only a query value: apps take `next`/`returnTo` from a path segment,
-        # a cookie, or a urlencoded/JSON body just as often. Restricting the re-drive to QUERY_VALUE meant
-        # those insertion points were ABSENT from adjudication — not reported as unexamined, simply missing,
-        # which reads to a consumer as "nothing there". Every point below is covered by the same admission
-        # path, so each one's outcome is attributed and capability-checked like any other.
-        for point in template.insertion_points(kinds=_redrive_kinds(InsertionKind)):
-            _run(lambda p=point: orc.probe(template, p, send), "open_redirect", f"{url}#{point.id}")
+        for tmpl, kinds in _redirect_templates(url, HttpRequest, InsertionKind, RequestTemplate):
+            for point in tmpl.insertion_points(kinds=kinds):
+                _run(lambda t=tmpl, p=point: orc.probe(t, p, send), "open_redirect",
+                     f"{url}#{point.id}", surface=point.kind.value)
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
         res.notes.append(f"probe error: {type(e).__name__}: {e}")
     return res
