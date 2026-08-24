@@ -41,6 +41,9 @@ from urllib.parse import parse_qs, urlsplit
 # this crosses no boundary and FATAL-2 holds. `offense_perm_for` maps a POST route to its required
 # permission (None ⇒ unmapped ⇒ default-deny) and `role_can` is the same predicate the sovereign gate uses.
 from vigil_core.rbac import offense_perm_for, role_can
+# The ONE construction of the proxy→offense role assertion (stamp side = uiproxy, verify side = console
+# AND the offense api). Namespace-pure (pure stdlib), so importing it crosses no trust boundary.
+from vigil_core.hopauth import verify_hop_assertion
 
 
 # X6 — a custom request header the same-origin SPA fetch sets and a cross-site HTML form cannot.
@@ -691,20 +694,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         a ±`_HOP_MAX_SKEW_S` freshness window. Fail-closed: no hop key (nothing to verify with), an
         incomplete assertion, a non-numeric/stale `ts`, or a mismatching MAC all return False. Binding the
         METHOD and console-side PATH stops a captured header set from being re-aimed at another verb/route;
-        binding `ts` (with the window) stops replay."""
-        hop_key = getattr(self.server, "hop_key", "") or ""
-        if not (hop_key and role and ts and sig):
-            return False
-        try:
-            ts_f = float(ts)
-        except (TypeError, ValueError):
-            return False
-        if abs(time.time() - ts_f) > _HOP_MAX_SKEW_S:
-            return False
-        msg = f"{principal}\n{role}\n{self.command}\n{path}\n{ts}".encode("utf-8")
-        expected = base64.b64encode(
-            hmac.new(hop_key.encode("utf-8"), msg, hashlib.sha256).digest()).decode("ascii")
-        return hmac.compare_digest(expected, sig)
+        binding `ts` (with the window) stops replay. Delegates to the shared `vigil_core.hopauth` so the
+        offense api (W16-12) verifies byte-identically and the proxy stamps the same field set."""
+        return verify_hop_assertion(getattr(self.server, "hop_key", "") or "",
+                                    principal, role, self.command, path, ts, sig,
+                                    max_skew_s=_HOP_MAX_SKEW_S)
 
     def _rbac_ok(self, path: str) -> tuple[bool, str]:
         """S1 per-action RBAC on a same-origin, token-valid POST. Three mutually-exclusive cases:

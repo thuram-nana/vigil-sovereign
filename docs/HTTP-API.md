@@ -41,6 +41,16 @@ python3 -m framework.v2 api [--port 8799] [--host 127.0.0.1]      # equivalent, 
   loopback + same-origin guards, never in place of them. A blank/whitespace value is treated as unset, so
   a misconfigured empty key cannot silently disable auth. **Default (no key configured) = no-op**
   (loopback + same-origin only).
+- **Per-user RBAC + authenticated-principal attribution on POSTs** (`api/server.py ApiHandler._authorize`,
+  W16-12): the shared bearer is **not** the only path. When the `vigil up` proxy forwards a per-user
+  request it stamps a **hop-signed** role (`X-VIGIL-Principal/Role/Role-Sig/Role-Ts`, HMAC under the per-run
+  `VIGIL_CONSOLE_HOP_KEY` — the SAME sovereign owner-signed accounts model the console uses), and the API
+  enforces `role_can(role, offense_perm_for(path))`: `/api/v1/tool/invoke` and `/api/v1/import` require
+  **operator-tier `run_engagement`**. A role lacking it is **`403` naming the principal** (the attributed
+  refusal); a permitted action's response carries an `actor` object. A **forged/unverifiable** stamped role
+  is refused (fail-closed). **Honest bound:** a **direct** on-host client presenting **no** role assertion is
+  **owner-equivalent** (the local operator / CLI / legacy path) — the per-user gate protects the
+  proxy-forwarded path, not a direct credential-holder. See `docs/decisions/W16-12-offense-api-multiuser.md`.
 
 ## Request and response model
 
@@ -96,8 +106,8 @@ API request (there is no interactive operator), so a destructive tool can **neve
 
 | Method | Route | Body | Effect |
 |---|---|---|---|
-| POST | `/api/v1/tool/invoke` | `{"tool": str, "slug": str, "args": object}` | Invoke `tool` through the gate chain, bound to `slug`'s charter/scope/kill-switch. Returns `{ok, refused, gate, summary, note, output}`. |
-| POST | `/api/v1/import` | `{"format": str, "report": str, "slug": str, "source_tool": str?}` | Import a third-party report as **unverified leads** — still routed through the gate chain (a tripped kill-switch refuses it before it runs). |
+| POST | `/api/v1/tool/invoke` | `{"tool": str, "slug": str, "args": object}` | Invoke `tool` through the gate chain, bound to `slug`'s charter/scope/kill-switch. Requires **`run_engagement`** (operator+) on a proxy-forwarded per-user request. Returns `{ok, refused, gate, summary, note, output, actor}` — `actor` names the authenticated principal the action is attributed to. |
+| POST | `/api/v1/import` | `{"format": str, "report": str, "slug": str, "source_tool": str?}` | Import a third-party report as **unverified leads** — still routed through the gate chain (a tripped kill-switch refuses it before it runs). Requires **`run_engagement`** (operator+) on a proxy-forwarded per-user request; the result carries the attributing `actor`. |
 
 ## Route reference (the exact set the code serves)
 
