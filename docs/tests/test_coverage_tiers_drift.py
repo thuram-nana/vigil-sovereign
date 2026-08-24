@@ -127,7 +127,7 @@ def test_the_sentence_is_generated_not_hardcoded() -> None:
     moved = next(d for d in src["detectors"] if d["tier"] == "local")
     moved["tier"] = "fixtures"
     sentence = g.render_sentence(src)
-    assert "12 loopback" in sentence and "21 fixtures-only" in sentence   # the counts followed the move
+    assert "12 loopback" in sentence and "24 fixtures-only" in sentence   # the counts followed the move (13→12 loopback, 23→24 fixtures)
     assert "13 loopback" not in sentence
 
 
