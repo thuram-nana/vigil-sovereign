@@ -72,8 +72,29 @@ DEFAULT_MANIFEST = _CRUCIBLE_ROOT / "framework" / "templates" / "legal" / "couns
 # SHIPPED (filled-in) instrument must contain NONE. Each pattern names a family
 # of unresolved fill-in. The patterns are deliberately conservative: they match
 # the template fill-in styles used across this framework's instruments without
-# flagging ordinary legal prose, markdown links (``[lower case](url)``), acronyms
-# in brackets (``[GDPR]``), HTML comments (``<!-- … -->``), or autolinked URLs.
+# flagging ordinary legal prose, markdown links (``[lower case](url)``), HTML
+# comments (``<!-- … -->``), or autolinked URLs.
+#
+# LEXICAL BOUND (honest limitation). A single-word ALL-CAPS bracket token is
+# structurally ambiguous: ``[VENUE]`` is an unresolved placeholder, but ``[GDPR]``
+# / ``[SOC2]`` are legitimate acronyms. The scanner CANNOT tell them apart by
+# shape, so for single-word bracket tokens it matches a CURATED allowlist of known
+# legal fill-in words (:data:`_BRACKET_FILL_WORDS`) rather than every single-word
+# bracket. This flags ``[VENUE]`` / ``[PARTY]`` / ``[ISSUER]`` while leaving true
+# acronyms alone — at the cost that a single-word bracket placeholder OUTSIDE the
+# allowlist is NOT caught by this family. The conjunctive review flag is the
+# independent second gate; add a word here when a new single-word fill-in appears.
+
+# Curated single-word legal fill-in tokens. Kept ALL-CAPS; matched case-sensitively
+# inside ``[ ]`` so an acronym of the same letters in prose is untouched.
+_BRACKET_FILL_WORDS: tuple[str, ...] = (
+    "VENUE", "JURISDICTION", "COURT", "COURTS", "PARTY", "PARTIES", "ISSUER",
+    "CUSTOMER", "OPERATOR", "CONTROLLER", "PROCESSOR", "COMPANY", "CLIENT",
+    "DATE", "NAME", "ADDRESS", "SIGNATURE", "SIGNATORY", "TITLE", "TERM",
+    "REGION", "PERIOD", "STATE", "COUNTRY", "LAW", "REGIME", "PLACEHOLDER",
+    "TBD", "TODO", "FIXME", "XXX",
+)
+
 _PLACEHOLDER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # 1. Bare fill-in words that mean "not yet decided".
     ("literal", re.compile(r"\b(?:TBD|TODO|FIXME|XXX|PLACEHOLDER)\b")),
@@ -81,6 +102,10 @@ _PLACEHOLDER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     #    ``[CUSTOMER LEGAL NAME]``. Requires at least one internal separator so a
     #    bare acronym like ``[GDPR]`` or a footnote ``[1]`` is NOT matched.
     ("bracket", re.compile(r"\[[A-Z][A-Z0-9]*(?:[ _/\-][A-Z0-9]+)+\]")),
+    # 2b. Single-word ALL-CAPS bracket placeholders from the curated allowlist:
+    #     ``[VENUE]``, ``[PARTY]``, ``[ISSUER]``. Case-sensitive, so a genuine
+    #     acronym like ``[GDPR]`` / ``[SOC2]`` (not in the allowlist) is NOT matched.
+    ("bracket", re.compile(r"\[(?:" + "|".join(_BRACKET_FILL_WORDS) + r")\]")),
     # 3. Angle-bracket template fill-ins: ``<PLACEHOLDER>``, ``<customer legal
     #    name>``, ``<target-name>``, ``<A0 | A1 | A2 | A3>``, ``<not_before>``.
     #    Excludes HTML comments/close-tags (first char must be a letter), URLs
