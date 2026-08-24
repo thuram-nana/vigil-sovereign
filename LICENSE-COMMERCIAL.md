@@ -1,6 +1,6 @@
 # VIGIL — Commercial License
 
-**Copyright © 2026 Junior Thuram Nana (the "Licensor"). All rights reserved.**
+**Copyright © 2026 SIGIL Limited (Sovereign Integrity Governance Infrastructure Labs) (the "Licensor"). All rights reserved.**
 
 VIGIL's first-party code is **dual-licensed**. You may use it under **either**:
 
@@ -84,8 +84,9 @@ Contact the Licensor:
 - Please include: your company, the product / use case, deployment model (internal /
   SaaS / distributed), and expected scale.
 
-*(Maintainer: confirm the copyright-holder line reflects your legal name/entity, and that
-`thuram@thuramnana.com` is a monitored mailbox, before relying on this for commercial sales.)*
+*(Maintainer: the Licensor entity is **SIGIL Limited** (founder & CEO: Junior Thuram Nana);
+confirm the copyright-holder line reflects that entity, and that `thuram@thuramnana.com` is a
+monitored mailbox, before relying on this for commercial sales.)*
 
 ---
 
@@ -137,9 +138,11 @@ may not imply endorsement or use the marks as your own.
 
 ## Governing law & IP jurisdiction
 
-The Licensor's current jurisdiction is the **Republic of Cameroon** (a move to **Delaware,
-USA** is planned; this section will be updated when that move completes). Unless a signed
-Commercial License states otherwise:
+The Licensor is **SIGIL Limited, a private limited company registered in the Republic of
+Cameroon** (a GovTech/RegTech company; founder & CEO: Junior Thuram Nana). The Licensor's
+current jurisdiction is the **Republic of Cameroon** (a move to **Delaware, USA** is planned;
+this section will be updated when that move completes). Unless a signed Commercial License
+states otherwise:
 
 - the enforcement of the Licensor's **copyright, other intellectual-property rights, and
   trademarks** in VIGIL's first-party code, and any dispute arising out of the

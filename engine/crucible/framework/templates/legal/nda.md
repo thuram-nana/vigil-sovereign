@@ -24,7 +24,7 @@ methods, findings, and unreleased tooling on the other.
 ## 1. Parties
 
 - **Customer:** `<customer legal name>`
-- **Operator:** `<operator legal name>`
+- **Operator:** SIGIL Limited (Sovereign Integrity Governance Infrastructure Labs), a private limited company registered in the Republic of Cameroon
 
 Signed (customer): `<name>`   Date: `__________`
 Signed (operator): `<name>`   Date: `__________`
