@@ -77,12 +77,24 @@ def _record(**kw: object) -> InstrumentRecord:
 def test_manifest_lists_the_three_instruments_all_pending() -> None:
     records = load_review_manifest()
     assert {r.id for r in records} == _EXPECTED_IDS
-    # AC(c): review status is RECORDED and defaults to FALSE/PENDING — the honest
-    # current state. Counsel review is a HUMAN action; nothing here marks it done.
+    by_id = {r.id: r for r in records}
+    # AC(c): COUNSEL REVIEW is recorded PENDING for EVERY instrument — the honest,
+    # load-bearing fact the ship gate depends on. Counsel review is a HUMAN action;
+    # nothing here marks it done, so no instrument can ship on the review flag.
     for r in records:
-        assert r.reviewed_by_counsel is False, f"{r.id} must be recorded PENDING (human action)"
-        assert r.governing_law_resolved is False, f"{r.id} governing law must be recorded unresolved"
+        assert r.reviewed_by_counsel is False, f"{r.id} must be recorded PENDING counsel review (human action)"
         assert r.path.is_file(), f"{r.id} instrument file must exist: {r.path}"
+    # The GOVERNING-LAW decision is a SEPARATE human action, and the operator has now
+    # made it (the Republic of Cameroon; a move to Delaware, USA is planned). The NDA
+    # and DPA carry an inline governing-law clause, so they record governing_law_resolved
+    # true; the authorization letter inherits its governing law from the signed
+    # EngagementAuthorization and keeps no inline clause, so it stays recorded false.
+    # Either way the gate STILL refuses to ship (counsel PENDING + per-engagement
+    # fill-ins remain) — see the placeholder/ship-gate tests below.
+    assert by_id["nda"].governing_law_resolved is True, "NDA governing law is resolved (Republic of Cameroon)"
+    assert by_id["dpa"].governing_law_resolved is True, "DPA governing law is resolved (Republic of Cameroon)"
+    assert by_id["authorization-letter"].governing_law_resolved is False, \
+        "authorization letter has no inline governing-law clause (inherited); recorded unresolved"
 
 
 def test_default_manifest_path_points_at_the_committed_file() -> None:
