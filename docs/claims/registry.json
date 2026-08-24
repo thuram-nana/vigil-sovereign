@@ -1571,6 +1571,32 @@
       "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W8-3",
+      "title": "Production posture refuses a solo / non-distinct transparency-log witness set",
+      "claim": "Under `VIGIL_POSTURE=production` (or `prod`, case-insensitive) the refuse-to-start production gate REFUSES `vigil up` / `vigil engage` unless the transparency-log witness set is a STRICT MAJORITY of DISTINCT witnesses — the `witness` precondition must be `DISTINCT-QUORUM`, decided by REUSING `transparency.is_split_view_resistant` (`2*threshold > n` over `n` distinct canonical keys). A solo self-witness (the shipped default, reported `SOLO`) is refused as detection-not-prevention, and witnesses that share a canonical key are refused as `NOT-DISTINCT` (any base64 encoding of one Ed25519 key collapses to one point, so a roster cannot fake a quorum from a single key); a sub-majority threshold or a non-canonical / low-order key is likewise refused fail-closed. The provisioning tool `python -m vigil_integration.witness_provision` stands up an additional witness end-to-end with no hand-editing (`add` mints a new persistent 0600 key and registers it; `register` adds an out-of-band independent witness's advertised public key) and RECOMPUTES the strict-majority threshold, and it refuses to register a duplicate canonical key so the tooling can never itself build a non-distinct roster. This is ADDITIVE and OPT-IN: with `VIGIL_POSTURE` unset the gate is inert and the non-production default is byte-identical to before.",
+      "source": "docs/decisions/W8-3-witness-provisioning-production-gate.md:29",
+      "enforced_by": {
+        "file": "integration/vigil_integration/doctor.py",
+        "symbol": "_posture_witness"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_witness_provision_posture.py",
+        "tests": [
+          "test_production_gate_refuses_solo_witness",
+          "test_production_gate_refuses_shared_key_witness",
+          "test_production_gate_witness_met_with_distinct_quorum",
+          "test_shared_canonical_key_is_rejected_not_distinct",
+          "test_sub_majority_threshold_is_not_distinct_quorum",
+          "test_provision_two_local_witnesses_reaches_distinct_quorum",
+          "test_provision_tool_refuses_duplicate_canonical_key",
+          "test_gate_inert_when_posture_unset"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "opt-in-stated-as-default",
+      "default": "off"
     }
   ]
 }

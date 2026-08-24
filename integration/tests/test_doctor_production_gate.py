@@ -1,8 +1,8 @@
 """W9-4b — the opt-in refuse-to-start PRODUCTION posture gate.
 
 When ``VIGIL_POSTURE=production`` (or ``prod``), a start path (``vigil up`` / ``vigil engage``) REFUSES to
-run unless ALL SEVEN production preconditions hold, read from the SAME on-disk / env posture probes
-``vigil doctor`` renders (the first five) plus two env / filesystem reads (the sixth and seventh):
+run unless ALL EIGHT production preconditions hold, read from the SAME on-disk / env posture probes
+``vigil doctor`` renders (the first five) plus three env / filesystem reads (the sixth, seventh and eighth):
 
   1. vault SEALED (secrets sealed at rest, not plaintext)
   2. sovereignty tier non-PERMISSIVE
@@ -14,6 +14,9 @@ run unless ALL SEVEN production preconditions hold, read from the SAME on-disk /
   7. the seccomp egress supervisor ARMED (W10-8 — production forces VIGIL_EGRESS_GUARD=require, so the
      gate refuses unless the guard binary is built; the supervisor's stated bound is that it refuses a
      tool's OWN non-loopback egress, NOT a containment boundary for hostile code)
+  8. the transparency-log witness set a strict majority of DISTINCT witnesses (W8-3 — a solo self-witness
+     is detection not prevention, and witnesses sharing a canonical key are refused as NOT distinct;
+     distinctness reuses ``transparency.is_split_view_resistant``)
 
 These tests prove:
 
@@ -39,12 +42,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from vigil_core import generate_keypair
+
 from vigil_integration import cli as climod
 from vigil_integration import doctor as dmod
+from vigil_integration import witness_provision as wpmod
 from vigil_integration.live import egress_guard as egmod
 
 _CONTROLS = ["vault", "sovereignty", "entitlement", "backups", "charter", "legacy-owner-token",
-             "egress-supervisor"]
+             "egress-supervisor", "witness"]
 
 
 # ------------------------------------------------------------------ world builder: all five SATISFIED
@@ -122,6 +128,15 @@ def _all_satisfied(monkeypatch, tmp_path) -> pathlib.Path:
     os.chmod(guard, 0o755)
     monkeypatch.setenv("VIGIL_EGRESS_GUARD", "require")
     monkeypatch.setenv("VIGIL_EGRESS_GUARD_BIN", str(guard))
+    # (8) the transparency-log witness set is a strict majority of DISTINCT witnesses (W8-3). Provision a
+    #     two-witness roster with distinct real Ed25519 keys via the SAME tooling an operator runs, and pin
+    #     it with VIGIL_WITNESS_ROSTER so the probe is deterministic. Two distinct keys ⇒ threshold 2 ⇒
+    #     2*2 > 2 ⇒ is_split_view_resistant ⇒ DISTINCT-QUORUM.
+    roster = tmp_path / "witness-roster.json"
+    for i in range(2):
+        kp = generate_keypair()
+        wpmod.register_authorizer(roster, key_id=f"w{i}", public_key_b64=kp.public_key_b64)
+    monkeypatch.setenv("VIGIL_WITNESS_ROSTER", str(roster))
     return repo
 
 
@@ -162,7 +177,7 @@ def test_gate_passes_when_all_satisfied(monkeypatch, tmp_path):
     states = {c["control"]: c["state"] for c in res["controls"]}
     assert states == {"vault": "SEALED", "sovereignty": "AIR_GAPPED", "entitlement": "ACTIVE",
                       "backups": "ON", "charter": "PRESENT", "legacy-owner-token": "DISABLED",
-                      "egress-supervisor": "ARMED"}
+                      "egress-supervisor": "ARMED", "witness": "DISTINCT-QUORUM"}
     assert all(c["met"] for c in res["controls"])
 
 
@@ -182,6 +197,8 @@ _BREAKERS = {
     # guard_binary directly so it is missing DETERMINISTICALLY even on a runner where the in-repo build
     # exists (the P5 job runs `make -C tools/egress-guard`).
     "egress-supervisor": lambda mp, tp: mp.setattr(egmod, "guard_binary", lambda: None),
+    # point the witness roster at an ABSENT path ⇒ the shipped SOLO self-witness default ⇒ NOT DISTINCT-QUORUM.
+    "witness": lambda mp, tp: mp.setenv("VIGIL_WITNESS_ROSTER", str(tp / "no-witness-roster.json")),
 }
 
 
