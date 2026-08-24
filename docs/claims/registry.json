@@ -1647,6 +1647,33 @@
       "ci_job": "vigil_core — shared integrity substrate",
       "failure_class": "n-a",
       "default": "off"
+    },
+    {
+      "id": "W13-3",
+      "title": "The signed EngagementAuthorization's four bounds are honoured by the executor, and the letter/charter/object scope is cross-checked",
+      "claim": "A threshold-signed EngagementAuthorization carries four enforcement bounds — a WARDEN danger ceiling, a validity window, a rate limit, and a concurrency limit — and the EngagementExecutor HONOURS all four: an action above the ceiling, outside the window, beyond the rate, or beyond the concurrency limit is refused with a distinct typed EthicsViolation (DangerCeilingExceeded / AuthorityExpired / RateLimitExceeded / ConcurrencyLimitExceeded), first-failure-wins and fail-closed. The danger ceiling reuses the ONE WARDEN classifier of record (no second danger taxonomy) and the signature reuses the entitlement layer's m-of-n threshold crypto and TrustRoot. The three legs of an engagement's authorization — the authorization-letter template (contract), the charter.md scope table (runtime), and the signed object (technical) — are cross-checked against each other so scope cannot drift (ScopeDrift on any divergence, empty-leg fail-closed). The deployment class and lifecycle EXTEND the entitlement layer with NO duplicated capability policy: a signed DeploymentProfile reuses the one DeploymentMode taxonomy, names the entitlement it governs, and adds only a lifecycle gate (require_operable_deployment refuses any non-ACTIVE deployment), while WHICH capabilities may run stays the decision of entitlement.require_capability(). Enforcement at the executor is OPT-IN at this stage: the EngagementExecutor honours the four bounds wherever it is used, and threading it through every production caller so a production deployment REQUIRES it on every action is named follow-on work.",
+      "source": "docs/decisions/W13-3-signed-engagement-authorization.md:8",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/authority/authorization.py",
+        "symbol": "authorize_engagement_action"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/authority/tests/test_engagement_authorization.py",
+        "tests": [
+          "test_danger_ceiling_uses_the_warden_classifier",
+          "test_negative_control_action_above_ceiling_is_refused",
+          "test_ceiling_gate_is_not_a_no_op",
+          "test_negative_control_action_before_window_is_refused",
+          "test_negative_control_action_after_window_is_refused",
+          "test_negative_control_action_beyond_rate_limit_is_refused",
+          "test_negative_control_action_beyond_concurrency_limit_is_refused",
+          "test_sign_and_verify_roundtrip",
+          "test_tampered_ceiling_is_detected"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "off"
     }
   ]
 }

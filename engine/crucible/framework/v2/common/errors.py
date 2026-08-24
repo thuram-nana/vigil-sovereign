@@ -128,6 +128,51 @@ class CapabilityNotGranted(EntitlementViolation):
     capability tier does not include the requested capability."""
 
 
+class DeploymentNotOperable(EntitlementViolation):
+    """A deployment profile (W13-3) is not in an operable lifecycle state
+    (DRAFT / SUSPENDED / EXPIRED / REVOKED). The deployment class and
+    lifecycle EXTEND the entitlement layer; the capability grant itself
+    still flows through require_capability(). This is the lifecycle gate:
+    a deployment that has not been activated, or that has been suspended
+    or revoked, may take no engagement action regardless of the
+    capabilities its entitlement would otherwise confer."""
+
+
+# ---------------------------------------------------------------------------
+# Signed engagement authorization (W13-3 #496) — the executor honours the
+# danger ceiling, validity window, and rate/concurrency limits carried by a
+# signed EngagementAuthorization. Each refusal is a distinct EthicsViolation
+# so it can never be silently swallowed into an allow.
+# ---------------------------------------------------------------------------
+
+
+class DangerCeilingExceeded(EthicsViolation):
+    """An action's WARDEN danger tier exceeds the danger ceiling the signed
+    EngagementAuthorization permits. The ceiling reuses the ONE WARDEN
+    classifier of record — this is not a second danger taxonomy."""
+
+
+class RateLimitExceeded(EthicsViolation):
+    """The engagement has taken its permitted number of actions within the
+    signed authorization's rate window; a further action inside that window
+    is refused. Distinct from BudgetExhausted, which is a whole-engagement
+    total; this is a sliding-window rate."""
+
+
+class ConcurrencyLimitExceeded(EthicsViolation):
+    """More actions are in flight than the signed authorization's
+    concurrency limit permits. The action is refused until an in-flight
+    action completes."""
+
+
+class ScopeDrift(EthicsViolation):
+    """The three legs of an engagement's authorization — the authorization
+    letter, the charter.md scope table, and the signed EngagementAuthorization
+    — do not declare the same in-scope host set. Scope has drifted between the
+    contract, runtime, and technical artifacts; fail closed rather than act on
+    an ambiguous authorization."""
+
+
 class EntitlementError(CrucibleError, IntegrityError):
     """Recoverable entitlement-layer error (file parse, store I/O) that
     is NOT itself an authorization decision. Also a vigil_core `IntegrityError`
