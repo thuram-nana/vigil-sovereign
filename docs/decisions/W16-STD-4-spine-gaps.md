@@ -45,3 +45,21 @@ GC idempotently. Proven by a kill-9-during-cutover fuzz (deterministic per-barri
 with a negative control that the recovery oracle detects a deleted retained record. It is behind three owner
 gates: a valid owner-signed head (the cutover re-signs with the owner key), explicit `--yes` confirmation,
 and the §7 referential-safety floors.
+
+## Red-pen notes
+
+**LOW-1 (closed — defence-in-depth on the delete path).** The manifest-rebase / file-delete primitives are
+`_`-prefixed internal AND self-guard: `_rebase_manifest_below` / `_delete_orphan_segment_files_below` call
+`_assert_may_drop_below`, which reads the boundary the OWNER-SIGNED head has committed
+(`_committed_prune_base_seq`, fail-closed to 0 on a missing/unverified head) and refuses any drop past it. So
+even a direct caller that bypasses `commit_prune`'s three gates cannot delete owner-signed records without a
+valid owner signature already committing that prune. Negative control:
+`test_spine_prune_cutover.py::test_drop_primitives_refuse_without_a_committed_prune`.
+
+**LOW-2 (accepted + mitigated — the transient committed-head window).** Between signing the pruned head
+(`base_seq=K`) and finishing the manifest+file GC, the below-K records are still physically present while the
+head declares them pruned. This is sound and fully mitigated: `classify_head` selects the live window BY SEQ
+(`>= base_seq`), every fold windows `[base_seq..T]` (reading the snapshot seed, not physical presence),
+`store.verify()` is prune-aware, `resolve_citation` refuses a citation not in the live window, and
+`finish_prune` deterministically closes the window (manifest rebase + archive-verified reclaim). No reader
+double-counts the still-present prefix because no reader keys on physical presence.

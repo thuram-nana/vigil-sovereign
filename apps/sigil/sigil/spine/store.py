@@ -858,16 +858,50 @@ class SpineStore:
                 pass
 
     # --- cold-archive hard-prune cutover (Slice E — the ONLY code that drops live records) --------------
-    def rebase_manifest_below(self, base_seq: int) -> bool:
+    def _committed_prune_base_seq(self) -> int:
+        """The prune boundary the on-disk OWNER-SIGNED head has COMMITTED (0 == no prune). A missing /
+        unreadable / unverified head returns 0, so the destructive primitives below fail CLOSED. This is the
+        internal authorization the drop primitives assert: a live-record drop is authorized ONLY by a valid
+        owner signature that already committed the prune (which `commit_prune` mints via `sign_pruned_head`
+        after its three gates). Read-only."""
+        from ..config import HEAD_PATH
+        from ..reuse import SignedChainHead
+        from .checkpoint import verify_checkpoint
+        try:
+            if not HEAD_PATH.exists():
+                return 0
+            ok, _ = verify_checkpoint(self)                 # Ed25519 + monotonic floor — the crypto gate
+            if not ok:
+                return 0
+            return int(SignedChainHead.model_validate_json(HEAD_PATH.read_text(encoding="utf-8")).base_seq)
+        except Exception:  # noqa: BLE001 — ANY failure ⇒ "no committed prune" ⇒ refuse to drop (fail-closed)
+            return 0
+
+    def _assert_may_drop_below(self, boundary: int) -> None:
+        """Guard on every live-record drop (defence-in-depth, W16-STD-4 red-pen LOW-1): refuse to drop below
+        `boundary` unless the owner-signed head has committed a prune reaching at least that far. These
+        primitives are reached only from `commit_prune` (after 3 owner gates + signing the pruned head) and
+        `finish_prune` (rolling forward an already-committed prune); a DIRECT caller with no committed prune is
+        refused here rather than silently deleting owner-signed records."""
+        committed = self._committed_prune_base_seq()
+        if boundary > committed:
+            raise SpineError(
+                f"refusing to drop live records below seq {boundary}: the owner-signed head commits a prune "
+                f"only through base_seq {committed}. This primitive runs ONLY inside a committed-prune context "
+                f"(commit_prune / finish_prune) — never as a standalone delete.")
+
+    def _rebase_manifest_below(self, base_seq: int) -> bool:
         """Publish a new-generation manifest that DROPS every sealed segment lying entirely below `base_seq`
-        (last_seq < base_seq). MUST hold the flock. This is the CUTOVER's atomic commit-echo: after it the
-        live window is [base_seq..T]; the dropped segment FILES are not touched here (that is a separate,
-        post-commit GC — a crash between the two leaves unreferenced orphans, never a torn chain). Idempotent
-        (a no-op when nothing lies below base_seq). Returns True iff it changed the segment set.
+        (last_seq < base_seq). MUST hold the flock, and MUST be inside a committed-prune context (guarded).
+        This is the CUTOVER's atomic commit-echo: after it the live window is [base_seq..T]; the dropped
+        segment FILES are not touched here (that is a separate, post-commit GC — a crash between the two
+        leaves unreferenced orphans, never a torn chain). Idempotent (a no-op when nothing lies below
+        base_seq). Returns True iff it changed the segment set.
 
         Retain-only-forward: the retained segments keep their bytes + chain linkage, so a reader that follows
         the new manifest sees the intact [base_seq..T] window (its first segment's `first_prev_hash` == the
         pruned boundary == the signed head's base_prev_hash)."""
+        self._assert_may_drop_below(base_seq)               # LOW-1: no drop without a committed owner signature
         m = self._manifest if self._manifest is not None else read_manifest(self._layout)
         if m is None:
             return False
@@ -884,13 +918,14 @@ class SpineStore:
         self._last = self._read_last_entry()
         return True
 
-    def delete_orphan_segment_files_below(self, base_seq: int) -> int:
+    def _delete_orphan_segment_files_below(self, base_seq: int) -> int:
         """Unlink every on-disk `seg-*` FILE whose segment lies entirely below `base_seq` and is NOT
-        referenced by the CURRENT manifest — the post-cutover reclaim. MUST hold the flock. Safe by
-        construction: a file the committed manifest does not reference holds no live record, and the pruned
-        prefix is preserved in the owner-anchored archive, so deleting it can never lose live data or break a
-        read. Idempotent (missing_ok); a crash mid-delete just leaves fewer/more orphans for the next call.
-        Returns the number of files unlinked."""
+        referenced by the CURRENT manifest — the post-cutover reclaim. MUST hold the flock, and MUST be inside
+        a committed-prune context (guarded). Safe by construction: a file the committed manifest does not
+        reference holds no live record, and the pruned prefix is preserved in the owner-anchored archive, so
+        deleting it can never lose live data or break a read. Idempotent (missing_ok); a crash mid-delete just
+        leaves fewer/more orphans for the next call. Returns the number of files unlinked."""
+        self._assert_may_drop_below(base_seq)               # LOW-1: no delete without a committed owner signature
         m = self._manifest if self._manifest is not None else read_manifest(self._layout)
         referenced = {self._layout.seg_path(s).name for s in (m.segments if m is not None else [])}
         n = 0
@@ -942,8 +977,8 @@ class SpineStore:
         with spine_lock(self.path):
             with self._crossproc_lock():
                 self._refresh_active_under_lock()
-                changed = self.rebase_manifest_below(head.base_seq)
-                self.delete_orphan_segment_files_below(head.base_seq)
+                changed = self._rebase_manifest_below(head.base_seq)
+                self._delete_orphan_segment_files_below(head.base_seq)
         return changed
 
     # --- write --------------------------------------------------------------------
