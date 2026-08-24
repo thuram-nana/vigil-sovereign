@@ -343,12 +343,24 @@ single writer scheduled); a comment block in that file states plainly that
   defeats the whole local floor (the irreducible all-keys limit above). The anchor's
   SIGNATURE + the anti-rollback consistency checks remain the tamper controls; the
   freshness gate sits *on top of* them, never in their place.
-- **Shared owner key across passives is a trust concession, not HA.** For a
-  passive to become a valid writer it must hold the owner signing key. Every host
-  that holds that key is a host that can sign a fork. HA of the writer therefore
-  widens the key's blast radius; keep the passive fleet small and the key custody
-  tight. This is the price of writer failover for a single-owner signed spine,
-  and it is stated here rather than hidden.
+- **Shared owner key across passives is a trust concession, not HA (W8-5, #471).**
+  For a passive to become a valid writer it must hold the owner signing key: the
+  sovereign spine head is signed by a **single owner key at a 1-of-1 trust root**
+  (`checkpoint.trust_root` → `sign_head`/`verify_head`), so **every passive holds the
+  SAME owner signing key, and every host that holds it can sign a fork.** A passive
+  holding only its own per-host key is NOT a valid writer — the head path admits no
+  per-host key. HA of the writer therefore widens that one key's blast radius; keep
+  the passive fleet small and the key custody tight. **Per-host keys with delegation
+  were evaluated (W8-5, #471) and deliberately NOT implemented for the head surface**
+  — a delegated per-host head signer would still emit a second, same-height,
+  owner-authorized head (the exact fork §2 detects and rejects), and admitting one
+  would require changing the head trust model from 1-of-1 to m-of-n rather than
+  reusing the existing (offense-plane) delegation machinery. The full evaluation
+  (against #434 succession, #438 per-host co-signer enrolment, and the S4 delegation
+  cert) and the decision to defer are recorded in
+  [`docs/decisions/W8-5-per-host-keys-with-delegation.md`](../decisions/W8-5-per-host-keys-with-delegation.md).
+  This is the price of writer failover for a single-owner signed spine, and it is
+  stated here rather than hidden.
 - **The stateless proxy tier's session token.** Active-active `vigil up` proxies
   are stateless *except* the per-instance session token. Use sticky sessions at
   the LB (documented in `infra/ha/docker-compose.ha.yml` and the k8s
