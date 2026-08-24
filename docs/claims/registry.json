@@ -1514,6 +1514,9 @@
         "tests": [
           "test_build_package_assembles_from_committed_sources",
           "test_every_assurance_claim_resolves_to_a_passing_registry_test",
+          "test_every_assurance_claim_sowhat_is_grounded_in_its_registered_claim",
+          "test_a_drifted_sowhat_is_rejected",
+          "test_build_fails_when_a_sowhat_drifts_from_its_registered_claim",
           "test_removing_a_proving_test_makes_the_build_fail",
           "test_no_wording_asserts_a_compliance_accreditation",
           "test_inserting_forbidden_wording_fails_the_gate",

@@ -35,6 +35,14 @@ This claim is TRUE of the code as of W13-9:
   symbol is really defined (AST, no import), its `proved_by` test file and **every** named test function
   exist, and its `ci_job` is a **required** check in `.github/required-status-checks.txt`. **Deleting a
   proving test therefore fails the package build** — the pack cannot outlive its evidence.
+- **Each summary is grounded in what its test proves** — a claim's reviewer-facing "so-what" is not free
+  text: `assert_sowhat_grounded` requires its significant terms to overlap the registry entry's own title +
+  claim + proving-test names above a threshold, and raises `SoWhatDriftError` otherwise. This is the
+  root-cause gate for the display-manufactures-evidence class: it fails the build if a summary asserts a
+  property the bound test does not establish (for example, asserting anti-rollback for W5-3, whose test only
+  establishes refusal of a newer/uncoercible envelope schema). Pinned by
+  `test_every_assurance_claim_sowhat_is_grounded_in_its_registered_claim` with negative controls
+  `test_a_drifted_sowhat_is_rejected` and `test_build_fails_when_a_sowhat_drifts_from_its_registered_claim`.
 - **No wording asserts certification** — `assert_no_certification_wording` scans the fully rendered package
   and raises `CertificationWordingError` on the `certify / certified / certifies / certification` family.
   The legitimate cryptographic word `certificate`/`certificates` (proof-carrying-finding certificates,
