@@ -16,9 +16,10 @@
       "target_clean_capable": true,
       "evidence_surface": "response_headers",
       "implementation_refs": [
-        "engine/crucible/framework/v2/scanner/checks.py:OpenRedirectCheck"
+        "engine/crucible/framework/v2/scanner/checks.py:OpenRedirectCheck",
+        "integration/vigil_integration/live/web_redrive.py:_redirect_templates"
       ],
-      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "blocking_work": "INSERTION COVERAGE — DONE for open_redirect: the live re-drive now probes the redirect value across five insertion surfaces — URL query value, URL path segment, Cookie value, urlencoded-body value and JSON-body value — synthesising the cookie/urlencoded/JSON carriers with the correct method + Content-Type (integration/vigil_integration/live/web_redrive.py:_redirect_templates). The OpenRedirectCheck predicate fires only on a real navigation to the UNIQUE canary HOST, so no benign-twin baseline is needed for soundness. RESIDUAL: a CLEAN over the synthesised cookie/body surfaces is bounded to the probed candidate redirect-parameter names (the URL’s own query names plus _REDIRECT_PARAM_NAMES), never a claim of absence under a parameter name not probed — the WebRedriveResult coverage statement names the examined surfaces so the bound is explicit.",
       "oracle_version": "achieved_state",
       "control_requirements": [
         "warden_active_recon_gate",
@@ -40,7 +41,7 @@
       "limitation": "NOT CLEAN-capable: a non-firing cannot distinguish 'the document contains no redirect' from 'we could not read the document'. Body availability is established ONLY for a complete, single-member gzip/deflate/identity stream whose charset is deterministically known (a BOM, the transport Content-Type charset, or the RFC-8259 UTF-8 default for application/json) and which decodes strictly; an undeclared charset, brotli/zstd, concatenated members, and truncated reads are INCONCLUSIVE, not CLEAN. Suppressed entirely on a followed 3xx, whose body is never rendered.",
       "target_fact_capable": true,
       "target_clean_capable": true,
-      "blocking_work": "Body evidence must become CLEAN-capable AND readable for every body, not only deterministically-declared ones. This needs: (1) a spec-compliant HTML encoding-determination implementation — a vendored reference, NOT a regex; a hand-approximated <meta> prescan is rejected under Claim-Discipline rule 4, and the transport charset must outrank the in-document declaration per WHATWG; (2) vendored, version-pinned, bounded STREAMING brotli/zstd decoders whose versions are bound into oracle provenance, so adjudication is host-independent and offline-replayable (dynamic host module-probing was removed for this reason); (3) bounded concatenated-member decoding so a multi-member body is read rather than refused; (4) a truncation-free read for pages under the cap. Only then is a non-firing a channel-confirmed negative. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "blocking_work": "Body evidence must become CLEAN-capable AND readable for every body, not only deterministically-declared ones. This needs: (1) a spec-compliant HTML encoding-determination implementation — a vendored reference, NOT a regex; a hand-approximated <meta> prescan is rejected under Claim-Discipline rule 4, and the transport charset must outrank the in-document declaration per WHATWG; (2) vendored, version-pinned, bounded STREAMING brotli/zstd decoders whose versions are bound into oracle provenance, so adjudication is host-independent and offline-replayable (dynamic host module-probing was removed for this reason); (3) bounded concatenated-member decoding so a multi-member body is read rather than refused; (4) a truncation-free read for pages under the cap. Only then is a non-firing a channel-confirmed negative. INSERTION COVERAGE — DONE for open_redirect: the live re-drive now injects the canary across query, URL path, Cookie, urlencoded-body and JSON-body insertion points via synthesised carriers (integration/vigil_integration/live/web_redrive.py:_redirect_templates), so a redirect reachable only from a cookie/body/JSON parameter is examined and can mint a FACT on this branch instead of sitting unexamined. This surface expansion is INDEPENDENT of the body-decode / render_dom completeness work above, which is what still blocks a body-derived CLEAN.",
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:_markup_redirect_hosts"
@@ -66,7 +67,7 @@
       "limitation": "Sinks in comments, string/template literals and ambiguous `/`-spans are excluded structurally by js_lex. The regex-vs-division ambiguity JavaScript cannot settle without parsing is resolved AWAY from minting, so an ambiguous span yields no FACT. NOT CLEAN-capable: this lexes but does not EXECUTE, so a sink built at runtime (string concatenation, eval, a framework router) is invisible and a non-firing cannot assert absence.",
       "target_fact_capable": true,
       "target_clean_capable": true,
-      "blocking_work": "CLEAN requires proving no sink exists, which lexing cannot do: a redirect assembled at runtime never appears literally. Closing it needs the headless browser path (render_dom) to observe actual navigation, not source inspection. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "blocking_work": "CLEAN requires proving no sink exists, which lexing cannot do: a redirect assembled at runtime never appears literally. Closing it needs the headless browser path (render_dom) to observe actual navigation, not source inspection. INSERTION COVERAGE — DONE for open_redirect: the live re-drive now injects the canary across query, URL path, Cookie, urlencoded-body and JSON-body insertion points via synthesised carriers (integration/vigil_integration/live/web_redrive.py:_redirect_templates), so a redirect reachable only from a cookie/body/JSON parameter is examined and can mint a FACT on this branch instead of sitting unexamined. This surface expansion is INDEPENDENT of the body-decode / render_dom completeness work above, which is what still blocks a body-derived CLEAN.",
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/js_lex.py:sink_is_executable",
@@ -119,7 +120,7 @@
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:HostHeaderCheck"
       ],
-      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "blocking_work": "INSERTION COVERAGE: host-header injection is a REQUEST-LEVEL surface — HostHeaderCheck sets a hostile Host header on the re-driven request (integration/vigil_integration/live/web_redrive.py), so this branch’s evidence (a redirect Location authority equal to the injected Host) is examined directly and does not depend on query/body parameter insertion; the open_redirect re-drive is what gained the cookie/urlencoded/JSON carriers.",
       "oracle_version": "achieved_state",
       "control_requirements": [
         "warden_active_recon_gate",
@@ -141,7 +142,7 @@
       "limitation": "NOT CLEAN-capable: a non-firing cannot distinguish 'the app emits no Host-derived URL' from 'we could not read the document'. Inert markup (comments, raw-text elements, template fragments) is excluded via the stdlib tokenizer; an inert-text echo is not an emission.",
       "target_fact_capable": true,
       "target_clean_capable": true,
-      "blocking_work": "Same decode-completeness work as open_redirect.body_markup; the emission scan itself is already tokenizer-backed and differential-tested. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "blocking_work": "Same decode-completeness work as open_redirect.body_markup; the emission scan itself is already tokenizer-backed and differential-tested. INSERTION COVERAGE: host-header injection is a REQUEST-LEVEL surface — the re-drive sets a hostile Host header on the request (HostHeaderCheck) rather than fuzzing a query/body parameter — so this branch does not depend on cookie/urlencoded/JSON parameter insertion; the open_redirect re-drive is what gained those carriers (integration/vigil_integration/live/web_redrive.py:_redirect_templates).",
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:_emitted_url_hosts"
@@ -170,7 +171,7 @@
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/sso.py:OidcRedirectUriCheck"
       ],
-      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "blocking_work": "INSERTION COVERAGE: the open_redirect re-drive now spans query/path/cookie/urlencoded/JSON insertion surfaces (integration/vigil_integration/live/web_redrive.py:_redirect_templates); the OIDC redirect_uri check (OidcRedirectUriCheck, opt-in SSO_REQUEST_CHECKS) is a distinct request-shaped probe that supplies redirect_uri as a QUERY parameter to the operator’s own authorization endpoint. RESIDUAL: an OIDC redirect_uri taken from a cookie or request body is not yet synthesised for the SSO check — a named residual mirrored on _redirect_templates when wired.",
       "oracle_version": "achieved_state",
       "control_requirements": [
         "warden_active_recon_gate",
@@ -192,7 +193,7 @@
       "limitation": "NOT CLEAN-capable, for the same reason as the other body-derived branches.",
       "target_fact_capable": true,
       "target_clean_capable": true,
-      "blocking_work": "Same decode-completeness work; shares the markup helper. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "blocking_work": "Same decode-completeness work; shares the markup helper. INSERTION COVERAGE: the open_redirect re-drive now spans query/path/cookie/urlencoded/JSON (integration/vigil_integration/live/web_redrive.py:_redirect_templates); the OIDC redirect_uri check (opt-in SSO_REQUEST_CHECKS) remains a query-parameter probe, so an OIDC redirect_uri taken from a cookie or request body is a NAMED residual, wired by mirroring _redirect_templates for the SSO check.",
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/sso.py:OidcRedirectUriCheck"

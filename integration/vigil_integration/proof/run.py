@@ -325,6 +325,10 @@ def _persist_web_redrive(run_dir: "str | os.PathLike", report: dict, wclass: str
         "url": getattr(wr, "url", ""),
         "claimed_family_verdict": wr.family_verdict(wclass),
         "family_verdicts": wr.family_verdicts(),
+        # The insertion surfaces each family was ACTUALLY examined on, so a persisted CLEAN names WHERE it
+        # looked (query/path/cookie/urlencoded-body/JSON-body) rather than reading as an unbounded absence.
+        "insertion_coverage": wr.family_coverage() if hasattr(wr, "family_coverage") else {},
+        "coverage_statement": wr.coverage_statement(wclass) if hasattr(wr, "coverage_statement") else "",
         "n_facts": len(wr.facts),
         "fact_refs": [getattr(f, "finding_ref", "") for f in wr.facts],
         "refused": bool(getattr(wr, "refused", False)),
