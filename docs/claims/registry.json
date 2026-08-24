@@ -1597,6 +1597,31 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "opt-in-stated-as-default",
       "default": "off"
+    },
+    {
+      "id": "W9-6",
+      "title": "The owner signing key can be held by a pluggable hardware backend that fails closed when the token is absent",
+      "claim": "The owner Ed25519 signing key can be held by a pluggable backend selected with `VIGIL_OWNER_KEY_BACKEND`: a `file` backend (the default — a base64 private key loaded into the process, byte-identical to the prior owner-signing path) or a `pkcs11` hardware backend (a real HSM / YubiKey) that signs ON the token so the private key never enters the process. `select_owner_backend` is FAIL-CLOSED: when the hardware backend is selected but its token / PKCS#11 module is absent it raises `HardwareKeyUnavailable` and NEVER falls back to a file key, and an unknown backend name is refused rather than defaulted to file. `vigil doctor` reports the active backend as the `owner-key-backend` posture control. Driving a real PKCS#11 token end-to-end is the irreducible residual, exercised only by an env-gated live-token test and never in CI.",
+      "source": "docs/decisions/W9-6-hardware-key-backend.md:15",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/key_backend.py",
+        "symbol": "select_owner_backend"
+      },
+      "proved_by": {
+        "file": "packages/core/vigil_core/tests/test_key_backend.py",
+        "tests": [
+          "test_file_backend_is_byte_identical_to_the_legacy_owner_signing_path",
+          "test_hardware_selected_but_token_absent_fails_closed_never_uses_file_key",
+          "test_hardware_selected_without_a_module_configured_fails_closed_before_opening",
+          "test_hardware_path_never_reads_private_material_into_the_process",
+          "test_hardware_backend_signs_with_the_token_key_not_the_supplied_file_key",
+          "test_unknown_backend_name_is_fail_closed_not_file",
+          "test_describe_owner_backend_reports_each_state"
+        ]
+      },
+      "ci_job": "vigil_core — shared integrity substrate",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

@@ -27,6 +27,11 @@ from .hard_guardrail import (
     HardBlockError, assert_not_hard_blocked, candidate_hosts, is_hard_blocked, normalize_domain,
     protected_guard_enabled,
 )
+from .key_backend import (
+    BACKEND_ENV as OWNER_KEY_BACKEND_ENV,
+    FileBackend, HardwareKeyUnavailable, KeyBackend, KeyBackendError, Pkcs11Backend, Pkcs11Config,
+    TokenSigner, describe_owner_backend, open_pkcs11_signer, select_owner_backend,
+)
 from .install_manifest import (
     INSTALL_MANIFEST_SCHEMA, InstallManifest, InstallManifestError, InstallManifestRefused,
     build_manifest, ensure_operable, manifest_path, new_install_id, read_manifest, verify_manifest,
@@ -66,6 +71,9 @@ __all__ = [
     "generate_keypair", "sign", "verify_one", "verify_threshold", "KeyPair", "IntegrityError",
     "HardBlockError", "assert_not_hard_blocked", "candidate_hosts", "is_hard_blocked",
     "normalize_domain", "protected_guard_enabled",
+    "KeyBackend", "FileBackend", "Pkcs11Backend", "Pkcs11Config", "TokenSigner",
+    "KeyBackendError", "HardwareKeyUnavailable", "OWNER_KEY_BACKEND_ENV",
+    "select_owner_backend", "describe_owner_backend", "open_pkcs11_signer",
     "INSTALL_MANIFEST_SCHEMA", "InstallManifest", "InstallManifestError", "InstallManifestRefused",
     "build_manifest", "ensure_operable", "manifest_path", "new_install_id", "read_manifest",
     "verify_manifest", "write_manifest",

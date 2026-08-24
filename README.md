@@ -690,6 +690,7 @@ Security posture (informational — off-by-default controls; does NOT affect the
   .. charter:     ABSENT  — no active VIGIL_ENGAGEMENT and no chartered engagement under targets/
   .. egress-supervisor: OFF  — the seccomp connect/sendto/sendmsg egress supervisor is not enabled — set VIGIL_EGRESS_GUARD=require, or run under VIGIL_POSTURE=production which forces it on
   .. witness:     SOLO  — no production witness roster — the shipped default is a solo self-witness (rollback DETECTION, not split-view prevention); provision >=2 DISTINCT witnesses with `python -m vigil_integration.witness_provision add`
+  .. owner-key-backend: FILE  — owner key is a file-based Ed25519 key loaded into the process (the default). Set VIGIL_OWNER_KEY_BACKEND=pkcs11 to hold it in a hardware token instead.
 ```
 
 Each line reads the **real** on-disk / environment state — never an optimistic default — and a control it cannot read reports `UNKNOWN` rather than guessing. The block itself is **informational**: it never changes `vigil doctor`'s exit code. `vigil doctor` itself imports no `framework`/`strix`/`sigil`; the one sovereign-plane line (`vault`) is read from disk, so the two trust planes never co-load to produce it.
