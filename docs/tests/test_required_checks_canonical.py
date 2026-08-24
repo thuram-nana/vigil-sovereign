@@ -191,6 +191,14 @@ KNOWN_NONPR_ADVISORY: dict[str, str] = {
         "a PR runner. The fast required per-PR proofs are test_mutation_gate_sensitivity.py, fuzz_smoke.rs "
         "and test_fuzz_corpus_replay.py; this job is a signal, never a merge blocker."
     ),
+    "strix sandbox live image scan (self-hosted, advisory)": (
+        "strix-sandbox-image-scan.yml (W3-7 residual #653) — schedule/workflow_dispatch only, runs-on a "
+        "self-hosted/large label and gated on the STRIX_SANDBOX_SCAN repo variable, so it never runs on a "
+        "PR and cannot be a required check. It BUILDS+`trivy image`-scans the ~7GB Kali strix sandbox at "
+        "the gateway's HIGH,CRITICAL --ignore-unfixed threshold, but ADVISORY: a security-testing distro "
+        "carries findings the author cannot fix, so blocking would switch the scan off. The PR-CI proof of "
+        "the Strix layer is the committed-SBOM scan in the A14 gate (supply-chain.yml §4a)."
+    ),
 }
 
 # W0-2 (#397): "Where a job is legitimately non-blocking (nightly), split the blocking subset out into

@@ -1,0 +1,143 @@
+# strix-sandbox-image-scan — live `trivy image` scan of the BUILT Strix sandbox image (W3-7 residual, #653)
+#
+# WHAT THIS IS. The A14 supply-chain gate (supply-chain.yml) BUILDS and `trivy image`-scans the
+# first-party gateway image live, but the Strix sandbox image — `vigil/strix-sandbox:local`, ~7GB Kali
+# + ~1000 deb packages, built from vendor/strix/containers/Dockerfile — is too large to build on a
+# GitHub-hosted PR runner, so there it is scanned only through its committed CycloneDX SBOM
+# (`trivy sbom`, advisory). This workflow is the SCAFFOLD for the residual named in
+# docs/SUPPLY-CHAIN.md §4a: a live `trivy image` build+scan of that image, at the SAME severity threshold
+# as the gateway image (HIGH,CRITICAL with --ignore-unfixed), on a self-hosted / large runner that can
+# actually build a 7GB image.
+#
+# WHY IT IS DORMANT UNTIL A RUNNER EXISTS. The job's `runs-on` names a SELF-HOSTED label set, so GitHub
+# only ever dispatches it to a self-hosted runner that carries those labels. It is ALSO gated on the
+# repository variable `STRIX_SANDBOX_SCAN` == 'enabled', so until an operator BOTH provisions such a
+# runner AND sets that variable, every scheduled/dispatched run is cleanly SKIPPED — no queue, no noise,
+# no false red. Provisioning the runner is the human/infra action this residual needs (see §4a).
+#
+# WHY ADVISORY. A security-testing distribution (Kali) ships tools that carry vulnerability findings the
+# author cannot fix; a HIGH/CRITICAL-BLOCKING gate over it would have to be switched off to ever go
+# green, which defeats the point. So this scan runs at the gateway's exact threshold but is ADVISORY:
+# it REPORTS, it does not block. It is enumerated in KNOWN_NONPR_ADVISORY in
+# docs/tests/test_required_checks_canonical.py (it never runs on a PR, so it can never be a required
+# check), and its shape is pinned by docs/tests/test_strix_sandbox_image_scan_workflow.py in required CI.
+#
+# THE HUMAN/INFRA ACTION (residual for #653): register a self-hosted (or large) runner able to build a
+# ~7GB image with labels [self-hosted, linux, x64, large], and set the repo variable STRIX_SANDBOX_SCAN
+# to 'enabled'. Until then this workflow is a documented, valid, dormant scaffold.
+name: strix-sandbox-image-scan
+
+on:
+  schedule:
+    - cron: "37 4 * * 1"   # weekly (Mon 04:37 UTC) — only fires when armed (see the header)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: strix-sandbox-image-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned identically to supply-chain.yml so both images are scanned by the same trivy build.
+  TRIVY_VERSION: "0.73.0"
+  TRIVY_SHA256: "2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b"
+  STRIX_IMAGE: "vigil/strix-sandbox:local"
+
+jobs:
+  scan:
+    name: strix sandbox live image scan (self-hosted, advisory)
+    # SELF-HOSTED guard: only a runner carrying ALL of these labels can run this job, so it stays
+    # dormant on GitHub-hosted infrastructure. Building a ~7GB image needs a large/self-hosted runner.
+    runs-on: [self-hosted, linux, x64, large]
+    # Second, explicit dormancy guard so a scheduled run is SKIPPED (not queued/failed) until an operator
+    # opts in after provisioning the runner. Removing either guard is a deliberate, reviewable change.
+    if: ${{ vars.STRIX_SANDBOX_SCAN == 'enabled' }}
+    timeout-minutes: 120
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: install trivy (version- and sha256-pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o /tmp/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  /tmp/trivy.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          sudo install -m 0755 /tmp/trivy /usr/local/bin/trivy
+          trivy --version
+
+      - name: build the Strix sandbox image (~7GB — needs the self-hosted runner)
+        run: |
+          set -euo pipefail
+          # Same build the compose file declares: context ./vendor/strix, dockerfile containers/Dockerfile.
+          docker compose --profile strix build strix-sandbox
+          docker image inspect "${STRIX_IMAGE}" --format 'built {{.RepoTags}} id={{.Id}}'
+
+      # NEGATIVE CONTROL, exactly as the gateway image gate has one: prove the blocking configuration
+      # actually fires before trusting a clean report. Build a tiny fixture image carrying known-CRITICAL
+      # packages and require the EXACT trivy image config to FAIL on it. Advisory here (this whole job is
+      # advisory), but if the control does not fire the scan below means nothing, so it errors loudly.
+      - name: negative control — prove the trivy image config fires
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/strix-scan-negctl
+          printf 'pyyaml==5.3.1\npillow==8.2.0\n' > /tmp/strix-scan-negctl/requirements.txt
+          printf 'FROM python:3.13-slim\nCOPY requirements.txt /app/requirements.txt\n' \
+            > /tmp/strix-scan-negctl/Dockerfile
+          docker build -t vigil-strix-scan-negctl:local /tmp/strix-scan-negctl
+          set +e
+          trivy image --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --ignorefile "${GITHUB_WORKSPACE}/.trivyignore" \
+            --exit-code 1 \
+            --no-progress \
+            vigil-strix-scan-negctl:local
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::NEGATIVE CONTROL FAILED — the trivy image config exited 0 on a known-CRITICAL image; the scan below would be meaningless."
+            exit 1
+          fi
+          echo "negative control OK — the blocking config exits ${rc} on a known-vulnerable image."
+
+      - name: full trivy image report (advisory, never blocks)
+        continue-on-error: true
+        run: |
+          trivy image --scanners vuln \
+            --severity HIGH,CRITICAL,MEDIUM,LOW \
+            --ignorefile .trivyignore \
+            --exit-code 0 \
+            --no-progress \
+            "${STRIX_IMAGE}"
+
+      # The gateway image's EXACT blocking threshold (HIGH,CRITICAL + --ignore-unfixed), run for real but
+      # ADVISORY: the result is surfaced to the job summary, and continue-on-error keeps a red distro
+      # finding from switching the whole scaffold off. When a maintainer decides the Strix layer is clean
+      # enough to block, flip continue-on-error off here (a deliberate change with a diff), mirroring §4a.
+      - name: trivy image scan at the gateway threshold — HIGH + CRITICAL (fixable), ADVISORY
+        id: gate
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          trivy image --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --ignorefile .trivyignore \
+            --exit-code 1 \
+            --no-progress \
+            "${STRIX_IMAGE}"
+
+      - name: record advisory result to the job summary
+        if: always()
+        run: |
+          {
+            echo "## Strix sandbox live image scan (advisory)"
+            echo ""
+            echo "- image: \`${STRIX_IMAGE}\`"
+            echo "- threshold: HIGH,CRITICAL with --ignore-unfixed (same as the gateway image gate)"
+            echo "- gate step outcome: ${{ steps.gate.outcome }} (advisory — does not block)"
+          } >> "$GITHUB_STEP_SUMMARY"
