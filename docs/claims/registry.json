@@ -1548,6 +1548,29 @@
       "ci_job": "the briefing explains every agent and capability",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W8-5",
+      "title": "HA passives share ONE owner key; per-host keys with delegation evaluated and deferred (not half-built)",
+      "claim": "Every HA passive that can become the sovereign spine writer holds the SAME single owner signing key: the spine head is signed at a 1-of-1 owner trust root (`checkpoint.trust_root` yields `threshold=1` with one owner authorizer), so a passive holding only its own per-host key is NOT a valid writer and every host that holds the owner key can sign a fork; per-host keys with delegation were evaluated (against W9-1 #434 succession, W9-5 #438 co-signer enrolment, and the S4 delegation cert) and deliberately NOT implemented for the head surface",
+      "source": "docs/decisions/W8-5-per-host-keys-with-delegation.md:70",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/checkpoint.py",
+        "symbol": "trust_root"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_ha_shared_owner_key_residual.py",
+        "tests": [
+          "test_ha_profile_states_the_shared_owner_key_concession",
+          "test_design_note_records_the_evaluation_and_decision",
+          "test_head_path_is_single_owner_and_admits_no_per_host_key",
+          "test_checkpoint_trust_root_is_1of1_single_owner",
+          "test_evaluated_delegation_machinery_bounds_a_signer_to_its_grant"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
