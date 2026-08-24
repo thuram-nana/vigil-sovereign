@@ -66,3 +66,10 @@ condition = "AND"
 paths = ['''engine/crucible/../integration/vigil_integration/live/approval_token\.py$''', '''(^|/)approval_token\.py$''']
 regexTarget = "match"
 regexes = ['''signature_b64''']
+
+[[allowlists]]
+description = "False positive: key_backend.py — the VIGIL_PKCS11_* / VIGIL_OWNER_KEY_BACKEND constants are env-variable NAMES (which PKCS#11 provider/token/key-label/PIN env var to read), not secrets."
+condition = "AND"
+paths = ['''(^|/)key_backend\.py$''']
+regexTarget = "match"
+regexes = ['''VIGIL_(PKCS11_[A-Z_]+|OWNER_KEY_BACKEND)''']
