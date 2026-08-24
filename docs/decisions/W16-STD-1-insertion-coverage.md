@@ -37,9 +37,10 @@ docs/capability-matrix/whatwg-encoding-conformance.json.
 
 <!-- CLAIM:W16-STD-1c -->
 Exactly six evidence branches are declared able to assert a bounded negative (a CLEAN), pinned by name in a
-test, so the ladder cannot silently gain or lose absence-authority; the three redirect header branches among
-them assert their bounded negative across the cookie, urlencoded-body and JSON-body insertion surfaces as
-well as query and path.
+test, so the ladder cannot silently gain or lose absence-authority; of the three redirect header branches
+among them, only open_redirect.location_header gained the cookie, urlencoded-body and JSON-body insertion
+surfaces, while host_header.location_header is a request-level Host-header surface and the OIDC non-query
+redirect_uri stays a named residual.
 
 The issue framed this as "6 of 26": at issue time the ladder held 26 branches, 6 of them clean-capable. The
 ladder has since grown past 26, so the load-bearing number pinned in the test is the count of clean-capable
