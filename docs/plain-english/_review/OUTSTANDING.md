@@ -196,7 +196,18 @@ external revocation binding to an agency credential — remains the "one soverei
 the spine's own non-repudiation. So the architectural boundary still holds; what is no longer true is that the
 API has *no* users/roles/attribution.
 
-### A-8. Six cloud/Kubernetes exploitation confirmations have no invocation path — **3–5 days**
+### A-8. Six cloud/Kubernetes exploitation confirmations have no invocation path — **RESOLVED (W16-16, #522)**
+
+> **RESOLVED (W16-16, #522).** The six confirmations are now invocable via **`vigil cloud-exploit
+> <imds|secret|gcp-sa|iam-escalation|k8s-rbac|k8s-rbac-grant>`** (`cli.py:_cmd_cloud_exploit`), the H4 audit
+> package via **`evidence audit-package`**, and the AI-Gauntlet via **`vigil gauntlet`** (its live garak/PyRIT
+> runner honestly deferred). A framework-free structural guard
+> (`integration/tests/test_capability_invocation_paths.py`, required P5 job) enumerates the registered
+> capabilities and reddens if any becomes orphaned again; the invocation paths are recorded in
+> `docs/capability-matrix/invocation-paths.json` and `docs/decisions/W16-16-orphan-capabilities-invocation-paths.md`.
+> The MCP-sensor sub-point is answered there too: MCP is an additional read-only surface, never the sole
+> interface (the sensors are driven by the engagement loop + the `capabilities` verb). The paragraphs below are
+> the ORIGINAL finding, kept for the audit trail.
 
 The headline capability that merged today is real, tested, and **unreachable from any command, route or
 button.** `integration/vigil_integration/live/{imds_verify, secret_verify, iam_escalation_verify,

@@ -397,6 +397,44 @@ def _pcf_verify(args: argparse.Namespace) -> int:
     return 0 if certs and ok_n == len(certs) else 2
 
 
+def _audit_package(args: argparse.Namespace) -> int:
+    """`evidence audit-package` — assemble a SELF-CONTAINED external-audit package (H4) from a report's
+    oracle-confirmed findings: a signed certificate + hash-linked chain per finding, the SCOPE/CHARTER/RUNBOOK,
+    the raw evidence tree, and a standalone ``verify_offline.py`` (stdlib + cryptography, NO VIGIL import) a
+    third party runs to re-verify authenticity + binding + integrity + chain OFFLINE. Reproduction (re-firing
+    each oracle) is the one step that still needs the open-source VIGIL verifier — the package says so.
+
+    This is the H4 capability's invocation path (W16-16 / OUTSTANDING A-8): ``evidence.audit_package`` shipped
+    tested but reachable from NO verb/route/button. Pure/offline; the governance private keys are only ever a
+    ``--signer`` argument, never written to the package (only the public ``--trust-root`` travels)."""
+    from .audit_package import build_audit_package
+    report = json.loads(Path(args.report).read_text(encoding="utf-8"))
+    findings = _findings(report)
+    signers = _parse_signers(args.signer)
+    if not signers:
+        print("audit-package: at least one --signer key_id:privb64 is required (an audit package carries "
+              "SIGNED certificates).", file=sys.stderr)
+        return 2
+    trust_root = TrustRoot.model_validate_json(Path(args.trust_root).read_text(encoding="utf-8"))
+    evidence_root = Path(args.evidence_root) if args.evidence_root else None
+    scope = Path(args.scope_file).read_text(encoding="utf-8") if args.scope_file else ""
+    charter = Path(args.charter_file).read_text(encoding="utf-8") if args.charter_file else ""
+
+    res = build_audit_package(
+        args.out, findings=findings, signers=signers, trust_root=trust_root,
+        evidence_root=evidence_root, scope=scope, charter=charter, engagement_slug=args.slug)
+    if not res.get("ok"):
+        print(f"audit-package: {res.get('error', 'build failed')}", file=sys.stderr)
+        return 1
+    print("=== evidence audit-package (H4 external-audit package) ===")
+    print(f"package:      {res['package']}")
+    print(f"certificates: {res['certificates']} oracle-confirmed FACT(s)")
+    print(f"trust-root fingerprint: {res.get('fingerprint', '')}")
+    print("  PUBLISH this fingerprint OUT-OF-BAND — the auditor pins it (--trust-root-fingerprint).")
+    print(f"verify:       cd {res['package']} && {res.get('verify_cmd', '')}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m framework.v2 evidence",
@@ -465,6 +503,22 @@ def main(argv: list[str]) -> int:
     p.add_argument("--evidence-root", default="", dest="evidence_root",
                    help="root of the raw evidence tree — REQUIRED to check certs carrying an artifact manifest")
     p.set_defaults(fn=_pcf_verify)
+
+    p = sub.add_parser("audit-package",
+                       help="assemble a self-contained external-audit package (H4): signed certs + chain + "
+                            "SCOPE/CHARTER/RUNBOOK + evidence + a standalone stdlib verify_offline.py")
+    p.add_argument("--report", required=True, help="a report with active_findings[] carrying oracle_context")
+    p.add_argument("--out", required=True, help="output directory for the package (must be empty)")
+    p.add_argument("--signer", action="append", default=[], required=False,
+                   help="key_id:private_key_b64 governance signer (repeatable; >=1 required)")
+    p.add_argument("--trust-root", required=True, dest="trust_root",
+                   help="the governance TrustRoot JSON (the signers' PUBLIC keys)")
+    p.add_argument("--slug", default="engagement")
+    p.add_argument("--evidence-root", default="", dest="evidence_root",
+                   help="root of the raw evidence tree to ship into the package")
+    p.add_argument("--scope-file", default="", dest="scope_file", help="a SCOPE.md to ship (optional)")
+    p.add_argument("--charter-file", default="", dest="charter_file", help="a CHARTER.md to ship (optional)")
+    p.set_defaults(fn=_audit_package)
 
     args = parser.parse_args(argv)
     return args.fn(args)

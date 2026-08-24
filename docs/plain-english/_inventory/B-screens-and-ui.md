@@ -1180,11 +1180,15 @@ end — an offline deterministic *oracle* plus a VIGIL-owned *producer/admission
 1. **There is no dedicated screen.** No NAV id, no tab, no button in `packages/vigil-ui/app.js` names
    IMDS, secret-validity, impersonation, IAM privilege-escalation, or K8s RBAC. Verified by grep across
    `app.js` and the console route tables.
-2. **There is no dedicated `vigil` CLI verb.** `imds_verify` / `secret_verify` /
-   `gcp_impersonation_verify` / `iam_escalation_verify` / `k8s_rbac_verify` / `k8s_rbac_grant_verify`
-   have **no** reference outside `integration/vigil_integration/live/` and their own tests — they are
-   Python library entry points called by the engine's verification path, not console-script verbs.
-   Verified by grep across `*.py`, `*.js` and `*.md`.
+2. **There IS a dedicated `vigil` CLI verb (since W16-16, #522).** `vigil cloud-exploit
+   <imds|secret|gcp-sa|iam-escalation|k8s-rbac|k8s-rbac-grant> --capture <file.json>`
+   (`integration/vigil_integration/cli.py:_cmd_cloud_exploit`) routes a retained capture through the
+   corresponding confirmation (`imds_verify` / `secret_verify` / `gcp_impersonation_verify` /
+   `iam_escalation_verify` / `rbac_verify` / `grant_verify`), printing a typed verdict and, on a FACT, a
+   signed offline-re-verifiable certificate. Before #522 these were library entry points imported only by
+   their own tests (the original orphan finding); the structural guard
+   `integration/tests/test_capability_invocation_paths.py` now keeps them wired. There is still no dedicated
+   UI *screen*/button (statement 1 stands); the invocation path is the CLI verb.
 3. **What the UI *does* offer for cloud is the seedless posture path**, and it is honest about being
    posture rather than exploitation: the New Assessment wizard's `cloud` target type →
    `POST OFF /api/launch/cloud` → `console/actions.py:155` `launch_cloud`, which requires a **signed

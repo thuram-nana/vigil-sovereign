@@ -1,0 +1,102 @@
+{
+  "schema": "vigil-invocation-paths/1",
+  "note": "The INVOCATION-PATH contract (W16-16, issue #522). Every capability listed here MUST be reachable from the product by at least one real invocation path — a CLI verb, an HTTP route, a UI button, or a production (non-test) caller in a shipped pipeline/harness. The structural guard integration/tests/test_capability_invocation_paths.py enforces this: for a symbol-kind entry it AST-checks that the named `entry` symbol is really referenced by some production (non-test, non-self) .py file under the product roots; for a cli_verb-kind entry it checks the verb is registered in the named CLI's parser. A capability that becomes orphaned (its only references are its own definition + tests) turns that test RED. The cloud/Kubernetes exploitation CONFIRMATIONS are ALSO enumerated automatically from docs/capability-matrix/evidence-branches.json (any evidence branch whose implementation_refs name a `integration/vigil_integration/live/*_verify.py:<fn>` producer), so a NEW confirmation branch with no caller reddens the test even if it is never added here — this registry is the human-readable twin of that automatic enumeration. `entry` is `path:symbol`; `verb` is `<cli>:<verbname>` where cli is `vigil` or `framework.v2 <group>`. `residual` states any honest external dependency for a FULL live run (the invocation path exists regardless).",
+  "capabilities": [
+    {
+      "id": "cloud_exploit.imds",
+      "name": "IMDS/metadata credential-capture confirmation (E1)",
+      "kind": "symbol",
+      "entry": "integration/vigil_integration/live/imds_verify.py:imds_verify",
+      "invocation": "vigil cloud-exploit imds --capture <file>",
+      "invocation_ref": "integration/vigil_integration/cli.py:_cmd_cloud_exploit",
+      "evidence_branch": "cloud_exploit.imds.credential_capture",
+      "residual": "the LIVE capture (reaching the metadata endpoint) is the credential-gated tools/livefire half; this verb re-derives the FACT over an already-captured, WARDEN-gated evidence dict and sends no traffic."
+    },
+    {
+      "id": "cloud_exploit.secret",
+      "name": "exposed-secret validity confirmation (E5)",
+      "kind": "symbol",
+      "entry": "integration/vigil_integration/live/secret_verify.py:secret_verify",
+      "invocation": "vigil cloud-exploit secret --capture <file>",
+      "invocation_ref": "integration/vigil_integration/cli.py:_cmd_cloud_exploit",
+      "evidence_branch": "cloud_exploit.secret.credential_validity",
+      "residual": "live secret validation (secret_runner) is credential-gated; the confirmation re-derives over a retained secret-safe capture."
+    },
+    {
+      "id": "cloud_exploit.gcp_sa",
+      "name": "GCP service-account impersonation confirmation (E3)",
+      "kind": "symbol",
+      "entry": "integration/vigil_integration/live/gcp_impersonation_verify.py:gcp_impersonation_verify",
+      "invocation": "vigil cloud-exploit gcp-sa --capture <file>",
+      "invocation_ref": "integration/vigil_integration/cli.py:_cmd_cloud_exploit",
+      "evidence_branch": "cloud_exploit.gcp.sa_impersonation",
+      "residual": "live token-mint + introspection is credential-gated; the confirmation re-derives over a retained capture."
+    },
+    {
+      "id": "cloud_exploit.iam_escalation",
+      "name": "IAM privilege-escalation confirmation (E2)",
+      "kind": "symbol",
+      "entry": "integration/vigil_integration/live/iam_escalation_verify.py:iam_escalation_verify",
+      "invocation": "vigil cloud-exploit iam-escalation --capture <file>",
+      "invocation_ref": "integration/vigil_integration/cli.py:_cmd_cloud_exploit",
+      "evidence_branch": "cloud_exploit.iam.privilege_escalation",
+      "residual": "the achieved-escalation differential is computed over a retained IAM-policy capture; VIGIL never executes the escalation."
+    },
+    {
+      "id": "k8s_exploit.rbac_anon",
+      "name": "K8s anonymous-privileged-binding confirmation (TIER-1)",
+      "kind": "symbol",
+      "entry": "integration/vigil_integration/live/k8s_rbac_verify.py:rbac_verify",
+      "invocation": "vigil cloud-exploit k8s-rbac --capture <file>",
+      "invocation_ref": "integration/vigil_integration/cli.py:_cmd_cloud_exploit",
+      "evidence_branch": "k8s_exploit.rbac.anonymous_privileged_binding",
+      "residual": "live kube-apiserver capture is credential-gated; the confirmation re-derives over a retained RBAC capture."
+    },
+    {
+      "id": "k8s_exploit.rbac_grant",
+      "name": "K8s dangerous-verb-grant confirmation (TIER-2)",
+      "kind": "symbol",
+      "entry": "integration/vigil_integration/live/k8s_rbac_grant_verify.py:grant_verify",
+      "invocation": "vigil cloud-exploit k8s-rbac-grant --capture <file>",
+      "invocation_ref": "integration/vigil_integration/cli.py:_cmd_cloud_exploit",
+      "evidence_branch": "k8s_exploit.rbac.dangerous_verb_grant",
+      "residual": "live kube-apiserver capture is credential-gated; the confirmation re-derives over a retained RBAC capture."
+    },
+    {
+      "id": "h4_audit_package",
+      "name": "H4 reproducible external-audit package",
+      "kind": "symbol",
+      "entry": "engine/crucible/framework/v2/evidence/audit_package.py:build_audit_package",
+      "invocation": "python3 -m framework.v2 evidence audit-package --report <r> --out <dir> --signer <k> --trust-root <tr>",
+      "invocation_ref": "engine/crucible/framework/v2/evidence/cli.py:_audit_package",
+      "residual": "reproduction (re-firing each oracle) still needs the open-source VIGIL verifier; the package's standalone verify_offline.py proves authenticity + binding + integrity + chain with no VIGIL import (documented in the shipped RUNBOOK.md)."
+    },
+    {
+      "id": "ai_gauntlet",
+      "name": "live AI-Gauntlet (offensive-LLM red-team sensor)",
+      "kind": "symbol",
+      "entry": "integration/vigil_integration/live/gauntlet_subproc.py:run_gauntlet_report",
+      "invocation": "vigil gauntlet --tool garak --target http://127.0.0.1:PORT [--runner-cmd <wrapper>]",
+      "invocation_ref": "integration/vigil_integration/cli.py:_cmd_gauntlet",
+      "residual": "the live garak/PyRIT runner image is deferred infra (docs/DEFERRED-INFRA.md 'the LLM-red-team tools'); without --runner-cmd the verb honestly reports available:false and mints ZERO findings. The verb (the invocation path) exists regardless."
+    },
+    {
+      "id": "web_redrive",
+      "name": "runner-owned gated HTTP re-drive -> ACHIEVED_STATE FACT",
+      "kind": "symbol",
+      "entry": "integration/vigil_integration/live/web_redrive.py:web_redrive",
+      "invocation": "reached inside `vigil engage` via the proof-minting pipeline",
+      "invocation_ref": "integration/vigil_integration/proof/run.py:_web_redrive_mint",
+      "residual": "none — a web finding produced by an engagement is re-driven automatically."
+    },
+    {
+      "id": "posture_verb",
+      "name": "Certificate of Non-Exploitability (vigil posture)",
+      "kind": "cli_verb",
+      "verb": "vigil:posture",
+      "invocation": "vigil posture attest|verify|endpoint",
+      "invocation_ref": "integration/vigil_integration/cli.py:_cmd_posture",
+      "residual": "none — already a first-class dispatch verb (#546)."
+    }
+  ]
+}

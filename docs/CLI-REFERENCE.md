@@ -156,6 +156,8 @@ a new sub-parser that is not documented here turns the required check red.
 | `vigil dossier` | Compile everything a run produced into one self-contained, tamper-evident `.zip`. |
 | `vigil posture` | Certificate of Non-Exploitability — mint (`attest`), `verify` offline, or `serve` a signed posture bundle. |
 | `vigil detect` | Run the Detection Mirror over log files (the defensive oracle plane). |
+| `vigil cloud-exploit` | Confirm a retained cloud/K8s exploitation capture (`imds`/`secret`/`gcp-sa`/`iam-escalation`/`k8s-rbac`/`k8s-rbac-grant`) → typed verdict + (on a FACT) a signed, offline-re-verifiable certificate. Sends no live traffic. |
+| `vigil gauntlet` | Drive the live AI-Gauntlet (offensive-LLM red-team sensor: garak/PyRIT) against an owner-authorized loopback target; honest empty result when no runner is wired. |
 | `vigil up` | Bring the whole unified UI up at one origin (self-contained reverse proxy). |
 | `vigil down` | CONTAIN a running `vigil up`: stop + disable the systemd unit, then kill the backends + proxy. |
 | `vigil services` | Docker bring-up: create the egress gateway + qdrant/neo4j/otel services if none exist (idempotent). |

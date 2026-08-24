@@ -2367,6 +2367,28 @@
       "ci_job": "the briefing explains every agent and capability",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W16-16",
+      "title": "Every registered capability has a product invocation path; a structural CI guard reddens on a new orphan",
+      "claim": "Every registered exploitation-confirmation capability, the H4 audit package, and the AI-Gauntlet is invocable from the product, and a framework-free structural CI guard enumerates the registered capabilities from the capability matrix and reddens when any becomes orphaned (its only references its own module and tests), using an AST caller-detector that ignores docstring mentions and re-export facades, with a self-contained negative control proving the detector is not a no-op.",
+      "source": "docs/decisions/W16-16-orphan-capabilities-invocation-paths.md:101",
+      "enforced_by": {
+        "file": "integration/tests/test_capability_invocation_paths.py",
+        "symbol": "_production_callers"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_capability_invocation_paths.py",
+        "tests": [
+          "test_each_cloud_confirmation_has_an_invocation_path",
+          "test_named_symbol_capability_has_an_invocation_path",
+          "test_new_cloud_exploit_verb_wires_all_six_confirmations",
+          "test_ast_detector_is_not_a_no_op"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
