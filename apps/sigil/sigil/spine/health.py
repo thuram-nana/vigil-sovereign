@@ -22,7 +22,7 @@ already hold, so drift detection never depends on the heavy ML stack being impor
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from .checkpoint import verify_checkpoint
 from .store import SpineStore

@@ -21,7 +21,7 @@ from typing import Any, Iterator
 
 from ..config import SCOPE, SPINE_PATH, SPINE_SEG_MAX_BYTES, SPINE_SEG_MAX_RECORDS
 from ..reuse import ChainEntry, append_entry, build_chain, digest_payload, verify_chain
-from ..reuse.chain import _GENESIS_PREV
+from vigil_core.models import _GENESIS_PREV       # defined in vigil_core (the reuse.* shims are runtime-only)
 from . import envelope
 from .atomicio import atomic_write_text, fsync_dir
 from .manifest import (
@@ -930,7 +930,7 @@ class SpineStore:
         never raises (a completion problem must not brick opening the store), and never rebases past what the
         signed head committed."""
         from ..config import HEAD_PATH
-        from ..reuse.models import SignedChainHead
+        from ..reuse import SignedChainHead
         try:
             if not HEAD_PATH.exists():
                 return False
@@ -1267,7 +1267,6 @@ class SpineStore:
         """The prev_hash the live window links from: GENESIS for an un-pruned spine, or the retained-segment
         boundary (base_prev_hash) after a cold-archive prune. Read from the FIRST live segment's stored
         `first_prev_hash` (a manifest convenience — corroborated against the signed head in verify())."""
-        from ..reuse.chain import _GENESIS_PREV
         m = read_manifest(self._layout)
         if m is None:
             return _GENESIS_PREV
@@ -1279,7 +1278,7 @@ class SpineStore:
         agrees on it. Delegates authenticity to `verify_checkpoint` (Ed25519 + floor) and cross-checks that
         the head's committed base (base_seq + base_prev_hash) matches the live window's actual left edge."""
         from ..config import HEAD_PATH
-        from ..reuse.models import SignedChainHead
+        from ..reuse import SignedChainHead
         from .checkpoint import verify_checkpoint            # function-local: checkpoint imports store
         if not entries:
             return False, "a non-genesis base is claimed but the live window is empty"
