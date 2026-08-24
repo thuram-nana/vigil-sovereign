@@ -57,9 +57,12 @@ def strix_sandbox_scan_workflow_defects(text: str) -> list[str]:
     if not any("self-hosted" in l for l in runs_on_lines):
         defects.append("job runs-on must include a 'self-hosted' label so it stays dormant on GitHub-hosted infra")
 
-    # Builds the strix sandbox image.
-    if "strix build strix-sandbox" not in text and "strix-sandbox" not in text:
-        defects.append("workflow must BUILD the strix sandbox image")
+    # Builds the strix sandbox image. Require the actual build command (`docker compose … build
+    # strix-sandbox`) — NOT merely the substring "strix-sandbox" (which appears in the header comments,
+    # so the earlier `and "strix-sandbox" not in text` made this check vacuous: it could not catch removal
+    # of the build step).
+    if "build strix-sandbox" not in text:
+        defects.append("workflow must BUILD the strix sandbox image (e.g. `docker compose … build strix-sandbox`)")
 
     # trivy image scan at the gateway threshold.
     if "trivy image" not in text:
