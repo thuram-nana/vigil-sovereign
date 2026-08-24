@@ -1674,6 +1674,30 @@
       "ci_job": "CRUCIBLE core on vigil_core",
       "failure_class": "n-a",
       "default": "off"
+    },
+    {
+      "id": "W11-2",
+      "title": "Live-fire scripts fail closed on a missing required tool",
+      "claim": "The live-fire tool preflight fails closed on a missing required tool: `require_tools` names every required binary that is not resolvable on PATH and exits non-zero rather than tolerating it or reporting a skip as a pass, and only a tool explicitly acknowledged as optional may be absent without failing the run.",
+      "source": "docs/decisions/W11-2-livefire-scheduled-failclosed.md:26",
+      "enforced_by": {
+        "file": "tools/livefire/require_tools.py",
+        "symbol": "require_tools"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_livefire_require_tools.py",
+        "tests": [
+          "test_present_required_tool_is_accepted",
+          "test_missing_required_tool_fails_closed",
+          "test_negative_control_absent_tool_is_named_not_swallowed",
+          "test_allow_missing_downgrades_only_the_named_tool",
+          "test_cli_exits_nonzero_and_annotates_on_missing_tool",
+          "test_the_gate_is_actually_wired_into_scripts_and_scheduled_jobs"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

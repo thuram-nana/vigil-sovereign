@@ -203,3 +203,122 @@ jobs:
             exit 1
           fi
           echo "no non-loopback send was attempted by any guarded tool"
+
+  # ===========================================================================================
+  # W11-2 (#483): the three live-fire scripts that no workflow referenced, wired as scheduled
+  # jobs that ASSERT ON RESULTS (a grepped success sentinel, not merely a zero exit) and FAIL
+  # CLOSED on a missing required tool (tools/livefire/require_tools.py — proven in required CI by
+  # integration/tests/test_livefire_require_tools.py). Nightly + on demand, never blocking a PR.
+  # ===========================================================================================
+
+  livefire-range:
+    name: livefire range (nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: preflight — a MISSING required tool FAILS this job (W11-2, not tolerated)
+        # The negative control for this gate is asserted in required CI: remove a required tool and
+        # require_tools.py exits non-zero. Here it guards the run for real.
+        run: python3 tools/livefire/require_tools.py docker python3 git
+
+      - name: source range — deterministic, no docker, and its content-id match is a RESULT assertion
+        # `up src` dies non-zero on any fingerprint drift; the status grep asserts the recorded content
+        # ids actually matched, rather than trusting the exit code alone.
+        run: |
+          bash tools/livefire/range.sh up src
+          bash tools/livefire/range.sh status | tee range-status.log
+          grep -q 'content ids match the manifest' range-status.log \
+            || { echo "::error::the source range content ids did not match the manifest"; exit 1; }
+
+      - name: bring the container range up and prove each planted weakness (differential)
+        # `range.sh verify` runs each probe next to its negative control; it dies non-zero unless the
+        # planted weakness fired AND the control stayed silent. This is the real live-fire.
+        run: |
+          bash tools/livefire/range.sh up all
+          bash tools/livefire/range.sh verify | tee range-verify.log
+
+      - name: ASSERT on the differential result, not just the exit code
+        run: |
+          grep -q 'every probed target demonstrated its planted weakness, and every control stayed silent' \
+            range-verify.log \
+            || { echo "::error::range verify did not reach its all-weaknesses-present success sentinel"; exit 1; }
+
+      - name: tear the range down (leave the runner clean)
+        if: always()
+        run: bash tools/livefire/range.sh down || true
+
+  livefire-k8s-rbac:
+    name: livefire k8s RBAC (nightly)
+    # E4: the Kubernetes-RBAC live-fire against a REAL throwaway k3s cluster this job stands up and
+    # destroys. RESIDUAL: the real-cluster run on a hosted runner is not verifiable from the
+    # charter-restricted build host; the fail-closed preflight guarding it IS proven in required CI.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: preflight — a MISSING required tool FAILS this job (W11-2, not tolerated)
+        run: python3 tools/livefire/require_tools.py docker python3
+
+      - name: install the engine's python deps (hash-locked; adjudicates the real API bytes)
+        run: |
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+
+      - name: live-fire the k8s RBAC oracle against real cluster evidence, asserting on results
+        env:
+          # The deps are installed into the runner's interpreter above, so no offense venv is needed.
+          VIGIL_LIVEFIRE_NO_VENV: "1"
+        run: |
+          bash tools/livefire/k8s_rbac_livefire.sh | tee k8s-rbac.log
+          grep -q 'All checks held against real cluster evidence.' k8s-rbac.log \
+            || { echo "::error::k8s RBAC live-fire did not reach its all-checks-held success sentinel"; exit 1; }
+
+  livefire-secret-github:
+    name: livefire exposed-secret validity (nightly)
+    # E5 github_pat row against the REAL api.github.com. RESIDUAL: it needs an operator GitHub PAT;
+    # there is none in default CI (the default GITHUB_TOKEN is an app-installation token and cannot
+    # authenticate GET /user). With no PAT this is an honest reported SKIP on the credential — never on
+    # a missing tool: `gh` being absent still FAILS the preflight below.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: preflight — gh MUST be present; a missing tool FAILS this job (W11-2, not tolerated)
+        run: python3 tools/livefire/require_tools.py gh python3
+
+      - name: install the engine's python deps (hash-locked; adjudicates the real 200/401)
+        run: |
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+
+      - name: live-fire exposed-secret validity against the real api.github.com, asserting on results
+        env:
+          VIGIL_LIVEFIRE_NO_VENV: "1"
+          # An operator PAT with read:user. Absent by default => the run is an honest credential SKIP.
+          GH_TOKEN: ${{ secrets.VIGIL_LIVEFIRE_GH_PAT }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::no VIGIL_LIVEFIRE_GH_PAT secret is configured — the exposed-secret live-fire"
+            echo "needs an operator PAT (RESIDUAL). The preflight above already proved gh is present;"
+            echo "skipping the provider run rather than fabricating a result."
+            exit 0
+          fi
+          bash tools/livefire/secret_github_livefire.sh | tee secret-github.log
+          grep -q 'All checks held against a real GitHub credential' secret-github.log \
+            || { echo "::error::exposed-secret live-fire did not reach its all-checks-held success sentinel"; exit 1; }

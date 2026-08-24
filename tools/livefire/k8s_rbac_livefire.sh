@@ -39,6 +39,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTAINER="${CONTAINER:-vigil-livefire-k3s}"
 K3S_IMAGE="${K3S_IMAGE:-rancher/k3s:v1.31.5-k3s1}"
 WORK="$(mktemp -d)"
@@ -49,7 +50,12 @@ export DOCKER_CONFIG="${DOCKER_CONFIG:-$WORK/dockercfg}"
 mkdir -p "$DOCKER_CONFIG" && echo '{}' > "$DOCKER_CONFIG/config.json"
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+die() { printf '\n\033[31mSTOP\033[0m %s\n' "$*" >&2; exit 1; }
 k()   { docker exec "$CONTAINER" kubectl "$@"; }
+
+# W11-2: fail closed on a missing required tool. docker and python3 are non-negotiable here; a run that
+# cannot stand up its cluster or adjudicate the bytes must not report success.
+python3 "$HERE/require_tools.py" docker python3
 
 cleanup() {
   if [ "${KEEP_CLUSTER:-0}" = "1" ]; then
@@ -110,8 +116,18 @@ echo "   captured $(ls "$WORK"/*.json | wc -l) real API responses"
 
 say "4. Adjudicating the real evidence through the production path"
 cd "$REPO"
-# shellcheck disable=SC1091
-source .venv-offense/bin/activate
+# VIGIL_VENV lets this run from a git worktree (no venv of its own); VIGIL_LIVEFIRE_NO_VENV=1 lets a CI
+# job that already installed the engine deps into the current interpreter proceed without a venv. If
+# neither the venv nor that opt-out is present, fail closed rather than adjudicate against a bare python.
+VENV="${VIGIL_VENV:-$REPO/.venv-offense}"
+if [ -f "$VENV/bin/activate" ]; then
+  # shellcheck disable=SC1091
+  source "$VENV/bin/activate"
+elif [ "${VIGIL_LIVEFIRE_NO_VENV:-0}" = "1" ]; then
+  echo "   no offense venv; using the current interpreter (VIGIL_LIVEFIRE_NO_VENV=1)"
+else
+  die "the offense virtualenv is missing at $VENV (set VIGIL_VENV, or VIGIL_LIVEFIRE_NO_VENV=1 if the deps are already installed)"
+fi
 WORK="$WORK" PYTHONPATH=integration:engine/crucible:gateway python3 "$REPO/tools/livefire/k8s_rbac_livefire.py"
 
 say "LIVE-FIRE COMPLETE"

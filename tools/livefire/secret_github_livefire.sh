@@ -61,12 +61,17 @@ set -euo pipefail
 # No `set -x` anywhere in this script: tracing would print the token.
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 skip() { printf '\n\033[1mLIVE-FIRE SKIPPED\033[0m — %s\n' "$*"; exit 0; }
 
 say "1. Checking for an authenticated GitHub credential"
-command -v gh >/dev/null 2>&1 || skip "the GitHub CLI (gh) is not installed. Install it and run 'gh auth login'."
+# W11-2: a MISSING TOOL is a hard failure, not a clean skip. gh being absent is exactly the tolerated
+# case this workstream removes — the run cannot be proven without it, so fail closed here. (Authentication
+# is a CREDENTIAL, not a tool: an unauthenticated gh is still an honest skip below, because there is no
+# operator credential in default CI.)
+python3 "$HERE/require_tools.py" gh python3
 gh auth status >/dev/null 2>&1 || skip "gh is not authenticated. Run 'gh auth login', then re-run this."
 gh auth token >/dev/null 2>&1   || skip "gh is authenticated but exposes no token (a GITHUB_TOKEN-less or restricted setup)."
 echo "   gh is authenticated — using the operator's own credential against their own /user endpoint."
@@ -74,14 +79,23 @@ echo "   the token is piped on stdin: never to disk, never to an argv, never to 
 
 say "2. Checking the offense virtualenv"
 # VIGIL_VENV lets this run from a git worktree, whose checkout has no venv of its own.
+# VIGIL_LIVEFIRE_NO_VENV=1 lets a CI job that already installed the engine deps into the current
+# interpreter proceed without a venv.
 VENV="${VIGIL_VENV:-$REPO/.venv-offense}"
-[ -f "$VENV/bin/activate" ] || skip "the offense virtualenv is missing at $VENV (set VIGIL_VENV to point at it)."
-echo "   using $VENV"
+if [ -f "$VENV/bin/activate" ]; then
+  echo "   using $VENV"
+elif [ "${VIGIL_LIVEFIRE_NO_VENV:-0}" != "1" ]; then
+  skip "the offense virtualenv is missing at $VENV (set VIGIL_VENV, or VIGIL_LIVEFIRE_NO_VENV=1 if the deps are already installed)."
+else
+  echo "   no offense venv; using the current interpreter (VIGIL_LIVEFIRE_NO_VENV=1)"
+fi
 
 say "3. Driving the real runner against the real api.github.com, then adjudicating"
 cd "$REPO"
-# shellcheck disable=SC1091
-source "$VENV/bin/activate"
+if [ -f "$VENV/bin/activate" ]; then
+  # shellcheck disable=SC1091
+  source "$VENV/bin/activate"
+fi
 gh auth token | PYTHONPATH=integration:engine/crucible:gateway \
   python3 "$REPO/tools/livefire/secret_github_livefire.py"
 
