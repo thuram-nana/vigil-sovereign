@@ -1746,6 +1746,49 @@
       "ci_job": "CRUCIBLE eval + benchmark corpus",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W11-5",
+      "title": "Two engagements share one spine and stay a single contiguous verified chain across a concurrent compaction",
+      "claim": "Two engagements sharing one segmented spine stay a single contiguous `verify()`-green chain with every record attributed to the engagement that wrote it, and a reader that races a concurrent compaction's segment supersession re-resolves and completes instead of raising, because `SpineStore._resolve_segments` treats only a strictly-forward manifest-generation move as a benign supersession to retry while a segment missing at an unchanged or regressed generation still fails closed.",
+      "source": "docs/decisions/W11-5-concurrency-stress-race.md:17",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/store.py",
+        "symbol": "SpineStore._resolve_segments"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_spine_concurrency_stress.py",
+        "tests": [
+          "test_two_engagements_one_spine_stay_contiguous_and_attributed",
+          "test_concurrent_engagement_read_survives_compaction_supersession",
+          "test_genuine_segment_loss_still_raises_under_concurrent_engagements"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W11-5-flake",
+      "title": "A flaky test can only be quarantined through an explicit, reviewer-visible registry entry",
+      "claim": "A test can be quarantined (skipped as known-flaky) only when it is registered in `docs/flake/quarantine.json` with a reason and a tracking issue: `require_registered_quarantine` returns the entry for a registered id and raises `QuarantineError` for any unregistered id, so there is no silent-quarantine path.",
+      "source": "docs/decisions/W11-5-concurrency-stress-race.md:40",
+      "enforced_by": {
+        "file": "tools/flake/flake_tracker.py",
+        "symbol": "require_registered_quarantine"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_flake_tracking.py",
+        "tests": [
+          "test_quarantine_is_explicit_not_silent",
+          "test_check_quarantine_explicit_flags_only_unregistered",
+          "test_pass_rate_computed_from_the_ledger",
+          "test_committed_ledger_has_real_history_for_the_stress_harness"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
