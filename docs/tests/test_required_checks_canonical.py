@@ -194,6 +194,15 @@ KNOWN_NONPR_ADVISORY: dict[str, str] = {
         "required 'SIGIL governor gates (P7 — offense gate + authn)' job; this soak is too slow for a PR "
         "runner and never reports on a PR, so requiring it would block every PR."
     ),
+    "deploy-verify full (real make smoke, scheduled)": (
+        "deploy-verify.yml — schedule/workflow_dispatch only (W11-8 #489); it builds the two isolated venvs "
+        "and runs the REAL `make smoke` (exit code honoured) then drives the deploy-verify pipeline. Building "
+        "both venvs (Rust kernel + hash-locked installs, minutes + network) is too heavy for a PR runner, so "
+        "it never reports on a PR and requiring it would block every PR. The FAST, deterministic core — a "
+        "healthy deploy stands, a broken deploy is caught by post-deploy smoke and auto-rolled-back, and a "
+        "smoke command's exit code is honoured and drives the rollback — runs on every PR in the required "
+        "'SIGIL governor gates (P7 — offense gate + authn)' job via apps/sigil/tests/test_deploy_verify.py."
+    ),
     "mutation-testing + coverage-fuzzing (scheduled, non-blocking)": (
         "mutation-fuzz.yml (W11-3 #484) — schedule/workflow_dispatch only; mutmut/cosmic-ray/cargo-fuzz/"
         "atheris re-run the suite per mutant or need a nightly libFuzzer toolchain, so they cannot run on "

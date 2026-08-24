@@ -190,6 +190,44 @@ vigil panic
 
 ---
 
+## 4. Deploy-verify — prove a deploy is healthy, or auto-rolls-back (W11-8, #489)
+
+A deploy is not "done" when the new code is in place; it is done when a **post-deploy smoke** has
+confirmed the running system is healthy — and if it is not, the deploy has **automatically rolled back**
+to the prior version and that prior version has been re-verified intact. The `deploy_verify` pipeline
+(`apps/sigil/sigil/spine/deploy_verify.py`) makes that a real, falsifiable procedure by reusing the
+upgrade/rollback machinery of section 2/3.
+
+1. **Post-deploy smoke — run `make smoke`, and honour its exit code.** After the upgrade of section 2,
+   before you re-open the cockpit, run the boundary + native-verb smoke. A non-zero exit means the
+   deployment is unhealthy — do NOT keep it up:
+
+   ```
+   make smoke
+   ```
+
+2. **Drive the full deploy-verify pipeline** (a healthy deploy stands; a deliberately-broken one is
+   caught by the post-deploy smoke and automatically rolled back, with the prior version restored and
+   its owner signature + full record set re-verified). It prints a JSON verdict and exits non-zero if the
+   pipeline did not behave correctly:
+
+   ```
+   python3 -m sigil.spine.deploy_verify --smoke-cmd 'make smoke'
+   ```
+
+3. **If the smoke failed**, the pipeline has already restored the prior data plane from the pre-deploy
+   verified backup (section 3a's automatic data rollback). Roll the **code** back to the previous version
+   (section 3a) and re-run `make smoke` to confirm the restored version is healthy before re-opening
+   `vigil up`.
+
+The FAST, deterministic core of this pipeline — the healthy-deploy, broken-deploy-caught-and-rolled-back
+negative control, and the smoke-exit-code-is-honoured proof — runs on **every PR** in the required
+`SIGIL governor gates (P7 …)` job (`apps/sigil/tests/test_deploy_verify.py`). The **heavy** variant that
+builds the two venvs and runs the REAL `make smoke` end to end is the scheduled
+`.github/workflows/deploy-verify.yml` (honestly NOT a required check — it never reports on a PR).
+
+---
+
 ## How this runbook is kept honest
 
 | Documented behaviour | Executed / asserted by (required CI) |
@@ -200,6 +238,7 @@ vigil panic
 | `CHANGELOG.md` is not stale vs. `VERSION`/tags | `docs/tests/test_changelog_staleness.py` |
 | The tag-triggered release workflow signs + attests + publishes | `integration/tests/test_release_provenance.py`, `integration/tests/test_release_github_release.py` |
 | `vigil upgrade` migrates crash-safely and rolls back on failure | the W5-5 sovereign upgrade suite under `apps/sigil/tests/` |
+| A deploy runs a post-deploy smoke (exit code honoured) and auto-rolls-back a broken deployment, restoring the prior version intact | `apps/sigil/tests/test_deploy_verify.py` (required `SIGIL governor gates (P7 …)` job) |
 
 A **manual drill** is still required for the parts CI cannot exercise end to end without a real tag and a
 real second host: performing an actual `git tag` + `git push` release, and an actual

@@ -1,0 +1,65 @@
+# deploy-verify (full) — the HEAVY variant of the W11-8 (#489) deploy-verify pipeline.
+#
+# THE SPLIT THIS IMPLEMENTS. The required `SIGIL governor gates (P7 ...)` job runs the FAST, deterministic
+# core of the deploy-verify pipeline (apps/sigil/tests/test_deploy_verify.py) on every PR — that is where the
+# falsifiability lives (a healthy deploy stands; a deliberately-broken deploy is caught by post-deploy smoke
+# and auto-rolled-back with the prior version restored intact; a smoke command's exit code is honoured and
+# drives the rollback). That core does NOT build the two isolated venvs, so it cannot run the REAL
+# `make smoke`. THIS job does: it builds the venvs and runs the actual `make smoke` — honouring its exit code
+# (the step fails the job on a non-zero exit) — then drives the pipeline with that same real smoke.
+#
+# HONESTLY LABELLED, NOT REQUIRED. This never runs on a PR (schedule / workflow_dispatch only), so it can
+# never be — and is never claimed to be — a merge-blocking check. It is enumerated with its reason in
+# KNOWN_NONPR_ADVISORY of docs/tests/test_required_checks_canonical.py. Building both venvs (Rust kernel +
+# hash-locked installs, minutes + network) is too heavy for a per-PR runner; the blocking guarantee is the
+# required deterministic core, not this job.
+#
+# `make smoke` HAD NO WORKFLOW CALLER before W11-8 — a broken smoke could ship unnoticed. This wires it into
+# CI with its exit code honoured. A true multi-host cloud staging / canary deploy is deferred until real
+# staging infrastructure exists; see docs/decisions/W11-8-deploy-verify-pipeline.md.
+
+name: deploy-verify
+
+on:
+  schedule:
+    - cron: "15 5 * * 1"        # weekly, Monday 05:15 UTC (off-peak; distinct from the other scheduled jobs)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-verify-full:
+    name: deploy-verify full (real make smoke, scheduled)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: build the two isolated venvs + the WARDEN kernel (the deployable build)
+        run: |
+          # `make envs` == `bash envs/build_envs.sh`: the two editable venvs (.venv-offense / .venv-sovereign)
+          # from the committed hash-locks + the Rust kernel + the egress guard. This is the build that is then
+          # "deployed" and smoke-checked below.
+          make envs
+
+      - name: post-deploy smoke — run the REAL `make smoke`, exit code HONOURED
+        run: |
+          # A non-zero exit from `make smoke` fails THIS step (and the job): the boundary + native-verb smoke
+          # is now a real CI gate, not an uninvoked target. This is the criterion "`make smoke` is CI-invoked
+          # and its exit code is honoured" (#457).
+          make smoke
+
+      - name: drive the deploy-verify pipeline with the real make smoke as the post-deploy smoke
+        run: |
+          # Healthy path uses the REAL `make smoke` (exit code honoured); the broken path uses the built-in
+          # health probe so the deliberately-broken deployment is actually detected and rolled back. Exit 0
+          # IFF the whole pipeline behaved correctly.
+          PYTHONPATH=apps/sigil .venv-sovereign/bin/python -m sigil.spine.deploy_verify --smoke-cmd 'make smoke'
