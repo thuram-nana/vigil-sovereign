@@ -1812,6 +1812,111 @@
       "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W16-STD-4-A",
+      "title": "A records-bearing host with no signed head fails the health check",
+      "claim": "A SIGIL host that holds spine records but has no valid owner-signed head fails the health check.",
+      "source": "docs/decisions/W16-STD-4-spine-gaps.md:10",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/cli.py",
+        "symbol": "_signed_head_doctor"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_doctor_signed_head.py",
+        "tests": [
+          "test_records_without_signed_head_fails_doctor",
+          "test_signed_head_passes_doctor",
+          "test_empty_pristine_box_passes_doctor"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-4-B",
+      "title": "Unresolvable citations are refused at read time, not rendered",
+      "claim": "A memory retrieval hit that does not resolve to a live signed spine record is refused at read time and never rendered.",
+      "source": "docs/decisions/W16-STD-4-spine-gaps.md:17",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/health.py",
+        "symbol": "grounded_after_refusal"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_spine_health.py",
+        "tests": [
+          "test_grounded_after_refusal_drops_high_score_drift",
+          "test_resolve_citation_refuses_seq_beyond_tip",
+          "test_resolve_citation_refuses_wrong_entry_hash"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-4-C",
+      "title": "Projection drift from the signed chain is detected and reported",
+      "claim": "The vector projection is compared against the signed chain and reported as drift when it references a seq beyond the tip or holds more points than the chain has projectable records.",
+      "source": "docs/decisions/W16-STD-4-spine-gaps.md:24",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/health.py",
+        "symbol": "projection_drift"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_spine_health.py",
+        "tests": [
+          "test_projection_drift_trips_on_reference_host_shape",
+          "test_projection_trailing_is_not_drift",
+          "test_projection_drift_in_sync_is_clean"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-4-D",
+      "title": "Opt-in content de-duplication on append does not break the hash chain",
+      "claim": "Opt-in content de-duplication on append returns an existing record's seq for byte-identical content without writing a new record, leaving the hash chain unchanged.",
+      "source": "docs/decisions/W16-STD-4-spine-gaps.md:31",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/store.py",
+        "symbol": "SpineStore._find_dedup"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_spine_dedup.py",
+        "tests": [
+          "test_dedup_returns_existing_seq_and_writes_nothing",
+          "test_dedup_keys_on_plaintext_for_sealed_content",
+          "test_dedup_off_by_default_appends_the_duplicate"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "off"
+    },
+    {
+      "id": "W16-STD-4-E",
+      "title": "The hard-prune cutover deletes crash-safely (kill-9 fuzz)",
+      "claim": "The hard-prune cutover deletes the pruned prefix from the live spine crash-safely: a crash at any point recovers to the un-pruned or the pruned state, never a torn or lost chain, with the pruned prefix preserved in the owner-anchored archive.",
+      "source": "docs/decisions/W16-STD-4-spine-gaps.md:38",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/prune.py",
+        "symbol": "commit_prune"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_spine_prune_crashfuzz.py",
+        "tests": [
+          "test_crash_at_each_cutover_barrier",
+          "test_random_sigkill_during_cutover",
+          "test_recovery_oracle_is_not_a_rubber_stamp"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

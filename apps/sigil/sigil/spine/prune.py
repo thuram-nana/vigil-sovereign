@@ -519,3 +519,92 @@ def _cumulative_over(arch: list[SpineRecord], am: dict) -> str:
 # entry_hash recomputation guard used by tests (a leaf whose entry_hash != H(seq,prev,cert) is tampered).
 def recompute_entry_hash(r: SpineRecord) -> str:
     return _entry_hash(r.seq, r.prev_hash, r.cert_digest)
+
+
+# ---- Slice E: the crash-safe cutover that DELETES (behind the owner gates) ------------------------------
+def _prior_snapshot(store) -> Optional[dict]:
+    """The most-recent committed `kind="snapshot"` record's payload (with its OWN seq stamped into
+    `snapshot_seq`, so the next snapshot chains `prev_snapshot_seq` correctly), or None for the first prune.
+    The snapshot payload is plaintext (no sealed content field), so the raw record payload is the fold."""
+    last_snap = None
+    for r in store.iter_records():
+        if r.kind == "snapshot":
+            last_snap = r
+    if last_snap is None:
+        return None
+    return {**last_snap.payload, "snapshot_seq": last_snap.seq}
+
+
+def _append_snapshot_idempotent(store, snap_payload: dict) -> int:
+    """Append the `kind="snapshot"` fold, unless an identical one (same cumulative_merkle_root + base_seq)
+    already sits in the recent tail — the RESUME guard: a prune retried after a crash between the snapshot
+    append and the head sign must not stack a second snapshot. Returns the snapshot record's seq."""
+    tip = store.next_seq - 1
+    if tip >= 0:
+        for r in store.iter_records(since_seq=max(-1, tip - 8)):
+            if (r.kind == "snapshot" and isinstance(r.payload, dict)
+                    and r.payload.get("cumulative_merkle_root") == snap_payload["cumulative_merkle_root"]
+                    and r.payload.get("base_seq") == snap_payload["base_seq"]):
+                return r.seq
+    return store.append(kind="snapshot", source="spine", actor="OWNER", payload=snap_payload)
+
+
+def commit_prune(store, K: int, *, confirm: bool = False) -> dict:
+    """Cold-archive hard-prune Slice E — the crash-safe cutover that DELETES the pruned prefix [0..K) from
+    the LIVE spine (its bytes preserved in the owner-anchored archive). This is the ONLY code path that ever
+    drops a live record.
+
+    THREE OWNER GATES (all required):
+      1. CRYPTO — a valid owner-signed head must already anchor the spine, and the cutover SIGNS the new
+         pruned head with the owner key (no owner key ⇒ no prune);
+      2. EXPLICIT — `confirm=True` (the CLI's `--yes`); a prune is never implicit;
+      3. REFERENTIAL SAFETY — `check_prune_safe` (§7 floors: open workflows, active accounts, owner-key
+         succession, segment alignment) must pass, or the prune is refused touching nothing.
+
+    CRASH-SAFE ORDERING (head-as-commit): archive-copy+verify → append snapshot → **SIGN THE PRUNED HEAD**
+    (the durable commit) → rebase the manifest (drop below-K) → delete the orphaned segment files. A crash
+    BEFORE the head sign leaves the un-pruned spine (retry re-runs, idempotently); a crash AFTER it leaves a
+    validly-signed pruned head that classify_head/verify() honour whether or not the manifest+file GC has
+    finished — and `finish_prune()` completes the GC on the next run. At NO crash point is a record lost
+    (below-K lives in the verified archive; ≥K is retained) or the chain torn/forked."""
+    from .checkpoint import sign_pruned_head, verify_checkpoint
+    from .store import _maybe_crash
+
+    if not confirm:
+        raise PruneUnsafe("commit_prune requires explicit owner confirmation (confirm=True / `sigil spine "
+                          "prune --yes`) — a hard prune deletes records and is never implicit")
+    # GATE 0: complete any prior prune whose head committed but whose GC did not finish (idempotent), then
+    # require a valid owner-signed baseline (GATE 1, crypto) before dropping anything.
+    store.finish_prune()
+    ok, why = verify_checkpoint(store)
+    if not ok:
+        raise PruneUnsafe(f"refuse to prune a spine that is not anchored by a valid signed head: {why}")
+
+    archived = check_prune_safe(store, K)                  # GATE 3: §7 referential floors (read-only)
+    prior = _prior_snapshot(store)
+    snap_payload = snapshot_payload(store, K, prior=prior)
+
+    # 1) durable, owner-anchored ARCHIVE of [0..K) BEFORE any live drop (copy → verify).
+    archive_copy(store, K, snap_payload)
+    _maybe_crash("prune_after_archive")
+
+    # 2) commit the fold on-chain so the post-prune folds (anti-replay high-water, accounts, promotions) have
+    #    their seed as a live record within the retained window.
+    snap_seq = _append_snapshot_idempotent(store, snap_payload)
+    _maybe_crash("prune_after_snapshot")
+
+    # 3) SIGN THE PRUNED HEAD — the durable commit instant (atomic head.json write + floor advance).
+    head = sign_pruned_head(store, base_seq=K, base_prev_hash=snap_payload["base_prev_hash"],
+                            cumulative_merkle_root=snap_payload["cumulative_merkle_root"], snapshot_seq=snap_seq)
+    _maybe_crash("prune_after_head")
+
+    # 4) rebase the manifest so reads follow the retained window [K..T] (atomic new-generation publish).
+    store.rebase_manifest_below(K)
+    _maybe_crash("prune_after_manifest")
+
+    # 5) reclaim: unlink the now-orphaned below-K segment files (idempotent post-commit GC).
+    dropped = store.delete_orphan_segment_files_below(K)
+
+    return {"base_seq": K, "snapshot_seq": snap_seq, "head_last_seq": head.last_seq,
+            "archived_segments": len(archived), "files_deleted": dropped,
+            "cumulative_merkle_root": snap_payload["cumulative_merkle_root"]}

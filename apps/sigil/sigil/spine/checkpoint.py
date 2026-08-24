@@ -142,6 +142,50 @@ def checkpoint(store: SpineStore | None = None, *, force: bool = False) -> Signe
     return head
 
 
+def sign_pruned_head(store: SpineStore, *, base_seq: int, base_prev_hash: str,
+                     cumulative_merkle_root: str, snapshot_seq: int) -> SignedChainHead:
+    """Sign the v2 (cold-archive hard-prune) head over the RETAINED live window [base_seq..T] — the DURABLE
+    COMMIT of a prune (hard-prune Slice E). Written + floor-advanced under a single `floor_lock`, exactly
+    like `checkpoint()`, so it is the crash-atomic commit instant: a crash BEFORE this leaves the un-pruned
+    spine (the head still anchors [0..T]); a crash AFTER it leaves a validly-signed pruned head that
+    classify_head verifies over the live window whether or not the manifest/segment GC has caught up.
+
+    The live window is selected BY SEQ (`>= base_seq`) from the CURRENT store, so this is correct while the
+    pruned prefix segments are still physically present (the manifest rebase runs AFTER this). base_count ==
+    base_seq (the pruned prefix [0..base_seq) is contiguous from genesis). The meta-chain `prev_head_hash` is
+    set to the durable floor's recorded head hash so `advance_floor`'s v2 meta-chain guard accepts this head
+    as the parent's child. Raises if the retained window does not actually start at base_seq/base_prev_hash
+    (a caller bug — never silently sign a mismatched anchor), or if a LONGER head already stands (rollback)."""
+    from ..reuse.canonical import evidence_signing_bytes
+    from ..reuse.chain import _head_payload
+    from ..reuse.crypto import sign
+    from ..reuse.models import Signature
+    priv, pub = _owner_keys()
+    owner_kp = KeyPair(public_key_b64=pub, private_key_b64=priv)
+    live = [e for e in store.entries() if e.seq >= base_seq]
+    if not live or live[0].seq != base_seq or live[0].prev_hash != base_prev_hash:
+        raise ValueError(
+            f"pruned head anchor mismatch: retained window must start at seq {base_seq} linking from "
+            f"{base_prev_hash[:12]}… (got {'<empty>' if not live else f'{live[0].seq}/{live[0].prev_hash[:12]}…'})")
+    prior_floor = load_floor()
+    head = SignedChainHead(
+        schema_version=2, engagement_slug=SCOPE, last_seq=live[-1].seq,
+        entry_count=base_seq + len(live), head_hash=live[-1].entry_hash,
+        base_seq=base_seq, base_prev_hash=base_prev_hash, base_count=base_seq,
+        cumulative_merkle_root=cumulative_merkle_root, snapshot_seq=snapshot_seq,
+        prev_head_hash=(prior_floor.head_sig_hash if prior_floor is not None else ""))
+    msg = evidence_signing_bytes(_head_payload(head))
+    head = head.model_copy(update={"signatures": [Signature(key_id=OWNER_KEY_ID, signature_b64=sign(priv, msg))]})
+    with floor_lock():                                     # head + floor commit as one critical section
+        disk = _read_head_on_disk()
+        if disk is not None and disk.entry_count > head.entry_count:
+            raise ValueError(f"refusing to write a pruned head with entry_count {head.entry_count} < the "
+                             f"on-disk head's {disk.entry_count} (would roll the spine back)")
+        _atomic_write_text(HEAD_PATH, head.model_dump_json())
+        advance_floor(head, owner_key=owner_kp, _locked=True)   # UPWARD (entry_count/base_seq both grow)
+    return head
+
+
 def classify_head(head: SignedChainHead, entries: list, tr: TrustRoot,
                   *, floor: Floor | None = None) -> tuple[bool, str]:
     """Pure head/chain classification (no globals — testable in isolation), SNAPSHOT-AWARE for the

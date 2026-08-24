@@ -1036,6 +1036,32 @@ def cmd_spine(a) -> None:
         ok, msg = verify_with_archive(store, adir=adir)
         print(("OK: " if ok else "FAILED: ") + msg)
         sys.exit(0 if ok else 2)
+    elif a.action == "prune":
+        # Slice E: the crash-safe cutover that DELETES the pruned prefix [0..K). Owner-gated: requires -K,
+        # --yes, a valid owner-signed head (the cutover re-signs with the owner key), and the §7 floors.
+        from .spine.prune import PruneUnsafe, commit_prune
+        if a.boundary is None:
+            print("prune needs -K <segment-aligned boundary> (see `sigil spine prune-plan -K …` first)",
+                  file=sys.stderr)
+            sys.exit(2)
+        if not a.yes:
+            print(f"REFUSING: `sigil spine prune -K {a.boundary}` DELETES records [0..{a.boundary}) from the "
+                  f"live spine (preserved in the owner-anchored archive). Re-run with --yes to confirm.",
+                  file=sys.stderr)
+            sys.exit(2)
+        try:
+            rep = commit_prune(store, a.boundary, confirm=True)
+        except PruneUnsafe as e:
+            print(f"prune UNSAFE at K={a.boundary}: {e}", file=sys.stderr)
+            sys.exit(2)
+        print(f"pruned [0..{rep['base_seq']}): archived {rep['archived_segments']} segment(s), deleted "
+              f"{rep['files_deleted']} file(s), snapshot at seq {rep['snapshot_seq']}, head last_seq "
+              f"{rep['head_last_seq']}. Re-attach anytime with `sigil spine verify-archive`.")
+    elif a.action == "prune-finish":
+        # Idempotently complete a prune whose owner-signed head committed but whose GC (manifest rebase +
+        # file unlink) was interrupted — the crash roll-forward, safe to run anytime.
+        print("completed a pending prune (manifest rebased + orphan files reclaimed)"
+              if store.finish_prune() else "nothing to finish (no committed-but-unreclaimed prune)")
     elif a.action == "status":
         segs = store.segment_info()
         if not segs:
@@ -2034,11 +2060,14 @@ def main(argv=None) -> None:
                      help="skip the backup+rollback frame (disposable store only; still refuses a "
                           "non-verifying spine)")
     pup.set_defaults(fn=cmd_upgrade)
-    psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact; convert; status; prune-plan; verify-archive")
+    psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact; convert; status; "
+                                       "prune-plan; verify-archive; prune; prune-finish")
     psp.add_argument("action", choices=["migrate", "rotate", "compact", "convert", "status",
-                                        "prune-plan", "verify-archive"])
+                                        "prune-plan", "verify-archive", "prune", "prune-finish"])
     psp.add_argument("-K", "--boundary", type=int, default=None,
-                     help="prune-plan: the segment-aligned boundary K (dry-run — checks §7 guards, archives NOTHING)")
+                     help="prune-plan / prune: the segment-aligned boundary K")
+    psp.add_argument("--yes", action="store_true",
+                     help="prune: REQUIRED confirmation — the hard prune DELETES the pruned prefix [0..K)")
     psp.add_argument("--archive", default=None, help="verify-archive: the archive dir (default SIGIL_HOME/spine/archive)")
     psp.set_defaults(fn=cmd_spine)
     pck = sub.add_parser("checkpoint",
