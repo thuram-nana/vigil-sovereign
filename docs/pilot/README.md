@@ -6,6 +6,9 @@
 > pilot run by, for, on behalf of, or funded by any government / agency / ministry / military /
 > law-enforcement / public-authority / state-owned entity. Arrange licensing before a pilot:
 > **thuram@thuramnana.com** (subject: `VIGIL commercial license`). See [`LICENSING.md`](../../LICENSING.md).
+>
+> The Licensor is **SIGIL Limited** (*Sovereign Integrity Governance Infrastructure Labs*), a private
+> limited company registered in the Republic of Cameroon; founder & CEO Junior Thuram Nana.
 
 Operator-facing runbooks for controlled pilots. Each phase has a goal, the commands, and the expected result
 that constitutes a pass — grounded in the actual CLI verbs so it cannot drift.
