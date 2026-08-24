@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vigil-vscp"
+version = "0.1.0"
+description = "VSCP — the Vigil Sovereign Control Plane: a sibling application, CI-isolated from the assessment product (W13-7 / #500)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0-OR-Commercial"  # first-party; see repo-root LICENSE + LICENSE-COMMERCIAL.md
+# OWN deps: reuses ONLY the shared, offense-free integrity substrate. It never depends on
+# vigil-integration / framework / strix / sigil — asserted by the isolation import-scan.
+dependencies = ["vigil-core"]
+
+[project.scripts]
+vscp-ctl = "vscp.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["vscp"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# ── quality gates (match the sibling packages' rule set) ────────────────────────────────
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E9", "F", "B", "C4", "PIE", "PLE", "ISC", "FLY", "T10", "SLOT"]
+ignore = [
+    "B007", "B008", "B011", "B904", "B905",
+    "C401", "C408", "C416", "C419", "C420",
+    "PIE810", "FLY002", "ISC002", "ISC003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**"    = ["E402", "F401", "F841", "B011", "B015", "B017"]
+"**/tests/**" = ["E402", "F401", "F841", "B011", "B015", "B017"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = false
+warn_redundant_casts = true
+check_untyped_defs = false

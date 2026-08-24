@@ -1,0 +1,50 @@
+name: VSCP sibling — isolated control plane
+
+# VSCP is a SIBLING application (W13-7 / #500) with its OWN runtime, deps, migrations and
+# CI. This is that CI: it runs VSCP's own test suite in isolation from the product.
+#
+# HONEST LABELLING (per the shared programme constraints): this workflow is ADDITIVE and
+# is NOT yet in .github/required-status-checks.txt — making a NEW check "required" needs a
+# branch-protection admin change the orchestrator applies separately. The LOAD-BEARING
+# isolation proof does NOT depend on this becoming required: it also runs as
+# integration/tests/test_vscp_isolation.py inside the ALREADY-REQUIRED
+# "integration two-env boundary (P5)" job. This workflow additionally runs VSCP's broader
+# suite (registries, signed issuance) and re-runs the isolation proof against the package.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  vscp:
+    name: VSCP isolated control plane (sibling)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: install VSCP's one dependency (vigil_core) + pytest
+        run: |
+          # VSCP depends ONLY on the shared, offense-free integrity substrate. Install it
+          # editable --no-deps (its runtime closure — cryptography/pydantic — comes from the
+          # hash-locked runtime, exactly as the other jobs do), then pytest for the harness.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+      - name: VSCP suite (isolation, reviewer read-only, registries, signed issuance)
+        run: |
+          # Run from the sibling project dir; conftest puts `vscp` on the path. This job
+          # imports NOTHING from the product (framework/strix/sigil/vigil_integration) — the
+          # isolation test asserts that property over the whole vscp package tree.
+          cd vscp && python -m pytest -q

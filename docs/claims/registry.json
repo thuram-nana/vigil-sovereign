@@ -2170,6 +2170,33 @@
       "ci_job": "the briefing explains every agent and capability",
       "failure_class": "n-a",
       "default": "off"
+    },
+    {
+      "id": "W13-7",
+      "title": "VSCP is a sibling application with CI-enforced isolation from the assessment product",
+      "claim": "VSCP is a SIBLING application under `vscp/` with its own runtime, dependencies (only the shared offense-free `vigil_core` substrate), migrations and CI, and it is ISOLATED from the assessment product: its database and Ed25519 signing key resolve strictly outside every product data root and `VscpConfig` REFUSES at construction any path that overlaps one (separate DB + isolated signing, fail-closed); no VSCP source file imports `framework`, `strix`, `sigil`, or `vigil_integration` (whose package init eagerly loads assessment-finding code), enforced by an AST import scan over the whole `vscp/vscp` tree with a negative control that flags a planted forbidden import; a VSCP attempt to read an assessment finding is REFUSED unconditionally and any authorization request referencing a finding is denied by a boundary gate; and reviewer roles are the read-only `viewer` of the shared RBAC-of-record, refused every write per route. The isolation proof runs in the REQUIRED `integration two-env boundary (P5)` job; VSCP's own broader suite runs in the additive `vscp-ci.yml` workflow.",
+      "source": "docs/decisions/W13-7-vscp-sibling-isolation.md:25",
+      "enforced_by": {
+        "file": "vscp/vscp/config.py",
+        "symbol": "VscpConfig"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_vscp_isolation.py",
+        "tests": [
+          "test_vscp_is_a_sibling_folder_with_its_own_runtime_deps_migrations_and_ci",
+          "test_no_import_path_to_assessment_findings",
+          "test_import_scanner_is_not_a_no_op_negative_control",
+          "test_separate_db_and_credentials",
+          "test_config_refuses_overlap_with_product_data_root_negative_control",
+          "test_reading_an_assessment_finding_is_refused",
+          "test_reviewer_write_is_refused_but_operator_is_allowed",
+          "test_reviewer_is_read_only_per_route",
+          "test_reviewer_readonly_report_is_not_a_no_op_negative_control"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

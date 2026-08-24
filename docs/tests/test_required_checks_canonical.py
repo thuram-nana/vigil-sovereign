@@ -124,6 +124,15 @@ KNOWN_ADVISORY: dict[str, str] = {
         "invariant it exercises is ALSO proven in the REQUIRED 'integration two-env boundary (P5)' job on "
         "3.13, so no coverage is lost by leaving this advisory."
     ),
+    "VSCP isolated control plane (sibling)": (
+        "vscp-ci.yml (W13-7 #500) — the VSCP sibling application's OWN test suite (registries + signed "
+        "issuance + a re-run of the isolation scan). Advisory because it is a NEW check whose promotion to "
+        "a required status check needs the operator's tools/governance/require-checks.sh --apply; the "
+        "LOAD-BEARING isolation proof does NOT depend on that — separate DB/credentials, the no-findings "
+        "import scan (with its negative control), the findings-read refusal and the reviewer-write refusal "
+        "ALSO run as integration/tests/test_vscp_isolation.py in the REQUIRED 'integration two-env boundary "
+        "(P5)' job."
+    ),
 }
 
 # Jobs that never run on a pull_request at all (push/tag or schedule/dispatch only) and so CANNOT be a PR
