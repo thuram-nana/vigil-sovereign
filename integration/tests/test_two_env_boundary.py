@@ -99,6 +99,9 @@ assert "strix" not in _m, "cloud_benchmark must not import strix at module scope
 import vigil_integration.sovereign_bridge  # W13-2: the unified authorization FACADE -- framework LAZY
 assert "framework" not in _m, "sovereign_bridge must not import framework at module scope"
 assert "strix" not in _m, "sovereign_bridge must not import strix at module scope"
+import vigil_integration.sovereign_deploy  # W13-8: the air-gapped DEPLOYMENT facade -- stdlib + vigil_core only
+assert "framework" not in _m, "sovereign_deploy must not import framework at module scope"
+assert "strix" not in _m, "sovereign_deploy must not import strix at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 

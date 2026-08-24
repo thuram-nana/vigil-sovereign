@@ -2006,6 +2006,90 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "off"
+    },
+    {
+      "id": "W13-8-1",
+      "title": "Offline signed deployment bundles install + verify with NO network (fail-closed)",
+      "claim": "Offline, signed deployment bundles install and verify with NO network: `install_bundle` verifies every shipped artifact against a manifest signed under the customer's trust root inside a `no_network` block that makes any outbound socket call raise, and only a manifest that verifies with every artifact matching yields an installed bundle — a tampered, missing, unsigned, or non-customer-signed bundle is fail-closed and NOT installed.",
+      "source": "docs/decisions/W13-8-sovereign-airgapped-deploy.md:27",
+      "enforced_by": {
+        "file": "integration/vigil_integration/sovereign_deploy/bundle.py",
+        "symbol": "install_bundle"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_sovereign_deploy_bundle.py",
+        "tests": [
+          "test_offline_bundle_installs_and_verifies_with_no_network",
+          "test_negative_control_tampered_artifact_is_rejected",
+          "test_negative_control_non_customer_signature_is_rejected"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W13-8-2",
+      "title": "Deployment trust anchor is CUSTOMER-controlled; no vendor kill switch",
+      "claim": "The deployment trust anchor is customer-controlled and there is no vendor kill switch: whether a deployment is operational is a pure function of the customer's own bundle verifying under the customer's own trust root, `deployment_operational` takes no vendor input of any kind, and no vendor-held key is among the operational authorities — so no vendor-held anchor can disable a deployment.",
+      "source": "docs/decisions/W13-8-sovereign-airgapped-deploy.md:44",
+      "enforced_by": {
+        "file": "integration/vigil_integration/sovereign_deploy/trust.py",
+        "symbol": "deployment_operational"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_sovereign_deploy_trust.py",
+        "tests": [
+          "test_operational_iff_customer_bundle_verifies",
+          "test_no_vendor_kill_switch_a_vendor_disallow_cannot_disable",
+          "test_negative_control_tampered_customer_bundle_is_not_operational"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W13-8-3",
+      "title": "Challenge-response attestation rejects a replay and never blocks an operation",
+      "claim": "Challenge-response attestation rejects a replayed challenge — a captured valid response presented against an already-consumed single-use nonce is `REJECTED_REPLAY` — and a failed, rejected, or unreachable attestation never blocks an individual operation: `run_operation` runs the operation regardless of the attestor, so there is no per-operation dependency on a vendor service.",
+      "source": "docs/decisions/W13-8-sovereign-airgapped-deploy.md:63",
+      "enforced_by": {
+        "file": "integration/vigil_integration/sovereign_deploy/attest.py",
+        "symbol": "verify_attestation"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_sovereign_deploy_attest.py",
+        "tests": [
+          "test_fresh_challenge_is_verified_then_a_replay_is_rejected",
+          "test_dark_attestor_does_not_block_the_operation",
+          "test_negative_control_verified_attestation_cannot_rescue_a_failing_operation"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W13-8-4",
+      "title": "Schema-allowlisted telemetry with an explicit no-collect list",
+      "claim": "Telemetry is schema-allowlisted with an explicit no-collect list: `build_telemetry_payload` emits only field names on the allowlist (an unknown field is dropped) and scrubs every no-collect field at every nesting level, the two lists are disjoint by construction, and a planted no-collect field is absent from the emitted payload.",
+      "source": "docs/decisions/W13-8-sovereign-airgapped-deploy.md:80",
+      "enforced_by": {
+        "file": "integration/vigil_integration/sovereign_deploy/telemetry.py",
+        "symbol": "build_telemetry_payload"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_sovereign_deploy_telemetry.py",
+        "tests": [
+          "test_planted_no_collect_fields_are_absent_from_the_payload",
+          "test_allowlisted_fields_survive_so_the_scrubber_is_not_a_no_op",
+          "test_allowlist_and_no_collect_are_disjoint_and_nonempty"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
