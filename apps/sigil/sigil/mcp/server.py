@@ -14,7 +14,6 @@ from mcp.server.fastmcp import FastMCP
 
 from ..config import EMBED_MODEL, QDRANT_URL
 from ..reuse import assert_no_offense
-from ..spine.checkpoint import verify_checkpoint
 from ..spine.store import SpineStore
 from ..vectors.index import VectorIndex
 
@@ -45,11 +44,23 @@ def memory_search(query: str, k: int = 8) -> dict[str, Any]:
         query: what to recall (natural language).
         k: max results (default 8).
     """
-    hits, is_grounded = _idx().grounded(query, k=max(1, min(int(k), 25)))
+    from ..spine.health import grounded_after_refusal
+    from ..vectors.index import GROUNDED_SCORE
+
+    # READ-TIME CITATION REFUSAL (issue #530): a vector index can drift from the signed spine (a rebuild/
+    # reset that outlives its points — 13,667 points over a 16-record chain on the reference host). Every
+    # hit is resolved back to a LIVE signed record (seq present AND entry_hash matches); a hit that does not
+    # resolve is REFUSED here, never rendered — and grounding is judged only on the resolved set, so a
+    # drifted top hit can no longer masquerade as a strongly-grounded answer.
+    raw = _idx().search(query, k=max(1, min(int(k), 25)))
+    resolved, refused, is_grounded = grounded_after_refusal(SpineStore(), raw, GROUNDED_SCORE)
     if not is_grounded:
-        return {"results": [],
-                "note": "No strongly-grounded match in SIGIL memory for this query. Do not fabricate — "
-                        "tell the owner memory has nothing solid on this (optionally suggest rephrasing)."}
+        note = ("No strongly-grounded match in SIGIL memory for this query. Do not fabricate — "
+                "tell the owner memory has nothing solid on this (optionally suggest rephrasing).")
+        if refused:
+            note += (f" ({len(refused)} projection hit(s) were refused because they cite no live signed "
+                     f"record — the vector index has drifted from the spine; run `sigil index`.)")
+        return {"results": [], "refused_citations": len(refused), "note": note}
     return {
         "results": [
             {
@@ -58,8 +69,9 @@ def memory_search(query: str, k: int = 8) -> dict[str, Any]:
                 "entry_hash": h.get("entry_hash"), "score": round(h["score"], 4),
                 "text": h.get("text"),
             }
-            for h in hits
+            for h in resolved
         ],
+        "refused_citations": len(refused),
         "provenance": "Each result is a tamper-evident spine record; cite its `seq` (and `entry_hash`) when you answer.",
     }
 
@@ -114,19 +126,29 @@ def ingest_status(verify: bool = True) -> dict[str, Any]:
     Args:
         verify: also run the (heavier) integrity + signed-head check (default true).
     """
+    from ..spine.health import embeddable_record_count, projection_drift, signed_head_health
+
     store = SpineStore()
     vi = _idx()
+    projected, projected_max = vi.count(), vi.last_indexed_seq()
     status: dict[str, Any] = {
         "spine_records": store.count(),
         "next_seq": store.next_seq,
-        "vectors_indexed": vi.count(),
-        "last_indexed_seq": vi.last_indexed_seq(),
+        "vectors_indexed": projected,
+        "last_indexed_seq": projected_max,
         "embedding_model": EMBED_MODEL,
         "qdrant_mode": "server" if QDRANT_URL else "local-embedded",
     }
+    # PROJECTION-DRIFT DETECTION (issue #530): compare the vector projection against the SIGNED chain rather
+    # than silently reporting a point count. A projection that references a seq beyond the tip, or holds more
+    # points than the chain has projectable records, is DRIFT — the reference-host 13,667-vs-16 failure.
+    signed_embeddable, tip = embeddable_record_count(store)
+    drift = projection_drift("vector", signed_records=signed_embeddable, projected=projected,
+                             projected_max_seq=projected_max, spine_tip_seq=tip)
+    status["projection_drift"] = drift.as_dict()
     if verify:
         ok, msg = store.verify()
-        hok, hmsg = verify_checkpoint(store)
+        hok, hmsg = signed_head_health(store)                # records-without-a-signed-head is UNHEALTHY
         status["chain"] = {"ok": ok, "detail": msg}
         status["signed_head"] = {"ok": hok, "detail": hmsg}
     return status

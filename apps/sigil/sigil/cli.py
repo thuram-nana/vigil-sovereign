@@ -1263,6 +1263,17 @@ def cmd_budget(a) -> None:
         print("  (no agent activity)")
 
 
+def _signed_head_doctor() -> tuple[bool, str]:
+    """The `sigil doctor` signed-head anchor probe (issue #530), factored out so it is monkeypatchable in
+    tests. A records-bearing spine with no valid owner-signed head is UNHEALTHY; an empty box is advisory-OK;
+    an unreadable spine fails closed (a host that cannot open its own spine is not healthy)."""
+    try:
+        from .spine.health import signed_head_health
+        return signed_head_health(SpineStore())
+    except Exception as e:  # noqa: BLE001 — an unopenable spine is a health FAILURE, never a silent pass
+        return False, f"spine unreadable — cannot confirm a signed head: {type(e).__name__}: {e}"
+
+
 def cmd_doctor(a) -> None:
     """Whole-install self-check driven by the SHARED doctor check registry (W6-6).
 
@@ -1304,6 +1315,13 @@ def cmd_doctor(a) -> None:
     checks.append(Check(id="kernel_pin", ok=(_mark != "!!"), required=True,
                         state=("TAMPER" if _mark == "!!" else ("UNPINNED" if _mark == "**" else "OK")),
                         detail=_detail))
+    # SIGNED-HEAD ANCHOR (issue #530). A host that HOLDS RECORDS but has no valid owner-signed head is
+    # serving un-anchored memory with no tamper-evidence — the reference-host defect. REQUIRED: a
+    # records-bearing host FAILS the health check. An empty pristine box is advisory-OK (nothing to anchor
+    # yet), so a fresh checkout's doctor stays green.
+    _shok, _shdetail = _signed_head_doctor()
+    checks.append(Check(id="signed_head", ok=_shok, required=True,
+                        state=("OK" if _shok else "NO-HEAD"), detail=_shdetail))
     drift = list(config_drift())
 
     # 2) the SHARED security block — posture lines + the opt-in production gate — from the ONE

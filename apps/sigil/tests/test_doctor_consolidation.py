@@ -47,6 +47,9 @@ def _install(monkeypatch, *, sovereign_rows, kernel_pin=("**", "unpinned"), gate
 
     monkeypatch.setattr(cfg, "doctor", lambda: list(sovereign_rows))
     monkeypatch.setattr(cfg, "effective_config", lambda: {"SCOPE": "sigil"})
+    # issue #530: neutralise the signed-head probe for these posture-focused tests (deterministic regardless
+    # of the ambient spine). test_doctor_signed_head.py exercises the real probe + its exit-flip separately.
+    monkeypatch.setattr(cli, "_signed_head_doctor", lambda: (True, "signed head OK (test)"))
     monkeypatch.setattr(vault, "owner_vault", lambda: _FakeVault(enabled=False))
     monkeypatch.setattr(integ, "kernel_pin_status", lambda: kernel_pin)
     monkeypatch.setattr(integ, "config_drift", list)
