@@ -13,14 +13,31 @@
 # branch protection also has "Require review from Code Owners" enabled — which it does not today (there
 # is no required-reviews rule on `main` at all). So this file makes ownership explicit and requests the
 # review; it does not by itself gate anything. Do not describe it as a gate until that setting is on.
+# The one remaining human/admin step for [W12-3] #492 is that branch-protection flip; see
+# docs/decisions/W12-3-require-code-owner-review.md.
 
 *       @thuram-nana
 
-# The two security-critical trust domains. Called out separately so a future second maintainer inherits
-# the rest of the tree without silently inheriting these.
+# The security-critical trust domains. Called out separately (each rule is MORE SPECIFIC than the `*`
+# catch-all, so it is the last matching rule and wins) so a future second maintainer inherits the rest
+# of the tree without silently inheriting these. The set here is machine-checked against
+# integration/tests/test_codeowners_coverage.py: dropping any one of these explicit rules — which would
+# fold the path back under the generic catch-all and erase its called-out ownership — turns that
+# required guard red. Keep this list and _CRITICAL_PREFIXES in that test in agreement.
 /engine/crucible/framework/v2/verify/      @thuram-nana
 /engine/crucible/framework/v2/veracity/    @thuram-nana
 /integration/vigil_integration/live/       @thuram-nana
 /gateway/                                  @thuram-nana
 /tools/egress-guard/                       @thuram-nana
 /.github/workflows/                        @thuram-nana
+# Governance surface itself — the files that DEFINE the checks and ownership (this CODEOWNERS, the
+# canonical required-status-checks policy, the branch-protection verifier, dependabot) and the tooling
+# that applies them. An unreviewed edit here silently weakens every other control, so it is called out.
+/.github/                                  @thuram-nana
+/tools/governance/                         @thuram-nana
+# Supply-chain integrity (digest pins, hash-locks, SBOMs, image-pin tooling) and the formal
+# core-invariant models (TLA+) — both are trust roots a reviewer must not inherit by accident.
+/infra/supply-chain/                       @thuram-nana
+/formal/                                   @thuram-nana
+# The shared integrity substrate every process links against.
+/packages/core/vigil_core/                 @thuram-nana
