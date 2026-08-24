@@ -225,8 +225,9 @@ def main() -> int:
     print("   A bogus token was rejected by GitHub itself and correctly left unconfirmed, and the")
     print("   confirmed capture stopped being a fact the moment its confirming endpoint or its")
     print("   fingerprint binding was tampered with.")
-    print("   This proves the github_pat row ONLY. The aws_access_key row is built but unexercised —")
-    print("   it needs a real AWS key, and nothing here says anything about it.")
+    print("   This proves the github_pat row ONLY. The aws_access_key / gitlab_pat / slack_token rows are")
+    print("   built but unexercised — each needs a real credential of its type, and nothing here says")
+    print("   anything about them.")
     return 0
 
 

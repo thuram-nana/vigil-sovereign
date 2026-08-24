@@ -260,10 +260,12 @@ class OracleKind(str, enum.Enum):
     # `secret_capture` ctx field that NO benchmark/scan/engage finding carries — so appending it leaves
     # `make gate` byte-identical and it never auto-fires on a scan. SECRET_CREDENTIAL_VALIDITY fires (0.95)
     # ONLY when a RETAINED, secret-safe capture proves an EXPOSED secret is VALID: (a) a structurally-
-    # recognized secret TYPE (aws_access_key / github_pat …) whose non-secret IDENTIFIER shape checks pass
+    # recognized secret TYPE (the closed four-row set aws_access_key / github_pat / gitlab_pat / slack_token)
+    # whose non-secret IDENTIFIER shape checks pass
     # (the secret value itself is a [REDACTED] presence marker, never validated for content); AND (b) a
     # retained CONFIRMING-CALL response proving the secret AUTHENTICATED as a real identity (AWS
-    # sts:GetCallerIdentity Arn/Account/UserId; GitHub GET /user login+numeric-id) with NO failure marker,
+    # sts:GetCallerIdentity Arn/Account/UserId; GitHub GET /user login+numeric-id; GitLab GET /api/v4/user
+    # username+numeric-id; Slack auth.test ok:true+user_id) with NO failure marker,
     # the confirming call's action matching the type, the confirming endpoint on the per-TYPE allow-list (the
     # ANTI-LAUNDERING gate — an attacker-controlled 'confirming' endpoint can never mint a FACT), and the
     # secret fingerprint-BOUND to that call over a trusted transport. SOURCE-SEMANTICS INVERSION vs IMDS: the

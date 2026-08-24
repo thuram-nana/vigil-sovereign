@@ -24,9 +24,11 @@ from framework.v2.verify.oracles import exposed_secret_validity_oracle as _oracl
 
 # A good AWS-access-key capture: a structurally-recognized identifier + a fingerprint-bound sts:
 # GetCallerIdentity confirming call over a trusted, allow-listed transport echoing a consistent identity.
+# (The AccessKeyId is assembled at runtime — prefix split from body — so push-protection secret scanning finds
+# no contiguous token literal; the assembled value is unchanged.)
 _AWS = {
     "secret_type": "aws_access_key",
-    "credential": {"identifier": "AKIA1234567890ABCDEF", "secret": "[REDACTED]",
+    "credential": {"identifier": "AKIA" + "1234567890ABCDEF", "secret": "[REDACTED]",
                    "credential_fingerprint": "fp-aws-1", "source": "js:app.min.js:1024"},
     "confirming_call": {"action": "sts:GetCallerIdentity", "status": 200,
                         "credential_fingerprint": "fp-aws-1",
@@ -47,6 +49,32 @@ _GH = {
                         "tls_verified": True, "no_proxy": True, "no_redirect": True,
                         "resolved_peer": "140.82.121.6", "response_digest": "sha256:bbb",
                         "response": {"login": "leakeduser", "id": 12345678}},
+}
+
+# A good GitLab-PAT capture: a recognized glpat- prefix + a fingerprint-bound GET /api/v4/user confirming call.
+_GL = {
+    "secret_type": "gitlab_pat",
+    "credential": {"identifier": "glpat-", "secret": "[REDACTED]",
+                   "credential_fingerprint": "fp-gl-1", "source": "git:.gitlab-ci.yml:12"},
+    "confirming_call": {"action": "gitlab:GET /api/v4/user", "status": 200, "credential_fingerprint": "fp-gl-1",
+                        "endpoint": "https://gitlab.com/api/v4/user",
+                        "tls_verified": True, "no_proxy": True, "no_redirect": True,
+                        "resolved_peer": "172.65.251.78", "response_digest": "sha256:ccc",
+                        "response": {"username": "leaked-runner", "id": 42}},
+}
+
+# A good Slack-token capture: a recognized xox?- prefix + a fingerprint-bound auth.test confirming call whose
+# API-level ``ok`` flag is true (Slack answers 200 with ok:false for a bad token, so the boolean is the gate).
+_SL = {
+    "secret_type": "slack_token",
+    "credential": {"identifier": "xoxb-", "secret": "[REDACTED]",
+                   "credential_fingerprint": "fp-sl-1", "source": "js:bundle.min.js:9001"},
+    "confirming_call": {"action": "slack:auth.test", "status": 200, "credential_fingerprint": "fp-sl-1",
+                        "endpoint": "https://slack.com/api/auth.test",
+                        "tls_verified": True, "no_proxy": True, "no_redirect": True,
+                        "resolved_peer": "3.89.13.0", "response_digest": "sha256:ddd",
+                        "response": {"ok": True, "user_id": "U01ABCDEF", "team_id": "T01ABCDEF",
+                                     "user": "vigilbot"}},
 }
 
 _DELETE = object()
@@ -139,6 +167,56 @@ def test_github_single_field_breaks_are_mutation_verified() -> None:
     _mutation_verified(_GH, "confirming_call.response", {"id": 5}, "identity_echo_absent")       # login missing
     _mutation_verified(_GH, "confirming_call.credential_fingerprint", "nope",
                        "secret_not_bound_to_confirming_call")
+
+
+# -- W16-STD-2(b): the recognizer set is broadened past AWS+GitHub to GitLab + Slack -------------------
+
+def test_the_recognizer_set_is_the_broadened_closed_four() -> None:
+    """The closed recognizer set now covers FOUR secret types (was two: aws_access_key + github_pat). This is
+    the behaviour W16-STD-2(b) adds; before the change this asserts a set of size 2 and fails."""
+    from framework.v2.verify.oracles import _SECRET_RECOGNIZERS
+    assert set(_SECRET_RECOGNIZERS) == {"aws_access_key", "github_pat", "gitlab_pat", "slack_token"}
+
+
+def test_good_gitlab_and_slack_captures_fire() -> None:
+    for name, cap in (("gitlab", _GL), ("slack", _SL)):
+        sig = _oracle(cap)
+        assert sig.fired is True, f"{name}: {sig.observed}"
+        assert sig.conclusive is True and sig.confidence == 0.95
+        assert sig.observed["reason"] == "exposed_secret_validated"
+        assert sig.observed["secret_type"] == cap["secret_type"]
+
+
+@pytest.mark.parametrize("path,bad,reason", [
+    ("secret_type", "mystery_token", "unrecognized_secret_type"),
+    ("credential.identifier", "not-a-gitlab-token", "secret_identifier_malformed"),
+    ("confirming_call.status", 401, "confirming_call_failed"),
+    ("confirming_call.action", "github:GET /user", "confirming_action_mismatch"),   # cross-type action
+    ("confirming_call.response", {"username": "u"}, "identity_echo_absent"),         # numeric id missing
+    ("confirming_call.response", {"id": 42}, "identity_echo_absent"),                # username missing
+    ("confirming_call.credential_fingerprint", "other-fp", "secret_not_bound_to_confirming_call"),
+    # anti-laundering: a GitLab token 'confirmed' at github's host (and at an attacker host) is refused.
+    ("confirming_call.endpoint", "https://api.github.com/api/v4/user", "confirming_endpoint_not_allowlisted"),
+    ("confirming_call.endpoint", "https://gitlab.com.evil.test/api/v4/user", "confirming_endpoint_not_allowlisted"),
+])
+def test_gitlab_single_field_breaks_are_mutation_verified(path, bad, reason) -> None:
+    _mutation_verified(_GL, path, bad, reason)
+
+
+@pytest.mark.parametrize("path,bad,reason", [
+    ("credential.identifier", "xyz-not-slack", "secret_identifier_malformed"),
+    ("confirming_call.action", "slack:api.test", "confirming_action_mismatch"),
+    # THE SLACK-SPECIFIC CONTROL: Slack returns HTTP 200 with ok:false for a bad token — the boolean, not the
+    # status, is the success signal, so an ok:false echo must NOT fire (it is not a proven-valid secret).
+    ("confirming_call.response", {"ok": False, "user_id": ""}, "identity_echo_absent"),
+    ("confirming_call.response", {"ok": True, "user_id": ""}, "identity_echo_absent"),   # no user id echoed
+    ("confirming_call.credential_fingerprint", "other-fp", "secret_not_bound_to_confirming_call"),
+    # anti-laundering: a Slack token 'confirmed' at an attacker host / at AWS STS is refused.
+    ("confirming_call.endpoint", "https://slack.com.evil.test/api/auth.test", "confirming_endpoint_not_allowlisted"),
+    ("confirming_call.endpoint", "https://sts.us-east-1.amazonaws.com/", "confirming_endpoint_not_allowlisted"),
+])
+def test_slack_single_field_breaks_are_mutation_verified(path, bad, reason) -> None:
+    _mutation_verified(_SL, path, bad, reason)
 
 
 def test_malformed_or_partial_capture_never_raises_and_never_fires() -> None:

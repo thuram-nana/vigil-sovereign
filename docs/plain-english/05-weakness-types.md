@@ -955,18 +955,22 @@ which reads what the role actually permits. Family 10 lists both.
 | Confirmation | What it establishes | The gate that stops a false confirmation | Fired against something real? |
 |---|---|---|---|
 | **Metadata credential capture** | Cloud machine credentials were retrieved from the internal metadata service *and* proven usable by a successful identity call. | The credential's recorded source address is parsed with a real address parser, and its **host** must be the metadata endpoint. Never a text match — so a look-alike hostname, an address hidden in a query parameter, or a credentials file on disk is not a metadata reach. | **No.** Built, wired end to end and proven against hand-written evidence. There is no live proven fact, and none is claimed. |
-| **Exposed-secret validity** | An exposed secret is still valid, because a confirming call authenticated with it as a real identity. | The confirming call must land on an endpoint on a fixed, per-secret-type approved list, and a fingerprint binds that call to the captured secret. Where the secret came from is deliberately *not* a firing condition: the claim is validity, not provenance. | **Yes — for one of its two secret types only.** See the split immediately below this table. |
+| **Exposed-secret validity** | An exposed secret is still valid, because a confirming call authenticated with it as a real identity. | The confirming call must land on an endpoint on a fixed, per-secret-type approved list, and a fingerprint binds that call to the captured secret. Where the secret came from is deliberately *not* a firing condition: the claim is validity, not provenance. | **Yes — for the GitHub row only** (the sole live-fire-proven one of its four recognised secret types: AWS, GitHub, GitLab, Slack). See the split immediately below this table. |
 | **Service-identity impersonation** | One account minted a short-lived credential *as* a different named service identity, and an independent check confirmed the new credential really carries that identity. | Entirely on the confirming side: an approved provider introspection endpoint, over a verified encrypted connection with no proxy and no redirect, and the identity echoed back must **equal** the named target. An echo of a *different* identity does not confirm. | **No.** Built and proven against hand-written evidence; live use deferred pending operator-provisioned cloud credentials. |
 | **Escalation primitive** | The retained permission configuration unconditionally permits a specific, named escalation manoeuvre that **strictly increases** what an account can reach. | An explicit before-and-after comparison of two reachability calculations: the target must be reachable after the manoeuvre and provably *not* reachable before it. A condition, an exclusion, an explicit denial, a restricting boundary and a wildcard that does not cover the target each contribute nothing at all. | **Not applicable, permanently and by design.** Performing the escalation is deliberately not part of this capability — a defensive verification test never executes the escalation it describes. This row is not waiting on anything. |
 | **Anonymous privileged binding** (container platform, name-matching tier) | An unauthenticated identity is bound to a dangerous built-in administrative role. | Typed matching on both halves. Something merely *named* like an anonymous account, an anonymous binding to a harmless or custom role, and a locally scoped role that merely happens to be *called* "admin" all fail to fire. | **Yes.** Against a real cluster the system creates and owns — see below. |
 | **Dangerous permission grant** (container platform, rule-parsing tier) | The role's *actual* permission rules grant a dangerous capability to an identity an attacker could occupy. | The subject gate set out in Family 10, plus an exact re-check of the link from the binding to the role object. | **Yes.** Same run. |
 
-**The one split that must not be blurred.** Exposed-secret validity recognises two kinds of secret. The
-**code-hosting access token** kind has been proven against the real provider. The **cloud access key**
-kind has **not**: its collection path and its cryptographically signed confirming call are built and
-proven by their own tests — the request-signing implementation checked against an independent one — but
-have **never** been exercised against a real cloud account. That row still requires a real,
-operator-provisioned key, and **nothing about the proven run transfers to it.**
+**The one split that must not be blurred.** Exposed-secret validity recognises **four** kinds of secret —
+a code-hosting access token (GitHub), a cloud access key (AWS), a GitLab access token, and a Slack token.
+Only the **code-hosting access token** kind has been proven against the real provider. The other three
+have **not**: each has a collection path and a per-type confirming call built and proven by their own
+tests — the AWS request-signing implementation checked against an independent one, GitLab's `GET /api/v4/user`
+and Slack's `auth.test` — but **none** has been exercised against a real account of its kind. Those rows
+still require a real, operator-provisioned credential, and **nothing about the proven GitHub run transfers
+to them.** (Separately, a *discovery* runner recognises an even wider set of shapes — including a Google API
+key and a Slack webhook URL that have no sound identity endpoint — but it only ever produces LEADs: a
+candidate becomes a fact solely through the confirming-call path above.)
 
 #### What the two live-fire runs actually did
 
@@ -1056,7 +1060,7 @@ credential.
 |---|---|---|---|
 | Response differencing | `differential_response` | core | **Outside system** — a public vendor-run test site on the internet |
 | Achieved state | `achieved_state` | core | **Outside system** — the same run |
-| Secret validity | `secret_credential_validity` | live capture | **Outside system** — the real code-hosting provider (one of its two secret types) |
+| Secret validity | `secret_credential_validity` | live capture | **Outside system** — the real code-hosting provider (the GitHub row, the sole live-fire-proven one of its four recognised secret types) |
 | Anonymous role binding | `k8s_workload_posture` | posture | **Own infrastructure** — a real Kubernetes cluster the system creates and destroys |
 | Permission-rule verb grant | `k8s_rbac_verb_grant` | live capture | **Own infrastructure** — the same cluster |
 | Marker reached a sink | `side_effect` | core | Real local process — the labelled test application over a real local connection |

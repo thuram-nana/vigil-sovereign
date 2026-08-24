@@ -43,12 +43,34 @@ _DOC_05 = _REPO / "docs" / "plain-english" / "05-weakness-types.md"
 _DOC_E = _REPO / "docs" / "plain-english" / "_inventory" / "E-today-and-catalogues.md"
 TARGET_DOCS = (_DOC_05, _DOC_E)
 
+# The one-sentence tier summary (W16-STD-2(d)) is GENERATED from the same registry-grounded counts and written
+# wherever the corpus's evidence-tier split is described in prose. Kept in its own marked region (a different
+# marker pair from the table) so the two never collide. Before this, that sentence was hand-written in
+# OUTSTANDING.md and had DRIFTED from the registry (it said "2 external ... ~14 loopback"; the registry is
+# 3 / 2 / 13 / 20) — exactly the hand-maintained-number failure this generator exists to prevent.
+_DOC_OUTSTANDING = _REPO / "docs" / "plain-english" / "_review" / "OUTSTANDING.md"
+SENTENCE_TARGET_DOCS = (_DOC_OUTSTANDING,)
+
 BEGIN = ("<!-- BEGIN GENERATED coverage-tiers (source: docs/capability-matrix/coverage-tiers.json; "
          "regenerate: python3 docs/capability-matrix/gen_coverage_tiers.py) -->")
 END = "<!-- END GENERATED coverage-tiers -->"
 
+SENTENCE_BEGIN = ("<!-- BEGIN GENERATED coverage-tiers-sentence (source: "
+                  "docs/capability-matrix/coverage-tiers.json; regenerate: "
+                  "python3 docs/capability-matrix/gen_coverage_tiers.py) -->")
+SENTENCE_END = "<!-- END GENERATED coverage-tiers-sentence -->"
+
 # Canonical render order — strongest evidence first, matching 05-weakness-types.md's prose.
 _ORDER = ("external", "own_infrastructure", "local", "fixtures")
+
+# The short phrasing each tier gets in the generated one-line summary (the "X external, Y own-infra, Z
+# loopback, W fixtures-only" shorthand W16-STD-2(d) asks for). The ``local`` tier is a real LOOPBACK service.
+_SENTENCE_PHRASING = {
+    "external": "{n} external (real bytes from a third-party target)",
+    "own_infrastructure": "{n} own-infra (real infrastructure the system builds and destroys)",
+    "local": "{n} loopback (a real local service over a real socket)",
+    "fixtures": "{n} fixtures-only (hand-written evidence)",
+}
 
 
 class DriftError(Exception):
@@ -134,12 +156,32 @@ def render_block(source: dict | None = None) -> str:
     return "\n".join(lines)
 
 
-def _extract_region(text: str, path: Path) -> str:
-    i = text.find(BEGIN)
-    j = text.find(END)
+def render_sentence(source: dict | None = None) -> str:
+    """The generated one-line evidence-tier summary, markers included, that each sentence-target doc must
+    contain verbatim: "Of the N registered oracle kinds, X external, Y own-infra, Z loopback, W fixtures-only."
+    Generated from the SAME registry-grounded counts as the table — never hand-maintained."""
+    source = source if source is not None else load_source()
+    counts = validate(source)
+    total = sum(counts.values())
+    parts = [_SENTENCE_PHRASING[tier].format(n=counts[tier]) for tier in _ORDER]
+    sentence = (f"Of the {total} registered oracle kinds (the ``OracleKind`` detector registry), "
+                + ", ".join(parts[:-1]) + f", and {parts[-1]}. "
+                "This split is GENERATED from docs/capability-matrix/coverage-tiers.json (keyed by the "
+                "OracleKind registry) by docs/capability-matrix/gen_coverage_tiers.py — not maintained by "
+                "hand — and docs/tests/test_coverage_tiers_drift.py asserts it matches the registry.")
+    return f"{SENTENCE_BEGIN}\n{sentence}\n{SENTENCE_END}"
+
+
+def _extract_marked(text: str, path: Path, begin: str, end: str, what: str) -> str:
+    i = text.find(begin)
+    j = text.find(end)
     if i == -1 or j == -1 or j < i:
-        raise DriftError(f"{path}: coverage-tiers markers not found — cannot locate the generated block")
-    return text[i:j + len(END)]
+        raise DriftError(f"{path}: {what} markers not found — cannot locate the generated block")
+    return text[i:j + len(end)]
+
+
+def _extract_region(text: str, path: Path) -> str:
+    return _extract_marked(text, path, BEGIN, END, "coverage-tiers")
 
 
 def _replace_region(text: str, block: str, path: Path) -> str:
@@ -152,6 +194,7 @@ def check() -> list[str]:
     try:
         source = load_source()
         block = render_block(source)
+        sentence = render_sentence(source)
     except DriftError as exc:
         return [str(exc)]
     for path in TARGET_DOCS:
@@ -163,16 +206,32 @@ def check() -> list[str]:
         if region != block:
             problems.append(f"{path.relative_to(_REPO)}: coverage-tiers block has drifted from the "
                             f"source of truth — run gen_coverage_tiers.py")
+    for path in SENTENCE_TARGET_DOCS:
+        try:
+            region = _extract_marked(path.read_text(encoding="utf-8"), path,
+                                     SENTENCE_BEGIN, SENTENCE_END, "coverage-tiers-sentence")
+        except DriftError as exc:
+            problems.append(str(exc))
+            continue
+        if region != sentence:
+            problems.append(f"{path.relative_to(_REPO)}: coverage-tiers SENTENCE has drifted from the "
+                            f"source of truth — run gen_coverage_tiers.py")
     return problems
 
 
 def write() -> None:
     source = load_source()
     block = render_block(source)
+    sentence = render_sentence(source)
     for path in TARGET_DOCS:
         text = path.read_text(encoding="utf-8")
         path.write_text(_replace_region(text, block, path), encoding="utf-8")
         print(f"updated {path.relative_to(_REPO)}")
+    for path in SENTENCE_TARGET_DOCS:
+        text = path.read_text(encoding="utf-8")
+        region = _extract_marked(text, path, SENTENCE_BEGIN, SENTENCE_END, "coverage-tiers-sentence")
+        path.write_text(text.replace(region, sentence), encoding="utf-8")
+        print(f"updated {path.relative_to(_REPO)} (sentence)")
 
 
 def main(argv: list[str]) -> int:

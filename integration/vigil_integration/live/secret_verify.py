@@ -26,8 +26,12 @@ LIVE-FIRE STATUS — proven for the ``github_pat`` row ONLY. ``tools/livefire/se
 drives the real runner over the real transport against the real ``api.github.com`` with the operator's own
 credential: the valid credential is CONFIRMED here and its certificate re-verifies OFFLINE, while a bogus
 token (a real 401 from GitHub), an attacker-controlled confirming endpoint, and a broken fingerprint binding
-are all correctly left LEADs. The ``aws_access_key`` row is BUILT and unit-proven but NOT live-fire proven —
-it still needs a real, operator-provisioned AWS access key, and nothing about the GitHub run transfers to it.
+are all correctly left LEADs. The recognizer set now holds FOUR types (``aws_access_key``, ``github_pat``,
+``gitlab_pat``, ``slack_token``); the ``aws_access_key`` / ``gitlab_pat`` / ``slack_token`` rows are BUILT and
+unit-proven (each with its per-type confirming call + identity extractor) but NOT live-fire proven — each
+still needs a real, operator-provisioned credential of its type, and nothing about the GitHub run transfers to
+them. (Finding candidate secrets is a SEPARATE capability — ``live/secret_discovery.py`` — which emits LEADs
+only; a candidate becomes a FACT solely through this oracle-gated confirming-call path.)
 """
 from __future__ import annotations
 

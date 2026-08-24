@@ -43,7 +43,7 @@
       "name": "Secret validity",
       "family": "live capture",
       "tier": "external",
-      "evidence": "**Outside system** — the real code-hosting provider (one of its two secret types)"
+      "evidence": "**Outside system** — the real code-hosting provider (the GitHub row, the sole live-fire-proven one of its four recognised secret types)"
     },
     {
       "kind": "k8s_workload_posture",

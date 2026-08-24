@@ -67,6 +67,27 @@ _CASE_MISMATCH_CAPTURE = {"format": "native", "export": {"resources": [
     {"id": "arn:aws:s3:::ACME-evil", "kind": "datastore",
      "grants": [{"principal": "*", "access": "s3:GetObject"}]}]}}
 
+# W16-STD-2(a): a capture whose ONLY insecure state is a NAMED CROSS-ACCOUNT grant — a bucket owned by
+# 111122223333 that grants read to an external account 999988887777, with the owner's own-account id threaded
+# into the retained control. The cloud_posture oracle fires rule ``named_cross_account_principal`` over this,
+# so the FACT must be attributed to the ``cross_account_principal`` branch (not the generic achieved_state one).
+_XACCT_CAPTURE = {"format": "native", "export": {"provider": "aws", "resources": [
+    {"id": "aws_s3_bucket.shared", "kind": "datastore", "owner_account": "111122223333",
+     "grants": [{"principal": "arn:aws:iam::999988887777:root", "access": "s3:GetObject"}]}]}}
+
+# The SAME cross-account grant but with NO owner-account threaded in — the oracle cannot tell an intended
+# internal grant from a cross-account one without the owner, so rule 4 does NOT fire (no cross-account FACT).
+_XACCT_NO_OWNER_CAPTURE = {"format": "native", "export": {"provider": "aws", "resources": [
+    {"id": "aws_s3_bucket.shared", "kind": "datastore",
+     "grants": [{"principal": "arn:aws:iam::999988887777:root", "access": "s3:GetObject"}]}]}}
+
+# A WILDCARD/anonymous grant (rule 3, ``wildcard_principal``) with an owner threaded in — the discriminating
+# negative control: the fired rule is NOT the cross-account rule, so the FACT stays on the achieved_state
+# branch, proving the cross-account branch selection is not a catch-all that swallows every cloud firing.
+_WILDCARD_OWNED_CAPTURE = {"format": "native", "export": {"provider": "aws", "resources": [
+    {"id": "aws_s3_bucket.public", "kind": "datastore", "owner_account": "111122223333",
+     "grants": [{"principal": "*", "access": "s3:GetObject"}]}]}}
+
 
 # ---- scope-gate refusals (sovereign-safe: no framework, no mint) ----------------------------------
 
@@ -238,6 +259,60 @@ def test_in_scope_capture_mints_reverifiable_live_facts():
         assert verify_certificate(f.signed, oracle_context=r.contexts[f.finding_ref], trust_root=tr,
                                   artifact_bytes=r.artifact_bytes).ok is True
     assert r.family_verdict() == "FACT"
+
+
+def _fact_branches(result) -> set:
+    return {b for (b, verdict, _reason) in result.admissions if verdict == "FACT"}
+
+
+def test_named_cross_account_grant_is_attributed_to_the_cross_account_branch():
+    """W16-STD-2(a) — the behaviour + the fail-without-fix. A capture whose only insecure state is a NAMED
+    cross-account grant mints a FACT attributed to the registered ``cloud_live.cloud_posture.cross_account_principal``
+    branch. BEFORE the wiring, EVERY cloud_posture firing was filed under ``achieved_state``, so this assertion
+    fails on the unfixed tree (the branch was registered but cited by no code path)."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    signers, tr = _signers_and_trust()
+    r = cloud_live_verify(_XACCT_CAPTURE, provider="aws", account="111122223333",
+                          scope_gate=_gate(_IN_SCOPE), engagement_slug="acme", signers=signers)
+    assert r.refused is False and r.n_facts >= 1, r.admissions
+    facts = _fact_branches(r)
+    assert "cloud_live.cloud_posture.cross_account_principal" in facts, r.admissions
+    # the cross-account firing is NOT (mis)filed under the generic achieved_state branch
+    assert "cloud_live.cloud_posture.achieved_state" not in facts, r.admissions
+    # and the minted FACT re-verifies offline like any other (the branch change is attribution, not authority)
+    from framework.v2.evidence.certify import verify_certificate
+    for f in r.facts:
+        assert verify_certificate(f.signed, oracle_context=r.contexts[f.finding_ref], trust_root=tr,
+                                  artifact_bytes=r.artifact_bytes).ok is True
+
+
+def test_wildcard_grant_stays_on_achieved_state_not_cross_account():
+    """NEGATIVE CONTROL (discriminating): a wildcard/anonymous grant fires the ``wildcard_principal`` rule, NOT
+    the cross-account rule, so it must stay on the achieved_state branch. Proves the cross-account arm is
+    selected by the FIRED RULE, not applied to every cloud firing."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    signers, _ = _signers_and_trust()
+    r = cloud_live_verify(_WILDCARD_OWNED_CAPTURE, provider="aws", account="111122223333",
+                          scope_gate=_gate(_IN_SCOPE), engagement_slug="acme", signers=signers)
+    assert r.refused is False and r.n_facts >= 1, r.admissions
+    facts = _fact_branches(r)
+    assert "cloud_live.cloud_posture.achieved_state" in facts, r.admissions
+    assert "cloud_live.cloud_posture.cross_account_principal" not in facts, r.admissions
+
+
+def test_cross_account_grant_without_owner_mints_no_cross_account_fact():
+    """NEGATIVE CONTROL (precondition is real, mutation-verified): the SAME cross-account grant with NO owner
+    threaded in mints NO cross-account FACT (the oracle will not guess the owner), and threading the owner in
+    restores it — so the cross-account FACT is caused by the owner-account precondition, not a vacuous pass."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    signers, _ = _signers_and_trust()
+    r = cloud_live_verify(_XACCT_NO_OWNER_CAPTURE, provider="aws", account="111122223333",
+                          scope_gate=_gate(_IN_SCOPE), engagement_slug="acme", signers=signers)
+    assert "cloud_live.cloud_posture.cross_account_principal" not in _fact_branches(r), r.admissions
+    # mutation-verified: add ONLY the owner-account field -> the cross-account FACT appears
+    r2 = cloud_live_verify(_XACCT_CAPTURE, provider="aws", account="111122223333",
+                           scope_gate=_gate(_IN_SCOPE), engagement_slug="acme", signers=signers)
+    assert "cloud_live.cloud_posture.cross_account_principal" in _fact_branches(r2), r2.admissions
 
 
 def test_live_capture_artifact_recheck_fails_on_mutation_or_missing():

@@ -672,11 +672,15 @@ Four qualifications that keep this from over-reading as weakness:
 
 And the one **row-level** split, which is the sharpest honesty point of the day and must not be blurred:
 
-> **The `github_pat` row of E5 is live-fire proven against the real provider. The `aws_access_key` row
-> of the same capability is NOT.** Its runner dispatch and its SigV4-signed confirming call are built
-> and unit-proven — the signer tested against botocore's independent implementation — but have **never**
-> been exercised against real AWS. It still requires a real, operator-provisioned access key, and
-> **nothing about the GitHub run transfers to it.**
+> **The `github_pat` row of E5 is live-fire proven against the real provider. The other three rows of the
+> same capability are NOT.** The recognizer set now holds FOUR types — `aws_access_key`, `github_pat`,
+> `gitlab_pat`, `slack_token` — each with a runner dispatch and a per-type confirming call built and
+> unit-proven (AWS's SigV4 signer tested against botocore's independent implementation; GitLab's
+> `GET /api/v4/user`; Slack's `auth.test`), but only the GitHub row has touched a real provider. The
+> AWS/GitLab/Slack rows each still require a real, operator-provisioned credential of their type, and
+> **nothing about the GitHub run transfers to them.** A *discovery* runner
+> (`integration/vigil_integration/live/secret_discovery.py`) recognises a wider set of shapes and emits
+> **LEADs only** — never facts; adjudication stays with the E5 oracle over a confirming-call capture.
 > (`docs/capability-matrix/evidence-branches.json`, `cloud_exploit.secret.credential_validity`.)
 
 ### 4.7 What the two live-fire runs did NOT exercise
@@ -956,7 +960,7 @@ The specific, fixable gap is named as `COVERAGE_GAP_NOTE` rather than left vague
 | "WARDEN blocks dangerous commands" | WARDEN classifies and records; it never executes and never blocks by itself. The *gate* blocks | "WARDEN decides a tier; the gate refuses or queues on that decision" |
 | "Unknown tools are blocked" | They are classified A3, which means explicit authorization required — not permanently forbidden | "Anything not positively recognised as safe is treated as maximally dangerous" |
 | "The system proved the Kubernetes finding on a live cluster" | True, but the capture path was `kubectl`, not the gated sensor, and the gated sensor's client is not installed here | "…against a real cluster it creates and owns; the gated enumeration runner is separate and not yet exercised" |
-| "Exposed-secret validation is live-fire proven" | Only the GitHub row. The AWS row has never touched real AWS | Name the row |
+| "Exposed-secret validation is live-fire proven" | Only the GitHub row. The AWS/GitLab/Slack rows have never touched a real provider | Name the row |
 | "38 detectors are available on every scan" | 15 are; 23 need an explicit category row keyed on evidence an ordinary scan does not produce | "15 core, 23 that only a specific kind of evidence can reach" |
 | "Keys are encrypted at rest" | Not on this deployment. The TPM device is present but `tpm2-tools` is absent, so no key-encryption key is provisioned | "The mechanism is built and fail-closed; it is not provisioned on this machine, and the owner key rests as plaintext behind `0600`" |
 | "The transparency log prevents a split view" | Only with a strict-majority witness set. Below that, detection only | Quote the conditional |
