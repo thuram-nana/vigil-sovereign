@@ -21,6 +21,7 @@ from typing import Any, Iterator
 
 from ..config import SCOPE, SPINE_PATH, SPINE_SEG_MAX_BYTES, SPINE_SEG_MAX_RECORDS
 from ..reuse import ChainEntry, append_entry, build_chain, digest_payload, verify_chain
+from ..reuse.chain import _GENESIS_PREV
 from . import envelope
 from .atomicio import atomic_write_text, fsync_dir
 from .manifest import (
@@ -856,6 +857,95 @@ class SpineStore:
             except OSError:                          # in use on a non-POSIX FS -> the next compact() retries
                 pass
 
+    # --- cold-archive hard-prune cutover (Slice E — the ONLY code that drops live records) --------------
+    def rebase_manifest_below(self, base_seq: int) -> bool:
+        """Publish a new-generation manifest that DROPS every sealed segment lying entirely below `base_seq`
+        (last_seq < base_seq). MUST hold the flock. This is the CUTOVER's atomic commit-echo: after it the
+        live window is [base_seq..T]; the dropped segment FILES are not touched here (that is a separate,
+        post-commit GC — a crash between the two leaves unreferenced orphans, never a torn chain). Idempotent
+        (a no-op when nothing lies below base_seq). Returns True iff it changed the segment set.
+
+        Retain-only-forward: the retained segments keep their bytes + chain linkage, so a reader that follows
+        the new manifest sees the intact [base_seq..T] window (its first segment's `first_prev_hash` == the
+        pruned boundary == the signed head's base_prev_hash)."""
+        m = self._manifest if self._manifest is not None else read_manifest(self._layout)
+        if m is None:
+            return False
+        keep = [s for s in m.segments if not (s.sealed and s.last_seq is not None and s.last_seq < base_seq)]
+        if len(keep) == len(m.segments):
+            return False                                # nothing below base_seq — idempotent no-op
+        if not any(not s.sealed for s in keep):
+            raise SpineError("refusing to rebase away the active segment — base_seq exceeds the live tail")
+        write_manifest(self._layout, Manifest(generation=m.generation + 1, scope=m.scope, segments=keep))
+        self._manifest = read_manifest(self._layout)
+        self._active = self._resolve_active_path()
+        with self._index_lock:
+            self._index_epoch = None                    # segment set changed -> reconcile offsets on next read
+        self._last = self._read_last_entry()
+        return True
+
+    def delete_orphan_segment_files_below(self, base_seq: int) -> int:
+        """Unlink every on-disk `seg-*` FILE whose segment lies entirely below `base_seq` and is NOT
+        referenced by the CURRENT manifest — the post-cutover reclaim. MUST hold the flock. Safe by
+        construction: a file the committed manifest does not reference holds no live record, and the pruned
+        prefix is preserved in the owner-anchored archive, so deleting it can never lose live data or break a
+        read. Idempotent (missing_ok); a crash mid-delete just leaves fewer/more orphans for the next call.
+        Returns the number of files unlinked."""
+        m = self._manifest if self._manifest is not None else read_manifest(self._layout)
+        referenced = {self._layout.seg_path(s).name for s in (m.segments if m is not None else [])}
+        n = 0
+        for p in sorted(self._layout.segments_dir.glob(f"{SEGMENT_STEM}*")):
+            if self._segment_id_of(p.name) is None or p.name in referenced:
+                continue
+            # only files strictly below the pruned boundary — never anything the retained window might need.
+            if self._segment_below(p, base_seq):
+                try:
+                    p.unlink(missing_ok=True)
+                    p.with_name(p.name + ".idx").unlink(missing_ok=True)
+                    n += 1
+                except OSError:
+                    pass
+        if n:
+            fsync_dir(self._layout.segments_dir)
+        return n
+
+    def _segment_below(self, path: Path, base_seq: int) -> bool:
+        """True iff the (unreferenced) segment file at `path` holds only records with seq < base_seq. Reads
+        the file's last record seq; a file we cannot read is treated as NOT-below (kept — never delete on a
+        read failure)."""
+        try:
+            last = self._last_line_of(path)
+            if last is None:
+                return False
+            return int(json.loads(last)["seq"]) < base_seq
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
+    def finish_prune(self) -> bool:
+        """Idempotently COMPLETE a cold-archive prune whose owner-signed head has already committed
+        (head.base_seq > 0) but whose manifest / segment files have not yet caught up — the roll-FORWARD after
+        a crash between signing the pruned head (the durable commit) and the manifest rebase / file GC. Reads
+        the committed head; if the live manifest still references segments below head.base_seq, rebases them
+        away and unlinks the orphaned files. Returns True iff it advanced anything. Best-effort + fail-safe:
+        never raises (a completion problem must not brick opening the store), and never rebases past what the
+        signed head committed."""
+        from ..config import HEAD_PATH
+        from ..reuse.models import SignedChainHead
+        try:
+            if not HEAD_PATH.exists():
+                return False
+            head = SignedChainHead.model_validate_json(HEAD_PATH.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 — an unreadable/legacy head means no committed prune to finish
+            return False
+        if head.base_seq <= 0:
+            return False
+        with spine_lock(self.path):
+            with self._crossproc_lock():
+                self._refresh_active_under_lock()
+                changed = self.rebase_manifest_below(head.base_seq)
+                self.delete_orphan_segment_files_below(head.base_seq)
+        return changed
+
     # --- write --------------------------------------------------------------------
     def append(
         self, *, kind: str, source: str, actor: str, payload: dict[str, Any],
@@ -1158,7 +1248,53 @@ class SpineStore:
             if digest_payload(content) != r.cert_digest:
                 return False, f"binding break at seq {r.seq}: payload does not match cert_digest (record tampered)"
             entries.append(ChainEntry(seq=r.seq, prev_hash=r.prev_hash, cert_digest=r.cert_digest, entry_hash=r.entry_hash))
-        return verify_chain(entries)
+        # PRUNE-AWARE ROOTING (hard-prune Slice E). The live window links from GENESIS for an un-pruned spine
+        # or from the retained-segment boundary (base_prev_hash) after a cold-archive prune. The first live
+        # segment's `first_prev_hash` carries that base (== GENESIS when nothing is pruned, so this stays
+        # byte-identical for every non-pruned spine). A NON-genesis base is a claimed prune: accept it ONLY
+        # when the owner-SIGNED head corroborates the same base — so a front-truncation of an un-pruned spine
+        # (drop seg-0, present the next segment as first) cannot pass this unkeyed check by editing the
+        # (unsigned, non-load-bearing) manifest. The authenticity of the base is thus delegated to the signed
+        # head, exactly as this method's contract already delegates recompute-resistance.
+        base_prev = self._live_base_prev_hash()
+        if base_prev != _GENESIS_PREV:
+            ok_c, why_c = self._corroborate_pruned_base(entries, base_prev)
+            if not ok_c:
+                return False, why_c
+        return verify_chain(entries, genesis_prev=base_prev)
+
+    def _live_base_prev_hash(self) -> str:
+        """The prev_hash the live window links from: GENESIS for an un-pruned spine, or the retained-segment
+        boundary (base_prev_hash) after a cold-archive prune. Read from the FIRST live segment's stored
+        `first_prev_hash` (a manifest convenience — corroborated against the signed head in verify())."""
+        from ..reuse.chain import _GENESIS_PREV
+        m = read_manifest(self._layout)
+        if m is None:
+            return _GENESIS_PREV
+        segs = m.ordered()
+        return segs[0].first_prev_hash if segs else _GENESIS_PREV
+
+    def _corroborate_pruned_base(self, entries: list[ChainEntry], base_prev: str) -> tuple[bool, str]:
+        """A non-genesis (pruned) base is accepted by the unkeyed verify() ONLY when the owner-signed head
+        agrees on it. Delegates authenticity to `verify_checkpoint` (Ed25519 + floor) and cross-checks that
+        the head's committed base (base_seq + base_prev_hash) matches the live window's actual left edge."""
+        from ..config import HEAD_PATH
+        from ..reuse.models import SignedChainHead
+        from .checkpoint import verify_checkpoint            # function-local: checkpoint imports store
+        if not entries:
+            return False, "a non-genesis base is claimed but the live window is empty"
+        hok, hmsg = verify_checkpoint(self)
+        if not hok:
+            return False, f"pruned live window is not anchored by a valid signed head: {hmsg}"
+        try:
+            head = SignedChainHead.model_validate_json(HEAD_PATH.read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001 — an unreadable head over a pruned window fails closed
+            return False, f"pruned spine head unreadable — cannot corroborate the base: {e}"
+        if head.base_seq != entries[0].seq or head.base_prev_hash != base_prev:
+            return False, (f"pruned live window base does not match the signed head (head base "
+                           f"{head.base_seq}/{head.base_prev_hash[:12]}…, live starts "
+                           f"{entries[0].seq}/{base_prev[:12]}…)")
+        return True, "corroborated by the signed head"
 
     @staticmethod
     def _entry_from_line(line: str | None) -> "ChainEntry | None":
