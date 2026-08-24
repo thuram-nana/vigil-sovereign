@@ -133,6 +133,21 @@ KNOWN_NONPR_ADVISORY: dict[str, str] = {
         "livefire.yml — schedule/workflow_dispatch only; it never reports on a PR, so requiring it would "
         "block every PR. Its per-PR blocking subset 'livefire smoke (per-PR subset)' IS required."
     ),
+    "livefire range (nightly)": (
+        "livefire.yml (W11-2 #483) — schedule/workflow_dispatch only; brings the deliberately-vulnerable "
+        "range up and runs the differential verify. It never reports on a PR; its fail-closed-on-missing-"
+        "tool preflight is proven in the required 'integration two-env boundary (P5)' job instead."
+    ),
+    "livefire k8s RBAC (nightly)": (
+        "livefire.yml (W11-2 #483) — schedule/workflow_dispatch only; stands up a throwaway k3s cluster "
+        "for the E4 RBAC live-fire, too heavy for a per-PR gate. It never reports on a PR; its fail-closed "
+        "preflight is proven in the required 'integration two-env boundary (P5)' job."
+    ),
+    "livefire exposed-secret validity (nightly)": (
+        "livefire.yml (W11-2 #483) — schedule/workflow_dispatch only; the E5 github_pat live-fire needs an "
+        "operator PAT that default CI does not have, so it never reports on a PR; its fail-closed preflight "
+        "(gh must be present) is proven in the required 'integration two-env boundary (P5)' job."
+    ),
     "build, sign and attest release artifacts": (
         "release.yml — triggers on push (tags), never on a pull_request, so it cannot be a PR status check."
     ),

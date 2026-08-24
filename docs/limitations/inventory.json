@@ -44,7 +44,7 @@
     {
       "id": "RVC-k8s-rbac-livefire",
       "name": "Kubernetes RBAC exploitation had no live-fire proof",
-      "summary": "Re-verified closed: the two K8s RBAC branches are adjudicated over bytes a real k3s API server produced by a harness VIGIL stands up, owns, and destroys.",
+      "summary": "Re-verified closed: the two K8s RBAC branches are adjudicated over bytes a real k3s API server produced by a harness VIGIL stands up, owns, and destroys. The harness now runs in a scheduled (nightly, non-blocking) CI job (W11-2 #483) rather than by hand; the required-CI guarantee is narrower and honestly so — the fail-closed-on-missing-tool preflight (tools/livefire/require_tools.py) that guards it, not the nightly cluster run itself.",
       "evidence": "tools/livefire/k8s_rbac_livefire.py"
     },
     {

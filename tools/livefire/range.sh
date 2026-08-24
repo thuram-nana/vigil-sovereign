@@ -70,6 +70,10 @@ ok()    { printf '   \033[32mok\033[0m   %s\n' "$*"; }
 fail()  { printf '   \033[31mFAIL\033[0m %s\n' "$*" >&2; }
 die()   { fail "$*"; exit 1; }
 
+# W11-2: fail closed on a missing required tool rather than discovering it deep inside a docker error.
+# The one preflight the scheduled livefire jobs also call directly; a missing binary exits non-zero here.
+require_bins() { python3 "$HERE/require_tools.py" "$@"; }
+
 rt() { python3 "$TARGETS_PY" "$@"; }
 
 ALL_TARGETS="$(rt names)"
@@ -201,6 +205,7 @@ target_up() {
   done
 
   if [ "$kind" = "container" ]; then
+    require_bins docker   # a container target without docker cannot come up — fail closed, don't limp on
     image="$(rt image "$name")"
     # `docker image inspect`, NOT `docker images -q`: the latter silently returns nothing for a
     # digest-pinned reference, so every `up` re-pulled an image that was already on the machine —
