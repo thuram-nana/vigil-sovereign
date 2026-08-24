@@ -109,13 +109,41 @@ def test_placeholder_scanner_flags_known_tokens(token: str) -> None:
     ["[GDPR]", "[1]", "see [the docs](https://example.com) for detail",
      "governed by the laws of England and Wales",
      "contact <https://example.com>", "email <ops@example.com>",
-     "<!-- ENVELOPE:BEGIN -->", "signed on 24 August 2026"],
+     "<!-- ENVELOPE:BEGIN -->", "signed on 24 August 2026",
+     "[SOC2]", "[HIPAA]", "[PCI]"],
 )
 def test_placeholder_scanner_ignores_legitimate_prose(text: str) -> None:
-    # No false positives on markdown links, acronyms, footnotes, autolinks,
-    # emails, HTML comments, or plain prose — so a genuinely clean instrument
-    # can pass the gate (otherwise the positive control could never hold).
+    # No false positives on markdown links, acronyms (incl. single-word bracket
+    # acronyms like [GDPR]/[SOC2] that are NOT curated fill-in words), footnotes,
+    # autolinks, emails, HTML comments, or plain prose — so a genuinely clean
+    # instrument can pass the gate (otherwise the positive control could never hold).
     assert find_placeholders(text) == []
+
+
+@pytest.mark.parametrize("token", ["[VENUE]", "[PARTY]", "[ISSUER]", "[JURISDICTION]", "[DATE]"])
+def test_single_word_bracket_fill_in_is_flagged(token: str) -> None:
+    # Regression: red-pen HIGH. A single-word ALL-CAPS bracket placeholder from the
+    # curated legal fill-in set MUST be flagged — the bracket family's
+    # internal-separator requirement used to silently miss these, and both shipped
+    # templates use [VENUE].
+    found = find_placeholders(f"...the exclusive jurisdiction of the courts of {token}.")
+    assert found, f"scanner must flag single-word bracket placeholder {token!r}"
+    assert any(p.token == token for p in found)
+
+
+def test_reviewed_instrument_with_only_a_venue_placeholder_is_refused() -> None:
+    # Regression (AC a belt-and-suspenders): an otherwise-clean, REVIEWED instrument
+    # whose ONLY remaining fill-in is a single-word [VENUE] must NOT ship. This is
+    # the exact false-clean the red-pen constructed; it must stay red.
+    only_venue = (
+        "# Mutual NDA — Acme Corp\n\nThis Agreement is governed by the laws of "
+        "England and Wales, and the parties submit to the exclusive jurisdiction "
+        "of the courts of [VENUE]. Signed on 24 August 2026.\n"
+    )
+    reviewed = _record(reviewed_by_counsel=True, governing_law_resolved=True)
+    with pytest.raises(InstrumentNotShippable) as exc:
+        assert_shippable(reviewed, only_venue)
+    assert "[VENUE]" in str(exc.value)
 
 
 # --------------------------------------------------------------------------------------------------

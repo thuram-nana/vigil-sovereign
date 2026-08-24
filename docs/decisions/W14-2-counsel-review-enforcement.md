@@ -38,6 +38,16 @@ human record says the human work is done:
   `YYYY-MM-DD`, and signature blanks). It is deliberately conservative: markdown
   links, bracketed acronyms (`[GDPR]`), autolinked URLs, emails, and HTML
   comments are NOT flagged, so a genuinely resolved instrument can pass.
+  **Lexical bound (honest limitation).** A single-word ALL-CAPS bracket token is
+  shape-ambiguous — `[VENUE]` is a placeholder, `[GDPR]`/`[SOC2]` are acronyms —
+  so for single-word bracket tokens the scanner matches a CURATED allowlist of
+  known legal fill-in words (`_BRACKET_FILL_WORDS`: `[VENUE]`, `[PARTY]`,
+  `[ISSUER]`, `[JURISDICTION]`, …) rather than every single-word bracket. This
+  catches the fill-in styles the shipped templates use (both carry `[VENUE]`)
+  while leaving true acronyms alone; the trade-off is that a single-word bracket
+  placeholder OUTSIDE the allowlist is not caught by that family. A single-word
+  fill-in must be added to the allowlist (or written multi-word / angle-form) to
+  be scanned. The conjunctive review flag is the independent second gate.
 - **Review-status manifest** (`counsel-review-status.json`, read by
   `load_review_manifest`) — records per instrument whether counsel has reviewed
   it. Every entry DEFAULTS to `false` / PENDING; a non-`true` value (missing,
