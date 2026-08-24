@@ -100,6 +100,10 @@ That's the category shift. VIGIL is the reference implementation of it, and it e
 - **Security researchers** who want a substrate where a claim is only as good as its re-execution, and where the tool's own blind spots are measured, not hidden.
 - **Defenders & auditors** who need evidence that survives scrutiny — an immutable, signed record of exactly what was tested, what was proven, and what was skipped.
 
+## Who builds VIGIL
+
+VIGIL is the flagship platform of **SIGIL Limited** — *Sovereign Integrity Governance Infrastructure Labs* — a **GovTech / RegTech company** registered in the **Republic of Cameroon**, founded and led by **Junior Thuram Nana** (Founder & CEO). SIGIL Limited owns VIGIL's first-party intellectual property. The mission is a governance-and-integrity infrastructure that institutions can *trust because they can re-check it themselves* — not because a vendor asked them to. That is why every finding is a replayable proof, every action passes a fail-closed gate, and every claim is signed and offline-verifiable. VIGIL's first-party code is dual-licensed (noncommercial-free / commercial-and-government-paid); **government and public-sector use requires a commercial license** — see [`LICENSE`](../LICENSE) and [`LICENSE-COMMERCIAL.md`](../LICENSE-COMMERCIAL.md).
+
 ---
 
 <div align="center">

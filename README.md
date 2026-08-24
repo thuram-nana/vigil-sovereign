@@ -109,6 +109,8 @@ Think of VIGIL as a very disciplined, very honest security team that happens to 
 
 You run it on your own hardware. Your data, your memory, and your signing keys never leave your machine unless *you* explicitly, verifiably approve it.
 
+**Who builds it.** VIGIL is the flagship platform of **SIGIL Limited** — *Sovereign Integrity Governance Infrastructure Labs* — a GovTech / RegTech company registered in the Republic of Cameroon (founder & CEO: Junior Thuram Nana). SIGIL Limited owns VIGIL's first-party intellectual property; the code is dual-licensed (noncommercial-free / commercial-and-government-paid), and government or public-sector use requires a commercial license. See [`LICENSE`](LICENSE) and [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
+
 ---
 
 ## Why it exists
