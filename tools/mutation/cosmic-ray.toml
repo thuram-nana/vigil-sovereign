@@ -1,0 +1,36 @@
+# cosmic-ray configuration — the SECONDARY Python mutation engine for the W11-3 critical set (issue #484).
+#
+# mutmut ([tool.mutmut] in the repo-root pyproject.toml) is the primary engine; cosmic-ray is a
+# cross-check that applies a DIFFERENT operator set (arithmetic/relational/boolean/constant/exception
+# swaps) to the SAME files, so a mutant one engine cannot express is still surfaced by the other.
+#
+# `module-path` is the enumerated security-critical set — it MUST equal, exactly, the set of files
+# marked `"mutation": true` in tools/mutation/critical-set.json. That single-source-of-truth invariant
+# is enforced on every PR by integration/tests/test_mutation_critical_set.py (a required job), so this
+# list cannot silently drift from the manifest.
+#
+# HEAVY / SCHEDULED ONLY. cosmic-ray re-runs the test session once per mutant and is not installed on the
+# ordinary PR runner; it runs in .github/workflows/mutation-fuzz.yml (scheduled / manual). It is NOT a
+# required PR check. The required per-PR proof that this kind of mutation testing MEASURES SOMETHING REAL
+# is the fast, stdlib sensitivity meta-test integration/tests/test_mutation_gate_sensitivity.py.
+
+[cosmic-ray]
+module-path = [
+    "packages/core/vigil_core/vigil_core/warden_tiers.py",
+    "integration/vigil_integration/warden_gate.py",
+    "engine/crucible/framework/v2/aegis/inspect.py",
+    "engine/crucible/framework/v2/verify/confirmation.py",
+    "engine/crucible/framework/v2/verify/verifier.py",
+    "packages/core/vigil_core/vigil_core/chain.py",
+    "packages/core/vigil_core/vigil_core/canonical.py",
+    "packages/core/vigil_core/vigil_core/crypto.py",
+]
+timeout = 30.0
+excluded-modules = []
+# The suite cosmic-ray re-runs to decide whether each mutant is KILLED. Deliberately the security-critical
+# unit + integration tests that cover the set above, not the whole monorepo suite (which would make a full
+# mutation run intractable). The scheduled workflow sets PYTHONPATH for the offense modules.
+test-command = "python -m pytest -x -q packages/core/vigil_core/tests integration/tests/test_mutation_gate_sensitivity.py integration/tests/test_fuzz_corpus_replay.py"
+
+[cosmic-ray.distributor]
+name = "local"

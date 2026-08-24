@@ -1917,6 +1917,27 @@
       "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W11-3",
+      "title": "The mutation gate has proven sensitivity (an adequate test kills a boundary mutant, a weak test does not)",
+      "claim": "The mutation gate has proven sensitivity: an adequate test KILLS a boundary mutant of the real WARDEN gate decision (`vigil_core.warden_tiers.gate`) while a deliberately-weak test lets the SAME mutant SURVIVE, and the unmutated source SURVIVES even the adequate test — so a KILLED verdict is caused by the mutation, and a green mutation score cannot be a rubber stamp.",
+      "source": "docs/decisions/W11-3-mutation-fuzzing-critical-set.md:13",
+      "enforced_by": {
+        "file": "tools/mutation/mutation_probe.py",
+        "symbol": "evaluate"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_mutation_gate_sensitivity.py",
+        "tests": [
+          "test_adequate_test_kills_the_boundary_mutant",
+          "test_weak_test_lets_the_mutant_survive_the_negative_control",
+          "test_identity_mutant_survives_even_the_strong_test_so_KILLED_is_load_bearing"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

@@ -1,0 +1,37 @@
+# cargo-fuzz harness for the WARDEN kernel (W11-3, issue #484).
+#
+# This is a SEPARATE crate from `sigil-kernel`. It is NOT built by the required `WARDEN Rust kernel`
+# CI job (`cargo test` / `cargo build --release` at apps/sigil/kernel touch only the sigil-kernel
+# package). It needs a nightly toolchain + the libFuzzer runtime, which cannot run on the ordinary PR
+# runner, so it is driven by cargo-fuzz in the SCHEDULED workflow .github/workflows/mutation-fuzz.yml.
+#
+# The FAST, deterministic, required counterpart is apps/sigil/kernel/tests/fuzz_smoke.rs, which replays
+# the committed corpus below through the SAME invariant oracle (`tiers::invariant_violation`) this target
+# asserts — so the slow fuzz and the required check cannot drift.
+
+[package]
+name = "sigil-kernel-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.sigil-kernel]
+path = ".."
+
+# Detach from the parent package: with its own (empty) workspace table this crate is a standalone
+# workspace root, so cargo-fuzz's `cargo build` inside fuzz/ never trips "package believes it's in a
+# workspace but is not a member", and `cargo test` at the parent never descends here.
+[workspace]
+
+[[bin]]
+name = "warden_classify"
+path = "fuzz_targets/warden_classify.rs"
+test = false
+doc = false
+bench = false

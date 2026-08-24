@@ -185,6 +185,12 @@ KNOWN_NONPR_ADVISORY: dict[str, str] = {
         "required 'SIGIL governor gates (P7 — offense gate + authn)' job; this soak is too slow for a PR "
         "runner and never reports on a PR, so requiring it would block every PR."
     ),
+    "mutation-testing + coverage-fuzzing (scheduled, non-blocking)": (
+        "mutation-fuzz.yml (W11-3 #484) — schedule/workflow_dispatch only; mutmut/cosmic-ray/cargo-fuzz/"
+        "atheris re-run the suite per mutant or need a nightly libFuzzer toolchain, so they cannot run on "
+        "a PR runner. The fast required per-PR proofs are test_mutation_gate_sensitivity.py, fuzz_smoke.rs "
+        "and test_fuzz_corpus_replay.py; this job is a signal, never a merge blocker."
+    ),
 }
 
 # W0-2 (#397): "Where a job is legitimately non-blocking (nightly), split the blocking subset out into

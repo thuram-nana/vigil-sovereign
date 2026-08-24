@@ -45,3 +45,31 @@ forbids = ["framework", "strix"]
 [tool.vigil.environments.offense]
 members = ["packages/core/vigil_core", "engine/crucible", "vendor/strix", "gateway", "integration"]
 owner_key = false   # the offense worker runs with NO owner signing key (keyless trust domain)
+
+# ------------------------------------------------------------------------------------------------
+# Mutation testing — the PRIMARY Python mutation engine for the W11-3 security-critical set (#484).
+#
+# `paths_to_mutate` is the enumerated security-critical set and MUST equal, exactly, the set of files
+# marked `"mutation": true` in tools/mutation/critical-set.json (the single source of truth). That
+# invariant is enforced on every PR by integration/tests/test_mutation_critical_set.py, which parses
+# THIS table and the manifest and fails the build on any drift — so the mutmut target set and the
+# cosmic-ray target set (tools/mutation/cosmic-ray.toml) cannot diverge from the manifest.
+#
+# HEAVY / SCHEDULED ONLY: mutmut re-runs the suite once per mutant and is not installed on the ordinary
+# PR runner, so the full run is .github/workflows/mutation-fuzz.yml (scheduled/manual), NOT a required
+# PR check. The required per-PR proof that a mutation score MEANS something is the fast, stdlib
+# sensitivity meta-test integration/tests/test_mutation_gate_sensitivity.py.
+[tool.mutmut]
+paths_to_mutate = [
+    "packages/core/vigil_core/vigil_core/warden_tiers.py",
+    "integration/vigil_integration/warden_gate.py",
+    "engine/crucible/framework/v2/aegis/inspect.py",
+    "engine/crucible/framework/v2/verify/confirmation.py",
+    "engine/crucible/framework/v2/verify/verifier.py",
+    "packages/core/vigil_core/vigil_core/chain.py",
+    "packages/core/vigil_core/vigil_core/canonical.py",
+    "packages/core/vigil_core/vigil_core/crypto.py",
+]
+# The suite mutmut re-runs to decide KILLED/SURVIVED for each mutant (security-critical coverage, not
+# the whole monorepo — a full mutation run over every suite would be intractable).
+runner = "python -m pytest -x -q packages/core/vigil_core/tests integration/tests/test_mutation_gate_sensitivity.py integration/tests/test_fuzz_corpus_replay.py"
