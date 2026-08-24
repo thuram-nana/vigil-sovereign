@@ -2126,6 +2126,154 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     return 0
 
 
+# The six cloud/Kubernetes exploitation CONFIRMATIONS (E1–E5 + K8s TIER-1/2). Each is a VIGIL-owned
+# admission/certification route that re-derives a FACT over an ALREADY-CAPTURED, WARDEN-gated evidence dict
+# (it sends NO live traffic here). They shipped tested but with NO verb/route/button (W16-16 / OUTSTANDING
+# A-8): imported only by their own tests. This verb is their invocation path. Each entry is resolved by an
+# EXPLICIT named import below (never importlib) so the symbol is a real reference the orphan-enumeration
+# structural test (test_capability_invocation_paths.py) can see — a wired confirmation, not a string.
+_CLOUD_EXPLOIT_MODES = ("imds", "secret", "gcp-sa", "iam-escalation", "k8s-rbac", "k8s-rbac-grant")
+
+
+def _cmd_cloud_exploit(args: argparse.Namespace) -> int:
+    """`vigil cloud-exploit <mode> --capture <file.json>` — route ONE retained cloud/K8s exploitation capture
+    through its deterministic oracle → admission → (on a confirmed achieved-effect) a SIGNED, offline-
+    re-verifiable certificate. Modes: imds | secret | gcp-sa | iam-escalation | k8s-rbac | k8s-rbac-grant.
+
+    NO live cloud/metadata/STS/kube call is made here — the capture is already-collected, WARDEN-gated
+    evidence (the live collection is the credential-gated ``tools/livefire`` half); this verb is the pure,
+    offline re-derivation that turns a capture into a typed verdict and, on a FACT, a certificate whose
+    retained secret-safe ``oracle_context`` re-verifies with ``vigil verify`` / the veracity firewall.
+    A malformed/partial capture is admitted as a LEAD/INCONCLUSIVE, NEVER a FACT (the producers never raise).
+
+    Offense-side (the producers pull ``framework`` function-locally, FATAL-2). ``signers`` default to the
+    run's provisioned CRUCIBLE governance authority under ``--base-dir`` (loopback scope — no traffic is
+    sent); pass ``--signer key_id:privb64`` to override, or ``--no-sign`` for a typed verdict with no cert."""
+    mode = args.mode
+    cap_path = Path(args.capture)
+    if not cap_path.is_file():
+        print(f"cloud-exploit: capture file not found: {cap_path}", file=sys.stderr)
+        return 1
+    try:
+        capture = json.loads(cap_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        print(f"cloud-exploit: cannot read capture JSON ({type(exc).__name__}: {exc})", file=sys.stderr)
+        return 1
+
+    # Resolve the confirmation entry by an EXPLICIT named import (keeps the symbol AST-visible + FATAL-2 lazy).
+    if mode == "imds":
+        from .live.imds_verify import imds_verify as _confirm
+    elif mode == "secret":
+        from .live.secret_verify import secret_verify as _confirm
+    elif mode == "gcp-sa":
+        from .live.gcp_impersonation_verify import gcp_impersonation_verify as _confirm
+    elif mode == "iam-escalation":
+        from .live.iam_escalation_verify import iam_escalation_verify as _confirm
+    elif mode == "k8s-rbac":
+        from .live.k8s_rbac_verify import rbac_verify as _confirm
+    elif mode == "k8s-rbac-grant":
+        from .live.k8s_rbac_grant_verify import grant_verify as _confirm
+    else:  # pragma: no cover — argparse `choices` already constrains mode
+        print(f"cloud-exploit: unknown mode {mode!r}", file=sys.stderr)
+        return 2
+
+    slug = str(getattr(args, "slug", "") or "") or f"cloud-exploit-{mode}"
+    signers: "list[tuple[str, str]]" = []
+    if args.signer:
+        for spec in args.signer:
+            kid, sep, priv = str(spec).partition(":")
+            if not sep or not kid or not priv:
+                print(f"cloud-exploit: malformed --signer {spec!r} (expected key_id:private_key_b64)",
+                      file=sys.stderr)
+                return 2
+            signers.append((kid, priv))
+    elif not getattr(args, "no_sign", False):
+        # Default: the run's STABLE governance authority under --base-dir (loopback scope — this verb sends
+        # no traffic). Fail-soft: if provisioning is unavailable, fall back to an UNSIGNED typed verdict
+        # rather than refuse (a LEAD needs no cert; the operator is told).
+        try:
+            from vigil_core.vault import Vault
+            from .live.wiring import provision_authority
+            prov = provision_authority(slug=slug, scope=["127.0.0.1"], base_dir=args.base_dir,
+                                       vault=Vault(Path(args.base_dir) / "vault"))
+            signers = list(prov.signers)
+        except Exception as exc:  # noqa: BLE001 — provisioning is best-effort; never crash the verdict
+            print(f"cloud-exploit: note: could not provision a governance signer ({type(exc).__name__}); "
+                  f"emitting an UNSIGNED typed verdict.", file=sys.stderr)
+            signers = []
+
+    res = _confirm(capture, engagement_slug=slug, signers=signers)
+    finding = res.finding or {}
+    print(f"=== vigil cloud-exploit ({mode}) ===")
+    print(f"capture:     {cap_path}")
+    print(f"verdict:     {res.verdict}" + ("  (FACT)" if res.is_fact else ""))
+    print(f"reason:      {res.reason or '-'}")
+    print(f"finding:     {finding.get('check_id', res.finding_ref or '-')}")
+    if res.is_fact and res.certificate is not None and signers:
+        out = str(getattr(args, "out", "") or "") or str(cap_path.with_suffix(".cert.json"))
+        try:
+            signed = res.certificate.signed
+            payload = signed.model_dump(mode="json") if hasattr(signed, "model_dump") else signed
+            Path(out).write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            print(f"certificate: SIGNED — wrote {out}")
+            print("  re-verify OFFLINE with `vigil verify` / `python3 -m framework.v2 evidence verify`.")
+        except Exception as exc:  # noqa: BLE001 — the verdict already printed; a write failure is non-fatal
+            print(f"certificate: (could not write {out}: {type(exc).__name__}: {exc})", file=sys.stderr)
+    elif res.is_fact:
+        print("certificate: FACT confirmed but UNSIGNED (no signer resolved) — pass --signer for a cert.")
+    else:
+        print("certificate: none (a non-FACT verdict mints no certificate).")
+    return 0
+
+
+def _cmd_gauntlet(args: argparse.Namespace) -> int:
+    """`vigil gauntlet --tool garak --target http://127.0.0.1:PORT` — drive the LIVE AI-Gauntlet (the
+    offensive-LLM red-team sensor) against an owner-authorized LOOPBACK target and print its honest report.
+
+    The heavy garak/PyRIT ML stack runs OUT-OF-PROCESS behind an injected subprocess boundary (the live
+    runner image is deferred infra — see docs/DEFERRED-INFRA.md 'the LLM-red-team tools'). Pass
+    ``--runner-cmd <path>`` to a wrapper that runs the tool and prints a JSON envelope
+    ``{"available": true, "report": <garak report>}`` on stdout; WITHOUT it (or if the tool is not
+    installed) the adapter honestly reports ``available: false`` and mints ZERO findings — it NEVER
+    fabricates one. The target is egress-pinned to loopback by the adapter; a non-loopback target is
+    refused. FACT vs LEAD is decided by the deterministic oracle inside the sensor, never by ASR."""
+    from .live.gauntlet_subproc import GauntletProbe, run_gauntlet_report
+
+    probes = tuple(s.strip() for s in str(getattr(args, "probes", "") or "").split(",") if s.strip())
+    probe = GauntletProbe(tool=args.tool, probes=probes, seed=int(getattr(args, "seed", 0) or 0),
+                          model_name=str(getattr(args, "model_name", "") or ""))
+
+    run_tool = None
+    runner_cmd = str(getattr(args, "runner_cmd", "") or "").strip()
+    if runner_cmd:
+        import subprocess
+
+        def run_tool(argv: "Sequence[str]") -> object:  # noqa: F811 — the injected subprocess boundary
+            """Exec the operator's gauntlet runner with the tool argv; parse its stdout JSON envelope.
+            An argv LIST (no shell), a bounded timeout, and any failure → an 'unavailable' envelope (no
+            signal), so a missing/crashing runner is honestly empty, never a fabricated finding."""
+            try:
+                proc = subprocess.run([runner_cmd, *[str(a) for a in argv]], capture_output=True,
+                                      text=True, timeout=int(getattr(args, "timeout", 900) or 900))
+                return json.loads(proc.stdout) if proc.stdout.strip() else {"available": False}
+            except Exception:  # noqa: BLE001 — a runner failure is no signal, never a crash
+                return {"available": False}
+
+    report = run_gauntlet_report(probe, target=args.target, run_tool=run_tool)
+    print("=== vigil gauntlet (live AI-Gauntlet) ===")
+    print(f"tool:        {report.tool}")
+    print(f"target:      {args.target}")
+    print(f"available:   {report.available}"
+          + ("" if report.available else "  (no runner configured / tool absent — honest empty result)"))
+    print(f"egress:      {'allowed' if report.egress_allowed else 'DENIED'} "
+          f"({report.egress_reason or '-'})")
+    print(f"findings:    {len(report.findings)}  (facts={report.fact_count}, leads={report.lead_count})")
+    print(f"overall ASR: {report.overall_asr:.3f}  (a descriptive metric — NEVER a promotion signal)")
+    for f in report.findings:
+        print(f"    • [{getattr(f, 'bug_class', '')}] {getattr(f, 'title', '') or getattr(f, 'summary', '')}")
+    return 0
+
+
 def _cmd_proof_export(args: argparse.Namespace) -> int:
     """`vigil proof-export` — assemble a CLIENT-VERIFIABLE proof bundle from a run's oracle-confirmed FACTs
     (Proof Studio C1). The bundle re-verifies OFFLINE with zero trust in VIGIL: `python -m framework.v2
@@ -3907,6 +4055,46 @@ def build_parser() -> argparse.ArgumentParser:
     pd.add_argument("--auth-log", default="", help="an auth log (credential oracles)")
     pd.add_argument("--conn-log", default="", help="a connection/flow log (port-scan oracle)")
     pd.set_defaults(func=_cmd_detect)
+
+    pce = sub.add_parser(
+        "cloud-exploit",
+        help="confirm a retained cloud/K8s exploitation capture → typed verdict + (on FACT) a signed, "
+             "offline-re-verifiable certificate. Modes: imds|secret|gcp-sa|iam-escalation|k8s-rbac|"
+             "k8s-rbac-grant. Sends NO live traffic (re-derives over already-captured, WARDEN-gated evidence).")
+    pce.add_argument("mode", choices=_CLOUD_EXPLOIT_MODES,
+                     help="which cloud/K8s confirmation to run over the capture")
+    pce.add_argument("--capture", required=True, help="path to the retained capture JSON (the evidence dict)")
+    pce.add_argument("--slug", default="", help="engagement slug bound into the finding/cert (default: "
+                                                "cloud-exploit-<mode>)")
+    pce.add_argument("--signer", action="append", default=[],
+                     help="key_id:private_key_b64 governance signer (repeatable). Default: the run's "
+                          "provisioned authority under --base-dir.")
+    pce.add_argument("--no-sign", action="store_true", dest="no_sign",
+                     help="emit a typed verdict with NO certificate (skip signer provisioning)")
+    pce.add_argument("--out", default="", help="where to write the signed certificate on a FACT (default: "
+                                               "<capture>.cert.json)")
+    pce.add_argument("--base-dir", default=".vigil-live")
+    pce.set_defaults(func=_cmd_cloud_exploit)
+
+    pg = sub.add_parser(
+        "gauntlet",
+        help="drive the LIVE AI-Gauntlet (offensive-LLM red-team sensor: garak/PyRIT) against an owner-"
+             "authorized LOOPBACK target. Honest by construction: no runner wired / tool absent => "
+             "available:false, ZERO findings (never a fabricated one). FACT/LEAD decided by the oracle.")
+    pg.add_argument("--tool", default="garak", help="the red-team CLI to drive (garak|pyrit|giskard|"
+                                                    "promptfoo) — must be a KNOWN_TOOLS member")
+    pg.add_argument("--target", required=True, help="the owner-authorized LOOPBACK target endpoint "
+                                                    "(egress-pinned to loopback; a non-loopback target is refused)")
+    pg.add_argument("--probes", default="", help="comma-separated probe/attack families (default: all)")
+    pg.add_argument("--model-name", default="", dest="model_name",
+                    help="the tool's --model_name (optional)")
+    pg.add_argument("--seed", type=int, default=0, help="deterministic challenge-token seed")
+    pg.add_argument("--runner-cmd", default="", dest="runner_cmd",
+                    help="path to a wrapper that runs the tool and prints a JSON envelope "
+                         "{'available':true,'report':<...>} on stdout. Omit => available:false (the live "
+                         "garak/PyRIT runner image is deferred infra; see docs/DEFERRED-INFRA.md).")
+    pg.add_argument("--timeout", type=int, default=900, help="runner subprocess timeout, seconds")
+    pg.set_defaults(func=_cmd_gauntlet)
 
     pu = sub.add_parser("up", help="bring the WHOLE unified UI up at one origin (self-contained reverse proxy)")
     pu.add_argument("--port", type=int, default=8770, help="the proxy port a browser points at (default 8770)")

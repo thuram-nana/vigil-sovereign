@@ -125,6 +125,32 @@
       "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
     },
     {
+      "id": "cli.cloud-exploit",
+      "name": "vigil cloud-exploit",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "cloud-exploit",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_cloud_exploit"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb (W16-16 #522): routes a retained cloud/K8s exploitation capture through its confirmation to a typed verdict + signed offline-re-verifiable cert; parser registered and handler resolves. The LIVE capture (reaching the metadata endpoint / STS / kube-apiserver) is the credential-gated tools/livefire half; this verb is the offline re-derivation."
+    },
+    {
+      "id": "cli.gauntlet",
+      "name": "vigil gauntlet",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "gauntlet",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_gauntlet"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb (W16-16 #522) drives the AI-Gauntlet adapter against a loopback target; parser registered and handler resolves. GATED on the deferred live garak/PyRIT runner image (docs/DEFERRED-INFRA.md) — without --runner-cmd it honestly reports available:false and mints zero findings, never a fabricated one."
+    },
+    {
       "id": "cli.doctor",
       "name": "vigil doctor",
       "surface": "cli-native",
