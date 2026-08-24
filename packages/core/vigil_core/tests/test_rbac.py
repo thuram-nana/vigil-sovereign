@@ -84,6 +84,21 @@ def test_ordinary_routes_are_operator_tier():
         assert role_can("operator", perm) and not role_can("analyst", perm)
 
 
+def test_offense_gated_api_routes_are_operator_tier():
+    # W16-12: the loopback gated api's two POST routes are ordinary offense actions (invoke a SAFE tool /
+    # import a third-party report) → operator-tier run_engagement, resolved out of the ONE shared map (not a
+    # second model). A user lacking run_engagement (analyst/viewer) is refused BOTH; an operator+ is allowed.
+    for path in ("/api/v1/tool/invoke", "/api/v1/import"):
+        perm = offense_perm_for(path)
+        assert perm == "run_engagement", f"{path} should be operator-tier, got {perm!r}"
+        assert role_can("operator", perm) and role_can("owner", perm)
+        assert not role_can("analyst", perm) and not role_can("viewer", perm)
+    # they are EXACT keys (the api's /api/v1 prefix does not collide with any console wildcard pattern).
+    assert offense_route_key("/api/v1/tool/invoke") == "/api/v1/tool/invoke"
+    # and an unmapped /api/v1 route is still default-deny (fail-closed for a future api POST route).
+    assert offense_perm_for("/api/v1/unmapped") is None
+
+
 def test_launch_preview_matches_sibling_launch_rbac_and_gates_by_perm():
     # W17-9: the PRE-Send preflight /api/launch/preview must carry the SAME RBAC as its sibling launch
     # endpoints (operator-tier run_engagement), so a per-user proxied operator is neither silently allowed

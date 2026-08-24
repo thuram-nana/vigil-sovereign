@@ -71,6 +71,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from . import dispatch
+from vigil_core.hopauth import stamp_hop_assertion
 from vigil_core.logging_setup import RotatingLineWriter
 from vigil_core.metrics import CONTENT_TYPE as _OPENMETRICS_CT, set_plane
 from vigil_core.posture import is_production_posture
@@ -1925,10 +1926,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             hop_key = getattr(self.server, "hop_key", "") or ""
             if hop_key:
                 ts = str(int(time.time()))
-                msg = f"{principal}\n{role}\n{self.command}\n{offense_path}\n{ts}".encode("utf-8")
-                sig = base64.b64encode(
-                    hmac.new(hop_key.encode("utf-8"), msg, hashlib.sha256).digest()).decode("ascii")
-                out[_ROLE_SIG_HDR] = sig
+                # ONE construction of the assertion (vigil_core.hopauth) — the offense console AND the
+                # offense api verify byte-identically against this exact stamp.
+                out[_ROLE_SIG_HDR] = stamp_hop_assertion(hop_key, principal, role, self.command,
+                                                         offense_path, ts)
                 out[_ROLE_TS_HDR] = ts
         return out
 
@@ -3144,7 +3145,15 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     console_env = {**offense_llm_env, **console_static}
     if _track("offense-console", console_argv, logs / "offense-console.log", extra_env=console_env):
         return 1
-    if _track("offense-api", api_argv, logs / "offense-api.log", extra_env=offense_llm_env):
+    # W16-12 — the gated api child ALSO receives the SAME per-run hop key (never argv/log). The proxy
+    # stamps a per-user role assertion on the api hop just as it does on the console hop, and the api now
+    # verifies it (per-action RBAC + principal attribution). Without the key the api would fail closed and
+    # refuse EVERY proxy-forwarded per-user request (role present, unverifiable) — so the key must reach it
+    # exactly as it reaches the console. It carries NO session token: the api gates on loopback + same-origin
+    # (+ optional CRUCIBLE_API_KEY), ignoring VIGIL_CONSOLE_TOKEN.
+    api_static = {_CONSOLE_HOP_KEY_ENV: hop_key}
+    api_env = {**offense_llm_env, **api_static}
+    if _track("offense-api", api_argv, logs / "offense-api.log", extra_env=api_env):
         return 1
 
     # PLANE CONTROL captures THESE spawns — the argv, STATIC env and log path just used — so the button
@@ -3189,12 +3198,13 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
             pass
 
     plane_control = PlaneControl(
-        # The spec env is the STATIC per-child env: the console keeps token/hop/live-dir/bin; the api has
-        # none (its whole env is the dynamic sovereign-resolved env). The dynamic half is re-resolved at each
-        # restart and merged UNDER these static values, so a token can never be clobbered by a re-resolve.
+        # The spec env is the STATIC per-child env: the console keeps token/hop/live-dir/bin; the api keeps
+        # the hop key (W16-12 — so a restarted api still verifies the proxy's per-user role assertion). The
+        # dynamic half is re-resolved at each restart and merged UNDER these static values, so the hop key /
+        # token can never be clobbered by a re-resolve.
         [("offense-console", list(console_argv), logs / "offense-console.log", dict(console_static),
           "127.0.0.1", CONSOLE_PORT),
-         ("offense-api", list(api_argv), logs / "offense-api.log", {},
+         ("offense-api", list(api_argv), logs / "offense-api.log", dict(api_static),
           "127.0.0.1", API_PORT)],
         on_started=_adopt, on_stopped=_unadopt,
         env_resolver=_reresolve_offense_env, dynamic_env=offense_llm_env)

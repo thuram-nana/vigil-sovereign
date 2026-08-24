@@ -50,10 +50,16 @@ def role_can(role: Optional[str], perm: Optional[str]) -> bool:
 
 
 # ==================================================================================================
-# OFFENSE CONSOLE per-action permission map (Slice S1).
+# OFFENSE per-action permission map (Slice S1 — console; W16-12 — the loopback gated api).
 #
-# Every state-changing POST route `framework.v2.console.server.do_POST` dispatches is mapped to the
-# permission a caller's role must carry. TWO tiers:
+# Every state-changing POST route the offense HTTP surfaces dispatch is mapped to the permission a
+# caller's role must carry. It covers BOTH offense backends behind the `vigil up` proxy:
+#   * the offense CONSOLE (`framework.v2.console.server.do_POST`) — the read + SSE + run-control plane;
+#   * the offense gated API (`framework.v2.api.server.do_POST`) — the `/api/v1/*` external action plane
+#     (W16-12), whose two POST routes (`/api/v1/tool/invoke`, `/api/v1/import`) are added below.
+# The two backends use disjoint path prefixes (console `/api/*`, api `/api/v1/*`), so ONE map with
+# exact keys is unambiguous — and there is exactly one source of truth for "offense route → permission".
+# TWO tiers:
 #   * OPERATOR-tier (`run_engagement`) — ordinary launch / run-control / edit / session / chat / label /
 #     read-recompute (replay/reverify/verify-cert/planner/intel/benchmark) routes. An operator+ may run
 #     engagements; these are the everyday offense actions.
@@ -118,6 +124,15 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/terminal/dryrun": _RUN,
     "/api/terminal/propose": _RUN,
     "/api/aegis/stop": _RUN,
+    # ---- offense gated API (framework.v2.api.server) — the loopback /api/v1 external action plane
+    #      (W16-12). Both POST routes are ordinary run-tier offense actions: invoking a tool through the
+    #      fail-closed gate chain (the api exposes only the SAFE registry — reverify + import), and
+    #      importing a third-party report as UNVERIFIED leads (a mutation of the intel store). Neither
+    #      executes on the host, mints authority, or provisions infra, so both sit at operator-tier
+    #      `run_engagement` — matching the coarse proxy floor (a viewer/analyst is refused BOTH here and
+    #      at the proxy) and the console's sibling read-recompute / knowledge-sync routes.
+    "/api/v1/tool/invoke": _RUN,
+    "/api/v1/import": _RUN,
     # ---- protective: tripping the kill-switch HALTS an engagement (idempotent, never CLEARS). An
     #      emergency-stop must be broadly available, gated to the LOWEST privilege — mirroring the sovereign
     #      `kill: read` convention (accounts.PERMISSION_BY_ACTION). Any authenticated principal may halt;

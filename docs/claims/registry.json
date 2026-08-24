@@ -1698,6 +1698,29 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W16-12",
+      "title": "Offense gated API enforces per-user RBAC + authenticated-principal attribution (direct on-host holder owner-equivalent — residual)",
+      "claim": "The offense gated API (framework.v2.api) enforces per-action RBAC against the same owner-signed multi-user model as the offense console: a proxy-forwarded per-user request carries a hop-signed role (VIGIL_CONSOLE_HOP_KEY) that the API verifies and enforces via role_can(role, offense_perm_for(path)), attributing each permitted action to the authenticated principal, and refusing-with-attribution a role that lacks the required permission (fail-closed on a forged or unverifiable role assertion). Residual: a direct on-host loopback credential-holder presenting no role assertion is owner-equivalent, and identity is only as strong as the sovereign accounts resolution plus the hop-key secrecy.",
+      "source": "docs/decisions/W16-12-offense-api-multiuser.md:83",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/api/server.py",
+        "symbol": "ApiHandler._authorize"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/api/tests/test_api_rbac.py",
+        "tests": [
+          "test_viewer_stamped_invoke_is_refused_attributed_and_tool_never_runs",
+          "test_operator_stamped_invoke_reaches_handler_and_is_attributed",
+          "test_forged_or_replayed_role_assertion_is_refused",
+          "test_no_hop_headers_keeps_full_access_and_is_attributed_as_on_host",
+          "test_api_with_no_hop_key_refuses_stamped_role_but_allows_direct"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

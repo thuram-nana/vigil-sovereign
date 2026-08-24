@@ -181,6 +181,21 @@ box's key; it does not establish *which human*.
 be discovered in questioning.** If the agency needs multi-operator with separation of duties, it is weeks
 of work and touches the trust model.
 
+**Update (W16-12, #518) — the offense API is now wired to the existing multi-user model; the "only auth is a
+shared bearer" statement above is superseded for it.** The sovereign plane already had an enforced multi-user
+RBAC (Claim 6: `viewer ⊂ analyst ⊂ operator ⊂ owner` over an owner-signed accounts spine, per-user
+bearers/sessions, MFA/TOTP, keypair PoP), and the offense **console** already enforced it per-action. This
+change closes the remaining surface: the loopback gated **API** (`framework.v2.api`) now enforces
+`role_can(role, offense_perm_for(path))` and **attributes** every action to the authenticated principal, with
+a role lacking the permission **refused-and-attributed** (`api/server.py ApiHandler._authorize`;
+`docs/decisions/W16-12-offense-api-multiuser.md`). **Residual (unchanged, stated honestly):** a **direct**
+on-host loopback credential-holder is still **owner-equivalent** (the per-user gate protects the
+proxy-forwarded path); "sessions" are the sovereign per-user bearer sessions surfaced via the proxy, not an
+api-side session store; and `attestation/identity.py`'s first-use operator keypair — with no CA / enrolment /
+external revocation binding to an agency credential — remains the "one sovereign owner, one box" boundary for
+the spine's own non-repudiation. So the architectural boundary still holds; what is no longer true is that the
+API has *no* users/roles/attribution.
+
 ### A-8. Six cloud/Kubernetes exploitation confirmations have no invocation path — **3–5 days**
 
 The headline capability that merged today is real, tested, and **unreachable from any command, route or

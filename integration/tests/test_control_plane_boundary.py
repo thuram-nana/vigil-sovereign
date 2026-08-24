@@ -162,8 +162,14 @@ def _module_imports(src: str) -> tuple[set[str], set[str]]:
 #   * `vigil_core.posture` (W8-6 #472: the ONE namespace-pure, pure-stdlib parse of `VIGIL_POSTURE` that
 #     BOTH planes share. The hop-TLS production fail-closed keys on `is_production_posture`; reusing this
 #     shared parse — rather than re-reading the env inline — is exactly what keeps the "is production armed?"
-#     rule from drifting between the start paths and the running server, per posture.py's own contract).
-_UP_ALLOWED_SHARED_CORE = {"vigil_core.metrics", "vigil_core.logging_setup", "vigil_core.posture"}
+#     rule from drifting between the start paths and the running server, per posture.py's own contract);
+#   * `vigil_core.hopauth` (W16-12: the ONE pure-stdlib construction of the proxy→offense per-user role
+#     assertion. The proxy STAMPS it (`stamp_hop_assertion`) and BOTH offense backends — console + gated
+#     api — VERIFY it byte-identically, so the single source of truth cannot drift. It imports stdlib only
+#     (hmac/hashlib/base64/time), re-proven by the purity check below, so reusing it here — rather than
+#     re-implementing the HMAC inline as the proxy used to — crosses no trust boundary).
+_UP_ALLOWED_SHARED_CORE = {"vigil_core.metrics", "vigil_core.logging_setup", "vigil_core.posture",
+                           "vigil_core.hopauth"}
 
 
 def _vigil_core_submodules(src: str) -> set[str]:

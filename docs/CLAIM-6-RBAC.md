@@ -247,6 +247,21 @@ here with the exact bound each carries — delivered, not soft-pedalled, and not
   `framework.v2.console.server._rbac_ok` against a **constant-time HMAC hop-assertion** the proxy stamps
   (`_hop_assertion_valid`, bound to principal+role+method+path+ts in a freshness window). **Honest bound:** a
   client holding the console token **directly** (no hop-signed role) is **owner-equivalent** by construction.
+- **Per-user RBAC + authenticated-principal attribution on the offense gated API (W16-12, #518).** The
+  loopback external API (`framework.v2.api`) — the OTHER offense HTTP surface, previously gated only by an
+  optional shared bearer (`CRUCIBLE_API_KEY`, off by default) with no users/roles/attribution — now consumes
+  the SAME model: `api.server.ApiHandler._authorize` enforces `role_can(role, offense_perm_for(path))` for
+  its two POST routes (`/api/v1/tool/invoke`, `/api/v1/import` → operator-tier `run_engagement`, added to the
+  ONE `OFFENSE_ACTION_PERM` map), verifying the proxy's hop-signed role via the shared
+  `vigil_core.hopauth.verify_hop_assertion` (the console STAMP/VERIFY and the proxy STAMP are now one
+  construction). A permitted action's response is **attributed** to the authenticated principal
+  (`{principal, role, authenticated, via}`); a role lacking the permission is **refused with a 403 that names
+  the principal** (the attributed negative control). `vigil up` hands the api child the same
+  `VIGIL_CONSOLE_HOP_KEY` the console gets, so the one proxy stamp verifies at both. **Honest bound:** a
+  **direct** on-host loopback credential-holder presenting no role assertion is **owner-equivalent** (as on
+  the console) — the per-user gate protects the proxy-forwarded path, not a direct credential-holder; and
+  "sessions" are the sovereign per-user bearer sessions surfaced via the proxy (the api holds no session
+  store, by FATAL-2). See `docs/decisions/W16-12-offense-api-multiuser.md`.
 - **Cryptographic per-user identities (S3, #382).** An owner can bind an Ed25519 `user_pubkey` to an account
   (`enroll_pubkey`, owner-signed into the grant, byte-identical when absent), via
   `sigil accounts enroll-pubkey <user> --pubkey <b64>|--pubkey-file <path>` (W17-3/#537), the `enroll_pubkey`
