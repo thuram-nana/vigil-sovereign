@@ -1983,6 +1983,29 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W6-4",
+      "title": "A real OTLP collector profile + documented backends, with an unreachable backend made VISIBLE (not silently dropped)",
+      "claim": "VIGIL ships a real OTLP collector profile that forwards every received span to a real OTLP-compatible backend (`infra/sidecars/otel-config-backend.yaml` defines an `otlp/backend` exporter with an endpoint and wires it into the traces pipeline, not only the stdout `debug` exporter), selectable in `docker-compose.yml` via `OTEL_CONFIG`; the engine's export path is exercised end-to-end against a real loopback OTLP endpoint (a real span, through the real `OTLPSpanExporter`, over real HTTP, arrives at the endpoint's `/v1/traces` route); and an UNREACHABLE backend is made VISIBLE rather than silently dropped — `live.otel_export.probe_collector` actively preflights the collector (loopback-pinned, stdlib-only) and, when it is down, returns `reachable=False` with a human-readable detail AND logs a WARNING, so a down telemetry backend never disappears into a silent per-span drop.",
+      "source": "docs/decisions/W6-4-otlp-collector-and-backends.md:21",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/otel_export.py",
+        "symbol": "probe_collector"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_otlp_collector_backend.py",
+        "tests": [
+          "test_probe_reports_reachable_against_a_live_loopback_endpoint",
+          "test_unreachable_backend_surfaces_a_visible_error_not_a_silent_drop",
+          "test_probe_refuses_a_non_loopback_endpoint_visibly",
+          "test_backend_collector_profile_exports_to_a_real_backend_not_only_stdout",
+          "test_default_profile_is_stdout_only_so_the_backend_profile_is_the_real_delta"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "off"
     }
   ]
 }

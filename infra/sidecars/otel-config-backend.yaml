@@ -1,0 +1,75 @@
+# VIGIL-LIVE OTel collector — the REAL-BACKEND export profile (W6-4 / #455).
+#
+# The default `otel-config.yaml` terminates traces in the collector's own stdout (the `debug`
+# exporter) — useful for a zero-dependency local run, but nothing is retained or queryable. THIS
+# config forwards every received span/metric/log to a REAL, queryable backend over OTLP while ALSO
+# keeping the `debug` stdout leg for local visibility.
+#
+# The backend is any OTLP-compatible tracing store — Jaeger (OTLP-native ≥ v1.35), Grafana Tempo,
+# Grafana Cloud, Honeycomb, a Datadog/New-Relic OTLP endpoint, or a second collector. Point the
+# collector at it with the OTLP_EXPORT_ENDPOINT env var (host:port, OTLP/gRPC 4317 by default):
+#
+#   OTEL_CONFIG=./infra/sidecars/otel-config-backend.yaml \
+#   OTLP_EXPORT_ENDPOINT=127.0.0.1:4317 \
+#   docker compose --profile observability up -d otel-collector
+#
+# See docs/decisions/W6-4-otlp-collector-and-backends.md for the supported-backend matrix and the
+# one-line Jaeger bring-up. As with the stdout profile the collector's OTLP receiver is host-bound to
+# 127.0.0.1:4318 by docker-compose.yml — VIGIL only ever egresses telemetry to loopback (the OTLPSink
+# egress pin), and the collector is the trust boundary that fans out to the backend.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Batch before export so a per-span network round-trip never stalls the pipeline.
+  batch:
+    timeout: 1s
+    send_batch_size: 512
+
+exporters:
+  # Local visibility — kept so `docker logs otel-collector` still shows spans even with a backend wired.
+  debug:
+    verbosity: detailed
+
+  # The REAL backend. `${env:OTLP_EXPORT_ENDPOINT}` is substituted at collector start; the default is a
+  # Jaeger all-in-one on loopback (see the docs for the one-liner that stands it up).
+  otlp/backend:
+    endpoint: ${env:OTLP_EXPORT_ENDPOINT:-127.0.0.1:4317}
+    tls:
+      # Loopback / same-host backends are plaintext OTLP/gRPC; set OTLP_EXPORT_INSECURE=false and add a
+      # `ca_file:` for a TLS backend (Grafana Cloud / Honeycomb — see the docs).
+      insecure: ${env:OTLP_EXPORT_INSECURE:-true}
+    # A down backend must be VISIBLE, never a silent black hole: the collector RETRIES with backoff and,
+    # when the bounded queue overflows, LOGS the drop at WARN (surfaced in `docker logs otel-collector`).
+    # This is the collector-layer half of the W6-4 "unreachable backend is visible" guarantee; the
+    # engine-layer half is the loopback reachability preflight in live/otel_export.probe_collector.
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+
+service:
+  telemetry:
+    logs:
+      # WARN-level collector logs so an export failure to the backend is printed, not swallowed.
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/backend, debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/backend, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/backend, debug]

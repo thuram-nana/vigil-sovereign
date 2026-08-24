@@ -11,7 +11,10 @@ the sink is TOTAL on a malformed record (never raises into the recorder).
 
 from __future__ import annotations
 
+import http.server
+import logging
 import pathlib
+import threading
 
 import pytest
 
@@ -21,6 +24,7 @@ from vigil_integration.live.otel_export import (
     _is_export_success,
     _otlp_scalar,
     endpoint_is_loopback,
+    probe_collector,
 )
 from vigil_integration.observability import (
     Span,
@@ -440,6 +444,102 @@ def test_sovereign_invariant_otlp_sink_emit_only_loopback_secret_free_determinis
 
     # (6) TOTAL: fully hostile input to the emit path returns None and never raises.
     assert sink(object()) is None and sink(None) is None
+
+
+# ====================================================================================================
+# W6-4 (#455) — END-TO-END against a REAL loopback OTLP endpoint (the real OTLPSpanExporter, real HTTP,
+# real protobuf), and the VISIBLE-failure guarantee when the collector is down. This is the otel-GATED
+# half; the otel-free reachability + config half lives in test_otlp_collector_backend.py (the required leg).
+# ====================================================================================================
+
+
+class _OTLPReceiver:
+    """A real loopback HTTP server that stands in for an OTLP backend: it accepts ``POST /v1/traces``,
+    captures each request's path + raw body, and answers 200. Ephemeral port so tests never collide."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, bytes]] = []
+        receiver = self
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                body = self.rfile.read(length) if length else b""
+                receiver.requests.append((self.path, body))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-protobuf")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *_a):
+                return
+
+        self._server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self) -> "_OTLPReceiver":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+
+def test_a_real_span_arrives_at_a_loopback_endpoint_through_the_real_exporter():
+    # THE end-to-end export proof: NO injected exporter — OTLPSink lazily builds the REAL OTLPSpanExporter,
+    # which POSTs a real OTLP protobuf over real HTTP to the loopback endpoint. Assert the span actually
+    # ARRIVED (a request on /v1/traces, a non-empty protobuf body carrying the span name in cleartext) and
+    # the sink counted it exported. This exercises the collector-facing export path a real backend receives.
+    with _OTLPReceiver() as rx:
+        sink = OTLPSink(rx.url)                       # real exporter, loopback endpoint
+        assert type(sink._exporter).__name__ == "OTLPSpanExporter"
+        sink(new_span("recon.scan", kind=SpanKind.CLIENT, spine_hash="rec:e2e", seq=1, ts=100,
+                      attributes={"vigil.tool": "nmap"}))
+    assert sink.stats() == {"exported": 1, "dropped": 0, "refused": 0, "skipped": 0}
+    assert len(rx.requests) == 1
+    path, body = rx.requests[0]
+    assert path.endswith("/v1/traces") and len(body) > 0
+    assert b"recon.scan" in body, "the span name must reach the endpoint in the OTLP protobuf body"
+
+
+def test_probe_reports_reachable_against_a_live_otlp_endpoint():
+    # the reachability preflight, proven against a REAL live loopback endpoint (otel-free, but colocated
+    # here with the receiver). A live collector ⇒ reachable, no error text.
+    with _OTLPReceiver() as rx:
+        probe = probe_collector(rx.url, timeout=2.0)
+    assert probe.reachable is True and probe.detail == ""
+    assert rx.requests and rx.requests[0][0] == "/v1/traces"
+
+
+def test_a_down_collector_is_VISIBLE_via_the_circuit_breaker_warning(caplog):
+    # The hot-path counterpart of probe_collector: a persistently-down collector (BoomExporter) must not be
+    # a purely silent drip of ``dropped++`` — when the count-based breaker latches, ONE WARNING is logged so
+    # the outage is visible. The engine is UNAFFECTED (the sink still swallows and never raises).
+    boom = BoomExporter()
+    sink = OTLPSink(LOOPBACK, exporter=boom, max_consecutive_failures=2)
+    with caplog.at_level(logging.WARNING, logger="vigil_integration.live.otel_export"):
+        sink(new_span("op", spine_hash="h", seq=1))       # fail 1
+        sink(new_span("op", spine_hash="h", seq=2))        # fail 2 → latch → WARN
+        sink(new_span("op", spine_hash="h", seq=3))        # already latched → skipped, no 2nd WARN
+    warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warns) == 1, "a latched-down collector must warn EXACTLY once (visible, not a log flood)"
+    assert "unreachable" in warns[0].getMessage().lower()
+    assert sink._disabled is True and sink.dropped == 2 and sink.skipped == 1
+
+
+def test_a_healthy_collector_logs_no_circuit_breaker_warning(caplog):
+    # NEGATIVE CONTROL for the warning above: a WORKING collector never logs the outage warning — so the
+    # warning is caused by the outage, not emitted unconditionally.
+    spy = SpyExporter()
+    sink = OTLPSink(LOOPBACK, exporter=spy)
+    with caplog.at_level(logging.WARNING, logger="vigil_integration.live.otel_export"):
+        for i in range(5):
+            sink(new_span("op", spine_hash="h", seq=i))
+    assert sink.exported == 5
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_no_wallclock_or_rng_in_the_exporter_source():

@@ -48,6 +48,9 @@ Import-clean: stdlib + the F11 observability seam + the F3 redactor; ``opentelem
 
 from __future__ import annotations
 
+import http.client
+import logging
+from dataclasses import dataclass
 from ipaddress import ip_address
 from typing import Any, Optional
 from urllib.parse import urlparse, urlunparse
@@ -70,6 +73,12 @@ _INT64_MIN = -(2 ** 63)
 _INT64_MAX = 2 ** 63 - 1
 # sentinel: opentelemetry probed and found unavailable (distinct from "not yet probed" == None).
 _OTEL_UNAVAILABLE = object()
+
+# The one logger for the export boundary. A collector that is down/unreachable is a TELEMETRY outage —
+# it must never deny cognition (the hot path stays swallow-only) — but it must not be a SILENT drop
+# either: this logger is where an unreachable backend becomes VISIBLE (W6-4 / #455). stdlib logging only;
+# no wallclock/RNG source is imported here (the structural determinism guard forbids it).
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -113,6 +122,89 @@ def _traces_url(endpoint: str) -> str:
     except Exception:  # noqa: BLE001
         return endpoint
     return endpoint
+
+
+# ---------------------------------------------------------------------------------------------------
+# reachability preflight — the VISIBLE-error surface for a down/unreachable collector (W6-4 / #455)
+# ---------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CollectorProbe:
+    """The result of actively probing an OTLP collector's reachability. ``reachable`` is the fact; ``detail``
+    is a human-readable reason (non-empty ONLY when not reachable, so a diagnostic can print it verbatim).
+    Truthy iff reachable, so ``if probe_collector(ep): ...`` reads naturally. This is a DIAGNOSTIC record —
+    it authorizes nothing (no tier/verdict); it exists so an unreachable telemetry backend is VISIBLE rather
+    than a silent drop."""
+
+    endpoint: str
+    reachable: bool
+    detail: str = ""
+
+    def __bool__(self) -> bool:
+        return self.reachable
+
+
+def probe_collector(endpoint: Any, *, timeout: float = 2.0,
+                    logger: Optional[logging.Logger] = None) -> CollectorProbe:
+    """Actively probe whether an OTLP/HTTP collector is reachable at ``endpoint`` — the engine-layer half of
+    W6-4's "an unreachable backend is VISIBLE, not silently dropped".
+
+    Unlike the hot-path emit (which SWALLOWS every export failure so a telemetry outage can never deny
+    cognition), this preflight makes a down collector LOUD: on failure it returns ``reachable=False`` with a
+    human ``detail`` AND logs a WARNING. It is meant to run ONCE at engagement start / from a diagnostic
+    (``vigil doctor``), never per-span on the hot path.
+
+    stdlib-only (``http.client``) — it needs NO ``opentelemetry`` and NO ``framework``, so it runs
+    unconditionally in the required sovereign CI leg. Loopback-PINNED (reuses :func:`endpoint_is_loopback`):
+    a non-loopback endpoint is REFUSED without a connection (the same egress pin the sink enforces), never
+    resolved via DNS. It opens a real TCP/HTTP connection to the collector's ``/v1/traces`` route and POSTs
+    an empty body: ANY HTTP status proves the collector is listening (we probe the transport, not a span
+    payload), while a refused/timed-out connection proves it is down. Total: never raises — every failure
+    mode degrades to ``reachable=False`` with a logged, human detail."""
+    log = logger or _log
+    ep = coerce_str(endpoint)
+    if not endpoint_is_loopback(ep):
+        detail = (f"OTLP endpoint {ep!r} is not loopback — refusing to probe (egress pin); telemetry "
+                  f"export is DISARMED for this endpoint")
+        log.warning("OTLP collector preflight refused: %s", detail)
+        return CollectorProbe(ep, False, detail)
+
+    url = _traces_url(ep)
+    try:
+        parsed = urlparse(url)
+    except Exception:  # noqa: BLE001 — a malformed url is unreachable, never a crash
+        parsed = None
+    if parsed is None or not parsed.hostname:
+        detail = f"OTLP endpoint {ep!r} could not be parsed into a host — unreachable"
+        log.warning("OTLP collector preflight failed: %s", detail)
+        return CollectorProbe(ep, False, detail)
+
+    host = parsed.hostname
+    is_https = parsed.scheme.lower() == "https"
+    port = parsed.port or (443 if is_https else 80)
+    path = parsed.path or _TRACES_PATH
+    conn: Any = None
+    try:
+        conn_cls = http.client.HTTPSConnection if is_https else http.client.HTTPConnection
+        conn = conn_cls(host, port, timeout=timeout)
+        conn.request("POST", path, body=b"", headers={"Content-Type": "application/x-protobuf"})
+        resp = conn.getresponse()
+        resp.read()                       # drain so the socket can close cleanly
+        # ANY HTTP response means the collector accepted a connection and answered its traces route — it is
+        # reachable. A 4xx to an empty body still proves reachability (we are probing transport, not a payload).
+        return CollectorProbe(ep, True, "")
+    except Exception as exc:  # noqa: BLE001 — OSError / ConnectionRefused / timeout / protocol error → DOWN
+        detail = f"OTLP collector at {url} is UNREACHABLE: {type(exc).__name__}: {exc}"
+        # VISIBLE, not silent: an operator running an engagement with telemetry configured sees this at start.
+        log.warning("OTLP collector preflight failed — spans will be dropped until it recovers: %s", detail)
+        return CollectorProbe(ep, False, detail)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -199,10 +291,18 @@ class OTLPSink:
         else:
             self.dropped += 1
             self._consecutive_failures += 1
-            if self._consecutive_failures >= self._max_consecutive_failures:
+            if self._consecutive_failures >= self._max_consecutive_failures and not self._disabled:
                 # Stop hammering a down collector — a deterministic, count-based (no-clock) latch so a
                 # dead collector can never stall the engine's hot path indefinitely.
                 self._disabled = True
+                # VISIBLE, not silent (W6-4 / #455): the latch is where a persistently-down collector stops
+                # being a silent drip of `dropped++` and becomes one WARNING an operator can see. Logged ONCE
+                # (guarded by `not self._disabled` above) so a dead collector cannot flood the log; the engine
+                # is UNAFFECTED (this path still swallows and never raises).
+                _log.warning(
+                    "OTLP collector at %s unreachable — %d consecutive export failures; telemetry export "
+                    "silenced for this engagement (a down collector never denies cognition)",
+                    self.endpoint, self._consecutive_failures)
 
     def _do_export(self, readable: Any) -> bool:
         """Hand one ReadableSpan to the injected exporter; report success. Every exporter error is
