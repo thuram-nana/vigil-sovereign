@@ -156,10 +156,9 @@ def sign_pruned_head(store: SpineStore, *, base_seq: int, base_prev_hash: str,
     set to the durable floor's recorded head hash so `advance_floor`'s v2 meta-chain guard accepts this head
     as the parent's child. Raises if the retained window does not actually start at base_seq/base_prev_hash
     (a caller bug — never silently sign a mismatched anchor), or if a LONGER head already stands (rollback)."""
-    from ..reuse.canonical import evidence_signing_bytes
-    from ..reuse.chain import _head_payload
-    from ..reuse.crypto import sign
-    from ..reuse.models import Signature
+    from vigil_core.chain import _head_payload     # defined in vigil_core (the reuse.* shims are runtime-only)
+
+    from ..reuse import Signature, evidence_signing_bytes, sign
     priv, pub = _owner_keys()
     owner_kp = KeyPair(public_key_b64=pub, private_key_b64=priv)
     live = [e for e in store.entries() if e.seq >= base_seq]
