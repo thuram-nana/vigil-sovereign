@@ -184,6 +184,18 @@ class EnvelopeDrift(EthicsViolation):
     object."""
 
 
+class InstrumentNotShippable(EthicsViolation):
+    """A client legal instrument (the authorization letter, the NDA, or the DPA)
+    is not fit to ship: either counsel has not recorded a review of it, or it
+    still carries an unresolved placeholder token (e.g. ``[GOVERNING LAW]``,
+    ``<PLACEHOLDER>``, ``TBD``). Both the counsel-review flag AND the machine
+    placeholder scan must pass before an instrument is assembled into a
+    deliverable — fail closed, so an unreviewed or placeholder-bearing instrument
+    can never be shipped. The counsel review and the placeholder resolution are
+    HUMAN actions; the framework only refuses to ship until they are done and
+    recorded."""
+
+
 class EntitlementError(CrucibleError, IntegrityError):
     """Recoverable entitlement-layer error (file parse, store I/O) that
     is NOT itself an authorization decision. Also a vigil_core `IntegrityError`

@@ -1,0 +1,35 @@
+{
+  "$note": "W14-2 (#504) — counsel-review status for the three client legal instruments. reviewed_by_counsel and governing_law_resolved are HUMAN decisions and default to false (PENDING). This file is the RECORD the ship gate (framework/v2/authority/counsel_review.py) reads: an instrument does not ship until its reviewed_by_counsel is true AND its content carries no unresolved placeholder. DO NOT flip a flag to true without a real counsel review; the placeholder scan is an independent second check, so flipping a flag alone still cannot ship placeholder-bearing text. 'path' is resolved relative to this file's directory.",
+  "instruments": [
+    {
+      "id": "authorization-letter",
+      "title": "Engagement authorization letter (contract leg)",
+      "path": "../authorization-letter.md",
+      "reviewed_by_counsel": false,
+      "governing_law_resolved": false,
+      "reviewer": null,
+      "review_date": null,
+      "notes": "PENDING. Human action: counsel to review the letter terms and resolve the per-engagement placeholders. Cross-checked against charter.md and the signed EngagementAuthorization by authority.crosscheck (W13-3)."
+    },
+    {
+      "id": "nda",
+      "title": "Mutual non-disclosure agreement (NDA)",
+      "path": "nda.md",
+      "reviewed_by_counsel": false,
+      "governing_law_resolved": false,
+      "reviewer": null,
+      "review_date": null,
+      "notes": "PENDING. Human action: counsel to review the NDA and resolve the [GOVERNING LAW] / [VENUE] placeholders and the party/date fill-ins."
+    },
+    {
+      "id": "dpa",
+      "title": "Data processing agreement (DPA)",
+      "path": "dpa.md",
+      "reviewed_by_counsel": false,
+      "governing_law_resolved": false,
+      "reviewer": null,
+      "review_date": null,
+      "notes": "PENDING. Human action: counsel to review the DPA and resolve the [GOVERNING LAW] / [DATA PROTECTION REGIME] / [VENUE] placeholders and the party/date fill-ins."
+    }
+  ]
+}
