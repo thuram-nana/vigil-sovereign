@@ -30,10 +30,14 @@ repos:
       # that guard. A patch is a record of BYTES: git apply tolerates stripped trailing whitespace
       # today (no added line currently carries any), but silently rewriting one would make the
       # series misrepresent the commit it claims to reproduce.
+      # tools/fuzz/atheris/corpus/ and apps/sigil/kernel/fuzz/corpus/ are EXCLUDED (W11-3, #484): they are
+      # BYTE-EXACT coverage-guided fuzz seed corpora — non-UTF8, null-byte, partial-record and truncated
+      # inputs are the point. end-of-file-fixer would append a trailing newline and silently corrupt the
+      # seed (the exact byte the harness is meant to exercise), so these directories must never be rewritten.
       - id: trailing-whitespace
-        exclude: '^(engine/crucible/|knowledge/claude-memory/|docs/knowledge/|docs/research/|docs/plain-english/|docs/architecture/|docs/assessments/|docs/strix-patches/)'
+        exclude: '^(engine/crucible/|knowledge/claude-memory/|docs/knowledge/|docs/research/|docs/plain-english/|docs/architecture/|docs/assessments/|docs/strix-patches/|tools/fuzz/atheris/corpus/|apps/sigil/kernel/fuzz/corpus/)'
       - id: end-of-file-fixer
-        exclude: '^(engine/crucible/|knowledge/claude-memory/|docs/knowledge/|docs/research/|docs/plain-english/|docs/architecture/|docs/assessments/|docs/strix-patches/)'
+        exclude: '^(engine/crucible/|knowledge/claude-memory/|docs/knowledge/|docs/research/|docs/plain-english/|docs/architecture/|docs/assessments/|docs/strix-patches/|tools/fuzz/atheris/corpus/|apps/sigil/kernel/fuzz/corpus/)'
       - id: check-yaml
         # A YAML file that no longer parses is how a workflow or compose file silently stops working.
         # --allow-multiple-documents: the infra/ha/k8s manifests are legitimately multi-document (`---`).

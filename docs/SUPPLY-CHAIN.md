@@ -397,8 +397,8 @@ indistinguishable from a fresh build). The A14 gate now also:
   switched off), while a **fixable** HIGH/CRITICAL still blocks. A negative control builds a fixture
   image with a deliberately vulnerable layer and requires the blocking config to FAIL on it.
 - **Scans the Strix sandbox layer via its committed SBOM** — `trivy sbom
-  infra/supply-chain/sbom-strix-sandbox.cdx.json`. The ~7GB Kali image cannot be built on a PR
-  runner, so it cannot be `trivy image`-scanned here; its committed CycloneDX SBOM enumerates the
+  infra/supply-chain/sbom-strix-sandbox.cdx.json`. The ~7GB Kali image is too large to build on a PR
+  runner, so it is not `trivy image`-scanned here; its committed CycloneDX SBOM enumerates the
   shipped OS-package layer and `trivy sbom` scans those purls. **Advisory** on purpose: a
   security-testing distro carries findings the author cannot fix, so blocking on it would switch the
   gate off.
