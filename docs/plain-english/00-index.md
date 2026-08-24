@@ -109,7 +109,7 @@ Word counts are rounded snapshots, for planning your time only.
 | 2 | `02-the-parts.md` | The Parts Of The System And How They Fit Together | The named components, the wall between the attacking half and the key-holding half, what runs on which machine, where the information is actually stored, the programmatic ways in, and why possessing the software is not possessing the capability | 22,500 w |
 | 3 | `03-an-operation-end-to-end.md` | How A Security Assessment Runs, From Start To Finish | The whole job in eleven stages: written permission, the session, set-up, pre-flight, discovery, mapping, testing, confirmation, the attack picture, the report, the re-test — and everything that can stop it mid-way | 19,500 w |
 | 4 | `04-leads-and-facts.md` | Leads And Facts: How The System Decides Something Is Real | The single most important chapter. What separates a suspicion from a proved finding, why the artificial intelligence is never allowed to make that call, what "confidence" means, and precisely which problem this does *not* solve | 16,200 w |
-| 5 | `05-weakness-types.md` | Every Type Of Weakness The System Can Find | The complete catalogue: 85 named categories of weakness, the 38 confirming checkers, defensive detection from the customer's own logs, which claims may be stated as a proved *absence*, the attack library behind it, and what the catalogue does not cover | 26,400 w |
+| 5 | `05-weakness-types.md` | Every Type Of Weakness The System Can Find | The complete catalogue: 88 named categories of weakness, the 41 confirming checkers, defensive detection from the customer's own logs, which claims may be stated as a proved *absence*, the attack library behind it, and what the catalogue does not cover | 26,400 w |
 | 6 | `06-evidence-and-proof.md` | Evidence: How It Is Collected, Shown, And Independently Re-Checked | What is captured, how it is sealed, what a report contains, exactly how a stranger re-checks it offline, what happens if a byte is altered, how evidence is kept and destroyed, and the safeguards over the system's own build | 27,000 w |
 | 7 | `07-signing-and-keys.md` | Signatures And Keys: Who Vouches For A Result | Digital signatures in plain terms, who holds which key, how keys are protected, what happens when one is lost, several-people-must-approve, the trust root, rollback defences, and where the guarantees stop | 21,200 w |
 | 8 | `08-safety-and-authorization.md` | Safety, Authorization, And What The System Refuses To Do | Written authorisation, scope enforcement, permission tiers, human approval, the emergency stop, not harming the target, the complete list of deliberate refusals — then the question turned round: who could attack VIGIL itself, and how its own build is assured | 24,300 w |
@@ -559,7 +559,7 @@ through the whole path; the other reaches a genuinely outside system, using the 
 credential against the real GitHub service. Neither runs in the automated build, deliberately — there are no credentials
 there, and a live test that invents a result when it cannot run is worse than no live test at all.
 
-**The honest count, checker by checker.** Of the 38 kinds of checker, **3** have judged material a real
+**The honest count, checker by checker.** Of the 41 kinds of checker, **3** have judged material a real
 outside system produced, **2** material from real infrastructure the system creates and destroys
 itself, **13** material a real program on the project's own machine produced, and **20** only saved
 sample material. Chapter 1, section 9.2 and chapter 5, Part 2 both set that out in full, and both name
@@ -760,7 +760,7 @@ Chapter 8, "Scope enforcement", is the authoritative account.
   cloud capability was fired at something real — the GitHub half of exposed-secret validity, driven
   over a real network connection against the real GitHub service, and the first of the six to have
   judged material from a system outside the project. An honest count appeared of
-  how strong the evidence behind each of the 38 checkers actually is. The plain-language case file
+  how strong the evidence behind each of the 41 checkers actually is. The plain-language case file
   became part of every delivered archive. An anti-replay guard was delivered on the owner's signed
   decisions, closing a gap a genuine signature alone did not cover. The engagement library brought
   the interface to twenty-nine screens. The claim-checking layer's own internal note — which several
@@ -879,9 +879,9 @@ re-derived for this index at the version named above.
 
 | Claim | How to check it |
 |---|---|
-| 38 kinds of confirming checker | Count the members of the `OracleKind` list in `engine/crucible/framework/v2/verify/models.py` |
+| 41 kinds of confirming checker | Count the members of the `OracleKind` list in `engine/crucible/framework/v2/verify/models.py` |
 | 15 always-available checkers in the frozen fallback set | Count `_ALL_ORACLES` in `engine/crucible/framework/v2/verify/verifier.py`; observe that the six cloud and container-platform kinds are not among them |
-| 85 named weakness categories, 190 alternative spellings, 275 accepted names in total | Read the class-to-checker map and the alias map in `engine/crucible/framework/v2/verify/verifier.py` |
+| 88 named weakness categories, 206 alternative spellings, 294 accepted names in total | Read the class-to-checker map and the alias map in `engine/crucible/framework/v2/verify/verifier.py` |
 | 26 evidence routes; all 26 may prove a weakness; only 6 may prove an absence; 17 carry named outstanding work | Read `docs/capability-matrix/evidence-branches.json` |
 | The six cloud and container-platform exploitation routes | The same file: the routes whose names begin `cloud_exploit.` and `k8s_exploit.` |
 | 29 screens | Compare the navigation list in `packages/vigil-ui/app.js` with `knowledge/system-map/system-map.json`. An automated check fails the build if the two disagree |

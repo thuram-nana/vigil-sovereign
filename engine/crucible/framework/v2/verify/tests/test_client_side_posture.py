@@ -73,6 +73,39 @@ def test_clickjacking_refuses_when_headers_were_not_observed() -> None:
     assert not cs.confirm_clickjacking_posture({}).confirmed
 
 
+def test_clickjacking_does_not_false_fact_on_multi_header_or_combined_defenses() -> None:
+    """RED-PEN regression (the load-bearing soundness property): a page that SHIPS the framing defense
+    as a DOUBLED header (proxy+app), a comma-combined value, or a SPLIT CSP is field-combined (RFC 7230)
+    into one value the anchored regexes once MISSED — minting a FALSE 'ships NO framing defense' FACT on a
+    browser-protected page (the exact multi-header-XFO FP that reverted the achieved-state oracle). The
+    token-aware consumers must read every case as PROTECTED (NOT confirmed)."""
+    HTML = ["Content-Type", "text/html"]
+    # (1) DOUBLED X-Frame-Options header (proxy AND app both set SAMEORIGIN) — the common shape.
+    assert not cs.confirm_clickjacking_posture(
+        {"rule": "framing_unprotected",
+         "headers": [HTML, ["X-Frame-Options", "SAMEORIGIN"], ["X-Frame-Options", "SAMEORIGIN"]]}).confirmed
+    # (2) comma-COMBINED X-Frame-Options value (already merged upstream).
+    assert not cs.confirm_clickjacking_posture(
+        {"rule": "framing_unprotected", "headers": {"Content-Type": "text/html",
+                                                    "X-Frame-Options": "DENY, DENY"}}).confirmed
+    # (3) TWO Content-Security-Policy headers, only ONE carrying frame-ancestors.
+    assert not cs.confirm_clickjacking_posture(
+        {"rule": "framing_unprotected",
+         "headers": [HTML, ["Content-Security-Policy", "default-src 'self'"],
+                     ["Content-Security-Policy", "frame-ancestors 'none'"]]}).confirmed
+    # (4) a combined value where only ONE token is a valid framing policy — still protected.
+    assert not cs.confirm_clickjacking_posture(
+        {"rule": "framing_unprotected", "headers": {"Content-Type": "text/html",
+                                                    "X-Frame-Options": "ALLOWALL, SAMEORIGIN"}}).confirmed
+    # POSITIVE CONTROLS so the above is non-vacuous: a bogus-only XFO (no valid token) and a page with
+    # neither defense DO still fire the genuine weakness.
+    assert cs.confirm_clickjacking_posture(
+        {"rule": "framing_unprotected", "headers": {"Content-Type": "text/html",
+                                                    "X-Frame-Options": "BOGUS"}}).confirmed
+    assert cs.confirm_clickjacking_posture(
+        {"rule": "framing_unprotected", "headers": [HTML, ["Server", "nginx"]]}).confirmed
+
+
 # ---------------------------------------------------------------------------
 # CSRF — anti-CSRF token not enforced (a control-differential). Positive + negative in one run.
 # ---------------------------------------------------------------------------

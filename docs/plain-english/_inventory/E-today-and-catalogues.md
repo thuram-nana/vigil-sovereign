@@ -236,16 +236,16 @@ Run against `main` @ `05b81e9f` with the offence virtualenv:
 
 | Quantity | Count | Source |
 |---|---|---|
-| Detector kinds (`OracleKind` members) | **38** | `engine/crucible/framework/v2/verify/models.py:31-337` |
+| Detector kinds (`OracleKind` members) | **41** | `engine/crucible/framework/v2/verify/models.py:31-363` |
 | Canonical weakness categories (`BUG_CLASS_ORACLES` rows) | **85** | `verify/verifier.py:33-283` |
 | Spelling aliases folded onto those 85 | **190** | `verify/verifier.py:284-519` |
 | Total recognised vocabulary (categories + aliases) | **275** | `verifier.known_bug_classes()` |
 | The frozen fallback set for an *unrecognised* category | **15** | `verify/verifier.py:531-547` |
-| Detector kinds reachable *only* through an explicit category row | **23** | 38 − 15 |
+| Detector kinds reachable *only* through an explicit category row | **26** | 41 − 15 |
 | Declarative check-library entries | **172** | `scanner/library_entries/*.json` |
 | Distinct weakness categories those entries cover | **23** | counted from the same files |
 
-**Every one of the 38 detector kinds is referenced by at least one category row** — there are no
+**Every one of the 41 detector kinds is referenced by at least one category row** — there are no
 orphans (verified programmatically).
 
 ### 2.2 Why the "frozen 15" matters, and how to explain it
@@ -362,9 +362,9 @@ cluster.
 
 **And this is exactly what the live-fire run measured against a real cluster** (Part 4.3).
 
-### 2.6 Notes the writers will need on the 85 categories
+### 2.6 Notes the writers will need on the 88 categories
 
-- The 85 canonical categories are not 85 different detectors: many share one. `achieved_state` alone
+- The 88 canonical categories are not 85 different detectors: many share one. `achieved_state` alone
   backs 24 categories (`idor`, `bola`, `bfla`, broken access control, mass assignment, open redirect,
   CORS, host-header injection, four GraphQL denial-of-service categories, four SSO categories, business
   logic, and more).
@@ -534,7 +534,7 @@ shape and is now wrong in two specifics. The corrected census:
 
 ### 4.1 The headline
 
-Each of the 38 detector kinds is counted **once, at its strongest tier**, so the four numbers sum to 38.
+Each of the 41 detector kinds is counted **once, at its strongest tier**, so the four numbers sum to 41.
 
 | Tier | Count | Kinds |
 |---|---|---|
@@ -672,15 +672,11 @@ Four qualifications that keep this from over-reading as weakness:
 
 And the one **row-level** split, which is the sharpest honesty point of the day and must not be blurred:
 
-> **The `github_pat` row of E5 is live-fire proven against the real provider. The other three rows of the
-> same capability are NOT.** The recognizer set now holds FOUR types — `aws_access_key`, `github_pat`,
-> `gitlab_pat`, `slack_token` — each with a runner dispatch and a per-type confirming call built and
-> unit-proven (AWS's SigV4 signer tested against botocore's independent implementation; GitLab's
-> `GET /api/v4/user`; Slack's `auth.test`), but only the GitHub row has touched a real provider. The
-> AWS/GitLab/Slack rows each still require a real, operator-provisioned credential of their type, and
-> **nothing about the GitHub run transfers to them.** A *discovery* runner
-> (`integration/vigil_integration/live/secret_discovery.py`) recognises a wider set of shapes and emits
-> **LEADs only** — never facts; adjudication stays with the E5 oracle over a confirming-call capture.
+> **The `github_pat` row of E5 is live-fire proven against the real provider. The `aws_access_key` row
+> of the same capability is NOT.** Its runner dispatch and its SigV4-signed confirming call are built
+> and unit-proven — the signer tested against botocore's independent implementation — but have **never**
+> been exercised against real AWS. It still requires a real, operator-provisioned access key, and
+> **nothing about the GitHub run transfers to it.**
 > (`docs/capability-matrix/evidence-branches.json`, `cloud_exploit.secret.credential_validity`.)
 
 ### 4.7 What the two live-fire runs did NOT exercise
@@ -960,8 +956,8 @@ The specific, fixable gap is named as `COVERAGE_GAP_NOTE` rather than left vague
 | "WARDEN blocks dangerous commands" | WARDEN classifies and records; it never executes and never blocks by itself. The *gate* blocks | "WARDEN decides a tier; the gate refuses or queues on that decision" |
 | "Unknown tools are blocked" | They are classified A3, which means explicit authorization required — not permanently forbidden | "Anything not positively recognised as safe is treated as maximally dangerous" |
 | "The system proved the Kubernetes finding on a live cluster" | True, but the capture path was `kubectl`, not the gated sensor, and the gated sensor's client is not installed here | "…against a real cluster it creates and owns; the gated enumeration runner is separate and not yet exercised" |
-| "Exposed-secret validation is live-fire proven" | Only the GitHub row. The AWS/GitLab/Slack rows have never touched a real provider | Name the row |
-| "38 detectors are available on every scan" | 15 are; 23 need an explicit category row keyed on evidence an ordinary scan does not produce | "15 core, 23 that only a specific kind of evidence can reach" |
+| "Exposed-secret validation is live-fire proven" | Only the GitHub row. The AWS row has never touched real AWS | Name the row |
+| "41 detectors are available on every scan" | 15 are; 26 need an explicit category row keyed on evidence an ordinary scan does not produce | "15 core, 26 that only a specific kind of evidence can reach" |
 | "Keys are encrypted at rest" | Not on this deployment. The TPM device is present but `tpm2-tools` is absent, so no key-encryption key is provisioned | "The mechanism is built and fail-closed; it is not provisioned on this machine, and the owner key rests as plaintext behind `0600`" |
 | "The transparency log prevents a split view" | Only with a strict-majority witness set. Below that, detection only | Quote the conditional |
 | "Every check passes before a merge" | Nine of ten are required, and administrators are exempt | State both |

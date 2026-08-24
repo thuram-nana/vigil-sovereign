@@ -123,7 +123,7 @@ inputs and the calculation can re-run it and must get the same answer. That is w
 turns a claim into a proof. It is a recipe, not a chef.
 
 In the version of the software read for this briefing, the system has **38 distinct
-kinds of automatic test** and a vocabulary of **85 named weakness classes**, each mapped
+kinds of automatic test** and a vocabulary of **88 named weakness classes**, each mapped
 to the specific tests that are allowed to confirm it.[^rev]
 
 [^rev]: Software is identified by a short code for the exact snapshot of the source it was
@@ -2240,7 +2240,7 @@ as a cross-check.
   is not a standing identity.
 - The downloadable **case file** now carries nine numbered plain-language documents alongside the
   machine records and the proof bundle, a front page that accounts for **every file in the
-  archive**, a catalogue of all 85 weakness categories the engine can confirm with this
+  archive**, a catalogue of all 88 weakness categories the engine can confirm with this
   engagement's position against each — and no "examined and found clean" state, because the run
   record does not support one. Three checks are set out with their exact commands, and each is
   stated with what a pass does *not* mean. A third party can run all three offline and with no

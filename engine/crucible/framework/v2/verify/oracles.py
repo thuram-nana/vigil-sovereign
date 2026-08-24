@@ -3537,7 +3537,11 @@ def _normalize_headers(raw: Any) -> "dict[str, str] | None":
     """A retained response's headers as a lowercase-keyed dict of joined values, or ``None`` if the shape
     is not a recognisable header collection. Accepts a Mapping ``{name: value}`` or a sequence of
     ``[name, value]`` pairs — the two JSON-safe shapes a captured response retains. Duplicate header names
-    are joined with ``', '`` (RFC 7230 §3.2.2 field-combining), so a split CSP still reads as one value."""
+    are joined with ``', '`` (RFC 7230 §3.2.2 field-combining). The consumers below read the COMBINED
+    value TOKEN-AWARE — ``_xfo_declares_framing`` splits it on ``,`` and ``_CSP_FRAME_ANCESTORS_RE``
+    treats ``,`` as a policy separator — so a doubled/comma-combined ``X-Frame-Options`` (proxy+app) and
+    two ``Content-Security-Policy`` headers (one carrying ``frame-ancestors``) are correctly read as
+    PROTECTED, never mis-read as unprotected."""
     if isinstance(raw, Mapping):
         items: list[tuple[Any, Any]] = list(raw.items())
     elif isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
@@ -3560,11 +3564,26 @@ def _normalize_headers(raw: Any) -> "dict[str, str] | None":
     return out
 
 
-# a CSP `frame-ancestors` directive (any value) — a declared framing policy the browser enforces.
-_CSP_FRAME_ANCESTORS_RE = re.compile(r"(?i)(?:^|;)\s*frame-ancestors\b")
-# an X-Frame-Options value that declares a framing policy: DENY / SAMEORIGIN (enforced), or the
+# a CSP `frame-ancestors` directive (any value) — a declared framing policy the browser enforces. It may
+# sit at the policy start (`^`), after a directive separator (`;`), OR — when TWO CSP headers are
+# RFC-7230-combined into one value — after a policy separator (`,`). Missing the `,` case would MISS a
+# split CSP (a real defense) and mint a FALSE "unprotected" fact, so `,` is a valid preceding boundary.
+_CSP_FRAME_ANCESTORS_RE = re.compile(r"(?i)(?:^|[;,])\s*frame-ancestors\b")
+# ONE X-Frame-Options TOKEN that declares a framing policy: DENY / SAMEORIGIN (enforced), or the
 # deprecated ALLOW-FROM (a declared intent — treated as "present" so a partner allowlist is NOT a FP).
-_XFO_DECLARED_RE = re.compile(r"(?i)^\s*(?:deny|sameorigin|allow-from\b.*)$")
+_XFO_TOKEN_RE = re.compile(r"(?i)^(?:deny|sameorigin|allow-from\b.*)$")
+
+
+def _xfo_declares_framing(value: str) -> bool:
+    """True iff ANY comma-separated ``X-Frame-Options`` TOKEN declares a framing policy. Because duplicate
+    XFO headers are field-combined into one value (RFC 7230 §3.2.2), a doubled/comma-combined header
+    (``SAMEORIGIN, SAMEORIGIN`` from a proxy + app, ``DENY, DENY``) carries MULTIPLE tokens — and a browser
+    enforces framing when ANY of them is DENY/SAMEORIGIN. So we split on ``,`` and test each token, rather
+    than anchor-matching the whole combined value (which would MISS the multi-token case and mint a FALSE
+    "unprotected" fact — the exact multi-header-XFO false positive that got the achieved-state oracle
+    reverted, see docs/DELIBERATE-REFUSALS.md refusal 8). XFO's own values never contain a legitimate comma
+    (ALLOW-FROM takes a single origin), so splitting on ``,`` is sound."""
+    return any(_XFO_TOKEN_RE.match(tok.strip()) for tok in value.split(","))
 
 
 def clickjacking_posture_oracle(observed_control: Any) -> OracleSignal:
@@ -3607,7 +3626,7 @@ def clickjacking_posture_oracle(observed_control: Any) -> OracleSignal:
                       f"{ctype or 'absent'!r}) — clickjacking does not apply (REFUSE)"))
     xfo = headers.get("x-frame-options", "")
     csp = headers.get("content-security-policy", "")
-    xfo_protects = bool(_XFO_DECLARED_RE.match(xfo))
+    xfo_protects = _xfo_declares_framing(xfo)
     csp_protects = bool(_CSP_FRAME_ANCESTORS_RE.search(csp))
     if xfo_protects or csp_protects:
         which = ("X-Frame-Options=" + xfo) if xfo_protects else "CSP frame-ancestors"

@@ -126,7 +126,7 @@ confirmations is a deliberate permanent exception: the identity privilege-escala
 carries out the escalation it is establishing, so what it awaits is a real set of permission rules to
 read, not a live attack. Section 9.3 sets all of this out capability by capability.
 
-Across the system as a whole the honest count is this. Of the 38 kinds of checker, **3** have been
+Across the system as a whole the honest count is this. Of the 41 kinds of checker, **3** have been
 run over material that a real outside system produced, **2** over material from real infrastructure
 the system creates and destroys itself, **13** over material a real program on the system's own
 machine produced, and **20** only over saved sample material. Section 9.2 sets that count out in
@@ -349,10 +349,10 @@ says how.
 
 | Count | What it counts |
 |---|---|
-| **38** | Distinct kinds of checker. |
-| **40** | Individual checking functions implementing those 38 kinds. |
-| **85** | Named categories of security weakness the system recognises. |
-| **275** | Names it will accept in total for those 85 categories — the 85 proper names plus 190 alternative spellings used by other vendors and standards bodies, each mapped onto one of the 85 so nothing is double-counted. |
+| **41** | Distinct kinds of checker. |
+| **43** | Individual checking functions implementing those 41 kinds. |
+| **88** | Named categories of security weakness the system recognises. |
+| **294** | Names it will accept in total for those 88 categories — the 88 proper names plus 206 alternative spellings used by other vendors and standards bodies, each mapped onto one of the 88 so nothing is double-counted. |
 
 No checker may claim complete certainty. Its confidence figure is capped at 0.99, on the project's
 stated principle that "a deterministic oracle never claims certainty it cannot have."
@@ -1132,7 +1132,7 @@ than quietly tidying it away, is what the project's own rules require.
   three have only ever been run over saved sample material: the two that reach their verdict by
   statistics rather than by direct observation, and the one that checks whether an installed version
   falls inside a published advisory's affected range. Section 9.2 gives the equivalent count for all
-  38 checker types, and names the one of these twelve where a stricter reader would reasonably
+  41 checker types, and names the one of these twelve where a stricter reader would reasonably
   disagree — a cloud checker exercised against a simulator rather than a real cloud account. The
   project ships a negative control for this: pointed at a deliberately *safe*
   version of the same application, the confirmation step returns nothing — demonstrating that the
@@ -1195,7 +1195,7 @@ of them fails.
 
 **The honest count, checker by checker.** The sharpest question to ask about a system like this is
 not "how many things can it check for" but "how much of that has ever been tried against something
-real". Each of the 38 checker types is counted below exactly once, at the strongest evidence it has
+real". Each of the 41 checker types is counted below exactly once, at the strongest evidence it has
 ever been run over, so the four figures add up to 38.
 
 | How strong the evidence behind it is | Count | Which ones |
@@ -1900,7 +1900,7 @@ table below says how.
 
 | Claim | How to re-check it |
 |---|---|
-| 38 checker kinds, 85 weakness categories, 190 alternative spellings, 275 accepted names, frozen fallback set of exactly 15 | Run the extraction script recorded in the project's own inventory notes against the verification module. |
+| 41 checker kinds, 88 weakness categories, 206 alternative spellings, 294 accepted names, frozen fallback set of exactly 15 | Run the extraction script recorded in the project's own inventory notes against the verification module. |
 | 26 evidence sources, 26 able to produce a proven fact, 6 able to produce a proven "clean" | Read `docs/capability-matrix/evidence-branches.json`. |
 | 186 named intergovernmental domains on the categorical refusal list | Count the entries in the blocked-domain set in `integration/vigil_integration/safety/hard_guardrail.py`. |
 | The build-and-release safeguards are in the released version (section 9.4) | Confirm that the change delivering them has been merged into the released version of the software, and that `docs/SUPPLY-CHAIN.md`, `.github/workflows/supply-chain.yml` and `.trivyignore` are present there. |
@@ -1944,7 +1944,7 @@ each and can be read in any order.
 | **2** | The parts of the system, and how they fit together | What CRUCIBLE, AEGIS, SIGIL, STRIX, the gateway and the shared core each are; the wall between the offensive and personal halves; what runs where. |
 | **3** | How a security assessment runs, from start to finish | The eleven stages of a job, from the written authorisation through discovery, testing, confirmation and reporting to re-testing after the fix. |
 | **4** | Leads and facts: how the system decides something is real | The single most important distinction in the product, examined closely: the four verdicts, the journey of a claim, and exactly what this approach cannot do. |
-| **5** | Every type of weakness the system can find | The full catalogue of the 85 named categories and the 38 checkers, with what each can and cannot prove. |
+| **5** | Every type of weakness the system can find | The full catalogue of the 88 named categories and the 41 checkers, with what each can and cannot prove. |
 | **6** | Evidence: how it is collected, shown, and independently re-checked | What counts as evidence, how it is sealed, the four checks a certificate must pass, and how to hand a package to an independent third party. |
 | **7** | Signatures and keys: who vouches for a result | What a digital signature is, what exactly gets signed, who holds which key, the trust root, and rotation and revocation. |
 | **8** | Safety, authorisation, and what the system refuses to do | The written authorisation, scope enforcement, permission tiers, approvals, the emergency stop, and the audit trail. **The authoritative account of the government-host refusal discussed in section 6.2 is here, in its section 2.5.** |
