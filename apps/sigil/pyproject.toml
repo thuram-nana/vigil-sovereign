@@ -39,10 +39,10 @@ dependencies = [
     "kuzu==0.11.3",
     "mcp==1.28.1",
     "numpy>=1.26,<3",
-    "onnxruntime==1.27.0",
+    "onnxruntime==1.29.0",
     "pydantic==2.13.4",
     "PyYAML>=6",                  # structural kubeconfig safety gate (refuse exec/cmd-path plugins)
-    "qdrant-client==1.18.0",
+    "qdrant-client==1.19.0",
 ]
 
 # Optional stacks are lazy-imported and degrade gracefully; the extras make the install intentional
