@@ -2090,6 +2090,86 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W12-3",
+      "title": "CODEOWNERS gives every security-critical path an explicit owner (W12-3 #492)",
+      "claim": "The repository-root CODEOWNERS lives where GitHub reads it, has a catch-all owner, and gives every security-critical trust-domain path its own explicit rule that is more specific than the catch-all, with a well-formed owner and a path that exists in the tree; a required-CI guard fails the build if any critical path falls back to the bare catch-all, if the catch-all is missing, if an owner token is malformed, or if a rule points at a path not in the tree.",
+      "source": "docs/decisions/W12-3-require-code-owner-review.md:45",
+      "enforced_by": {
+        "file": "integration/tests/test_codeowners_coverage.py",
+        "symbol": "codeowners_coverage_defects"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_codeowners_coverage.py",
+        "tests": [
+          "test_root_codeowners_covers_every_critical_path",
+          "test_negative_control_missing_critical_rule_is_flagged"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W12-4",
+      "title": "Commit-signing setup + a real local verify check ship (W12-4 #493)",
+      "claim": "A commit-signing setup script configures git to sign commits and a shared verify check (`signing_config_defects`) decides whether a working copy will produce signed commits — passing a fully configured setup and rejecting one missing `commit.gpgsign` or `user.signingkey` — so a contributor can confirm local signing before pushing; the server-side \"Require signed commits\" branch-protection rule that rejects an unsigned push is a documented human/admin action and is NOT claimed to be enabled.",
+      "source": "docs/decisions/W12-4-enforce-signed-commits.md:50",
+      "enforced_by": {
+        "file": "tools/governance/commit_signing.py",
+        "symbol": "signing_config_defects"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_commit_signing_setup.py",
+        "tests": [
+          "test_signing_config_defects_passes_a_configured_setup",
+          "test_negative_control_unsigned_config_is_rejected"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W0-1-branch-protection-verify",
+      "title": "Branch-protection verify logic is a single tested module that detects policy drift (W0-1 #554)",
+      "claim": "The branch-protection verify logic lives in a single tested module (`compare_protection`) that the workflow calls, and it detects when live GitHub branch protection drifts from the committed canonical policy — flagging a missing or extra required check, a non-strict rule, or allowed force-pushes/deletions — with a required offline test proving that dropping a required check from the committed policy makes the compare fail; the live pin itself stays advisory (deliberately not a required check) and no-ops until the fine-grained `BRANCH_PROTECTION_TOKEN` PAT with Administration:read is provisioned, which is a human/admin action.",
+      "source": "docs/decisions/W0-1-branch-protection-token.md:58",
+      "enforced_by": {
+        "file": "tools/governance/branch_protection_check.py",
+        "symbol": "compare_protection"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_branch_protection_verify.py",
+        "tests": [
+          "test_matching_protection_has_no_problems",
+          "test_dropping_a_required_check_from_the_policy_fails"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W3-7-strix-selfhosted",
+      "title": "Strix sandbox live-image-scan is a shape-pinned, self-hosted-guarded advisory scaffold (W3-7 #653)",
+      "claim": "A committed, dormant-by-design workflow scaffold builds and `trivy image`-scans the Strix sandbox image at the gateway image's exact threshold (HIGH,CRITICAL with --ignore-unfixed), advisory; it triggers only on schedule/workflow_dispatch and is guarded to a self-hosted `runs-on` label plus an opt-in repository variable, so it never runs on a pull request and stays inert until an operator provisions a self-hosted/large runner (a human/infra action); a required-CI guard pins its shape, and it is enumerated in KNOWN_NONPR_ADVISORY so it can never become a required check.",
+      "source": "docs/SUPPLY-CHAIN.md:411",
+      "enforced_by": {
+        "file": "docs/tests/test_strix_sandbox_image_scan_workflow.py",
+        "symbol": "strix_sandbox_scan_workflow_defects"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_strix_sandbox_image_scan_workflow.py",
+        "tests": [
+          "test_workflow_is_correctly_shaped",
+          "test_negative_control_missing_self_hosted_guard"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "off"
     }
   ]
 }
