@@ -74,7 +74,7 @@ jobs:
           pip install -e packages/core/vigil_core --no-deps
           pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt || true
 
-      - name: mutmut run over the security-critical set (config: pyproject [tool.mutmut])
+      - name: "mutmut run over the security-critical set (config: pyproject [tool.mutmut])"
         run: |
           set -euo pipefail
           # paths_to_mutate + runner come from pyproject.toml, pinned to the manifest by the required
@@ -83,7 +83,7 @@ jobs:
           mutmut results || true
           echo "::notice::mutmut complete — investigate any SURVIVED mutant above."
 
-      - name: cosmic-ray cross-check (config: tools/mutation/cosmic-ray.toml)
+      - name: "cosmic-ray cross-check (config: tools/mutation/cosmic-ray.toml)"
         run: |
           set -euo pipefail
           # A different operator set over the same files. init builds the mutation work-db, exec runs it.
