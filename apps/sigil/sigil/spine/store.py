@@ -68,6 +68,10 @@ class SpineError(Exception):
 # lives in the test, never in the shipped writer.
 _crash_hook: "Any" = None
 
+# Default look-back window (in records) for opt-in content de-duplication on append. Bounded so dedup is
+# O(window) per append, never O(spine); a caller may override per-append via `dedup_window`.
+_DEDUP_WINDOW = 256
+
 
 def _maybe_crash(name: str) -> None:
     """Invoke the installed test fault-injection hook (if any) at a named cutover barrier. No-op in
@@ -244,6 +248,43 @@ class SpineStore:
             return self.decrypted(r)
         except Exception:  # noqa: BLE001 — locked/unopenable vault → show the sealed form (display only)
             return r
+
+    # --- content de-duplication (opt-in; NEVER touches the chain) ------------------
+    @staticmethod
+    def _content_key(kind: str, source: str, actor: str, payload: dict[str, Any],
+                     parent_id: int | None, supersedes_id: int | None) -> str:
+        """A digest over the PLAINTEXT content a record carries — the identity two records share iff they
+        are the same event. Deliberately over the plaintext payload, NOT the stored `cert_digest`: a
+        content-bearing payload is sealed with a seq-bound AEAD, so the stored digest differs per seq even
+        for identical plaintext; keying dedup on `cert_digest` would therefore never dedup real content.
+        `ts`/`seq`/`schema_version` are excluded (informational), so a genuine re-emit of the same event
+        keys identically regardless of when it arrives."""
+        return digest_payload({"scope": SCOPE, "kind": kind, "source": source, "actor": actor,
+                               "payload": payload, "parent_id": parent_id, "supersedes_id": supersedes_id})
+
+    def _find_dedup(self, kind: str, source: str, actor: str, payload: dict[str, Any],
+                    parent_id: int | None, supersedes_id: int | None, *, window: int) -> int | None:
+        """MUST hold the append lock (the tip is authoritative). Return the seq of an EXISTING record within
+        the last `window` records whose plaintext content is byte-identical to this candidate, or None.
+
+        Bounded + fail-safe: a record whose sealed content cannot be decrypted (locked vault) is SKIPPED, not
+        matched — so dedup never mistakes ciphertext for a match and never suppresses a real append it could
+        not verify as a duplicate. Scans newest→oldest so the NEAREST duplicate wins (the smallest chain
+        rewind); reads only, so it can never alter or gap the chain."""
+        if window <= 0 or self._last is None:
+            return None
+        key = self._content_key(kind, source, actor, payload, parent_id, supersedes_id)
+        tip = self._last.seq
+        recent = [r for r in self.iter_records(since_seq=max(-1, tip - window))]
+        for r in reversed(recent):                       # newest first — the nearest duplicate
+            try:
+                rr = self.decrypted(r)                   # fail-closed: an unopenable record is NOT a match
+            except Exception:  # noqa: BLE001 — locked/corrupt sealed content ⇒ skip (never a false dedup)
+                continue
+            if self._content_key(rr.kind, rr.source, rr.actor, rr.payload,
+                                 rr.parent_id, rr.supersedes_id) == key:
+                return r.seq
+        return None
 
     # --- segment layout / manifest ------------------------------------------------
     @staticmethod
@@ -820,6 +861,7 @@ class SpineStore:
         self, *, kind: str, source: str, actor: str, payload: dict[str, Any],
         parent_id: int | None = None, supersedes_id: int | None = None,
         ts: str | None = None, schema_version: int = SCHEMA_VERSION,
+        dedup: bool = False, dedup_window: int | None = None,
     ) -> int:
         # W5-1 write-path enforcement (layer 1 of the sovereign mirror of the offense blackboard's
         # Python `if kind not in ALL_EVENT_KINDS` + SQL `CHECK(kind IN (...))`). BOTH checks fail CLOSED —
@@ -842,6 +884,16 @@ class SpineStore:
         with spine_lock(self.path):
             with self._crossproc_lock():                 # cross-process guard on the path-stable lockfile
                 self._refresh_active_under_lock()        # pick up a concurrent migrate()/rotation; never fork
+                # CONTENT DE-DUPLICATION (opt-in, issue #530). Under the lock — so the tip is authoritative —
+                # look back a bounded window for a record with byte-identical PLAINTEXT content and, on a hit,
+                # return ITS seq WITHOUT writing. This NEVER touches the chain: no record is added, removed,
+                # or rewritten, so `prev_hash`/seq contiguity and every signed head are byte-identical to a
+                # store where the caller simply chose not to re-append. Default off ⇒ append is unchanged.
+                if dedup:
+                    hit = self._find_dedup(kind, source, actor, payload, parent_id, supersedes_id,
+                                           window=_DEDUP_WINDOW if dedup_window is None else dedup_window)
+                    if hit is not None:
+                        return hit
                 active = self._active
                 # binary append+read: lets us TRUNCATE a torn tail before writing (BLOCK-1 fix). `a+b`
                 # creates the file if absent and — in append mode — every write still lands at EOF.
