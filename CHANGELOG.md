@@ -16,7 +16,17 @@ workflow feeds a released section back out as the GitHub release notes via
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+- A **deploy-verify pipeline with rollback proof** (`sigil.spine.deploy_verify`, W11-8 #489): a deploy is
+  modelled as an upgrade of a live owner-signed data plane (reusing the #451 upgrade/rollback machinery), a
+  post-deploy smoke is run with its **exit code honoured**, and a failing smoke triggers an **automatic
+  rollback** to the prior version that is re-verified intact (owner signature + full record set). A
+  deliberately-broken deployment is caught and rolled back — proven by `apps/sigil/tests/test_deploy_verify.py`
+  in the required `SIGIL governor gates (P7 …)` job — and the pipeline is documented in the release runbook.
+- `make smoke` is now **CI-invoked with its exit code honoured** (it had no workflow caller before): the
+  scheduled `.github/workflows/deploy-verify.yml` builds the venvs and runs the real `make smoke`, then
+  drives the pipeline (W11-8 #489). The heavy full-venv variant is honestly labelled scheduled-only, not a
+  required PR check.
 
 ## [0.1.0] - 2026-08-23
 

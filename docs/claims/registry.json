@@ -2470,6 +2470,29 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "config-stated-as-code",
       "default": "on"
+    },
+    {
+      "id": "W11-8",
+      "title": "Deploy-verify pipeline with rollback proof",
+      "claim": "The deploy-verify pipeline deploys a build by upgrading a live owner-signed data plane, runs a post-deploy smoke whose exit code is honoured, and when the smoke fails automatically rolls back to the prior version and re-verifies it is restored with the owner signature and full record set intact; a deliberately-broken deployment is caught and rolled back, and a non-zero smoke exit drives the rollback while a zero exit lets the deployment stand.",
+      "source": "docs/decisions/W11-8-deploy-verify-pipeline.md:76",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/deploy_verify.py",
+        "symbol": "deploy_verify_roundtrip"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_deploy_verify.py",
+        "tests": [
+          "test_healthy_deployment_passes_smoke_and_stands",
+          "test_negative_control_broken_deployment_is_caught_and_auto_rolled_back",
+          "test_negative_control_rollback_is_not_a_no_op",
+          "test_run_smoke_honours_the_command_exit_code",
+          "test_a_nonzero_exit_smoke_drives_the_rollback"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
