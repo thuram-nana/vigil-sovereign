@@ -72,6 +72,10 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     OracleKind.GCP_SA_IMPERSONATION: (oracles.gcp_sa_impersonation_oracle,),
     OracleKind.IAM_ESCALATION_PRIMITIVE: (oracles.iam_escalation_oracle,),
     OracleKind.K8S_RBAC_VERB_GRANT: (oracles.k8s_rbac_verb_grant_oracle,),
+    # W16-STD-5 client-side posture-weakness oracles (clickjacking / CSRF / postMessage).
+    OracleKind.CLICKJACKING_POSTURE: (oracles.clickjacking_posture_oracle,),
+    OracleKind.CSRF_POSTURE: (oracles.csrf_posture_oracle,),
+    OracleKind.POSTMESSAGE_POSTURE: (oracles.postmessage_posture_oracle,),
 }
 
 

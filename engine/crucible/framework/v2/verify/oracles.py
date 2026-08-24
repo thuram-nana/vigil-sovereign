@@ -3515,6 +3515,263 @@ def identity_posture_oracle(observed_control: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# Client-side POSTURE-WEAKNESS oracles (W16-STD-5) — clickjacking / CSRF / postMessage.
+#
+# The always-applicable constitution "Client-side" classes (constitution §V: XSS, CSRF, clickjacking,
+# postMessage). Each proves a MISSING or WEAK client-side DEFENSE — a POSTURE WEAKNESS — from a RETAINED
+# artifact ALONE (a response's headers, a control-vs-treatment response pair, or a handler's source),
+# offline, ZERO traffic. They are DELIBERATELY NOT achieved-state exploit oracles: a single-response
+# "the page WAS framed" / "the forged request went through" signal cannot be made near-zero-FP
+# (legitimate framing / intentional embedding / SameSite-protected endpoints), so VIGIL refuses the
+# achieved-state clickjacking oracle and proves the WEAKNESS (the absent/weak defense) instead — the
+# sound claim (docs/DELIBERATE-REFUSALS.md refusal 8). Pure + deterministic; never raise.
+# ---------------------------------------------------------------------------
+
+
+def _clickjacking_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.9) -> OracleSignal:
+    return OracleSignal(kind=OracleKind.CLICKJACKING_POSTURE, fired=fired,
+                        confidence=(conf if fired else 0.0), evidence=evidence, observed=observed)
+
+
+def _normalize_headers(raw: Any) -> "dict[str, str] | None":
+    """A retained response's headers as a lowercase-keyed dict of joined values, or ``None`` if the shape
+    is not a recognisable header collection. Accepts a Mapping ``{name: value}`` or a sequence of
+    ``[name, value]`` pairs — the two JSON-safe shapes a captured response retains. Duplicate header names
+    are joined with ``', '`` (RFC 7230 §3.2.2 field-combining), so a split CSP still reads as one value."""
+    if isinstance(raw, Mapping):
+        items: list[tuple[Any, Any]] = list(raw.items())
+    elif isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        items = []
+        for pair in raw:
+            if (isinstance(pair, Sequence) and not isinstance(pair, (str, bytes))
+                    and len(pair) == 2):
+                items.append((pair[0], pair[1]))
+            else:
+                return None
+    else:
+        return None
+    out: dict[str, str] = {}
+    for name, value in items:
+        key = _coerce_text(name).strip().lower()
+        if not key:
+            continue
+        val = _coerce_text(value).strip()
+        out[key] = f"{out[key]}, {val}" if key in out else val
+    return out
+
+
+# a CSP `frame-ancestors` directive (any value) — a declared framing policy the browser enforces.
+_CSP_FRAME_ANCESTORS_RE = re.compile(r"(?i)(?:^|;)\s*frame-ancestors\b")
+# an X-Frame-Options value that declares a framing policy: DENY / SAMEORIGIN (enforced), or the
+# deprecated ALLOW-FROM (a declared intent — treated as "present" so a partner allowlist is NOT a FP).
+_XFO_DECLARED_RE = re.compile(r"(?i)^\s*(?:deny|sameorigin|allow-from\b.*)$")
+
+
+def clickjacking_posture_oracle(observed_control: Any) -> OracleSignal:
+    """Fire when a RETAINED response provably ships NO framing protection — a pure header check over the
+    OBSERVED headers, exactly the two defenses a browser enforces. One rule, ``framing_unprotected``:
+
+      * fires (0.9) ONLY when the response carries NEITHER a framing ``X-Frame-Options`` (DENY /
+        SAMEORIGIN / the deprecated ALLOW-FROM) NOR a CSP ``frame-ancestors`` directive — both framing
+        defenses are absent, so ANY origin can frame the page and mount a UI-redress (clickjacking) attack.
+
+    A response that declares EITHER defense does NOT fire — a present ``frame-ancestors`` directive (even a
+    permissive one) is a deliberate framing policy, and firing on it would be exactly the FP a permissive
+    value invites (that stays a LEAD, never an oracle FACT). Two further near-zero-FP gates: (1) the
+    response must be a FRAMABLE DOCUMENT — its ``Content-Type`` declares ``text/html`` (or
+    ``application/xhtml+xml``); a JSON/image/API response cannot be meaningfully clickjacked, so a missing
+    or non-document content-type REFUSES. (2) Absence must be OBSERVED: the control MUST carry a
+    ``headers`` collection (a captured response's complete header set); an unretained header set REFUSES.
+    DELIBERATELY NOT an achieved-state oracle — a "the page WAS framed" signal cannot be near-zero-FP
+    (legitimate framing exists). Never raises."""
+    if not isinstance(observed_control, Mapping):
+        return _clickjacking_signal(False, evidence="no clickjacking control evidence", observed={})
+    rule = _coerce_text(observed_control.get("rule")).strip().lower() or "framing_unprotected"
+    if rule != "framing_unprotected":
+        return _clickjacking_signal(
+            False, observed={"rule": rule},
+            evidence=f"unrecognised/lead-only clickjacking rule {rule!r} (stays a lead)")
+    url = _coerce_text(observed_control.get("url")).strip()
+    where = f" for {url}" if url else ""
+    headers = _normalize_headers(observed_control.get("headers"))
+    if headers is None:
+        return _clickjacking_signal(
+            False, observed={"rule": rule},
+            evidence=("no retained response headers to judge — framing posture UNOBSERVED "
+                      "(REFUSE: absence must be observed, never assumed)"))
+    ctype = headers.get("content-type", "").lower()
+    if not ("text/html" in ctype or "application/xhtml+xml" in ctype):
+        return _clickjacking_signal(
+            False, observed={"rule": rule, "content_type": ctype or None},
+            evidence=("the response is not a framable HTML document (Content-Type "
+                      f"{ctype or 'absent'!r}) — clickjacking does not apply (REFUSE)"))
+    xfo = headers.get("x-frame-options", "")
+    csp = headers.get("content-security-policy", "")
+    xfo_protects = bool(_XFO_DECLARED_RE.match(xfo))
+    csp_protects = bool(_CSP_FRAME_ANCESTORS_RE.search(csp))
+    if xfo_protects or csp_protects:
+        which = ("X-Frame-Options=" + xfo) if xfo_protects else "CSP frame-ancestors"
+        return _clickjacking_signal(
+            False, observed={"rule": rule, "x_frame_options": xfo or None, "csp": csp or None},
+            evidence=f"a framing defense is declared ({which}) — not unprotected")
+    return _clickjacking_signal(
+        True, conf=0.9,
+        evidence=(f"the response{where} ships NO framing defense — neither an X-Frame-Options "
+                  "(DENY/SAMEORIGIN) header nor a CSP frame-ancestors directive is present, so any "
+                  "origin can frame it (clickjacking / UI-redress is unmitigated)"),
+        observed={"rule": rule, "url": url or None, "x_frame_options": xfo or None, "csp": csp or None})
+
+
+def _csrf_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.9) -> OracleSignal:
+    return OracleSignal(kind=OracleKind.CSRF_POSTURE, fired=fired,
+                        confidence=(conf if fired else 0.0), evidence=evidence, observed=observed)
+
+
+_STATE_CHANGING_METHODS = frozenset({"post", "put", "patch", "delete"})
+
+
+def _is_2xx(status: Any) -> bool:
+    return isinstance(status, int) and not isinstance(status, bool) and 200 <= status < 300
+
+
+def csrf_posture_oracle(observed_control: Any) -> OracleSignal:
+    """Fire on a control-DIFFERENTIAL proving an anti-CSRF (synchronizer) token is NOT ENFORCED on a
+    state-changing endpoint — a re-derivation over TWO retained responses, never a scanner's say-so. One
+    rule, ``token_not_enforced``, fires (0.9) ONLY when ALL hold:
+
+      * the method is state-changing (POST/PUT/PATCH/DELETE);
+      * the CONTROL request (a valid anti-CSRF token present) was ACCEPTED — a retained 2xx
+        ``token_present_status`` (the baseline works);
+      * the TREATMENT request (the SAME request with the token REMOVED or FORGED) was ACCEPTED — a
+        retained 2xx ``token_absent_status``.
+
+    A valid-token request and a stripped/forged-token request BOTH accepted proves the token is not
+    validated — no synchronizer-token CSRF defense (a posture weakness). If stripping/forging the token
+    changes acceptance (a non-2xx reject / redirect / status divergence), the token IS enforced and it
+    does NOT fire. A safe method (GET/HEAD), a control that did not itself succeed, or a missing/non-int
+    status REFUSES. Proves ONLY that the token is not enforced — NEVER that a cross-site attack succeeded
+    (SameSite cookies / Origin checks are a separate defense layer this does not adjudicate). Pure +
+    deterministic; never raises."""
+    if not isinstance(observed_control, Mapping):
+        return _csrf_signal(False, evidence="no CSRF control evidence", observed={})
+    rule = _coerce_text(observed_control.get("rule")).strip().lower() or "token_not_enforced"
+    if rule != "token_not_enforced":
+        return _csrf_signal(False, observed={"rule": rule},
+                            evidence=f"unrecognised/lead-only CSRF rule {rule!r} (stays a lead)")
+    method = _coerce_text(observed_control.get("method")).strip().lower()
+    endpoint = _coerce_text(observed_control.get("endpoint")).strip()
+    where = (f" {method.upper()} {endpoint}").rstrip() if (method or endpoint) else ""
+    if method not in _STATE_CHANGING_METHODS:
+        return _csrf_signal(False, observed={"rule": rule, "method": method or None},
+                            evidence=(f"method {method!r} is not state-changing — anti-CSRF token enforcement "
+                                      "is not applicable (REFUSE)"))
+    present = observed_control.get("token_present_status")
+    absent = observed_control.get("token_absent_status")
+    if (not isinstance(present, int) or isinstance(present, bool)
+            or not isinstance(absent, int) or isinstance(absent, bool)):
+        return _csrf_signal(False, observed={"rule": rule},
+                            evidence=("both the token-present and token-absent/forged response statuses must be "
+                                      "retained integers — the control-differential is UNRESOLVED (REFUSE)"))
+    if not _is_2xx(present):
+        return _csrf_signal(False, observed={"rule": rule, "token_present_status": present},
+                            evidence=(f"the valid-token control was not accepted (status {present}) — there is no "
+                                      "working baseline to differentiate against (REFUSE)"))
+    if not _is_2xx(absent):
+        return _csrf_signal(False, observed={"rule": rule, "token_present_status": present,
+                                             "token_absent_status": absent},
+                            evidence=(f"removing/forging the anti-CSRF token changed acceptance (status {absent} vs "
+                                      f"{present}) — the token IS enforced (protected)"))
+    return _csrf_signal(True, conf=0.9,
+                        evidence=(f"a state-changing request{where} was accepted with a valid anti-CSRF token "
+                                  f"(status {present}) AND accepted with the token removed/forged (status {absent}) "
+                                  "— the synchronizer token is NOT enforced (no token-based CSRF defense)"),
+                        observed={"rule": rule, "method": method, "endpoint": endpoint or None,
+                                  "token_present_status": present, "token_absent_status": absent})
+
+
+def _postmessage_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.9) -> OracleSignal:
+    return OracleSignal(kind=OracleKind.POSTMESSAGE_POSTURE, fired=fired,
+                        confidence=(conf if fired else 0.0), evidence=evidence, observed=observed)
+
+
+# a `postMessage(<data>, "*")` call whose SECOND argument (targetOrigin) is a literal `*`. Bounded
+# alternation over a length-capped source (ReDoS-safe): the message argument may nest one level of
+# parens; the targetOrigin literal must be exactly a quoted `*`.
+_POSTMESSAGE_WILDCARD_RE = re.compile(
+    r"""(?is)postMessage\s*\((?:[^()]|\([^()]*\))*,\s*(['"])\*\1\s*\)""")
+# any reference to `origin` (event.origin / e.origin / a destructured origin / a guard helper) — the
+# presence of an origin check. SOUND in the negative direction: if `origin` appears NOWHERE, there is
+# provably no origin validation. Its presence (even in a string/comment) SUPPRESSES a fire (safe under-report).
+_ORIGIN_REF_RE = re.compile(r"(?i)\borigin\b")
+# the handler consumes the untrusted cross-origin payload (event.data / e.data / msg.data / .data).
+_USES_MESSAGE_DATA_RE = re.compile(r"(?i)\.\s*data\b")
+
+
+def postmessage_posture_oracle(observed_control: Any) -> OracleSignal:
+    """Fire when a RETAINED postMessage handler source re-derives a wildcard cross-origin weakness — a
+    sound STATIC check over the source ALONE, never a scanner's say-so. Two rules:
+
+      * ``wildcard_target`` — a ``postMessage(<data>, "*")`` send whose targetOrigin literal is ``*`` (in
+        the retained source), OR a retained ``target_origin`` field equal to ``*``. A ``*`` targetOrigin
+        broadcasts the message to ANY origin (data exfiltration to a hostile frame). A send to a SPECIFIC
+        origin does NOT fire.
+      * ``no_origin_check`` — a ``message``-event handler that CONSUMES the untrusted payload
+        (``event.data``) yet references ``origin`` NOWHERE in its source: there is provably no
+        ``event.origin`` validation, so the handler acts on messages from ANY origin. A handler that
+        references ``origin`` ANYWHERE (an origin check — even in a helper/guard) does NOT fire
+        (near-zero-FP: a present ``origin`` reference safely SUPPRESSES).
+
+    Proves the MISSING/WEAK origin restriction (a posture weakness), NEVER a proven cross-origin exploit.
+    ReDoS-safe (length-capped source, bounded alternation). Pure + deterministic; never raises."""
+    if not isinstance(observed_control, Mapping):
+        return _postmessage_signal(False, evidence="no postMessage control evidence", observed={})
+    source = _coerce_text(observed_control.get("handler_source") or observed_control.get("source"))[:20000]
+    target_origin = _coerce_text(observed_control.get("target_origin")).strip()
+    rule = _coerce_text(observed_control.get("rule")).strip().lower()
+    if not rule:
+        rule = ("wildcard_target" if (target_origin or "postmessage" in source.lower())
+                else ("no_origin_check" if source else ""))
+
+    if rule == "wildcard_target":
+        if target_origin == "*":
+            return _postmessage_signal(
+                True, conf=0.9,
+                evidence=("a postMessage send uses targetOrigin '*' (retained literal) — the message is "
+                          "broadcast to ANY origin"),
+                observed={"rule": rule, "target_origin": "*"})
+        if source and _POSTMESSAGE_WILDCARD_RE.search(source):
+            return _postmessage_signal(
+                True, conf=0.9,
+                evidence=("the handler source calls postMessage(<data>, '*') — a wildcard targetOrigin "
+                          "broadcasts the message to ANY origin"),
+                observed={"rule": rule, "wildcard_send": True})
+        return _postmessage_signal(
+            False, observed={"rule": rule, "target_origin": target_origin or None},
+            evidence="no wildcard '*' targetOrigin in the retained send/source — a specific-origin send is not a weakness (no fire)")
+
+    if rule == "no_origin_check":
+        if not source:
+            return _postmessage_signal(False, observed={"rule": rule},
+                                       evidence="no retained handler source to judge (REFUSE)")
+        if not _USES_MESSAGE_DATA_RE.search(source):
+            return _postmessage_signal(
+                False, observed={"rule": rule},
+                evidence="the handler does not consume event.data — no untrusted cross-origin payload is acted on (no fire)")
+        if _ORIGIN_REF_RE.search(source):
+            return _postmessage_signal(
+                False, observed={"rule": rule},
+                evidence="the handler references `origin` — an origin check is present (protected; no fire)")
+        return _postmessage_signal(
+            True, conf=0.9,
+            evidence=("a message-event handler consumes event.data yet references `origin` NOWHERE — it "
+                      "validates no sender origin and acts on messages from ANY origin"),
+            observed={"rule": rule, "uses_data": True, "checks_origin": False})
+
+    return _postmessage_signal(False, observed={"rule": rule},
+                               evidence=f"unrecognised/lead-only postMessage rule {rule!r} (stays a lead)")
+
+
+# ---------------------------------------------------------------------------
 # AEGIS request-side PARSE-PROOF oracles (the inline "provable firewall" gateway).
 #
 # These judge a single DECODED request-parameter value on the REQUEST ALONE (no app response). They

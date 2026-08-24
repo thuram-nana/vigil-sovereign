@@ -278,6 +278,16 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # finding does), so appending it leaves the unknown-class fallback and `make gate` byte-identical. Distinct
     # from the TIER-1 `k8s_workload_misconfiguration` row (K8S_WORKLOAD_POSTURE) — TIER-2 parses rules.
     "k8s_rbac_privilege_grant": (OracleKind.K8S_RBAC_VERB_GRANT,),
+    # W16-STD-5 client-side POSTURE-WEAKNESS classes — the always-applicable constitution "Client-side"
+    # classes (constitution §V: XSS [already mapped], CSRF, clickjacking, postMessage). Each proves a
+    # MISSING/WEAK client-side DEFENSE (a posture weakness) — NEVER an achieved-state exploit. Like the
+    # AEGIS/posture rows, each NEW OracleKind is reachable ONLY via its row — NOT in the frozen
+    # _ALL_ORACLES fallback — and fires only when the ctx carries `clickjacking_control` /
+    # `csrf_control` / `postmessage_control`, which no benchmark/scan/engage finding does, so appending
+    # them leaves the unknown-class fallback and `make gate` byte-identical.
+    "clickjacking": (OracleKind.CLICKJACKING_POSTURE,),
+    "csrf": (OracleKind.CSRF_POSTURE,),
+    "postmessage": (OracleKind.POSTMESSAGE_POSTURE,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -518,6 +528,23 @@ _ALIASES: dict[str, str] = {
     "iam_escalation": "iam_escalation_primitive",
     "achieved_iam_escalation": "iam_escalation_primitive",
     "iam_privilege_escalation_primitive": "iam_escalation_primitive",
+    # W16-STD-5 client-side posture spelling variants fold onto the single canonical class each.
+    "clickjacking_posture": "clickjacking",
+    "ui_redress": "clickjacking",
+    "ui_redressing": "clickjacking",
+    "frame_options_missing": "clickjacking",
+    "missing_x_frame_options": "clickjacking",
+    "frame_ancestors_missing": "clickjacking",
+    "cross_site_request_forgery": "csrf",
+    "csrf_posture": "csrf",
+    "csrf_token_missing": "csrf",
+    "missing_csrf_token": "csrf",
+    "post_message": "postmessage",
+    "post_message_misconfiguration": "postmessage",
+    "postmessage_misconfiguration": "postmessage",
+    "postmessage_posture": "postmessage",
+    "postmessage_wildcard_origin": "postmessage",
+    "insecure_postmessage": "postmessage",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -945,6 +972,21 @@ class OracleVerifier:
         if kind is OracleKind.K8S_RBAC_VERB_GRANT:
             if "k8s_rbac_grant_control" in ctx:
                 return oracles.k8s_rbac_verb_grant_oracle(ctx["k8s_rbac_grant_control"])
+            return None
+        # -- W16-STD-5 client-side posture-weakness — fire ONLY when the ctx carries the retained
+        #    client-side control; no benchmark/scan/engage finding carries these keys, so they are inert
+        #    on the gate path. Each proves a MISSING/WEAK defense, NEVER an achieved-state exploit.
+        if kind is OracleKind.CLICKJACKING_POSTURE:
+            if "clickjacking_control" in ctx:
+                return oracles.clickjacking_posture_oracle(ctx["clickjacking_control"])
+            return None
+        if kind is OracleKind.CSRF_POSTURE:
+            if "csrf_control" in ctx:
+                return oracles.csrf_posture_oracle(ctx["csrf_control"])
+            return None
+        if kind is OracleKind.POSTMESSAGE_POSTURE:
+            if "postmessage_control" in ctx:
+                return oracles.postmessage_posture_oracle(ctx["postmessage_control"])
             return None
         return None
 

@@ -9,8 +9,9 @@ The governing rule is [CLAIM-DISCIPLINE](CLAIM-DISCIPLINE.md): a claim is only m
 **true of the code**. So every refusal here is paired with the code that makes it true and the
 test that proves it stays true — not a promise, an invariant.
 
-> **Two of these are machine-checked claims in the registry.** The capability-absence guarantee is
-> registered as `W16-STD-8b` and the rejected-x5c-oracle guarantee as `W16-STD-8`
+> **Three of these are machine-checked claims in the registry.** The capability-absence guarantee is
+> registered as `W16-STD-8b`, the rejected-x5c-oracle guarantee as `W16-STD-8`, and the
+> client-side posture-weakness (clickjacking/CSRF/postMessage) guarantee as `W16-STD-5`
 > ([`docs/claims/registry.json`](claims/registry.json)); the registry guard fails CI if either the
 > enforcing code or its proving test is removed.
 
@@ -27,7 +28,7 @@ move, and it is auditable here.
 
 ---
 
-## The seven refusals
+## The eight refusals
 
 ### 1. No detection-evasion / anti-defender / stealth
 
@@ -183,6 +184,53 @@ re-added by a well-meaning future contributor.
   reviewer's note (`verify/adapter.py`, `verify/tests/test_saml_forgery_crypto.py`).
 - A regression test keeps it rejected (see below).
 
+### 8. No achieved-state clickjacking oracle — the client-side weaknesses are proven as POSTURE, not exploit
+
+**What is refused.** An *achieved-state* clickjacking oracle — one that would emit a FACT because a page
+"was framed" or a UI-redress was staged. It was in fact **built** once (a framable + password-field
+predicate) and, under adversarial review, found to **false-positive on 8 variants** — a password marker
+inside an HTML comment / `<script>` string / `<textarea>`, a `text/plain` page, a disabled/hidden field,
+or a page framing-protected via meta-CSP or a multi-header XFO the regex missed — so it was **reverted /
+demoted to a lead** (recorded in `docs/knowledge/memory/prover-to-discoverer-program.md`). It is refused
+because a single-response achieved-state signal cannot be made near-zero-false-positive: legitimate apps
+are framed all the time (intentional embeds, partner iframes, a page whose own design permits framing),
+so "the page was framed" is not proof of an exploit. The same reasoning governs CSRF and postMessage — a
+live "the forged request went through" / "the message was delivered" signal cannot distinguish a real
+cross-origin exploit from a SameSite-protected endpoint or an intentional same-app broadcast.
+
+**What is BUILT instead (the sound dual, W16-STD-5).** VIGIL proves the *posture weakness* — the MISSING
+or WEAK DEFENSE — from a RETAINED artifact ALONE, which IS near-zero-FP and offline-re-verifiable. These
+are the always-applicable constitution *client-side* classes (constitution §V: XSS, CSRF, clickjacking,
+postMessage); XSS already had an oracle, and these complete the row:
+- **clickjacking** — `clickjacking_posture_oracle` (kind `CLICKJACKING_POSTURE`) fires only when a
+  retained response ships NEITHER a framing X-Frame-Options (DENY/SAMEORIGIN) NOR a CSP `frame-ancestors`
+  directive — a pure header check, exactly what a browser enforces.
+- **CSRF** — `csrf_posture_oracle` (kind `CSRF_POSTURE`) fires only on a control-differential: a
+  state-changing request accepted with a valid anti-CSRF token AND accepted with the token removed/forged
+  (the synchronizer token is not enforced). It proves the token is not enforced, NEVER that a cross-site
+  attack succeeded.
+- **postMessage** — `postmessage_posture_oracle` (kind `POSTMESSAGE_POSTURE`) fires only on a wildcard `*`
+  targetOrigin send, or a message handler that consumes `event.data` with no origin check — a sound static
+  check over the retained source.
+
+Each proves a POSTURE WEAKNESS (a missing/weak defense), never a proven achieved-state exploit — the
+honest, near-zero-FP claim an oracle FACT requires.
+
+**Why it is a strength.** The SAME anti-hallucination discipline as refusal 7: a plausible-looking
+achieved-state oracle that cannot be made near-zero-FP is not shipped as a FACT-emitter; its sound
+posture-weakness dual is. Recorded so a future contributor does not re-add the FP-prone achieved-state
+form.
+
+**Where it lives in the code.**
+- The three oracles live in `engine/crucible/framework/v2/verify/oracles.py`; their kinds in
+  `verify/models.py`; the confirmation seam (ingest + adjudicate an imported finding) in
+  `verify/client_side_posture.py`.
+- The "DELIBERATELY NOT an achieved-state oracle" breadcrumb is a permanent comment on the
+  `CLICKJACKING_POSTURE` member in `verify/models.py` and in `verify/oracles.py`.
+- Negative-control regression tests keep the posture oracles SOUND and present:
+  `verify/tests/test_client_side_posture.py` (a page/handler/endpoint that HAS the defense is not
+  confirmed; one that LACKS it is).
+
 ---
 
 ## The guarantees, as machine-checked claims
@@ -204,6 +252,15 @@ The regression guard is in
 `…embedded_x5c…` non-fire tests), with the live control that a genuinely forgeable `alg=none` token
 *does* fire — proving the oracle is not a dead no-op. It runs in the required
 **CRUCIBLE core on vigil_core** CI job.
+
+<!-- CLAIM:W16-STD-5 -->
+The three client-side posture-weakness oracles (clickjacking, CSRF, postMessage) each prove a MISSING or WEAK client-side defense from a retained artifact alone — never an achieved-state exploit — so the FP-prone achieved-state clickjacking oracle stays refused, and per-class negative-control tests keep each posture oracle sound (a page/handler/endpoint that HAS the defense is not confirmed; one that LACKS it is).
+The oracles are `clickjacking_posture_oracle` / `csrf_posture_oracle` / `postmessage_posture_oracle`
+(`engine/crucible/framework/v2/verify/oracles.py`), routed via their `CLICKJACKING_POSTURE` /
+`CSRF_POSTURE` / `POSTMESSAGE_POSTURE` rows and reachable only through a retained `*_control` context no
+benchmark finding carries (so the gate stays byte-identical). The negative-control regression tests live
+in `verify/tests/test_client_side_posture.py` and run in the required **CRUCIBLE core on vigil_core** CI
+job.
 
 ---
 

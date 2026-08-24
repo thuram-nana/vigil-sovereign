@@ -336,6 +336,33 @@ class OracleKind(str, enum.Enum):
     # default-SA×secret-read; authenticated×broad-read; a linkage break; aggregated static rules; malformed
     # evidence) stays an honest LEAD.
     K8S_RBAC_VERB_GRANT = "k8s_rbac_verb_grant"
+    # W16-STD-5 client-side POSTURE-WEAKNESS kinds (the always-applicable constitution client-side classes:
+    # clickjacking / CSRF / postMessage). Like the AEGIS / K8S / posture members above, these are ADDITIVE
+    # appends reachable ONLY via their explicit BUG_CLASS_ORACLES rows (keyed on the `clickjacking_control` /
+    # `csrf_control` / `postmessage_control` ctx fields NO benchmark/scan/engage finding carries), never via
+    # the frozen unknown-class fallback (verifier._ALL_ORACLES stays EXACTLY 15). Each proves the MISSING /
+    # WEAK DEFENSE (a posture weakness) — NEVER a proven achieved-state exploit — from a RETAINED artifact
+    # alone, offline, ZERO traffic. DELIBERATELY NOT an achieved-state clickjacking oracle: a single-response
+    # "the page was framed" signal is FP-prone (legitimate framing / intentional embedding), so VIGIL refuses
+    # it and proves the posture weakness instead (docs/DELIBERATE-REFUSALS.md refusal 8).
+    #   * CLICKJACKING_POSTURE fires (0.9) ONLY when a RETAINED response's OBSERVED headers carry NEITHER a
+    #     framing X-Frame-Options (DENY/SAMEORIGIN) NOR a CSP `frame-ancestors` directive — the two framing
+    #     defenses a browser actually enforces are both absent (a pure header check, sound). A page that ships
+    #     either defense does NOT fire.
+    CLICKJACKING_POSTURE = "clickjacking_posture"
+    #   * CSRF_POSTURE fires (0.9) ONLY on a control-DIFFERENTIAL over TWO retained responses to the SAME
+    #     state-changing request: the anti-CSRF token PRESENT+valid was accepted (2xx) AND the token
+    #     REMOVED-or-FORGED was accepted IDENTICALLY (2xx) — proving the synchronizer token is NOT enforced
+    #     (a posture weakness). If stripping/forging the token changes acceptance (a reject / status
+    #     divergence), the defense holds and it does NOT fire. Proves the token is not validated, NEVER that a
+    #     cross-site attack succeeded (SameSite/origin defenses are a separate layer).
+    CSRF_POSTURE = "csrf_posture"
+    #   * POSTMESSAGE_POSTURE fires (0.9) ONLY when a RETAINED handler source re-derives a wildcard cross-origin
+    #     weakness: (a) a `postMessage(<data>, "*")` call whose targetOrigin literal is `*` (data broadcast to
+    #     ANY origin); or (b) a `message`-event handler that CONSUMES `event.data` yet references NO `origin`
+    #     anywhere (no origin validation). A send to a specific origin, or a handler that checks `event.origin`,
+    #     does NOT fire (near-zero-FP). A sound static check over the retained source, NEVER a proven exploit.
+    POSTMESSAGE_POSTURE = "postmessage_posture"
 
 
 class OracleProbe(BaseModel):

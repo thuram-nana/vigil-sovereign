@@ -289,6 +289,27 @@
       "family": "live capture",
       "tier": "fixtures",
       "evidence": "Fixtures only — and permanently so by design, as explained above"
+    },
+    {
+      "kind": "clickjacking_posture",
+      "name": "Framing posture",
+      "family": "posture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "csrf_posture",
+      "name": "Anti-CSRF token posture",
+      "family": "posture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "postmessage_posture",
+      "name": "postMessage origin posture",
+      "family": "posture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
     }
   ]
 }

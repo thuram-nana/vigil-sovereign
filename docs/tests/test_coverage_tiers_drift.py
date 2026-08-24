@@ -54,14 +54,15 @@ def test_both_documents_match_the_generated_block() -> None:
     assert problems == [], "coverage-tiers drift:\n" + "\n".join(problems)
 
 
-def test_the_reconciled_numbers_are_3_2_13_20() -> None:
-    """Pin the reconciled truth: the 05 chapter (3/2/13/20) was correct; the inventory (3/2/12/21) drifted.
+def test_the_reconciled_numbers_are_3_2_13_23() -> None:
+    """Pin the reconciled truth. It was 3/2/13/20; W16-STD-5 added THREE fixtures-tier client-side
+    posture detectors (clickjacking / CSRF / postMessage), so the fixtures column moved 20 -> 23.
 
     Derived, not asserted blind — the counts come from the registry-grounded source; this states the
     value that reconciliation landed on so a future edit that changes an honesty number is loud."""
     counts = g.validate()
     assert (counts["external"], counts["own_infrastructure"], counts["local"], counts["fixtures"]) \
-        == (3, 2, 13, 20)
+        == (3, 2, 13, 23)
 
 
 def test_the_inventory_inline_quotable_row_matches_the_source() -> None:
@@ -157,7 +158,7 @@ def test_generation_is_real_not_hardcoded() -> None:
     moved = next(d for d in src["detectors"] if d["tier"] == "local")
     moved["tier"] = "fixtures"
     counts = g.validate(src)
-    assert counts["local"] == 12 and counts["fixtures"] == 21     # the very number that drifted, on purpose
+    assert counts["local"] == 12 and counts["fixtures"] == 24     # 13->12 local, 23->24 fixtures, on purpose
     assert "| 12 |" in g.render_block(src)
 
 

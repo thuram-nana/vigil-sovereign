@@ -6,7 +6,10 @@ structured postmortem to targets/<slug>/postmortem.md, plus updates
 archetype priors based on the engagement's outcomes.
 
 Idempotent — running it twice produces the same content the second
-time, modulo any new rows recorded between runs.
+time, modulo any new rows recorded between runs. Prior updates are
+idempotent too: an engagement's outcomes are credited to
+archetype_priors AT MOST ONCE (a per-engagement schema_meta marker), so
+re-running never re-bumps a prior.
 """
 
 from __future__ import annotations
@@ -90,47 +93,78 @@ def _query_summary(store: Store, slug: str) -> PostmortemSummary:
 
 
 def _update_priors_from_engagement(store: Store, slug: str) -> int:
-    """Update archetype_priors using this engagement's hypotheses + payloads.
-    Returns the number of priors updated.
+    """Credit archetype_priors from THIS engagement's outcomes — each (archetype, bug_class, surface)
+    exactly ONCE (success-dominant), and the whole engagement AT MOST ONCE.
+
+    Two double-counts are fixed here (W16-STD-5):
+
+      * WITHIN a run — a single confirmed finding is recorded BOTH as a confirmed hypothesis AND as a
+        successful payload on the SAME (bug_class, surface); crediting both inflated the prior to two
+        successes/attempts for one outcome (observed: webhook-forgery succ=2 att=2 after one seed).
+        Outcomes are now MERGED per (bug_class, surface) key and credited once — a success anywhere on
+        the key dominates a same-key attempt — so one confirmed finding is one success/attempt, matching
+        the reward-bus "one credit per finding" doctrine.
+      * ACROSS runs — ``postmortem.run()`` is invoked by ``seed()`` and can be re-run from the CLI /
+        console; re-crediting the same engagement re-bumped the priors. A per-engagement marker in
+        ``schema_meta`` makes prior application idempotent: a second run is a no-op.
+
+    Returns the number of (bug_class, surface) keys credited (0 on a re-run or an archetype-less engagement).
     """
     eid = store.engagement_id(slug)
+
+    # ACROSS-run idempotency: apply an engagement's priors at most once (schema_meta is a stdlib kv table).
+    marker = f"priors_applied:{eid}"
+    if store.fetchone("SELECT 1 FROM schema_meta WHERE key=?", (marker,)) is not None:
+        return 0
+
     row = store.fetchone("SELECT archetype FROM engagements WHERE id=?", (eid,))
     archetype = (row["archetype"] if row is not None else "") or ""
     if not archetype:
         return 0
 
-    n = 0
+    # Merge every recorded outcome onto its (bug_class, surface) key; True == a success occurred on that
+    # key this engagement (a success dominates a same-key attempt). Hypotheses (reasoning-level) and
+    # payloads (execution-level) are two VIEWS of the same weakness on a surface, so crediting each key
+    # once dedups the finding-vs-payload overlap that caused the double-count.
+    outcomes: dict[tuple[str, str], bool] = {}
 
-    # confirmed hypotheses → bump_success per (archetype, bug_class, surface)
-    rows = store.fetchall(
-        "SELECT bug_class, surface, status FROM hypotheses WHERE engagement_id=?",
-        (eid,),
-    )
-    for r in rows:
+    for r in store.fetchall(
+        "SELECT bug_class, surface, status FROM hypotheses WHERE engagement_id=?", (eid,)
+    ):
         bc = r["bug_class"] or ""
         if not bc:
             continue
+        key = (bc, r["surface"] or "")
         if r["status"] == "confirmed":
-            priors.bump_success(store, archetype, bc, r["surface"] or "")
+            outcomes[key] = True
         elif r["status"] in ("refuted", "deferred"):
-            priors.bump_attempt(store, archetype, bc, r["surface"] or "")
-        n += 1
+            outcomes.setdefault(key, False)
 
-    # successful payloads → bump_success
-    pl = store.fetchall(
-        "SELECT bug_class, target_surface, outcome FROM payloads WHERE engagement_id=?",
-        (eid,),
-    )
-    for r in pl:
+    for r in store.fetchall(
+        "SELECT bug_class, target_surface, outcome FROM payloads WHERE engagement_id=?", (eid,)
+    ):
         bc = r["bug_class"] or ""
         if not bc:
             continue
+        key = (bc, r["target_surface"] or "")
         if r["outcome"] == "success":
-            priors.bump_success(store, archetype, bc, r["target_surface"] or "")
+            outcomes[key] = True
         else:
-            priors.bump_attempt(store, archetype, bc, r["target_surface"] or "")
-        n += 1
-    return n
+            outcomes.setdefault(key, False)
+
+    for (bc, surface), success in outcomes.items():
+        if success:
+            priors.bump_success(store, archetype, bc, surface)
+        else:
+            priors.bump_attempt(store, archetype, bc, surface)
+
+    store.execute(
+        "INSERT INTO schema_meta(key,value) VALUES(?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (marker, "1"),
+    )
+    store.commit()
+    return len(outcomes)
 
 
 def _render_markdown(s: PostmortemSummary) -> str:
