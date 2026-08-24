@@ -1,5 +1,8 @@
 # VIGIL-LIVE OTel collector — receives OTLP over HTTP (loopback), logs spans/observations to stdout.
 # Internal-only: the container binds 127.0.0.1:4318 on the host. No external exporter, secret-free.
+# This is the ZERO-DEPENDENCY default (traces terminate in the collector's stdout). To forward spans to
+# a REAL, queryable backend (Jaeger / Grafana Tempo / an OTLP endpoint) use the sibling
+# `otel-config-backend.yaml` profile — see docs/decisions/W6-4-otlp-collector-and-backends.md.
 receivers:
   otlp:
     protocols:

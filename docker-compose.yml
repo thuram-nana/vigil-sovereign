@@ -12,7 +12,7 @@
 # Profiles:
 #   (default)        qdrant            — the vector store (Qdrant); SIGIL also has an embedded fallback
 #   graph            neo4j             — the knowledge graph (optional)
-#   observability    otel-collector    — OTLP receiver → stdout (optional)
+#   observability    otel-collector    — OTLP receiver → stdout, or → a real backend (optional)
 #   strix            strix-sandbox     — BUILD-ONLY: the Kali sandbox image strix runs targets in
 #   aegis            aegis-gateway     — BUILD-ONLY: the AEGIS defensive "provable firewall" sidecar image
 #
@@ -62,7 +62,11 @@ services:
     restart: unless-stopped
     command: ["--config", "/etc/otelcol/config.yaml"]
     volumes:
-      - ./infra/sidecars/otel-config.yaml:/etc/otelcol/config.yaml:ro
+      # Default config = OTLP receiver → stdout (debug). To forward every span to a REAL backend
+      # (Jaeger / Grafana Tempo / an OTLP endpoint) set OTEL_CONFIG to the backend profile and point it
+      # at the backend:  OTEL_CONFIG=./infra/sidecars/otel-config-backend.yaml OTLP_EXPORT_ENDPOINT=127.0.0.1:4317
+      # See docs/decisions/W6-4-otlp-collector-and-backends.md for the supported-backend matrix.
+      - ${OTEL_CONFIG:-./infra/sidecars/otel-config.yaml}:/etc/otelcol/config.yaml:ro
     ports:
       - "127.0.0.1:4318:4318"          # OTLP/HTTP (the config's receiver endpoint)
 

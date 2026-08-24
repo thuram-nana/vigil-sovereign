@@ -924,6 +924,20 @@ def _build_emit(slug: str, otlp_endpoint: Optional[str], *,
     if sink is None:
         if not otlp_endpoint:
             return None                      # OFF by default — byte-identical to no emit seam
+        # W6-4 (#455): PREFLIGHT the collector ONCE at wiring time and surface the result VISIBLY. A down
+        # or unreachable backend must not be a silent drip of dropped spans — an operator running an
+        # engagement with `otlp_endpoint` set sees an unreachable collector in the logs at start. Best-effort
+        # and NON-fatal: the probe never raises, and an unreachable collector still wires the emit seam (the
+        # collector may recover mid-run; telemetry never denies cognition). This is the engine-layer half of
+        # the "unreachable backend is visible" guarantee; the collector→backend half is in otel-config-backend.yaml.
+        try:
+            from .otel_export import probe_collector
+            probe = probe_collector(otlp_endpoint)
+            if probe.reachable:
+                _log.info("OTLP collector reachable at %s — engine telemetry export armed", otlp_endpoint)
+            # (an unreachable collector is already logged at WARNING inside probe_collector — not repeated here)
+        except Exception:  # noqa: BLE001 — a preflight failure never blocks wiring the emit seam
+            pass
         try:
             sink = make_sink(otlp_endpoint=otlp_endpoint)
         except Exception:  # noqa: BLE001
