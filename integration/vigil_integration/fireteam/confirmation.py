@@ -106,6 +106,32 @@ def escalation_approval_bytes(key: tuple[str, str, int], outcome: str, approved:
     return _APPROVAL_DOMAIN + canonical_json(payload)
 
 
+def sign_escalation_approval_with(
+    signer: Callable[[bytes], str],
+    *,
+    key_id: str,
+    key: tuple[str, str, int],
+    engagement: str = "",
+    outcome: str = "approved",
+    approved: bool = True,
+) -> dict[str, Any]:
+    """Mint a signed approval envelope from a SIGNER CALLABLE (``bytes -> base64 signature``) rather than a
+    raw private key — so an owner-key HARDWARE backend (PKCS#11, which never exposes the private material)
+    can mint an envelope byte-identically to the file-key path. :func:`sign_escalation_approval` is the
+    file-key convenience wrapper over this. The signed bytes are the SAME domain-tagged
+    :func:`escalation_approval_bytes` a resolver re-derives on verify."""
+    signature_b64 = signer(escalation_approval_bytes(key, outcome, approved, engagement=engagement))
+    return {
+        "schema": _APPROVAL_ENVELOPE_SCHEMA,
+        "key_id": str(key_id),
+        "alg": "ed25519",
+        "engagement": str(engagement or ""),
+        "outcome": str(outcome),
+        "approved": bool(approved),
+        "signature_b64": signature_b64,
+    }
+
+
 def sign_escalation_approval(
     private_key_b64: str,
     *,
@@ -123,17 +149,9 @@ def sign_escalation_approval(
     self-declared ``outcome``/``approved`` are advisory only — verification always reconstructs the signed
     bytes from the VERIFIER's ``engagement`` + the ledger RECORD's ``(key, outcome, approved)``, so an
     envelope can't misdescribe what — or where — it authorizes."""
-    signature_b64 = sign(private_key_b64, escalation_approval_bytes(key, outcome, approved,
-                                                                    engagement=engagement))
-    return {
-        "schema": _APPROVAL_ENVELOPE_SCHEMA,
-        "key_id": str(key_id),
-        "alg": "ed25519",
-        "engagement": str(engagement or ""),
-        "outcome": str(outcome),
-        "approved": bool(approved),
-        "signature_b64": signature_b64,
-    }
+    return sign_escalation_approval_with(
+        lambda message: sign(private_key_b64, message),
+        key_id=key_id, key=key, engagement=engagement, outcome=outcome, approved=approved)
 
 
 def _envelope_of(approval: Any) -> Optional[dict[str, Any]]:
@@ -459,6 +477,13 @@ class ConfirmationRegistry:
 
     def pending_keys(self) -> list[tuple[str, str, int]]:
         return sorted(self._pending.keys())
+
+    def pending(self, key: tuple[str, str, int]) -> Optional[PendingConfirmation]:
+        """The :class:`PendingConfirmation` for a still-pending ``key`` (or ``None`` if unknown/resolved) — a
+        read-only accessor the Tier-B resolve loop (:mod:`fireteam.resolver`) uses to surface an escalation's
+        tool/target/tier/reason/``deadline_seq`` to the operator view + live feed. The ``escalation``'s
+        ``target``/``reason`` may be RAW in a live (same-process) registry; callers RE-redact before display."""
+        return self._pending.get(key)
 
     def resolution(self, key: tuple[str, str, int]) -> Optional[ConfirmationResolution]:
         return self._resolved.get(key)

@@ -142,6 +142,7 @@ a new sub-parser that is not documented here turns the required check red.
 | `vigil floor` | The offense anti-rollback floor ↔ witnessed-checkpoint anchor (`floor witness …`). |
 | `vigil witness` | The deployable loopback witness co-sign service (`witness serve --port … --key …`). |
 | `vigil approve` | Per-action owner approval for offense tools — sub-verbs `provision-authority` \| `list` \| `sign`. |
+| `vigil fireteam` | (W17-7) The Tier-B over-cap escalation resolve loop — sub-verbs `list` \| `approve` (sovereign owner-signs) \| `resolve` (offense applies the signed approval / sweeps deadline expiries). Without a signed approval an escalation still auto-rejects at its deadline (fail-closed). |
 | `vigil enroll-cosigner` | (W9-5) Phase 1 — generate a destruction key locally + emit a PUBLIC enrolment request (pubkey + proof-of-possession). |
 | `vigil assemble-destruction` | (W9-5) Phase 2 — assemble the m-of-n trust root from public enrolment requests. |
 | `vigil request-destruction` | (W9-5) Coordinator — mint the shared unsigned authorization each signer signs detached. |

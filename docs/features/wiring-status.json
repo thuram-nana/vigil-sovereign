@@ -1124,6 +1124,19 @@
       },
       "check": "cli-native-verb",
       "rationale": "W7-7 recovery half; reconstruct an escrowed backup passphrase from a threshold set of share files (fail-closed below threshold)."
+    },
+    {
+      "id": "cli.fireteam",
+      "name": "vigil fireteam",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "fireteam",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_fireteam_resolve"
+      },
+      "check": "cli-native-verb",
+      "rationale": "W17-7 #541 Tier-B escalation resolve loop (list|approve|resolve): the operator signs an owner approval for an over-cap fireteam member escalation and the offense resolver applies the registry's signed-only resolve() — owner-key gated; without a signed approval an escalation still auto-rejects at its deadline (fail-closed)."
     }
   ]
 }

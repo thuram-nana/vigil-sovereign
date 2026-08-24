@@ -1816,6 +1816,128 @@ def _cmd_approve_sign(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------------------------------
+# fireteam Tier-B escalation resolve loop (W17-7 #541): list pending over-cap member escalations, sign an
+# owner approval envelope (sovereign), and drive the resolve loop (offense) so an escalation reaches an
+# OPERATOR DECISION instead of only ever auto-rejecting at its deadline.
+# ---------------------------------------------------------------------------------------------------
+
+
+def _cmd_fireteam_list(args: argparse.Namespace) -> int:
+    """OFFENSE (keyless): list the PENDING over-cap member escalations in the engagement's durable ledger —
+    what is awaiting a signed operator decision before it expires. Each row is secret-safe (target/reason
+    redacted). The owner signs one with `vigil fireteam approve`."""
+    from .fireteam import open_registry, pending_escalations
+    from .live.approval_broker import load_authority
+
+    reg = open_registry(args.base_dir, args.slug, trusted_approvers=load_authority(args.base_dir))
+    now_seq = args.now_seq if args.now_seq is not None else None
+    rows = pending_escalations(reg, now_seq=now_seq)
+    if not rows:
+        print(f"(no pending fireteam escalations for slug {args.slug!r} under {args.base_dir})")
+        return 0
+    print(f"=== pending fireteam escalations ({len(rows)}) — slug {args.slug!r} ===")
+    for r in rows:
+        rem = r.get("ticks_remaining")
+        rem_s = f"   ticks_remaining: {rem}" if rem is not None else ""
+        print(f"  {r['wave_id']}/{r['member_id']}/{r['seq']}")
+        print(f"    tool     : {r['tool_name']}   tier: {r['requested_tier']}")
+        print(f"    target   : {r['target']}")
+        print(f"    reason   : {r['reason']}")
+        print(f"    deadline : seq {r['deadline_seq']}{rem_s}")
+        print(f"    approve  : vigil fireteam approve --base-dir {args.base_dir} --slug {args.slug} "
+              f"--wave-id {r['wave_id']} --member-id {r['member_id']} --seq {r['seq']}")
+    return 0
+
+
+def _cmd_fireteam_approve(args: argparse.Namespace) -> int:
+    """SOVEREIGN (owner key): mint a single-terminal, engagement-bound, Ed25519-signed approval envelope for
+    ONE pending over-cap escalation and drop it in the signed inbox the offense resolver reads. The owner key
+    is read from VIGIL_APPROVAL_OWNER_KEY (never argv) or a hardware backend — the offense side only ever
+    VERIFIES it, so this is the ONLY step that can authorize a queued escalation, and it can never widen
+    scope (a member tier is still capped ≤A2 by construction; this satisfies the human leg only)."""
+    import os
+
+    from vigil_core.key_backend import (
+        BACKEND_ENV, HardwareKeyUnavailable, KeyBackendError, select_owner_backend,
+    )
+
+    from .fireteam import open_registry, sign_escalation_approval_with, write_signed_approval
+    from .live.approval_broker import load_authority
+
+    owner_priv = os.environ.get("VIGIL_APPROVAL_OWNER_KEY", "").strip()
+    backend_kind = os.environ.get(BACKEND_ENV, "").strip().lower()
+    if backend_kind in ("", "file") and not owner_priv:
+        print("vigil fireteam approve: no owner signing key — set VIGIL_APPROVAL_OWNER_KEY (run "
+              "`vigil approve provision-authority`).", file=sys.stderr)
+        return 2
+    try:
+        backend = select_owner_backend(file_private_key_b64=(owner_priv or None))
+    except HardwareKeyUnavailable as exc:
+        print(f"vigil fireteam approve: hardware owner-key backend unavailable — {exc}", file=sys.stderr)
+        return 2
+    except KeyBackendError as exc:
+        print(f"vigil fireteam approve: {exc}", file=sys.stderr)
+        return 2
+
+    key = (args.wave_id, args.member_id, int(args.seq))
+    # Advisory: warn if the escalation is not (or no longer) pending — a signature for an unknown/resolved key
+    # simply won't resolve anything, but the operator should know. Read-only; never blocks the signing.
+    reg = open_registry(args.base_dir, args.slug, trusted_approvers=load_authority(args.base_dir))
+    if key not in reg.pending_keys():
+        res = reg.resolution(key)
+        state = f"already {res.outcome.value}" if res is not None else "not pending (unknown)"
+        print(f"vigil fireteam approve: WARNING escalation {key} is {state} in the ledger — signing anyway, "
+              "but the resolver will not approve a key that is not pending.", file=sys.stderr)
+    auth = load_authority(args.base_dir)
+    if auth is not None and auth.owner_key_id != args.key_id:
+        print(f"vigil fireteam approve: WARNING key_id {args.key_id!r} != pinned authority "
+              f"{auth.owner_key_id!r}; the offense verifier will REJECT this approval (key pin).",
+              file=sys.stderr)
+
+    # ENGAGEMENT-BOUND: sign over (slug, wave_id, member_id, seq, "approved", True) — valid ONLY in this
+    # engagement's registry, never replayable into another even with a colliding wave_id.
+    envelope = sign_escalation_approval_with(backend.sign, key_id=args.key_id, key=key,
+                                             engagement=args.slug)
+    path = write_signed_approval(args.base_dir, args.slug, key, envelope)
+    print(f"=== vigil fireteam approve — {args.wave_id}/{args.member_id}/{args.seq} "
+          f"[owner-key backend: {backend.name}] ===")
+    print(f"signed by : {args.key_id}   engagement: {args.slug}")
+    print(f"written   : {path}")
+    print("Drive the resolve loop to apply it: "
+          f"vigil fireteam resolve --base-dir {args.base_dir} --slug {args.slug}")
+    return 0
+
+
+def _cmd_fireteam_resolve(args: argparse.Namespace) -> int:
+    """OFFENSE (keyless): drive the Tier-B RESOLVE LOOP over the engagement's durable ledger — read back any
+    owner-signed approval envelopes and apply the registry's signed-only resolve() (an OPERATOR DECISION),
+    while auto-REJECTING (fail-closed) any escalation past its deadline when --now-seq is supplied. Holds no
+    private key: it can only READ BACK a sovereign-signed approval, never mint one."""
+    from .fireteam import open_registry, resolve_pending
+    from .live.approval_broker import load_authority
+
+    reg = open_registry(args.base_dir, args.slug, trusted_approvers=load_authority(args.base_dir))
+    before = reg.pending_keys()
+    if not before:
+        print(f"(no pending fireteam escalations for slug {args.slug!r} under {args.base_dir})")
+        return 0
+    applied = resolve_pending(reg, base_dir=args.base_dir, slug=args.slug, now_seq=args.now_seq)
+    if not applied:
+        print(f"=== vigil fireteam resolve — slug {args.slug!r} ===")
+        print(f"{len(before)} pending; NONE resolved this pass (no signed operator approval found"
+              + (", none past deadline)" if args.now_seq is not None else "; pass --now-seq to sweep expiries)"))
+        for k in before:
+            print(f"    still pending: {k[0]}/{k[1]}/{k[2]}")
+        return 0
+    print(f"=== vigil fireteam resolve — slug {args.slug!r} ===")
+    for res in applied:
+        wave_id, member_id, seq = res.key
+        verb = "APPROVED (operator decision)" if res.approved else f"{res.outcome.value.upper()} (fail-closed)"
+        print(f"  {wave_id}/{member_id}/{seq}: {verb} — {res.reason}")
+    return 0
+
+
 def _load_and_verify_ledger(path: str, *, base_dir: str) -> tuple[list, object]:
     from .attestation.identity import operator_key_resolver
     from .attestation.ledger import LedgerVerification, read_ledger, verify_ledger
@@ -3706,6 +3828,40 @@ def build_parser() -> argparse.ArgumentParser:
                       help="validity window in seconds (single-use; capped at the 900s dead-man's-switch)")
     paps.add_argument("--key-id", default="owner", help="the owner signer's key id (must match provisioning)")
     paps.set_defaults(func=_cmd_approve_sign)
+
+    # W17-7 (#541) — the fireteam Tier-B escalation resolve loop: list | approve | resolve. An over-cap member
+    # escalation is QUEUED (signed-approval-only); these verbs let the operator drive it to a DECISION instead
+    # of letting it only ever auto-reject at its deadline.
+    pft = sub.add_parser(
+        "fireteam",
+        help="resolve over-cap fireteam member escalations (list | approve | resolve)")
+    pft_sub = pft.add_subparsers(dest="fireteam_cmd", required=True)
+
+    pftl = pft_sub.add_parser("list", help="list PENDING over-cap escalations awaiting a signed operator decision")
+    pftl.add_argument("--base-dir", default=".vigil-live")
+    pftl.add_argument("--slug", required=True, help="the engagement slug (names its durable escalation ledger)")
+    pftl.add_argument("--now-seq", type=int, default=None,
+                      help="current injected-sequence tick; shows ticks_remaining before the fail-closed auto-reject")
+    pftl.set_defaults(func=_cmd_fireteam_list)
+
+    pfta = pft_sub.add_parser("approve",
+                              help="SOVEREIGN: sign an owner approval for ONE escalation (VIGIL_APPROVAL_OWNER_KEY)")
+    pfta.add_argument("--base-dir", default=".vigil-live")
+    pfta.add_argument("--slug", required=True, help="the engagement slug (bound INTO the signed approval bytes)")
+    pfta.add_argument("--wave-id", required=True, help="the escalation's wave_id (from `vigil fireteam list`)")
+    pfta.add_argument("--member-id", required=True, help="the escalation's member_id")
+    pfta.add_argument("--seq", type=int, required=True, help="the escalation's seq")
+    pfta.add_argument("--key-id", default="owner", help="the owner signer's key id (must match provisioning)")
+    pfta.set_defaults(func=_cmd_fireteam_approve)
+
+    pftr = pft_sub.add_parser("resolve",
+                              help="OFFENSE: drive the resolve loop — apply signed approvals, sweep deadline expiries")
+    pftr.add_argument("--base-dir", default=".vigil-live")
+    pftr.add_argument("--slug", required=True, help="the engagement slug (names its durable escalation ledger)")
+    pftr.add_argument("--now-seq", type=int, default=None,
+                      help="current injected-sequence tick; a pending escalation past its deadline auto-REJECTS "
+                           "(fail-closed). Omit to apply signed approvals only (never expire).")
+    pftr.set_defaults(func=_cmd_fireteam_resolve)
 
     ppe = sub.add_parser("proof-export",
                          help="assemble a client-verifiable proof bundle from a run's oracle-confirmed FACTs "
