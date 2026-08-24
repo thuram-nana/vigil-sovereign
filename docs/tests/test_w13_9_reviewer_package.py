@@ -101,6 +101,46 @@ def test_every_assurance_claim_resolves_to_a_passing_registry_test():
 
 
 # --------------------------------------------------------------------------------------------------
+# GROUNDING — a reviewer-facing "so-what" must be DERIVED from what the bound claim/tests prove, not
+# free text that can silently overstate it. This is the root-cause gate for the display-manufactures-
+# evidence failure class (a so-what asserting anti-rollback for a "refuse-a-newer-schema" claim).
+# --------------------------------------------------------------------------------------------------
+def test_every_assurance_claim_sowhat_is_grounded_in_its_registered_claim():
+    registry = asm.load_registry(_REPO)
+    by_id = {c["id"]: c for c in registry["claims"]}
+    for cid, so_what in asm.ASSURANCE_CLAIMS:
+        # raises SoWhatDriftError if the summary is not grounded in the entry's claim/title/tests
+        asm.assert_sowhat_grounded(cid, so_what, by_id[cid])
+        ratio, _sup, _uns = asm.sowhat_grounding(so_what, by_id[cid])
+        assert ratio >= asm._GROUNDING_MIN_RATIO
+
+
+def test_a_drifted_sowhat_is_rejected():
+    registry = asm.load_registry(_REPO)
+    w5_3 = next(c for c in registry["claims"] if c["id"] == "W5-3")
+    # The EXACT drift the red-pen caught: W5-3 proves "refuse a newer schema (fail-closed)", not
+    # anti-rollback. A summary asserting rollback resistance must be rejected.
+    drift = ("A witnessed checkpoint envelope refuses a record older than the one it already "
+             "anchored (no rollback).")
+    with pytest.raises(asm.SoWhatDriftError):
+        asm.assert_sowhat_grounded("W5-3", drift, w5_3)
+    # An entirely unrelated summary is rejected too (the gate is not a no-op).
+    with pytest.raises(asm.SoWhatDriftError):
+        asm.assert_sowhat_grounded("W5-3", "the weather is sunny with a chance of rain today", w5_3)
+    # ...while the shipped, grounded W5-3 summary passes.
+    grounded = dict(asm.ASSURANCE_CLAIMS)["W5-3"]
+    asm.assert_sowhat_grounded("W5-3", grounded, w5_3)  # must not raise
+
+
+def test_build_fails_when_a_sowhat_drifts_from_its_registered_claim(monkeypatch):
+    # Wired into the FULL build: a drifted so-what for a real, backed claim fails the package build.
+    monkeypatch.setattr(asm, "ASSURANCE_CLAIMS",
+                        [("W5-3", "bananas grow on tropical trees in warm humid climates")])
+    with pytest.raises(asm.SoWhatDriftError):
+        asm.build_package(_REPO)
+
+
+# --------------------------------------------------------------------------------------------------
 # NEGATIVE CONTROL 1 — removing a proving test makes the FULL package build FAIL.
 # A self-contained scratch repo is assembled against, then the proving test function is removed.
 # --------------------------------------------------------------------------------------------------

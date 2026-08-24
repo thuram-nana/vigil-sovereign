@@ -66,6 +66,10 @@ class MissingRequiredInput(Exception):
     """A REQUIRED committed source input is absent from the tree."""
 
 
+class SoWhatDriftError(Exception):
+    """A claim's reviewer-facing summary is not grounded in what its registered claim + tests prove."""
+
+
 # --------------------------------------------------------------------------------------------------
 # The certification gate. Forbid the certify/certification family but NOT "certificate", which is a
 # legitimate cryptographic term across this codebase (proof-carrying-finding certificates, evidence
@@ -85,6 +89,74 @@ def assert_no_certification_wording(text: str) -> None:
         raise CertificationWordingError(
             "the reviewer package must never assert certification; found: "
             + ", ".join(sorted(set(h.lower() for h in hits)))
+        )
+
+
+# --------------------------------------------------------------------------------------------------
+# The GROUNDING gate — a reviewer-facing "so-what" must be DERIVED from what its registry entry
+# actually proves, not free text that can quietly overstate the claim (the display-manufactures-
+# evidence failure class). The reference vocabulary is the entry's title + claim + the NAMES of its
+# proving tests (test names describe precisely what is established). Every significant term in the
+# so-what must be grounded in that vocabulary above a threshold; an ungrounded summary fails the
+# build. This is the root-cause gate: it is what stops a so-what asserting (e.g.) "anti-rollback"
+# when the bound test only establishes "refuse a newer schema".
+# --------------------------------------------------------------------------------------------------
+_GROUNDING_MIN_RATIO = 0.67
+
+# Common words carry no claim-specific meaning; they neither ground nor drift a summary.
+_STOPWORDS = frozenset("""
+that this with than then when unless until into onto from each every which what does done have
+been being must should would could will shall also only just more most less very such same other
+another because rather even still yet about without while never they them their there here whose
+who whom does over under upon your ours mine cannot cant wont dont isnt arent make makes made
+turn turns turned state states stated thing things path paths one ones some none both either
+neither along across after before during between within toward towards per via and but nor for
+the not its it is are was were be been being of to in on at by as or if so an a no
+""".split())
+
+
+def _stem(tok: str) -> str:
+    for suf in ("ations", "ation", "ings", "ing", "edly", "ed", "es", "s", "ly"):
+        if tok.endswith(suf) and len(tok) - len(suf) >= 3:
+            return tok[: -len(suf)]
+    return tok
+
+
+def _significant_terms(text: str) -> list[str]:
+    out: list[str] = []
+    for raw in re.findall(r"[a-z0-9]+", text.lower()):
+        if len(raw) < 4 or raw in _STOPWORDS:
+            continue
+        out.append(_stem(raw))
+    return out
+
+
+def _reference_vocabulary(entry: dict) -> set[str]:
+    parts = [entry.get("title", ""), entry.get("claim", "")]
+    parts.extend(entry.get("proved_by", {}).get("tests", ()))
+    return set(_significant_terms(" ".join(parts)))
+
+
+def sowhat_grounding(so_what: str, entry: dict) -> tuple[float, list[str], list[str]]:
+    """Return (overlap_ratio, supported_terms, unsupported_terms) for a so-what against its entry."""
+    ref = _reference_vocabulary(entry)
+    terms = _significant_terms(so_what)
+    if not terms:
+        return 0.0, [], []
+    supported = [t for t in terms if t in ref]
+    unsupported = [t for t in terms if t not in ref]
+    return len(supported) / len(terms), supported, unsupported
+
+
+def assert_sowhat_grounded(claim_id: str, so_what: str, entry: dict) -> None:
+    if not so_what.strip():
+        raise SoWhatDriftError(f"{claim_id}: reviewer-facing summary is empty")
+    ratio, _supported, unsupported = sowhat_grounding(so_what, entry)
+    if ratio < _GROUNDING_MIN_RATIO:
+        raise SoWhatDriftError(
+            f"{claim_id}: reviewer-facing summary is not grounded in the registered claim/tests "
+            f"(term overlap {ratio:.2f} < {_GROUNDING_MIN_RATIO}); ungrounded terms: "
+            f"{sorted(set(unsupported))}"
         )
 
 
@@ -219,23 +291,23 @@ def resolve_claim(claim_id: str, registry: dict, repo_root: Path) -> ClaimEviden
 # any control of its own.
 # --------------------------------------------------------------------------------------------------
 ASSURANCE_CLAIMS: list[tuple[str, str]] = [
-    ("W13-9", "This package is script-assembled from committed sources and every claim is test-bound; it is not a compliance accreditation."),
-    ("REGISTRY-SELF", "Every product claim resolves to a real enforcing symbol and a real proving test, or CI goes red."),
-    ("W14-3", "The map of where sensitive data lives on disk is generated from and drift-checked against the code."),
-    ("W16-8", "Right-to-erasure is honoured by crypto-shredding an off-spine key, without breaking the append-only audit chain."),
-    ("W12-2", "A published security policy carries a contact, supported versions, coordinated disclosure and a safe-harbour."),
-    ("W5-1", "Every event-spine record is schema-validated on the way in, so the tamper-evident log cannot silently accept junk."),
-    ("W5-3", "A witnessed checkpoint envelope refuses a record older than the one it already anchored (no rollback)."),
-    ("W9-4", "A production deployment refuses to start unless its trust roots and signing posture are actually provisioned."),
-    ("W9-5", "Destructive authority ships multi-signer by default — one key cannot unilaterally authorise destruction."),
-    ("W9-7", "The build manifest is signed, so a deployer can verify the artifacts came from this source."),
-    ("W3-5", "A signed SBOM is attached to each release, so a reviewer can audit the supply chain offline."),
-    ("W7-1", "Disaster-recovery objectives (RPO 24h / bounded RTO) are stated and asserted by a drill, not merely hinted."),
-    ("W7-4", "Off-host backup uses a real transport with destination-integrity checks, not a silent no-op copy."),
-    ("W10-8", "In production the egress supervisor is a start-gate: the deny-default network boundary cannot be left off."),
-    ("W11-4", "Resource-exhaustion paths fail closed rather than degrading into an unbounded or unsafe state."),
-    ("W13-5", "A presented executor capability token is validated single-use and nine-field-bound at the tool boundary."),
-    ("W13-6", "Restricted mode narrows what the offense executor may launch, enforced at the boundary, not by convention."),
+    ("W13-9", "This package is script-assembled from committed sources and every claim is bound to a proving test; it is not a compliance accreditation."),
+    ("REGISTRY-SELF", "Every registered claim resolves to a real enforcing symbol and a real proving test, or the guard fails the build."),
+    ("W14-3", "The on-disk data-store map is generated from a source of truth and verified against the code that defines each store; CI fails when a store is not described."),
+    ("W16-8", "Destroying the off-spine per-engagement key renders the sealed credential material unrecoverable, while the append-only spine chain still verifies."),
+    ("W12-2", "A root security policy publishes a contact, a supported-versions policy, a coordinated-disclosure process, and a safe-harbour statement."),
+    ("W5-1", "Every record appended to the spine carries a kind and schema_version from an enforced vocabulary; the append refuses an unknown kind or schema_version and writes nothing."),
+    ("W5-3", "The witnessed-checkpoint envelope reader refuses an envelope whose schema is newer than this build, and fails closed on an uncoercible schema."),
+    ("W9-4", "The production refuse-to-start gate is opt-in (inert unless VIGIL_POSTURE selects production); once selected it refuses each unprovisioned control and fails closed on an unknown control."),
+    ("W9-5", "The production destruction-authorization path requires a genuine multi-signer quorum and refuses a 1-of-1 or pubkey-collapsed authority, fail-closed."),
+    ("W9-7", "A running install verifies its shipped files against the signed build manifest and reports one of six explicit integrity states, never an optimistic default."),
+    ("W3-5", "Every release attaches a signed SBOM, durable and independent of CI artifact retention, cross-checked against its hash-pinned lock so an SBOM omitting a shipped component fails."),
+    ("W7-1", "Disaster-recovery objectives (RPO and RTO) are defined numerically and the recovery drill asserts them, failing closed when recovery exceeds the RTO or data loss exceeds the RPO."),
+    ("W7-4", "Backup push verifies the copy at the destination by re-reading the landed bytes and matching their sha256, and fails closed when the destination copy is truncated, tampered, or corrupted."),
+    ("W10-8", "The seccomp egress supervisor is off-by-default and opt-in outside production; under the production posture it is forced on, and the gate refuses when its binary is missing."),
+    ("W11-4", "The audit/spine writer fails closed on an unwritable append-only spine: it raises rather than returning as if audited, and does not advance its append point on a failed write."),
+    ("W13-5", "A presented executor capability token is validated single-use and nine-field-bound at the external-tool executor boundary."),
+    ("W13-6", "Restricted mode is a safe landing state over the existing kill-switch (a facade, not a second policy engine): an integrity failure drops into it, it survives restart, and it permits only the diagnostic surface."),
 ]
 
 
@@ -479,9 +551,14 @@ def build_package(repo_root: Path | None = None) -> str:
     root = Path(repo_root) if repo_root is not None else default_repo_root()
     registry = load_registry(root)
     inputs = resolve_inputs(root)
-    evidence = [resolve_claim(cid, registry, root) for cid, _ in ASSURANCE_CLAIMS]
+    by_id = {c.get("id"): c for c in registry["claims"]}
+    evidence = []
+    for cid, so_what in ASSURANCE_CLAIMS:
+        ev = resolve_claim(cid, registry, root)          # gate: claim is backed by a real proving test
+        assert_sowhat_grounded(cid, so_what, by_id[cid])  # gate: the summary matches what that test proves
+        evidence.append(ev)
     rendered = render_package(root, registry, evidence, inputs)
-    assert_no_certification_wording(rendered)  # gate: no wording asserts certification
+    assert_no_certification_wording(rendered)             # gate: no wording asserts certification
     return rendered
 
 
@@ -497,7 +574,7 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.repo_root).resolve() if args.repo_root else default_repo_root()
     try:
         rendered = build_package(root)
-    except (MissingRequiredInput, EvidenceMissing, CertificationWordingError) as exc:
+    except (MissingRequiredInput, EvidenceMissing, CertificationWordingError, SoWhatDriftError) as exc:
         print(f"reviewer-package build FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
