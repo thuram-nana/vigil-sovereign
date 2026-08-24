@@ -350,6 +350,14 @@ _STANDARDS: dict[str, ControlMapping] = {
                                   iso=("A.8.24", "A.8.28"), attack=("T1552.001",)),
     "email_auth_misconfiguration": _m("A05:2021", ("CWE-16", "CWE-290"), pci=_MISCFG_PCI, soc2=("CC6.1", "CC7.2"),
                                      iso=("A.8.9", "A.5.14"), attack=("T1566",)),
+    # ---- Client-side posture-weakness classes (W16-STD-5; constitution §V "Client-side": missing/weak
+    #      framing, unenforced anti-CSRF token, wildcard postMessage origin). ATT&CK has no clean
+    #      enterprise technique for a client-side UI-redress / CSRF / postMessage weakness → honest empty. ----
+    "clickjacking": _m("A05:2021", ("CWE-1021",), pci=_MISCFG_PCI, soc2=_MISCFG_SOC2, iso=_MISCFG_ISO,
+                       attack=()),
+    "csrf": _m("A01:2021", ("CWE-352",), pci=_AC_PCI, soc2=_AC_SOC2, iso=_AC_ISO, attack=()),
+    "postmessage": _m("A05:2021", ("CWE-346", "CWE-940"), pci=_MISCFG_PCI, soc2=_MISCFG_SOC2, iso=_MISCFG_ISO,
+                      attack=()),
     # ---- LLM / AI application classes (OWASP LLM Top 10; ATT&CK has no clean web technique, ATLAS does) ----
     "prompt_injection": _m(None, ("CWE-1427",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=("A.8.28", "A.8.26"),
                            attack=("AML.T0051",)),

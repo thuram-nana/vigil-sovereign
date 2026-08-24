@@ -385,6 +385,13 @@ class FindingContext(BaseModel):
     # A RETAINED IdP-export control (FORGE Domain 7) for the identity-posture oracle. No benchmark finding
     # carries identity_control, so appending this leaves the gate byte-identical.
     identity_control: dict[str, Any] | None = None
+    # W16-STD-5 client-side POSTURE-WEAKNESS controls (constitution §V client-side classes). Each routes to
+    # its posture oracle (clickjacking = missing framing headers; csrf = token-not-enforced control-
+    # differential; postmessage = wildcard target-origin static check). No benchmark/scan/engage finding
+    # carries any of these keys, so appending them leaves the gate byte-identical.
+    clickjacking_control: dict[str, Any] | None = None
+    csrf_control: dict[str, Any] | None = None
+    postmessage_control: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -1032,6 +1039,69 @@ class FindingContext(BaseModel):
         elif src.get("mfa_enrolled") is False:
             retained["mfa_enrolled"] = False
         return cls(bug_class=bug_class, identity_control=retained)
+
+    @classmethod
+    def from_clickjacking_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "clickjacking"
+    ) -> "FindingContext":
+        """A RETAINED response's header set for the clickjacking posture oracle (W16-STD-5). The oracle
+        re-derives the weakness (NO framing X-Frame-Options AND no CSP frame-ancestors) over the OBSERVED
+        headers alone — offline, ZERO traffic — so a scanner's say-so is a FACT only by the actual absent
+        defense. The full captured header collection is retained (the oracle must see EVERY header to prove
+        neither defense is present); ``url``/``rule`` are retained verbatim. JSON-safe + deterministic."""
+        src = dict(control or {}) if isinstance(control, Mapping) else {}
+        retained: dict[str, Any] = {}
+        for k in ("rule", "url"):
+            if src.get(k) not in (None, ""):
+                retained[k] = _coerce_text(src.get(k))
+        headers = src.get("headers")
+        if isinstance(headers, Mapping):
+            # lowercase-key the retained headers so the certificate is canonical and the oracle's
+            # complete-header-set requirement is met from the certificate alone.
+            retained["headers"] = {_coerce_text(k).lower(): _coerce_text(v) for k, v in headers.items()}
+        elif isinstance(headers, (list, tuple)):
+            retained["headers"] = [[_coerce_text(p[0]), _coerce_text(p[1])]
+                                   for p in headers if isinstance(p, (list, tuple)) and len(p) == 2]
+        return cls(bug_class=bug_class, clickjacking_control=retained)
+
+    @classmethod
+    def from_csrf_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "csrf"
+    ) -> "FindingContext":
+        """A RETAINED control-vs-treatment status pair for the CSRF posture oracle (W16-STD-5). The oracle
+        re-derives the weakness (a state-changing request accepted 2xx with a valid token AND accepted 2xx
+        with the token removed/forged) over the retained statuses alone — offline — so a scanner's say-so is
+        a FACT only by the actual acceptance-differential. Only the fields the oracle judges are retained;
+        the two statuses are retained STRICTLY as ints (never coerced). JSON-safe + deterministic."""
+        src = dict(control or {}) if isinstance(control, Mapping) else {}
+        retained: dict[str, Any] = {}
+        for k in ("rule", "method", "endpoint"):
+            if src.get(k) not in (None, ""):
+                retained[k] = _coerce_text(src.get(k))
+        for k in ("token_present_status", "token_absent_status"):
+            v = src.get(k)
+            if isinstance(v, int) and not isinstance(v, bool):
+                retained[k] = v
+        return cls(bug_class=bug_class, csrf_control=retained)
+
+    @classmethod
+    def from_postmessage_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "postmessage"
+    ) -> "FindingContext":
+        """A RETAINED postMessage handler source (and/or a captured target-origin literal) for the
+        postMessage posture oracle (W16-STD-5). The oracle re-derives the weakness (a ``*`` targetOrigin
+        send, or a handler that consumes ``event.data`` with NO origin check) over the retained source
+        alone — offline, a sound static check — so a scanner's say-so is a FACT only by the actual source.
+        The handler source is retained verbatim (the oracle re-parses it). JSON-safe + deterministic."""
+        src = dict(control or {}) if isinstance(control, Mapping) else {}
+        retained: dict[str, Any] = {}
+        for k in ("rule", "target_origin"):
+            if src.get(k) not in (None, ""):
+                retained[k] = _coerce_text(src.get(k))
+        source = src.get("handler_source") or src.get("source")
+        if source not in (None, ""):
+            retained["handler_source"] = _coerce_text(source)
+        return cls(bug_class=bug_class, postmessage_control=retained)
 
     @classmethod
     def from_jwt_token(
@@ -1739,6 +1809,12 @@ class FindingContext(BaseModel):
             ctx["email_auth_control"] = self.email_auth_control
         if self.identity_control is not None:
             ctx["identity_control"] = self.identity_control
+        if self.clickjacking_control is not None:
+            ctx["clickjacking_control"] = self.clickjacking_control
+        if self.csrf_control is not None:
+            ctx["csrf_control"] = self.csrf_control
+        if self.postmessage_control is not None:
+            ctx["postmessage_control"] = self.postmessage_control
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:

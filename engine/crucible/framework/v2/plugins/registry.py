@@ -421,6 +421,9 @@ def _oracle_summaries() -> dict[Any, str]:
         OracleKind.DOM_EXECUTION: "Injected JS actually executed in a real DOM (DOM-XSS).",
         OracleKind.SERVICE_REACHABILITY: "A real transport handshake reproduced (port open).",
         OracleKind.TLS_WEAKNESS: "A real TLS handshake negotiated a weak protocol/cipher.",
+        OracleKind.CLICKJACKING_POSTURE: "A retained response ships NO framing defense (no X-Frame-Options DENY/SAMEORIGIN, no CSP frame-ancestors) — a posture weakness, not an achieved-state exploit.",
+        OracleKind.CSRF_POSTURE: "A control-differential proved an anti-CSRF token is not enforced (accepted with and without a valid token) — a posture weakness, not a proven cross-site exploit.",
+        OracleKind.POSTMESSAGE_POSTURE: "A retained handler source uses a wildcard '*' targetOrigin or consumes event.data with no origin check — a posture weakness, not a proven exploit.",
     }
 
 

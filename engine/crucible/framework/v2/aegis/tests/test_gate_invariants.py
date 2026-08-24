@@ -56,6 +56,10 @@ _ADDITIVE = frozenset({
     # BUILD-PLAN §E4 TIER-2 K8s dangerous-VERB / default-SA RBAC verb-grant (the rule-PARSING sibling of the
     # TIER-1 K8S_WORKLOAD_POSTURE name-match oracle).
     "K8S_RBAC_VERB_GRANT",
+    # W16-STD-5 client-side POSTURE-WEAKNESS kinds (constitution §V client-side classes: clickjacking /
+    # CSRF / postMessage) — each proves a MISSING/WEAK defense, reachable ONLY via its explicit row keyed
+    # on a `*_control` ctx field no benchmark/scan finding carries; never in the frozen fallback.
+    "CLICKJACKING_POSTURE", "CSRF_POSTURE", "POSTMESSAGE_POSTURE",
 })
 
 
@@ -75,11 +79,11 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
         member = OracleKind[name]
         assert member not in V._ALL_ORACLES, f"{name} leaked into the frozen fallback"
         assert name not in frozen_names
-    # the enum is exactly the 15 frozen + 23 additive = 38; a new frozen member (or a new additive one
+    # the enum is exactly the 15 frozen + 26 additive = 41; a new frozen member (or a new additive one
     # not accounted for here) fails this, forcing an explicit review of the byte-identity impact.
-    # (E3 GCP_SA_IMPERSONATION, E2 IAM_ESCALATION_PRIMITIVE and E4-TIER-2 K8S_RBAC_VERB_GRANT all landed
-    # additively: 35 -> 36 -> 37 -> 38.)
-    assert len(OracleKind) == 38
+    # (E3 GCP_SA_IMPERSONATION, E2 IAM_ESCALATION_PRIMITIVE and E4-TIER-2 K8S_RBAC_VERB_GRANT landed
+    # additively: 35 -> 36 -> 37 -> 38; W16-STD-5 added the 3 client-side posture kinds: 38 -> 41.)
+    assert len(OracleKind) == 41
     assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE
     assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE}
 

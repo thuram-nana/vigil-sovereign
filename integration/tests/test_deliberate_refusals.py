@@ -255,16 +255,17 @@ def test_negative_control_planting_into_a_real_first_party_style_tree(tmp_path):
 _DOC = _REPO / "docs" / "DELIBERATE-REFUSALS.md"
 
 
-def test_deliberate_refusals_doc_exists_and_states_all_seven():
+def test_deliberate_refusals_doc_exists_and_states_all_eight():
     assert _DOC.is_file(), "docs/DELIBERATE-REFUSALS.md is missing"
     text = _DOC.read_text(encoding="utf-8")
-    # the seven numbered refusal headings
-    for n in range(1, 8):
+    # the eight numbered refusal headings (refusal 8 = W16-STD-5: no achieved-state clickjacking oracle;
+    # the client-side weaknesses are proven as POSTURE, not exploit)
+    for n in range(1, 9):
         assert f"### {n}." in text, f"refusal #{n} heading missing from DELIBERATE-REFUSALS.md"
     # each refusal must carry its reasoning — a 'strength'/'why' rationale, not a bare list
     assert "strength" in text.lower()
     for kw in ("evasion", "C2", "persistence", "lateral", "defensive-only",
-               "serial", "NON-RUNNABLE", "x5c"):
+               "serial", "NON-RUNNABLE", "x5c", "clickjacking", "posture"):
         assert kw in text, f"DELIBERATE-REFUSALS.md does not state refusal keyword {kw!r}"
 
 
@@ -376,6 +377,20 @@ def test_refusal7_x5c_rejection_breadcrumb_is_recorded_in_the_oracle():
     oracles = (_REPO / "engine/crucible/framework/v2/verify/oracles.py").read_text(encoding="utf-8")
     assert "DELIBERATELY NOT a fire path" in oracles
     assert "x5c" in oracles and "RFC 7515" in oracles  # the unsoundness argument, recorded in code
+
+
+def test_refusal8_clickjacking_is_posture_not_achieved_state():
+    """W16-STD-5: the achieved-state clickjacking oracle stays refused; the SOUND posture-weakness dual
+    (clickjacking/CSRF/postMessage) WAS added. Asserts the three posture oracles exist AND the
+    'DELIBERATELY NOT an achieved-state' breadcrumb is recorded in code — so the refusal cannot drift."""
+    oracles = (_REPO / "engine/crucible/framework/v2/verify/oracles.py").read_text(encoding="utf-8")
+    for fn in ("clickjacking_posture_oracle", "csrf_posture_oracle", "postmessage_posture_oracle"):
+        assert f"def {fn}(" in oracles, f"sound posture oracle {fn} is missing"
+    assert "DELIBERATELY NOT an achieved-state" in oracles  # the refusal breadcrumb, recorded in code
+    models = (_REPO / "engine/crucible/framework/v2/verify/models.py").read_text(encoding="utf-8")
+    assert "CLICKJACKING_POSTURE" in models and "DELIBERATELY NOT an achieved-state" in models
+    # the confirmation seam that adjudicates an imported client-side finding exists.
+    assert (_REPO / "engine/crucible/framework/v2/verify/client_side_posture.py").is_file()
 
 
 if __name__ == "__main__":  # pragma: no cover

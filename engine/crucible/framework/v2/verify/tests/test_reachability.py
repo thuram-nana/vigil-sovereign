@@ -205,12 +205,27 @@ def test_capture_handshake_out_of_scope_host_refused(monkeypatch: pytest.MonkeyP
     assert hs["connected"] is False and "scope" in hs["error"] and called["n"] == 0
 
 
+# CIDR / range / flag / list / space — NOT a single host. IPv6 literals are NO LONGER here: the scope
+# layer now brackets a bare IPv6 before urlparse and matches it canonically (W16-STD-5), so a single IPv6
+# literal is a valid single host (see test_ipv6_single_host_is_accepted_and_reachable). An IPv6 CIDR is
+# still rejected (proves the guard is not a blanket IPv6 accept).
 @pytest.mark.parametrize("bad", ["10.0.0.5/24", "10.0.0.1-50", "-oN", "a,b", "1.2.3.4 5.6.7.8",
-                                 "fe80::1", "2001:db8::5", "::1"])
+                                 "fe80::/10", "2001:db8::/32"])
 def test_capture_handshake_rejects_non_single_host_targets(monkeypatch, bad) -> None:
-    # includes bare IPv6: the URL-shaped scope gate truncates it, so the gate would validate a
-    # different string than the socket dials — reject until the scope layer supports bracketed IPv6.
     _grant_active_recon(monkeypatch)
     hs = capture_handshake(bad, 443, slug="alpha", connect=lambda *a: ("x", ""))
     assert hs["connected"] is False and "single host" in hs["error"]
     assert _is_single_host(bad) is False
+
+
+@pytest.mark.parametrize("ip", ["::1", "fe80::1", "2001:db8::5", "[2001:db8::5]"])
+def test_ipv6_single_host_is_accepted_and_reachable(monkeypatch, tmp_path, ip) -> None:
+    """W16-STD-5: a single IPv6 literal (bare or bracketed) is now a valid single host, and — with the
+    charter scope layer's IPv6 correctness — a gated handshake to it confirms end-to-end. Fails WITHOUT
+    the fix: `_is_single_host` returned False for any IPv6, so capture_handshake refused with 'single host'."""
+    assert _is_single_host(ip) is True                 # the removed rejection
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, ip)                              # the SAME literal is in charter scope
+    hs = capture_handshake(ip, 443, slug="alpha", connect=lambda h, p, t, b: (f"{h}:443", "hi"))
+    assert hs["connected"] is True, hs
+    assert confirm_reachable(hs).confirmed              # the reachability oracle confirms the IPv6 host

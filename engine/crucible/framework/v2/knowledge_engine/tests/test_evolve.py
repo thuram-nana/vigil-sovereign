@@ -26,7 +26,10 @@ from framework.v2.knowledge_engine.evolve import plan_evolution, record_predicti
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _LEADS = [
     {"id": "CVE-2024-0001", "severity": "CRITICAL", "cwes": ["CWE-89"]},   # sqli → oracle-known
-    {"id": "CVE-2024-0002", "bug_class": "csrf"},                          # csrf → NOT oracle-known → coverage gap
+    {"id": "CVE-2024-0002", "bug_class": "prototype_pollution"},           # NOT oracle-known → coverage gap
+                                                                           # (csrf USED to be uncovered; W16-STD-5
+                                                                           #  gave it an oracle, so pick a still-
+                                                                           #  uncovered class here)
     {"id": "CVE-2024-0003", "bug_class": "sqli"},                          # known → no coverage gap
 ]
 
@@ -34,7 +37,7 @@ _LEADS = [
 def test_plan_has_horizon_and_only_uncovered_coverage_gaps(tmp_path):
     plan = plan_evolution(_LEADS, skills_dir=tmp_path, now=NOW)
     assert len(plan.horizon_gaps) == 3                       # one horizon gap per disclosed lead
-    assert [g.bug_class for g in plan.coverage_gaps] == ["csrf"]   # ONLY the oracle-uncovered class
+    assert [g.bug_class for g in plan.coverage_gaps] == ["prototype_pollution"]   # ONLY the oracle-uncovered class
     assert len(plan.proposals) == 4                          # 3 horizon + 1 coverage, one draft each
 
 

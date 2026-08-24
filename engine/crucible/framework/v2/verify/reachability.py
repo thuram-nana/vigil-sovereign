@@ -34,15 +34,21 @@ _BANNER_BYTES = 256
 def _is_single_host(host: str) -> bool:
     """A handshake is to exactly ONE host: a single IPv4 literal or a single DNS hostname. Reject
     CIDR / range / list / wildcard / option-like input so the connect target is unambiguous and the
-    scope gate validates the SAME host we probe (the W2.2 lesson, applied here too). IPv6 is rejected
-    for now — the URL-shaped charter-scope gate truncates a bare IPv6 literal (``fe80::1`` -> ``fe80``),
-    so it would validate a different string than the address dialled; support returns with bracketed
-    IPv6 in the scope layer."""
+    scope gate validates the SAME host we probe (the W2.2 lesson, applied here too).
+
+    IPv6 is now SUPPORTED (W16-STD-5): the earlier deferral existed because the URL-shaped charter-scope
+    gate truncated a bare IPv6 literal (``fe80::1`` -> ``fe80``), validating a different string than the
+    address dialled. The scope layer has since gained IPv6 correctness — ``common.ethics.bracket_bare_ipv6``
+    / ``extract_hostname`` bracket a bare literal before ``urlparse`` and ``host_matches_scope`` compares
+    IPv6 canonically — so the scope gate now validates the SAME address, and the obsolete rejection is gone."""
     h = (host or "").strip()
     if not h or h.startswith("-") or any(c in h for c in "/,*") or any(c.isspace() for c in h):
         return False
+    # A single IPv6 literal may be bracketed (``[fe80::1]``); strip a matched pair before parsing.
+    inner = h[1:-1] if (h.startswith("[") and h.endswith("]")) else h
     try:
-        return ipaddress.ip_address(h).version == 4   # a single IPv4 literal (IPv6 deferred)
+        ipaddress.ip_address(inner)   # a single IPv4 OR IPv6 literal (bare or bracketed)
+        return True
     except ValueError:
         return any(c.isalpha() for c in h)   # a hostname has a letter; a numeric non-IP is a range/typo
 
@@ -81,7 +87,10 @@ def _authorize(host: str, port: Any, slug: str) -> str | None:
 
 def _socket_connect(host: str, port: int, timeout: float, read_banner: bool) -> tuple[str, str]:
     """The default connector: ONE bounded TCP connect. Returns (peer, banner); raises OSError on a
-    refused/timed-out connect (the caller turns that into a ``connected: False`` handshake)."""
+    refused/timed-out connect (the caller turns that into a ``connected: False`` handshake). A bracketed
+    IPv6 literal (``[fe80::1]``) is unwrapped — ``getaddrinfo`` wants the bare address."""
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
     with socket.create_connection((host, port), timeout=timeout) as sock:
         sock.settimeout(timeout)
         peer = ""
