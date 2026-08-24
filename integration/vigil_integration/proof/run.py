@@ -329,6 +329,9 @@ def _persist_web_redrive(run_dir: "str | os.PathLike", report: dict, wclass: str
         # looked (query/path/cookie/urlencoded-body/JSON-body) rather than reading as an unbounded absence.
         "insertion_coverage": wr.family_coverage() if hasattr(wr, "family_coverage") else {},
         "coverage_statement": wr.coverage_statement(wclass) if hasattr(wr, "coverage_statement") else "",
+        # The candidate redirect-parameter names probed on the synthesised cookie/body/JSON carriers — the
+        # bound an open_redirect CLEAN over those surfaces is scoped to, machine-readable rather than prose.
+        "probed_redirect_param_names": list(getattr(wr, "probed_redirect_param_names", []) or []),
         "n_facts": len(wr.facts),
         "fact_refs": [getattr(f, "finding_ref", "") for f in wr.facts],
         "refused": bool(getattr(wr, "refused", False)),

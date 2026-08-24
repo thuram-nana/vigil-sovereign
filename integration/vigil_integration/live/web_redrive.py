@@ -37,6 +37,7 @@ class WebRedriveResult:
     branch_verdicts: dict = field(default_factory=dict)  # bug_class -> {branch: verdict}
     contexts: dict = field(default_factory=dict)  # finding_ref -> oracle_context (offline re-verify)
     insertion_surfaces: dict = field(default_factory=dict)  # bug_class -> set(surface) actually EXAMINED
+    probed_redirect_param_names: list = field(default_factory=list)  # candidate names on the synth carriers
     refused: bool = False
     notes: list = field(default_factory=list)
 
@@ -291,19 +292,20 @@ def _candidate_redirect_names(url: str) -> "list[str]":
     return names[:_MAX_CANDIDATE_REDIRECT_NAMES]
 
 
-def _redirect_templates(url, http_request, insertion_kind, request_template):
+def _redirect_templates(url, names, http_request, insertion_kind, request_template):
     """The ``(RequestTemplate, insertion-kinds)`` carriers the open-redirect re-drive probes.
 
     Four carriers, each restricted to the surface it introduces so the URL query/path is not re-probed by the
     body carriers: the bare GET (URL query + path), a GET with a synthesised Cookie header, a POST with a
-    urlencoded body, and a POST with a JSON body. Every carrier feeds the identical admission path, so each
-    surface's outcome is attributed and capability-checked like any other. Returns a list; never raises."""
+    urlencoded body, and a POST with a JSON body. ``names`` (from :func:`_candidate_redirect_names`) are the
+    redirect-parameter names placed on the synthesised carriers — the caller passes them so it can also record
+    the CLEAN's parameter-name bound. Every carrier feeds the identical admission path, so each surface's
+    outcome is attributed and capability-checked like any other. Returns a list; never raises."""
     import json  # noqa: PLC0415 — stdlib, function-local
     templates = [
         (request_template(http_request(method="GET", url=url)),
          (insertion_kind.QUERY_VALUE, insertion_kind.URL_PATH_SEG)),
     ]
-    names = _candidate_redirect_names(url)
     if names:
         cookie = "; ".join(f"{n}=redir" for n in names)
         templates.append((
@@ -485,7 +487,11 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         # to the surface it introduces so the URL is not re-probed. Every outcome flows through the SAME
         # admission path, so each surface is attributed and capability-checked like any other.
         orc = OpenRedirectCheck()
-        for tmpl, kinds in _redirect_templates(url, HttpRequest, InsertionKind, RequestTemplate):
+        # the candidate redirect-parameter names placed on the synthesised cookie/body/JSON carriers — recorded
+        # so the location_header CLEAN's parameter-name bound is machine-readable, not prose-only.
+        names = _candidate_redirect_names(url)
+        res.probed_redirect_param_names = list(names)
+        for tmpl, kinds in _redirect_templates(url, names, HttpRequest, InsertionKind, RequestTemplate):
             for point in tmpl.insertion_points(kinds=kinds):
                 _run(lambda t=tmpl, p=point: orc.probe(t, p, send), "open_redirect",
                      f"{url}#{point.id}", surface=point.kind.value)

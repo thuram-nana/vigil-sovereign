@@ -216,13 +216,18 @@ def test_the_negatives_capable_branch_count_is_pinned_and_named():
     (20 could not assert a negative). The ladder has since grown — the total is NOT 26 any more, and pinning a
     total would be brittle churn — so the load-bearing number is the count of CLEAN-CAPABLE branches, pinned
     to the exact 6 named below. The insertion-coverage slice did NOT add a clean-capable branch (a
-    body-derived CLEAN still needs the render_dom / streaming-decoder work); what it changed is that the three
-    redirect HEADER branches below can now assert their bounded negative across the cookie / urlencoded-body /
-    JSON-body insertion surfaces too — before it, a redirect reachable only from those surfaces was
-    unexamined, so their CLEAN was a latent false-CLEAN. The re-drive proving that in test_web_redrive.py
-    (a JSON-body-only redirect is FOUND; a clean target names all five surfaces) is what makes these six a
-    SOUND six rather than a nominal one."""
-    clean = sorted(b["id"] for b in _branches() if b.get("clean_capable"))
+    body-derived CLEAN still needs the render_dom / streaming-decoder work).
+
+    HONEST SCOPE (do not overclaim across the three redirect header branches): only
+    ``open_redirect.location_header`` gained the cookie / urlencoded-body / JSON-body insertion surfaces —
+    before it, a redirect reachable only from those surfaces was unexamined, so its CLEAN was a latent
+    false-CLEAN, and test_web_redrive.py proves the fix (a JSON-body-only redirect is FOUND; a clean target
+    names all five surfaces). ``host_header.location_header`` is a REQUEST-LEVEL Host-header surface, probed
+    once on the bare template — it does NOT depend on parameter insertion, so it gained nothing here. The
+    OIDC check is not driven by the web re-drive at all, so a non-query ``redirect_uri`` stays a NAMED
+    residual. This test guards that honest scope against the registry drifting back to the overclaim."""
+    branches = {b["id"]: b for b in _branches()}
+    clean = sorted(bid for bid, b in branches.items() if b.get("clean_capable"))
     expected = sorted([
         "open_redirect.location_header",
         "cors.reflected_origin_with_credentials",
@@ -235,10 +240,22 @@ def test_the_negatives_capable_branch_count_is_pinned_and_named():
         f"the set of CLEAN-capable branches changed to {clean}; if this is intended, update the pin AND the "
         f"reasoning — a clean-capable branch is one that may assert absence, the most safety-sensitive claim")
     assert len(clean) == 6, f"expected exactly 6 negatives-capable branches, found {len(clean)}"
-    # the three redirect HEADER branches whose bounded negative the insertion coverage made sound
-    for made_sound in ("open_redirect.location_header", "host_header.location_header",
-                       "oidc_redirect_uri.location_header"):
-        assert made_sound in clean, f"{made_sound} must remain a negatives-capable branch"
+    # the three redirect HEADER branches must all remain negatives-capable ...
+    for header_branch in ("open_redirect.location_header", "host_header.location_header",
+                          "oidc_redirect_uri.location_header"):
+        assert header_branch in clean, f"{header_branch} must remain a negatives-capable branch"
+    # ... but ONLY open_redirect.location_header gained the synthesised insertion surfaces. Pin that honest
+    # scope from the registry's OWN blocking_work so a re-introduced overclaim (host_header/oidc "gained
+    # cookie/body coverage") turns this red rather than green-passing as it did before the red-pen.
+    orl = branches["open_redirect.location_header"]["blocking_work"]
+    assert "_redirect_templates" in orl and "five insertion surfaces" in orl, (
+        "open_redirect.location_header must record that it gained the synthesised insertion surfaces")
+    hh = branches["host_header.location_header"]["blocking_work"]
+    assert "REQUEST-LEVEL" in hh and "does not depend on query/body parameter insertion" in hh, (
+        "host_header.location_header must stay declared a request-level surface, not a param-insertion one")
+    oidc = branches["oidc_redirect_uri.location_header"]["blocking_work"]
+    assert "RESIDUAL" in oidc and "cookie or request body" in oidc, (
+        "oidc_redirect_uri non-query redirect_uri must stay a named residual, not a gained surface")
 
 
 def test_no_row_is_a_non_strict_xfail():

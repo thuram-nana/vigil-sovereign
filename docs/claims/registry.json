@@ -2243,7 +2243,7 @@
     {
       "id": "W16-STD-1c",
       "title": "The count of negatives-capable (CLEAN-capable) evidence branches is pinned by name in a test",
-      "claim": "Exactly six evidence branches are declared able to assert a bounded negative (a CLEAN), pinned by name in a test, so the ladder cannot silently gain or lose absence-authority; the three redirect header branches among them assert their bounded negative across the cookie, urlencoded-body and JSON-body insertion surfaces as well as query and path.",
+      "claim": "Exactly six evidence branches are declared able to assert a bounded negative (a CLEAN), pinned by name in a test, so the ladder cannot silently gain or lose absence-authority; of the three redirect header branches among them, only open_redirect.location_header gained the cookie, urlencoded-body and JSON-body insertion surfaces, while host_header.location_header is a request-level Host-header surface and the OIDC non-query redirect_uri stays a named residual.",
       "source": "docs/decisions/W16-STD-1-insertion-coverage.md:38",
       "enforced_by": {
         "file": "integration/vigil_integration/live/verdict.py",

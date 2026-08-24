@@ -643,6 +643,12 @@ def test_clean_target_is_bounded_clean_and_names_every_insertion_surface(monkeyp
     statement = res.coverage_statement("open_redirect")
     for surface in _REDIRECT_SURFACES:
         assert surface in statement, f"coverage statement omits {surface!r}: {statement}"
+    # ... and the parameter-name bound is MACHINE-READABLE, not prose-only: the CLEAN over the synthesised
+    # cookie/body surfaces is scoped to these names (grounded 'next' from the URL + the fixed well-known set).
+    assert "next" in res.probed_redirect_param_names, (
+        f"the grounded query param name is not in the recorded bound: {res.probed_redirect_param_names}")
+    assert {"url", "redirect"} <= set(res.probed_redirect_param_names), (
+        f"the fixed candidate names are not recorded: {res.probed_redirect_param_names}")
 
 
 def test_insertion_coverage_went_from_two_surfaces_to_five(monkeypatch, tmp_path):
