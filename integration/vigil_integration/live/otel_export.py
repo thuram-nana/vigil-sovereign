@@ -291,14 +291,15 @@ class OTLPSink:
         else:
             self.dropped += 1
             self._consecutive_failures += 1
-            if self._consecutive_failures >= self._max_consecutive_failures and not self._disabled:
+            if self._consecutive_failures >= self._max_consecutive_failures:
                 # Stop hammering a down collector — a deterministic, count-based (no-clock) latch so a
                 # dead collector can never stall the engine's hot path indefinitely.
                 self._disabled = True
                 # VISIBLE, not silent (W6-4 / #455): the latch is where a persistently-down collector stops
                 # being a silent drip of `dropped++` and becomes one WARNING an operator can see. Logged ONCE
-                # (guarded by `not self._disabled` above) so a dead collector cannot flood the log; the engine
-                # is UNAFFECTED (this path still swallows and never raises).
+                # — once `_disabled` latches, `_export_one` returns at the `if self._disabled` guard above and
+                # never re-enters this branch — so a dead collector cannot flood the log; the engine is
+                # UNAFFECTED (this path still swallows and never raises).
                 _log.warning(
                     "OTLP collector at %s unreachable — %d consecutive export failures; telemetry export "
                     "silenced for this engagement (a down collector never denies cognition)",
