@@ -67,6 +67,16 @@ def test_wrong_key_or_tampered_field_is_rejected():
     assert verify_hop_assertion(KEY, "eve", R, M, PATH, TS, sig, now=float(TS)) is False
 
 
+def test_non_finite_ts_is_refused_even_when_signed_with_the_real_key():
+    # `ts` is inside the HMAC, so only a hop-key holder can produce these — but a non-finite ts must STILL be
+    # refused fail-closed: `abs(now - nan)` is nan and `nan > skew` is False, so WITHOUT the isfinite guard a
+    # "nan"/"inf" ts would slip the freshness window entirely. Each is signed with the REAL key so the MAC
+    # matches and ONLY the finiteness guard can reject it — a genuine negative control on that guard.
+    for bad in ("nan", "NaN", "inf", "-inf", "Infinity", "-Infinity"):
+        sig = stamp_hop_assertion(KEY, P, R, M, PATH, bad)
+        assert verify_hop_assertion(KEY, P, R, M, PATH, bad, sig, now=1700000000.0) is False, bad
+
+
 def test_default_now_uses_wall_clock_for_a_fresh_stamp():
     import time
     ts = str(int(time.time()))

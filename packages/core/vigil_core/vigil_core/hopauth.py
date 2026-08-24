@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import math
 import time
 from typing import Optional
 
@@ -68,6 +69,12 @@ def verify_hop_assertion(hop_key: str, principal: str, role: str, method: str, p
     try:
         ts_f = float(ts)
     except (TypeError, ValueError):
+        return False
+    # A non-finite ts ("nan"/"inf") would SLIP the freshness window: abs(reference - nan) is nan and
+    # `nan > max_skew` is False, so the window check would pass. Refuse it fail-closed BEFORE the window
+    # check. (Defense in depth — ts is inside the HMAC, so only a hop-key holder could ever set it — but a
+    # timestamp that is not a real instant can never be "fresh".)
+    if not math.isfinite(ts_f):
         return False
     reference = time.time() if now is None else now
     if abs(reference - ts_f) > max_skew_s:
