@@ -43,7 +43,7 @@ services:
     # — the Qdrant image ships no shell/curl for an in-container HEALTHCHECK.
 
   neo4j:
-    image: neo4j:5-community@sha256:89d577f2e49606de76441eca8cf7a0fe88e594cbaac4d2a3d86c6e59676e2b1e
+    image: neo4j:5-community@sha256:b3c4f3ded24b3e2bec0753e2c535bb0885b08410fe29b33852861404c8830dac
     profiles: ["graph"]
     restart: unless-stopped
     environment:
