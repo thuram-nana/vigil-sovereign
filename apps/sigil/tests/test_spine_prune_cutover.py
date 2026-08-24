@@ -77,6 +77,26 @@ def test_commit_prune_deletes_and_stays_verifiable(tmp_path, isolated):
     assert aok, amsg                                      # [archive‖live] re-attaches to the owner-signed head
 
 
+def test_drop_primitives_refuse_without_a_committed_prune(tmp_path, isolated):
+    """Red-pen LOW-1 (defence-in-depth): the destructive primitives `_rebase_manifest_below` /
+    `_delete_orphan_segment_files_below` refuse to drop live records unless the OWNER-SIGNED head has
+    committed a prune reaching that far. A direct caller that bypasses `commit_prune`'s three gates cannot
+    delete owner-signed records."""
+    from sigil.spine.store import SpineError
+    s = _segmented_store(tmp_path)
+    _cp.checkpoint(s)                                       # a valid signed head, but base_seq=0 (no prune)
+    with pytest.raises(SpineError) as e1:
+        s._rebase_manifest_below(10)
+    assert "committed-prune context" in str(e1.value)
+    with pytest.raises(SpineError):
+        s._delete_orphan_segment_files_below(10)
+    assert _seqs(s) == list(range(23)), "a guarded primitive dropped nothing"
+    # fail-closed with NO head at all, too.
+    isolated.unlink()
+    with pytest.raises(SpineError):
+        s._rebase_manifest_below(10)
+
+
 def test_commit_prune_requires_confirm(tmp_path, isolated):
     s = _segmented_store(tmp_path)
     _cp.checkpoint(s)

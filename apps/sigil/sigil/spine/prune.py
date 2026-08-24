@@ -598,12 +598,13 @@ def commit_prune(store, K: int, *, confirm: bool = False) -> dict:
                             cumulative_merkle_root=snap_payload["cumulative_merkle_root"], snapshot_seq=snap_seq)
     _maybe_crash("prune_after_head")
 
-    # 4) rebase the manifest so reads follow the retained window [K..T] (atomic new-generation publish).
-    store.rebase_manifest_below(K)
+    # 4) rebase the manifest so reads follow the retained window [K..T] (atomic new-generation publish). The
+    #    drop primitives self-guard on the just-signed head (they refuse a drop with no committed prune).
+    store._rebase_manifest_below(K)
     _maybe_crash("prune_after_manifest")
 
     # 5) reclaim: unlink the now-orphaned below-K segment files (idempotent post-commit GC).
-    dropped = store.delete_orphan_segment_files_below(K)
+    dropped = store._delete_orphan_segment_files_below(K)
 
     return {"base_seq": K, "snapshot_seq": snap_seq, "head_last_seq": head.last_seq,
             "archived_segments": len(archived), "files_deleted": dropped,
