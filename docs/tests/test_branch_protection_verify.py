@@ -45,6 +45,7 @@ def _live_matching(canonical: list[str]) -> dict:
     """A protection body that MATCHES the committed policy (the good case)."""
     return {
         "required_status_checks": {"strict": True, "contexts": list(canonical)},
+        "required_signatures": {"enabled": True},   # W12-4 (#493): signed commits required
         "allow_force_pushes": {"enabled": False},
         "allow_deletions": {"enabled": False},
         "enforce_admins": {"enabled": False},
@@ -98,6 +99,27 @@ def test_strict_false_is_flagged():
     live = _live_matching(canonical)
     live["required_status_checks"]["strict"] = False
     assert any("strict" in p for p in bpc.compare_protection(live, canonical))
+
+
+def test_required_signatures_disabled_is_flagged():
+    # W12-4 (#493) NEGATIVE CONTROL: live protection that does NOT require signed commits must fail the
+    # compare — an unsigned push would otherwise be accepted on main. Proven in both shapes: the flag set
+    # false, and the sub-resource absent entirely (as it is on an unprotected branch).
+    canonical = _canonical()
+    live = _live_matching(canonical)
+    live["required_signatures"]["enabled"] = False
+    assert any("required_signatures" in p for p in bpc.compare_protection(live, canonical)), \
+        "disabled signed-commits must be caught"
+    del live["required_signatures"]
+    assert any("required_signatures" in p for p in bpc.compare_protection(live, canonical)), \
+        "absent required_signatures must be caught (fail closed)"
+
+
+def test_required_signatures_enabled_passes():
+    # And with signatures enabled (plus the rest matching), there is no problem — proving the new check
+    # is not a constant failure.
+    canonical = _canonical()
+    assert bpc.compare_protection(_live_matching(canonical), canonical) == []
 
 
 def test_force_push_allowed_is_flagged():

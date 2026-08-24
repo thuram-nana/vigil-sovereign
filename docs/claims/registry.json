@@ -2136,8 +2136,8 @@
     {
       "id": "W12-4",
       "title": "Commit-signing setup + a real local verify check ship (W12-4 #493)",
-      "claim": "A commit-signing setup script configures git to sign commits and a shared verify check (`signing_config_defects`) decides whether a working copy will produce signed commits — passing a fully configured setup and rejecting one missing `commit.gpgsign` or `user.signingkey` — so a contributor can confirm local signing before pushing; the server-side \"Require signed commits\" branch-protection rule that rejects an unsigned push is a documented human/admin action and is NOT claimed to be enabled.",
-      "source": "docs/decisions/W12-4-enforce-signed-commits.md:50",
+      "claim": "A commit-signing setup script configures git to sign commits and a shared verify check (`signing_config_defects`) decides whether a working copy will produce signed commits — passing a fully configured setup and rejecting one missing `commit.gpgsign` or `user.signingkey` — so a contributor can confirm local signing before pushing; and the server-side \"Require signed commits\" branch-protection rule that rejects an unsigned push is now ENABLED on `main` (the W12-4 rollout, applied by `require-checks.sh`), with the comparator that verifies it (`branch_protection_check.compare_protection`) unit-tested with a negative control in required CI, and continuous live re-verification armed once the `BRANCH_PROTECTION_TOKEN` (#554) is provisioned.",
+      "source": "docs/decisions/W12-4-enforce-signed-commits.md:51",
       "enforced_by": {
         "file": "tools/governance/commit_signing.py",
         "symbol": "signing_config_defects"

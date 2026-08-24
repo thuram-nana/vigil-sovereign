@@ -25,8 +25,10 @@
 #     case-insensitive order purely so a human can diff it against the live settings by eye.
 #
 # Live protection also sets: strict = true (branch must be up to date), enforce_admins = false
-# (the owner keeps an attributable admin override), allow_force_pushes = false, allow_deletions = false.
-# Required reviews and required signed commits are NOT enabled — a deliberate, scheduled handoff, not a
+# (the owner keeps an attributable admin override), allow_force_pushes = false, allow_deletions = false,
+# and required signed commits = TRUE (W12-4 #493 — every commit landing on main must be signature-
+# verified; GitHub signs squash/merge-commit merges, so the PR-merge flow works, and a direct unsigned
+# push is rejected). Required PR reviews are NOT enabled — a deliberate, scheduled handoff, not yet a
 # shipped control. Do not add a line here for a control that is not actually enforced.
 
 A14 supply-chain gate
