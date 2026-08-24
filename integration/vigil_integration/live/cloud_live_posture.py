@@ -25,11 +25,14 @@ independently re-authorised through the SAME gate — with its RAW case-exact id
 an out-of-scope subject is skipped, never certified. The requested scope and each FACT's own subject
 scope are bound into the signed certificate (bounded honesty).
 
-ADMISSION, not a direct mint (Phase-D BLOCKER-1). Both branches are ``clean_capable:false`` in
+ADMISSION, not a direct mint (Phase-D BLOCKER-1). Every registered branch is ``clean_capable:false`` in
 ``docs/capability-matrix/evidence-branches.json``; a conclusive non-fire is demoted to INCONCLUSIVE, never
-escapes as CLEAN. The oracle yields ``(fired, conclusive, rules)`` (``rules`` = the fired evidence-rule ids,
-retained for a future per-rule branch attribution refinement) → ``verdict.admit(fired, conclusive, ...)`` →
-``certify_admitted`` mints ONLY a FACT. provenance="reproduced" (VIGIL re-derives the evidence over the retained capture bytes).
+escapes as CLEAN. The oracle yields ``(fired, conclusive, rules)`` (``rules`` = the fired evidence-rule ids);
+this producer USES ``rules`` for PER-RULE BRANCH ATTRIBUTION: a cloud_posture firing whose rule is
+``named_cross_account_principal`` is admitted under the registered ``cloud_live.cloud_posture.cross_account_principal``
+branch (whose extra precondition ``owner_account_supplied`` is evaluated over the retained control), every
+other cloud firing under ``cloud_live.cloud_posture.achieved_state`` → ``verdict.admit(fired, conclusive, ...)``
+→ ``certify_admitted`` mints ONLY a FACT. provenance="reproduced" (VIGIL re-derives the evidence over the retained capture bytes).
 
 D2 BINDING. The captured evidence sha256, ``capture_method="api:list"``, the per-FACT ``resource_scope``
 (provider/account/region/resource) naming the FACT's ACTUAL subject, the requested scope,
@@ -54,11 +57,20 @@ from typing import Any
 
 from .safe_parse import ParseBudget, safe_json
 
-# The TWO registered LIVE-capture evidence branches (docs/capability-matrix/evidence-branches.json). Both
+# The registered LIVE-capture evidence branches (docs/capability-matrix/evidence-branches.json). All
 # fact_capable:true (an unambiguous insecure achieved state / a real anon grant path in a scoped live capture
 # is a FACT), clean_capable:false (a partial capture cannot prove ABSENCE). Namespaced under ``cloud_live.`` so
-# they never collide with the Track-A ``iac.`` branches or a bare cloud_posture/policy_path branch.
+# they never collide with the Track-A ``iac.`` branches or a bare cloud_posture/policy_path branch. The
+# cloud_posture family splits by fired rule into two branches (achieved_state / cross_account_principal).
 _BRANCH_CLOUD = "cloud_live.cloud_posture.achieved_state"
+# The NAMED-cross-account-principal branch: the same cloud_posture oracle, but attributed to its OWN registered
+# branch when the fired evidence rule is the cross-account rule (rather than filed under the generic
+# achieved_state branch). This is the per-rule branch-attribution the ``rules`` return value was added for, and
+# it is what makes this branch's extra precondition — ``owner_account_supplied`` — evaluated by a real code
+# path over THIS retained control (before this wiring the branch was registered but cited by nothing).
+_BRANCH_CROSS_ACCOUNT = "cloud_live.cloud_posture.cross_account_principal"
+# The oracle rule id (``observed["rule"]``) that the cross-account branch attributes.
+_CROSS_ACCOUNT_RULE = "named_cross_account_principal"
 _BRANCH_POLICY = "cloud_live.policy_path.iam_grant_path"
 
 _CAPTURE_BUDGET = ParseBudget(max_bytes=32_000_000, max_depth=200, max_nodes=1_000_000, max_aliases=200)
@@ -265,13 +277,25 @@ def cloud_live_verify(
             "oracle_context": oracle_context,
         }
         binding = {**base_binding, "resource_scope": _subject_scope(rid)}
-        # ``rules`` (the fired evidence-rule ids) is returned for a future per-rule branch attribution
-        # refinement (readiness audit 2.7); this loop files every cloud firing under the single registered
-        # ``_BRANCH_CLOUD`` branch, so it is deliberately unused here — but it MUST be unpacked (the oracle
-        # returns a 3-tuple; unpacking 2 was a ValueError on every adjudicated resource).
-        fired, conclusive, _rules = _oracle_signal("cloud_misconfiguration", oracle_context)
-        admitted = admit(_BRANCH_CLOUD, fired=fired, conclusive=conclusive, observed=observed)
-        res.admissions.append((_BRANCH_CLOUD, admitted.verdict.value, admitted.reason))
+        # PER-RULE BRANCH ATTRIBUTION (readiness audit 2.7). ``rules`` is the set of fired evidence-rule ids.
+        # A firing whose rule is the NAMED cross-account-principal rule IS the distinct registered
+        # ``cross_account_principal`` branch — a real code path now evaluates that branch's extra precondition
+        # (``owner_account_supplied``) over THIS retained control. Every other firing, and every non-firing,
+        # stays under the generic ``achieved_state`` branch (a non-firing has no rule to attribute). Both
+        # branches are fact_capable:true / clean_capable:false, so the VERDICT is identical either way; what
+        # changes is the branch a FACT is filed under (honest attribution) and that the precondition is
+        # actually checked — with no owner-account threaded in, the cross-account rule cannot fire, so the
+        # precondition holds by construction whenever this arm is taken (belt-and-suspenders: if it somehow did
+        # not, admission demotes to INCONCLUSIVE rather than minting).
+        fired, conclusive, rules = _oracle_signal("cloud_misconfiguration", oracle_context)
+        if _CROSS_ACCOUNT_RULE in rules:
+            branch_id = _BRANCH_CROSS_ACCOUNT
+            branch_observed = {**observed, "owner_account_supplied": _owner_account_supplied(r)}
+        else:
+            branch_id = _BRANCH_CLOUD
+            branch_observed = observed
+        admitted = admit(branch_id, fired=fired, conclusive=conclusive, observed=branch_observed)
+        res.admissions.append((branch_id, admitted.verdict.value, admitted.reason))
         out = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
                                provenance="reproduced", binding=binding)
         if out.is_fact:

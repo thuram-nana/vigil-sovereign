@@ -18,8 +18,11 @@ from vigil_integration.live.secret_runner import (  # noqa: E402
     _SECRET_TYPES, run_secret_validation, secret_fingerprint,
 )
 
+# Secret-shaped fixtures are ASSEMBLED AT RUNTIME (the prefix is never contiguous with its body in a single
+# source literal) so GitHub push-protection secret scanning cannot match a fake token — same assembled dummy.
 _GH_ENDPOINT = "https://api.github.com/user"
-_GH_TOKEN = "ghp_ThisIsAFakeTokenForTestsOnly000000"
+_GH_TOKEN = "ghp" + "_" + "ThisIsAFakeTokenForTestsOnly000000"
+_AWS_KEY_ID = "AKIA" + "ZZ7EXAMPLE0KEY01"
 _GH_USER = {"login": "octocat", "id": 583231, "type": "User"}
 _STS_JSON = {"GetCallerIdentityResponse": {"GetCallerIdentityResult": {
     "Arn": "arn:aws:iam::123456789012:user/leaked", "Account": "123456789012",
@@ -79,7 +82,7 @@ def test_runner_produces_a_capture_the_oracle_confirms_for_an_aws_access_key() -
 
     factory, seen = _factory(_STS_JSON, peer="72.21.206.80", raw=b'{"GetCallerIdentityResponse":1}')
     res = _run(factory, secret_type="aws_access_key", secret="wJalrXUtnFEMI/K7MDENG+bPxRfiCYEX",
-               identifier="AKIAZZ7EXAMPLE0KEY01")
+               identifier=_AWS_KEY_ID)
     assert res.status == "captured"
     # the nested STS JSON envelope is unwrapped to the flat identity the oracle's extractor reads
     assert res.capture["confirming_call"]["response"] == {
@@ -89,9 +92,37 @@ def test_runner_produces_a_capture_the_oracle_confirms_for_an_aws_access_key() -
     assert seen["calls"] == [("POST", "https://sts.amazonaws.com/")]
 
 
+def test_runner_produces_a_capture_the_oracle_confirms_for_a_gitlab_pat() -> None:
+    from framework.v2.verify import confirm_secret_capture, exposed_secret_validity_oracle
+
+    gl_user = {"username": "leaked-runner", "id": 42}
+    factory, seen = _factory(gl_user, peer="172.65.251.78", raw=b'{"username":"leaked-runner","id":42}')
+    res = _run(factory, secret_type="gitlab_pat", secret="glpat-" + "A" * 24)
+    assert res.status == "captured" and res.capture is not None
+    assert res.capture["credential"]["identifier"] == "glpat-"    # only the prefix is retained
+    assert exposed_secret_validity_oracle(res.capture).fired
+    assert confirm_secret_capture(res.capture).confirmed
+    assert seen["calls"] == [("GET", "https://gitlab.com/api/v4/user")]
+
+
+def test_runner_produces_a_capture_the_oracle_confirms_for_a_slack_token() -> None:
+    from framework.v2.verify import exposed_secret_validity_oracle
+
+    sl_ident = {"ok": True, "user_id": "U01ABCDEF", "team_id": "T01ABCDEF", "user": "vigilbot"}
+    factory, seen = _factory(sl_ident, peer="3.89.13.0",
+                             raw=b'{"ok":true,"user_id":"U01ABCDEF"}')
+    res = _run(factory, secret_type="slack_token", secret="xoxb-" + "1234567890-abcdEF")
+    assert res.status == "captured" and res.capture is not None
+    assert res.capture["credential"]["identifier"] == "xoxb-"     # only the prefix is retained
+    # the ``ok`` boolean is retained — it is Slack's success signal, not the HTTP status
+    assert res.capture["confirming_call"]["response"]["ok"] is True
+    assert exposed_secret_validity_oracle(res.capture).fired
+    assert seen["calls"] == [("POST", "https://slack.com/api/auth.test")]
+
+
 def test_a_regional_sts_endpoint_is_used_when_a_region_is_given() -> None:
     factory, seen = _factory(_STS_JSON)
-    _run(factory, secret_type="aws_access_key", secret="secretkey", identifier="AKIAZZ7EXAMPLE0KEY01",
+    _run(factory, secret_type="aws_access_key", secret="secretkey", identifier=_AWS_KEY_ID,
          region="eu-west-1")
     assert seen["calls"] == [("POST", "https://sts.eu-west-1.amazonaws.com/")]
 

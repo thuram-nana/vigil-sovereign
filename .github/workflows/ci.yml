@@ -534,6 +534,7 @@ jobs:
               integration/tests/test_imds_runner.py \
               integration/tests/test_secret_verify.py \
               integration/tests/test_secret_runner.py \
+              integration/tests/test_secret_discovery.py \
               integration/tests/test_iam_escalation_verify.py \
               integration/tests/test_k8s_rbac_verify.py \
               integration/tests/test_gcp_impersonation_verify.py \

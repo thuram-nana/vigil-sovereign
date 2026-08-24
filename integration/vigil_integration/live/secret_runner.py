@@ -28,9 +28,11 @@ Guarantees enforced here (constitution §II/§VI + the E-series audit):
 
 Dispatch is by secret type, against the per-type confirming endpoint the oracle's recognizer table already
 defines (``oracles._SECRET_RECOGNIZERS``): ``github_pat`` -> ``GET https://api.github.com/user``;
-``aws_access_key`` -> ``sts:GetCallerIdentity`` at ``sts[.<region>].amazonaws.com``. Both are built. Only
-GitHub is exercisable without a provisioned cloud credential, and the live-fire harness
-(``tools/livefire/secret_github_livefire.sh``) exercises exactly that row and claims nothing about the other.
+``aws_access_key`` -> ``sts:GetCallerIdentity`` at ``sts[.<region>].amazonaws.com``; ``gitlab_pat`` ->
+``GET https://gitlab.com/api/v4/user``; ``slack_token`` -> ``POST https://slack.com/api/auth.test``. All four
+are built and unit-proven. Only the ``github_pat`` row is LIVE-FIRE proven — the harness
+(``tools/livefire/secret_github_livefire.sh``) exercises exactly that row and claims nothing about the other
+three, each of which still needs an operator-provisioned credential of its type to be exercised for real.
 
 FATAL-2 / purity: stdlib only at module scope, so importing this co-loads no offense engine.
 """
@@ -62,6 +64,8 @@ CredentialTransport = Callable[[str], Transport]
 # captures. It is duplicated rather than imported because this module must stay offense-import-free.
 # --------------------------------------------------------------------------------------------------
 _GITHUB_PREFIX_RE = re.compile(r"^(gh[posru]_|github_pat_)")
+_GITLAB_PREFIX_RE = re.compile(r"^glpat-[A-Za-z0-9_-]{20,}$")
+_SLACK_PREFIX_RE = re.compile(r"^xox[baprse]-[A-Za-z0-9-]{10,}$")
 _AWS_KEY_ID_RE = re.compile(r"^(AKIA|ASIA)[0-9A-Z]{16}$")
 _AWS_STS_HOST_RE = re.compile(r"^sts(\.[a-z0-9-]+)?\.amazonaws\.com$")
 
@@ -106,6 +110,46 @@ def _aws_identity(result: TransportResult) -> dict:
     return {k: body[k] for k in ("Arn", "Account", "UserId") if body.get(k) not in (None, "")}
 
 
+def _gitlab_identifier(secret: str) -> str:
+    """The NON-SECRET identifier for a GitLab token: its ``glpat-`` PREFIX and nothing more. The token body
+    is the secret and is never retained."""
+    match = _GITLAB_PREFIX_RE.match(secret)
+    return "glpat-" if match else ""
+
+
+def _gitlab_identity(result: TransportResult) -> dict:
+    """The identity echo from ``GET /api/v4/user``: username + id, the two fields the oracle's extractor reads.
+    Only those two are retained (a full user object is noise, and the retained echo is re-scanned for error
+    markers — retaining GitLab's ``message`` field on a failure would defeat that)."""
+    body = result.json or {}
+    out: dict[str, Any] = {}
+    if body.get("username") not in (None, ""):
+        out["username"] = body["username"]
+    if body.get("id") not in (None, ""):
+        out["id"] = body["id"]
+    return out
+
+
+def _slack_identifier(secret: str) -> str:
+    """The NON-SECRET identifier for a Slack token: its ``xox?-`` PREFIX and nothing more."""
+    match = _SLACK_PREFIX_RE.match(secret)
+    return match.group(0)[:5] if match else ""
+
+
+def _slack_identity(result: TransportResult) -> dict:
+    """The identity echo from ``auth.test``: the ``ok`` flag plus user_id/team_id/user. ``ok`` MUST be
+    retained — Slack answers HTTP 200 with ``ok:false`` for an invalid token, so the oracle's extractor keys
+    off the boolean, not the status."""
+    body = result.json or {}
+    out: dict[str, Any] = {}
+    if "ok" in body:
+        out["ok"] = body["ok"]
+    for k in ("user_id", "team_id", "user"):
+        if body.get(k) not in (None, ""):
+            out[k] = body[k]
+    return out
+
+
 _SECRET_TYPES: "dict[str, dict[str, Any]]" = {
     "github_pat": {
         "method": "GET",
@@ -123,6 +167,22 @@ _SECRET_TYPES: "dict[str, dict[str, Any]]" = {
         "identifier": None,                        # the AccessKeyId is supplied; it is NOT the secret
         "identity": _aws_identity,
         "host_ok": lambda host: _AWS_STS_HOST_RE.match(host) is not None,
+    },
+    "gitlab_pat": {
+        "method": "GET",
+        "endpoint": lambda region: "https://gitlab.com/api/v4/user",
+        "action": "gitlab:GET /api/v4/user",
+        "identifier": _gitlab_identifier,          # derived from the secret (its glpat- prefix)
+        "identity": _gitlab_identity,
+        "host_ok": lambda host: host == "gitlab.com",
+    },
+    "slack_token": {
+        "method": "POST",
+        "endpoint": lambda region: "https://slack.com/api/auth.test",
+        "action": "slack:auth.test",
+        "identifier": _slack_identifier,           # derived from the secret (its xox?- prefix)
+        "identity": _slack_identity,
+        "host_ok": lambda host: host == "slack.com",
     },
 }
 

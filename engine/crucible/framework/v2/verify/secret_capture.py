@@ -36,9 +36,10 @@ def confirm_secret_capture(
     capture: Mapping[str, Any], *, verifier: OracleVerifier | None = None
 ) -> VerificationResult:
     """Judge a retained exposed-secret capture with the deterministic oracle: ``confirmed`` iff the capture
-    PROVES the achieved effect — a structurally-recognized secret (an AWS AccessKeyId shape, a GitHub PAT
-    prefix) that AUTHENTICATED via a confirming call (sts:GetCallerIdentity / GitHub ``GET /user``) whose
-    endpoint is on the per-TYPE allow-list, bound to the secret over a validated-TLS, no-proxy, no-redirect
+    PROVES the achieved effect — a structurally-recognized secret (one of the closed four-row set: an AWS
+    AccessKeyId shape, a GitHub PAT prefix, a GitLab PAT prefix, a Slack token prefix) that AUTHENTICATED via a
+    confirming call (sts:GetCallerIdentity / GitHub ``GET /user`` / GitLab ``GET /api/v4/user`` / Slack
+    ``auth.test``) whose endpoint is on the per-TYPE allow-list, bound to the secret over a validated-TLS, no-proxy, no-redirect
     transport. A recognized-but-unconfirmed secret, a failed confirming call, an un-allow-listed confirming
     endpoint (a laundering attempt), a fingerprint mismatch, an action/type mismatch, or malformed evidence
     is NOT confirmed (stays an honest LEAD). No live validation call is made and no secret is used: a pure

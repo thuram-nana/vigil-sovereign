@@ -409,13 +409,18 @@ E1–E5 merged today (stale — bucket 4). **P1–P4 checked against code, not t
 | **Source-code review has no SAST** | "The path is an LLM agent over the codebase (`vigil strix --target`), with no deterministic oracle behind it. It produces leads, not facts, and it's labelled that way." |
 | **Scan stays serial; anti-defender evasion declined** | "Deliberate. A tool that evades the customer's own detection is not a tool a customer should buy." |
 
-**A note on evidence tiers, because the agency will ask:** of the 38 registered oracle kinds, **2** have
-been adjudicated over bytes from a real external target (`BOOLEAN_INFERENCE`, `ACHIEVED_STATE` —
-testasp.vulnweb.com, 2 FACTs, offline re-verified 2/2); **2** against real infrastructure you own
-(`K8S_WORKLOAD_POSTURE`, `K8S_RBAC_VERB_GRANT` — the k3s cluster, with negative controls); ~14 against a
-real loopback service over a real socket; and **about 20 against hand-written fixtures only** — all of the
-cloud, mesh, CI/CD, mobile, identity, SAML, TLS and version-range families. That is not a defect; it is
-the honest coverage statement, and volunteering it is far stronger than being asked.
+**A note on evidence tiers, because the agency will ask** (this one-line split is GENERATED from the
+registry — see W16-STD-2(d) — not maintained by hand, which is why it can no longer drift as the earlier
+prose here had):
+
+<!-- BEGIN GENERATED coverage-tiers-sentence (source: docs/capability-matrix/coverage-tiers.json; regenerate: python3 docs/capability-matrix/gen_coverage_tiers.py) -->
+Of the 38 registered oracle kinds (the ``OracleKind`` detector registry), 3 external (real bytes from a third-party target), 2 own-infra (real infrastructure the system builds and destroys), 13 loopback (a real local service over a real socket), and 20 fixtures-only (hand-written evidence). This split is GENERATED from docs/capability-matrix/coverage-tiers.json (keyed by the OracleKind registry) by docs/capability-matrix/gen_coverage_tiers.py — not maintained by hand — and docs/tests/test_coverage_tiers_drift.py asserts it matches the registry.
+<!-- END GENERATED coverage-tiers-sentence -->
+
+The external tier is testasp.vulnweb.com plus the GitHub live-fire; the own-infrastructure tier is the
+k3s cluster (with negative controls); the fixtures-only tier is the cloud, mesh, CI/CD, mobile, identity,
+SAML, TLS and version-range families. That is not a defect; it is the honest coverage statement, and
+volunteering it is far stronger than being asked.
 
 ---
 

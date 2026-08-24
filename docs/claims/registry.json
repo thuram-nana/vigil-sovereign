@@ -2258,6 +2258,93 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W16-STD-2a",
+      "title": "The cross_account_principal evidence branch is cited by a real code path",
+      "claim": "The registered `cloud_live.cloud_posture.cross_account_principal` evidence branch is cited by a real code path: `cloud_live_verify` attributes a cloud_posture firing whose fired rule is `named_cross_account_principal` to that branch and evaluates the branch's `owner_account_supplied` precondition over the retained control, instead of filing every cloud firing under the generic achieved_state branch; a wildcard/anonymous firing stays on achieved_state and a cross-account grant with no owner-account threaded in mints no cross-account FACT.",
+      "source": "docs/decisions/W16-STD-2-cloud-k8s-secret-gaps.md:20",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/cloud_live_posture.py",
+        "symbol": "cloud_live_verify"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_cloud_live_posture.py",
+        "tests": [
+          "test_named_cross_account_grant_is_attributed_to_the_cross_account_branch",
+          "test_wildcard_grant_stays_on_achieved_state_not_cross_account",
+          "test_cross_account_grant_without_owner_mints_no_cross_account_fact"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-2b",
+      "title": "E5's secret-type recognizer set is broadened from two types to four",
+      "claim": "The E5 exposed-secret recognizer set (`_SECRET_RECOGNIZERS`) covers four secret types — aws_access_key, github_pat, gitlab_pat, slack_token — each with its own per-type identity-confirming endpoint and anti-laundering host allow-list, and the deterministic oracle fires on a well-formed capture of any of them while a mutation of any single field (a wrong host, a cross-type action, an absent identity echo, a broken fingerprint binding) leaves it a LEAD.",
+      "source": "docs/decisions/W16-STD-2-cloud-k8s-secret-gaps.md:31",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/verify/oracles.py",
+        "symbol": "_SECRET_RECOGNIZERS"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/verify/tests/test_secret_capture.py",
+        "tests": [
+          "test_the_recognizer_set_is_the_broadened_closed_four",
+          "test_good_gitlab_and_slack_captures_fire",
+          "test_gitlab_single_field_breaks_are_mutation_verified",
+          "test_slack_single_field_breaks_are_mutation_verified"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-2c",
+      "title": "A secret-DISCOVERY runner emits LEADs only (no FACT from tool bytes)",
+      "claim": "The exposed-secret DISCOVERY runner (`secret_discovery.scan`) finds secret candidates across a retained text surface and emits them as LEADs only — it exposes no code path that mints, admits, or certifies a FACT; a discovered candidate becomes a FACT solely through the WARDEN-gated confirming call adjudicated by the E5 oracle, so a candidate routed through the oracle with no confirming call never fires (it stays a LEAD), while benign text and near-miss shapes yield no candidates at all.",
+      "source": "docs/decisions/W16-STD-2-cloud-k8s-secret-gaps.md:42",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/secret_discovery.py",
+        "symbol": "scan"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_secret_discovery.py",
+        "tests": [
+          "test_scan_finds_a_candidate_of_every_recognised_shape",
+          "test_candidate_finding_is_a_lead_and_the_module_exposes_no_mint_path",
+          "test_a_discovered_candidate_stays_a_lead_until_the_oracle_confirms_a_real_call",
+          "test_benign_text_and_near_misses_yield_no_candidates"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W16-STD-2d",
+      "title": "The evidence-tier sentence is generated from the registry, not hand-written",
+      "claim": "The one-line evidence-tier summary (\"of N registered oracle kinds, X external, Y own-infra, Z loopback, W fixtures-only\") is generated from the registry-grounded counts by `render_sentence` and published between markers in OUTSTANDING.md, and a drift guard fails the build if the published sentence does not match the per-tier counts derived from the OracleKind registry.",
+      "source": "docs/decisions/W16-STD-2-cloud-k8s-secret-gaps.md:52",
+      "enforced_by": {
+        "file": "docs/capability-matrix/gen_coverage_tiers.py",
+        "symbol": "render_sentence"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_coverage_tiers_drift.py",
+        "tests": [
+          "test_the_generated_tier_sentence_matches_the_registry_counts",
+          "test_the_generated_tier_sentence_is_published_and_in_sync",
+          "test_the_sentence_is_generated_not_hardcoded",
+          "test_check_catches_a_drifted_sentence"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

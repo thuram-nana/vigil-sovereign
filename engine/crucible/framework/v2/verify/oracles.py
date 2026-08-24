@@ -5103,6 +5103,13 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
 # itself is the secret; only its prefix is retained, and it is structurally recognizable).
 _SECRET_AWS_KEY_ID_RE = re.compile(r"^(AKIA|ASIA)[0-9A-Z]{16}$")
 _SECRET_GITHUB_PREFIX_RE = re.compile(r"^(gh[posru]_|github_pat_)")
+# GitLab PAT (personal / project / group access token) — the fixed ``glpat-`` prefix. The RETAINED identifier
+# is the bare prefix (the token body is the secret and is never retained), so this — like the GitHub prefix —
+# matches the PREFIX, not the whole token. (The full-token shape lives in the discovery runner's own table.)
+_SECRET_GITLAB_PREFIX_RE = re.compile(r"^glpat-")
+# Slack API token — one of the fixed ``xox[baprse]-`` prefixes (bot/user/app/refresh/workspace/config). The
+# retained identifier is the bare prefix; the token body is the secret.
+_SECRET_SLACK_PREFIX_RE = re.compile(r"^xox[baprse]-")
 # The per-TYPE confirming-endpoint host ALLOW-LIST (the anti-laundering gate). AWS STS regional/global only.
 _SECRET_AWS_STS_HOST_RE = re.compile(r"^sts(\.[a-z0-9-]+)?\.amazonaws\.com$")
 
@@ -5123,9 +5130,41 @@ def _github_identity(body: Mapping[str, Any]) -> tuple[bool, dict[str, str]]:
     return (bool(login) and id_ok), {"login": login, "id": _imds_text(raw_id).strip()}
 
 
+def _gitlab_identity(body: Mapping[str, Any]) -> tuple[bool, dict[str, str]]:
+    """Whether a GitLab ``GET /api/v4/user`` response proves the token authenticated: a non-empty
+    ``username`` AND a positive numeric ``id`` — the fields only an authenticated /user carries. Mirrors
+    ``_github_identity`` (positive-evidence-only; a degenerate/absent identity does not prove auth)."""
+    username = _imds_text(body.get("username")).strip()
+    raw_id = body.get("id")
+    if isinstance(raw_id, bool):
+        id_ok = False
+    elif isinstance(raw_id, (int, float)):
+        id_ok = raw_id > 0
+    else:
+        t = _imds_text(raw_id).strip()
+        id_ok = t.isdigit() and int(t) > 0
+    return (bool(username) and id_ok), {"username": username, "id": _imds_text(raw_id).strip()}
+
+
+def _slack_identity(body: Mapping[str, Any]) -> tuple[bool, dict[str, str]]:
+    """Whether a Slack ``auth.test`` response proves the token authenticated: the API-level ``ok`` flag is
+    literally ``true`` (Slack answers HTTP 200 with ``ok:false`` for an invalid token, so the boolean, NOT the
+    status, is the success signal) AND a non-empty ``user_id`` is echoed. Positive-evidence-only."""
+    ok_flag = body.get("ok")
+    user_id = _imds_text(body.get("user_id")).strip()
+    authenticated = (ok_flag is True) and bool(user_id)
+    return authenticated, {"ok": "true" if ok_flag is True else _imds_text(ok_flag),
+                           "user_id": user_id, "team_id": _imds_text(body.get("team_id")).strip(),
+                           "user": _imds_text(body.get("user")).strip()}
+
+
 # The CLOSED recognizer set: secret_type -> {identifier shape, expected confirming action, identity
-# extractor, confirming-host allow-list}. Adding a type is an auditable, one-row extension (slice-1 =
-# AWS access key + GitHub PAT; GCP-SA / Slack / SecretsManager-value are follow-on rows).
+# extractor, confirming-host allow-list}. Adding a type is an auditable, one-row extension. Each row is
+# FACT-capable only because it carries a SOUND identity-confirming endpoint (a benign read-only identity call
+# whose echo proves WHICH identity authenticated) on a per-TYPE anti-laundering host allow-list — so a shape
+# with no such endpoint (e.g. a Google API key, which is not identity-bound) is deliberately NOT a row here; it
+# is a DISCOVERY-only LEAD (see integration/vigil_integration/live/secret_discovery.py). LIVE-FIRE proven for
+# the github_pat row ONLY; aws_access_key/gitlab_pat/slack_token are built and unit-proven, not live-fire proven.
 _SECRET_RECOGNIZERS: "dict[str, dict[str, Any]]" = {
     "aws_access_key": {
         "id_ok": lambda s: _SECRET_AWS_KEY_ID_RE.match(s) is not None,
@@ -5138,6 +5177,18 @@ _SECRET_RECOGNIZERS: "dict[str, dict[str, Any]]" = {
         "action": "github:get /user",
         "identity": _github_identity,
         "host_ok": lambda h: h == "api.github.com",
+    },
+    "gitlab_pat": {
+        "id_ok": lambda s: _SECRET_GITLAB_PREFIX_RE.match(s) is not None,
+        "action": "gitlab:get /api/v4/user",
+        "identity": _gitlab_identity,
+        "host_ok": lambda h: h == "gitlab.com",
+    },
+    "slack_token": {
+        "id_ok": lambda s: _SECRET_SLACK_PREFIX_RE.match(s) is not None,
+        "action": "slack:auth.test",
+        "identity": _slack_identity,
+        "host_ok": lambda h: h == "slack.com",
     },
 }
 
@@ -5153,13 +5204,15 @@ def exposed_secret_validity_oracle(observed: Any) -> OracleSignal:
     path, a SecretsManager ARN) is RETAINED as evidence but is NOT a firing gate — E5 asserts VALIDITY, not
     provenance. The ANTI-LAUNDERING gate is on the CONFIRMING-CALL side: the confirming endpoint must be on
     the per-TYPE host allow-list (an AWS key confirmed ONLY against ``sts:GetCallerIdentity`` at
-    ``sts[.<region>].amazonaws.com``; a GitHub PAT ONLY against ``api.github.com`` ``GET /user``), and the
+    ``sts[.<region>].amazonaws.com``; a GitHub PAT ONLY against ``api.github.com`` ``GET /user``; a GitLab PAT
+    ONLY against ``gitlab.com`` ``GET /api/v4/user``; a Slack token ONLY against ``slack.com`` ``auth.test``),
+    and the
     secret must be fingerprint-BOUND to that call over a validated-TLS, no-proxy, no-redirect transport — so
     an attacker-controlled 'confirming' endpoint can never launder an arbitrary string into a FACT.
 
     ``observed`` is the JSON-safe, SECRET-SAFE retained capture::
 
-        {"secret_type": "aws_access_key" | "github_pat",
+        {"secret_type": "aws_access_key" | "github_pat" | "gitlab_pat" | "slack_token",
          "credential": {"identifier": "AKIA…" | "ghp_…" (non-secret id/prefix), "secret": "[REDACTED]",
                         "credential_fingerprint": "…", "source": "js:app.min.js:1024" (evidence only)},
          "confirming_call": {"action": "sts:GetCallerIdentity" | "github:GET /user", "status": 200,

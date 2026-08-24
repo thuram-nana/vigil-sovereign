@@ -89,6 +89,64 @@ def test_the_assembled_master_carries_the_reconciled_block() -> None:
 
 
 # --------------------------------------------------------------------------------------------
+# W16-STD-2(d): the one-line evidence-tier SENTENCE is generated from the registry too, and published.
+# --------------------------------------------------------------------------------------------
+
+def test_the_generated_tier_sentence_matches_the_registry_counts() -> None:
+    """The one-line "of N registered oracle kinds, X external, Y own-infra, Z loopback, W fixtures-only"
+    summary is GENERATED from the registry-grounded counts — not hand-maintained. It states the N total and
+    the per-tier split derived from ``validate()``. (Before W16-STD-2(d) there was no ``render_sentence`` and
+    the prose in OUTSTANDING.md had drifted to "2 external ... ~14 loopback", so this test fails.)"""
+    counts = g.validate()
+    total = sum(counts.values())
+    sentence = g.render_sentence()
+    assert f"Of the {total} registered oracle kinds" in sentence
+    assert f"{counts['external']} external" in sentence
+    assert f"{counts['own_infrastructure']} own-infra" in sentence
+    assert f"{counts['local']} loopback" in sentence
+    assert f"{counts['fixtures']} fixtures-only" in sentence
+
+
+def test_the_generated_tier_sentence_is_published_and_in_sync() -> None:
+    """The generated sentence is published verbatim in OUTSTANDING.md, and check() (which now covers BOTH the
+    table and the sentence) reports no drift."""
+    sentence = g.render_sentence()
+    doc = g._DOC_OUTSTANDING.read_text(encoding="utf-8")
+    region = g._extract_marked(doc, g._DOC_OUTSTANDING, g.SENTENCE_BEGIN, g.SENTENCE_END,
+                               "coverage-tiers-sentence")
+    assert region == sentence, "OUTSTANDING.md's generated tier sentence has drifted — run gen_coverage_tiers.py"
+    assert g.check() == []
+
+
+def test_the_sentence_is_generated_not_hardcoded() -> None:
+    """NEGATIVE CONTROL: move one detector's tier in an in-memory copy; the SENTENCE's numbers must follow —
+    proving it is derived from the registry, not a constant string."""
+    import copy
+    src = copy.deepcopy(g.load_source())
+    moved = next(d for d in src["detectors"] if d["tier"] == "local")
+    moved["tier"] = "fixtures"
+    sentence = g.render_sentence(src)
+    assert "12 loopback" in sentence and "21 fixtures-only" in sentence   # the counts followed the move
+    assert "13 loopback" not in sentence
+
+
+def test_check_catches_a_drifted_sentence() -> None:
+    """NEGATIVE CONTROL: a tampered sentence region between the markers must be reported — proven on a
+    synthetic string carrying the sentence markers."""
+    sentence = g.render_sentence()
+    good = f"prefix\n{sentence}\nsuffix"
+    assert g._extract_marked(good, Path("synthetic"), g.SENTENCE_BEGIN, g.SENTENCE_END, "s") == sentence
+    tampered = good.replace("13 loopback", "14 loopback")
+    assert g._extract_marked(tampered, Path("synthetic"), g.SENTENCE_BEGIN, g.SENTENCE_END, "s") != sentence
+
+
+def test_missing_sentence_markers_are_reported_not_silently_ignored() -> None:
+    with pytest.raises(g.DriftError):
+        g._extract_marked("a document with no sentence markers", Path("synthetic"),
+                          g.SENTENCE_BEGIN, g.SENTENCE_END, "coverage-tiers-sentence")
+
+
+# --------------------------------------------------------------------------------------------
 # The guard has teeth — each failure mode is provoked and must be caught.
 # --------------------------------------------------------------------------------------------
 
