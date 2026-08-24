@@ -2389,6 +2389,87 @@
       "ci_job": "integration two-env boundary (P5)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "W14-1-anchor",
+      "title": "Usage-ledger anti-rollback anchor lives host-level and survives a base-dir wipe (W10-3 #475)",
+      "claim": "The monotonic anti-back-dating counter lives host-level at `~/.vigil/attestation/monotonic.counter`, outside any engagement base directory, so `rm -rf .vigil-live` erases the ledger but the monotonic counter survives",
+      "source": "docs/legal/DATA-RETENTION.md:58",
+      "enforced_by": {
+        "file": "integration/vigil_integration/attestation/anchor.py",
+        "symbol": "default_counter_path"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_anchor_out_of_base.py",
+        "tests": [
+          "test_anchor_survives_rm_rf_of_the_base_dir",
+          "test_default_counter_path_tracks_the_redirectable_state_dir"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "W14-1-egress",
+      "title": "Target traffic: two always-on gates + the egress allowlist wired on the engage/repeater path (W10-1 #473)",
+      "claim": "the signed charter scope and the categorical protected-domain floor bound every run, and the runtime egress allowlist is installed on the engage and repeater target-traffic executors (W10-1 #473), not merely available",
+      "source": "ACCEPTABLE-USE.md:95",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/agents/egress_guard.py",
+        "symbol": "build_engagement_allowlist"
+      },
+      "proved_by": {
+        "file": "docs/tests/test_w10_egress_allowlist_wired.py",
+        "tests": [
+          "test_readme_cited_code_facts_are_true_in_tree",
+          "test_readme_gate6_describes_the_real_reach_and_the_two_always_on_gates"
+        ]
+      },
+      "ci_job": "the briefing explains every agent and capability",
+      "failure_class": "config-stated-as-code",
+      "default": "on"
+    },
+    {
+      "id": "W14-1-tier",
+      "title": "Sovereignty tier is re-resolved at each offense-plane restart, not only at a fresh vigil up (W10-2 #474)",
+      "claim": "The sovereign runtime env is resolved at bring-up (`integration/vigil_integration/uiproxy.py:3122`) and **re-resolved at each offense-plane restart**",
+      "source": "ACCEPTABLE-USE.md:168",
+      "enforced_by": {
+        "file": "integration/vigil_integration/uiproxy.py",
+        "symbol": "PlaneControl.start_offense"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_uiproxy.py",
+        "tests": [
+          "test_plane_control_start_offense_reresolves_the_tier",
+          "test_plane_control_start_offense_fails_closed_when_resolver_errors"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "config-stated-as-code",
+      "default": "on"
+    },
+    {
+      "id": "W14-1-containment",
+      "title": "vigil down contains a systemd-managed unit; vigil panic masks it and disables the sidecars (W10-5 #477/#478)",
+      "claim": "On a systemd-managed install, `vigil down` disables and cleanly stops the `vigil-command` unit so `Restart=always` cannot revive the stack, and `vigil panic` additionally masks the unit and disables the cadence sidecars",
+      "source": "docs/legal/INCIDENT-RESPONSE.md:50",
+      "enforced_by": {
+        "file": "integration/vigil_integration/uiproxy.py",
+        "symbol": "_contain_service_unit"
+      },
+      "proved_by": {
+        "file": "integration/tests/test_down_contains.py",
+        "tests": [
+          "test_run_down_contains_the_unit_a_bare_pidkill_would_be_revived",
+          "test_manual_down_disables_and_stops_a_managed_active_unit",
+          "test_run_panic_masks_and_stops_the_unit"
+        ]
+      },
+      "ci_job": "integration two-env boundary (P5)",
+      "failure_class": "config-stated-as-code",
+      "default": "on"
     }
   ]
 }
