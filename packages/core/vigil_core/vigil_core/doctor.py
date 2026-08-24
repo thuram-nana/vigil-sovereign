@@ -59,6 +59,12 @@ REQUIRED_CONTROLS: "tuple[tuple[str, frozenset, str], ...]" = (
       "production forces it on (VIGIL_EGRESS_GUARD=require, fail-closed). It supervises "
       "connect/sendto/sendmsg to refuse a tool's own non-loopback egress; it is NOT a containment "
       "boundary for hostile code and does NOT cover 32-bit binaries, sendmmsg or io_uring (see docs)")),
+    ("witness", frozenset({"DISTINCT-QUORUM"}),
+     ("the transparency-log witness set must be a STRICT MAJORITY of DISTINCT witnesses (W8-3) — a solo "
+      "self-witness is rollback DETECTION, not split-view PREVENTION. Provision >=2 distinct witnesses "
+      "with `python -m vigil_integration.witness_provision add` (mint one) or `register` an out-of-band "
+      "witness key; witnesses that share a canonical key are refused as NOT distinct. Split-view "
+      "prevention additionally needs those keys held by INDEPENDENT parties (uncheckable by code)")),
 )
 
 
@@ -174,6 +180,7 @@ README_POSTURE_FIXTURE: "dict[str, str]" = {
     "charter": "ABSENT",
     "legacy-owner-token": "ENABLED",
     "egress-supervisor": "OFF",
+    "witness": "SOLO",
 }
 
 

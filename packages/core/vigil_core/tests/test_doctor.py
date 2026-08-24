@@ -21,10 +21,10 @@ from vigil_core.posture import POSTURE_ENV
 
 # ---------------------------------------------------------------- the registry is the single source of truth
 
-def test_registry_is_the_seven_named_controls_in_order():
+def test_registry_is_the_eight_named_controls_in_order():
     names = [c for (c, _good, _req) in dmod.REQUIRED_CONTROLS]
     assert names == ["vault", "sovereignty", "entitlement", "backups", "charter", "legacy-owner-token",
-                     "egress-supervisor"]
+                     "egress-supervisor", "witness"]
 
 
 def _good_states() -> dict:

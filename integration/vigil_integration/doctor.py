@@ -639,12 +639,26 @@ def _posture_egress_supervisor() -> "tuple[str, str]":
                      f"tool's own non-loopback egress, NOT a containment boundary for hostile code")
 
 
+def _posture_witness(repo: Path) -> "tuple[str, str]":
+    """The transparency-log WITNESS-SET control (W8-3): is the production witness roster a strict majority
+    of DISTINCT witnesses, or a solo / non-distinct set? DELEGATES the distinctness decision to
+    ``vigil_integration.witness_provision.roster_posture`` (which REUSES ``transparency.is_split_view_resistant``
+    — the strict-majority-of-distinct-canonical-keys rule already merged in the transparency log). Reports
+    DISTINCT-QUORUM (production-fit), SOLO (absent roster / one witness — the shipped default is detection,
+    not prevention), NOT-DISTINCT (witnesses share a canonical key, a sub-majority threshold, or a
+    non-canonical key — fail-closed), or UNKNOWN (present-but-unreadable roster). Read from a plain JSON
+    roster on disk — NEVER imports sigil/framework (FATAL-2); ``witness_provision`` pulls only vigil_core +
+    the offense-free transparency layer. The roster path is $VIGIL_WITNESS_ROSTER, else <repo>/.vigil-live/."""
+    from vigil_integration import witness_provision as _wp
+    return _wp.roster_posture(_wp.roster_path(repo))
+
+
 def _collect_posture(repo: Path, services: dict) -> list:
     """The security-posture block: one honest line PER control, its CURRENT state read from real on-disk /
     env state (never an optimistic default). INFORMATIONAL — never flips `ok`. Every probe fails soft to
     UNKNOWN. FATAL-2: the sovereign-plane vault and the framework entitlement are read from DISK, importing
     neither sigil nor framework. The order is the plan's: egress-gate, vault, sovereignty, entitlement,
-    backups, charter."""
+    backups, charter, egress-supervisor, witness."""
     def _entry(control: str, fn) -> dict:
         try:
             state, detail = fn()
@@ -661,19 +675,22 @@ def _collect_posture(repo: Path, services: dict) -> list:
         _entry("backups", lambda: _posture_backups(repo)),
         _entry("charter", lambda: _posture_charter(repo)),
         _entry("egress-supervisor", _posture_egress_supervisor),
+        _entry("witness", lambda: _posture_witness(repo)),
     ]
 
 
 # ── PRODUCTION posture gate (W9-4b) ───────────────────────────────────────────────────────────────────
 # The opt-in REFUSE-TO-START gate. When VIGIL_POSTURE=production (or `prod`; case-insensitive), a start path
-# (`vigil up` / `vigil engage`) refuses to run unless ALL SEVEN production preconditions hold: the vault is
+# (`vigil up` / `vigil engage`) refuses to run unless ALL EIGHT production preconditions hold: the vault is
 # SEALED, the sovereignty tier is non-PERMISSIVE, entitlement enforcement is ACTIVE, the backup/reprove
 # timers are ON, a signed charter + EngagementAuthority is PRESENT, the legacy embedded shared owner
-# token is DISABLED (per-user PoP auth required — W10-7), and the seccomp egress supervisor is ARMED (its
-# binary built, so production's forced `require` mode is fail-closed not spawn-refusing — W10-8). The first
-# five read the exact SAME on-disk/env posture probes `vigil doctor` renders; the sixth reads
-# SIGIL_LEGACY_OWNER_TOKEN and the seventh reads VIGIL_EGRESS_GUARD + the guard-binary path (no new state,
-# no import of sigil/framework — the FATAL-2 boundary holds).
+# token is DISABLED (per-user PoP auth required — W10-7), the seccomp egress supervisor is ARMED (its
+# binary built, so production's forced `require` mode is fail-closed not spawn-refusing — W10-8), and the
+# transparency-log witness set is a strict majority of DISTINCT witnesses (W8-3 — a solo/non-distinct set
+# is refused; distinctness reuses `transparency.is_split_view_resistant`). The first five read the exact
+# SAME on-disk/env posture probes `vigil doctor` renders; the sixth reads SIGIL_LEGACY_OWNER_TOKEN, the
+# seventh reads VIGIL_EGRESS_GUARD + the guard-binary path, and the eighth reads the on-disk witness roster
+# (no import of sigil/framework — the FATAL-2 boundary holds).
 #
 # ADDITIVE + OPT-IN: with VIGIL_POSTURE unset (or any non-production value) the gate is INERT — it never
 # blocks, so behaviour is byte-identical to before. FAIL-CLOSED: any control NOT in its required good-state
@@ -730,6 +747,7 @@ def evaluate_production_gate(repo_root, posture: "list | None" = None) -> dict:
         "charter": lambda: _posture_charter(repo),
         "legacy-owner-token": _posture_legacy_owner_token,
         "egress-supervisor": _posture_egress_supervisor,
+        "witness": lambda: _posture_witness(repo),
     }
     # Gather the current state of every registry control (reuse the precomputed posture where present, else
     # probe here — FAIL CLOSED: an unreadable control becomes UNKNOWN, never a crash), then hand the SHARED

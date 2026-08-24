@@ -96,7 +96,7 @@ Per the no-network constraint, these are enumerated here for the orchestrator to
 
 | id | verdict | registry pin | proposed milestone | note |
 |---|---|---|---|---|
-| CA-RDM-10 | SCOPED | W9-4 | W9 | unless **all seven** of these production preconditions hold |
+| CA-RDM-10 | SCOPED | W9-4 | W9 | unless **all eight** of these production preconditions hold |
 | CA-RDM-11 | SCOPED | W10-8 | W10 | off-by-default and opt-in outside production |
 | CA-ASB-11 | SCOPED | W9-5 | W9 | REQUIRES a genuine multi-signer quorum |
 | CA-SUP-04 | SCOPED | W3-8 | W3 | base-image drift (a Docker Hub tag that has moved) BLOCKS |
