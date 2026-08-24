@@ -401,8 +401,26 @@ indistinguishable from a fresh build). The A14 gate now also:
   runner, so it cannot be `trivy image`-scanned here; its committed CycloneDX SBOM enumerates the
   shipped OS-package layer and `trivy sbom` scans those purls. **Advisory** on purpose: a
   security-testing distro carries findings the author cannot fix, so blocking on it would switch the
-  gate off. **Residual:** a live `trivy image` build of the Strix sandbox needs a self-hosted / large
-  runner and is a follow-up.
+  gate off.
+
+**Residual — the live `trivy image` scan of the Strix sandbox (W3-7 residual, #653).** A live build +
+`trivy image` scan of the ~7GB Strix sandbox cannot run on a GitHub-hosted PR runner. It is now
+**scaffolded** as a dedicated workflow, `.github/workflows/strix-sandbox-image-scan.yml`, honestly
+labelled as a self-hosted follow-up:
+
+<!-- CLAIM:W3-7-strix-selfhosted -->
+> **Registered claim:** A committed, dormant-by-design workflow scaffold builds and `trivy image`-scans the Strix sandbox image at the gateway image's exact threshold (HIGH,CRITICAL with --ignore-unfixed), advisory; it triggers only on schedule/workflow_dispatch and is guarded to a self-hosted `runs-on` label plus an opt-in repository variable, so it never runs on a pull request and stays inert until an operator provisions a self-hosted/large runner (a human/infra action); a required-CI guard pins its shape, and it is enumerated in KNOWN_NONPR_ADVISORY so it can never become a required check.
+
+The scaffold triggers only on `schedule` + `workflow_dispatch`, its job `runs-on` a `[self-hosted,
+linux, x64, large]` label (so GitHub only dispatches it to a large self-hosted runner), and it is
+additionally gated on the `STRIX_SANDBOX_SCAN` repository variable — so every scheduled/dispatched run
+is cleanly **skipped** until an operator both provisions such a runner and opts in. When it does run, it
+builds `vigil/strix-sandbox:local` and `trivy image`-scans it at the gateway threshold, ADVISORY (a Kali
+distro carries findings the author cannot fix). Its shape is pinned in required CI by
+`docs/tests/test_strix_sandbox_image_scan_workflow.py`, and it is enumerated in `KNOWN_NONPR_ADVISORY`
+(it never runs on a PR, so it can never be a required check). **The single human/infra action left is
+registering that self-hosted runner** (and setting the opt-in variable); until then the SBOM scan above
+remains the PR-CI proof of the Strix layer.
 
 ### The gate is proved to fire
 
@@ -558,7 +576,9 @@ Stated plainly, because a hardening document that only lists wins is a marketing
   The gateway image is BUILT and `trivy image`-scanned in the required gate (§4a). The ~7GB Strix
   sandbox cannot be built on a PR runner, so its shipped layer is scanned through its committed
   CycloneDX SBOM (`trivy sbom`, advisory) rather than a live image build. A live `trivy image` of the
-  Strix sandbox needs a self-hosted / large runner and is a follow-up.
+  Strix sandbox is now **scaffolded** as the self-hosted workflow
+  `.github/workflows/strix-sandbox-image-scan.yml` (W3-7 residual, #653); it stays inert until a
+  self-hosted/large runner is provisioned (a human/infra action) — see §4a.
 - **Base-image digests are re-resolved against Docker Hub only.** An image on another registry
   cannot be resolved by the drift check, so it is reported as an explicit **UNKNOWN** in the drift
   report and the job summary (never a silent `??` pass, W3-8). Resolvable (Docker Hub) drift blocks;
