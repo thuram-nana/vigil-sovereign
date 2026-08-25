@@ -115,6 +115,32 @@ def _cmd_engage(args: argparse.Namespace) -> int:
     from .live.think_claude import ReplayThinker
     from .live.wiring import EngineConfig, build_engine
 
+    # B3/H10 — a PROPOSE-ONLY plan request read from a FILE. The console writes a validated
+    # {target, objective, slug} JSON into a server-controlled run dir and passes only its PATH on the argv, so
+    # no user value reaches the command line (the launch_cloud precedent). It implies --brain hexstrike
+    # --plan-only and supplies the target the positional url would otherwise carry. Fail-closed on a bad file.
+    plan_request = str(getattr(args, "plan_request", "") or "").strip()
+    if plan_request:
+        try:
+            _req = json.loads(Path(plan_request).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"vigil engage: --plan-request file unreadable/not JSON: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(_req, dict) or not str(_req.get("target", "") or "").strip():
+            print("vigil engage: --plan-request file must be a JSON object with a non-empty 'target'",
+                  file=sys.stderr)
+            return 2
+        args.url = str(_req.get("target", "") or "")
+        args.brain = "hexstrike"
+        args.plan_only = True
+        args.brain_objective = str(_req.get("objective", "") or "comprehensive")
+        if str(_req.get("slug", "") or "").strip():
+            args.slug = str(_req["slug"])
+    if not str(getattr(args, "url", "") or "").strip():
+        print("vigil engage: a target url is required (as the positional argument or via --plan-request)",
+              file=sys.stderr)
+        return 2
+
     replay = None
     if args.replay:
         decisions = json.loads(Path(args.replay).read_text(encoding="utf-8"))
@@ -3545,7 +3571,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     pe = sub.add_parser("engage", help="run an engagement against an owner-authorized target (loopback or remote)")
-    pe.add_argument("url")
+    pe.add_argument("url", nargs="?", default="")   # optional: --plan-request supplies it from a file instead
     pe.add_argument("--slug", default="loopback")
     pe.add_argument("--objective", default="",
                     help="free-text goal RECORDED with the engagement for your own record; it does not "
@@ -3609,6 +3635,11 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--proposal-out", default="",
                     help="directory to write the brain's proposal (brain-proposal.json) to; used with --brain "
                          "(esp. --plan-only). Defaults to $VIGIL_PROOF_RUN_DIR when unset.")
+    pe.add_argument("--plan-request", default="",
+                    help="B3/H10: a JSON file {target, objective, slug} for a PROPOSE-ONLY plan. Reading the "
+                         "target/objective/slug from a file (instead of the argv) keeps user values off the "
+                         "command line (the launch_cloud precedent). Implies --brain hexstrike --plan-only; "
+                         "the positional url may be omitted (it comes from the file).")
     pe.add_argument("--approve-offense", action="store_true",
                     help="a SINGLE-USE standing approval to run ONE queued offense action against the "
                          "operator's own chartered loopback (the human leg of the conjunctive gate; scope "

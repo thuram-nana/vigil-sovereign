@@ -56,11 +56,14 @@ def test_happy_path_spawns_plan_only_and_returns_run_id(monkeypatch):
     assert res.get("run_id"), res
     assert len(calls) == 1, calls
     argv = calls[0]
-    # PROPOSE-ONLY: plan-only present, loopback scope pinned, the propose-only brain wired.
-    assert "--plan-only" in argv
+    # PROPOSE-ONLY via a FILE request: NO user value (target/objective/slug) on the argv — only literals +
+    # server paths. The request file carries the validated inputs; --plan-request implies plan-only+hexstrike.
+    assert "--plan-request" in argv
     assert argv[argv.index("--scope") + 1] == "127.0.0.1"
-    assert argv[argv.index("--brain") + 1] == "hexstrike"
     assert argv[argv.index("--proposal-out") + 1]   # a real destination is passed
+    req = json.loads(Path(argv[argv.index("--plan-request") + 1]).read_text(encoding="utf-8"))
+    assert req["target"] == "http://127.0.0.1:8080/" and req["objective"] == "comprehensive"
+    assert "http://127.0.0.1:8080/" not in argv and "comprehensive" not in argv   # not on the command line
     # NEVER an execute flag — this endpoint plans, it does not drive.
     assert "--brain-execute-via-body" not in argv
     assert "--approve-offense" not in argv
@@ -70,7 +73,9 @@ def test_default_objective_is_comprehensive(monkeypatch):
     calls = _capture_spawn(monkeypatch)
     res = actions.brain_propose({"brain": "hexstrike", "target": "http://127.0.0.1:8080/"})
     assert res.get("ok") is True and res.get("objective") == "comprehensive"
-    assert calls[0][calls[0].index("--brain-objective") + 1] == "comprehensive"
+    argv = calls[0]
+    req = json.loads(Path(argv[argv.index("--plan-request") + 1]).read_text(encoding="utf-8"))
+    assert req["objective"] == "comprehensive"
 
 
 def test_executing_brain_strix_refused_before_any_spawn(monkeypatch):
@@ -129,9 +134,9 @@ def test_target_is_canonicalized_no_raw_user_bytes_on_argv(monkeypatch):
                                  "target": "http://evil:secret@127.0.0.1:8080/a b?q=1#frag"})
     assert res.get("ok") is True, res
     argv = calls[0]
-    spawned_target = argv[argv.index("engage") + 1]
-    assert spawned_target == "http://127.0.0.1:8080/"   # userinfo/query/fragment gone; unsafe path (space) → "/"
-    assert "secret" not in spawned_target and "evil" not in spawned_target
+    req = json.loads(Path(argv[argv.index("--plan-request") + 1]).read_text(encoding="utf-8"))
+    assert req["target"] == "http://127.0.0.1:8080/"   # userinfo/query/fragment gone; unsafe path (space) → "/"
+    assert not any("secret" in a or "evil" in a for a in argv)   # and no raw user bytes anywhere on the argv
 
 
 def test_non_http_scheme_refused_before_any_spawn(monkeypatch):

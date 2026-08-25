@@ -12,6 +12,7 @@ Runs in the offense process (``PYTHONPATH=integration:engine/crucible:gateway``)
 from __future__ import annotations
 
 import dataclasses
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -115,8 +116,8 @@ def test_without_plan_only_the_same_decision_reaches_the_gate(hermetic_root, tmp
 def _engage_args(**over):
     base = dict(url="http://127.0.0.1:9/", slug="_planonly", base_dir="", scope="127.0.0.1", connect="",
                 replay="", brain="", brain_objective="quick", brain_observations="",
-                brain_execute_via_body=False, plan_only=False, proposal_out="", model="", backend="",
-                access_log="", auth_log="", conn_log="", max_iterations=6, approve_offense=False,
+                brain_execute_via_body=False, plan_only=False, proposal_out="", plan_request="", model="",
+                backend="", access_log="", auth_log="", conn_log="", max_iterations=6, approve_offense=False,
                 objective="", resume=False, session="")
     base.update(over)
     return SimpleNamespace(**base)
@@ -133,3 +134,24 @@ def test_cli_plan_only_requires_a_destination(hermetic_root, monkeypatch):
     monkeypatch.delenv("VIGIL_PROOF_RUN_DIR", raising=False)
     rc = cli._cmd_engage(_engage_args(plan_only=True, brain="hexstrike", proposal_out=""))
     assert rc == 2   # --plan-only + --brain but nowhere to write the proposal is refused
+
+
+def test_cli_plan_request_reads_target_from_file_and_plans_only(hermetic_root, tmp_path):
+    # --plan-request supplies target/objective/slug from a FILE (no url on argv), implies --brain hexstrike
+    # --plan-only, and persists a proposal WITHOUT executing (the console's boundary-respecting path).
+    from vigil_integration import cli
+    rd = tmp_path / "rd"
+    rd.mkdir()
+    (rd / "plan-request.json").write_text(
+        json.dumps({"target": "http://127.0.0.1:9/", "objective": "quick", "slug": "planreq"}),
+        encoding="utf-8")
+    rc = cli._cmd_engage(_engage_args(url="", plan_request=str(rd / "plan-request.json"),
+                                      proposal_out=str(rd)))
+    assert rc == 0
+    assert (rd / "brain-proposal.json").is_file()   # planned + persisted, executed nothing
+
+
+def test_cli_plan_request_bad_file_refused(hermetic_root, tmp_path):
+    from vigil_integration import cli
+    rc = cli._cmd_engage(_engage_args(url="", plan_request=str(tmp_path / "nope.json")))
+    assert rc == 2   # unreadable request file → fail-closed

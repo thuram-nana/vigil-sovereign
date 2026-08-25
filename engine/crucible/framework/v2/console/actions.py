@@ -1983,11 +1983,15 @@ def brain_propose(body: dict) -> dict:
     run_id = _new_run_id()
     rd = run_dir(run_id)
     rd.mkdir(parents=True, exist_ok=True)
-    # PROPOSE-ONLY argv: --plan-only stops after the proposal persists; NO --brain-execute-via-body and NO
-    # --approve-offense (either would turn this into execution). --proposal-out pins the artifact into THIS
-    # run dir so GET /api/brain/decision?run=<run_id> reads exactly it.
-    cmd = [vigil, "engage", target, "--slug", slug, "--scope", "127.0.0.1", "--base-dir", _live_base(),
-           "--brain", "hexstrike", "--brain-objective", objective, "--plan-only", "--proposal-out", str(rd)]
+    # PROPOSE-ONLY, via a FILE request so NO user value (target/objective/slug) reaches the spawn argv — the
+    # launch_cloud precedent ("the operator's target label is NEVER on the command line"). The argv carries
+    # ONLY literals + server-controlled paths (this run dir); the validated {target, objective, slug} go in the
+    # JSON request. In the child, --plan-request implies --brain hexstrike --plan-only (so no tool runs, no
+    # traffic, nothing minted); --proposal-out pins brain-proposal.json into THIS run dir for the reader.
+    req_path = rd / "plan-request.json"
+    req_path.write_text(json.dumps({"target": target, "objective": objective, "slug": slug}), encoding="utf-8")
+    cmd = [vigil, "engage", "--plan-request", str(req_path), "--scope", "127.0.0.1",
+           "--base-dir", _live_base(), "--proposal-out", str(rd)]
 
     def _meta(**extra) -> None:
         _write_meta(run_id, mode="brain-propose", target=target, slug=slug, brain="hexstrike",
