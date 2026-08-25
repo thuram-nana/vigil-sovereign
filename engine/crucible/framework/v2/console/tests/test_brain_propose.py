@@ -121,6 +121,15 @@ def test_child_nonzero_rc_is_a_clean_error(monkeypatch):
     assert len(calls) == 1
 
 
+def test_non_string_slug_is_a_clean_value_not_a_traceback(monkeypatch):
+    # A hand-crafted same-origin body with a non-string truthy slug must not raise (the docstring promises a
+    # clean result, never a traceback). str()-coercion makes it a plain slug value; the run still proposes.
+    calls = _capture_spawn(monkeypatch)
+    res = actions.brain_propose({"brain": "hexstrike", "target": "http://127.0.0.1:8080/", "slug": ["x", "y"]})
+    assert res.get("ok") is True, res   # coerced, not crashed
+    assert len(calls) == 1
+
+
 def test_route_is_rbac_gated_run():
     rbac = pytest.importorskip("vigil_core.rbac")
     assert rbac.OFFENSE_ACTION_PERM.get("/api/brain/propose") == "run_engagement"

@@ -64,19 +64,30 @@ def _engine(tmp_path, replay, *, plan_only: bool):
 def test_plan_only_stops_before_the_gate_and_the_executor(hermetic_root, tmp_path):
     engine = _engine(tmp_path, ReplayThinker([_use_terminal("echo X"), _use_terminal("echo Y")]),
                      plan_only=True)
+    # FLAG spies, not raising ones: authorize_edge (react.py) catches a gate exception and returns a DENY,
+    # and _run_tool catches an executor exception — a raised AssertionError would be SWALLOWED into a deny and
+    # the test could pass even if the gate/executor WERE reached. A flag set BEFORE delegating survives that.
+    reached = {"gate": False, "exec": False}
+    _g, _r = engine.seams.gate, engine.seams.run_tool
 
-    def _boom_gate(*a, **k):
-        raise AssertionError("the gate was consulted under plan_only")
+    def _gate_spy(*a, **k):
+        reached["gate"] = True
+        return _g(*a, **k)
 
-    def _boom_exec(*a, **k):
-        raise AssertionError("the executor ran under plan_only")
+    def _exec_spy(*a, **k):
+        reached["exec"] = True
+        return _r(*a, **k)
 
     engine = dataclasses.replace(engine, seams=dataclasses.replace(
-        engine.seams, gate=_boom_gate, run_tool=_boom_exec))
+        engine.seams, gate=_gate_spy, run_tool=_exec_spy))
     rep = engine.engage(LOOPBACK)
 
     assert rep.paused == "plan-only"            # the honest terminal state
     assert rep.iterations == 1                  # exactly ONE think(), then stop
+    assert rep.decisions == ["use_tool"]        # …and that think PROPOSED a real tool (non-vacuous: the
+    #                                             short-circuit stops a genuine USE_TOOL, not an ASK_USER fallback)
+    assert reached["gate"] is False             # the gate was NEVER consulted…
+    assert reached["exec"] is False             # …and the executor NEVER ran
     assert rep.tool_calls == []                 # nothing ran…
     assert rep.fact_count == 0 and not rep.leads   # …and nothing was minted
 

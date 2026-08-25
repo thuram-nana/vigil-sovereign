@@ -1962,7 +1962,8 @@ def brain_propose(body: dict) -> dict:
     if not vigil:
         return {"error": "no `vigil` entrypoint resolved (set VIGIL_BIN or put `vigil` on PATH) — the "
                          "propose-only brain runs in the integration engine, which is spawned, not imported"}
-    slug = _slugify(body.get("slug") or "brain-plan", fallback="brain-plan")
+    slug = _slugify(str(body.get("slug") or "brain-plan"), fallback="brain-plan")   # str() so a non-string
+    #                                        slug is a clean value, not a 500 traceback (docstring: never one)
     run_id = _new_run_id()
     rd = run_dir(run_id)
     rd.mkdir(parents=True, exist_ok=True)

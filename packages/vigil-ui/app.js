@@ -5774,9 +5774,10 @@
       ]),
       propOut,
       h("div.hint", { style: { marginTop: "8px" } },
-        "Plans a chain with the propose-only brain and shows it below. It PERSISTS a proposal but runs NO "
-        + "tools, sends NO traffic, and mints NO findings. DRIVING the chain (execution) stays the "
-        + "owner-checkpoint-gated New-Assessment path — this button never executes."),
+        "Plans a chain with the propose-only brain and shows it below. It PERSISTS a proposal and sends NO "
+        + "traffic to the target and mints NO findings (it does run a local check of which tools are "
+        + "installed, to annotate each step). DRIVING the chain (execution) stays the owner-checkpoint-gated "
+        + "New-Assessment path — this button never executes against the target."),
     ]), true);
   }
 
