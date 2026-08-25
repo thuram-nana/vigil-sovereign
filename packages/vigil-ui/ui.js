@@ -225,20 +225,26 @@
     return url + sep + "token=" + encodeURIComponent(token());
   }
   // SSE with query-param auth (EventSource can't set headers). onEvent(kind, data, id).
-  // If the caller passes no onError, install a DEFAULT that surfaces only a TERMINAL failure —
-  // one the browser will not retry (readyState === CLOSED, e.g. a 4xx/401 or an explicit close).
-  // Transient network blips leave readyState === CONNECTING and auto-reconnect silently, so we do
-  // not spam a toast on every reconnect. Without this, a stream that never connects showed a
-  // stalled "running…" with no error at all.
+  // sse() stays MINIMAL — it wires onError only when the caller passes one. A blanket default toast is
+  // WRONG for streams that legitimately END (and then poll for completion) or are ambient/optional (the
+  // SIGIL HUD): they would false-alarm on a clean close. Streams that SHOULD stay connected opt IN by
+  // passing sseErrorToast(label) below.
   function sse(url, onEvent, onError) {
     const es = new EventSource(authUrl(url), { withCredentials: true });
     es.onmessage = function (e) { let d; try { d = JSON.parse(e.data); } catch (_) { d = e.data; } onEvent(d, e.lastEventId); };
-    es.onerror = onError || function () {
-      if (es.readyState === EventSource.CLOSED) {
-        toast("Live stream disconnected — this view may be stale (" + url + ")", true);
+    if (onError) es.onerror = onError;
+    return es;
+  }
+  // Opt-in terminal-failure surface: pass as sse()'s 3rd arg for a stream that should stay connected.
+  // Fires ONE toast only on a TERMINAL failure the browser will not retry (readyState === CLOSED);
+  // transient reconnects (readyState === CONNECTING) stay silent. NOT a default — see the note above.
+  function sseErrorToast(label) {
+    return function (e) {
+      const es = e && e.target;
+      if (es && es.readyState === EventSource.CLOSED) {
+        toast("Live stream disconnected" + (label ? " (" + label + ")" : "") + " — data may be stale", true);
       }
     };
-    return es;
   }
 
   // -- toasts -----------------------------------------------------------------
@@ -264,7 +270,6 @@
       ]),
       h("button.eb-x", { title: "dismiss", onClick: function () { host.remove(); } }, "×"),
     ]));
-    host.style.display = "";
     return host;
   }
   function clearErrorBanner() { const b = $("#error-banner"); if (b) b.remove(); }
@@ -286,9 +291,9 @@
         const p = Math.max(0, Math.min(100, Number(pct)));
         fill.style.width = p + "%";
         pctlbl.textContent = Math.round(p) + "%";
-      }
+        el.classList.remove("pbar-err");   // a REAL progress update clears a prior error; a label-only
+      }                                    // (indeterminate) set must NOT wipe an existing error state.
       if (lbl != null) label.textContent = String(lbl);
-      el.classList.remove("pbar-err");
     }
     function done(lbl) { set(100, lbl != null ? lbl : "done"); el.classList.add("pbar-done"); }
     function fail(msg) { el.classList.add("pbar-err"); if (msg != null) label.textContent = String(msg); }
@@ -305,11 +310,14 @@
       if (!d || typeof d !== "object") return;
       if (d.error) { bar.fail(String(d.error)); es.close(); if (opts.onError) opts.onError(d); return; }
       bar.set(typeof d.pct === "number" ? d.pct : null, d.label != null ? d.label : null);
-      if (d.phase === "done" || d.done === true || (typeof d.pct === "number" && d.pct >= 100)) {
+      // Complete ONLY on an explicit done signal — a sub-phase hitting 100% (e.g. "layer 1 pulled:
+      // 100%") must NOT close the stream and discard the phases that follow.
+      if (d.phase === "done" || d.done === true) {
         bar.done(d.label != null ? d.label : null); es.close(); if (opts.onDone) opts.onDone(d);
       }
-    }, function () {
-      if (es.readyState === EventSource.CLOSED) {
+    }, function (e) {
+      const s = e && e.target;
+      if (s && s.readyState === EventSource.CLOSED) {
         bar.fail("stream disconnected"); if (opts.onError) opts.onError(new Error("stream closed"));
       }
     });
@@ -368,7 +376,8 @@
   }
 
   window.VUI = { h: h, clear: clear, mount: mount, append: append, $: $, store: store,
-    getJSON: getJSON, postJSON: postJSON, uploadChunked: uploadChunked, sse: sse, authUrl: authUrl,
+    getJSON: getJSON, postJSON: postJSON, uploadChunked: uploadChunked, sse: sse, sseErrorToast: sseErrorToast,
+    authUrl: authUrl,
     toast: toast, errorBanner: errorBanner, clearErrorBanner: clearErrorBanner,
     progressBar: progressBar, streamProgress: streamProgress, router: router,
     pill: pill, statusBadge: statusBadge, tile: tile, card: card, icon: icon, api: api, token: token,
