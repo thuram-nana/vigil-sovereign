@@ -121,6 +121,15 @@ class RunnerDeps:
     engagement_slug: str
     signers: list                         # [(key_id, private_key_b64)] — m-of-n governance signers
     timeout: float = 60.0
+    # H8f GATE PARITY (closes the H1x-1 red-pen prerequisite). A provisioned runner is a LIVE egress path,
+    # so — unlike the runner-less planning body — it MUST re-enforce the executor's execution-time single-use
+    # authorization. run_external_tool already re-checks scope + loopback + pre-flight (kill-switch / charter
+    # slug / entitlement) + backend isolation UNCONDITIONALLY; the ONE control it applies only when threaded
+    # is the single-use, action-bound CAPABILITY TOKEN (W13-5). This carries it (a
+    # ``live.external_tool.CapabilityCheck``); ``_run_via_external_tool`` refuses BEFORE traffic if a runner
+    # is provisioned without one, so a body-routed tool can never emit a packet on an unspent authorization.
+    # Typed ``Any`` (not the offense-side CapabilityCheck) so this dataclass stays FATAL-2-safe at module scope.
+    capability: Any = None
 
 
 class HexstrikeAgentBody(AgentBody):
@@ -245,8 +254,9 @@ class HexstrikeAgentBody(AgentBody):
 
     def _run_via_external_tool(self, action: ProposedAction, decision: GateDecision) -> ActionOutcome:
         """Real executor: run ONLY through the R4 gated runner, which owns the per-bug-class re-drive +
-        provenance + signing. A tool with no oracle-mapped ToolSpec, or an unprovisioned runner, stays a
-        LEAD (honest — never a fabricated fact)."""
+        provenance + signing. A tool with no oracle-mapped ToolSpec, an unprovisioned runner, or a runner
+        provisioned WITHOUT a single-use capability token (H8f gate parity), stays a LEAD (honest — never a
+        fabricated fact, never a packet on an unspent authorization)."""
         if action.kind not in _ORACLE_MAPPED_TOOLS:
             return ActionOutcome(executed=False, ok=False,
                                  blocked_reason=f"{action.kind!r} has no oracle-mapped ToolSpec — stays a LEAD")
@@ -273,10 +283,21 @@ class HexstrikeAgentBody(AgentBody):
             return ActionOutcome(executed=False, ok=False,
                                  blocked_reason=f"{action.kind!r} is oracle-mapped but has no spec builder "
                                                 f"(internal) — stays a LEAD")
+        # H8f GATE PARITY (H1x-1 red-pen prerequisite): reaching here means real traffic is about to flow, so
+        # the body must re-enforce the executor's single-use, action-bound authorization. run_external_tool
+        # re-checks scope + loopback + pre-flight + isolation for free; the capability token is the one control
+        # it applies only when threaded. A provisioned runner with no capability would emit a packet on an
+        # unspent authorization — refuse it BEFORE traffic (a LEAD), never diverge from the executor path. When
+        # present, run_external_tool binds the token to the EXACT argv (operation_hash), burns its O_EXCL nonce,
+        # and refuses a stale/replayed/different-operation token before the subprocess runs.
+        if self._runner.capability is None:
+            return ActionOutcome(executed=False, ok=False,
+                                 blocked_reason="runner provisioned without a single-use capability token — "
+                                                "refused before traffic (H8f gate parity)")
         res = run_external_tool(
             spec, action.target, scope_gate=self._runner.scope_gate, backend=self._runner.backend,
             engagement_slug=self._runner.engagement_slug, signers=self._runner.signers,
-            timeout=self._runner.timeout,
+            timeout=self._runner.timeout, capability=self._runner.capability,
         )
         if getattr(res, "refused", False):
             return ActionOutcome(executed=False, ok=False,

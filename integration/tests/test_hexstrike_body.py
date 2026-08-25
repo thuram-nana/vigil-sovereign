@@ -21,12 +21,51 @@ from vigil_core import generate_keypair
 from vigil_core.models import AuthorizerKey, TrustRoot
 from vigil_gateway.scope_source import StaticScopeSource
 from vigil_integration.brains.hexstrike_body import HexstrikeAgentBody, RunnerDeps
-from vigil_integration.live.external_tool import LocalSubprocessBackend, ScopeGate
+from vigil_integration.live.capability_token import (
+    CapabilityAuthority,
+    CapabilityGrant,
+    mint_capability_token,
+    operation_hash,
+    policy_digest,
+)
+from vigil_integration.live.external_tool import (
+    CapabilityCheck,
+    LocalSubprocessBackend,
+    ScopeGate,
+    masscan_service_scan,
+    nmap_service_scan,
+)
+from vigil_integration.live.nonce_ledger import NonceLedger
 
 SIGNER = generate_keypair()
 SIGNERS = [("root0", SIGNER.private_key_b64)]
 TRUST = TrustRoot(threshold=1, authorizers=[
     AuthorizerKey(key_id="root0", name="root0", public_key_b64=SIGNER.public_key_b64)])
+
+# H8f GATE PARITY — the single-use capability token a PROVISIONED runner must now carry (a runner-less
+# planning body needs none). The token is bound to the EXACT argv the body builds (operation_hash), so a
+# test mints it over the SAME spec the body will run.
+_CAP_KP = generate_keypair()
+_CAP_KEY_ID = "owner-root"
+_CAP_AUTHORITY = CapabilityAuthority(owner_key_id=_CAP_KEY_ID, owner_public_key_b64=_CAP_KP.public_key_b64)
+_CAP_DEPLOYMENT = "deploy-test-1"
+_CAP_DANGER = "recon"
+_CAP_POLICY_DIGEST = policy_digest({"warden": "A2", "charter": "alpha"})
+
+
+def _capability_for(spec, target, ledger, *, nonce="cap-1", now=1100.0, op_argv=None):
+    """Mint a single-use CapabilityCheck bound to the exact argv the body runs. ``op_argv`` overrides the
+    argv used for the operation_hash — used to forge a DIFFERENT-operation token (the tamper control)."""
+    argv = op_argv if op_argv is not None else list(spec.build_argv(target))
+    grant = CapabilityGrant(
+        deployment=_CAP_DEPLOYMENT, engagement="alpha",
+        operation_hash=operation_hash(spec.name, target, argv),
+        target=target, tool=spec.name, danger_class=_CAP_DANGER, policy_digest=_CAP_POLICY_DIGEST,
+    )
+    token = mint_capability_token(grant, owner_private_key_b64=_CAP_KP.private_key_b64, key_id=_CAP_KEY_ID,
+                                  nonce=nonce, not_before=1000.0, expiry=1300.0)
+    return CapabilityCheck(token=token, authority=_CAP_AUTHORITY, ledger=ledger, deployment=_CAP_DEPLOYMENT,
+                           danger_class=_CAP_DANGER, policy_digest=_CAP_POLICY_DIGEST, now=lambda: now)
 
 
 @pytest.fixture(autouse=True)
@@ -143,8 +182,10 @@ def test_live_nmap_fact_through_the_body(tmp_path: Path):
     srv.bind(("127.0.0.1", 0))
     srv.listen(8)
     port = srv.getsockname()[1]
+    ledger = NonceLedger(tmp_path / "nonces")
+    cap = _capability_for(nmap_service_scan(ports=str(port)), "127.0.0.1", ledger)
     deps = RunnerDeps(scope_gate=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
-                      backend=LocalSubprocessBackend(), engagement_slug="alpha", signers=SIGNERS)
+                      backend=LocalSubprocessBackend(), engagement_slug="alpha", signers=SIGNERS, capability=cap)
     body = HexstrikeAgentBody(posture="staging", runner=deps)  # staging so the recon nmap step autos
     try:
         # execute the body's REAL R4 path for an nmap step scoped to the one open port
@@ -156,6 +197,94 @@ def test_live_nmap_fact_through_the_body(tmp_path: Path):
         srv.close()
     assert outcome.executed is True and outcome.ok is True, outcome
     assert outcome.detail.get("n_facts") == 1, f"expected 1 oracle-confirmed FACT, got {outcome.detail}"
+    assert ledger.is_consumed("cap-1"), "the body must burn the single-use capability nonce (H8f gate parity)"
+
+
+class _SpyBackend:
+    """Records every tool launch so 'refused BEFORE traffic' is proven by the tool never being invoked."""
+    name = "spy"
+    loopback_only = False
+
+    def __init__(self) -> None:
+        self.launches: list = []
+
+    def available(self):
+        return True, ""
+
+    def run(self, argv, *, timeout=0):
+        from vigil_integration.live.external_tool import ToolOutcome
+        self.launches.append(list(argv))
+        return ToolOutcome(list(argv), 0, "", "", self.name)
+
+
+# ===================================================================================================
+# H8f GATE PARITY (closes the H1x-1 red-pen prerequisite): a PROVISIONED runner is a live egress path, so
+# the body must re-enforce the executor's single-use, action-bound capability token BEFORE any traffic. A
+# runner without a token is refused pre-traffic; a replayed or different-operation token is refused at the
+# executor boundary and the tool never launches. (Scope/loopback/pre-flight/isolation parity is already
+# proven by test_executor_capability_boundary + test_external_tool_runner — run_external_tool applies those
+# unconditionally; this file pins the token leg the body now threads.)
+# ===================================================================================================
+def test_h8f_provisioned_runner_without_a_capability_refuses_before_traffic(tmp_path: Path):
+    """A runner with NO capability token would emit a packet on an unspent authorization — the body refuses
+    it before the runner is even entered, so the backend is never launched."""
+    _charter(tmp_path, "127.0.0.1")
+    spy = _SpyBackend()
+    deps = RunnerDeps(scope_gate=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+                      backend=spy, engagement_slug="alpha", signers=SIGNERS, capability=None)
+    body = HexstrikeAgentBody(posture="staging", runner=deps)
+    out = body.execute(ProposedAction(kind="nmap", target="127.0.0.1", params={"ports": "80", "danger": "recon"}),
+                       GateDecision(authorized=True))
+    assert out.executed is False and "without a single-use capability token" in out.blocked_reason, out
+    assert spy.launches == [], "no tool may launch when the runner carries no capability token"
+
+
+def test_h8f_a_replayed_capability_token_is_refused_and_no_second_run(tmp_path: Path):
+    """The FIRST run burns the single-use nonce; replaying the SAME token for the SAME action is refused at
+    the executor boundary (the masscan tool is launched exactly once)."""
+    _charter(tmp_path, "127.0.0.1")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    port = srv.getsockname()[1]
+    ledger = NonceLedger(tmp_path / "nonces")
+    cap = _capability_for(masscan_service_scan(ports=str(port), rate=1000), "127.0.0.1", ledger)
+    deps = RunnerDeps(scope_gate=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+                      backend=_CannedBackend(f"Discovered open port {port}/tcp on 127.0.0.1\n"),
+                      engagement_slug="alpha", signers=SIGNERS, capability=cap)
+    body = HexstrikeAgentBody(posture="staging", runner=deps)
+    action = ProposedAction(kind="masscan", target="127.0.0.1", params={"ports": str(port), "danger": "recon"})
+    try:
+        first = body.execute(action, GateDecision(authorized=True))
+        second = body.execute(action, GateDecision(authorized=True))
+    finally:
+        srv.close()
+    assert first.executed is True and first.detail.get("n_facts") == 1, first
+    # pin the CAPABILITY-specific refusal (the spent nonce), not just the generic runner-refused wrapper, so a
+    # future regression that refused the replay for an unrelated reason cannot slip through.
+    assert second.executed is False, second
+    assert "already consumed" in second.blocked_reason, second
+
+
+def test_h8f_a_capability_for_a_different_operation_is_refused(tmp_path: Path):
+    """A token minted for a DIFFERENT argv (different ports) does not authorize THIS operation — the boundary
+    recomputes the operation_hash over the real argv and refuses, so the tool never launches."""
+    _charter(tmp_path, "127.0.0.1")
+    spy = _SpyBackend()
+    ledger = NonceLedger(tmp_path / "nonces")
+    # token bound to ports=443, but the body will run ports=80 → operation_hash mismatch at the boundary.
+    other = masscan_service_scan(ports="443", rate=1000)
+    cap = _capability_for(masscan_service_scan(ports="80", rate=1000), "127.0.0.1", ledger,
+                          op_argv=list(other.build_argv("127.0.0.1")))
+    deps = RunnerDeps(scope_gate=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+                      backend=spy, engagement_slug="alpha", signers=SIGNERS, capability=cap)
+    body = HexstrikeAgentBody(posture="staging", runner=deps)
+    out = body.execute(ProposedAction(kind="masscan", target="127.0.0.1", params={"ports": "80", "danger": "recon"}),
+                       GateDecision(authorized=True))
+    # pin the operation-hash mismatch specifically — the boundary recomputes the hash over the REAL argv.
+    assert out.executed is False, out
+    assert "does not match this operation" in out.blocked_reason, out
+    assert spy.launches == [], "a token for a different operation must not launch the tool"
 
 
 def test_fatal2_body_imports_no_offense_engine():
@@ -243,9 +372,11 @@ def test_h5_live_masscan_fact_through_the_body(tmp_path: Path):
     srv.bind(("127.0.0.1", 0))
     srv.listen(8)
     port = srv.getsockname()[1]
+    ledger = NonceLedger(tmp_path / "nonces")
+    cap = _capability_for(masscan_service_scan(ports=str(port), rate=1000), "127.0.0.1", ledger)
     deps = RunnerDeps(scope_gate=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
                       backend=_CannedBackend(f"Discovered open port {port}/tcp on 127.0.0.1\n"),
-                      engagement_slug="alpha", signers=SIGNERS)
+                      engagement_slug="alpha", signers=SIGNERS, capability=cap)
     body = HexstrikeAgentBody(posture="staging", runner=deps)
     try:
         action = ProposedAction(kind="masscan", target="127.0.0.1",
@@ -257,6 +388,7 @@ def test_h5_live_masscan_fact_through_the_body(tmp_path: Path):
         srv.close()
     assert outcome.executed is True and outcome.ok is True, outcome
     assert outcome.detail.get("n_facts") == 1, f"expected 1 reachability FACT via masscan, got {outcome.detail}"
+    assert ledger.is_consumed("cap-1"), "the body must burn the single-use capability nonce (H8f gate parity)"
 
 
 # ===================================================================================================
