@@ -129,8 +129,12 @@ jobs:
 
       - name: install the apt tools
         # nikto deliberately NOT from apt — see the smoke job: noble's 2.1.5 predates JSON output and
-        # silently writes text, so the engine's reader cannot consume it.
-        run: sudo apt-get update && sudo apt-get install -y nmap hydra sqlmap wapiti libnet-ssleay-perl
+        # silently writes text, so the engine's reader cannot consume it. But nikto's *Perl deps* DO come
+        # from apt: libnet-ssleay-perl (SSL) and libxml-writer-perl (XML::Writer, needed by the report
+        # plugins). Without XML::Writer, `nikto -Version` aborts with "Required module not found" so the
+        # version probe below reads empty and the job fails — a provision flake seen when a runner image
+        # ships without XML::Writer (same SHA passed minutes earlier on a runner that had it).
+        run: sudo apt-get update && sudo apt-get install -y nmap hydra sqlmap wapiti libnet-ssleay-perl libxml-writer-perl
 
       - name: install a nikto the engine can actually drive
         # Pinned to a COMMIT on main, not the 2.5.0 RELEASE TAG. The first CI run of this branch pinned
