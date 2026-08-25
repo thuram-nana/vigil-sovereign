@@ -437,7 +437,11 @@ def services_data() -> dict[str, Any]:
         return doctor.collect(doctor.find_repo_root())
     return _safe(_collect, default={"ok": False, "issues": ["system readiness probe unavailable"],
                                     "notes": [], "binaries": {}, "venvs": {}, "dirs": {},
-                                    "ui_ports": {}, "docker_services": {}})
+                                    "ui_ports": {}, "docker_services": {},
+                                    # keep the fail-soft shape identical to the happy path (WS1a added
+                                    # these two keys), so a collector hiccup on one of two back-to-back
+                                    # reads can never change the dict's key set.
+                                    "docker_daemon": None, "dependencies": []})
 
 
 def session_detail(session_id: str) -> dict[str, Any]:
