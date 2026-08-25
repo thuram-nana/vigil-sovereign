@@ -307,12 +307,15 @@ class _BodyExecResult:
     ``.stdout``/``.record``) it reads from the governed executor. Duck-typed to ``engine._DenyResult`` /
     the executor's ExecResult.
 
-    FACT SEAM CLOSED for this slice: the canonical body is driven with NO RunnerDeps, so its execute never
-    runs a tool (``executed`` is always False) — this maps to ``ran=False`` (a recorded refusal), carries
-    an EMPTY ``stdout`` (nothing reaches oracle intake) and NO signed ExecRecord, so ``fact_count`` stays 0.
-    ``ran`` mirrors ``ActionOutcome.executed`` defensively: were a future H8f slice to provision the runner,
-    a genuinely-executed body outcome would surface as ``ran=True`` — but even then this view carries no
-    stdout, so THIS engine path still mints nothing; the body owns its own runner-side oracle re-drive."""
+    FACT SEAM: with NO RunnerDeps (the DEFAULT), the body's execute runs no tool (``executed`` always False)
+    → ``ran=False``, an EMPTY ``stdout`` (nothing reaches oracle intake) and NO signed ExecRecord. H8f-b: when
+    the operator provisions a runner, a genuinely-executed body outcome surfaces as ``ran=True`` and carries
+    the runner's OWN oracle-confirmed, signed facts in ``body_facts`` (each an ``AdapterResult`` with
+    ``is_fact`` + a signed certificate) plus their retained ``body_contexts`` (finding_ref -> oracle_context,
+    for offline re-verify). ``stdout`` stays EMPTY, so the engine's stdout→oracle-intake path still mints
+    nothing from a body run — the engine surfaces ``body_facts`` through its already-confirmed-fact path
+    instead (the fireteam-fact pattern), never by re-adjudicating tool bytes. The body owns its runner-side
+    oracle re-drive; the engine only counts what the runner already confirmed + signed."""
 
     tool: str
     reason: str
@@ -323,6 +326,9 @@ class _BodyExecResult:
     destructive: bool = False
     stdout: str = ""
     record: Any = None
+    body_facts: tuple = ()          # H8f-b: runner-minted, oracle-confirmed AdapterResult facts (is_fact)
+    body_leads: tuple = ()          # H8f-b: runner-side AdapterResult LEADs (surfaced as report leads)
+    body_contexts: Any = None       # H8f-b: finding_ref -> oracle_context (offline re-verify), or None
 
 
 def build_engine(config: EngineConfig) -> VigilEngine:
@@ -549,10 +555,20 @@ def build_engine(config: EngineConfig) -> VigilEngine:
             return _BodyExecResult(tool=tool_name, target="",
                                    reason=f"body-execute route error (fail-closed): {type(exc).__name__}: {exc}")
         ran = bool(getattr(outcome, "executed", False))
+        detail = getattr(outcome, "detail", None) or {}
         reason = (str(getattr(outcome, "blocked_reason", "") or "")
-                  or str((getattr(outcome, "detail", None) or {}).get("reason", "") or ""))
+                  or str(detail.get("reason", "") or ""))
+        # H8f-b: carry the runner's OWN oracle-confirmed, signed facts (+ retained contexts) AND its LEADs up to
+        # the engine loop so it can surface them into the run report. Facts go through the already-confirmed-fact
+        # path (they were minted by run_external_tool's admit()+certify, never the body/brain; the engine
+        # re-checks each carries is_fact + a signed evidence ref and degrades anything else to a LEAD); the
+        # runner's LEADs are recorded as report leads so a body run that found only leads is not silently empty.
+        body_facts = tuple(detail.get("facts") or ())
+        body_leads = tuple(detail.get("leads") or ())
+        body_contexts = detail.get("contexts") or None
         return _BodyExecResult(tool=tool_name, target=target, ran=ran,
-                               outcome=("ran" if ran else "deny"), reason=reason)
+                               outcome=("ran" if ran else "deny"), reason=reason,
+                               body_facts=body_facts, body_leads=body_leads, body_contexts=body_contexts)
 
     def run_tool(tool: Any, phase: Phase, seq: int, *, approved: bool = False) -> Any:
         _seq["n"] = seq

@@ -411,6 +411,24 @@ class VigilEngine:
                      "facts": 0, "leads": 0, "advisory": "terminal"})
                 continue
 
+            # H8f-b — a body-routed execution (--brain-execute-via-body with a provisioned runner) mints its
+            # facts inside the RUNNER's OWN admit()+certify (over VIGIL's own gated re-drive, never the tool's
+            # bytes), so this ExecResult carries ZERO stdout and the oracle-intake path below would mint
+            # nothing. Surface the runner's ALREADY-oracle-confirmed, signed facts through the SAME
+            # already-confirmed-fact path used for fireteam facts (a fact needs a signed evidence ref, else it
+            # degrades to a LEAD). This never re-adjudicates tool output — the engine only counts what the
+            # runner independently confirmed + signed. A normal executor ExecResult has no `body_facts`
+            # attribute, so this branch is body-only.
+            if getattr(exec_res, "body_facts", None) is not None:
+                nf, nl = self._surface_body_facts(exec_res, state, report, parent_id=_tc_id)
+                self._emit(getattr(exec_res, "record", None))
+                self._checkpoint(state, seq, report)
+                seq += 1
+                state.execution_trace.append(
+                    {"iteration": it, "action": "use_tool", "tool": getattr(exec_res, "tool", ""),
+                     "outcome": "ran", "facts": nf, "leads": nl})
+                continue
+
             # ORACLE INTAKE — the LLM's claims become LEADs; only the oracle re-firing over target-produced
             # bytes mints a signed FACT. This is the load-bearing anti-hallucination seam. T2: for an
             # error_based_sqli exploit claim the oracle ADDITIONALLY re-drives the proposed exploit through
@@ -694,6 +712,58 @@ class VigilEngine:
         if decision.action == ActionType.TRANSITION_PHASE and decision.target_phase is not None:
             state.phase = decision.target_phase
             state.awaiting_approval = False
+
+    def _surface_body_facts(self, exec_res: Any, state: AgentState, report: RunReport,
+                            *, parent_id: Optional[int] = None) -> tuple[int, int]:
+        """H8f-b — surface a body-routed execution's runner-minted results into the run report, honestly.
+
+        The runner already ran the deterministic oracle over VIGIL's OWN gated re-drive and signed a
+        certificate (``admit()`` + ``certify_admitted``); this does NOT re-adjudicate any tool bytes. Each
+        carried ``AdapterResult`` is admitted as a FACT ONLY if it is a signed fact with a non-empty evidence
+        ref — the SAME 'a FACT needs a signed evidence ref' invariant the fireteam path (and ``AgentState``)
+        enforce; anything else degrades to a LEAD (fail-closed). Returns (n_facts, n_leads) surfaced.
+
+        The evidence ref is the certificate's ``finding_ref`` — identical to how the engine's own intake facts
+        are referenced (``oracle`` seam → ``_admit_and_mint`` returns ``finding_ref``); the fact is mirrored to
+        the spine as a finding event, so a body FACT is as durable + provenance-linked as any other."""
+        tool = str(getattr(exec_res, "tool", "") or "")
+        n_facts = 0
+        n_leads = 0
+        for af in list(getattr(exec_res, "body_facts", ()) or ()):
+            ref = str(getattr(af, "finding_ref", "") or "").strip()
+            bug_class = str(getattr(af, "bug_class", "") or "")
+            is_fact = bool(getattr(af, "is_fact", False)) and str(getattr(af, "status", "")) == "fact"
+            signed = getattr(af, "signed", None)
+            if is_fact and signed is not None and ref:
+                title = f"{bug_class or tool} confirmed (runner re-drive)"
+                f = Finding(ref=ref, bug_class=bug_class, title=title, severity="", status="fact",
+                            evidence_ref=ref, source=tool)
+                state.record_fact(f, evidence_ref=ref)     # already oracle-confirmed + signed by the runner
+                report.facts.append(f)
+                self._spine_post("finding", {
+                    "ref": ref, "title": title, "bug_class": bug_class, "surface": tool,
+                    "summary": title, "status": "fact", "verified_by_oracle": True}, parent_id=parent_id)
+                self._project([f])
+                n_facts += 1
+            else:
+                # fail-closed: a body result without a signed evidence ref is a LEAD, never a report FACT.
+                ld = Finding(ref=ref or (tool or "body-lead"), bug_class=bug_class,
+                             title=(bug_class or tool or "body lead"), status="lead", source=tool)
+                state.record_lead(ld)
+                report.leads.append(ld)
+                n_leads += 1
+        # The runner's OWN leads (a reachable-but-unconfirmed probe, a non-FACT-capable proposal) are recorded
+        # as report leads too, so a body run that found only leads is not silently empty (never a fact — a lead
+        # by construction, mirroring record_lead which strips any status/evidence_ref).
+        for al in list(getattr(exec_res, "body_leads", ()) or ()):
+            ld = Finding(ref=str(getattr(al, "finding_ref", "") or "").strip() or (tool or "body-lead"),
+                         bug_class=str(getattr(al, "bug_class", "") or ""),
+                         title=(str(getattr(al, "bug_class", "") or "") or tool or "body lead"),
+                         status="lead", source=tool)
+            state.record_lead(ld)
+            report.leads.append(ld)
+            n_leads += 1
+        return n_facts, n_leads
 
     def _project(self, facts: list) -> None:
         if self.seams.project is None or not facts:

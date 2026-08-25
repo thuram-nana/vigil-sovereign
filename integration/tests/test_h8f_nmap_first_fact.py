@@ -7,10 +7,10 @@ run can mint its first real, signed, offline-verifiable FACT. The MECHANISM alre
 mints a fresh single-use token bound to the exact argv the brain proposes. DEFAULT (no runner) stays
 runner-less → 0 facts → the FP-0 canary and every `fact_count==0` test are unchanged.
 
-Scope of THIS slice: minting + offline re-verification through the production seam. Surfacing the
-body-minted FACT into `report.fact_count` (which needs durable certificate PERSISTENCE) is the immediate
-follow-up **H8f-b** — until then a body-routed run mints the signed certificate but the run report's headline
-count does not yet reflect it (asserted honestly below).
+Scope: minting + offline re-verification through the production seam (H8f-a), and — added by **H8f-b** —
+SURFACING the runner-minted FACT into `report.fact_count` through the engine's already-confirmed-fact path
+(`_surface_body_facts`): a body FACT carrying a signed evidence ref is counted; a fact-shaped result without
+one degrades to a LEAD (fail-closed); the DEFAULT runner-less run still reports ZERO facts (FP-0 preserved).
 
 Full FACT-enabling battery (plan Part III / release gate #2,#7,#6,#9):
   * POSITIVE           — BrainThink(runner) mints a real signed nmap SERVICE_REACHABILITY FACT that
@@ -224,8 +224,12 @@ def test_h8f_production_engine_seam_reaches_the_minting_body(tmp_path: Path, mon
     # real SERVICE_REACHABILITY FACT (captured at the body seam).
     nmap_facts = [f for f in minted["facts"] if getattr(f, "bug_class", "") == "service_reachable"]
     assert nmap_facts, "the engine seam did not drive the runner-equipped body to mint an nmap FACT"
-    # H8f-b (follow-up) surfaces the body FACT into the run report; until then the headline count is honestly 0.
-    assert report.fact_count == 0, "report surfacing of body facts is H8f-b — the count must not silently change"
+    # H8f-b: the runner-minted body FACT is now surfaced into the run report through the already-confirmed-fact
+    # path — report.fact_count reflects it, as a status=fact Finding carrying a signed evidence ref.
+    assert report.fact_count >= 1, "H8f-b must surface the runner-minted body FACT into the run report"
+    surfaced = [f for f in report.facts if getattr(f, "bug_class", "") == "service_reachable"
+                and getattr(f, "status", "") == "fact" and str(getattr(f, "evidence_ref", "") or "").strip()]
+    assert surfaced, "the surfaced body FACT must be a status=fact Finding with a signed evidence ref"
 
 
 # ===================================================================================================
@@ -340,3 +344,104 @@ def test_h8f_provisioned_runner_without_capability_is_refused(tmp_path: Path):
                        GateDecision(authorized=True))
     assert out.executed is False and "without a single-use capability token" in out.blocked_reason, out
     assert spy.launches == []
+
+
+# ===================================================================================================
+# H8f-b — report surfacing: the runner-minted body FACT is now counted in the run report through the
+# already-confirmed-fact path; a body result without a signed evidence ref degrades to a LEAD (fail-closed);
+# the DEFAULT runner-less run still reports ZERO facts (FP-0 preserved at the report level).
+# ===================================================================================================
+def _engine_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, brain):
+    from types import SimpleNamespace
+
+    from vigil_integration.live.wiring import EngineConfig, provision_authority
+    monkeypatch.setenv("CRUCIBLE_ROOT", str(tmp_path / "crucible-root"))
+    from framework.v2.agents import blackboard as _bb
+    db = tmp_path / "bb.sqlite"
+    monkeypatch.setattr(_bb, "open_blackboard", lambda **_kw: _bb.Blackboard(db_path=db))
+    _charter(tmp_path, "127.0.0.1")
+    prov = provision_authority(slug="alpha", scope=["127.0.0.1"])
+    return EngineConfig(slug="alpha", base_dir=str(tmp_path / "live"), provisioned=prov,
+                        runner=lambda *a, **k: SimpleNamespace(exit_code=0, stdout="", stderr="",
+                                                               timed_out=False, truncated=False),
+                        max_iterations=6, owner_approves_offense=True, brain=brain,
+                        brain_execute_via_body=True)
+
+
+def test_h8fb_report_counts_the_runner_minted_body_fact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """H8f-b: a provisioned-runner body run surfaces its runner-minted nmap FACT into report.fact_count, as a
+    status=fact Finding carrying a signed evidence ref (the certificate's finding_ref, exactly like intake)."""
+    from vigil_integration.live.wiring import build_engine
+
+    srv, port = _loopback_listener()
+    ledger = NonceLedger(tmp_path / "nonces")
+    brain = BrainThink(HexstrikeBrain(), target="127.0.0.1", posture="staging",
+                       runner=_deps(_CannedNmap(port), ledger))
+    try:
+        report = build_engine(_engine_cfg(tmp_path, monkeypatch, brain)).engage("127.0.0.1")
+    finally:
+        srv.close()
+    facts = [f for f in report.facts if getattr(f, "bug_class", "") == "service_reachable"]
+    assert facts, f"H8f-b must surface the body nmap FACT into report.facts (fact_count={report.fact_count})"
+    f = facts[0]
+    assert f.status == "fact" and str(f.evidence_ref or "").strip(), f
+    assert report.fact_count >= 1
+
+
+def test_h8fb_default_runnerless_run_reports_zero_facts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """FP-0 at the REPORT level: with surfacing wired but NO runner provisioned, a full engage still reports
+    ZERO facts (the body executes nothing) — the default path is unchanged."""
+    from vigil_integration.live.wiring import build_engine
+
+    brain = BrainThink(HexstrikeBrain(), target="127.0.0.1", posture="staging")  # NO runner
+    report = build_engine(_engine_cfg(tmp_path, monkeypatch, brain)).engage("127.0.0.1")
+    assert report.fact_count == 0, "a runner-less body run must surface ZERO facts (FP-0 preserved)"
+
+
+def test_h8fb_unsigned_body_result_degrades_to_lead_never_a_fact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """FAIL-CLOSED at the surfacing seam: a body result that is fact-SHAPED but carries NO signed certificate
+    (or no evidence ref) is recorded as a LEAD, never counted as a report FACT — the same 'a FACT needs a
+    signed evidence ref' invariant AgentState enforces. (The runner only ever emits is_fact results WITH a
+    signed cert; this guards the seam against a malformed one reaching it.)"""
+    from types import SimpleNamespace
+
+    from vigil_integration.agent.state import AgentState
+    from vigil_integration.live.engine import RunReport
+    from vigil_integration.live.wiring import build_engine
+
+    engine = build_engine(_engine_cfg(tmp_path, monkeypatch, BrainThink(HexstrikeBrain(), target="127.0.0.1")))
+    state = AgentState(engagement_slug="alpha")
+    report = RunReport(slug="alpha")
+    # fact-shaped but UNSIGNED (signed=None) and no ref → must degrade to a LEAD.
+    # SINGLE-VARIABLE cases isolate each half of the guard (is_fact AND signed is not None AND ref):
+    #   (i) missing SIGNATURE only (ref present, signed=None) → LEAD
+    no_sig = SimpleNamespace(is_fact=True, status="fact", finding_ref="svc:127.0.0.1:80",
+                             bug_class="service_reachable", signed=None, confirmed_by="service_reachability")
+    nf, nl = engine._surface_body_facts(SimpleNamespace(tool="nmap", body_facts=(no_sig,)), state, report)
+    assert nf == 0 and nl == 1 and report.facts == [], "a body 'fact' with no signature must degrade to a LEAD"
+    #   (ii) missing REF only (signed present, finding_ref="") → LEAD
+    no_ref = SimpleNamespace(is_fact=True, status="fact", finding_ref="", bug_class="service_reachable",
+                             signed=object(), confirmed_by="service_reachability")
+    r2 = RunReport(slug="alpha")
+    nf2, nl2 = engine._surface_body_facts(SimpleNamespace(tool="nmap", body_facts=(no_ref,)),
+                                          AgentState(engagement_slug="alpha"), r2)
+    assert nf2 == 0 and nl2 == 1 and r2.facts == [], "a body 'fact' with no evidence ref must degrade to a LEAD"
+    #   (iii) a non-fact (status='lead') carried in body_facts → LEAD
+    lead_shaped = SimpleNamespace(is_fact=False, status="lead", finding_ref="svc:x", bug_class="service_reachable",
+                                  signed=object(), confirmed_by="")
+    r3 = RunReport(slug="alpha")
+    nf3, nl3 = engine._surface_body_facts(SimpleNamespace(tool="nmap", body_facts=(lead_shaped,)),
+                                          AgentState(engagement_slug="alpha"), r3)
+    assert nf3 == 0 and nl3 == 1 and r3.facts == [], "a non-fact must never be counted as a report FACT"
+    # NON-VACUITY control: a genuinely signed, ref'd fact-shaped result IS counted.
+    signed_ok = SimpleNamespace(is_fact=True, status="fact", finding_ref="svc:127.0.0.1:80",
+                                bug_class="service_reachable", signed=object(), confirmed_by="service_reachability")
+    r4 = RunReport(slug="alpha")
+    nf4, nl4 = engine._surface_body_facts(SimpleNamespace(tool="nmap", body_facts=(signed_ok,)),
+                                          AgentState(engagement_slug="alpha"), r4)
+    assert nf4 == 1 and nl4 == 0 and len(r4.facts) == 1, (nf4, nl4)
+    # runner-side LEADs are surfaced as report leads (completeness — a body run of only leads is not empty).
+    r5 = RunReport(slug="alpha")
+    nf5, nl5 = engine._surface_body_facts(SimpleNamespace(tool="nmap", body_facts=(), body_leads=(lead_shaped,)),
+                                          AgentState(engagement_slug="alpha"), r5)
+    assert nf5 == 0 and nl5 == 1 and r5.facts == [] and len(r5.leads) == 1, (nf5, nl5)
