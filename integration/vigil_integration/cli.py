@@ -2469,6 +2469,43 @@ def _enforce_production_gate(action: str) -> "int | None":
     return 2
 
 
+def _inject_gateway_scope(slug: str, extra_env: dict) -> None:
+    """B2 (option c) — hand the stdlib-only egress gateway container a HOST-VERIFIED signed-scope SNAPSHOT.
+
+    The gateway container cannot read the engagement charter (stdlib-only, no charter mount, no framework
+    parser), so before B2 a chartered ``vigil up`` brought up a gateway that could not resolve its scope and
+    fail-closed to deny-all — legitimate in-scope egress was non-functional. This launcher runs in the OFFENSE
+    venv where the charter AND its parser live, so it VERIFIES the SIGNED charter and PARSES its scope HERE,
+    then injects the resolved host list as ``VIGIL_GATEWAY_SCOPE_HOSTS``. ``config.from_env`` then enforces
+    exactly that snapshot via the existing ``StaticScopeSource`` — no charter file and no framework parser ever
+    enter the egress container, and the never-liftable metadata/RFC1918 nftables+denylist floor is unaffected
+    (it is charter-independent).
+
+    FAIL-CLOSED: a missing/unsigned charter, or a signed-but-EMPTY scope, RAISES ``RuntimeError`` so the caller
+    takes its existing fail-closed branch — never bring up a deny-all/ungated gateway silently. HONEST BOUND:
+    the 'signed' guarantee is enforced HOST-SIDE by this launcher (the charter ``Signed:`` line is a plaintext
+    attestation, not a cryptographic signature); the container trusts the launcher-injected snapshot. SNAPSHOT
+    semantics: scope is captured at bring-up — a mid-engagement scope change requires a gateway restart."""
+    try:
+        from framework.v2.common.ethics import parse_scope, require_charter_signed  # noqa: PLC0415 (offense-side)
+        require_charter_signed(slug)          # raises CharterMissing / CharterNotSigned
+        # Drop blanks AND the "N/A"/"none" sentinels operators write for an inapplicable row — the matcher
+        # skips them anyway, but filtering here makes a sentinel-ONLY charter hit the EMPTY refusal below
+        # (a clear fail-closed refusal) rather than bringing up a "running" but effectively deny-all gateway.
+        hosts = [h for h in parse_scope(slug)
+                 if h and h.strip() and h.strip().strip("`").lower() not in {"n/a", "n\\/a", "none"}]
+    except Exception as exc:  # noqa: BLE001 — any verify/parse failure is a fail-closed refusal (never ungated)
+        raise RuntimeError(
+            f"refusing to bring up the egress gateway for charter {slug!r}: {type(exc).__name__}: {exc} — the "
+            "launcher must verify the SIGNED charter and inject its scope; a missing/unsigned charter "
+            "fail-closes rather than run a deny-all/ungated gateway") from exc
+    if not hosts:
+        raise RuntimeError(
+            f"charter {slug!r} is signed but declares no usable in-scope host (empty or only N/A sentinels) — "
+            "refusing to bring up a gateway with nothing to allow (fail-closed; add the in-scope systems)")
+    extra_env["VIGIL_GATEWAY_SCOPE_HOSTS"] = ",".join(hosts)
+
+
 def _cmd_up(args: argparse.Namespace) -> int:
     """`vigil up` — bring the WHOLE unified UI up at ONE origin and federate the two trust planes
     behind a self-contained reverse proxy. EXEC-ONLY: it spawns the three backends (sigil cockpit,
@@ -2506,7 +2543,8 @@ def _cmd_up(args: argparse.Namespace) -> int:
             _slug = getattr(args, "charter_slug", "") or os.environ.get("VIGIL_GATEWAY_CHARTER_SLUG", "")
             _extra_env: dict = {}
             if _slug:
-                _extra_env["VIGIL_GATEWAY_CHARTER_SLUG"] = _slug
+                _extra_env["VIGIL_GATEWAY_CHARTER_SLUG"] = _slug   # kept for provenance/logging
+                _inject_gateway_scope(_slug, _extra_env)          # B2: host-verified signed-scope snapshot
             _tok = mint_proxy_token(_repo / PROXY_TOKEN_RELPATH)
             if _tok:
                 _extra_env["VIGIL_GATEWAY_PROXY_TOKEN"] = _tok
@@ -2618,7 +2656,8 @@ def _cmd_services(args: argparse.Namespace) -> int:
         slug = getattr(args, "charter_slug", "") or os.environ.get("VIGIL_GATEWAY_CHARTER_SLUG", "")
         extra_env: dict = {}
         if slug:
-            extra_env["VIGIL_GATEWAY_CHARTER_SLUG"] = slug
+            extra_env["VIGIL_GATEWAY_CHARTER_SLUG"] = slug   # kept for provenance/logging
+            _inject_gateway_scope(slug, extra_env)           # B2: host-verified signed-scope snapshot
         tok = mint_proxy_token(repo / PROXY_TOKEN_RELPATH)
         if tok:
             extra_env["VIGIL_GATEWAY_PROXY_TOKEN"] = tok

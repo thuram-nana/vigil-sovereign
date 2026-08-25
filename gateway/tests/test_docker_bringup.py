@@ -321,12 +321,15 @@ def test_real_docker_build_and_fail_closed():
     if build.returncode != 0:
         pytest.skip(f"could not build the gateway image here (no base/registry/apt): {build.stderr[-300:]}")
     try:
-        # serve-proxy with no charter must fail closed (the scope source is required)
+        # serve-proxy with NO scope source (no charter slug AND no injected VIGIL_GATEWAY_SCOPE_HOSTS) must
+        # fail closed. B2 reworded the refusal (a static-scope env can now supply scope too), so assert the
+        # stable fail-closed phrase rather than the old slug-specific text.
         run = subprocess.run(["docker", "run", "--rm", tag, "serve-proxy"],
                              capture_output=True, text=True, timeout=120)
-        assert "VIGIL_GATEWAY_CHARTER_SLUG is required" in (run.stdout + run.stderr), (
-            "the gateway image did NOT fail closed without a charter slug — a fail-OPEN data plane: "
-            + (run.stdout + run.stderr)[-400:]
+        out = run.stdout + run.stderr
+        assert "refuses to run without a scope source" in out, (
+            "the gateway image did NOT fail closed without a scope source — a fail-OPEN data plane: "
+            + out[-400:]
         )
     finally:
         subprocess.run(["docker", "image", "rm", "-f", tag], capture_output=True, text=True, timeout=120)

@@ -18,6 +18,32 @@ Scope is **CRUCIBLE's**, reused not reinvented (`scope_source.py` → `host_matc
 both layers), including IPv4-mapped/6to4/NAT64 **and IPv4-compatible `::/96`** IPv6 forms so
 neither `::ffff:169.254.169.254` nor `::169.254.169.254` can slip past.
 
+### How the container gets its scope (B2, option c — host-verified snapshot)
+
+The gateway container is **stdlib-only** and never reads the charter or imports the CRUCIBLE
+parser. Instead, the launcher (`vigil up` / `vigil services up`), which runs in the offense venv
+where the charter and its parser live, **verifies the SIGNED charter and parses its scope
+host-side**, then injects the resolved host list as `VIGIL_GATEWAY_SCOPE_HOSTS`. `config.from_env`
+enforces exactly that snapshot via `StaticScopeSource` (precedence: a non-empty
+`VIGIL_GATEWAY_SCOPE_HOSTS` wins; else a directly-readable `VIGIL_GATEWAY_CHARTER_SLUG`; else it
+**fail-closes** — refuses to run without a scope source).
+
+The per-connection MATCH itself runs in the container: `scope_source` prefers CRUCIBLE's
+`framework.v2.common.ethics` matcher when framework is importable (host-run), and falls back to a
+**verbatim stdlib-only port** (`scope_match.py`) inside the container where framework is absent — so the
+injected scope is actually enforced there, not raised-and-denied. The port is kept in lock-step with the
+original by a drift-guard (`integration/tests/test_scope_match_parity.py`); charter *parsing* is never
+ported (that stays the launcher's host-side job). Two honest bounds:
+
+* **Signature is verified host-side, not in-container.** The trust root is the launcher; the
+  container trusts the launcher-injected snapshot. (The charter `Signed:` line is a plaintext
+  attestation, not a cryptographic signature — a true in-container crypto check would need
+  cryptographically-signed charters + a pinned pubkey baked into the image.)
+* **Snapshot, not live.** Scope is captured at bring-up; a mid-engagement scope change requires a
+  gateway restart. A missing/unsigned charter, or a signed-but-empty scope, refuses the bring-up
+  (never a deny-all/ungated gateway). The never-liftable metadata/RFC1918 floor above is
+  charter-independent and applies regardless.
+
 ## Topology (strongest form)
 
 ```

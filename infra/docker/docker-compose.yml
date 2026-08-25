@@ -85,7 +85,13 @@ services:
       VIGIL_GATEWAY_PROXY_PORT: "48081"
       VIGIL_GATEWAY_PROXY_HOST: "172.31.240.2"
       VIGIL_GATEWAY_PROXY_TOKEN: "${VIGIL_GATEWAY_PROXY_TOKEN:-}"
-      VIGIL_GATEWAY_CHARTER_SLUG: "${VIGIL_GATEWAY_CHARTER_SLUG:-}"
+      VIGIL_GATEWAY_CHARTER_SLUG: "${VIGIL_GATEWAY_CHARTER_SLUG:-}"   # provenance/logging (scope via SCOPE_HOSTS)
+      # B2 (option c): the HOST-VERIFIED signed-scope SNAPSHOT the launcher injects after verifying the SIGNED
+      # charter and parsing its scope host-side. Non-empty ⇒ the stdlib-only proxy enforces exactly this list
+      # via StaticScopeSource (no charter file/parser in the container); empty/unset ⇒ from_env falls back to
+      # the (unreadable-in-container) CHARTER_SLUG and fail-closes, exactly as before. The never-liftable
+      # metadata/RFC1918 floor is charter-independent and unaffected.
+      VIGIL_GATEWAY_SCOPE_HOSTS: "${VIGIL_GATEWAY_SCOPE_HOSTS:-}"
     command: ["vigil-gateway", "serve-proxy", "--host", "172.31.240.2", "--port", "48081"]
     healthcheck:
       # The gate is only "up" when the proxy is actually LISTENING on its pinned sandbox bind. A bad or
