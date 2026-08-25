@@ -828,20 +828,13 @@ def security_report(repo_root, services: "dict | None" = None) -> dict:
             "production_gate": evaluate_production_gate(repo, posture=posture)}
 
 
-# Offense host tools the engine uses for REAL scans (absent ⇒ the engine still runs, but those scan
-# families degrade to unavailable). Probed live with shutil.which; each carries the concrete Kali/Debian
-# install command so the preflight is ACTIONABLE, not just red/green.
-_OFFENSE_TOOLS = {
-    "nmap":     "sudo apt install -y nmap",
-    "nuclei":   "sudo apt install -y nuclei",
-    "httpx":    "sudo apt install -y httpx-toolkit   # ProjectDiscovery httpx (not the python 'httpx')",
-    "ffuf":     "sudo apt install -y ffuf",
-    "sqlmap":   "sudo apt install -y sqlmap",
-    "hydra":    "sudo apt install -y hydra",
-    "sslscan":  "sudo apt install -y sslscan",
-    "gobuster": "sudo apt install -y gobuster",
-    "nikto":    "sudo apt install -y nikto",
-}
+# NOTE on offense host tools (nmap/nuclei/httpx/…): doctor deliberately does NOT probe them. The engine's
+# tool registry (framework.v2.tools.registry) already resolves them SHADOW-AWARE (an alt-name + version
+# banner check that steps over a same-named impostor, e.g. the Python `httpx` shadowing ProjectDiscovery
+# `httpx`), and that status is surfaced live on the Tools screen / `/api/tools`. A second, shadow-BLIND
+# `shutil.which(name)` here would contradict the engine it previews (false-green on an impostor, false-red
+# on a correctly alt-named install) — so offense-tool status is handed off to the registry, and doctor
+# covers the SYSTEM prerequisites the registry does not (docker + daemon, compose, venvs, toolchain, images).
 
 # The docker images the offence/defence engines need at RUN time. Each is BUILT (not pulled) and the
 # build context is non-obvious, so the hint names the make target that encodes it.
@@ -852,7 +845,10 @@ _ENGINE_IMAGES = {
 
 # Concrete install commands for the core prerequisites (Kali/Debian).
 _INSTALL = {
-    "docker": "sudo apt install -y docker.io docker-compose-plugin && sudo systemctl enable --now docker "
+    # docker.io + docker-compose-v2 are BOTH distro packages (Debian bookworm+/Kali), so this apt line
+    # never half-fails the way `docker.io && docker-compose-plugin` did (the -plugin package ships only
+    # from download.docker.com's repo, so the && chain aborted on a stock box before enabling the daemon).
+    "docker": "sudo apt install -y docker.io docker-compose-v2 && sudo systemctl enable --now docker "
               "&& sudo usermod -aG docker \"$USER\"   # then log out/in for the group to take effect",
     "docker-daemon": "sudo systemctl start docker   # enable at boot: sudo systemctl enable --now docker; "
                      "if 'permission denied': sudo usermod -aG docker \"$USER\" then re-login",
@@ -865,10 +861,11 @@ _INSTALL = {
 }
 
 
-def _docker_daemon_running(timeout: float = 10.0):
+def _docker_daemon_running(timeout: float = 5.0):
     """True/False iff the docker daemon answers ``docker info``; None if the docker binary is absent.
     doctor previously checked only that the docker BINARY existed — a STOPPED daemon was invisible, so a
-    bring-up would fail later with an opaque error instead of a clear 'start dockerd' remedy here."""
+    bring-up would fail later with an opaque error instead of a clear 'start dockerd' remedy here. The
+    timeout is kept short because this runs synchronously in the console `/api/services` read path."""
     if not shutil.which("docker"):
         return None
     try:
@@ -878,7 +875,7 @@ def _docker_daemon_running(timeout: float = 10.0):
         return False
 
 
-def _image_present(image: str, timeout: float = 10.0) -> bool:
+def _image_present(image: str, timeout: float = 5.0) -> bool:
     try:
         return subprocess.run(["docker", "image", "inspect", image], capture_output=True, text=True,
                               timeout=timeout).returncode == 0
@@ -887,10 +884,12 @@ def _image_present(image: str, timeout: float = 10.0) -> bool:
 
 
 def _dependencies_report(repo: Path, has_docker: bool, daemon_up, compose_ok: bool) -> list:
-    """A per-item, ACTIONABLE preflight: for every dependency the system can use,
+    """A per-item, ACTIONABLE SYSTEM-prerequisite preflight: for each prerequisite,
     ``{name, kind, present, required, detail, how_to_install}``. INFORMATIONAL — it never flips the
     doctor ``ok`` gate (the existing _issue/_note logic owns the exit code); it exists so the operator
-    and the UI can see exactly what is missing and the exact command to install it. Fails soft."""
+    (via ``vigil doctor``) sees exactly what is missing and the exact command to install it. Offense host
+    tools are intentionally NOT here — they are the registry's shadow-aware job (see the module note).
+    Fails soft."""
     deps: list = []
 
     def _add(name, kind, present, required, detail, how_to_install=""):
@@ -923,10 +922,6 @@ def _dependencies_report(repo: Path, has_docker: bool, daemon_up, compose_ok: bo
     # egress guard (needed only under production posture)
     _add("egress-guard", "binary", (repo / "tools" / "egress-guard" / "egress-guard").exists(), False,
          "seccomp egress guard (required under VIGIL_POSTURE=production)", _INSTALL["egress-guard"])
-
-    # offense tools (optional; real scans degrade without them)
-    for tool, how in _OFFENSE_TOOLS.items():
-        _add(tool, "offense-tool", bool(shutil.which(tool)), False, "real-scan tool", how)
 
     # engine images (built on demand; the daemon must be up to probe or build them)
     for image, (what, how) in _ENGINE_IMAGES.items():
@@ -966,17 +961,25 @@ def collect(repo_root) -> dict:
         _note("docker is not installed — the gateway + qdrant/neo4j/otel services can't be brought up "
               "(optional: the engine still runs; SIGIL falls back to embedded vectors).")
 
-    # 1b) Actionable dependency preflight (WS1a) — the missing-dependency report WITH install commands.
-    #     INFORMATIONAL: it does NOT flip `ok` (the _issue/_note logic owns the exit code); it adds the
-    #     per-item {present, how_to_install} the UI/operator needs. Includes the docker DAEMON check
-    #     doctor lacked (a stopped daemon was invisible), the offense tools, and the engine images.
-    daemon_up = _docker_daemon_running() if has_docker else None
-    report["docker_daemon"] = daemon_up
-    report["dependencies"] = _dependencies_report(repo, has_docker, daemon_up, compose_ok)
-    if has_docker and daemon_up is False:
-        _note("docker is installed but the daemon is not answering `docker info` — start it with "
-              "`sudo systemctl start docker` (add yourself to the 'docker' group if 'permission denied'). "
-              "The gateway + services + engine sandboxes cannot come up until it is running.")
+    # 1b) Actionable dependency preflight (WS1a) — the missing SYSTEM-prerequisite report WITH install
+    #     commands. INFORMATIONAL: it does NOT flip `ok` (the _issue/_note logic owns the exit code); it
+    #     adds the per-item {present, how_to_install} `vigil doctor` surfaces. Includes the docker DAEMON
+    #     check doctor lacked (a stopped daemon was invisible) and the engine images (offense host tools
+    #     are the registry's shadow-aware job). The keys are pre-seeded and the block is wrapped like every
+    #     other probe, so a future addition can never break collect()'s never-raises contract OR the stable
+    #     top-level shape the console read relies on.
+    report["docker_daemon"] = None
+    report["dependencies"] = []
+    try:
+        daemon_up = _docker_daemon_running() if has_docker else None
+        report["docker_daemon"] = daemon_up
+        report["dependencies"] = _dependencies_report(repo, has_docker, daemon_up, compose_ok)
+        if has_docker and daemon_up is False:
+            _note("docker is installed but the daemon is not answering `docker info` — start it with "
+                  "`sudo systemctl start docker` (add yourself to the 'docker' group if 'permission "
+                  "denied'). The gateway + services + engine sandboxes cannot come up until it is running.")
+    except Exception as _exc:  # noqa: BLE001 — a probe must never crash the report
+        report["notes"].append(f"dependency preflight partially failed: {_exc}")
 
     # 2) the two venvs (hard prerequisites for `vigil up`)
     venvs = {
@@ -1195,9 +1198,13 @@ def render(report: dict) -> str:
             st = d.get("state", "?")
             purpose = f"  ({d['purpose']})" if d.get("purpose") else ""
             if st != "running" and d.get("reachable"):
-                # endpoint-aware: something already answers on the port (e.g. an externally-named
-                # sigil-qdrant), so this is NOT the misleading "absent" the compose-scoped view showed.
-                lines.append(f"  OK {name}: serving on the port (external container){purpose}")
+                # endpoint-aware: a bare TCP connect succeeded on the port — so SOMETHING is answering
+                # (e.g. an externally-named sigil-qdrant). Identity is NOT proven (not a protocol/banner
+                # check) and it is not this compose project's container — but the port is not free, so
+                # this is NOT the misleading "absent" the compose-scoped view showed. Honest wording, no
+                # green mark, no "container" claim.
+                lines.append(f"  ?? {name}: a process is answering on the port "
+                             f"(outside this compose project — verify it is {name}){purpose}")
             else:
                 lines.append(f"  {'OK ' if st == 'running' else '.. '}{name}: {st}{purpose}")
         else:
