@@ -2489,7 +2489,11 @@ def _inject_gateway_scope(slug: str, extra_env: dict) -> None:
     try:
         from framework.v2.common.ethics import parse_scope, require_charter_signed  # noqa: PLC0415 (offense-side)
         require_charter_signed(slug)          # raises CharterMissing / CharterNotSigned
-        hosts = [h for h in parse_scope(slug) if h and h.strip()]
+        # Drop blanks AND the "N/A"/"none" sentinels operators write for an inapplicable row — the matcher
+        # skips them anyway, but filtering here makes a sentinel-ONLY charter hit the EMPTY refusal below
+        # (a clear fail-closed refusal) rather than bringing up a "running" but effectively deny-all gateway.
+        hosts = [h for h in parse_scope(slug)
+                 if h and h.strip() and h.strip().strip("`").lower() not in {"n/a", "n\\/a", "none"}]
     except Exception as exc:  # noqa: BLE001 — any verify/parse failure is a fail-closed refusal (never ungated)
         raise RuntimeError(
             f"refusing to bring up the egress gateway for charter {slug!r}: {type(exc).__name__}: {exc} — the "
@@ -2497,8 +2501,8 @@ def _inject_gateway_scope(slug: str, extra_env: dict) -> None:
             "fail-closes rather than run a deny-all/ungated gateway") from exc
     if not hosts:
         raise RuntimeError(
-            f"charter {slug!r} is signed but declares an EMPTY in-scope host set — refusing to bring up a "
-            "gateway with nothing to allow (fail-closed; add the in-scope systems to the charter)")
+            f"charter {slug!r} is signed but declares no usable in-scope host (empty or only N/A sentinels) — "
+            "refusing to bring up a gateway with nothing to allow (fail-closed; add the in-scope systems)")
     extra_env["VIGIL_GATEWAY_SCOPE_HOSTS"] = ",".join(hosts)
 
 

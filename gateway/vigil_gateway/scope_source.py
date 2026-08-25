@@ -26,13 +26,34 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 
-def _bootstrap_crucible_import():
-    """Import CRUCIBLE's ethics gate, adding engine/crucible to sys.path if needed.
+def _local_gate():
+    """The STDLIB-ONLY fallback used inside the gateway container (no framework, no engine/crucible on the
+    path). ``host_matches_scope`` + ``extract_hostname`` are ported verbatim in ``scope_match`` and kept in
+    lock-step with CRUCIBLE's originals by ``test_scope_match_parity``. ``parse_scope`` (reading a signed
+    charter) is NOT ported — that is the launcher's host-side job (it injects the resolved hosts via
+    ``VIGIL_GATEWAY_SCOPE_HOSTS``), so the container only ever MATCHES against an already-parsed static scope;
+    a container-side ``CharterScopeSource`` (which would call parse_scope) is never constructed. If one ever
+    were, this raises rather than silently mis-parsing."""
+    from . import scope_match
 
-    The gateway is offense-side infrastructure; reusing ``framework`` is intended. The
-    package is path-based (not pip-installed), so locate engine/crucible relative to this
-    file (repo_root/engine/crucible) and insert it if the plain import fails.
-    """
+    def _parse_scope_unavailable(_slug: str):
+        raise RuntimeError(
+            "charter parsing (parse_scope) requires the CRUCIBLE ethics gate, which is not present in the "
+            "stdlib-only gateway container; scope must be injected as VIGIL_GATEWAY_SCOPE_HOSTS by the "
+            "host-side launcher (see gateway/README.md B2). The container matches, it does not parse.")
+
+    return _parse_scope_unavailable, scope_match.host_matches_scope, scope_match.extract_hostname
+
+
+def _bootstrap_crucible_import():
+    """Import CRUCIBLE's ethics gate, adding engine/crucible to sys.path if needed; FALL BACK to the
+    stdlib-only ``scope_match`` when framework is genuinely absent (the gateway container).
+
+    The gateway is offense-side infrastructure; reusing ``framework`` is the single source of truth when it
+    is importable (the host-run path). But the egress gateway also ships as a STDLIB-ONLY container with no
+    framework and no engine/crucible on the path — there the per-connection matching predicate must STILL
+    work (else the proxy denies every host and the injected scope is inert). So on a genuine ImportError we
+    return the verbatim-ported local matching functions instead of raising (B2 red-pen BLOCK)."""
     try:
         from framework.v2.common.ethics import (  # type: ignore
             extract_hostname,
@@ -45,12 +66,16 @@ def _bootstrap_crucible_import():
         crucible = repo_root / "engine" / "crucible"
         if crucible.is_dir() and str(crucible) not in sys.path:
             sys.path.insert(0, str(crucible))
-        from framework.v2.common.ethics import (  # type: ignore
-            extract_hostname,
-            host_matches_scope,
-            parse_scope,
-        )
-        return parse_scope, host_matches_scope, extract_hostname
+        try:
+            from framework.v2.common.ethics import (  # type: ignore
+                extract_hostname,
+                host_matches_scope,
+                parse_scope,
+            )
+            return parse_scope, host_matches_scope, extract_hostname
+        except ImportError:
+            # genuinely no framework (the stdlib-only container) → the ported local matcher.
+            return _local_gate()
 
 
 _GATE: tuple | None = None

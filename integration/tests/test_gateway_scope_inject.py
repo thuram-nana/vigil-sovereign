@@ -65,6 +65,16 @@ def test_missing_charter_is_refused_fail_closed(tmp_path: Path):
 def test_signed_but_empty_scope_is_refused_fail_closed(tmp_path: Path):
     _write_charter(tmp_path, "acme", signed=True, hosts=())   # signed, but no in-scope host rows
     env: dict = {}
-    with pytest.raises(RuntimeError, match="EMPTY in-scope host set"):
+    with pytest.raises(RuntimeError, match="no usable in-scope host"):
+        cli._inject_gateway_scope("acme", env)
+    assert "VIGIL_GATEWAY_SCOPE_HOSTS" not in env
+
+
+def test_sentinel_only_scope_is_refused_fail_closed(tmp_path: Path):
+    """A signed charter whose only in-scope rows are N/A/none sentinels has no usable host — the launcher
+    refuses (rather than bringing up a 'running' but effectively deny-all gateway)."""
+    _write_charter(tmp_path, "acme", signed=True, hosts=("N/A", "none"))
+    env: dict = {}
+    with pytest.raises(RuntimeError, match="no usable in-scope host"):
         cli._inject_gateway_scope("acme", env)
     assert "VIGIL_GATEWAY_SCOPE_HOSTS" not in env
