@@ -2622,8 +2622,16 @@ def _cmd_up(args: argparse.Namespace) -> int:
             # it may relative-import ONLY `.uiproxy`; a pure-stdlib sibling helper comes in by absolute
             # path, exactly like `vigil_gateway.docker` above (test_up_down_verbs_import_no_trust_domain).
             from vigil_integration.services import DEFAULT_SERVICES, RootServices
-            _sres = RootServices(_repo).up(list(DEFAULT_SERVICES))
+            _rs = RootServices(_repo)
+            _sres = _rs.up(list(DEFAULT_SERVICES))
             print(f"vigil up: services up ({_json.dumps(_sres)})")
+            # Build the offence/defence engine sandbox images if-absent (best-effort) so the FIRST strix/aegis
+            # engagement doesn't fail at container-create with a missing image. --no-build-images skips it.
+            if not getattr(args, "no_build_images", False):
+                _imgs = _rs.build_images_if_absent(
+                    progress=lambda n, ph: print(f"vigil up: building engine image {n} (minutes)…",
+                                                 file=sys.stderr))
+                print(f"vigil up: engine images ({_json.dumps(_imgs)})")
         except Exception as _e:  # noqa: BLE001
             print(f"vigil up: root services preflight skipped — {_e}", file=sys.stderr)
     from .uiproxy import run_up
@@ -2707,6 +2715,14 @@ def _cmd_services(args: argparse.Namespace) -> int:
         result = {"gateway": net.compose_up(compose, build=not getattr(args, "no_build", False),
                                             context_dir=gw_dir, extra_env=extra_env)}
         result["services"] = root.up(_selected_root())
+        # Build the offence/defence engine images if-absent so a strix/aegis engagement is ready without a
+        # separate `make strix` / `make aegis-image`. BEST-EFFORT (never fails the bring-up); on under --all
+        # or --build-images, off under --no-build-images.
+        if not getattr(args, "no_build_images", False) and (
+                getattr(args, "all", False) or getattr(args, "build_images", False)):
+            result["images"] = root.build_images_if_absent(
+                progress=lambda n, ph: print(f"vigil services up: building engine image {n} (minutes)…",
+                                             file=sys.stderr))
         print(json.dumps(result, indent=2))
         return 0
     except (RuntimeError, OSError) as e:
@@ -4241,6 +4257,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "if the gateway topology fails to come up, continue anyway with the sandbox UNGATED "
                          "(a default route to the operator LAN / a third party / 169.254.169.254 — FATAL-1). "
                          "Off by default; only pass it when you have accepted running without the egress gate.")
+    pu.add_argument("--no-build-images", action="store_true",
+                    help="with --services: skip building the offence/defence engine images if absent. By "
+                         "default `vigil up --services` builds vigil/strix-sandbox + vigil/aegis-gateway when "
+                         "missing (best-effort), so the first engagement is ready at container-create time.")
     pu.add_argument("--charter-slug", default="",
                     help="with --services: the signed-charter slug the egress gateway enforces as its L7 "
                          "scope. Falls back to $VIGIL_GATEWAY_CHARTER_SLUG. Unset ⇒ the gateway fail-closes "
@@ -4276,7 +4296,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "$VIGIL_GATEWAY_CHARTER_SLUG; unset ⇒ the gateway fail-closes — no scope, no gate)")
     psu.add_argument("--with-graph", action="store_true", help="also bring up Neo4j (the knowledge graph)")
     psu.add_argument("--with-observability", action="store_true", help="also bring up the otel-collector")
-    psu.add_argument("--all", action="store_true", help="bring up ALL services (gateway + qdrant + neo4j + otel)")
+    psu.add_argument("--all", action="store_true",
+                     help="bring up EVERYTHING: gateway + qdrant + neo4j + otel, AND build the offence/defence "
+                          "engine images (vigil/strix-sandbox, vigil/aegis-gateway) if absent")
+    psu.add_argument("--build-images", action="store_true",
+                     help="also build the offence/defence engine images if absent (best-effort) so a strix/"
+                          "aegis engagement is ready without a separate `make strix` / `make aegis-image`; "
+                          "implied by --all")
+    psu.add_argument("--no-build-images", action="store_true", help="skip the engine-image build even under --all")
     pssg = psvc_sub.add_parser("status", help="show which networks / image / container already exist")
     pssg.add_argument("--compose", default="")
     psdn = psvc_sub.add_parser("down", help="stop + remove the gateway container (networks are left in place)")

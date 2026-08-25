@@ -30,6 +30,19 @@ DEFAULT_SERVICES = ("qdrant",)
 # up` may pull an image, so it gets a generous bound.
 READ_TIMEOUT = 30.0
 UP_TIMEOUT = 600.0
+BUILD_TIMEOUT = 1800.0   # a from-scratch Kali/AEGIS image build is minutes; bounded so it can't hang forever
+
+# The BUILD-ONLY engine images (offence + defence sandboxes). Nothing PULLS them — each is built via its
+# compose profile (the root docker-compose.yml `strix-sandbox` / `aegis-gateway` build services, whose build
+# contexts are non-obvious). `image` is the tag the engine resolves at run time; absence degrades a later
+# engagement with a clear error (it is NOT a security gate, unlike the egress gateway), so building them is
+# best-effort — a build failure is recorded, never raised.
+ENGINE_IMAGES = {
+    "strix-sandbox": {"image": "vigil/strix-sandbox:local", "profile": "strix", "service": "strix-sandbox",
+                      "purpose": "Strix offence sandbox"},
+    "aegis-gateway": {"image": "vigil/aegis-gateway:local", "profile": "aegis", "service": "aegis-gateway",
+                      "purpose": "AEGIS defensive gateway"},
+}
 
 
 class RootServices:
@@ -141,3 +154,37 @@ class RootServices:
         if services:
             self._run(self._compose("stop", *services, profiles=self._profiles_for(services)), timeout=UP_TIMEOUT)
             self._run(self._compose("rm", "-f", *services, profiles=self._profiles_for(services)), timeout=UP_TIMEOUT)
+
+    def _image_present(self, image: str) -> bool:
+        """True iff the docker image TAG already exists locally. Never raises (no docker / a probe error → False)."""
+        try:
+            return self._run([self._docker(), "image", "inspect", image]).returncode == 0
+        except (RuntimeError, OSError, subprocess.SubprocessError):
+            return False
+
+    def build_images_if_absent(self, images=None, progress=None) -> dict:
+        """Build each ENGINE_IMAGES entry whose tag is ABSENT (idempotent), via its compose profile —
+        so `vigil up`/`vigil services up` can make the offence/defence sandboxes ready without the operator
+        remembering a separate `make strix` / `make aegis-image`. Returns {name: 'present'|'built'|
+        'failed: <err>'|'unknown'}. BEST-EFFORT per image: a build failure is RECORDED, never raised — a
+        missing engine image degrades a later engagement with a clear error, it is not a security gate (the
+        egress gateway is the one that fails closed). `progress(name, phase)` is called if given."""
+        names = list(images) if images is not None else list(ENGINE_IMAGES)
+        out: dict = {}
+        for name in names:
+            meta = ENGINE_IMAGES.get(name)
+            if not meta:
+                out[name] = "unknown"
+                continue
+            try:
+                if self._image_present(meta["image"]):
+                    out[name] = "present"
+                    continue
+                if progress:
+                    progress(name, "building")
+                proc = self._run(self._compose("build", meta["service"], profiles=[meta["profile"]]),
+                                 timeout=BUILD_TIMEOUT)
+                out[name] = "built" if proc.returncode == 0 else f"failed: {proc.stderr.strip()[-400:]}"
+            except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+                out[name] = f"failed: {e}"
+        return out
