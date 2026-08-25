@@ -22,7 +22,7 @@
 # committed default is what CI and `vigil services up` actually build, and that is pinned.
 # Re-pin with: bash infra/supply-chain/resolve-image-digests.sh   (see docs/SUPPLY-CHAIN.md)
 # python:3.13-slim, resolved 2026-08-12.
-ARG PYTHON_BASE=python:3.13-slim@sha256:afd91e25d0d1b40e4c92bf716154ec3c4a9f0de1ce2a5c3663007fb6918eaf9c
+ARG PYTHON_BASE=python:3.13-slim@sha256:7e3a6aca9d74f93cca21a91d86a8dad8c34749afd5b4a98ee481c9c47b9f5ed4
 FROM ${PYTHON_BASE}
 
 # A dedicated unprivileged user — the proxy drops all capabilities and runs read-only in compose.
