@@ -92,3 +92,26 @@ def _isolate_backup_trust_anchor(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("VIGIL_BACKUP_TRUST_ANCHOR",
                        str(tmp_path_factory.mktemp("backup-anchor") / "trust-anchor.json"))
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_crucible_root_cache():
+    """Keep CRUCIBLE_ROOT resolution hermetic per test (B4). ``framework.v2.common.paths.crucible_root`` is an
+    ``@lru_cache(maxsize=1)`` — the FIRST caller in the process FREEZES the resolved root for every later
+    caller. So a test that monkeypatches ``CRUCIBLE_ROOT`` (or merely triggers the eager
+    ``tool_intake``/``brain_engine`` path resolution) leaks its root into every subsequent test, making the
+    suite ORDER-DEPENDENT — the exact fragility the ``test_brain_fact_path_tripwire`` subprocess trampoline
+    was working around. Clear the cache BEFORE each test — that is what delivers order-independence (no prior
+    test's monkeypatched root survives into this one) — and AFTER as belt-and-suspenders (covering any
+    session/module-scoped teardown or plugin hook that resolves the root while this test's env is still live).
+    Behaviour-preserving: production sets CRUCIBLE_ROOT once
+    and never mutates it mid-process, so ``crucible_root()`` re-resolves to the identical value; this only makes
+    tests order-independent. A no-op in the framework-free (sovereign) leg where ``paths`` cannot be imported."""
+    try:
+        from framework.v2.common import paths
+    except Exception:  # noqa: BLE001 — the sovereign leg has no framework; nothing to reset
+        yield
+        return
+    paths._reset_cache()
+    yield
+    paths._reset_cache()

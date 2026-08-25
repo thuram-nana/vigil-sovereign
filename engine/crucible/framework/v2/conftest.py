@@ -46,3 +46,22 @@ def _unbind_engagement_after_test() -> Generator[None, None, None]:
         bind_engagement(None)
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _isolate_crucible_root_cache() -> Generator[None, None, None]:
+    """Keep CRUCIBLE_ROOT resolution hermetic per test (B4). ``common.paths.crucible_root`` is an
+    ``@lru_cache(maxsize=1)`` — the FIRST caller freezes the resolved root for the whole process, so a test
+    that monkeypatches ``CRUCIBLE_ROOT`` leaks its root into every later test and makes the wholesale
+    ``crucible-core`` run ORDER-DEPENDENT. Clear the cache BEFORE each test (this delivers the
+    order-independence) and AFTER as belt-and-suspenders. Behaviour-preserving:
+    production sets CRUCIBLE_ROOT once, so it re-resolves to the identical value; this only makes tests
+    order-independent (the individual paths tests already reset locally — this is the global autouse guard)."""
+    try:
+        from framework.v2.common import paths
+    except Exception:  # noqa: BLE001 — defensive; paths is always importable in this leg
+        yield
+        return
+    paths._reset_cache()
+    yield
+    paths._reset_cache()
