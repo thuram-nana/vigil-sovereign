@@ -91,6 +91,7 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/launch/preview": _RUN,
     "/api/launch/assessment": _RUN,
     "/api/launch/cloud": _RUN,
+    "/api/brain/propose": _RUN,   # B3/H10 propose-only planning (spawns --plan-only; executes nothing)
     "/api/replay": _RUN,
     "/api/reverify/*": _RUN,
     "/api/proof/export": _RUN,

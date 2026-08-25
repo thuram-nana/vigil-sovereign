@@ -143,9 +143,25 @@ def _cmd_engage(args: argparse.Namespace) -> int:
         observations = collect_engage_observations(
             slug=args.slug, base_dir=args.base_dir, scope=scope,
             sidecar_path=(getattr(args, "brain_observations", "") or None))
+        # --proposal-out (B3): where BrainThink._persist writes brain-proposal.json. When unset it falls back
+        # to $VIGIL_PROOF_RUN_DIR (what the console sets when it spawns a run); with neither, _persist no-ops.
+        _proposal_out = str(getattr(args, "proposal_out", "") or "").strip() or None
         brain = BrainThink(HexstrikeBrain(), target=args.url,
                            objective=getattr(args, "brain_objective", None),
-                           observations=observations)
+                           observations=observations, proposal_out=_proposal_out)
+    # --plan-only (B3): propose the chain (persist brain-proposal.json) then STOP before the gate/scope/
+    # traffic. Only meaningful WITH the brain (its _persist is the sole producer) and only useful if there is
+    # somewhere to write the proposal — fail closed on either gap rather than "succeed" having done nothing.
+    if bool(getattr(args, "plan_only", False)):
+        if brain is None:
+            print("vigil engage: --plan-only requires --brain (the propose-only brain is what persists the "
+                  "proposed chain); there is nothing to plan without it.", file=sys.stderr)
+            return 2
+        if not (str(getattr(args, "proposal_out", "") or "").strip()
+                or os.environ.get("VIGIL_PROOF_RUN_DIR", "").strip()):
+            print("vigil engage: --plan-only needs a destination for the proposal — pass --proposal-out DIR "
+                  "or set VIGIL_PROOF_RUN_DIR; otherwise the proposal is written nowhere.", file=sys.stderr)
+            return 2
     # GAP-1 — the per-session model sovereignty pick. --backend (LOCAL) and --model (CLOUD) are mutually
     # exclusive: a local backend routes think through the loopback-enforced provider with no cloud failover,
     # so simultaneously naming a cloud model string is contradictory. Fail-closed on the contradiction rather
@@ -175,6 +191,7 @@ def _cmd_engage(args: argparse.Namespace) -> int:
         access_log=args.access_log, auth_log=args.auth_log, conn_log=args.conn_log,
         max_iterations=args.max_iterations, owner_approves_offense=args.approve_offense,
         brain_execute_via_body=bool(getattr(args, "brain_execute_via_body", False)),
+        plan_only=bool(getattr(args, "plan_only", False)),
     )
     engine = build_engine(cfg)
     report = engine.engage(args.url, objective=args.objective, resume=bool(getattr(args, "resume", False)))
@@ -3583,6 +3600,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "HexstrikeAgentBody.execute instead of the governed executor. The gate is unchanged "
                          "(offense still queues; nuclei stays A2) and the FACT seam stays CLOSED — the body "
                          "runs with no runner, so it mints ZERO facts. Only meaningful with --brain hexstrike.")
+    pe.add_argument("--plan-only", action="store_true",
+                    help="B3/H10 PROPOSE-ONLY: run exactly one think() (which, with --brain, PERSISTS the "
+                         "proposed chain to brain-proposal.json) then STOP before the gate/scope/traffic — no "
+                         "tool runs, nothing is minted. Requires --brain and a proposal destination "
+                         "(--proposal-out or $VIGIL_PROOF_RUN_DIR). Driving the chain stays the normal "
+                         "owner-checkpoint-gated path.")
+    pe.add_argument("--proposal-out", default="",
+                    help="directory to write the brain's proposal (brain-proposal.json) to; used with --brain "
+                         "(esp. --plan-only). Defaults to $VIGIL_PROOF_RUN_DIR when unset.")
     pe.add_argument("--approve-offense", action="store_true",
                     help="a SINGLE-USE standing approval to run ONE queued offense action against the "
                          "operator's own chartered loopback (the human leg of the conjunctive gate; scope "

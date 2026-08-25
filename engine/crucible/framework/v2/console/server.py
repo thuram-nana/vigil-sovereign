@@ -834,6 +834,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     provider=str(body.get("provider", "")),
                 ))
                 return
+            if path == "/api/brain/propose":
+                # B3/H10 PROPOSE-ONLY: plan a chain with the propose-only hexstrike brain against a loopback
+                # target and return its run_id, executing NOTHING. Spawns `vigil engage --brain hexstrike
+                # --plan-only` (validation + loopback + fail-closed refusals live in actions.brain_propose);
+                # the Brain panel then reads the persisted proposal via GET /api/brain/decision?run=<run_id>.
+                # DRIVING/execution stays the owner-checkpoint-gated launch path — this mints nothing.
+                self._json(actions.brain_propose(body))
+                return
             if path == "/api/replay":
                 # Replay-the-Proof: re-fire an EXTERNALLY-supplied report/finding document's RETAINED oracle
                 # certificates OFFLINE (pure re-computation — NO target, NO scope, NO traffic). Registered

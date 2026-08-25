@@ -5714,15 +5714,19 @@
     ]);
   }
 
-  // The plan-a-chain control row: a brain selector, the CLOSED objective enum (derived server-side from the
-  // brain's own `Objective` enum), and a RUN button that is deliberately disabled. Driving a live chain
-  // spawns the gated `vigil engage --brain` path — a FACT-adjacent action deferred to an owner checkpoint —
-  // so nothing here fires; the panel only SURFACES a proposal a real run already persisted.
-  function brainControls(brain) {
+  // The plan-a-chain control row: a loopback target, a brain selector, the CLOSED objective enum (derived
+  // server-side from the brain's own `Objective` enum), and a PROPOSE-ONLY button (B3/H10). Clicking it
+  // POSTs /api/brain/propose, which SPAWNS `vigil engage --brain hexstrike --plan-only` — one think() that
+  // PERSISTS the proposed chain then STOPS before the gate/scope/traffic — and re-renders the panel over that
+  // fresh proposal. It runs NO tools, sends NO traffic, mints NO findings. DRIVING the chain (execution)
+  // stays the owner-checkpoint-gated New-Assessment path; this button never executes. `v` is the panel node,
+  // so a successful propose can re-render it against the new run's proposal.
+  function brainControls(brain, v) {
     var b = brain || {};
     var objs = b.objectives || [];
-    // The brains VIGIL's `--brain` flag distinguishes: the propose-only brain this panel describes (its
-    // name is derived from source), and the default agentic path (Strix). Inert until the checkpoint.
+    // The `--brain` flag distinguishes: the propose-only brain this panel plans with (its name is derived
+    // from source), and the default agentic path (Strix, which EXECUTES — not planned here; the propose
+    // endpoint refuses it with an honest reason).
     var brainOpts = [
       { id: "hexstrike", label: (b.name || "HexStrike") + " (propose-only)" },
       { id: "strix", label: "Strix (default agentic path)" },
@@ -5734,22 +5738,46 @@
       ? h("select", null, objs.map(function (o) {
           return h("option", { value: o.id, selected: !!o.default }, o.id + (o.default ? " (default)" : "")); }))
       : h("select", { disabled: true }, [h("option", null, "objective vocabulary unavailable")]);
-    var runBtn = h("button.btn.owner", { disabled: true,
-      title: "Live spawning is gated behind an owner checkpoint (not wired in this build)" },
-      [V.icon("bolt"), "Propose & drive chain"]);
-    return V.card("Plan a chain", "CHECKPOINT-GATED", h("div", null, [
+    var tgtInput = h("input", { type: "text", placeholder: "http://127.0.0.1:PORT/  (loopback only)",
+      style: { width: "100%" } });
+    var propOut = h("div", { style: { marginTop: "10px" } });
+    var canRun = V.can("run_engagement");
+    var idle = [V.icon("bolt"), "Propose chain (plan-only)"];
+    var runBtn = h("button.btn.owner", {
+      disabled: !canRun,
+      title: canRun
+        ? "Propose-only: persists a proposed chain and shows it below — runs no tools, sends no traffic"
+        : "requires the run_engagement permission",
+      onClick: function () {
+        var tgt = (tgtInput.value || "").trim();
+        if (!tgt) { V.mount(propOut, brainActErr("enter a loopback target URL to plan against")); return; }
+        if (objs.length === 0) { V.mount(propOut, brainActErr("no objective vocabulary available")); return; }
+        runBtn.disabled = true; V.mount(runBtn, [V.icon("bolt"), "Proposing…"]);
+        V.mount(propOut, h("div.hint", null, "Planning a propose-only chain (no gate, no traffic, no execution)…"));
+        V.postJSON(OFF("/api/brain/propose"), { brain: brainSel.value, target: tgt, objective: objSel.value })
+          .then(function (r) {
+            if (!r || r.ok !== true) { V.mount(propOut, brainActErr((r && r.error) || "propose failed")); return; }
+            brainDecision(v, r.run_id);   // re-render the whole panel over THIS run's persisted proposal
+          })
+          .catch(function () { V.mount(propOut, brainActErr("could not reach the propose action")); })
+          .then(function () { runBtn.disabled = !canRun; V.mount(runBtn, idle); });
+      },
+    }, idle);
+    return V.card("Plan a chain", "PROPOSE-ONLY", h("div", null, [
+      h("div.field", { style: { marginBottom: "10px" } }, [h("label", null, "Target (loopback)"), tgtInput]),
       h("div.grid.cols-2", { style: { gap: "12px", alignItems: "end" } }, [
         h("div.field", null, [h("label", null, "Brain"), brainSel]),
         h("div.field", null, [h("label", null, "Objective"), objSel]),
       ]),
       h("div.row-flex", { style: { gap: "10px", alignItems: "center", marginTop: "10px", flexWrap: "wrap" } }, [
-        runBtn, V.pill("checkpoint-gated", "sm warn", null),
+        runBtn, V.pill("propose-only", "sm ok", null),
       ]),
+      propOut,
       h("div.hint", { style: { marginTop: "8px" } },
-        "Selecting a brain + objective and driving a live chain spawns the gated `vigil engage --brain` path "
-        + "— a FACT-adjacent action deferred to an owner checkpoint, so this button does not fire. This "
-        + "screen surfaces a proposal a real run persisted (below); it never invokes the brain itself."),
-    ]), false);
+        "Plans a chain with the propose-only brain and shows it below. It PERSISTS a proposal but runs NO "
+        + "tools, sends NO traffic, and mints NO findings. DRIVING the chain (execution) stays the "
+        + "owner-checkpoint-gated New-Assessment path — this button never executes."),
+    ]), true);
   }
 
   function brainChain(prop, roster) {
@@ -5803,8 +5831,11 @@
     }));
     return h("div", { style: { marginTop: "12px" } }, [head, list]);
   }
-  function brainDecision(v) {
-    V.getJSON(OFF("/api/brain/decision")).then(function (d) {
+  function brainDecision(v, runId) {
+    // runId (optional): after a propose, read THAT run's persisted proposal deterministically (no
+    // cross-run stale fallback); without it, the reader returns the newest run carrying a valid proposal.
+    var url = OFF("/api/brain/decision") + (runId ? "?run=" + encodeURIComponent(runId) : "");
+    V.getJSON(url).then(function (d) {
       var brain = (d && d.brain) || {};
       var prop = (d && d.proposal) || { present: false };
       var doctrine = (d && d.doctrine) || "";
@@ -5847,7 +5878,7 @@
               + "(checkpoint-gated) or run `vigil engage --brain hexstrike`, which persists the proposal this panel surfaces."),
           ]);
         }
-        V.mount(v, [banner, brainControls(brain), brainCard, gatePosture, legend, chain]);
+        V.mount(v, [banner, brainControls(brain, v), brainCard, gatePosture, legend, chain]);
       }
     }).catch(function () { V.mount(v, offlineEmpty()); });
   }
