@@ -202,6 +202,9 @@ class VigilEngine:
     seams: EngineSeams = field(default_factory=EngineSeams)
     require_attestation: bool = True       # the WS-6 deep-core rule: no attestation → no run
     max_iterations: int = 12
+    plan_only: bool = False                 # B3 (H10): run exactly ONE think() (which, with a wired brain,
+                                            # PERSISTS the proposed chain) then STOP before the gate/scope/
+                                            # traffic — propose, never execute (the console propose button)
 
     # -- the loop -----------------------------------------------------------------------------------
 
@@ -279,6 +282,16 @@ class VigilEngine:
             self._drain_operator(state)      # (A5) fold in any queued operator instructions BEFORE we think
             decision = self._think(state)
             report.decisions.append(str(decision.action.value))
+
+            # B3 (H10) PLAN-ONLY: the (first) think() has just run — with a wired brain it transitively
+            # PERSISTED the proposed chain to <run_dir>/brain-proposal.json (engine_think._persist). Stop
+            # HERE, BEFORE authorize_edge (the conjunctive gate + CRUCIBLE scope) at line ~333 and before any
+            # _run_tool. No gate, no scope-check, no target traffic, no execution — the run PROPOSES and never
+            # drives. Driving the chain stays the owner-checkpoint-gated normal (non-plan-only) path.
+            if self.plan_only:
+                report.paused = "plan-only"
+                state.done = True
+                break
 
             # W6b — a classified BACKEND-CALL failure the think seam fail-closed over (network / api /
             # api_transient) is mirrored to the spine as an OBSERVATION so the operator's process box shows

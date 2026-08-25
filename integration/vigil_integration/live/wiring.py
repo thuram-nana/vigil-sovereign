@@ -231,6 +231,11 @@ class EngineConfig:
     # runner so a tool mints its first live FACT (nmap SERVICE_REACHABILITY) is the SEPARATE,
     # operator-checkpoint-gated H8f slice — never enabled here.
     brain_execute_via_body: bool = False
+    # B3 (H10) — propose-only. When True the engine runs exactly ONE think() (which, with a wired brain,
+    # persists the proposed chain) then STOPS before the gate/scope/traffic: the console "propose" button and
+    # ``vigil engage --brain hexstrike --plan-only``. Only meaningful WITH a brain (the persist producer);
+    # the CLI refuses --plan-only without --brain. Execution/driving stays the owner-checkpoint-gated path.
+    plan_only: bool = False
     # attestation
     operator_keypair: Optional[KeyPair] = None
     # spine
@@ -900,7 +905,8 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     )
     return VigilEngine(slug=config.slug, seams=seams,
                        require_attestation=config.require_attestation,
-                       max_iterations=config.max_iterations)
+                       max_iterations=config.max_iterations,
+                       plan_only=config.plan_only)
 
 
 # ---------------------------------------------------------------------------------------------------

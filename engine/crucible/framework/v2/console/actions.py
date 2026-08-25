@@ -1923,6 +1923,102 @@ def engine_plan(body: dict) -> dict:
             "agentic_unmet_reason": _AGENTIC_UNMET_REASONS[unmet]}
 
 
+_BRAIN_OBJECTIVES = frozenset({"quick", "comprehensive"})   # the propose-only brain's closed objective enum
+# RFC-3986 path characters (pchar + "/"); anything else in the path is dropped when canonicalizing the
+# loopback target so no raw user bytes flow onto the spawn argv (defense-in-depth over the list-form spawn).
+_SAFE_URL_PATH = re.compile(r"[A-Za-z0-9._~%!$&'()*+,;=:@/-]*")
+
+
+def brain_propose(body: dict) -> dict:
+    """B3/H10 — PROPOSE-ONLY: plan a chain with the homegrown, propose-only decision brain against a
+    LOOPBACK target and return the run_id of the persisted proposal, executing NOTHING. It SPAWNS (never
+    imports — FATAL-2) the integration ``vigil engage <target> --brain hexstrike --brain-objective <obj>
+    --plan-only``, which runs exactly ONE think() (persisting ``<run_dir>/brain-proposal.json``) and STOPS
+    before the conjunctive gate, the CRUCIBLE scope check, and any traffic. The Brain panel then reads the
+    artifact via the existing GET ``/api/brain/decision?run=<run_id>``. DRIVING the chain (execution) stays
+    the owner-checkpoint-gated launch path — this endpoint never runs a tool, sends a packet, or mints a
+    finding. Returns ``{ok, run_id, slug, engine, objective}`` or ``{error}`` (a clean, fail-closed refusal —
+    never a traceback)."""
+    brain = str(body.get("brain", "hexstrike")).strip().lower()
+    if brain != "hexstrike":
+        # 'strix' (the default agentic path) is not a propose-only planner — it is the executing agent, gated
+        # behind the normal launch/approval path. Only the hexstrike brain plans without executing.
+        return {"error": f"unknown propose-only brain {brain!r} (only 'hexstrike' plans without executing; "
+                         f"the default agentic path is Strix, which is not planned here)"}
+    objective = str(body.get("objective", "comprehensive")).strip().lower()
+    if objective not in _BRAIN_OBJECTIVES:
+        return {"error": f"objective must be one of {sorted(_BRAIN_OBJECTIVES)} (a closed enum); "
+                         f"got {objective!r}"}
+    raw_target = str(body.get("target", "")).strip()
+    if not raw_target:
+        return {"error": "a target URL is required to plan a chain"}
+    sp = urlsplit(raw_target)
+    host = (sp.hostname or "").lower()
+    if not host:
+        return {"error": "target must be an absolute URL"}
+    if host not in _LOOPBACK:
+        # The propose spawn pins --scope 127.0.0.1 (like the agentic bridge); a remote plan would need a
+        # signed charter the console cannot mint. Keep the UI surface loopback-only and honest.
+        return {"error": "planning here is loopback-only (the propose spawn pins --scope 127.0.0.1); point "
+                         "it at your own loopback target, or run `vigil engage --brain hexstrike --plan-only` "
+                         "against a chartered target from the CLI"}
+    if sp.scheme not in ("http", "https"):
+        return {"error": "target must be an http(s) loopback URL"}
+    try:
+        port = sp.port          # int | None; a malformed port raises ValueError
+    except ValueError:
+        return {"error": "target has an invalid port"}
+    # Rebuild a CANONICAL loopback target from VALIDATED pieces so NO raw user string reaches the spawn argv:
+    # the scheme is a {http,https} literal, the host is a _LOOPBACK member, the port is an int, and the path is
+    # charset-checked (anything else → "/"). Defense-in-depth over the already list-form (shell-free) spawn —
+    # and it removes the tainted-argv surface entirely (userinfo/query/fragment are dropped).
+    safe_path = sp.path if _SAFE_URL_PATH.fullmatch(sp.path or "") else "/"
+    target = f"{sp.scheme}://{host}" + (f":{int(port)}" if port is not None else "") + (safe_path or "/")
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"error": "no `vigil` entrypoint resolved (set VIGIL_BIN or put `vigil` on PATH) — the "
+                         "propose-only brain runs in the integration engine, which is spawned, not imported"}
+    slug = _slugify(str(body.get("slug") or "brain-plan"), fallback="brain-plan")   # str() so a non-string
+    #                                        slug is a clean value, not a 500 traceback (docstring: never one)
+    run_id = _new_run_id()
+    rd = run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    # PROPOSE-ONLY, via a FILE request so NO user value (target/objective/slug) reaches the spawn argv — the
+    # launch_cloud precedent ("the operator's target label is NEVER on the command line"). The argv carries
+    # ONLY literals + server-controlled paths (this run dir); the validated {target, objective, slug} go in the
+    # JSON request. In the child, --plan-request implies --brain hexstrike --plan-only (so no tool runs, no
+    # traffic, nothing minted); --proposal-out pins brain-proposal.json into THIS run dir for the reader.
+    req_path = rd / "plan-request.json"
+    req_path.write_text(json.dumps({"target": target, "objective": objective, "slug": slug}), encoding="utf-8")
+    cmd = [vigil, "engage", "--plan-request", str(req_path), "--scope", "127.0.0.1",
+           "--base-dir", _live_base(), "--proposal-out", str(rd)]
+
+    def _meta(**extra) -> None:
+        _write_meta(run_id, mode="brain-propose", target=target, slug=slug, brain="hexstrike",
+                    objective=objective, cmd=cmd, plan_only=True, stream="none", **extra)
+
+    _meta(status="running", started=time.time())
+    # SYNCHRONOUS: plan-only is fast (one think + local capability probing, no traffic), so run it inline and
+    # return once the artifact exists — the UI can fetch the proposal immediately. Belt-and-suspenders on the
+    # destination: --proposal-out AND VIGIL_PROOF_RUN_DIR both name rd (owner key is stripped from the offense
+    # child by dispatch, and plan-only signs nothing anyway).
+    child_env = {**os.environ, "VIGIL_PROOF_RUN_DIR": str(rd)}
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=child_env)  # noqa: S603
+    except Exception as e:  # never let a propose crash the console
+        _meta(status="error", error=str(e), finished=time.time())
+        return {"error": f"the propose-only run failed to start: {e}", "run_id": run_id}
+    wrote = (rd / "brain-proposal.json").is_file()
+    if proc.returncode != 0 or not wrote:
+        _meta(status="error", rc=proc.returncode, stderr=(proc.stderr or "")[-2000:], finished=time.time())
+        return {"error": "the propose-only run produced no proposal"
+                         + (f" (rc={proc.returncode})" if proc.returncode else "")
+                         + ((": " + (proc.stderr or "").strip()[-400:]) if (proc.stderr or "").strip() else ""),
+                "run_id": run_id}
+    _meta(status="done", rc=0, finished=time.time())
+    return {"ok": True, "run_id": run_id, "slug": slug, "engine": "brain-propose", "objective": objective}
+
+
 def launch_assessment(body: dict) -> dict:
     """Route the New-Assessment wizard body to the SAME gated CLI a hand-run engagement uses and
     spawn it. Returns ``{run_id, status, mode, slug, stream}`` or ``{error}`` (a clean, fail-closed

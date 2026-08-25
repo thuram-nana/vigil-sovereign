@@ -115,6 +115,32 @@ def _cmd_engage(args: argparse.Namespace) -> int:
     from .live.think_claude import ReplayThinker
     from .live.wiring import EngineConfig, build_engine
 
+    # B3/H10 — a PROPOSE-ONLY plan request read from a FILE. The console writes a validated
+    # {target, objective, slug} JSON into a server-controlled run dir and passes only its PATH on the argv, so
+    # no user value reaches the command line (the launch_cloud precedent). It implies --brain hexstrike
+    # --plan-only and supplies the target the positional url would otherwise carry. Fail-closed on a bad file.
+    plan_request = str(getattr(args, "plan_request", "") or "").strip()
+    if plan_request:
+        try:
+            _req = json.loads(Path(plan_request).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"vigil engage: --plan-request file unreadable/not JSON: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(_req, dict) or not str(_req.get("target", "") or "").strip():
+            print("vigil engage: --plan-request file must be a JSON object with a non-empty 'target'",
+                  file=sys.stderr)
+            return 2
+        args.url = str(_req.get("target", "") or "")
+        args.brain = "hexstrike"
+        args.plan_only = True
+        args.brain_objective = str(_req.get("objective", "") or "comprehensive")
+        if str(_req.get("slug", "") or "").strip():
+            args.slug = str(_req["slug"])
+    if not str(getattr(args, "url", "") or "").strip():
+        print("vigil engage: a target url is required (as the positional argument or via --plan-request)",
+              file=sys.stderr)
+        return 2
+
     replay = None
     if args.replay:
         decisions = json.loads(Path(args.replay).read_text(encoding="utf-8"))
@@ -143,9 +169,25 @@ def _cmd_engage(args: argparse.Namespace) -> int:
         observations = collect_engage_observations(
             slug=args.slug, base_dir=args.base_dir, scope=scope,
             sidecar_path=(getattr(args, "brain_observations", "") or None))
+        # --proposal-out (B3): where BrainThink._persist writes brain-proposal.json. When unset it falls back
+        # to $VIGIL_PROOF_RUN_DIR (what the console sets when it spawns a run); with neither, _persist no-ops.
+        _proposal_out = str(getattr(args, "proposal_out", "") or "").strip() or None
         brain = BrainThink(HexstrikeBrain(), target=args.url,
                            objective=getattr(args, "brain_objective", None),
-                           observations=observations)
+                           observations=observations, proposal_out=_proposal_out)
+    # --plan-only (B3): propose the chain (persist brain-proposal.json) then STOP before the gate/scope/
+    # traffic. Only meaningful WITH the brain (its _persist is the sole producer) and only useful if there is
+    # somewhere to write the proposal — fail closed on either gap rather than "succeed" having done nothing.
+    if bool(getattr(args, "plan_only", False)):
+        if brain is None:
+            print("vigil engage: --plan-only requires --brain (the propose-only brain is what persists the "
+                  "proposed chain); there is nothing to plan without it.", file=sys.stderr)
+            return 2
+        if not (str(getattr(args, "proposal_out", "") or "").strip()
+                or os.environ.get("VIGIL_PROOF_RUN_DIR", "").strip()):
+            print("vigil engage: --plan-only needs a destination for the proposal — pass --proposal-out DIR "
+                  "or set VIGIL_PROOF_RUN_DIR; otherwise the proposal is written nowhere.", file=sys.stderr)
+            return 2
     # GAP-1 — the per-session model sovereignty pick. --backend (LOCAL) and --model (CLOUD) are mutually
     # exclusive: a local backend routes think through the loopback-enforced provider with no cloud failover,
     # so simultaneously naming a cloud model string is contradictory. Fail-closed on the contradiction rather
@@ -175,6 +217,7 @@ def _cmd_engage(args: argparse.Namespace) -> int:
         access_log=args.access_log, auth_log=args.auth_log, conn_log=args.conn_log,
         max_iterations=args.max_iterations, owner_approves_offense=args.approve_offense,
         brain_execute_via_body=bool(getattr(args, "brain_execute_via_body", False)),
+        plan_only=bool(getattr(args, "plan_only", False)),
     )
     engine = build_engine(cfg)
     report = engine.engage(args.url, objective=args.objective, resume=bool(getattr(args, "resume", False)))
@@ -3528,7 +3571,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     pe = sub.add_parser("engage", help="run an engagement against an owner-authorized target (loopback or remote)")
-    pe.add_argument("url")
+    pe.add_argument("url", nargs="?", default="")   # optional: --plan-request supplies it from a file instead
     pe.add_argument("--slug", default="loopback")
     pe.add_argument("--objective", default="",
                     help="free-text goal RECORDED with the engagement for your own record; it does not "
@@ -3583,6 +3626,20 @@ def build_parser() -> argparse.ArgumentParser:
                          "HexstrikeAgentBody.execute instead of the governed executor. The gate is unchanged "
                          "(offense still queues; nuclei stays A2) and the FACT seam stays CLOSED — the body "
                          "runs with no runner, so it mints ZERO facts. Only meaningful with --brain hexstrike.")
+    pe.add_argument("--plan-only", action="store_true",
+                    help="B3/H10 PROPOSE-ONLY: run exactly one think() (which, with --brain, PERSISTS the "
+                         "proposed chain to brain-proposal.json) then STOP before the gate/scope/traffic — no "
+                         "tool runs, nothing is minted. Requires --brain and a proposal destination "
+                         "(--proposal-out or $VIGIL_PROOF_RUN_DIR). Driving the chain stays the normal "
+                         "owner-checkpoint-gated path.")
+    pe.add_argument("--proposal-out", default="",
+                    help="directory to write the brain's proposal (brain-proposal.json) to; used with --brain "
+                         "(esp. --plan-only). Defaults to $VIGIL_PROOF_RUN_DIR when unset.")
+    pe.add_argument("--plan-request", default="",
+                    help="B3/H10: a JSON file {target, objective, slug} for a PROPOSE-ONLY plan. Reading the "
+                         "target/objective/slug from a file (instead of the argv) keeps user values off the "
+                         "command line (the launch_cloud precedent). Implies --brain hexstrike --plan-only; "
+                         "the positional url may be omitted (it comes from the file).")
     pe.add_argument("--approve-offense", action="store_true",
                     help="a SINGLE-USE standing approval to run ONE queued offense action against the "
                          "operator's own chartered loopback (the human leg of the conjunctive gate; scope "
