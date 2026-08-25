@@ -359,7 +359,11 @@ def _web_redrive_mint(report: dict, wclass: str, *, run_dir: "str | os.PathLike"
         # ``engagement_slug`` is BOTH the gate-authorization slug and the certificate-binding slug: the
         # bootstrap provisions the run's authority under ``engagement_slug``, so the two scopes are identical
         # by construction (a future deployment needing distinct slugs is deferred).
-        wr = web_redrive(url, slug=engagement_slug, engagement_slug=engagement_slug, signers=signers)
+        # Thread the CLAIMED class through: the oidc_redirect_uri branch is class-gated in web_redrive (its
+        # predicate is identical to open_redirect, so it fires ONLY for a report that actually claims oidc —
+        # never as a severity-upgrade of a plain open_redirect that merely has a redirect_uri param).
+        wr = web_redrive(url, slug=engagement_slug, engagement_slug=engagement_slug, signers=signers,
+                         claimed_class=wclass)
     except Exception as exc:  # noqa: BLE001 — a re-drive failure drops the mint (LEAD), never raises into Strix
         # inv 12 (S9): the VIGIL-owned re-drive EXECUTION raised (gateway down / network crash / framework
         # import error) — a re-drive we could not RUN, not a target we confirmed clean. Record the typed

@@ -108,6 +108,34 @@ class _WebApp(http.server.BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Credentials", "true")
             self.end_headers()
             self.wfile.write(b"{}")
+        elif parts.path == "/hostecho":                    # BENIGN: echoes the injected Host as INERT plain
+            host = self.headers.get("Host", "")            # text — never a URL/Location authority → no FACT.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")   # declared: the body IS adjudicable
+            self.end_headers()
+            self.wfile.write((f"<html><body><p>Host header was: {host}</p>"
+                              f'<a href="/reset?t=abc">reset</a></body></html>').encode("utf-8"))
+        elif parts.path == "/hostloc":                     # VULNERABLE: reflects the injected Host into the
+            host = self.headers.get("Host", "")            # 302 Location AUTHORITY (host_header.location_header).
+            self.send_response(302)
+            self.send_header("Location", f"https://{host}/reset?t=abc")
+            self.end_headers()
+        elif parts.path == "/authorize":                   # VULNERABLE OIDC authz: honors the forged
+            ru = (q.get("redirect_uri") or [""])[0]        # redirect_uri VERBATIM → 302 to the attacker host.
+            self.send_response(302)
+            self.send_header("Location", ru)
+            self.end_headers()
+        elif parts.path == "/authorize-safe":              # BENIGN OIDC authz: validates redirect_uri against a
+            ru = (q.get("redirect_uri") or [""])[0]        # registered allowlist — never honors a forgery.
+            if urlsplit(ru).hostname in {"legit.example"}:
+                self.send_response(302)
+                self.send_header("Location", ru)           # only ever its OWN registered host
+                self.end_headers()
+            else:
+                self.send_response(400)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(f"unregistered redirect_uri: {ru}".encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
@@ -353,6 +381,199 @@ def test_wildcard_cors_with_credentials_mints_no_fact(monkeypatch, tmp_path):
         srv.shutdown()
     assert _HITS["n"] > 0, "the re-drive must actually contact the server"
     assert not [x for x in res.facts if "cors" in x.finding_ref], "ACAO:* + creds must NOT mint a cors FACT"
+
+
+def test_a_host_header_echoed_into_inert_body_mints_no_fact(monkeypatch, tmp_path):
+    """FALSE-FACT (C1): a page that reflects the injected hostile Host into INERT body text — never a
+    Location/URL authority — is NOT a host-header injection. VIGIL's own re-drive refutes it, so nothing is
+    minted (a scanner that flagged it would be a LEAD at most)."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = web_redrive(f"http://127.0.0.1:{port}/hostecho",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert _HITS["n"] > 0, "the re-drive must actually contact the server (a refusal would be a vacuous pass)"
+    assert not [x for x in res.facts if "host_header" in x.finding_ref], \
+        f"an inert Host echo must NOT mint a host_header FACT: {[x.finding_ref for x in res.facts]}"
+
+
+def test_a_host_header_reflected_into_the_location_authority_mints_a_fact(monkeypatch, tmp_path):
+    """NON-VACUITY twin: the SAME injected Host, reflected into the 302 Location AUTHORITY, IS a real
+    host-header injection and mints a signed FACT that re-verifies offline — so the false-FACT above is a
+    genuine difference the runner's own re-drive draws, not a probe that never fires."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from framework.v2.evidence.certify import verify_certificate
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, tr = _signers_and_trust()
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = web_redrive(f"http://127.0.0.1:{port}/hostloc",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    facts = [x for x in res.facts if "host_header" in x.finding_ref]
+    assert facts, f"a Host reflected into the Location authority must mint; leads={res.leads} notes={res.notes}"
+    ctx = res.contexts[facts[0].finding_ref]
+    assert verify_certificate(facts[0].signed, oracle_context=ctx, trust_root=tr).ok is True
+
+
+def test_a_real_js_location_sink_open_redirect_mints_a_js_sink_fact(monkeypatch, tmp_path):
+    """POSITIVE CONTROL (C1): a 200 HTML page that reflects `next` into an EXECUTABLE JS location sink
+    (window.location.href = <canary>) is a real DOM-based open redirect and mints a signed
+    open_redirect.js_sink FACT that re-verifies offline."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from framework.v2.evidence.certify import verify_certificate
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, tr = _signers_and_trust()
+
+    class _JsSink(http.server.BaseHTTPRequestHandler):
+        hits = 0
+
+        def do_GET(self):  # noqa: N802
+            type(self).hits += 1
+            nxt = (parse_qs(urlsplit(self.path).query).get("next") or [""])[0]
+            self.send_response(200)                        # NOT a 3xx: the executable JS sink IS the evidence
+            self.send_header("Content-Type", "text/html; charset=utf-8")   # declared: body is adjudicable
+            self.end_headers()
+            self.wfile.write((f'<!doctype html><html><body><script>window.location.href = "{nxt}";'
+                              f'</script></body></html>').encode("utf-8"))
+
+        def log_message(self, *a):
+            return
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _JsSink)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        res = web_redrive(f"http://127.0.0.1:{srv.server_address[1]}/x?next=orig",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert _JsSink.hits > 0, "the re-drive must actually contact the server"
+    assert res.branch_verdicts.get("open_redirect", {}).get("open_redirect.js_sink") == "FACT", \
+        f"an executable JS location sink must mint a js_sink FACT; verdicts={res.branch_verdicts}"
+    facts = [x for x in res.facts if "open_redirect" in x.finding_ref]
+    assert facts, f"expected an open_redirect FACT; leads={res.leads}"
+    ctx = res.contexts[facts[0].finding_ref]
+    assert verify_certificate(facts[0].signed, oracle_context=ctx, trust_root=tr).ok is True
+
+
+def test_a_js_param_read_without_navigation_mints_no_fact(monkeypatch, tmp_path):
+    """FALSE-FACT (C1, the gap): a page whose JS READS `next` but never navigates (assigns it to a text
+    node, not a location sink) is NOT a DOM open redirect. The js_sink oracle's executable-context guard
+    refutes it, so nothing is minted — a scanner that flagged it would be a LEAD at most."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+
+    class _JsRead(http.server.BaseHTTPRequestHandler):
+        hits = 0
+
+        def do_GET(self):  # noqa: N802
+            type(self).hits += 1
+            nxt = (parse_qs(urlsplit(self.path).query).get("next") or [""])[0]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")   # declared: body is adjudicable
+            self.end_headers()
+            # reads the param into a TEXT node — never a location/navigation (executable) sink
+            self.wfile.write((f'<!doctype html><html><body><span id="n"></span><script>'
+                              f'document.getElementById("n").textContent = "{nxt}";'
+                              f'</script></body></html>').encode("utf-8"))
+
+        def log_message(self, *a):
+            return
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _JsRead)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        res = web_redrive(f"http://127.0.0.1:{srv.server_address[1]}/x?next=orig",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert _JsRead.hits > 0, "the re-drive must actually contact the server (a refusal would be a vacuous pass)"
+    assert not [x for x in res.facts if "open_redirect" in x.finding_ref], \
+        f"a JS param read without navigation must NOT mint an open_redirect FACT: {[x.finding_ref for x in res.facts]}"
+
+
+def test_a_vulnerable_oidc_authorize_endpoint_mints_an_oidc_fact(monkeypatch, tmp_path):
+    """POSITIVE CONTROL (C1): an OIDC authorization endpoint that honors a forged redirect_uri (302 Location
+    to the attacker host) mints a signed oidc_redirect_uri FACT that re-verifies offline — but ONLY when the
+    finding actually CLAIMS oidc (the class-gated re-drive)."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from framework.v2.evidence.certify import verify_certificate
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, tr = _signers_and_trust()
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = web_redrive(f"http://127.0.0.1:{port}/authorize?redirect_uri=https://orig.example/cb",
+                          slug="alpha", engagement_slug="alpha", signers=signers,
+                          claimed_class="oidc_redirect_uri")
+    finally:
+        srv.shutdown()
+    facts = [x for x in res.facts if "oidc_redirect_uri" in x.finding_ref]
+    assert facts, f"a forged-redirect_uri OIDC authz must mint an oidc FACT; leads={res.leads} notes={res.notes}"
+    ctx = res.contexts[facts[0].finding_ref]
+    assert verify_certificate(facts[0].signed, oracle_context=ctx, trust_root=tr).ok is True
+
+
+def test_a_benign_oidc_endpoint_that_validates_redirect_uri_mints_no_fact(monkeypatch, tmp_path):
+    """FALSE-FACT (C1, the gap): an OIDC authz endpoint that VALIDATES redirect_uri against a registered
+    allowlist (400s a forgery, never redirects off its own host) is NOT vulnerable. VIGIL's own re-drive
+    refutes it, so nothing is minted — even with the oidc claim."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = web_redrive(f"http://127.0.0.1:{port}/authorize-safe?redirect_uri=https://orig.example/cb",
+                          slug="alpha", engagement_slug="alpha", signers=signers,
+                          claimed_class="oidc_redirect_uri")
+    finally:
+        srv.shutdown()
+    assert _HITS["n"] > 0, "the re-drive must actually contact the server (a refusal would be a vacuous pass)"
+    assert not [x for x in res.facts if "oidc_redirect_uri" in x.finding_ref], \
+        f"a redirect_uri-validating endpoint must NOT mint an oidc FACT: {[x.finding_ref for x in res.facts]}"
+
+
+def test_a_plain_open_redirect_is_not_upgraded_to_oidc_without_the_claim(monkeypatch, tmp_path):
+    """ANTI-LAUNDERING (C1): the SAME vulnerable /authorize endpoint, re-driven WITHOUT the oidc claim
+    (claimed_class='open_redirect'), must NOT mint an oidc_redirect_uri FACT. The oidc predicate is
+    observationally identical to open_redirect, so the CLASS-GATE is what prevents a severity-upgrade
+    (A01→A07) of a plain open-redirect that merely carries a redirect_uri param — the inverse of the S6
+    relabel."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = web_redrive(f"http://127.0.0.1:{port}/authorize?redirect_uri=https://orig.example/cb",
+                          slug="alpha", engagement_slug="alpha", signers=signers,
+                          claimed_class="open_redirect")
+    finally:
+        srv.shutdown()
+    assert _HITS["n"] > 0, "the re-drive must actually contact the server (a refusal would be a vacuous pass)"
+    # NON-VACUITY (red-pen LENS-2 LOW): the SAME /authorize endpoint IS a genuine open redirect, so under the
+    # open_redirect claim the channel MUST mint an open_redirect FACT. This proves the re-drive worked and
+    # that ONLY the class-gate suppresses the oidc upgrade — not a gate-refusal/dead channel greening it.
+    assert [x for x in res.facts if "open_redirect" in x.finding_ref], \
+        f"the open_redirect channel did not fire — the anti-laundering test is vacuous: {[x.finding_ref for x in res.facts]}"
+    assert not [x for x in res.facts if "oidc_redirect_uri" in x.finding_ref], \
+        "a plain open_redirect claim must NEVER be upgraded to an oidc_redirect_uri FACT (class-gate)"
 
 
 def test_a_connection_refused_midrun_is_inconclusive_not_clean(tmp_path, monkeypatch):

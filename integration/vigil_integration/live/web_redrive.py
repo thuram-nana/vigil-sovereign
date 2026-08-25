@@ -25,7 +25,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # the web classes this wave mints as FACTs (each has a definite, exploitable-condition ACHIEVED_STATE predicate).
-WEB_FACT_CLASSES = ("open_redirect", "cors", "host_header_injection", "graphql_introspection")
+WEB_FACT_CLASSES = ("open_redirect", "cors", "host_header_injection", "graphql_introspection",
+                    "oidc_redirect_uri")
 
 
 @dataclass
@@ -395,7 +396,7 @@ def _branch_outcomes(bug_class: str, context: "dict", overall_fired: bool) -> "l
 
 
 def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
-                timeout: float = 8.0) -> WebRedriveResult:
+                timeout: float = 8.0, claimed_class: str = "") -> WebRedriveResult:
     """Re-drive ``url`` through the shipped web checks via a gated send and mint a signed FACT for every
     ACHIEVED_STATE predicate the oracle confirms over VIGIL's OWN live capture. The predicates are scoped to
     the exploitable, co-located condition (a real navigation target / reflected-origin+creds), and a probe
@@ -496,6 +497,16 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         # a well-formed returned schema — a definite proposition, so a single oracle-driven branch (like cors).
         _run(lambda: GraphqlIntrospectionCheck().probe(template, send), "graphql_introspection", url,
              surface="graphql_introspection_query")
+        # oidc redirect_uri: CLASS-GATED (run ONLY when the CLAIMED class is exactly "oidc_redirect_uri").
+        # OidcRedirectUriCheck's predicate is observationally IDENTICAL to open_redirect (a 3xx Location to
+        # the canary host, or a meta-refresh to it), so running it unconditionally would UPGRADE a plain
+        # open_redirect endpoint that merely carries a redirect_uri param to the higher-severity oidc class
+        # (A07 vs A01) — a severity-overclaim, the inverse of the S6 relabel. The OIDC-authorization semantic
+        # is carried by the CLAIM, never the 302; the check itself no-ops unless redirect_uri is present.
+        if claimed_class == "oidc_redirect_uri":
+            from framework.v2.scanner.sso import OidcRedirectUriCheck  # noqa: PLC0415 (FATAL-2: function-local)
+            _run(lambda: OidcRedirectUriCheck().probe(template, send), "oidc_redirect_uri", url,
+                 surface="redirect_uri_query")
         # per-insertion-point: open-redirect injects the canary into each redirect insertion point, across
         # EVERY surface a redirect parameter is really taken from — the URL query/path, a Cookie, a
         # urlencoded body, and a JSON body. The runner synthesises the cookie/body/JSON carriers (see
