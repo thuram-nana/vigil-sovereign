@@ -36,6 +36,7 @@ from vigil_integration.live.external_tool import (  # noqa: E402
     ToolOutcome,
     nmap_service_scan,
     run_external_tool,
+    tls_scan,
 )
 
 _SIGNER = generate_keypair()
@@ -203,3 +204,120 @@ def test_no_row_is_a_non_strict_xfail():
         for mark in getattr(obj, "pytestmark", []):
             if mark.name == "xfail":
                 assert mark.kwargs.get("strict"), f"{name} uses a non-strict xfail and would hide a regression"
+
+
+# =========================================================================================================
+# The TLS deception (C1): an sslscan-shaped tool CLAIMS a weakness (SSLv2 / RC4 / an MD5-signed, expired
+# cert) in its stdout. VIGIL never trusts those rows — it re-negotiates its OWN gated handshake and lets the
+# deterministic TLS oracle judge the cert IT retrieved. Against a STRONG (SHA-256) endpoint the lie is
+# refuted → no FACT; against a genuinely WEAK (SHA-1) endpoint the SAME lying tool's finding is CONFIRMED by
+# VIGIL's own cert → a FACT. So the FACT tracks VIGIL's handshake, never the tool's say-so.
+# =========================================================================================================
+class _LyingSslscanBackend:
+    """An sslscan-shaped backend whose ROWS lie about a weakness (SSLv2 + RC4 + an MD5-signed, expired cert).
+    Those rows are never adjudicated — the runner re-drives its own handshake and judges the cert it gets."""
+    name = "lying-sslscan"
+
+    def available(self):
+        return True, "lying"
+
+    def run(self, argv, *, timeout=0):
+        stdout = ("Connected to 127.0.0.1\nTesting SSL server 127.0.0.1 on port 443\n"
+                  "Accepted  SSLv2  256 bits  RC4-MD5\n  SSL Certificate:\n"
+                  "Signature Algorithm: md5WithRSAEncryption\n"
+                  "Not valid after: Jan  1 00:00:00 2015 GMT  (EXPIRED)\n")
+        return ToolOutcome(list(argv), 0, stdout, "", self.name)
+
+
+def _selfsigned(sha: str):
+    """A self-signed 2048-bit RSA cert signed with ``sha`` (``-sha1`` weak / ``-sha256`` strong) via the
+    openssl CLI (modern ``cryptography`` refuses to SIGN with SHA-1). Skips (never fakes) if openssl can't."""
+    import subprocess
+    import tempfile
+    d = tempfile.mkdtemp()
+    cert_p, key_p = Path(d) / "c.pem", Path(d) / "k.pem"
+    proc = subprocess.run(
+        ["openssl", "req", "-x509", sha, "-newkey", "rsa:2048", "-nodes",
+         "-keyout", str(key_p), "-out", str(cert_p), "-days", "3650",
+         "-subj", "/CN=vigil-tls-deception.local"], capture_output=True, text=True)
+    if proc.returncode != 0 or not cert_p.is_file():
+        pytest.skip(f"openssl could not mint a {sha} cert here (rc={proc.returncode}): {proc.stderr[:200]}")
+    return cert_p.read_bytes(), key_p.read_bytes()
+
+
+class _TLSServer:
+    """A minimal threaded loopback TLS server that completes handshakes presenting the given cert."""
+
+    def __init__(self, cert_pem: bytes, key_pem: bytes):
+        import ssl
+        import tempfile
+        import threading
+        d = tempfile.mkdtemp()
+        cf, kf = Path(d) / "c.pem", Path(d) / "k.pem"
+        cf.write_bytes(cert_pem)
+        kf.write_bytes(key_pem)
+        self._ssl = ssl
+        self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self._ctx.load_cert_chain(str(cf), str(kf))
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(8)
+        self.port = self._sock.getsockname()[1]
+        self._stop = False
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while not self._stop:
+            try:
+                self._sock.settimeout(0.5)
+                raw, _ = self._sock.accept()
+            except (socket.timeout, OSError):
+                continue
+            try:
+                with self._ctx.wrap_socket(raw, server_side=True) as tls:
+                    tls.recv(16)
+            except (self._ssl.SSLError, OSError):
+                pass
+
+    def close(self):
+        self._stop = True
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+
+def test_a_lying_tls_tool_cannot_mint_a_fact_over_a_strong_endpoint(tmp_path):
+    """The TLS deception: a lying sslscan claims SSLv2/RC4/MD5 weaknesses, but VIGIL's OWN handshake reaches a
+    STRONG (SHA-256) cert and the TLS oracle refutes every claim → no FACT. The runner trusted its own
+    re-drive, not the tool's rows."""
+    cert, key = _selfsigned("-sha256")
+    srv = _TLSServer(cert, key)
+    try:
+        res = _run(tls_scan(port=srv.port), _LyingSslscanBackend(), tmp_path)
+    finally:
+        srv.close()
+    assert list(getattr(res, "proposed", []) or []), (
+        "the lying sslscan proposed NOTHING — the deception was never exercised")
+    assert not [f for f in (getattr(res, "facts", []) or [])
+                if getattr(f, "confirmed_by", "") == "tls_weakness"], (
+        "a LYING sslscan minted a TLS FACT over a STRONG endpoint — the runner trusted its rows, not its own "
+        "handshake")
+
+
+def test_negative_control_the_same_lying_tls_tool_mints_when_the_weakness_is_REAL(tmp_path):
+    """Non-vacuity: the IDENTICAL lying backend against a genuinely WEAK (SHA-1-signed) cert DOES mint a
+    signed TLS_WEAKNESS FACT — VIGIL's own retrieved cert confirms it. So 'no fact from a lie' is a real
+    refutation drawn by the handshake, not a probe that never fires."""
+    from framework.v2.evidence.certify import verify_certificate
+    cert, key = _selfsigned("-sha1")
+    srv = _TLSServer(cert, key)
+    try:
+        res = _run(tls_scan(port=srv.port), _LyingSslscanBackend(), tmp_path)
+    finally:
+        srv.close()
+    facts = [f for f in (res.facts or []) if getattr(f, "confirmed_by", "") == "tls_weakness"]
+    assert facts, f"a REAL SHA-1 cert must mint a TLS_WEAKNESS FACT; facts={res.facts} leads={res.leads}"
+    ctx = res.contexts[facts[0].finding_ref]
+    assert verify_certificate(facts[0].signed, oracle_context=ctx, trust_root=TRUST).ok is True
