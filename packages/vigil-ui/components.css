@@ -576,6 +576,32 @@ textarea { min-height: 80px; resize: vertical; }
   font-size: var(--fs-sm); min-width: 240px; animation: fadein .25s ease; }
 .toast.err { border-color: color-mix(in srgb, var(--st-blocked) 50%, var(--border)); }
 
+/* WS0: reusable percentage progress bar (docker build/pull/health/plane-start + any long op) */
+.pbar { display: flex; flex-direction: column; gap: 6px; margin: var(--sp-2) 0; }
+.pbar-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3); }
+.pbar-label { font-size: var(--fs-sm); color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pbar-pct { font-size: var(--fs-sm); font-variant-numeric: tabular-nums; color: var(--text-0); font-weight: 700; }
+.pbar-track { height: 8px; border-radius: var(--r-pill); background: var(--bg-3); border: 1px solid var(--border); overflow: hidden; }
+.pbar-fill { height: 100%; width: 0; border-radius: var(--r-pill); background: var(--st-running);
+  transition: width .3s ease, background-color .2s ease; }
+.pbar-done .pbar-fill { background: var(--st-confirmed); }
+.pbar-err .pbar-fill { background: var(--st-blocked); }
+.pbar-err .pbar-label { color: var(--st-blocked); }
+
+/* WS0: persistent (route-surviving) error banner — a hard failure the operator must see and dismiss */
+#error-banner { position: fixed; top: calc(var(--topbar-h) + 8px); left: 50%; transform: translateX(-50%);
+  z-index: 90; max-width: min(720px, 92vw); }
+#error-banner .eb-row { display: flex; align-items: flex-start; gap: var(--sp-3);
+  background: var(--bg-1); border: 1px solid color-mix(in srgb, var(--st-blocked) 55%, var(--border));
+  border-radius: var(--r-2); padding: 10px 12px; box-shadow: var(--shadow-2); }
+#error-banner .eb-ico { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--st-blocked); color: #fff; font-weight: 800; display: grid; place-items: center; font-size: 13px; }
+#error-banner .eb-msg { flex: 1 1 auto; min-width: 0; font-size: var(--fs-sm); color: var(--text-0); }
+#error-banner .eb-detail { margin-top: 3px; color: var(--text-1); font-size: var(--fs-micro); word-break: break-word; }
+#error-banner .eb-x { flex: 0 0 auto; background: transparent; border: none; color: var(--text-1);
+  font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px; }
+#error-banner .eb-x:hover { color: var(--text-0); }
+
 /* SIGIL on-screen HUD (S4) — a small bottom-LEFT overlay of SIGIL's state; clones the #toasts fixed host,
    capped at 300px so it never obscures the workspace. Reuses .pill for the state chip (idle/listening/
    thinking/speaking → idle/live/reconnect/owner tones). */

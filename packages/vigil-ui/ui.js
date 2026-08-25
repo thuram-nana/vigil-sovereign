@@ -88,9 +88,19 @@
     return hh;
   }
   async function getJSON(url) {
+    // Symmetric with postJSON: on a non-2xx, carry the SERVER'S error body up to the caller
+    // (message + .status + .data) instead of the old opaque "500 <url>". Read panels used to
+    // catch this and render a generic "offline/empty" state, masking a real backend 4xx/5xx as
+    // "plane down" — the single biggest source of silent-ish failures in the UI.
     const r = await fetch(url, { headers: _headers(), credentials: "same-origin" });
-    if (!r.ok) throw new Error(r.status + " " + url);
-    return r.json();
+    const txt = await r.text();
+    let data = null; try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = { raw: txt }; }
+    if (!r.ok) {
+      const err = new Error((data && data.error) || (r.status + " " + url));
+      err.status = r.status; err.data = data; err.url = url;
+      throw err;
+    }
+    return data;
   }
   async function postJSON(url, body) {
     const r = await fetch(url, {
@@ -215,11 +225,26 @@
     return url + sep + "token=" + encodeURIComponent(token());
   }
   // SSE with query-param auth (EventSource can't set headers). onEvent(kind, data, id).
+  // sse() stays MINIMAL — it wires onError only when the caller passes one. A blanket default toast is
+  // WRONG for streams that legitimately END (and then poll for completion) or are ambient/optional (the
+  // SIGIL HUD): they would false-alarm on a clean close. Streams that SHOULD stay connected opt IN by
+  // passing sseErrorToast(label) below.
   function sse(url, onEvent, onError) {
     const es = new EventSource(authUrl(url), { withCredentials: true });
     es.onmessage = function (e) { let d; try { d = JSON.parse(e.data); } catch (_) { d = e.data; } onEvent(d, e.lastEventId); };
     if (onError) es.onerror = onError;
     return es;
+  }
+  // Opt-in terminal-failure surface: pass as sse()'s 3rd arg for a stream that should stay connected.
+  // Fires ONE toast only on a TERMINAL failure the browser will not retry (readyState === CLOSED);
+  // transient reconnects (readyState === CONNECTING) stay silent. NOT a default — see the note above.
+  function sseErrorToast(label) {
+    return function (e) {
+      const es = e && e.target;
+      if (es && es.readyState === EventSource.CLOSED) {
+        toast("Live stream disconnected" + (label ? " (" + label + ")" : "") + " — data may be stale", true);
+      }
+    };
   }
 
   // -- toasts -----------------------------------------------------------------
@@ -228,6 +253,75 @@
     const t = h("div.toast" + (isErr ? ".err" : ""), null, msg);
     host.appendChild(t);
     setTimeout(function () { t.remove(); }, isErr ? 6000 : 3500);
+  }
+
+  // -- persistent error banner (route-surviving) ------------------------------
+  // Unlike a toast (auto-dismisses), a banner STAYS until dismissed — for a hard failure the
+  // operator must see and act on. errorBanner(msg, detail?) mounts/updates a single #error-banner.
+  function errorBanner(msg, detail) {
+    let host = $("#error-banner");
+    if (!host) { host = h("div#error-banner"); document.body.appendChild(host); }
+    clear(host);
+    host.appendChild(h("div.eb-row", null, [
+      h("span.eb-ico", null, "!"),
+      h("div.eb-msg", null, [
+        h("strong", null, String(msg || "Something went wrong")),
+        detail ? h("div.eb-detail", null, String(detail)) : null,
+      ]),
+      h("button.eb-x", { title: "dismiss", onClick: function () { host.remove(); } }, "×"),
+    ]));
+    return host;
+  }
+  function clearErrorBanner() { const b = $("#error-banner"); if (b) b.remove(); }
+
+  // -- reusable percentage progress bar ---------------------------------------
+  // progressBar({label?, pct?, className?}) → { el, set(pct,label), done(label), fail(msg) }.
+  // set(pct=null) keeps the current width and only updates the label — an indeterminate step.
+  function progressBar(opts) {
+    opts = opts || {};
+    const fill = h("div.pbar-fill");
+    const pctlbl = h("span.pbar-pct", null, "0%");
+    const label = h("span.pbar-label", null, opts.label || "");
+    const track = h("div.pbar-track", null, fill);
+    const el = h("div.pbar" + (opts.className ? "." + opts.className : ""), null, [
+      h("div.pbar-head", null, [label, pctlbl]), track,
+    ]);
+    function set(pct, lbl) {
+      if (pct != null && isFinite(Number(pct))) {
+        const p = Math.max(0, Math.min(100, Number(pct)));
+        fill.style.width = p + "%";
+        pctlbl.textContent = Math.round(p) + "%";
+        el.classList.remove("pbar-err");   // a REAL progress update clears a prior error; a label-only
+      }                                    // (indeterminate) set must NOT wipe an existing error state.
+      if (lbl != null) label.textContent = String(lbl);
+    }
+    function done(lbl) { set(100, lbl != null ? lbl : "done"); el.classList.add("pbar-done"); }
+    function fail(msg) { el.classList.add("pbar-err"); if (msg != null) label.textContent = String(msg); }
+    set(opts.pct != null ? opts.pct : 0, opts.label);
+    return { el: el, set: set, done: done, fail: fail };
+  }
+
+  // Drive a progressBar from a server SSE stream of {op,label,pct,phase,error?} frames.
+  //   streamProgress(url, bar, {onDone?, onError?}) → the EventSource (.close() to stop).
+  // A frame carrying .error fails the bar and stops; phase==="done" (or pct>=100) completes it.
+  function streamProgress(url, bar, opts) {
+    opts = opts || {};
+    const es = sse(url, function (d) {
+      if (!d || typeof d !== "object") return;
+      if (d.error) { bar.fail(String(d.error)); es.close(); if (opts.onError) opts.onError(d); return; }
+      bar.set(typeof d.pct === "number" ? d.pct : null, d.label != null ? d.label : null);
+      // Complete ONLY on an explicit done signal — a sub-phase hitting 100% (e.g. "layer 1 pulled:
+      // 100%") must NOT close the stream and discard the phases that follow.
+      if (d.phase === "done" || d.done === true) {
+        bar.done(d.label != null ? d.label : null); es.close(); if (opts.onDone) opts.onDone(d);
+      }
+    }, function (e) {
+      const s = e && e.target;
+      if (s && s.readyState === EventSource.CLOSED) {
+        bar.fail("stream disconnected"); if (opts.onError) opts.onError(new Error("stream closed"));
+      }
+    });
+    return es;
   }
 
   // -- hash router ------------------------------------------------------------
@@ -282,8 +376,10 @@
   }
 
   window.VUI = { h: h, clear: clear, mount: mount, append: append, $: $, store: store,
-    getJSON: getJSON, postJSON: postJSON, uploadChunked: uploadChunked, sse: sse, authUrl: authUrl,
-    toast: toast, router: router,
+    getJSON: getJSON, postJSON: postJSON, uploadChunked: uploadChunked, sse: sse, sseErrorToast: sseErrorToast,
+    authUrl: authUrl,
+    toast: toast, errorBanner: errorBanner, clearErrorBanner: clearErrorBanner,
+    progressBar: progressBar, streamProgress: streamProgress, router: router,
     pill: pill, statusBadge: statusBadge, tile: tile, card: card, icon: icon, api: api, token: token,
     setSessionToken: setSessionToken, setPrincipal: setPrincipal, principal: principal, can: can };
 })();
