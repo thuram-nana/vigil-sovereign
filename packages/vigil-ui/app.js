@@ -1192,11 +1192,8 @@
       h("div#tools-body", { style: { marginTop: "16px" } }, h("div.empty", null, "Probing host tools…")),
       h("div#tool-consciousness", { style: { marginTop: "16px" } }),
     ]);
-    V.getJSON(OFF("/api/tools")).then(renderToolsData).catch(function () {
-      V.mount(V.$("#tools-body"), h("div.empty", null, [
-        h("div.big", null, "Offense engine offline"),
-        h("p", null, "Could not reach the offense console to probe host tools. Start it (vigil up / the console server) and reload."),
-      ]));
+    V.getJSON(OFF("/api/tools")).then(renderToolsData).catch(function (e) {
+      V.mount(V.$("#tools-body"), offlineEmpty(e, "Could not reach the offense console to probe host tools. Start it (vigil up) and reload."));
     });
     V.getJSON(OFF("/api/toolprofiles")).then(drawToolProfiles).catch(function () { /* panel just stays empty */ });
   }
@@ -1226,12 +1223,8 @@
       h("div#trust-doctrine", { style: { marginBottom: "14px" } }),
       h("div#trust-body", null, h("div.empty", null, "Loading certificates…")),
     ]);
-    V.getJSON(OFF("/api/certs")).then(renderTrustData).catch(function () {
-      V.mount(V.$("#trust-body"), h("div.empty", null, [
-        h("div.big", null, "Offense engine offline"),
-        h("p", null, "Could not reach the offense console to read certificates. "
-          + "Start it (vigil up / the console server) and reload."),
-      ]));
+    V.getJSON(OFF("/api/certs")).then(renderTrustData).catch(function (e) {
+      V.mount(V.$("#trust-body"), offlineEmpty(e, "Could not reach the offense console to read certificates. Start it (vigil up) and reload."));
     });
   }
 
@@ -1430,14 +1423,10 @@
   function loadPosture() {
     var body = V.$("#posture-body");
     if (body) V.mount(body, h("div.empty", null, "Loading posture certificates…"));
-    V.getJSON(OFF("/api/posture")).then(function (d) { PST.data = d; renderPostureData(d); }).catch(function () {
+    V.getJSON(OFF("/api/posture")).then(function (d) { PST.data = d; renderPostureData(d); }).catch(function (e) {
       PST.data = null;
       var b = V.$("#posture-body");
-      if (b) V.mount(b, h("div.empty", null, [
-        h("div.big", null, "Offense engine offline"),
-        h("p", null, "Could not reach the offense console to read posture certificates. "
-          + "Start it (vigil up / the console server) and reload."),
-      ]));
+      if (b) V.mount(b, offlineEmpty(e, "Could not reach the offense console to read posture certificates. Start it (vigil up) and reload."));
     });
   }
 
@@ -1746,11 +1735,8 @@
           + "m-of-n destruction quorum. This screen cannot provision, authorize, or fire anything.")]),
       h("div#gov-body", null, h("div.empty", null, "Reading governance posture…")),
     ]);
-    V.getJSON(OFF("/api/governance")).then(renderGovernanceData).catch(function () {
-      V.mount(V.$("#gov-body"), h("div.empty", null, [
-        h("div.big", null, "Offense engine offline"),
-        h("p", null, "Could not reach the offense console to read the governance posture. "
-          + "Start it (vigil up / the console server) and reload.")]));
+    V.getJSON(OFF("/api/governance")).then(renderGovernanceData).catch(function (e) {
+      V.mount(V.$("#gov-body"), offlineEmpty(e, "Could not reach the offense console to read the governance posture. Start it (vigil up) and reload."));
     });
   }
 
@@ -2596,9 +2582,8 @@
       L.elsewhere = (want && !L.runs.some(function (r) { return r.run_id === want; })) ? want : "";
       if (L.run) { L.started = L.run.started; attachStream(); }
       drawBody();
-    }).catch(function () {
-      V.mount(V.$("#live-body"), h("div.empty", null, [h("div.big", null, "Offense engine offline"),
-        h("p", null, "Could not reach the offense console. Start it (vigil up) and reload.")]));
+    }).catch(function (e) {
+      V.mount(V.$("#live-body"), offlineEmpty(e, "Could not reach the offense console. Start it (vigil up) and reload."));
     });
 
     function selectRun(runId) {
@@ -3304,9 +3289,8 @@
       S.elsewhere = (want && !S.runs.some(function (r) { return r.run_id === want; })) ? want : "";
       if (P3_TABS.some(function (t) { return t.id === wantTab; })) S.tab = wantTab;
       drawShell();
-    }).catch(function () {
-      V.mount(V.$("#p3-body"), h("div.empty", null, [h("div.big", null, "Offense engine offline"),
-        h("p", null, "Could not reach the offense console. Start it (vigil up) and reload.")]));
+    }).catch(function (e) {
+      V.mount(V.$("#p3-body"), offlineEmpty(e, "Could not reach the offense console. Start it (vigil up) and reload."));
     });
 
     function syncHash() {
@@ -3446,7 +3430,7 @@
         ]);
       }
       draw();
-    }).catch(function () { V.mount(host, offlineEmpty()); });
+    }).catch(function (e) { V.mount(host, offlineEmpty(e)); });
   }
 
   function p3HowToVerify(f) {
@@ -3706,7 +3690,7 @@
 
       V.mount(host, [tiles, graphCard, h("div.grid.cols-2", { style: { marginTop: "16px", alignItems: "start" } }, [pathsCard, chokeCard])]);
       p3DrawGraph(V.$("#p3-graph"), wm, function (n) { p3OpenNodeDrawer(wm, n); });
-    }).catch(function () { V.mount(host, offlineEmpty()); });
+    }).catch(function (e) { V.mount(host, offlineEmpty(e)); });
   }
 
   function p3OpenNodeDrawer(wm, n) {
@@ -3753,7 +3737,7 @@
   }
   function p3Evidence(host, run) {
     function load(then) {
-      V.getJSON(OFF("/api/evidence/" + encodeURIComponent(run.run_id))).then(then).catch(function () { V.mount(host, offlineEmpty()); });
+      V.getJSON(OFF("/api/evidence/" + encodeURIComponent(run.run_id))).then(then).catch(function (e) { V.mount(host, offlineEmpty(e)); });
     }
     load(function (ev) {
       if (ev && ev.pending) { V.mount(host, p3NoReportEmpty(run, "Evidence") || pendingEmpty(run)); return; }
@@ -3886,7 +3870,7 @@
         "Coverage map: what was reached and probed. A quick loopback scan does not exercise auth-gated classes (access-control, SSO) or the host arsenal unless those packs were explicitly enabled — those remain blind spots for this run."]);
       V.mount(host, [tiles, blind, h("div.grid.cols-2", { style: { marginTop: "16px", alignItems: "start" } }, [stack, epsCard]),
         h("div.grid.cols-2", { style: { marginTop: "16px", alignItems: "start" } }, [passiveCard, domCard])]);
-    }).catch(function () { V.mount(host, offlineEmpty()); });
+    }).catch(function (e) { V.mount(host, offlineEmpty(e)); });
   }
 
   // ---- 5) Timeline replay (scrub graph growth by monotonic first_seen) --------
@@ -3935,7 +3919,7 @@
         ]), false),
       ]);
       redraw();
-    }).catch(function () { V.mount(host, offlineEmpty()); });
+    }).catch(function (e) { V.mount(host, offlineEmpty(e)); });
   }
 
   // ---- shared small empties --------------------------------------------------
@@ -3944,9 +3928,21 @@
       h("p", null, "This run has not produced a saved report yet. Watch it in Live, then come back."),
       h("button.btn", { style: { marginTop: "12px" }, onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(run.run_id); } }, [V.icon("live"), "Open in Live"])]);
   }
-  function offlineEmpty() {
+  function offlineEmpty(err, hint) {
+    // WS2a: distinguish a real BACKEND error from a DOWN plane, instead of masking every read failure as
+    // "offline". WS0's getJSON attaches .status/.data on an HTTP error — so a failure WITH a status means
+    // the plane is reachable but the endpoint erred (surface the real server message), while a failure with
+    // NO status is a fetch/network failure, i.e. the plane is genuinely unreachable.
+    if (err && err.status) {
+      var msg = (err.data && err.data.error) || err.message || ("HTTP " + err.status);
+      return h("div.empty", null, [
+        h("div.big", null, "Request failed (" + err.status + ")"),
+        h("p", null, String(msg)),
+        h("p.hint", null, "The engine is reachable but this request errored — retry, or check the engine logs."),
+      ]);
+    }
     return h("div.empty", null, [h("div.big", null, "Offense engine offline"),
-      h("p", null, "Could not reach the offense console read plane. Start it (vigil up) and reload.")]);
+      h("p", null, hint || "Could not reach the offense console read plane. Start it (vigil up) and reload.")]);
   }
 
   // ---- guided stub for not-yet-built screens --------------------------------
@@ -5495,11 +5491,8 @@
         h("span.sub", null, "The gated capabilities this engine exposes to an external MCP (Model Context Protocol) client over an on-host stdio server.")]),
       h("div#mcp-body", { style: { marginTop: "16px" } }, h("div.empty", null, "Loading MCP capabilities…")),
     ]);
-    V.getJSON(OFF("/api/mcp")).then(drawMcp).catch(function () {
-      V.mount(V.$("#mcp-body"), h("div.empty", null, [
-        h("div.big", null, "Offense engine offline"),
-        h("p", null, "Could not reach the offense console to list MCP capabilities. Start it (`vigil up`) and reload."),
-      ]));
+    V.getJSON(OFF("/api/mcp")).then(drawMcp).catch(function (e) {
+      V.mount(V.$("#mcp-body"), offlineEmpty(e, "Could not reach the offense console to list MCP capabilities. Start it (`vigil up`) and reload."));
     });
   }
 
@@ -5538,11 +5531,8 @@
         h("span.sub", null, "Everything the system needs, at a glance — prerequisites, the UI ports, and every docker service's state.")]),
       h("div#system-body", { style: { marginTop: "16px" } }, h("div.empty", null, "Checking system readiness…")),
     ]);
-    V.getJSON(OFF("/api/services")).then(drawSystem).catch(function () {
-      V.mount(V.$("#system-body"), h("div.empty", null, [
-        h("div.big", null, "Offense engine offline"),
-        h("p", null, "Could not reach the offense console for the readiness report. Start it (`vigil up`) and reload."),
-      ]));
+    V.getJSON(OFF("/api/services")).then(drawSystem).catch(function (e) {
+      V.mount(V.$("#system-body"), offlineEmpty(e, "Could not reach the offense console for the readiness report. Start it (`vigil up`) and reload."));
     });
   }
 
@@ -5881,7 +5871,7 @@
         }
         V.mount(v, [banner, brainControls(brain, v), brainCard, gatePosture, legend, chain]);
       }
-    }).catch(function () { V.mount(v, offlineEmpty()); });
+    }).catch(function (e) { V.mount(v, offlineEmpty(e)); });
   }
 
   function brainMemory(v) {
@@ -5905,7 +5895,7 @@
                 h("div.v", null, "success " + mean + lb + n)]); }))
           : h("div.empty", null, "No priors learned yet — the system learns a per-archetype/bug-class success rate as you run assessments; it never fabricates a score."), false),
       ]);
-    }).catch(function () { V.mount(v, offlineEmpty()); });
+    }).catch(function (e) { V.mount(v, offlineEmpty(e)); });
   }
 
   function brainBenchmark(v) {
@@ -5940,7 +5930,7 @@
         ], false),
         h("div.legend", null, [V.icon("info"), h("span", null, "tp = planted bugs found · fp = safe controls wrongly flagged · fn = missed bugs. The corpus includes safe controls a precise engine must leave alone.")]),
       ]);
-    }).catch(function () { V.mount(v, offlineEmpty()); });
+    }).catch(function (e) { V.mount(v, offlineEmpty(e)); });
   }
   function runBenchmark(btn, slot) {
     if (btn) { btn.disabled = true; btn.textContent = "Running… (up to ~5 min)"; }
@@ -5996,7 +5986,7 @@
         h("div.legend", null, [V.icon("brain"), h("span", null, "Reasoning (critics, learning, reflection) is advisory only — it re-ranks and defers, but never promotes a finding. Only a fired oracle confirms.")]),
       ]);
       drawCaps();
-    }).catch(function () { V.mount(v, offlineEmpty()); });
+    }).catch(function (e) { V.mount(v, offlineEmpty(e)); });
   }
 
   function brainRunScoped(v, b, tab) {
@@ -6027,7 +6017,7 @@
           h("pre.code.scroll-x", null, JSON.stringify(data, null, 2)),
         ]);
       }).catch(function () { var host = V.$("#brain-rs"); if (host) V.mount(host, h("div.empty", null, "Could not load " + tab + ".")); });
-    }).catch(function () { V.mount(v, offlineEmpty()); });
+    }).catch(function (e) { V.mount(v, offlineEmpty(e)); });
   }
 
   // The per-engagement ACTION for the intel/planner tabs. Planner: compute the read-only plan projection
@@ -7649,8 +7639,7 @@
   function loadBudgets() {
     V.getJSON(OFF("/api/token-budgets")).then(drawBudgets).catch(function (e) {
       var host = V.$("#budgets-body"); if (!host) return;
-      V.mount(host, h("div.empty", null, [h("div.big", null, "Offense engine offline"),
-        h("p", null, "Could not load token budgets: " + ((e && e.message) || e))]));
+      V.mount(host, offlineEmpty(e, "Could not load token budgets — is the offense console up? (vigil up)"));
     });
   }
   function budgetLevelPill(level) {
@@ -7925,8 +7914,7 @@
       drawLibrary();
     }).catch(function (e) {
       var host = V.$("#library-body"); if (!host) return;
-      V.mount(host, h("div.empty", null, [h("div.big", null, "Offense console offline"),
-        h("p", null, "Could not load the library: " + ((e && e.message) || e))]));
+      V.mount(host, offlineEmpty(e, "Could not load the library — is the offense console up? (vigil up)"));
     });
   }
 
