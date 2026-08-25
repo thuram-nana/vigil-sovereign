@@ -112,6 +112,36 @@ class _WebApp(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_POST(self):  # noqa: N802 — GraphQL introspection is a POST
+        self._count()
+        parts = urlsplit(self.path)
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        _ = self.rfile.read(length) if length else b""     # consume VIGIL's introspection query body
+        if parts.path == "/graphql":                       # VULNERABLE: introspection ENABLED → returns a schema
+            body = (b'{"data":{"__schema":{"types":['
+                    b'{"name":"Query"},{"name":"User"},{"name":"Mutation"}]}}}')
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body)
+        elif parts.path == "/graphql-disabled":            # SAFE: introspection DISABLED → a GraphQL errors reply
+            body = b'{"errors":[{"message":"GraphQL introspection is not allowed"}]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body)
+        elif parts.path == "/graphql-undecodable":         # a schema-shaped body VIGIL CANNOT decode: it
+            body = (b'{"data":{"__schema":{"types":['     # declares Content-Encoding: br (brotli, unsupported
+                    b'{"name":"Query"},{"name":"User"}]}}}')   # by the strict stdlib decoder) so the body is
+            self.send_response(200)                        # NOT semantically available → no FACT, INCONCLUSIVE.
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Encoding", "br")
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def log_message(self, *a):  # silence
         return
 
@@ -671,3 +701,108 @@ def test_insertion_coverage_went_from_two_surfaces_to_five(monkeypatch, tmp_path
     assert probed == _REDIRECT_SURFACES, f"expected 5 surfaces, got {sorted(probed)}"
     added = {"cookie_value", "body_form_value", "json_value"}
     assert added <= probed, f"the three newly-covered surfaces are missing: {sorted(added - probed)}"
+
+
+# ===================================================================================================
+# S7 breadth — graphql_introspection: VIGIL POSTs its OWN introspection query and mints a FACT ONLY when a
+# well-formed schema is returned. Introspection-disabled / non-graphql endpoints mint nothing; out-of-scope
+# is refused before traffic. The FACT is grounded in VIGIL's own gated capture, never the tool's say-so.
+# ===================================================================================================
+def test_live_graphql_introspection_mints_a_signed_fact_that_reverifies_offline(monkeypatch, tmp_path):
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from framework.v2.evidence.certify import verify_certificate
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, tr = _signers_and_trust()
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = web_redrive(f"http://127.0.0.1:{port}/graphql",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    gql = [x for x in res.facts if "graphql_introspection" in x.finding_ref]
+    assert gql, f"expected a graphql_introspection FACT; leads={res.leads} notes={res.notes}"
+    f = gql[0]
+    ctx = res.contexts[f.finding_ref]
+    # OFFLINE re-verify from the retained JSON-safe capture — no network, no VIGIL runner.
+    assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr).ok is True
+    # family verdict is a FACT (composed over the single schema_returned branch).
+    assert res.family_verdict("graphql_introspection") == "FACT"
+
+
+def test_graphql_introspection_disabled_endpoint_mints_no_fact(monkeypatch, tmp_path):
+    """false-FACT: a GraphQL endpoint that DISABLES introspection (a well-formed errors reply) must mint no
+    graphql_introspection FACT — the schema disjunct never fires. Paired with the positive proof above, this
+    shows 'no fact' is a real difference, not a check that never mints."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = web_redrive(f"http://127.0.0.1:{port}/graphql-disabled",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert not [x for x in res.facts if "graphql_introspection" in x.finding_ref], (
+        f"introspection-disabled endpoint minted a graphql FACT: {[x.finding_ref for x in res.facts]}")
+
+
+def test_graphql_non_graphql_endpoint_mints_no_fact(monkeypatch, tmp_path):
+    """A non-GraphQL endpoint (a plain page that 404s the introspection POST, or reflects arbitrary text)
+    must mint no graphql_introspection FACT — the mere reachability of a URL is never a returned schema."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = web_redrive(f"http://127.0.0.1:{port}/safe",   # POST → 404; no schema
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert not [x for x in res.facts if "graphql_introspection" in x.finding_ref], \
+        "a non-graphql endpoint minted a graphql FACT"
+
+
+def test_graphql_out_of_scope_target_is_refused_before_any_traffic(monkeypatch, tmp_path):
+    """scope: an out-of-charter target is refused BEFORE any traffic — the introspection query is never sent."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "example.test")   # 127.0.0.1 is NOT in scope
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve()
+    port = srv.server_address[1]
+    _HITS["n"] = 0
+    try:
+        res = web_redrive(f"http://127.0.0.1:{port}/graphql",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert res.refused is True and res.n_facts == 0
+    assert _HITS["n"] == 0, "an out-of-scope target must be refused before any request reaches the server"
+
+
+def test_graphql_introspection_undecodable_body_is_inconclusive_not_a_fact(monkeypatch, tmp_path):
+    """An introspection response VIGIL cannot DECODE (declared Content-Encoding: br) is NOT evidence: even
+    though the raw bytes are a schema, the body is not semantically available, so no graphql_introspection
+    FACT is minted — and (clean_capable=false) it is INCONCLUSIVE, never a CLEAN. Pins the body-availability
+    guard end-to-end through the runner, not just the count disjunct."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = web_redrive(f"http://127.0.0.1:{port}/graphql-undecodable",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert not [x for x in res.facts if "graphql_introspection" in x.finding_ref], \
+        "an undecodable body must never mint a graphql FACT"
+    assert res.family_verdict("graphql_introspection") != "CLEAN", \
+        "an undecodable body must never read CLEAN (INCONCLUSIVE only)"

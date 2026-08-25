@@ -156,6 +156,32 @@
       ]
     },
     {
+      "id": "graphql_introspection.schema_returned",
+      "check": "GraphqlIntrospectionCheck",
+      "evidence": "VIGIL's own minimal introspection query returns a well-formed schema (data.__schema.types is a non-empty array)",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "Body-derived (the schema is in the JSON response body): NOT CLEAN-capable — a non-firing cannot distinguish 'introspection is disabled' from 'the response body could not be decoded'. Fires ONLY on a well-formed GraphQL introspection response whose data.__schema.types is a non-empty array, produced by VIGIL's OWN introspection query — never a tool's say-so, never the mere presence of a /graphql path; a 400/403 or a GraphQL 'errors' (introspection disabled) response fails the predicate.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/checks.py:GraphqlIntrospectionCheck",
+        "integration/vigil_integration/live/web_redrive.py:web_redrive"
+      ],
+      "blocking_work": "CLEAN-capability needs the same decode-completeness guarantee as open_redirect.body_markup, to distinguish 'introspection disabled' from 'body unreadable'; until then a non-firing is INCONCLUSIVE, never CLEAN. The proposition itself (a returned schema) is DEFINITE, so no benign-twin baseline is needed for the FACT.",
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "response_body_decode"
+      ]
+    },
+    {
       "id": "oidc_redirect_uri.location_header",
       "check": "OidcRedirectUriCheck",
       "evidence": "the authorization endpoint redirects (3xx Location) to the attacker-supplied redirect_uri host",
