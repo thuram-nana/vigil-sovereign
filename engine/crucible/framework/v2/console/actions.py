@@ -1924,6 +1924,9 @@ def engine_plan(body: dict) -> dict:
 
 
 _BRAIN_OBJECTIVES = frozenset({"quick", "comprehensive"})   # the propose-only brain's closed objective enum
+# RFC-3986 path characters (pchar + "/"); anything else in the path is dropped when canonicalizing the
+# loopback target so no raw user bytes flow onto the spawn argv (defense-in-depth over the list-form spawn).
+_SAFE_URL_PATH = re.compile(r"[A-Za-z0-9._~%!$&'()*+,;=:@/-]*")
 
 
 def brain_propose(body: dict) -> dict:
@@ -1946,18 +1949,31 @@ def brain_propose(body: dict) -> dict:
     if objective not in _BRAIN_OBJECTIVES:
         return {"error": f"objective must be one of {sorted(_BRAIN_OBJECTIVES)} (a closed enum); "
                          f"got {objective!r}"}
-    target = str(body.get("target", "")).strip()
-    if not target:
+    raw_target = str(body.get("target", "")).strip()
+    if not raw_target:
         return {"error": "a target URL is required to plan a chain"}
-    host = (urlsplit(target).hostname or "").lower()
+    sp = urlsplit(raw_target)
+    host = (sp.hostname or "").lower()
     if not host:
-        return {"error": f"target must be an absolute URL (got {target!r})"}
+        return {"error": "target must be an absolute URL"}
     if host not in _LOOPBACK:
         # The propose spawn pins --scope 127.0.0.1 (like the agentic bridge); a remote plan would need a
         # signed charter the console cannot mint. Keep the UI surface loopback-only and honest.
         return {"error": "planning here is loopback-only (the propose spawn pins --scope 127.0.0.1); point "
                          "it at your own loopback target, or run `vigil engage --brain hexstrike --plan-only` "
                          "against a chartered target from the CLI"}
+    if sp.scheme not in ("http", "https"):
+        return {"error": "target must be an http(s) loopback URL"}
+    try:
+        port = sp.port          # int | None; a malformed port raises ValueError
+    except ValueError:
+        return {"error": "target has an invalid port"}
+    # Rebuild a CANONICAL loopback target from VALIDATED pieces so NO raw user string reaches the spawn argv:
+    # the scheme is a {http,https} literal, the host is a _LOOPBACK member, the port is an int, and the path is
+    # charset-checked (anything else → "/"). Defense-in-depth over the already list-form (shell-free) spawn —
+    # and it removes the tainted-argv surface entirely (userinfo/query/fragment are dropped).
+    safe_path = sp.path if _SAFE_URL_PATH.fullmatch(sp.path or "") else "/"
+    target = f"{sp.scheme}://{host}" + (f":{int(port)}" if port is not None else "") + (safe_path or "/")
     vigil = _vigil_bin()
     if not vigil:
         return {"error": "no `vigil` entrypoint resolved (set VIGIL_BIN or put `vigil` on PATH) — the "

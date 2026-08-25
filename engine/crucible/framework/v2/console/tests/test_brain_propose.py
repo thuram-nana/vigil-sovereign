@@ -121,6 +121,25 @@ def test_child_nonzero_rc_is_a_clean_error(monkeypatch):
     assert len(calls) == 1
 
 
+def test_target_is_canonicalized_no_raw_user_bytes_on_argv(monkeypatch):
+    # userinfo / query / fragment / an odd path are DROPPED — the argv target is rebuilt from validated
+    # scheme+host+port(+safe path), so no raw user string reaches the spawn.
+    calls = _capture_spawn(monkeypatch)
+    res = actions.brain_propose({"brain": "hexstrike",
+                                 "target": "http://evil:secret@127.0.0.1:8080/a b?q=1#frag"})
+    assert res.get("ok") is True, res
+    argv = calls[0]
+    spawned_target = argv[argv.index("engage") + 1]
+    assert spawned_target == "http://127.0.0.1:8080/"   # userinfo/query/fragment gone; unsafe path (space) → "/"
+    assert "secret" not in spawned_target and "evil" not in spawned_target
+
+
+def test_non_http_scheme_refused_before_any_spawn(monkeypatch):
+    calls = _capture_spawn(monkeypatch)
+    res = actions.brain_propose({"brain": "hexstrike", "target": "file://127.0.0.1/etc/passwd"})
+    assert "error" in res and calls == []
+
+
 def test_non_string_slug_is_a_clean_value_not_a_traceback(monkeypatch):
     # A hand-crafted same-origin body with a non-string truthy slug must not raise (the docstring promises a
     # clean result, never a traceback). str()-coercion makes it a plain slug value; the run still proposes.
