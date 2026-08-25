@@ -222,3 +222,55 @@ def test_v4_only_saddr_backstop_would_leak_ipv6_the_regression_guards_against():
     assert "ip6 saddr" not in fwd and 'iifname "' not in fwd   # nothing catches a v6 sandbox packet
     # => a v6 sandbox packet hits the forward `policy accept` and escapes. The fix (iface OR v6 subnet)
     #    is what closes this; test_auto_applied_backstop_denies_default_ipv6_sandbox_egress proves it closed.
+
+
+# ===================================================================================================
+# B2 (option c) — VIGIL_GATEWAY_SCOPE_HOSTS: the launcher-injected, host-verified signed-scope SNAPSHOT.
+# A non-empty value wins and is enforced via StaticScopeSource; an empty/absent one falls through to the
+# slug, and with NEITHER source from_env fail-closes. StaticScopeSource([]) is deny-all, so an empty value
+# can never be silently used as a permissive "scope provided".
+# ===================================================================================================
+from vigil_gateway.config import _split_hosts  # noqa: E402
+from vigil_gateway.scope_source import CharterScopeSource  # noqa: E402
+
+
+def _clear_scope_env(monkeypatch):
+    for k in ("VIGIL_GATEWAY_SCOPE_HOSTS", "VIGIL_GATEWAY_CHARTER_SLUG"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_static_scope_hosts_env_wins_and_is_enforced(monkeypatch):
+    _clear_scope_env(monkeypatch)
+    monkeypatch.setenv("VIGIL_GATEWAY_SCOPE_HOSTS", "acme.example.com, 10.0.0.5")
+    cfg = GatewayConfig.from_env()                      # no explicit scope → resolves from env
+    assert isinstance(cfg.scope, StaticScopeSource)
+    assert cfg.scope.hosts() == ["acme.example.com", "10.0.0.5"]
+    assert cfg.scope.matches("acme.example.com") and not cfg.scope.matches("evil.example")
+
+
+def test_static_scope_wins_over_a_present_slug(monkeypatch):
+    _clear_scope_env(monkeypatch)
+    monkeypatch.setenv("VIGIL_GATEWAY_SCOPE_HOSTS", "acme.example.com")
+    monkeypatch.setenv("VIGIL_GATEWAY_CHARTER_SLUG", "acme")   # slug present, but the static snapshot wins
+    cfg = GatewayConfig.from_env()
+    assert isinstance(cfg.scope, StaticScopeSource) and cfg.scope.hosts() == ["acme.example.com"]
+
+
+def test_empty_scope_hosts_falls_through_to_slug_never_a_denyall_static(monkeypatch):
+    _clear_scope_env(monkeypatch)
+    monkeypatch.setenv("VIGIL_GATEWAY_SCOPE_HOSTS", "  , \n ")   # present but ALL-BLANK → not a static scope
+    monkeypatch.setenv("VIGIL_GATEWAY_CHARTER_SLUG", "acme")
+    cfg = GatewayConfig.from_env()
+    assert isinstance(cfg.scope, CharterScopeSource), "an empty SCOPE_HOSTS must fall through to the slug"
+
+
+def test_no_scope_source_at_all_fails_closed(monkeypatch):
+    _clear_scope_env(monkeypatch)
+    monkeypatch.setenv("VIGIL_GATEWAY_SCOPE_HOSTS", "")   # empty and no slug
+    with pytest.raises(RuntimeError, match="no gateway scope source"):
+        GatewayConfig.from_env()
+
+
+def test_split_hosts_parses_comma_and_newline_dropping_blanks():
+    assert _split_hosts("a.com, b.com\nc.com , ") == ["a.com", "b.com", "c.com"]
+    assert _split_hosts("") == [] and _split_hosts("  ,\n ") == []

@@ -548,6 +548,7 @@ jobs:
               integration/tests/test_h9_replanning.py \
               integration/tests/test_brain_execute_via_body.py \
               integration/tests/test_h8f_nmap_first_fact.py \
+              integration/tests/test_gateway_scope_inject.py \
               integration/tests/test_brain_capability_persisted.py \
               integration/tests/test_hexstrike_profile_observations.py \
               integration/tests/test_sovereignty_governs_llm_egress.py \

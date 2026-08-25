@@ -49,6 +49,14 @@ def _parse_ports(raw: str) -> frozenset[int] | None:
     return frozenset(ports) or None
 
 
+def _split_hosts(raw: str) -> list[str]:
+    """Parse the launcher-injected ``VIGIL_GATEWAY_SCOPE_HOSTS`` (B2): comma- OR newline-separated scope
+    hosts, blanks dropped. Empty/unset/all-blank → ``[]`` — which the caller treats as NO static scope (it
+    falls through to the slug or the fail-closed refusal), so an empty value can NEVER be silently used as a
+    deny-all 'scope provided'."""
+    return [h.strip() for h in raw.replace("\n", ",").split(",") if h.strip()]
+
+
 @dataclass
 class GatewayConfig:
     scope: ScopeSource
@@ -67,13 +75,30 @@ class GatewayConfig:
     @classmethod
     def from_env(cls, *, scope: ScopeSource | None = None) -> "GatewayConfig":
         if scope is None:
+            # B2 (option c) — a HOST-VERIFIED signed-scope SNAPSHOT. The launcher (`vigil up`), running in the
+            # offense venv where the charter and its parser live, verifies the SIGNED charter and parses its
+            # scope HOST-SIDE, then injects the resolved host list as VIGIL_GATEWAY_SCOPE_HOSTS. The stdlib-only
+            # egress container then enforces exactly that snapshot via the existing StaticScopeSource — no
+            # charter file and no framework parser ever enter the container. Precedence + fail-closed:
+            #   * a NON-EMPTY static scope wins (the injected snapshot);
+            #   * else a directly-readable charter slug (the host-run path where the charter IS readable);
+            #   * else NEITHER → raise (unchanged). An empty/absent VIGIL_GATEWAY_SCOPE_HOSTS FALLS THROUGH and
+            #     is never silently used as a deny-all "scope provided" — StaticScopeSource([]) is deny-all, but
+            #     we must still require SOME source or refuse. (Snapshot semantics: scope is captured at bring-up;
+            #     a mid-engagement scope change requires a gateway restart — the accepted tradeoff of option c.)
+            static_hosts = _split_hosts(os.environ.get("VIGIL_GATEWAY_SCOPE_HOSTS", ""))
             slug = os.environ.get("VIGIL_GATEWAY_CHARTER_SLUG", "").strip()
-            if not slug:
+            if static_hosts:
+                scope = StaticScopeSource(static_hosts)
+            elif slug:
+                scope = CharterScopeSource(slug)
+            else:
                 raise RuntimeError(
-                    "VIGIL_GATEWAY_CHARTER_SLUG is required (or pass an explicit scope). "
-                    "The gateway refuses to run without a scope source — fail closed."
+                    "no gateway scope source — set VIGIL_GATEWAY_SCOPE_HOSTS (the launcher-injected, "
+                    "host-verified signed-charter snapshot) or VIGIL_GATEWAY_CHARTER_SLUG (a directly "
+                    "readable charter), or pass an explicit scope. The gateway refuses to run without a "
+                    "scope source — fail closed."
                 )
-            scope = CharterScopeSource(slug)
         subnets = _parse_subnets(os.environ.get("VIGIL_GATEWAY_SANDBOX_SUBNET", "172.31.240.0/24"))
         primary = subnets[0] if subnets else "172.31.240.0/24"
         return cls(
