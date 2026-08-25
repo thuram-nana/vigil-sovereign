@@ -74,8 +74,14 @@ def _bootstrap_crucible_import():
             )
             return parse_scope, host_matches_scope, extract_hostname
         except ImportError:
-            # genuinely no framework (the stdlib-only container) → the ported local matcher.
-            return _local_gate()
+            # Fall back to the ported local matcher ONLY when the framework package is GENUINELY absent (the
+            # stdlib-only container). If `framework` IS importable but ethics failed for a real reason (a
+            # broken sibling on the host path), re-raise the true error rather than masking it behind the
+            # container fallback (red-pen LOW: keep host-side faults diagnosable).
+            import importlib.util
+            if importlib.util.find_spec("framework") is None:
+                return _local_gate()
+            raise
 
 
 _GATE: tuple | None = None

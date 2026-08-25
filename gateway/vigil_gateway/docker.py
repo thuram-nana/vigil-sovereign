@@ -256,6 +256,11 @@ class SandboxNetworking:
             engagement's signed-charter slug, and an unset var still fail-closes (no scope ⇒ no gateway) — the
             same safe default, now with an actionable path instead of an unfixable literal.
           * an explicit slug — templated LITERALLY (used when rendering a compose pinned to one engagement).
+
+        The proxy env also carries ``VIGIL_GATEWAY_SCOPE_HOSTS`` as the interpolation form
+        ``${{VIGIL_GATEWAY_SCOPE_HOSTS:-}}`` (B2, option c): the launcher injects the host-verified signed-scope
+        snapshot there, and ``config.from_env`` prefers a non-empty snapshot over ``CHARTER_SLUG`` — see
+        gateway/README.md. Unset ⇒ the same fail-closed default as before (no scope source ⇒ no gateway).
         """
         # BOTH templated values are guarded — a quote / newline in either would let it break out of its
         # YAML scalar and inject compose directives (e.g. privileged: true). charter_slug: a simple slug;
@@ -364,7 +369,13 @@ services:
       VIGIL_GATEWAY_PROXY_PORT: "{self.proxy_port}"
       VIGIL_GATEWAY_PROXY_HOST: "{bind_ip}"
       VIGIL_GATEWAY_PROXY_TOKEN: "${{VIGIL_GATEWAY_PROXY_TOKEN:-}}"
-      VIGIL_GATEWAY_CHARTER_SLUG: "{charter_slug_value}"
+      VIGIL_GATEWAY_CHARTER_SLUG: "{charter_slug_value}"   # provenance/logging (scope via SCOPE_HOSTS)
+      # B2 (option c): the HOST-VERIFIED signed-scope SNAPSHOT the launcher injects after verifying the SIGNED
+      # charter and parsing its scope host-side. Non-empty ⇒ the stdlib-only proxy enforces exactly this list
+      # via StaticScopeSource (no charter file/parser in the container); empty/unset ⇒ from_env falls back to
+      # the (unreadable-in-container) CHARTER_SLUG and fail-closes, exactly as before. The never-liftable
+      # metadata/RFC1918 floor is charter-independent and unaffected.
+      VIGIL_GATEWAY_SCOPE_HOSTS: "${{VIGIL_GATEWAY_SCOPE_HOSTS:-}}"
     command: ["vigil-gateway", "serve-proxy", "--host", "{bind_ip}", "--port", "{self.proxy_port}"]
     healthcheck:
       # The gate is only "up" when the proxy is actually LISTENING on its pinned sandbox bind. A bad or
