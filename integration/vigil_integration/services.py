@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import socket
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -63,6 +64,22 @@ class RootServices:
         return sorted({ROOT_SERVICES[s]["profile"] for s in services
                        if s in ROOT_SERVICES and ROOT_SERVICES[s]["profile"]})
 
+    @staticmethod
+    def _port_open(port: Optional[int], host: str = "127.0.0.1", timeout: float = 0.5) -> bool:
+        """True iff SOMETHING is already serving on host:port. This is what makes detection
+        ENDPOINT-aware rather than compose-project-scoped: the sovereign app ships qdrant as a
+        differently-named container (`sigil-qdrant`) in a different compose project, so `ps()` reports
+        the root-compose `qdrant` service as absent even while 6333 is served. Probing the port tells
+        the operator the truth ("something is already answering here") without a false "absent". Never
+        raises; a closed port refuses fast, so the bound only bites a silently-dropping port."""
+        if not port:
+            return False
+        try:
+            with socket.create_connection((host, int(port)), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
     def ps(self) -> dict:
         """{service: docker-state} for every service that has a container. Robust to both compose-v2 output
         shapes (a JSON array, or newline-delimited JSON objects)."""
@@ -95,10 +112,15 @@ class RootServices:
         return states
 
     def status(self) -> dict:
-        """A create-if-absent readiness snapshot for every known root service."""
+        """A create-if-absent readiness snapshot for every known root service.
+
+        `reachable` (endpoint-aware) is True when SOMETHING already answers on the service's loopback
+        port even if THIS compose project has no such container — so a differently-named external
+        container (e.g. `sigil-qdrant` on 6333) reads as reachable instead of a misleading "absent"."""
         live = self.ps()
         return {name: {"state": live.get(name, "absent"), "profile": meta["profile"],
-                       "port": meta["port"], "purpose": meta["purpose"]}
+                       "port": meta["port"], "purpose": meta["purpose"],
+                       "reachable": self._port_open(meta["port"])}
                 for name, meta in ROOT_SERVICES.items()}
 
     def up(self, services) -> dict:
