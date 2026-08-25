@@ -541,6 +541,14 @@ _ADVISORY_ROLLING_DRIFT: dict[str, str] = {
     # current. Its committed SBOM is regenerated deliberately (gen_image_sbom.py), never per-drift, and its
     # image vuln scan is already ADVISORY in the A14 job — so its drift is surfaced, not blocking.
     "kalilinux/kali-rolling": "rolling Kali distro base (strix sandbox); any tag of this rolling repo is tracked-latest by design, already advisory-vuln-scanned; SBOM regenerated deliberately, not per-drift",
+    # The graph DB: docker-compose.yml deliberately tracks the ROLLING `5-community` tag (latest 5.x
+    # community patch), rather than a pinned patch. That tag moves on every 5.x release (observed drifting
+    # twice in a day), so BLOCKING on it is pure toil with no security signal — the move is expected. It
+    # is scoped to the optional `graph` compose profile (off the default engine/test path), and A14 builds
+    # and image-scans only the gateway and Strix images, so this pin is a tag-drift check, not an image
+    # scan. Its drift is SURFACED (advisory), and the pinned digest is refreshed deliberately on a
+    # cadence, exactly like the Kali rolling base above.
+    "library/neo4j": "rolling neo4j `5-community` tag (optional `graph` compose-profile service); tracks latest 5.x by design; A14 tag-drift-checks it but does not image-scan it; drift surfaced advisory, digest re-pinned on a cadence",
 }
 
 

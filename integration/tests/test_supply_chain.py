@@ -1716,8 +1716,9 @@ _GHCR_REF = "ghcr.io/owner/image:1.2@sha256:" + "b" * 64
 #: A DOCUMENTED rolling base (image_pins.py::_ADVISORY_ROLLING_DRIFT) — its repository normalises to
 #: exactly the allowlist key "kalilinux/kali-rolling"; it lives in vendor/strix/containers/Dockerfile.
 _KALI_ROLLING_REF = "kalilinux/kali-rolling:latest@sha256:" + "a" * 64
-#: A stable service tag Option A deliberately RE-PINNED (docker-compose.yml). Its repository normalises
-#: to "library/neo4j" — NOT allowlisted — so its drift must still BLOCK (the negative control).
+#: The graph DB's ROLLING `5-community` tag (docker-compose.yml). Its repository normalises to
+#: "library/neo4j", now a DOCUMENTED rolling base in _ADVISORY_ROLLING_DRIFT — so a MOVE is advisory,
+#: not blocking (it tracks latest 5.x by design and is not A14-image-scanned).
 _NEO4J_REF = "neo4j:5-community@sha256:" + "a" * 64
 
 
@@ -1852,7 +1853,6 @@ def test_non_allowlisted_moved_digest_still_blocks_negative_control(capsys) -> N
         return pins.Resolution(supported=True, digest="sha256:" + "9" * 64)
 
     cases = {
-        "neo4j (the re-pinned stable service tag)": _NEO4J_REF,
         "python (an ordinary Hub base)": _HUB_REF,
         "a :latest tag on a NON-allowlisted repo": "debian:latest@sha256:" + "a" * 64,
     }
@@ -1870,6 +1870,29 @@ def test_non_allowlisted_moved_digest_still_blocks_negative_control(capsys) -> N
     assert "!!" in out and "~~" not in out
 
 
+def test_neo4j_rolling_tag_is_advisory_not_blocking(capsys) -> None:
+    """The graph DB's rolling `5-community` tag is a DOCUMENTED rolling base: a MOVE is advisory
+    (surfaced, `~~`), never blocking. It tracks latest 5.x by design, is deploy-gated (compose profile
+    `graph`) and is not A14-image-scanned, so blocking on its inevitable drift is toil with no signal.
+    Pins the reclassification so removing library/neo4j from the allowlist (reverting to blocking) is
+    caught here."""
+    pins = _load_image_pins()
+    ref = _pinned_ref(pins, _NEO4J_REF)
+    assert ref.repository == "library/neo4j"
+    assert ref.repository in pins._ADVISORY_ROLLING_DRIFT, "neo4j 5-community must be a documented rolling base"
+
+    def moved(_r):
+        return pins.Resolution(supported=True, digest="sha256:" + "9" * 64)
+
+    results = pins.evaluate_drift([ref], moved)
+    assert results[0].status == pins.DRIFT_MOVED_ADVISORY
+    assert results[0].is_advisory_drift and not results[0].is_drift
+    # A moved rolling tag does NOT block under --fail-on-drift, and is reported advisory (`~~`), not `!!`.
+    assert pins.run_drift([ref], moved, fail_on_drift=True) == 0
+    out = capsys.readouterr().out
+    assert "~~" in out
+
+
 def test_option_a_leaves_the_other_verdicts_unchanged() -> None:
     """INVARIANT: Option A only re-labels a MOVED digest of a documented rolling repo — every other
     verdict is unchanged.
@@ -1885,7 +1908,7 @@ def test_option_a_leaves_the_other_verdicts_unchanged() -> None:
         return pins.Resolution(supported=True, digest=r.digest)
 
     # (a) matching digest -> DRIFT_MATCH, for a plain repo AND the allowlisted rolling repo.
-    for ref_str in (_NEO4J_REF, _KALI_ROLLING_REF):
+    for ref_str in (_HUB_REF, _KALI_ROLLING_REF):
         ref = _pinned_ref(pins, ref_str)
         res = pins.evaluate_drift([ref], matches)
         assert res[0].status == pins.DRIFT_MATCH and not res[0].is_advisory_drift, ref_str
