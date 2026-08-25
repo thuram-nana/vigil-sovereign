@@ -125,9 +125,11 @@ class RunnerDeps:
     # so — unlike the runner-less planning body — it MUST re-enforce the executor's execution-time single-use
     # authorization. run_external_tool already re-checks scope + loopback + pre-flight (kill-switch / charter
     # slug / entitlement) + backend isolation UNCONDITIONALLY; the ONE control it applies only when threaded
-    # is the single-use, action-bound CAPABILITY TOKEN (W13-5). This carries it (a
-    # ``live.external_tool.CapabilityCheck``); ``_run_via_external_tool`` refuses BEFORE traffic if a runner
-    # is provisioned without one, so a body-routed tool can never emit a packet on an unspent authorization.
+    # is the single-use, action-bound CAPABILITY TOKEN (W13-5). This carries EITHER a static
+    # ``live.external_tool.CapabilityCheck`` OR a PER-ACTION minter ``callable(spec, target) -> CapabilityCheck``
+    # (H8f: the brain proposes a fresh argv each step and each nonce is single-use, so a real multi-step run
+    # needs a token minted per operation). ``_run_via_external_tool`` refuses BEFORE traffic if a runner is
+    # provisioned without one, so a body-routed tool can never emit a packet on an unspent authorization.
     # Typed ``Any`` (not the offense-side CapabilityCheck) so this dataclass stays FATAL-2-safe at module scope.
     capability: Any = None
 
@@ -290,23 +292,45 @@ class HexstrikeAgentBody(AgentBody):
         # unspent authorization — refuse it BEFORE traffic (a LEAD), never diverge from the executor path. When
         # present, run_external_tool binds the token to the EXACT argv (operation_hash), burns its O_EXCL nonce,
         # and refuses a stale/replayed/different-operation token before the subprocess runs.
-        if self._runner.capability is None:
+        # H8f: the capability may be a static CapabilityCheck OR a PER-ACTION minter — a
+        # ``callable(spec, target) -> CapabilityCheck`` that mints a fresh single-use token bound to THIS
+        # exact operation (the brain proposes a fresh argv each step, and each nonce is single-use, so one
+        # static token cannot cover a multi-step run). The minter is called with the SAME ``spec`` passed to
+        # run_external_tool, so the token's operation_hash matches the argv the runner actually builds. A
+        # minter that raises is fail-closed (a LEAD, no traffic) — an authorization we could not mint is not
+        # one we execute under.
+        cap = self._runner.capability
+        if callable(cap):
+            try:
+                cap = cap(spec, action.target)
+            except Exception as e:  # noqa: BLE001 — a mint failure REFUSES (fail-closed), never runs unspent
+                return ActionOutcome(executed=False, ok=False,
+                                     blocked_reason=f"capability minter failed (fail-closed): "
+                                                    f"{type(e).__name__}: {e}")
+        if cap is None:
             return ActionOutcome(executed=False, ok=False,
                                  blocked_reason="runner provisioned without a single-use capability token — "
                                                 "refused before traffic (H8f gate parity)")
         res = run_external_tool(
             spec, action.target, scope_gate=self._runner.scope_gate, backend=self._runner.backend,
             engagement_slug=self._runner.engagement_slug, signers=self._runner.signers,
-            timeout=self._runner.timeout, capability=self._runner.capability,
+            timeout=self._runner.timeout, capability=cap,
         )
         if getattr(res, "refused", False):
             return ActionOutcome(executed=False, ok=False,
                                  blocked_reason=f"runner refused (pre-traffic): {getattr(res, 'reason', '')}")
         facts = list(getattr(res, "facts", []) or [])
         leads = list(getattr(res, "leads", []) or [])
+        # H8f: surface the ACTUAL runner-minted facts (oracle-confirmed AdapterResults, each carrying a signed
+        # certificate) and their retained oracle_contexts (finding_ref -> context, for OFFLINE re-verify) — not
+        # just counts — so the engine seam can propagate a body-routed FACT into the run report through the SAME
+        # already-confirmed-fact path it uses for fireteam facts. The body still supplies NO provenance; these
+        # facts were minted by the RUNNER's own admit()+certify, never by the body/brain.
         return ActionOutcome(executed=True, ok=bool(facts),
                              detail={"n_facts": len(facts), "n_leads": len(leads),
-                                     "reason": getattr(res, "reason", ""), "tool": action.kind})
+                                     "reason": getattr(res, "reason", ""), "tool": action.kind,
+                                     "facts": facts, "leads": leads,
+                                     "contexts": dict(getattr(res, "contexts", {}) or {})})
 
     # ---- learn (re-rank/defer ONLY) ------------------------------------------------------------
     def learn(self, outcome: ActionOutcome) -> None:

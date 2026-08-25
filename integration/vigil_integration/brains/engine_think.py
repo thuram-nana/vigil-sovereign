@@ -65,9 +65,17 @@ class BrainThink:
 
     def __init__(self, brain: Optional[HexstrikeBrain] = None, *, target: str = "",
                  objective: "str | None" = None, observations: Optional[dict[str, Any]] = None,
-                 posture: str = "live", proposal_out: "str | os.PathLike | None" = None) -> None:
+                 posture: str = "live", proposal_out: "str | os.PathLike | None" = None,
+                 runner: Optional[Any] = None) -> None:
         self._brain = brain or HexstrikeBrain()
         self._target = target
+        # H8f — the OPERATOR-CHECKPOINT-GATED runner. DEFAULT None: the body stays runner-less, executes no
+        # tool, and mints ZERO facts (the FP-0 seam stays closed, every existing fact_count==0 test unchanged).
+        # When the operator provisions a ``hexstrike_body.RunnerDeps`` (with a per-action capability minter),
+        # ``config.brain.body()`` returns a runner-equipped body, so a GATE-AUTHORIZED nmap tool routed via
+        # ``--brain-execute-via-body`` mints its first live SERVICE_REACHABILITY FACT through the runner's own
+        # admit()+certify. Typed ``Any`` so engine_think stays framework-free at module scope (FATAL-2).
+        self._runner = runner
         # Normalise ONCE, here: an unknown objective raises at construction rather than silently planning
         # something other than its label, and the persisted proposal records the objective actually used.
         # (parse_objective is stdlib — this keeps construction framework-free for the sovereign leg.)
@@ -131,7 +139,7 @@ class BrainThink:
         if self._body is None:
             from .hexstrike_body import HexstrikeAgentBody  # noqa: PLC0415 (FATAL-2: framework at module scope)
             self._body = HexstrikeAgentBody(brain=self._brain, objective=self._objective,
-                                            posture=self._posture)
+                                            posture=self._posture, runner=self._runner)
         return self._body
 
     def body(self):
@@ -140,10 +148,13 @@ class BrainThink:
         gate-authorized tool through the body's own ``execute`` when the operator opts into
         ``--brain-execute-via-body`` (H1x-1 — execute-path convergence).
 
-        FACT SEAM CLOSED by construction here: the body is built with NO ``RunnerDeps`` (runner defaults
-        to None), so ``HexstrikeAgentBody.execute`` returns an unexecuted LEAD ("runner not provisioned")
-        and can mint no FACT. Provisioning the runner so a tool mints its first live FACT (nmap
-        SERVICE_REACHABILITY) is the SEPARATE, operator-checkpoint-gated H8f slice — not this one.
+        FACT SEAM: by DEFAULT the body is built with NO ``RunnerDeps`` (``runner`` defaults to None), so
+        ``HexstrikeAgentBody.execute`` returns an unexecuted LEAD ("runner not provisioned") and mints no
+        FACT — the FP-0 seam stays closed and every ``fact_count==0`` test is unchanged. H8f: when the
+        operator provisions a runner (``BrainThink(runner=RunnerDeps(...))``, with a per-action capability
+        minter), this returns a runner-equipped body, and a gate-authorized nmap routed via
+        ``--brain-execute-via-body`` mints its first live SERVICE_REACHABILITY FACT through the runner's own
+        admit()+certify. Provisioning is the operator checkpoint; the default remains runner-less.
 
         Import is function-local (via ``_ensure_body``) for the same FATAL-2 reason as planning: the body
         pulls the framework agent-body interface, available only in the offense leg where a run is driven."""
