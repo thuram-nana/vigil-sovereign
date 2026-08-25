@@ -8,7 +8,8 @@ substring match — a benign reflecting page does not false-FACT):
 
   * open_redirect   — a 30x whose Location host == the injected canary host (or a meta/JS redirect to it);
   * cors            — Access-Control-Allow-Origin reflects the evil origin (or ``*``) AND ...-Credentials=true;
-  * host_header_injection — a hostile Host header became a redirect Location authority (or a ``//evil`` in body).
+  * host_header_injection — a hostile Host header became a redirect Location authority (or a ``//evil`` in body);
+  * graphql_introspection — VIGIL's OWN introspection query returns a well-formed schema (data.__schema.types).
 
 It REUSES the shipped ``scanner.checks`` probes verbatim (same crafting + the exact predicate the oracle
 already trusts) driven by a gated ``send`` — so nothing about the oracle or the predicate is reinvented; only
@@ -24,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # the web classes this wave mints as FACTs (each has a definite, exploitable-condition ACHIEVED_STATE predicate).
-WEB_FACT_CLASSES = ("open_redirect", "cors", "host_header_injection")
+WEB_FACT_CLASSES = ("open_redirect", "cors", "host_header_injection", "graphql_introspection")
 
 
 @dataclass
@@ -362,6 +363,12 @@ def _branch_outcomes(bug_class: str, context: "dict", overall_fired: bool) -> "l
     if bug_class == "cors":
         return [("cors.reflected_origin_with_credentials", overall_fired)]
 
+    if bug_class == "graphql_introspection":
+        # A single, oracle-driven branch: the check's predicate already IS the exploitable proposition (a
+        # well-formed schema returned to VIGIL's own introspection query), so the branch simply mirrors the
+        # oracle's verdict over that live capture — no per-response decomposition to do (like cors).
+        return [("graphql_introspection.schema_returned", overall_fired)]
+
     if bug_class == "host_header_injection":
         # The host-header Location disjunct is itself status-free (checks.py:HostHeaderCheck), so branch and
         # oracle already agree here — do not add a gate the oracle does not have.
@@ -393,7 +400,12 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
     ACHIEVED_STATE predicate the oracle confirms over VIGIL's OWN live capture. The predicates are scoped to
     the exploitable, co-located condition (a real navigation target / reflected-origin+creds), and a probe
     that established no channel is INCONCLUSIVE (never CLEAN). Returns a :class:`WebRedriveResult`."""
-    from framework.v2.scanner.checks import CorsActiveCheck, HostHeaderCheck, OpenRedirectCheck  # noqa: PLC0415
+    from framework.v2.scanner.checks import (  # noqa: PLC0415
+        CorsActiveCheck,
+        GraphqlIntrospectionCheck,
+        HostHeaderCheck,
+        OpenRedirectCheck,
+    )
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
     from framework.v2.verify.reachability_cloud import _authorize  # noqa: PLC0415 — the URL-shaped gate
 
@@ -480,6 +492,10 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         _run(lambda: CorsActiveCheck().probe(template, send), "cors", url, surface="origin_header")
         _run(lambda: HostHeaderCheck().probe(template, send), "host_header_injection", url,
              surface="host_header")
+        # graphql introspection: VIGIL POSTs its OWN minimal introspection query and the oracle fires only on
+        # a well-formed returned schema — a definite proposition, so a single oracle-driven branch (like cors).
+        _run(lambda: GraphqlIntrospectionCheck().probe(template, send), "graphql_introspection", url,
+             surface="graphql_introspection_query")
         # per-insertion-point: open-redirect injects the canary into each redirect insertion point, across
         # EVERY surface a redirect parameter is really taken from — the URL query/path, a Cookie, a
         # urlencoded body, and a JSON body. The runner synthesises the cookie/body/JSON carriers (see

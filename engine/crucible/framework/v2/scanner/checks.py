@@ -442,6 +442,60 @@ class OpenRedirectCheck:
             bug_class=self.bug_class)
 
 
+def _graphql_schema_type_count(body: str) -> int:
+    """Number of types in a GraphQL introspection RESPONSE (``data.__schema.types``), or 0 when the body is
+    not a well-formed introspection response. VIGIL sends its OWN introspection query; this counts what came
+    back. Total on untrusted input — a non-JSON body, a GraphQL ``errors`` response ("introspection is
+    disabled"), or a non-GraphQL page all count 0, so the predicate fires ONLY on a real returned schema."""
+    import json
+    try:
+        obj = json.loads(body)
+    except (ValueError, TypeError):
+        return 0
+    if not isinstance(obj, dict):
+        return 0
+    data = obj.get("data")
+    schema = data.get("__schema") if isinstance(data, dict) else None
+    types = schema.get("types") if isinstance(schema, dict) else None
+    return len(types) if isinstance(types, list) else 0
+
+
+@dataclass(frozen=True)
+class GraphqlIntrospectionCheck:
+    """GraphQL introspection exposure: send VIGIL's OWN minimal introspection query and confirm via
+    achieved-state ONLY when the endpoint returns a WELL-FORMED introspection schema
+    (``data.__schema.types`` is a non-empty array). A 400/403, a GraphQL ``errors`` response
+    ("introspection is disabled"), or any non-GraphQL page fails the predicate — so this does NOT fire on the
+    mere presence of a ``/graphql`` path, and never on a tool's say-so: the schema is read from VIGIL's own
+    live capture. A body VIGIL could not decode is NOT evidence (the predicate is suppressed), so a
+    non-firing over an unreadable body is INCONCLUSIVE for the runner, never CLEAN.
+
+    Request-level (no insertion point): it POSTs the query to the endpoint URL as ``application/json``."""
+
+    id: str = "graphql-introspection"
+    bug_class: str = "graphql_introspection"
+    query: str = '{"query":"query IntrospectionQuery { __schema { types { name } } }"}'
+
+    def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None:
+        req = template.request
+        headers = [(k, v) for k, v in req.headers if k.lower() != "content-type"]
+        headers.append(("Content-Type", "application/json"))
+        resp = send(req.model_copy(update={"method": "POST", "headers": headers, "body": self.query}))
+        if not isinstance(resp, dict):
+            return None
+        body = str(resp.get("body", ""))
+        # A body VIGIL could not decode (unsupported encoding / undeclared charset / truncated) is not
+        # evidence: the count disjunct must not fire over it, and a non-firing is INCONCLUSIVE not CLEAN.
+        body_available = bool(resp.get("body_semantically_available", True))
+        return FindingContext.from_predicate(
+            {"introspection_type_count": _graphql_schema_type_count(body), "body_available": body_available},
+            {"all": [
+                {"eq": [{"var": "body_available"}, True]},
+                {"gt": [{"var": "introspection_type_count"}, 0]},
+            ]},
+            bug_class=self.bug_class)
+
+
 @dataclass(frozen=True)
 class IdorCheck:
     """Broken-object-level authorization (IDOR / BOLA) via a two-identity read.
