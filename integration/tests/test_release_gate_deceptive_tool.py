@@ -300,6 +300,15 @@ def test_a_lying_tls_tool_cannot_mint_a_fact_over_a_strong_endpoint(tmp_path):
         srv.close()
     assert list(getattr(res, "proposed", []) or []), (
         "the lying sslscan proposed NOTHING — the deception was never exercised")
+    # NON-VACUITY (red-pen LENS-2 HIGH): prove VIGIL's OWN handshake actually completed and the weak_crypto
+    # oracle CONCLUSIVELY did not fire — a weak_crypto_artifact INCONCLUSIVE outcome (the leaf cert was
+    # captured over a live handshake). Without this, a no-channel run (both re-drives SKIPPED, minting
+    # nothing) would green this test VACUOUSLY. Mirrors test_loopback_tls_strong_hash_cert_is_inconclusive_
+    # not_clean in test_external_tool_runner.py.
+    wc = [o for o in (getattr(res, "outcomes", []) or []) if o["bug_class"] == "weak_crypto_artifact"]
+    assert wc and any(o["outcome"] == "inconclusive" for o in wc), (
+        "VIGIL's own TLS handshake produced no conclusive weak_crypto non-fire — the strong-cert refutation "
+        f"was never exercised (a SKIPPED no-channel run greens vacuously): outcomes={getattr(res, 'outcomes', None)}")
     assert not [f for f in (getattr(res, "facts", []) or [])
                 if getattr(f, "confirmed_by", "") == "tls_weakness"], (
         "a LYING sslscan minted a TLS FACT over a STRONG endpoint — the runner trusted its rows, not its own "

@@ -566,6 +566,12 @@ def test_a_plain_open_redirect_is_not_upgraded_to_oidc_without_the_claim(monkeyp
                           claimed_class="open_redirect")
     finally:
         srv.shutdown()
+    assert _HITS["n"] > 0, "the re-drive must actually contact the server (a refusal would be a vacuous pass)"
+    # NON-VACUITY (red-pen LENS-2 LOW): the SAME /authorize endpoint IS a genuine open redirect, so under the
+    # open_redirect claim the channel MUST mint an open_redirect FACT. This proves the re-drive worked and
+    # that ONLY the class-gate suppresses the oidc upgrade — not a gate-refusal/dead channel greening it.
+    assert [x for x in res.facts if "open_redirect" in x.finding_ref], \
+        f"the open_redirect channel did not fire — the anti-laundering test is vacuous: {[x.finding_ref for x in res.facts]}"
     assert not [x for x in res.facts if "oidc_redirect_uri" in x.finding_ref], \
         "a plain open_redirect claim must NEVER be upgraded to an oidc_redirect_uri FACT (class-gate)"
 
