@@ -184,7 +184,11 @@ class RootServices:
                     progress(name, "building")
                 proc = self._run(self._compose("build", meta["service"], profiles=[meta["profile"]]),
                                  timeout=BUILD_TIMEOUT)
-                out[name] = "built" if proc.returncode == 0 else f"failed: {proc.stderr.strip()[-400:]}"
-            except (RuntimeError, OSError, subprocess.SubprocessError) as e:
-                out[name] = f"failed: {e}"
+                if proc.returncode == 0:
+                    out[name] = "built"
+                else:
+                    tail = ((proc.stderr or "") or (proc.stdout or "")).strip()[-400:]
+                    out[name] = f"failed (rc={proc.returncode}): {tail or '(no output)'}"
+            except Exception as e:  # noqa: BLE001 — best-effort: a missing image is not a gate (unlike the
+                out[name] = f"failed: {e}"   # egress gateway); RECORD every failure, incl. a raised progress cb, never raise
         return out

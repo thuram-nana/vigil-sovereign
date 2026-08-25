@@ -2625,9 +2625,12 @@ def _cmd_up(args: argparse.Namespace) -> int:
             _rs = RootServices(_repo)
             _sres = _rs.up(list(DEFAULT_SERVICES))
             print(f"vigil up: services up ({_json.dumps(_sres)})")
-            # Build the offence/defence engine sandbox images if-absent (best-effort) so the FIRST strix/aegis
-            # engagement doesn't fail at container-create with a missing image. --no-build-images skips it.
-            if not getattr(args, "no_build_images", False):
+            # Build the offence/defence engine images if-absent — OPT-IN (--build-images). A from-scratch
+            # strix/aegis build is MINUTES and this runs BEFORE run_up serves the UI, so making it default-on
+            # would leave the cockpit blank for the whole build (and trip a systemd start timeout into a
+            # restart loop). The boot path builds them in a SEPARATE parallel unit instead; this flag is the
+            # explicit one-shot inline build. Consistent with `vigil services up` (also opt-in via --build-images/--all).
+            if getattr(args, "build_images", False):
                 _imgs = _rs.build_images_if_absent(
                     progress=lambda n, ph: print(f"vigil up: building engine image {n} (minutes)…",
                                                  file=sys.stderr))
@@ -4257,10 +4260,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "if the gateway topology fails to come up, continue anyway with the sandbox UNGATED "
                          "(a default route to the operator LAN / a third party / 169.254.169.254 — FATAL-1). "
                          "Off by default; only pass it when you have accepted running without the egress gate.")
-    pu.add_argument("--no-build-images", action="store_true",
-                    help="with --services: skip building the offence/defence engine images if absent. By "
-                         "default `vigil up --services` builds vigil/strix-sandbox + vigil/aegis-gateway when "
-                         "missing (best-effort), so the first engagement is ready at container-create time.")
+    pu.add_argument("--build-images", action="store_true",
+                    help="with --services: also build the offence/defence engine images (vigil/strix-sandbox, "
+                         "vigil/aegis-gateway) if absent. OFF by default because a from-scratch build is minutes "
+                         "and runs BEFORE the UI serves — leaving it on would blank the cockpit for the whole "
+                         "build and trip a systemd start timeout. The boot path builds them in a parallel unit; "
+                         "use this for an explicit one-shot inline all-up bring-up.")
     pu.add_argument("--charter-slug", default="",
                     help="with --services: the signed-charter slug the egress gateway enforces as its L7 "
                          "scope. Falls back to $VIGIL_GATEWAY_CHARTER_SLUG. Unset ⇒ the gateway fail-closes "
