@@ -3019,7 +3019,7 @@
   // screen owns that); a single sovereign EventSource keeps teardownLive() clean.
   function renderBackground(screen) {
     teardownLive();   // close any stream/timers from the previous screen
-    const B = { runs: [], snap: null, offOnline: null, sovOnline: null, seen: {}, eventCount: 0, streamAttached: false };
+    const B = { runs: [], snap: null, offOnline: null, offErr: null, sovOnline: null, seen: {}, eventCount: 0, streamAttached: false };
 
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Activity"),
@@ -3144,8 +3144,9 @@
     function drawRuns() {
       const host = V.$("#bg-runs"); if (!host) return;
       if (B.offOnline === false) {
-        V.mount(host, h("div.empty", null, [h("div.big", null, "Offense engine offline"),
-          h("p", null, "Could not reach the offense console. Start it with `vigil up` and it appears here.")])); return;
+        // WS2a: the runs region surfaces the REAL poll error (offlineEmpty distinguishes a backend 4xx/5xx
+        // from a down plane). The compact status pill + "Active runs" tile stay boolean by design.
+        V.mount(host, offlineEmpty(B.offErr, "Could not reach the offense console. Start it with `vigil up` and it appears here.")); return;
       }
       if (!B.runs.length) {
         V.mount(host, activeEngagement()
@@ -3166,8 +3167,8 @@
     // -- polling (read-only GETs; cleaned up by teardownLive via liveTimers) -----
     function pollRuns() {
       V.getJSON(runsURL()).then(function (d) {
-        B.runs = runsOf(d); B.offOnline = true; drawRuns(); drawStatus(); drawTiles();
-      }).catch(function () { B.offOnline = false; drawRuns(); drawStatus(); drawTiles(); });
+        B.runs = runsOf(d); B.offOnline = true; B.offErr = null; drawRuns(); drawStatus(); drawTiles();
+      }).catch(function (e) { B.offOnline = false; B.offErr = e; drawRuns(); drawStatus(); drawTiles(); });
     }
     function pollSnap() {
       V.getJSON(SOV("/api/snapshot")).then(function (s) {

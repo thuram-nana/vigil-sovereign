@@ -2,8 +2,12 @@
 
 `offlineEmpty(err)` now distinguishes an HTTP error (the plane is UP but the endpoint failed → show the
 server message, which WS0's getJSON attaches on `.status`/`.data`) from a fetch/network failure (the plane
-is genuinely down). Every data-read `.catch` routes through it instead of rendering its own inline empty
-state that discarded the error. This guards against a regression that re-introduces a masking inline empty.
+is genuinely down). Every single-read data `.catch` routes through it — including the Background panel's
+runs region, which now captures its poll error into `B.offErr` — so the only surviving inline
+"Offense engine offline" literal is the helper itself. (Two multi-source loaders — the Feed/Knowledge
+fan-out and the New-Assessment capability catalog — collapse their errors into an "offline" state by a
+different, fan-out shape, and are a deliberate boundary for this single-read slice.) This guards against a
+regression that re-introduces a masking inline empty.
 """
 from pathlib import Path
 
@@ -26,16 +30,19 @@ def test_offline_empty_distinguishes_a_backend_error_from_a_down_plane():
 
 
 def test_no_read_catch_discards_the_error_by_calling_offlineEmpty_with_no_arg():
+    import re
     src = _app()
-    # Every catch was threaded from `function ()` to `function (e)` and passes the error: offlineEmpty(e[,hint]).
-    assert "offlineEmpty());" not in src, \
-        "a catch still calls offlineEmpty() with no error — the real backend error is discarded"
+    # Every catch passes the error: offlineEmpty(e[, hint]). A BARE offlineEmpty() — any whitespace, any
+    # syntactic position — would mean a catch discarded the error. (The definition `function offlineEmpty(
+    # err, hint)` never matches this regex.)
+    bare = re.findall(r"offlineEmpty\(\s*\)", src)
+    assert not bare, f"a catch still calls offlineEmpty() with no error — the real backend error is discarded: {bare}"
 
 
-def test_masking_inline_empty_states_survive_only_in_the_helper_and_the_flag_based_panel():
+def test_the_only_masking_inline_empty_left_is_the_helper_itself():
     src = _app()
-    # The literal masking markup survives ONLY in offlineEmpty itself and the flag-based Background panel
-    # (which renders from a cached offOnline flag and has no error object) — at most 2 occurrences.
+    # After threading every single-read catch (incl. the Background runs region) through offlineEmpty(err),
+    # the literal masking markup survives ONLY inside offlineEmpty's own fallback branch — one occurrence.
     n = src.count('h("div.big", null, "Offense engine offline")')
-    assert n <= 2, (f"{n} inline 'Offense engine offline' empty-states remain — read panels should route "
-                    "their catch through offlineEmpty(e) so the real backend error is not masked")
+    assert n <= 1, (f"{n} inline 'Offense engine offline' empty-states remain — every single-read catch "
+                    "should route through offlineEmpty(err) so the real backend error is not masked")
