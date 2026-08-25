@@ -102,6 +102,11 @@ assert "strix" not in _m, "sovereign_bridge must not import strix at module scop
 import vigil_integration.sovereign_deploy  # W13-8: the air-gapped DEPLOYMENT facade -- stdlib + vigil_core only
 assert "framework" not in _m, "sovereign_deploy must not import framework at module scope"
 assert "strix" not in _m, "sovereign_deploy must not import strix at module scope"
+import vigil_integration.live.observation  # H6/B1: the normalized ONE-tool-run record — SOVEREIGN-LOADED,
+_o = vigil_integration.live.observation
+assert "framework" not in _m, "live.observation must not import framework at module scope (sovereign-loaded)"
+assert "strix" not in _m, "live.observation must not import strix at module scope (sovereign-loaded)"
+assert hasattr(_o, "Observation"), "live.observation must expose the Observation record it is guarding"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 

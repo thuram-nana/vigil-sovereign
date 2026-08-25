@@ -44,6 +44,10 @@ them would be lossy, so H6 converges the one record every EXECUTION emits and le
 | `live.observation.Observation` | **What a tool EXECUTION emits** — the normalized run record. | tool/binary/args/output digests, proposals, outcome class. | **Converged (this slice).** The "one record every execution emits." |
 | `intel.models.Observation` | **An atomic INTEL datum** that enters the world-model graph. | Admiralty reliability × credibility, polarity (affirms/refutes), subject→relation→object claim, monotonic `seq`. | **Left distinct.** It is the graph-claim currency of the reasoning layer, not a tool run. It has no tool-identity/argv/binary concept, and the run record has no subject/relation/polarity/belief concept. A run record can *feed* an intel datum (via a collector), but they are not one record. |
 | `agent_body.interface.Observation` | **The read-only INPUT to the agent-body cycle** (`think → propose → gate → execute → learn`). | a `state: dict` snapshot of "what the body currently sees". | **Left distinct.** It is a research-gated SCAFFOLD that changes no behaviour, and it is the cycle's INPUT, whereas the live record is a tool run's OUTPUT. Forcing an adapter here would merge input with output. |
+| `observability.model.Observation` | **A Langfuse-style TELEMETRY span** (emit-only, authorization-free). | trace/span ids, `type` (generation/agent/tool/chain), level, spine hash, pre-redacted attributes. | **Left distinct (B1).** It deliberately mirrors the Langfuse *wire shape* for the observability exporter; it carries no tool-run provenance and is authorization-free by design. Merging it into the run record would erase that guarantee and lose the wire-shape fidelity. |
+| `agents.models.ObservationPayload` | **The blackboard spine-event payload** for the `observation` `EventKind`. | source, surface, summary, raw excerpt, confidence. | **Left distinct (B1) — and already uniquely named.** It is a human-readable spine event, not a tool-run record; no action. |
+
+**B1 re-review (bucket-B hardening).** A fresh scope of *all five* same-named types (this table now covers them all) re-confirmed the H6 verdict: the literal "collapse into ONE record" is **unsound** — the five are genuinely distinct concerns, and two of them (`live.*` / `observability.*` on the integration plane vs `intel.*` / `agent_body.*` / `agents.*` on the framework plane) sit on **opposite sides of the FATAL-2 boundary**, so a single shared record would force a cross-plane import that breaks two-env isolation. The collapse is therefore **declined**; the honest hardening is (a) the partial convergence already done above and (b) the sovereign-load guard below.
 
 Convergence target (`live.observation.Observation`) has exactly two consumers today — its producer
 (`external_tool.py`) and its tests — so extending the record migrated every consumer with it; no adapter
@@ -52,7 +56,10 @@ shim was needed and no caller's behaviour changed.
 ## FATAL-2 / safety notes
 
 - `live/observation.py` remains **stdlib-only** (no framework import — sovereign-loaded). Digest helpers use
-  `hashlib` only.
+  `hashlib` only. **Enforced (B1):** `test_two_env_boundary.py` now imports `vigil_integration.live.observation`
+  in the genuinely-sovereign probe subprocess and asserts neither `framework` nor `strix` entered `sys.modules`
+  — so a future edit that pulls a framework import into the record is caught immediately and by name, not as a
+  confusing downstream sovereign-leg failure.
 - `external_tool.py` computes `binary_sha256` with `hashlib`/`shutil` (already imported); no new framework
   import. The runner's framework imports stay function-local.
 - Schema bumped `vigil-observation/1` → `/2`. The record is NOT hashed into any certificate (the cert's
