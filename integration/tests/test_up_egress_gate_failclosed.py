@@ -63,6 +63,11 @@ class _FakeRootServices:
     def up(self, services):
         return {}
 
+    def build_images_if_absent(self, *a, **kw):
+        # WS1b added an opt-in engine-image build to _cmd_up's best-effort leg. Provide the method so an
+        # AttributeError can never be SWALLOWED by that leg's broad except and silently pass a test.
+        return {}
+
 
 @pytest.fixture
 def wired(monkeypatch):
