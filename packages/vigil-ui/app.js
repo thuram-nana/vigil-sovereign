@@ -3934,6 +3934,19 @@
     // "offline". WS0's getJSON attaches .status/.data on an HTTP error — so a failure WITH a status means
     // the plane is reachable but the endpoint erred (surface the real server message), while a failure with
     // NO status is a fetch/network failure, i.e. the plane is genuinely unreachable.
+    if (err && (err.status === 401 || err.status === 403)) {
+      // WS2a-2: a stale SESSION token (it rotates on every server restart — a Claim-6 property) 401s every
+      // request. That is NOT "offline"; the engine is up, the token is just old. The token is deliberately
+      // not embedded in the page, so recovery is reloading with a fresh `?token=` URL, not a plain reload.
+      return h("div.empty", null, [
+        h("div.big", null, "Session expired"),
+        h("p", null, "Your session token is stale — it rotates whenever the server restarts. The engine is "
+          + "up; your token is just old."),
+        h("p.hint", null, "Reload the interface with a fresh token URL — get the current one from the terminal:"),
+        h("pre.mono", { style: { whiteSpace: "pre-wrap", userSelect: "all", marginTop: "6px" } },
+          "journalctl --user -u vigil-command.service | grep -oE 'http://127.0.0.1:8770/\\?token=[A-Za-z0-9_-]+' | tail -1"),
+      ]);
+    }
     if (err && err.status) {
       var msg = (err.data && err.data.error) || err.message || ("HTTP " + err.status);
       return h("div.empty", null, [
@@ -6138,7 +6151,7 @@
   // live cpu/mem/pids, an on-demand container kill) the surface says UNAVAILABLE — never a
   // fabricated number. The kill controls it DOES wire are STOPS (host-pid cancel + engagement
   // kill-switch), never a spawn.
-  var STX = { run: "", data: null, loaded: false, _body: null };
+  var STX = { run: "", data: null, err: null, loaded: false, _body: null };
   function renderStrix(screen) {
     var body = V.mount(screen, [h("div.screen-head", null, [h("h1", null, "Strix Control"),
       h("span.sub", null, "The Strix agent's runtime control state — gateway, sandbox, approvals, "
@@ -6153,10 +6166,11 @@
       + (STX.run ? ("?run=" + encodeURIComponent(STX.run)) : "")
       + (slug ? ((STX.run ? "&" : "?") + "slug=" + encodeURIComponent(slug)) : ""));
     V.getJSON(url).then(function (d) {
-      STX.data = d; STX.loaded = true; STX.run = d.run_id || "";   // reflect the server's selection
-      drawStrix(body);
-    }).catch(function () { STX.data = null; STX.loaded = true; drawStrix(body); });
-  }
+      STX.data = d; STX.err = null; STX.loaded = true; STX.run = d.run_id || "";   // reflect the server's selection
+    }).catch(function (e) {
+      STX.data = null; STX.err = e; STX.loaded = true;   // WS2a-2: capture the REAL error (401 = stale token)
+    }).then(function () { drawStrix(body); });            // render ALWAYS runs, OUTSIDE the catch — so a render
+  }                                                       // throw is no longer swallowed and mislabelled "offline"
   function strixLocalityChip(model) {
     var m = model || {};
     if (m.locality === "local") return V.pill("model: local", "sm ok", null);
@@ -6329,8 +6343,8 @@
   }
   function drawStrix(body) {
     var d = STX.data;
-    if (!d) { V.mount(body, h("div.card", null, h("div.empty", null,
-      "Could not load the Strix control state (the offense plane may be offline)."))); return; }
+    if (!d) { V.mount(body, h("div.card", null, offlineEmpty(STX.err,
+      "Could not load the Strix control state — is the offense plane up? (vigil up)"))); return; }
     STX._body = body;
     V.mount(body, [
       strixPicker(d), strixOverviewCard(d), strixGatewayCard(d.gateway), strixSandboxCard(d.sandbox),
