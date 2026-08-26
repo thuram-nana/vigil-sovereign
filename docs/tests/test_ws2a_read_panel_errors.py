@@ -19,10 +19,21 @@ def _app() -> str:
     return APP_JS.read_text(encoding="utf-8")
 
 
+def test_offline_empty_special_cases_a_stale_session_token_401():
+    # WS2a-2: a 401/403 is a stale SESSION token (it rotates on a server restart), NOT an outage — it must
+    # render a distinct "Session expired" state with the recovery, not a scary "offline"/"request failed".
+    src = _app()
+    i = src.index("function offlineEmpty(")
+    body = src[i:i + 1800]
+    assert ("err.status === 401" in body) and ("err.status === 403" in body), \
+        "offlineEmpty must special-case 401/403 (a stale session token)"
+    assert "Session expired" in body, "a stale-token 401 must render 'Session expired', not a generic error"
+
+
 def test_offline_empty_distinguishes_a_backend_error_from_a_down_plane():
     src = _app()
     i = src.index("function offlineEmpty(")
-    body = src[i:i + 1000]
+    body = src[i:i + 1800]
     assert "if (err && err.status)" in body, "offlineEmpty must branch on a real HTTP status"
     assert ("err.data && err.data.error" in body) or ("err.message" in body), \
         "the backend-error branch must surface the server message"
