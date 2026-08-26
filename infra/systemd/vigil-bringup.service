@@ -1,0 +1,59 @@
+# VIGIL BRING-UP — bring the docker half of the system up on boot, IN PARALLEL with the UI.
+#
+# WHAT THIS IS FOR. `vigil-command.service` serves the unified UI. This companion unit brings up the
+# docker side the engine needs — the egress gateway, the root services (qdrant/neo4j/otel), AND the
+# offence/defence sandbox IMAGES (built if absent) — so that after a reboot "everything works" without
+# the operator remembering `vigil services up --all` / `make strix` / `make aegis-image`.
+#
+# WHY A SEPARATE, PARALLEL UNIT (not an ExecStartPre on vigil-command). A from-scratch Kali/AEGIS image
+# build is MINUTES. Doing it before the UI serves would leave the cockpit blank for the whole build and,
+# under a default 90 s start timeout, SIGKILL the UI unit into a restart loop. So this runs on its OWN
+# schedule with NO ordering against vigil-command: the UI comes up immediately, and docker + the images
+# come up behind it. The System screen shows what is (not yet) ready meanwhile.
+#
+# BEST-EFFORT, AND STILL FAIL-CLOSED. The `-` prefix on ExecStart means a non-zero exit (docker not ready
+# yet, an image build failure) does NOT fail the unit — a missing engine image is a convenience, not a
+# security gate. Egress is NEVER ungated by this: the Strix launch pre-flight independently REFUSES an
+# engagement until the egress gateway is running (see strix_sandbox.preflight), so a partial bring-up here
+# only delays an engagement, it never runs one without the gate.
+#
+# INSTALL (alongside vigil-command.service):
+#   cp infra/systemd/vigil-bringup.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-bringup.service
+#   sudo loginctl enable-linger "$USER"     # (same linger as vigil-command — start at boot)
+#
+# CHECK:   systemctl --user status vigil-bringup
+# LOGS:    journalctl --user -u vigil-bringup -f
+# RE-RUN:  systemctl --user restart vigil-bringup     # idempotent — creates only what is absent
+# SKIP:    it is optional. Without it the UI still serves; the System screen's bring-up button (or
+#          `vigil services up --all`) brings docker up on demand.
+
+[Unit]
+Description=VIGIL BRING-UP — docker services + engine images (best-effort, parallel to the UI)
+Documentation=file:/home/kali/vigil/docs/runbooks/RELEASE-UPGRADE-ROLLBACK.md
+After=network-online.target
+Wants=network-online.target
+# DELIBERATELY no Before=/After=/Requires= against vigil-command.service: the two run in PARALLEL so a
+# slow first-boot image build can never block the cockpit. Do not add an ordering dependency here.
+
+# A oneshot that keeps failing is a real problem restarting will not fix (docker misconfigured, no disk).
+# Bound the burst so it surfaces in the status instead of looping. These MUST live in [Unit].
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/kali/vigil
+EnvironmentFile=-/home/kali/vigil/.vigil-live/service.env
+# BEST-EFFORT: the leading `-` ignores a non-zero exit so a docker hiccup / a build failure never fails
+# the unit (and never blocks the parallel UI). `--all` = gateway + qdrant + neo4j + otel AND build the
+# strix/aegis engine images if absent.
+ExecStart=-/home/kali/vigil/.venv-offense/bin/vigil services up --all
+# A from-scratch Kali/AEGIS build is minutes; give it room. It runs in parallel, so a long start never
+# delays the UI. Bounded so a genuinely wedged build eventually gives up rather than hanging forever.
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=default.target
