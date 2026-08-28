@@ -19,7 +19,7 @@ import hashlib
 import json
 import math
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from ..config import SIGIL_HOME, assert_env_key_safe, assert_env_value_safe
 from ..platform.secrets import SecretStore
@@ -34,7 +34,7 @@ from ..platform.secrets import SecretStore
 # renders whatever settings_status serves). A closed allowlist: an unknown name is refused by set_secret, so
 # the UI can never seal an arbitrary env var. `category` groups the API-keys screen; `probe` flags whether a
 # LIVE health check exists (see platform/secret_probes.py) so a bad/expired key shows as FAILING, not green.
-SECRET_META = {
+SECRET_META: dict[str, dict[str, Any]] = {
     # --- LLM providers (the AI that reasons over your target; bring-your-own-model) ---
     "ANTHROPIC_API_KEY": {"category": "llm", "probe": True, "label": "Claude / Anthropic API key",
                           "purpose": "Lets the AI reason over your target (engagements, scans, fix proposals)."},
@@ -165,7 +165,7 @@ CLOUD_FILE_SECRETS = {
 # The ordered per-provider layout for the Settings UI. Each field name is either a SECRET_META secret
 # (masked) or a CLOUD_CONFIG_META config var (shown). `probe_env` is the secret whose LIVE probe validates
 # the whole provider credential (a bad/expired credential always shows as failing).
-CLOUD_PROVIDERS = (
+CLOUD_PROVIDERS: tuple[dict[str, Any], ...] = (
     {"id": "aws", "label": "Amazon Web Services (AWS)", "probe_env": "AWS_ACCESS_KEY_ID",
      "purpose": "Read-only AWS posture (S3 public exposure, IAM over-broad trust) and Bedrock models. The live "
                 "collector discovers these via boto3's credential chain.",
@@ -232,7 +232,7 @@ MODEL_CHOICES = (
      "note": "Uses your logged-in Claude Code session on this machine — no API key required.",
      "keyless": True},
 )
-_MODEL_IDS = frozenset(c["id"] for c in MODEL_CHOICES)
+_MODEL_IDS = frozenset(str(c["id"]) for c in MODEL_CHOICES)
 _KEYLESS_IDS = frozenset(c["id"] for c in MODEL_CHOICES if c["keyless"])
 
 
@@ -255,7 +255,7 @@ def _env_plan(model: str) -> dict:
 # goes; `sovereign_model` marks providers whose model also drives SIGIL research (`claude -p`).
 _PROVIDER_ORDER = ("anthropic", "anthropic-zdr", "bedrock", "vertex", "mistral", "azure_openai",
                    "self-hosted", "ollama", "claude-code")
-PROVIDERS = {
+PROVIDERS: dict[str, dict[str, Any]] = {
     "anthropic": {"label": "Claude (Anthropic API)", "backend": "", "model_var": _ANTHROPIC_MODEL_ENV,
                   "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
                   "keyless": False, "keys": ["ANTHROPIC_API_KEY"], "config": (),
@@ -334,7 +334,7 @@ _OFFENSE_DELIVERED_SECRETS = tuple(n for n in SECRET_NAMES if n not in _OFFENSE_
 #   type field:  int|number|bool|enum|url|cidr|host|ports|str  (with min/max, choices as needed)
 #     (worded "type field:" not "type:" — a leading "# type:" comment is parsed by mypy as a PEP 484
 #      type comment and, being prose, aborts the whole run with "invalid type comment")
-CONFIG_META = {
+CONFIG_META: dict[str, dict[str, Any]] = {
     # --- Offense engine (CRUCIBLE) performance + tuning ---
     "CRUCIBLE_LLM_MAX_WORKERS": {"group": "offense", "type": "int", "min": 1, "max": 64, "default": "4",
         "label": "LLM max workers", "plane": "offense",
@@ -775,7 +775,8 @@ def _assert_kubeconfig_safe(content: str) -> None:
         user = u.get("user") if isinstance(u, dict) and isinstance(u.get("user"), dict) else {}
         ap = user.get("auth-provider") if isinstance(user, dict) else None
         cfg = ap.get("config") if isinstance(ap, dict) and isinstance(ap.get("config"), dict) else {}
-        if (isinstance(user, dict) and isinstance(user.get("exec"), dict)) or cfg.get("cmd-path"):
+        if (isinstance(user, dict) and isinstance(user.get("exec"), dict)) or (
+                isinstance(cfg, dict) and cfg.get("cmd-path")):
             raise ValueError(
                 "kubeconfig contains an exec / cmd-path credential plugin, which runs a LOCAL COMMAND when "
                 "loaded — refused for safety. Use a token- or client-certificate-based kubeconfig (e.g. one "
@@ -908,9 +909,9 @@ def export_runtime_env(include_secrets: bool = False) -> dict:
     if include_secrets:
         ss = SecretStore()
         for name in _OFFENSE_DELIVERED_SECRETS:
-            val = ss.get(name)
-            if val:
-                env[name] = val
+            sval = ss.get(name)
+            if sval:
+                env[name] = sval
     return env
 
 
@@ -937,7 +938,7 @@ def settings_status() -> dict:
         secrets.append({
             "name": name,
             "set": present,
-            "fingerprint": _fingerprint(val) if present else None,
+            "fingerprint": _fingerprint(val) if val else None,
             "backend": ss.backend,
             "label": meta.get("label", name),
             "purpose": meta.get("purpose", ""),
@@ -994,7 +995,7 @@ def settings_status() -> dict:
                 fields.append({
                     "env": env, "kind": "secret", "input": meta.get("input", "line"),
                     "label": meta.get("label", env), "purpose": meta.get("purpose", ""), "set": present,
-                    "fingerprint": _fingerprint(val) if present else None,
+                    "fingerprint": _fingerprint(val) if val else None,
                     "probeable": bool(meta.get("probe")),
                     "health": (health or {"status": "unchecked", "reason": "", "checked_at": 0}) if present else None,
                 })

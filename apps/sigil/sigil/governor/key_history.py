@@ -68,7 +68,7 @@ from ..reuse import (
     sign,
     verify_one,
 )
-from ..reuse.crypto import load_public_key
+from vigil_core.crypto import load_public_key
 
 assert_no_offense()
 
@@ -189,7 +189,7 @@ def _history_from_records(records: Iterable) -> list[tuple[int, dict]]:
         seq = getattr(r, "seq", None) if not isinstance(r, dict) else r.get("seq")
         if kind != KEY_HISTORY_KIND or not isinstance(payload, dict):
             continue
-        if payload.get("signal") != SUCCESSION_SIGNAL:
+        if payload.get("signal") != SUCCESSION_SIGNAL or seq is None:
             continue
         out.append((int(seq), payload))
     out.sort(key=lambda t: t[0])

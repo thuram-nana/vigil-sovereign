@@ -471,15 +471,16 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
             f"silently overlay stale state) — pass force=True (--force) to REPLACE those units, or restore into "
             f"a fresh home. Un-captured home content (vector/cursor/config caches) is left intact regardless.")
 
-    staged: Path | None = _new_staging_dir(new_home)
+    staged_dir = _new_staging_dir(new_home)     # the working staging home (always a Path)
+    staged: Path | None = staged_dir            # cleanup handle for the finally; None once ownership transfers
     try:
         # decode + verify EVERY file against the signed manifest BEFORE writing anything (fail-closed). Each rel
         # is resolved to ONE validated target INSIDE the STAGED home, and that SAME target is what we write — so
         # the check and the write can never diverge (closing the "validate the normalised path, write the raw
         # path" class of escape).
-        staged_resolved = staged.resolve()
+        staged_resolved = staged_dir.resolve()
         for rel, b64 in files.items():
-            target = _safe_target(staged, staged_resolved, rel)
+            target = _safe_target(staged_dir, staged_resolved, rel)
             try:
                 data = base64.b64decode(b64)
             except Exception as e:  # noqa: BLE001
@@ -495,28 +496,28 @@ def restore_backup(src: str | Path, new_home: str | Path, passphrase: str, *, va
         # re-seal the machine-bound secrets through the NEW vault (seals under the new TPM if provisioned) — into
         # the STAGED home, swapped into place with the rest of the tree.
         if body.get("owner_priv_b64"):
-            vault.write_text_secret(staged / "spine" / "keys" / "owner.priv",
+            vault.write_text_secret(staged_dir / "spine" / "keys" / "owner.priv",
                                     body["owner_priv_b64"], context=_OWNER_PRIV_CONTEXT)
         if body.get("spine_dek_b64"):
-            vault.write_text_secret(staged / "spine" / "keys" / "spine.dek",
+            vault.write_text_secret(staged_dir / "spine" / "keys" / "spine.dek",
                                     body["spine_dek_b64"], context=_DEK_CONTEXT)
         # re-seal the KV secret store through the NEW vault, under the SAME purpose context — so the operator's
         # own API keys are recoverable on new hardware. Lands as a top-level ``secrets.sealed`` unit in staged.
         if body.get("secrets_kv_b64"):
-            vault.write_text_secret(staged / _SECRETS_KV_FILE, body["secrets_kv_b64"],
+            vault.write_text_secret(staged_dir / _SECRETS_KV_FILE, body["secrets_kv_b64"],
                                     context=_SECRETS_KV_CONTEXT)
 
         # re-verify the STAGED spine's internal integrity (keyless binding + chain) — never claim a restore
         # succeeded on a corrupt ledger, and never swap an unverified home into place.
         from .spine.store import SpineStore
-        ok, why = SpineStore(staged / "spine" / "spine.jsonl").verify()
+        ok, why = SpineStore(staged_dir / "spine" / "spine.jsonl").verify()
         if not ok:
             raise BackupError(f"restored spine failed verification ({why}) — the restore is NOT trustworthy")
 
         # everything verified: swap ONLY the captured units into new_home (subset capture → leave un-captured
         # home content intact), then drop the drained staging shell (its units were moved out).
-        _atomic_swap_captured_units(staged, new_home)
-        shutil.rmtree(staged, ignore_errors=True)
+        _atomic_swap_captured_units(staged_dir, new_home)
+        shutil.rmtree(staged_dir, ignore_errors=True)
         staged = None
     finally:
         if staged is not None:
