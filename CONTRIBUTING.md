@@ -1,6 +1,6 @@
 # Contributing to VIGIL — branch & merge policy
 
-VIGIL is maintained by **Junior Thuram Nana** (Founder & CEO of **SIGIL Limited**, the "Maintainer"). The `main` branch is
+VIGIL is maintained by **Junior Thuram Nana** (Founder & CEO of **SIGIL SARL**, the "Maintainer"). The `main` branch is
 **protected**. This document is the authoritative repository-level statement of how changes
 reach `main`. Engine-specific contribution mechanics and the full doctrine references live in
 [`engine/crucible/CONTRIBUTING.md`](./engine/crucible/CONTRIBUTING.md).
