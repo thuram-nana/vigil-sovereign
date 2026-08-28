@@ -791,7 +791,7 @@ vigil up                      # → http://127.0.0.1:8770/?token=… (opens a br
   public/`0.0.0.0` bind is refused); it routes `/sovereign/*` → the SIGIL cockpit (127.0.0.1:8733),
   `/offense/api/v1/*` → the gated action API (8799), and `/offense/*` → the read-only console + SSE (8787).
 - **Hosted mode** (`--domain example.com`) sits behind your own TLS edge proxy (see
-  [`deploy/reverse-proxy/`](deploy/reverse-proxy/)) and **refuses** unless `CRUCIBLE_API_KEY` is set, so the
+  [`deploy/reverse-proxy/`](apps/sigil/deploy/reverse-proxy/)) and **refuses** unless `CRUCIBLE_API_KEY` is set, so the
   gated API is never exposed unauthenticated.
 - **Cloud graph auto-connect.** Enter Neo4j Aura credentials (`NEO4J_URI` / user in Settings, password sealed
   in the owner store); `bootstrap.sh` tests the connection through the sovereign check-secret broker (the

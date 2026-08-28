@@ -48,23 +48,23 @@ the engagement charter, or (b) an LLM API call bounded by
 
 | Call site | Purpose | Bound by |
 |---|---|---|
-| [`framework/v2/agents/http_executor.py:357`](framework/v2/agents/http_executor.py#L357) | HttpExecutor — exploit-agent's live-HTTP path | Six safety gates: charter signature, scope, destructive prompt, request budget, posture rate-limit, posture UA |
-| [`framework/v2/agents/http_executor.py:386`](framework/v2/agents/http_executor.py#L386) | HttpExecutor manual redirect-chain follow | Same gates as above; redirects capped at 5 |
-| [`framework/v2/intake/http.py:160`](framework/v2/intake/http.py#L160) | UTI Fetcher — passive fingerprinting | Intake-authorization ledger + per-intake request budget |
+| [`framework/v2/agents/http_executor.py:357`](agents/http_executor.py#L357) | HttpExecutor — exploit-agent's live-HTTP path | Six safety gates: charter signature, scope, destructive prompt, request budget, posture rate-limit, posture UA |
+| [`framework/v2/agents/http_executor.py:386`](agents/http_executor.py#L386) | HttpExecutor manual redirect-chain follow | Same gates as above; redirects capped at 5 |
+| [`framework/v2/intake/http.py:160`](intake/http.py#L160) | UTI Fetcher — passive fingerprinting | Intake-authorization ledger + per-intake request budget |
 
 Sovereign-mode behaviour: both call sites should be constructed with
 a `SovereignHttpxTransport` injected via the `httpx.Client`
 constructor. The transport refuses any host outside the
 engagement allowlist (charter scope ∪ LLM substrate ∪ operator
-extras). See [`framework/v2/agents/egress_guard.py`](framework/v2/agents/egress_guard.py).
+extras). See [`framework/v2/agents/egress_guard.py`](agents/egress_guard.py).
 
 ### 2.2 LLM substrate
 
 | Call site | Purpose | Bound by |
 |---|---|---|
-| [`framework/v2/kernel/backends/ollama.py:44`](framework/v2/kernel/backends/ollama.py#L44) | Ollama probe (`/api/version`) | localhost (sovereign-permitted) |
-| [`framework/v2/kernel/backends/ollama.py:49`](framework/v2/kernel/backends/ollama.py#L49) | Ollama tag list (`/api/tags`) | localhost (sovereign-permitted) |
-| [`framework/v2/kernel/backends/ollama.py:91`](framework/v2/kernel/backends/ollama.py#L91) | Ollama inference (`/api/chat`) | localhost (sovereign-permitted) |
+| [`framework/v2/kernel/backends/ollama.py:44`](kernel/backends/ollama.py#L44) | Ollama probe (`/api/version`) | localhost (sovereign-permitted) |
+| [`framework/v2/kernel/backends/ollama.py:49`](kernel/backends/ollama.py#L49) | Ollama tag list (`/api/tags`) | localhost (sovereign-permitted) |
+| [`framework/v2/kernel/backends/ollama.py:91`](kernel/backends/ollama.py#L91) | Ollama inference (`/api/chat`) | localhost (sovereign-permitted) |
 | `framework/v2/kernel/backends/anthropic.py` (via SDK) | Anthropic Messages API | **Refused under sovereign mode** by `SovereigntyPolicy.assert_permitted()` at construction |
 | `framework/v2/kernel/backends/claude_code.py` (subprocess) | `claude -p` — process I/O, subprocess talks to Anthropic | **Refused under sovereign mode** |
 
@@ -77,8 +77,8 @@ spawns.
 
 | Call site | Purpose | Concern |
 |---|---|---|
-| [`framework/v2/kernel/backends/claude_code.py`](framework/v2/kernel/backends/claude_code.py) | Spawns `claude -p` as a subprocess | The subprocess's network behaviour is opaque to CRUCIBLE; sovereign mode policy-refuses this backend. |
-| [`framework/v2/intake/cli.py`](framework/v2/intake/cli.py) | Reads / writes engagement filesystem | Bounded by `paths.target_dir(slug)` — never escapes operator's filesystem. |
+| [`framework/v2/kernel/backends/claude_code.py`](kernel/backends/claude_code.py) | Spawns `claude -p` as a subprocess | The subprocess's network behaviour is opaque to CRUCIBLE; sovereign mode policy-refuses this backend. |
+| [`framework/v2/intake/cli.py`](intake/cli.py) | Reads / writes engagement filesystem | Bounded by `paths.target_dir(slug)` — never escapes operator's filesystem. |
 
 ---
 
@@ -115,7 +115,7 @@ that aren't in this document.
 Source-level auditing is necessary but not sufficient. A malicious
 or malfunctioning dependency could issue HTTP requests from inside
 its own code. The runtime backstop is `SovereignHttpxTransport`
-([framework/v2/agents/egress_guard.py](framework/v2/agents/egress_guard.py)):
+([framework/v2/agents/egress_guard.py](agents/egress_guard.py)):
 
 - Wraps a real `httpx.HTTPTransport`.
 - Every request's host is matched against an `EgressAllowlist` (engagement
@@ -125,7 +125,7 @@ its own code. The runtime backstop is `SovereignHttpxTransport`
 In sovereign mode, sovereign deployments must wire this transport
 into every `httpx.Client` they construct. The framework provides
 the transport; the deployment wires it. Tests in
-[`framework/v2/agents/tests/test_egress_guard.py`](framework/v2/agents/tests/test_egress_guard.py) confirm the
+[`framework/v2/agents/tests/test_egress_guard.py`](agents/tests/test_egress_guard.py) confirm the
 guard fires on off-allowlist egress.
 
 ---
