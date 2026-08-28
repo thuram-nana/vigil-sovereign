@@ -93,9 +93,10 @@ def test_ensure_image_raises_on_build_failure(fake):
 
 
 def test_container_state_parses_and_absent(fake):
-    assert SandboxNetworking().container_state() == "absent"           # inspect rc!=0 → absent
-    fake(container="running")
-    assert SandboxNetworking().container_state() == "running"
+    fake(container="absent")                                           # install the fake FIRST (audit F-09):
+    assert SandboxNetworking().container_state() == "absent"           # else container_state() shells to a real
+    fake(container="running")                                          # docker CLI (and raises when it's absent)
+    assert SandboxNetworking().container_state() == "running"          # before any product parsing is exercised
 
 
 def _ctx(tmp_path):

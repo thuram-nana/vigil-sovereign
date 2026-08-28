@@ -86,7 +86,11 @@ build() {  # name  lock  reqs-file
   local name="$1" lock="$2" reqs="$3" venv=".venv-$1"
   echo ">>> building env-$name in $venv"
   if command -v uv >/dev/null 2>&1; then
-    uv venv --python "$PY" "$venv"
+    # --clear makes this actually "Re-runnable" (see the header): without it `uv venv` REFUSES an
+    # already-existing environment, so a second run / an upgrade rebuild aborts before dependency
+    # verification (audit F-04). Every run reinstalls the full pinned closure below + `pip check`s it, so
+    # clearing is safe — nothing reads pre-existing venv state.
+    uv venv --clear --python "$PY" "$venv"
   else
     "$PY" -m venv "$venv"
     "$venv/bin/pip" install --upgrade pip >/dev/null
