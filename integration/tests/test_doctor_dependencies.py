@@ -116,3 +116,20 @@ def test_render_surfaces_install_commands_and_external_reachability():
     assert "make -C tools/egress-guard" in txt
     assert "a process is answering on the port" in txt
     assert "external container" not in txt          # no false "container"/identity claim (red-pen F4)
+
+
+def test_egress_guard_dep_uses_the_runtime_resolver_not_a_literal_path(monkeypatch):
+    # Audit F-03: the built binary is `egress_guard` (underscore); doctor must resolve it via the runtime
+    # resolver (live.egress_guard.guard_binary), NOT a hard-coded `egress-guard` (hyphen) literal that
+    # reported a BUILT guard as absent. present ⇒ no install hint; absent ⇒ the install hint.
+    from vigil_integration.live import egress_guard as eg
+
+    monkeypatch.setattr(eg, "guard_binary", lambda: "/repo/tools/egress-guard/egress_guard")
+    deps = dmod._dependencies_report(dmod.Path("/x"), has_docker=False, daemon_up=None, compose_ok=False)
+    guard = next(d for d in deps if d["name"] == "egress-guard")
+    assert guard["present"] is True and guard["how_to_install"] == ""
+
+    monkeypatch.setattr(eg, "guard_binary", lambda: None)
+    deps2 = dmod._dependencies_report(dmod.Path("/x"), has_docker=False, daemon_up=None, compose_ok=False)
+    guard2 = next(d for d in deps2 if d["name"] == "egress-guard")
+    assert guard2["present"] is False and guard2["how_to_install"].strip()

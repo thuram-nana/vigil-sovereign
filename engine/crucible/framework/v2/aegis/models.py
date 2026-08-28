@@ -222,6 +222,13 @@ class AegisConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     deployment_secret: str = Field(min_length=1, description="Per-deployment HMAC key for identifier pseudonymisation (PR2).")
+    upstream_ca_bundle: str | None = Field(
+        default=None,
+        description="Path to a CA bundle (PEM file or dir) for verifying an HTTPS upstream whose cert chains "
+                    "to a PRIVATE CA. Passed as httpx verify=. EXPLICIT config only — never inherited from the "
+                    "ambient SSL_CERT_FILE/SSL_CERT_DIR (the gateway sets trust_env=False so the host env can "
+                    "neither divert the forward nor swap the trust store). Unset => the system trust store.",
+    )
     mode: Literal["observe", "enforce"] = "observe"       # default READ-ONLY
     max_envelope_bytes: int = Field(default=65536, gt=0)
     max_depth: int = Field(default=16, gt=0)
