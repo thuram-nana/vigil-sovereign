@@ -7,9 +7,11 @@ Covers:
 
 Run: ~/.sigil/venv/bin/python tests/test_robustness.py
 """
+import importlib.util
 import subprocess as _sp
 
 import httpx
+import pytest
 
 import sigil.agents.kernel_classify as kc_mod
 from sigil.agents.base import Tier
@@ -106,16 +108,29 @@ def _bare_index(client) -> VectorIndex:
     return vi
 
 
+# The 5 vector tests call VectorIndex.last_indexed_seq(), which lazily `from qdrant_client.models import
+# ...`. The client LIBRARY (not a running server) must be importable. Per the CI doctrine, guard heavy deps
+# with a REPORTED skip rather than excluding the whole file (audit F-05) — so the kernel-classify tests
+# still run in the minimal governor job and this file is no longer --ignored.
+_needs_qdrant = pytest.mark.skipif(
+    importlib.util.find_spec("qdrant_client") is None,
+    reason="qdrant_client (the client library) is not installed — the vector outage-vs-empty tests need it",
+)
+
+
+@_needs_qdrant
 def test_vectors_empty_collection_returns_minus1():
     vi = _bare_index(_FakeClient(points=[]))
     assert vi.last_indexed_seq() == -1, "a genuinely empty/uncreated collection → -1 (correct)"
 
 
+@_needs_qdrant
 def test_vectors_reads_the_durable_cursor():
     vi = _bare_index(_FakeClient(points=[_Pt(42)]))
     assert vi.last_indexed_seq() == 42, "with points present, returns the highest indexed seq"
 
 
+@_needs_qdrant
 def test_vectors_outage_does_not_masquerade_as_empty():
     """The KEY fix: a backend OUTAGE must NOT return -1 (which the caller feeds into
     index_spine(since_seq=-1) → a destructive full re-embed of the whole corpus)."""
@@ -128,6 +143,7 @@ def test_vectors_outage_does_not_masquerade_as_empty():
     assert raised, "an outage raises VectorBackendUnavailable — it never silently returns -1"
 
 
+@_needs_qdrant
 def test_vectors_query_shape_error_is_treated_as_empty_not_outage():
     """A non-outage query error (e.g. order_by needs a payload index) is legitimately 'treat as
     empty' → -1. This is non-destructive: index_spine upserts by id=seq (idempotent), never wipes."""
@@ -135,6 +151,7 @@ def test_vectors_query_shape_error_is_treated_as_empty_not_outage():
     assert vi.last_indexed_seq() == -1, "a query-shape error stays -1 (idempotent re-embed, no data loss)"
 
 
+@_needs_qdrant
 def test_vectors_outage_wrapped_in_a_cause_is_still_detected():
     """qdrant wraps transport errors; the classifier walks the __cause__/__context__ chain."""
     class _Wrapped(Exception):

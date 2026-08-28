@@ -266,7 +266,7 @@ confirmed a finding backed by real target evidence.
 
 | Date | Target | Substrate | Tier | Outcome | Notes |
 |---|---|---|---|---|---|
-| 2026-05-05 | `mrbeanpanel.com` (operator's production SMM panel) | `claude-code` (Claude Max OAuth, model=haiku) | `PERMISSIVE` | **Completed clean** on `max_steps=15` | First real engagement. Reduced run shape (50 / $2 / 1800 s, GET-only via destructive-deny). 15 GET requests, 0 scope violations, 0 destructive refusals, 0 findings emitted. Validated framework plumbing end-to-end; finding-discovery deferred to a richer second-engagement run. Post-engagement summary at [`targets/mrbeanpanel/POST-ENGAGEMENT.md`](targets/mrbeanpanel/POST-ENGAGEMENT.md). |
+| 2026-05-05 | `mrbeanpanel.com` (operator's production SMM panel) | `claude-code` (Claude Max OAuth, model=haiku) | `PERMISSIVE` | **Completed clean** on `max_steps=15` | First real engagement. Reduced run shape (50 / $2 / 1800 s, GET-only via destructive-deny). 15 GET requests, 0 scope violations, 0 destructive refusals, 0 findings emitted. Validated framework plumbing end-to-end; finding-discovery deferred to a richer second-engagement run. Post-engagement summary at `targets/mrbeanpanel/POST-ENGAGEMENT.md` (operator-local engagement evidence; gitignored, not in the public tree). |
 
 This converts the framework's status from "verified at integration test"
 (Sessions 3 / 4 against synthetic harnesses) to "verified in real

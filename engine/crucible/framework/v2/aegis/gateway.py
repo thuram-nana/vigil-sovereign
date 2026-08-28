@@ -448,7 +448,18 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         fwd_headers.append(("Host", self.settings.upstream_netloc))
         fwd_headers.append(("X-Forwarded-For", self.client_address[0] if self.client_address else ""))
         try:
-            with httpx.Client(follow_redirects=False, timeout=_FORWARD_TIMEOUT_S) as client:
+            # trust_env=False: the operator-configured upstream is the ONLY transport authority. Without it,
+            # httpx honours ambient ALL_PROXY/HTTP(S)_PROXY and SSL_CERT_FILE/SSL_CERT_DIR — so the host
+            # environment could divert this forward through a proxy or swap the TLS trust store out from
+            # under a security gateway (audit F-01). AEGIS exposes no operator proxy setting, so pinning the
+            # environment off removes only the attack surface. (If a validated proxy is ever a feature, it
+            # must be an explicit, provenance-bound config value, never inherited from the ambient env.)
+            # verify=: an HTTPS upstream whose cert chains to a PRIVATE CA is supported ONLY through the
+            # explicit `upstream_ca_bundle` config (not the ambient SSL_CERT_FILE, which trust_env=False now
+            # ignores). Unset => True => the system trust store.
+            _verify = self.settings.config.upstream_ca_bundle or True
+            with httpx.Client(follow_redirects=False, timeout=_FORWARD_TIMEOUT_S, trust_env=False,
+                              verify=_verify) as client:
                 # A11: STREAM the response and bound PEAK memory (read at most _MAX_RESPONSE_BYTES); an
                 # upstream response that EXCEEDS the bound is REFUSED (caller -> 502), never SILENTLY
                 # truncated with a rewritten Content-Length (which would corrupt the body and mislead the

@@ -58,13 +58,27 @@ def _known_project_map() -> dict[str, str]:
     return m
 
 
+@lru_cache(maxsize=1)
+def _known_basenames() -> tuple[str, ...]:
+    """The repo BASENAMES — host-INDEPENDENT: the parent path differs per machine, the basename does not."""
+    from ..ingest.git import DEFAULT_REPOS
+    return tuple(dict.fromkeys(Path(p).name for p in DEFAULT_REPOS))
+
+
 def normalize_project(raw: str) -> str:
-    """Collapse a transcript project slug and a git repo name that denote the SAME project
-    onto one canonical name (its basename)."""
+    """Collapse a transcript project slug and a git repo name that denote the SAME project onto one
+    canonical name (its basename) — HOST-INDEPENDENTLY. Audit F-05: a transcript slug is an abs path with
+    '/'->'-', so the SAME repo yields a different slug on every machine (/home/kali/... vs /home/runner/...
+    vs /root/...), which used to split one repo into different Project nodes."""
     if not raw:
         return "unknown"
     s = raw.strip()
     known = _known_project_map()
     if s in known:
         return known[s]
-    return s.rstrip("/").split("/")[-1] if "/" in s else s  # best-effort for unknown inputs
+    # Host-independent fallback: match by the repo BASENAME (stable across machines). A slug ending with
+    # '-<basename>' (any host path prefix) OR equal to the basename collapses to that basename.
+    for base in _known_basenames():
+        if s == base or s.endswith("-" + base):
+            return base
+    return s.rstrip("/").split("/")[-1] if "/" in s else s  # best-effort for a genuinely unknown input

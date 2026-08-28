@@ -1,6 +1,6 @@
 # VIGIL — Commercial License
 
-**Copyright © 2026 SIGIL Limited (Sovereign Integrity Governance Infrastructure Labs) (the "Licensor"). All rights reserved.**
+**Copyright © 2026 SIGIL SARL (Sovereign Integrity Governance Infrastructure Labs) (the "Licensor"). All rights reserved.**
 
 VIGIL's first-party code is **dual-licensed**. You may use it under **either**:
 
@@ -84,7 +84,7 @@ Contact the Licensor:
 - Please include: your company, the product / use case, deployment model (internal /
   SaaS / distributed), and expected scale.
 
-*(Maintainer: the Licensor entity is **SIGIL Limited** (founder & CEO: Junior Thuram Nana);
+*(Maintainer: the Licensor entity is **SIGIL SARL** (founder & CEO: Junior Thuram Nana);
 confirm the copyright-holder line reflects that entity, and that `thuram@thuramnana.com` is a
 monitored mailbox, before relying on this for commercial sales.)*
 
@@ -138,10 +138,9 @@ may not imply endorsement or use the marks as your own.
 
 ## Governing law & IP jurisdiction
 
-The Licensor is **SIGIL Limited, a private limited company registered in the Republic of
+The Licensor is **SIGIL SARL, a société à responsabilité limitée (SARL) registered in the Republic of
 Cameroon** (a GovTech/RegTech company; founder & CEO: Junior Thuram Nana). The Licensor's
-current jurisdiction is the **Republic of Cameroon** (a move to **Delaware, USA** is planned;
-this section will be updated when that move completes). Unless a signed Commercial License
+current jurisdiction is the **Republic of Cameroon**. Unless a signed Commercial License
 states otherwise:
 
 - the enforcement of the Licensor's **copyright, other intellectual-property rights, and
@@ -157,5 +156,5 @@ including the laws of a jurisdiction into which the Licensor later moves.
 > This section explains the model in plain language; it is **not legal advice** and is
 > **not itself a license**. The binding governing-law term of any Commercial License is the
 > one in your signed agreement. The maintainer should have qualified counsel confirm the
-> governing-law, venue and IP-enforcement wording for the Republic of Cameroon (and for the
-> planned Delaware, USA entity) before relying on it commercially.
+> governing-law, venue and IP-enforcement wording for the Republic of Cameroon before relying
+> on it commercially.

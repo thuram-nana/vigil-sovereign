@@ -382,7 +382,7 @@ What is **still NOT verified live**:
   GET-only via destructive-deny). The framework's PLUMBING is now
   verified against a real target; FINDING-DISCOVERY at scale awaits
   a second engagement that approves destructive-action probes on
-  the test accounts. See [`targets/mrbeanpanel/POST-ENGAGEMENT.md`](targets/mrbeanpanel/POST-ENGAGEMENT.md).
+  the test accounts. See `targets/mrbeanpanel/POST-ENGAGEMENT.md` (operator-local engagement evidence; gitignored, not in the public tree).
 - The `mixed`-evidence scenario (timing-side-channel) was not
   picked up by the planner during the captured run — only the
   strong + weak scenarios fired.  The mixed scenario's behaviour
@@ -396,7 +396,7 @@ What is **still NOT verified live**:
 ran cleanly under the reduced shape (GET-only, 15 requests, 0
 violations). The plumbing-level gap is closed; the
 finding-discovery-at-scale gap remains — see
-[`targets/mrbeanpanel/POST-ENGAGEMENT.md`](targets/mrbeanpanel/POST-ENGAGEMENT.md)
+`targets/mrbeanpanel/POST-ENGAGEMENT.md` (operator-local engagement evidence; gitignored, not in the public tree)
 § 5 for issues surfaced during the run (UTI slug-collision with the
 operator's pre-existing engagement folder, planner Cartesian-product
 seeding, recon-agent not wired into the live pipeline). These become

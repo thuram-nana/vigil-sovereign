@@ -120,6 +120,9 @@ def test_interception_off_by_default_no_command_emitted() -> None:
 
 
 def test_unrestricted_browser_installs_no_allowlist() -> None:
-    # the loopback `scan` default: no allowed_hosts → no request-allowlist gate
-    br = CdpBrowser()
+    # the loopback `scan` default: no allowed_hosts → no request-allowlist gate.
+    # An injected browser_path short-circuits find_browser() so this hermetic assertion needs no real
+    # Chromium (audit F-07); start() is never called, so nothing launches (mirrors _browser() in
+    # test_cdp_page_target_polling.py).
+    br = CdpBrowser(browser_path="/nonexistent/chrome")
     assert br._allowed_hosts is None

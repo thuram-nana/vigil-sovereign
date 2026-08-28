@@ -35,16 +35,11 @@ import pytest
 
 # filename -> reason. See the module docstring for the inclusion bar. Add an entry here IF AND ONLY IF you
 # also add a matching `--ignore=apps/sigil/tests/<file>` to the sigil-governor job — the equality assertion
-# below fails on either half alone. These two were surfaced by the whole-directory run failing on ubuntu CI
-# (they pass on the Kali dev host, which has the vector backend / the dev checkout path).
+# below fails on either half alone.
 KNOWN_EXCLUDED: dict[str, str] = {
-    # needs `qdrant_client` (imported by sigil/vectors/index.py) — the vector backend is NOT in the minimal
-    # `sigil-governor` install set, so these vector-index-robustness tests ModuleNotFoundError on ubuntu CI.
-    "test_robustness.py": "needs qdrant_client (vector backend), absent from the minimal governor install",
-    # asserts an environment-path-coupled slug→repo-basename normalization (`normalize_project(_SLUG)`) that
-    # only holds in the dev checkout layout; on the CI runner's checkout path it maps differently. Env-coupled,
-    # not portable logic — excluded here; making it path-independent is a separate test fix.
-    "test_graph.py": "asserts a dev-checkout-path-specific project normalization (env-coupled, not portable)",
+    # EMPTY (audit F-05): test_graph is now host-independent (normalize_project collapses ANY host slug by
+    # the stable repo basename), and test_robustness's vector tests are importorskip-guarded on qdrant_client
+    # — so BOTH run in the sigil-governor job. No file needs excluding.
 }
 
 _ME = Path(__file__).name

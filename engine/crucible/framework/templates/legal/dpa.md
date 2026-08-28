@@ -26,7 +26,7 @@ proof-of-impact requires touching it.
 ## 1. Parties and roles
 
 - **Controller (Customer):** `<customer legal name>`
-- **Processor (Operator):** SIGIL Limited (Sovereign Integrity Governance Infrastructure Labs), a private limited company registered in the Republic of Cameroon
+- **Processor (Operator):** SIGIL SARL (Sovereign Integrity Governance Infrastructure Labs), a société à responsabilité limitée (SARL) registered in the Republic of Cameroon
 
 The Customer is the data Controller; the Operator acts as a Processor and
 processes personal data only on the Customer's documented instructions.

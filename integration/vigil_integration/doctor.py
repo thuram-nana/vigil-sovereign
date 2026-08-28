@@ -919,8 +919,17 @@ def _dependencies_report(repo: Path, has_docker: bool, daemon_up, compose_ok: bo
     _add("sovereign venv (.venv-sovereign/bin/sigil)", "venv",
          (repo / ".venv-sovereign" / "bin" / "sigil").exists(), True, "the sovereign cockpit", _INSTALL["venv"])
 
-    # egress guard (needed only under production posture)
-    _add("egress-guard", "binary", (repo / "tools" / "egress-guard" / "egress-guard").exists(), False,
+    # egress guard (needed only under production posture). Resolve it the SAME way the runtime does
+    # (live.egress_guard.guard_binary — $VIGIL_EGRESS_GUARD_BIN, else the in-repo build, else PATH), NOT a
+    # hard-coded literal: the built binary is `egress_guard` with an UNDERSCORE (tools/egress-guard/Makefile),
+    # so the old `egress-guard` (hyphen) literal reported a BUILT guard as absent (audit F-03). The posture
+    # block at _posture_egress_supervisor already uses this resolver — this makes the dependency row agree.
+    try:
+        from vigil_integration.live import egress_guard as _eg  # noqa: PLC0415 — lazy, boundary-safe (stdlib)
+        _guard_present = _eg.guard_binary() is not None
+    except Exception:  # noqa: BLE001 — a probe must never crash the report
+        _guard_present = False
+    _add("egress-guard", "binary", _guard_present, False,
          "seccomp egress guard (required under VIGIL_POSTURE=production)", _INSTALL["egress-guard"])
 
     # engine images (built on demand; the daemon must be up to probe or build them)

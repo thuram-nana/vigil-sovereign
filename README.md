@@ -109,7 +109,7 @@ Think of VIGIL as a very disciplined, very honest security team that happens to 
 
 You run it on your own hardware. Your data, your memory, and your signing keys never leave your machine unless *you* explicitly, verifiably approve it.
 
-**Who builds it.** VIGIL is the flagship platform of **SIGIL Limited** — *Sovereign Integrity Governance Infrastructure Labs* — a GovTech / RegTech company registered in the Republic of Cameroon (founder & CEO: Junior Thuram Nana). SIGIL Limited owns VIGIL's first-party intellectual property; the code is dual-licensed (noncommercial-free / commercial-and-government-paid), and government or public-sector use requires a commercial license. See [`LICENSE`](LICENSE) and [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
+**Who builds it.** VIGIL is the flagship platform of **SIGIL SARL** — *Sovereign Integrity Governance Infrastructure Labs* — a GovTech / RegTech company registered in the Republic of Cameroon (founder & CEO: Junior Thuram Nana). SIGIL SARL owns VIGIL's first-party intellectual property; the code is dual-licensed (noncommercial-free / commercial-and-government-paid), and government or public-sector use requires a commercial license. See [`LICENSE`](LICENSE) and [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
 
 ---
 
@@ -791,7 +791,7 @@ vigil up                      # → http://127.0.0.1:8770/?token=… (opens a br
   public/`0.0.0.0` bind is refused); it routes `/sovereign/*` → the SIGIL cockpit (127.0.0.1:8733),
   `/offense/api/v1/*` → the gated action API (8799), and `/offense/*` → the read-only console + SSE (8787).
 - **Hosted mode** (`--domain example.com`) sits behind your own TLS edge proxy (see
-  [`deploy/reverse-proxy/`](deploy/reverse-proxy/)) and **refuses** unless `CRUCIBLE_API_KEY` is set, so the
+  [`deploy/reverse-proxy/`](apps/sigil/deploy/reverse-proxy/)) and **refuses** unless `CRUCIBLE_API_KEY` is set, so the
   gated API is never exposed unauthenticated.
 - **Cloud graph auto-connect.** Enter Neo4j Aura credentials (`NEO4J_URI` / user in Settings, password sealed
   in the owner store); `bootstrap.sh` tests the connection through the sovereign check-secret broker (the
@@ -922,7 +922,7 @@ See [`docs/AS-BUILT-LIVE.md`](docs/AS-BUILT-LIVE.md) for the honest, itemized st
 ## License & attribution
 
 **VIGIL's first-party code is dual-licensed: [PolyForm Noncommercial License 1.0.0](LICENSE) OR a
-[Commercial License](LICENSE-COMMERCIAL.md)** (© 2026 SIGIL Limited — Sovereign Integrity Governance Infrastructure Labs). In plain language:
+[Commercial License](LICENSE-COMMERCIAL.md)** (© 2026 SIGIL SARL — Sovereign Integrity Governance Infrastructure Labs). In plain language:
 
 - **Noncommercial use is free** — use, run, study, modify, and share VIGIL for any noncommercial purpose,
   under [PolyForm Noncommercial 1.0.0](LICENSE). You may **not** sell it or deploy it commercially/in
