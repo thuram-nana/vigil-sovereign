@@ -111,6 +111,7 @@ PERMISSION_BY_ACTION: dict[str, Optional[str]] = {
     "offense_approve": "offense_authority", "offense_deny": "offense_authority",
     "create_account": "manage_users", "assign_role": "manage_users", "revoke_account": "manage_users",
     "revoke_all_teammates": "manage_users",                            # bulk revoke every non-owner account
+    "rotate_bootstrap_token": "manage_users", "revoke_bootstrap_token": "manage_users",   # owner session (1b)
     "enroll_pubkey": "manage_users",
     "enroll_totp": "manage_users", "set_password": "manage_users",     # S4 MFA / password enrollment
 }

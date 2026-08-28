@@ -27,9 +27,13 @@ _OFFENSE_APPROVAL_ACTIONS = frozenset({"offense_bind_authority", "offense_approv
 # a SEALED TOTP second factor, set_password = owner-set the optional weaker scrypt password login).
 _ACCOUNT_ACTIONS = frozenset({"create_account", "assign_role", "revoke_account", "revoke_all_teammates",
                               "enroll_pubkey", "enroll_totp", "set_password"})
+# Owner-session (bootstrap-token) actions (Slice 1b): rotate/revoke the persistent dev bootstrap token.
+# File operations, effective on the next cockpit start (see ui/bootstrap_token.py on why not live).
+_SESSION_ACTIONS = frozenset({"rotate_bootstrap_token", "revoke_bootstrap_token"})
 ACTIONS = (frozenset({"approve", "deny", "kill", "release", "promote", "revoke",
                       "queue_learn", "start_learn"})
-           | _CAP_ACTIONS | _SETTINGS_ACTIONS | _OFFENSE_APPROVAL_ACTIONS | _ACCOUNT_ACTIONS)
+           | _CAP_ACTIONS | _SETTINGS_ACTIONS | _OFFENSE_APPROVAL_ACTIONS | _ACCOUNT_ACTIONS
+           | _SESSION_ACTIONS)
 
 
 def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
@@ -156,6 +160,30 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
         seq = reg.revoke(username)
         return {"ok": True, "action": "revoke_account", "username": username, "recorded_seq": seq,
                 "requested_by": requested_by}
+
+    if action in _SESSION_ACTIONS:
+        # Owner-session (bootstrap-token) management (Slice 1b) — a FILE operation, effective on the next
+        # cockpit start. We do NOT mutate the running server's live token: under `vigil up` the reverse proxy
+        # scraped the token at startup and re-injects it, so live-rotating would desync the proxy.
+        from vigil_core.posture import is_production_posture
+        if is_production_posture():
+            # In production the persistent bootstrap token is inert (the URL-token owner path is disabled;
+            # the owner logs in with a passkey), so rotating/revoking it would be misleading. Refuse honestly.
+            return {"ok": False, "action": action, "requested_by": requested_by, "production_noop": True,
+                    "note": "The persistent bootstrap token is not used in production posture — the owner "
+                            "logs in with a passkey and the URL-token owner path is disabled. No change made."}
+        from .bootstrap_token import mint_bootstrap_token, revoke_bootstrap_token
+        if action == "rotate_bootstrap_token":
+            tok = mint_bootstrap_token()
+            return {"ok": True, "action": "rotate_bootstrap_token", "requested_by": requested_by,
+                    "new_url_path": f"/?token={tok}",
+                    "note": "Session token rotated. It applies on the NEXT cockpit restart (restart "
+                            "`vigil up` or re-run `sigil serve`); then open the new URL. The old ?token= URL "
+                            "stops working."}
+        revoke_bootstrap_token()
+        return {"ok": True, "action": "revoke_bootstrap_token", "requested_by": requested_by,
+                "note": "Session token revoked. The next cockpit start mints a fresh one; the old ?token= URL "
+                        "will no longer authenticate."}
 
     if action in _OFFENSE_APPROVAL_ACTIONS:
         # Route-via-sovereign: sign/deny a queued OFFENSE approval in-process with the owner key. The owner

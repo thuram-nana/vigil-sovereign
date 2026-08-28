@@ -4382,8 +4382,50 @@
         V.card("Create an account", "OWNER", h("div#users-create", null, usersCreateForm()), true),
         V.card("Accounts", "OWNER", h("div#users-list", null, h("div.empty", null, "Loading…")), true),
       ]),
+      h("div", { style: { marginTop: "16px" } },
+        V.card("Owner session", "OWNER", ownerSessionCard(), true)),
     ]);
     loadUsers();
+  }
+  // Owner session (bootstrap-token) controls (Slice 1b). The owner login token now PERSISTS across restarts
+  // in dev posture (the same ?token= URL keeps working); rotate issues a new one, revoke kills it. Both are
+  // FILE operations effective on the next cockpit restart (the reverse proxy re-reads the token then), so we
+  // never desync a live `vigil up` session mid-flight.
+  function ownerSessionCard() {
+    var out = h("div", null, "");
+    var rotate = h("button.btn.owner", { onClick: function () {
+      if (!window.confirm("Rotate the owner session token?\n\nA new ?token= URL is issued. It applies on the "
+        + "next cockpit restart; the current URL stops working then. Copy the new URL before you restart.")) return;
+      settingsAct({ action: "rotate_bootstrap_token", reason: "rotate owner session from Users & Roles" },
+        "Session rotated — copy the new URL, then restart.", function (r) {
+        if (r && r.new_url_path) {
+          var url = location.origin + r.new_url_path;
+          var box = h("input.input.mono", { value: url, readonly: true,
+            onClick: function (e) { e.target.select(); } });
+          V.mount(out, h("div.set-status.ok", { style: { marginTop: "12px", flexDirection: "column", alignItems: "stretch" } }, [
+            h("div", null, [V.icon("check"), h("span", null, " New session URL — applies on the next restart; "
+              + "copy it now, then restart `vigil up`:")]),
+            h("div.acts", { style: { marginTop: "8px", display: "flex", gap: "8px" } }, [box,
+              h("button.btn.sm", { onClick: function () {
+                try { navigator.clipboard.writeText(url); V.toast("Copied."); } catch (e) { box.select(); } } }, "Copy")]),
+          ]));
+        }
+      });
+    } }, [V.icon("bolt"), "Rotate session"]);
+    var revoke = h("button.btn.danger", { onClick: function () {
+      if (!window.confirm("Revoke the owner session token?\n\nThe next cockpit start mints a fresh one; the "
+        + "current ?token= URL stops working after the restart.")) return;
+      settingsAct({ action: "revoke_bootstrap_token", reason: "revoke owner session from Users & Roles" },
+        "Session revoked — the next restart mints a fresh token.", function () { V.mount(out, ""); });
+    } }, [V.icon("trash"), "Revoke session"]);
+    return h("div", null, [
+      h("div.hint", null, "Your owner login token now PERSISTS across restarts (dev posture) — the same "
+        + "?token= URL keeps working after a reboot. Rotate to issue a new token, or revoke to kill it; both "
+        + "apply on the next cockpit restart (the reverse proxy re-reads the token then). In production "
+        + "posture the URL-token owner path is disabled — the owner logs in with a passkey."),
+      h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } }, [rotate, revoke]),
+      out,
+    ]);
   }
   function usersCreateForm() {
     var name = h("input.input", { placeholder: "username (letters, digits, . _ -)", autocomplete: "off" });
