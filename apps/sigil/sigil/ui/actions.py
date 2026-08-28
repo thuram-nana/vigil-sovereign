@@ -30,10 +30,12 @@ _ACCOUNT_ACTIONS = frozenset({"create_account", "assign_role", "revoke_account",
 # Owner-session (bootstrap-token) actions (Slice 1b): rotate/revoke the persistent dev bootstrap token.
 # File operations, effective on the next cockpit start (see ui/bootstrap_token.py on why not live).
 _SESSION_ACTIONS = frozenset({"rotate_bootstrap_token", "revoke_bootstrap_token"})
+# Cookie-session actions (Slice 1c-ii): revoke_sessions signs out EVERY live cookie session immediately.
+_COOKIE_SESSION_ACTIONS = frozenset({"revoke_sessions"})
 ACTIONS = (frozenset({"approve", "deny", "kill", "release", "promote", "revoke",
                       "queue_learn", "start_learn"})
            | _CAP_ACTIONS | _SETTINGS_ACTIONS | _OFFENSE_APPROVAL_ACTIONS | _ACCOUNT_ACTIONS
-           | _SESSION_ACTIONS)
+           | _SESSION_ACTIONS | _COOKIE_SESSION_ACTIONS)
 
 
 def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
@@ -184,6 +186,16 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
         return {"ok": True, "action": "revoke_bootstrap_token", "requested_by": requested_by,
                 "note": "Session token revoked. The next cockpit start mints a fresh one; the old ?token= URL "
                         "will no longer authenticate."}
+
+    if action in _COOKIE_SESSION_ACTIONS:
+        # Sign out EVERY live cookie session immediately (server-side). The session ledger lives next to the
+        # spine (mirrors server._session_ledger()); every id stops authenticating at once.
+        from pathlib import Path as _Path
+
+        from .sessions import SessionLedger
+        base = _Path(store.path)
+        n = SessionLedger(base.parent / (base.name + ".sessions")).revoke_all()
+        return {"ok": True, "action": "revoke_sessions", "revoked": n, "requested_by": requested_by}
 
     if action in _OFFENSE_APPROVAL_ACTIONS:
         # Route-via-sovereign: sign/deny a queued OFFENSE approval in-process with the owner key. The owner

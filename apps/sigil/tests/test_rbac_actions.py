@@ -137,6 +137,7 @@ OWNER_ONLY = [
     ("revoke_all_teammates", {}),
     ("rotate_bootstrap_token", {}),
     ("revoke_bootstrap_token", {}),
+    ("revoke_sessions", {}),
     # W17-3 enrolment actions are user-management -> owner-only, same as create/assign/revoke. The RBAC gate
     # fires at the funnel BEFORE the registry is touched, so an unknown-account username is irrelevant here.
     ("enroll_pubkey", {"username": "newbie", "user_pubkey": "x"}),
