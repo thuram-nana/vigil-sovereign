@@ -34,6 +34,17 @@ def test_project_normalization_collapses_slug_and_repo():
     assert normalize_project("PENTEST-main") == "PENTEST-main", "repo basename passes through"
 
 
+def test_slug_is_host_independent_same_repo_on_any_machine():
+    # audit F-05: the SAME repo yields a DIFFERENT transcript slug on every machine (the slug is the abs
+    # cwd with '/'->'-'), so they must all collapse to the one basename — else the project splits into
+    # different graph nodes across hosts / checkout paths. This is what keeps a project one project.
+    for host_slug in ("-home-kali-Pictures-PENTEST-main",           # this dev host
+                      "-home-runner-work-vigil-vigil-PENTEST-main",  # a CI runner
+                      "-root-PENTEST-main",                          # a root checkout
+                      "-srv-src-PENTEST-main"):                      # some other server path
+        assert normalize_project(host_slug) == "PENTEST-main", f"{host_slug} must collapse host-independently"
+
+
 def test_slug_and_repo_land_on_one_project():
     s = _spine()
     sessions, docs, commits, _ = _accumulate(s)

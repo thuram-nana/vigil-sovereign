@@ -340,7 +340,9 @@ def test_operator_ca_pin_does_not_trust_the_system_store(tmp_path):
     system = uiproxy.build_hop_tls_context({"VIGIL_HOP_TLS": "require"})
     system_der = system.get_ca_certs(binary_form=True)
     if system_der:                                   # a box with a real system CA bundle
-        assert len(system_der) > 1
+        # The security property is that the operator CA is NOT in the system store — not the store's SIZE.
+        # A minimal/single-CA system store legitimately has len==1 (audit F-08), so assert absence, not a
+        # count.
         assert op_der[0] not in system_der
     assert system.verify_mode == ssl.CERT_REQUIRED and system.check_hostname is True
 
