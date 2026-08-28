@@ -897,6 +897,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # CSRF/rebind-gated above + _RUN in OFFENSE_ACTION_PERM; shells the exec-only vigil, read-only.
                 self._json(actions.run_verify(str(body.get("kind", "integrity"))))
                 return
+            if path == "/api/doctor":
+                # Wave 2b (parity): run `vigil doctor --json` (install/health preflight) from the System
+                # screen. CSRF/rebind-gated above + _RUN in OFFENSE_ACTION_PERM; shells the exec-only vigil,
+                # read-only (`--install` stays a deliberate CLI act).
+                self._json(actions.run_doctor())
+                return
             if path == "/api/knowledge/gitsync":
                 # A6c: run `vigil knowledge status|sync` (regenerate + secret-scan + local commit; NOT push).
                 # CSRF/rebind-gated above; shells the exec-only vigil, surfacing the secret-scan refusal.
