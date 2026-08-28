@@ -454,7 +454,12 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
             # under a security gateway (audit F-01). AEGIS exposes no operator proxy setting, so pinning the
             # environment off removes only the attack surface. (If a validated proxy is ever a feature, it
             # must be an explicit, provenance-bound config value, never inherited from the ambient env.)
-            with httpx.Client(follow_redirects=False, timeout=_FORWARD_TIMEOUT_S, trust_env=False) as client:
+            # verify=: an HTTPS upstream whose cert chains to a PRIVATE CA is supported ONLY through the
+            # explicit `upstream_ca_bundle` config (not the ambient SSL_CERT_FILE, which trust_env=False now
+            # ignores). Unset => True => the system trust store.
+            _verify = self.settings.config.upstream_ca_bundle or True
+            with httpx.Client(follow_redirects=False, timeout=_FORWARD_TIMEOUT_S, trust_env=False,
+                              verify=_verify) as client:
                 # A11: STREAM the response and bound PEAK memory (read at most _MAX_RESPONSE_BYTES); an
                 # upstream response that EXCEEDS the bound is REFUSED (caller -> 502), never SILENTLY
                 # truncated with a rewritten Content-Length (which would corrupt the body and mislead the

@@ -142,8 +142,9 @@ def test_ambient_proxy_and_ca_env_do_not_divert_the_forward(upstream, monkeypatc
     (which would re-route the httpx forward through an attacker/monitor) and SSL_CERT_FILE/SSL_CERT_DIR
     (which would swap the TLS trust store). With those set to bogus values a benign request must STILL
     reach the real local upstream DIRECTLY (the gateway builds its client with trust_env=False). Before the
-    fix, httpx honoured ALL_PROXY and dialed the dead proxy port, so the forward failed (502) instead of
-    reaching the upstream."""
+    fix, EITHER ambient var breaks the forward under trust_env=True: SSL_CERT_FILE=/nonexistent raises at
+    httpx.Client construction, and ALL_PROXY dials the dead proxy port — both drive the assertion the same
+    way (the forward failed / never reached the upstream)."""
     # Clear any ambient NO_PROXY first: httpx (0.28) has no built-in localhost bypass, but an ambient
     # NO_PROXY=127.0.0.1 would bypass the proxy even under trust_env=True and make this test VACUOUS. With
     # NO_PROXY cleared, ALL_PROXY applies to the loopback forward, so the OLD (trust_env=True) code dials the
@@ -166,6 +167,33 @@ def test_ambient_proxy_and_ca_env_do_not_divert_the_forward(upstream, monkeypatc
         assert b"UP /alive" in body, "the real upstream body did not come back — the ambient env diverted the forward"
     finally:
         gw.shutdown()
+
+
+def test_upstream_ca_bundle_is_passed_as_verify_not_inherited_from_env(upstream, monkeypatch):
+    """A private-CA HTTPS upstream is supported ONLY via the explicit `upstream_ca_bundle` config, passed to
+    httpx as verify= — NOT via the ambient SSL_CERT_FILE (which trust_env=False ignores). Assert the wiring:
+    the configured bundle reaches the client, and the unset default is verify=True (the system trust store);
+    trust_env stays False either way."""
+    import httpx
+    captured: dict = {}
+
+    class _StubClient:
+        def __init__(self, **kw):
+            captured.clear(); captured.update(kw)
+            raise RuntimeError("stub client — kwargs captured, no real forward")   # caught by _forward -> 502
+
+    monkeypatch.setattr(httpx, "Client", _StubClient)   # gateway does a function-local `import httpx`
+    for bundle, expected in (("/etc/my-private-ca.pem", "/etc/my-private-ca.pem"), (None, True)):
+        cfg = AegisConfig(deployment_secret="k", upstream_ca_bundle=bundle)
+        gw = serve_gateway(f"http://127.0.0.1:{upstream}", config=cfg, host="127.0.0.1", port=0)
+        threading.Thread(target=gw.serve_forever, daemon=True).start()
+        port = gw.server_address[1]
+        try:
+            _raw(port, b"GET /x HTTP/1.1\r\nHost: x\r\n\r\n")   # triggers a forward -> builds the stub client
+        finally:
+            gw.shutdown()
+        assert captured.get("trust_env") is False, "must still ignore the ambient env"
+        assert captured.get("verify") == expected, f"verify must be {expected!r} for bundle={bundle!r}"
 
 
 # --------------------------------------------------------------------------- A11: XFF + response bound
