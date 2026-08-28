@@ -178,12 +178,78 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
     def _principal(self):
-        """The authenticated principal for THIS request (header `X-SIGIL-Token`, or `?token=` for SSE/
-        downloads), or None. The same carrier now bears either the legacy owner token or a per-user bearer
-        — zero change to the ~100 existing call sites."""
+        """The authenticated principal for THIS request, or None. Resolution order (either carrier works, so
+        the ~100 existing call sites are unchanged): (1) the `X-SIGIL-Token` header / `?token=` bearer, then
+        (2) the HttpOnly `sigil_session` cookie via the server-side session ledger (Slice 1c-ii). The header
+        path is tried first so a dev cockpit (header model, plain-http) is byte-identical; the cookie path is
+        the production transport (idle/absolute expiry + server-side revocation)."""
         q = self._query()
         tok = self.headers.get("X-SIGIL-Token") or (q.get("token", [""])[0])
-        return self._principal_for_token(tok or "")
+        p = self._principal_for_token(tok or "")
+        if p is not None:
+            return p
+        return self._principal_from_session()
+
+    _SESSION_COOKIE = "sigil_session"
+
+    def _session_ledger(self):
+        """The server-side cookie-session ledger, rooted next to the spine file (one per spine, so a test's
+        temp spine gets its own isolated ledger) — mirrors `_challenge_ledger`."""
+        from .sessions import SessionLedger
+        base = Path(self.server.spine_path)
+        return SessionLedger(base.parent / (base.name + ".sessions"))
+
+    def _session_cookie(self) -> str:
+        """The `sigil_session` id from the request Cookie header, or "" (fail-closed on any parse error)."""
+        raw = self.headers.get("Cookie", "")
+        if not raw:
+            return ""
+        try:
+            from http.cookies import SimpleCookie
+            jar = SimpleCookie()
+            jar.load(raw)
+            m = jar.get(self._SESSION_COOKIE)
+            return m.value if m else ""
+        except Exception:  # noqa: BLE001 — a malformed Cookie header is "no session", never a crash
+            return ""
+
+    def _set_session_cookie(self, sid: str) -> None:
+        """Queue a Set-Cookie for the session id: HttpOnly + SameSite=Strict + Path=/, Max-Age = the absolute
+        TTL, and **Secure IN PRODUCTION**. A Secure cookie is dropped by the browser over plain-http loopback,
+        so dev omits it (dev uses the header model anyway); a production cockpit MUST sit behind TLS."""
+        from vigil_core.posture import is_production_posture
+        from .sessions import DEFAULT_ABSOLUTE_TTL_SECONDS
+        parts = [f"{self._SESSION_COOKIE}={sid}", "Path=/", "HttpOnly", "SameSite=Strict",
+                 f"Max-Age={int(DEFAULT_ABSOLUTE_TTL_SECONDS)}"]
+        if is_production_posture():
+            parts.append("Secure")
+        self._pending_set_cookie = "; ".join(parts)
+
+    def _clear_session_cookie(self) -> None:
+        self._pending_set_cookie = f"{self._SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+
+    def _principal_from_session(self):
+        """Resolve the HttpOnly `sigil_session` cookie to a Principal via the server-side ledger, or None.
+        An owner session returns OWNER_PRINCIPAL; a TEAMMATE session is RE-VALIDATED against the account fold
+        each request (so a revoked or account-expired teammate's session is dead IMMEDIATELY, not merely at
+        idle expiry) and carries the account's CURRENT role. Fail-closed on any error."""
+        sid = self._session_cookie()
+        if not sid:
+            return None
+        rec = self._session_ledger().resolve(sid)
+        if rec is None:
+            return None
+        from ..governor.accounts import OWNER_PRINCIPAL, AccountsRegistry, Principal
+        if rec.get("is_owner"):
+            return OWNER_PRINCIPAL
+        username = str(rec.get("username") or "")
+        try:
+            acct = AccountsRegistry(self.server.store()).account(username)
+        except Exception:  # noqa: BLE001 — hostile/corrupt spine → fail-closed
+            acct = None
+        if acct is None:
+            return None                    # account revoked / expired / gone ⇒ the session is dead too
+        return Principal(username=acct.username, role=acct.role)
 
     def _origin_host_ok(self) -> bool:
         """The anti-CSRF / anti-DNS-rebinding half of the action gate (Host + exact Origin/Referer), with no
@@ -213,6 +279,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", _CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        sc = getattr(self, "_pending_set_cookie", None)   # Slice 1c-ii: a queued session Set-Cookie, if any
+        if sc:
+            self.send_header("Set-Cookie", sc)
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -531,15 +600,19 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True, **self._principal_json(p)})
 
     def _logout(self):
-        """Record a logout for the current principal (best-effort AUDIT) and return ok. Same-origin gated.
-        The header/bearer model has no server-side session to invalidate here — the SPA clears its stored
-        token, a teammate bearer is revoked via manage_users, and the owner session via the bootstrap-token
-        rotate (Slice 1b) — so this endpoint's job is to make the logout AUDITABLE on the spine (a cookie
-        session ledger with true server-side invalidation lands in a later sub-slice)."""
+        """Invalidate the current cookie session server-side (Slice 1c-ii) + clear the cookie, and record an
+        auditable logout. Same-origin gated. A COOKIE session is TRULY invalidated — its ledger record is
+        removed, so the id stops authenticating immediately, everywhere. A header/bearer session has no
+        server record to drop here (the SPA clears its token; teammate bearers are revoked via manage_users,
+        the owner session via the 1b bootstrap-token rotate)."""
         if not self._origin_host_ok():
             return self._deny(403, "denied (origin / host)")
         from .authn_audit import record_authn
         p = self._principal()
+        sid = self._session_cookie()
+        if sid:
+            self._session_ledger().revoke(sid)     # true server-side invalidation of the cookie session
+        self._clear_session_cookie()
         record_authn(self.server.store(), "authn.logout",
                      username=(p.username if p else ""), method="logout", outcome="success")
         self._json({"ok": True})
@@ -597,6 +670,9 @@ class Handler(BaseHTTPRequestHandler):
         bearer, _seq = reg.mint_session_bearer(username, issued_at=time.time())
         p = Principal(username=acct.username, role=acct.role)
         record_authn(store, "authn.login.success", username=username, method="pop", outcome="success")
+        sid = self._session_ledger().create(acct.username, acct.role, is_owner=False)
+        if sid:
+            self._set_session_cookie(sid)      # Slice 1c-ii: fresh cookie session (rotation → no fixation)
         self._json({"ok": True, **self._principal_json(p), "bearer": bearer})
 
     def _login_password(self, username: str, password: str, body: dict):
@@ -638,6 +714,9 @@ class Handler(BaseHTTPRequestHandler):
         bearer, _seq = reg.mint_session_bearer(username, issued_at=time.time())
         p = Principal(username=acct.username, role=acct.role)
         record_authn(store, "authn.login.success", username=username, method="password", outcome="success")
+        sid = self._session_ledger().create(acct.username, acct.role, is_owner=False)
+        if sid:
+            self._set_session_cookie(sid)      # Slice 1c-ii: fresh cookie session (rotation → no fixation)
         self._json({"ok": True, **self._principal_json(p), "bearer": bearer})
 
     # --- OIDC Relying Party (S5, SHIPPED OFF BY DEFAULT) ------------------------------------------

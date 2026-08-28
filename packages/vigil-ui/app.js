@@ -4418,12 +4418,22 @@
       settingsAct({ action: "revoke_bootstrap_token", reason: "revoke owner session from Users & Roles" },
         "Session revoked — the next restart mints a fresh token.", function () { V.mount(out, ""); });
     } }, [V.icon("trash"), "Revoke session"]);
+    var signoutAll = h("button.btn.danger", { onClick: function () {
+      if (!window.confirm("Sign out ALL active cookie sessions?\n\nEvery teammate (and owner) cookie session "
+        + "is invalidated immediately server-side; they must log in again. Bearer / URL-token sessions are "
+        + "unaffected.")) return;
+      settingsAct({ action: "revoke_sessions", reason: "sign out all sessions from Users & Roles" },
+        "All cookie sessions signed out.", function () {});
+    } }, [V.icon("x"), "Sign out all sessions"]);
     return h("div", null, [
       h("div.hint", null, "Your owner login token now PERSISTS across restarts (dev posture) — the same "
         + "?token= URL keeps working after a reboot. Rotate to issue a new token, or revoke to kill it; both "
         + "apply on the next cockpit restart (the reverse proxy re-reads the token then). In production "
-        + "posture the URL-token owner path is disabled — the owner logs in with a passkey."),
-      h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } }, [rotate, revoke]),
+        + "posture the URL-token owner path is disabled — the owner logs in with a passkey. “Sign out all "
+        + "sessions” immediately invalidates every server-side cookie session (idle + absolute expiry are "
+        + "enforced automatically)."),
+      h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } },
+        [rotate, revoke, signoutAll]),
       out,
     ]);
   }
