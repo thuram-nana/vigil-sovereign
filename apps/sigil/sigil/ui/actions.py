@@ -25,8 +25,8 @@ _OFFENSE_APPROVAL_ACTIONS = frozenset({"offense_bind_authority", "offense_approv
 # Claim 6: owner-only user-management actions (create/assign-role/revoke a per-user bearer account; S3
 # enroll_pubkey = owner-bind the account's Ed25519 challenge/response login key; S4 enroll_totp = owner-bind
 # a SEALED TOTP second factor, set_password = owner-set the optional weaker scrypt password login).
-_ACCOUNT_ACTIONS = frozenset({"create_account", "assign_role", "revoke_account", "enroll_pubkey",
-                              "enroll_totp", "set_password"})
+_ACCOUNT_ACTIONS = frozenset({"create_account", "assign_role", "revoke_account", "revoke_all_teammates",
+                              "enroll_pubkey", "enroll_totp", "set_password"})
 ACTIONS = (frozenset({"approve", "deny", "kill", "release", "promote", "revoke",
                       "queue_learn", "start_learn"})
            | _CAP_ACTIONS | _SETTINGS_ACTIONS | _OFFENSE_APPROVAL_ACTIONS | _ACCOUNT_ACTIONS)
@@ -91,11 +91,19 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
         reg = AccountsRegistry(store, owner_key=owner)
         username = str(params.get("username", ""))
         if action == "create_account":
+            # `ttl_seconds` (optional) bounds the token's lifetime. It is browser-untrusted but SAFE to honor:
+            # `reg.create` validates it fail-closed (a non-finite/non-positive/over-cap value is a clean 400),
+            # and the worst a hostile value can do is SHORTEN the account's own life (self-DoS), never extend
+            # anyone else's. The absolute `expires_at` is derived from the SERVER-stamped `issued_at`.
+            from ..governor.accounts import _derive_expires_at
+            iat = _time.time()
+            ttl = params.get("ttl_seconds")
             bearer = secrets.token_urlsafe(32)
             seq = reg.create(username, str(params.get("role", "")), bearer_token=bearer,
-                             issued_at=_time.time())
+                             issued_at=iat, ttl_seconds=ttl)
             return {"ok": True, "action": "create_account", "username": username,
                     "role": str(params.get("role", "")), "bearer_token": bearer, "recorded_seq": seq,
+                    "expires_at": _derive_expires_at(iat, ttl),   # None ⇒ never expires
                     "requested_by": requested_by,
                     "note": "Copy this bearer token now — it is shown once and never stored in plaintext."}
         if action == "assign_role":
@@ -138,6 +146,13 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
             return {"ok": True, "action": "set_password", "username": username, "recorded_seq": seq,
                     "requested_by": requested_by,
                     "note": "Password set (salted scrypt). Keypair login (enroll_pubkey) is the stronger path."}
+        if action == "revoke_all_teammates":
+            # Bulk-revoke every active non-owner account. Owner is never an Account, so this cannot lock the
+            # owner out; each revoke is the SAFE, replay-safe direction (fixed issued_at=0.0). No username.
+            revoked = reg.revoke_all()
+            return {"ok": True, "action": "revoke_all_teammates",
+                    "revoked": [u for u, _seq in revoked], "count": len(revoked),
+                    "requested_by": requested_by}
         seq = reg.revoke(username)
         return {"ok": True, "action": "revoke_account", "username": username, "recorded_seq": seq,
                 "requested_by": requested_by}

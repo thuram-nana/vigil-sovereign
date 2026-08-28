@@ -49,6 +49,7 @@ import hmac
 import math
 import re
 import secrets
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -78,6 +79,11 @@ SIGNAL = "governor.account"
 _ROLE_RANK = {r: i for i, r in enumerate(ROLES)}
 _ASSIGNABLE_ROLES = frozenset(ROLES[:-1])   # viewer / analyst / operator — never "owner"
 
+# Upper bound on a per-token TTL (10 years, in seconds), mirroring the delegate-offense `--hours` cap
+# (`cli.py`'s (0, 24*365*10] bound). A create with a larger/non-finite/non-positive ttl is refused
+# fail-closed. A token's expiry is the ABSOLUTE `Account.expires_at` derived here from `issued_at + ttl`.
+MAX_ACCOUNT_TTL = 24 * 365 * 10 * 3600
+
 # The env whose set_config disables the categorical .gov/.mil/.edu/.int safety floor (Claim 5). Turning
 # that floor OFF is OWNER-ONLY (`toggle_protected_guard`), NOT the operator-level `config_nonsecret` the
 # rest of set_config uses — do_action special-cases it (see the funnel gate).
@@ -104,6 +110,7 @@ PERMISSION_BY_ACTION: dict[str, Optional[str]] = {
     "offense_bind_authority": "offense_authority",
     "offense_approve": "offense_authority", "offense_deny": "offense_authority",
     "create_account": "manage_users", "assign_role": "manage_users", "revoke_account": "manage_users",
+    "revoke_all_teammates": "manage_users",                            # bulk revoke every non-owner account
     "enroll_pubkey": "manage_users",
     "enroll_totp": "manage_users", "set_password": "manage_users",     # S4 MFA / password enrollment
 }
@@ -172,7 +179,8 @@ def _core_fields(payload: dict) -> "tuple[str, ...]":
     """The signed core field set for an accounts grant — CONDITIONAL on the payload itself: the 7 base
     fields ALWAYS, plus each OPTIONAL field IFF the grant actually carries a truthy value for it —
     `user_pubkey` (S3, the owner-bound Ed25519 login identity), `totp_secret` (S4, the SEALED TOTP shared
-    secret), and `password_hash` (S4, the salted-scrypt password login). Scoped to this module (NOT baked
+    secret), `password_hash` (S4, the salted-scrypt password login), and `expires_at` (the ABSOLUTE
+    wallclock deadline after which this bearer no longer authenticates). Scoped to this module (NOT baked
     into the shared `authn.verify_signed`), so every other record type is untouched.
 
     This conditional encoding keeps two properties at once:
@@ -195,6 +203,8 @@ def _core_fields(payload: dict) -> "tuple[str, ...]":
         fields += ("totp_secret",)
     if payload.get("password_hash"):
         fields += ("password_hash",)
+    if payload.get("expires_at"):
+        fields += ("expires_at",)
     return fields
 
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -220,6 +230,18 @@ class Account:
     #                                     owner vault to verify codes. None ⇒ no second factor enrolled.
     password_hash: Optional[str] = None  # S4 OPTIONAL weaker login: a salted-scrypt hash (see hash_password).
     #                                      None ⇒ no password login. Keypairs (S3) are the stronger path.
+    expires_at: Optional[float] = None  # ABSOLUTE wallclock deadline (issued_at + ttl at create time). None ⇒
+    #                                     never expires (backward-compat: a legacy grant carries no such field).
+    #                                     Read-time ONLY: expiry filters auth in resolve()/account(); it is
+    #                                     NOT a durable state and NEVER touches the anti-replay high-water.
+
+    def expired(self, now: float) -> bool:
+        """True iff this account carries a deadline that `now` has reached. `None` ⇒ never expires."""
+        return self.expires_at is not None and now >= self.expires_at
+
+    def remaining(self, now: float) -> Optional[float]:
+        """Seconds until this account's deadline (may be negative once past it), or None if it never expires."""
+        return None if self.expires_at is None else self.expires_at - now
 
 
 @dataclass(frozen=True)
@@ -264,6 +286,39 @@ def _check_user_pubkey(user_pubkey: str) -> str:
     return pk
 
 
+def _derive_expires_at(issued_at: float, ttl_seconds: Optional[float]) -> Optional[float]:
+    """Derive the ABSOLUTE expiry deadline for a NEW grant from a chosen TTL, or None for never-expires.
+    Validates fail-closed at BINDING time: a non-finite, non-positive, or over-cap `ttl_seconds` is a clean
+    ValueError (400) now, never silently coerced. The deadline is anchored to the server-stamped `issued_at`
+    (the token's lifetime is measured from when the owner minted it). The returned value is the absolute
+    `expires_at` carried UNCHANGED through every later re-sign, so it never slides forward on a role change
+    or a login rotation (mirrors the gesture-arm `expires_at`, not a use-renewing idle timer)."""
+    if ttl_seconds is None:
+        return None
+    try:
+        ttl = float(ttl_seconds)
+    except (TypeError, ValueError):
+        raise ValueError("ttl_seconds must be a positive number of seconds, or None for no expiry")
+    if not math.isfinite(ttl) or ttl <= 0:
+        raise ValueError("ttl_seconds must be a positive, finite number of seconds")
+    if ttl > MAX_ACCOUNT_TTL:
+        raise ValueError(f"ttl_seconds must be <= {MAX_ACCOUNT_TTL} seconds (10 years)")
+    return float(issued_at) + ttl
+
+
+def _as_deadline(value) -> float:
+    """Coerce a TRUTHY signed-payload `expires_at` into an absolute float deadline FAIL-CLOSED. A genuine
+    grant always carries a finite float (`create` writes `float(expires_at)`); a numeric STRING, a bool, a
+    non-finite, or any non-number is POISON and maps to 0.0 (already expired ⇒ denied) — never a live future
+    deadline. Unlike `as_issued_at` (which tolerantly `float()`s a numeric string, the right call for the
+    anti-replay high-water), a deadline must reject a string so a corrupt/owner-fat-fingered value fails
+    CLOSED rather than open. Called only for a truthy value; None/absent is 'never expires' at the caller."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    f = float(value)
+    return f if math.isfinite(f) else 0.0
+
+
 class AccountsRegistry:
     """Owner-signed account grants on the spine. Construction mirrors KillSwitch/PromotionPolicy: the owner
     signing key and trusted pubkey default to the persisted owner identity."""
@@ -275,22 +330,25 @@ class AccountsRegistry:
 
     # -- owner mutations ---------------------------------------------------------------------------
     def create(self, username: str, role: str, *, bearer_token: str, issued_at: float,
-               user_pubkey: Optional[str] = None) -> int:
+               user_pubkey: Optional[str] = None, ttl_seconds: Optional[float] = None) -> int:
         """Owner-sign a new active account. The caller (the actions layer) generates the bearer token and
         never stores it in plaintext: only `sha256_hex(salt + bearer)` and the per-account salt are
         recorded. Requires the owner signing key (a grant with no owner signature never verifies in the
         fold, so it would be inert). `user_pubkey` optionally binds the S3 challenge/response login identity
-        at creation (usually bound later via `enroll_pubkey`); it is validated fail-closed when present."""
+        at creation (usually bound later via `enroll_pubkey`); it is validated fail-closed when present.
+        `ttl_seconds` optionally bounds the token's lifetime: the absolute `expires_at = issued_at + ttl` is
+        signed INTO the grant (tamper-evident) and enforced at read time; None ⇒ the token never expires."""
         if self.owner_key is None:
             raise ValueError("account creation requires the owner signing key")
         u, r = _check_username(username), _check_role(role)
         if not isinstance(bearer_token, str) or len(bearer_token) < 16:
             raise ValueError("bearer_token must be a >=16-char string")
         pk = _check_user_pubkey(user_pubkey) if user_pubkey else None
+        expires_at = _derive_expires_at(float(issued_at), ttl_seconds)
         salt = secrets.token_hex(16)
         cred_hash = sha256_hex((salt + bearer_token).encode("utf-8"))
         return self._append_active(u, r, cred_hash=cred_hash, cred_salt=salt, issued_at=float(issued_at),
-                                   user_pubkey=pk)
+                                   user_pubkey=pk, expires_at=expires_at)
 
     def assign_role(self, username: str, role: str, *, issued_at: float) -> int:
         """Owner-sign a role change — the DANGEROUS direction, so it is honored only if it verifies AND is
@@ -304,7 +362,8 @@ class AccountsRegistry:
             raise ValueError(f"no such active account {u!r} (create it first, or it was revoked)")
         return self._append_active(u, r, cred_hash=acct.cred_hash, cred_salt=acct.cred_salt,
                                    issued_at=float(issued_at), user_pubkey=acct.user_pubkey,
-                                   totp_secret=acct.totp_secret, password_hash=acct.password_hash)
+                                   totp_secret=acct.totp_secret, password_hash=acct.password_hash,
+                                   expires_at=acct.expires_at)
 
     def enroll_pubkey(self, username: str, user_pubkey: str, *, issued_at: float) -> int:
         """Owner-bind an Ed25519 PUBLIC key to an existing active account — the S3 stronger login identity.
@@ -324,7 +383,8 @@ class AccountsRegistry:
             raise ValueError(f"no such active account {u!r} (create it first, or it was revoked)")
         return self._append_active(u, acct.role, cred_hash=acct.cred_hash, cred_salt=acct.cred_salt,
                                    issued_at=float(issued_at), user_pubkey=pk,
-                                   totp_secret=acct.totp_secret, password_hash=acct.password_hash)
+                                   totp_secret=acct.totp_secret, password_hash=acct.password_hash,
+                                   expires_at=acct.expires_at)
 
     def enroll_totp(self, username: str, sealed_totp_b64: str, *, issued_at: float) -> int:
         """Owner-bind a SEALED TOTP secret to an existing active account — the S4 second factor. The caller
@@ -345,7 +405,8 @@ class AccountsRegistry:
             raise ValueError(f"no such active account {u!r} (create it first, or it was revoked)")
         return self._append_active(u, acct.role, cred_hash=acct.cred_hash, cred_salt=acct.cred_salt,
                                    issued_at=float(issued_at), user_pubkey=acct.user_pubkey,
-                                   totp_secret=blob, password_hash=acct.password_hash)
+                                   totp_secret=blob, password_hash=acct.password_hash,
+                                   expires_at=acct.expires_at)
 
     def disable_totp(self, username: str, *, issued_at: float) -> int:
         """Remove the TOTP second factor from an active account — the SAFE direction (drops a factor). This
@@ -365,7 +426,8 @@ class AccountsRegistry:
         iat = max(float(issued_at), math.nextafter(acct.issued_at, math.inf))
         return self._append_active(u, acct.role, cred_hash=acct.cred_hash, cred_salt=acct.cred_salt,
                                    issued_at=iat, user_pubkey=acct.user_pubkey,
-                                   totp_secret=None, password_hash=acct.password_hash)
+                                   totp_secret=None, password_hash=acct.password_hash,
+                                   expires_at=acct.expires_at)
 
     def set_password(self, username: str, password: str, *, issued_at: float) -> int:
         """Owner-set a scrypt password hash for an existing active account — the S4 OPTIONAL weaker login.
@@ -382,7 +444,8 @@ class AccountsRegistry:
             raise ValueError(f"no such active account {u!r} (create it first, or it was revoked)")
         return self._append_active(u, acct.role, cred_hash=acct.cred_hash, cred_salt=acct.cred_salt,
                                    issued_at=float(issued_at), user_pubkey=acct.user_pubkey,
-                                   totp_secret=acct.totp_secret, password_hash=ph)
+                                   totp_secret=acct.totp_secret, password_hash=ph,
+                                   expires_at=acct.expires_at)
 
     def mint_session_bearer(self, username: str, *, issued_at: float) -> "tuple[str, int]":
         """Mint a FRESH owner-signed session bearer for an existing active account, returning
@@ -404,7 +467,8 @@ class AccountsRegistry:
         cred_hash = sha256_hex((salt + bearer).encode("utf-8"))
         seq = self._append_active(u, acct.role, cred_hash=cred_hash, cred_salt=salt,
                                   issued_at=iat, user_pubkey=acct.user_pubkey,
-                                  totp_secret=acct.totp_secret, password_hash=acct.password_hash)
+                                  totp_secret=acct.totp_secret, password_hash=acct.password_hash,
+                                  expires_at=acct.expires_at)
         return bearer, seq
 
     def revoke(self, username: str) -> int:
@@ -418,9 +482,24 @@ class AccountsRegistry:
                    "tier": "A0", "decision": "auto", "reason": f"account {u} REVOKED (governed latch)"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
+    def revoke_all(self, *, exclude: "frozenset[str]" = frozenset()) -> "list[tuple[str, int]]":
+        """Bulk-revoke every currently-active account (the SAFE direction, applied one-by-one via `revoke`).
+        The owner is NEVER an `Account` (the fold carries no "owner" row — `OWNER_PRINCIPAL` is the legacy
+        embedded token / a passkey session), so this structurally cannot lock the owner out. Idempotent and
+        replay-safe: each `revoke` writes a FIXED `issued_at=0.0` and never bumps a high-water, so re-running
+        it merely re-revokes. Returns [(username, recorded_seq), ...] in username order; `exclude` skips
+        named usernames (e.g. a break-glass service account the owner wants to keep)."""
+        out: "list[tuple[str, int]]" = []
+        for username in sorted(self._fold()):
+            if username in exclude:
+                continue
+            out.append((username, self.revoke(username)))
+        return out
+
     def _append_active(self, username: str, role: str, *, cred_hash: str, cred_salt: str,
                        issued_at: float, user_pubkey: Optional[str] = None,
-                       totp_secret: Optional[str] = None, password_hash: Optional[str] = None) -> int:
+                       totp_secret: Optional[str] = None, password_hash: Optional[str] = None,
+                       expires_at: Optional[float] = None) -> int:
         core = {"signal": SIGNAL, "username": username, "role": role, "cred_hash": cred_hash,
                 "cred_salt": cred_salt, "state": "active", "issued_at": float(issued_at)}
         # CONDITIONALLY signed: each optional field is included ONLY when set, so a grant MISSING it
@@ -433,6 +512,8 @@ class AccountsRegistry:
             core["totp_secret"] = totp_secret
         if password_hash:
             core["password_hash"] = password_hash
+        if expires_at:
+            core["expires_at"] = float(expires_at)   # ABSOLUTE deadline, inside the owner-signed core
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"account {username} → {role} (owner-signed grant)"}
@@ -468,12 +549,14 @@ class AccountsRegistry:
             accts = {row[0]: Account(                     # rebuild the honored-active Accounts from the seed
                         username=str(row[0]), role=str(row[1] or ""), cred_hash=str(row[2] or ""),
                         cred_salt=str(row[3] or ""), issued_at=issued.get(row[0], 0.0), state="active",
-                        # seed fields 5/6/7 = user_pubkey / totp_secret / password_hash (each None for a
-                        # legacy/shorter row) — carried so a KEYED / TOTP-enrolled / password account pruned
-                        # below base_seq keeps its PoP login, its second factor, and its password.
+                        # seed fields 5/6/7/8 = user_pubkey / totp_secret / password_hash / expires_at (each
+                        # None for a legacy/shorter row) — carried so a KEYED / TOTP-enrolled / password /
+                        # EXPIRING account pruned below base_seq keeps its PoP login, its second factor, its
+                        # password, and its DEADLINE (else a pruned+seeded account silently never-expires).
                         user_pubkey=(str(row[4]) if len(row) > 4 and row[4] else None),
                         totp_secret=(str(row[5]) if len(row) > 5 and row[5] else None),
-                        password_hash=(str(row[6]) if len(row) > 6 and row[6] else None))
+                        password_hash=(str(row[6]) if len(row) > 6 and row[6] else None),
+                        expires_at=(_as_deadline(row[7]) if len(row) > 7 and row[7] else None))
                      for row in snap.account_cred}
             since = snap.base_seq - 1
         for r in self.store.iter_records(since_seq=since):
@@ -497,38 +580,56 @@ class AccountsRegistry:
                 upk = p.get("user_pubkey")
                 tsec = p.get("totp_secret")
                 phash = p.get("password_hash")
+                exp = p.get("expires_at")
                 accts[username] = Account(
                     username=str(username), role=str(p.get("role") or ""),
                     cred_hash=str(p.get("cred_hash") or ""), cred_salt=str(p.get("cred_salt") or ""),
                     issued_at=at, state="active",
                     user_pubkey=(str(upk) if upk else None),   # each carried through unchanged (None ⇒ absent):
                     totp_secret=(str(tsec) if tsec else None),  # the SEALED TOTP secret (S4 second factor)
-                    password_hash=(str(phash) if phash else None))  # the scrypt password hash (S4 optional)
+                    password_hash=(str(phash) if phash else None),  # the scrypt password hash (S4 optional)
+                    # ABSOLUTE deadline. It is in the signed core, so a tampered value fails verify above; and
+                    # _as_deadline is fail-closed — a poisoned value (non-finite, a numeric STRING, a bool, any
+                    # non-number) maps to 0.0 ⇒ always-expired ⇒ denied, never a live future deadline.
+                    expires_at=(_as_deadline(exp) if exp else None))
         return {u: a for u, a in accts.items() if state.get(u) == "active"}
 
-    def resolve(self, token: str) -> Optional[Principal]:
+    def resolve(self, token: str, *, now: Optional[float] = None) -> Optional[Principal]:
         """Map a per-user bearer token to its Principal, or None (fail-closed). Constant-time per account:
         `hmac.compare_digest(sha256_hex(salt + token), cred_hash)`. First match (by username order) wins.
-        Never resolves a revoked account (they are absent from the fold). Folds ONCE per call."""
+        Never resolves a revoked account (absent from the fold) NOR an EXPIRED one (its absolute `expires_at`
+        has passed `now`) — expiry is a read-time filter here, never a durable state, so it can only
+        SUBTRACT access. `now` defaults to the live clock. Folds ONCE per call."""
         if not isinstance(token, str) or not token:
             return None
+        now = time.time() if now is None else now
         fold = self._fold()
         for username in sorted(fold):
             a = fold[username]
             if hmac.compare_digest(sha256_hex((a.cred_salt + token).encode("utf-8")), a.cred_hash):
-                return Principal(username=a.username, role=a.role)
+                # A bearer is unique to one account (per-account salt + 32-byte secret), so a match is the
+                # only match — an expired match is a hard None, not a fall-through to another account.
+                return None if a.expired(now) else Principal(username=a.username, role=a.role)
         return None
 
-    def account(self, username: str) -> Optional[Account]:
-        """The current active `Account` for `username` (carrying its bound `user_pubkey`), or None
-        (fail-closed — a revoked/unknown username is absent from the fold). Folds ONCE. Used by the PoP
-        login to look up the account's owner-bound login key before verifying the challenge signature."""
+    def account(self, username: str, *, now: Optional[float] = None) -> Optional[Account]:
+        """The current active, NON-EXPIRED `Account` for `username` (carrying its bound `user_pubkey`), or
+        None (fail-closed — a revoked/unknown/EXPIRED username is treated as absent). Folds ONCE. Used by the
+        PoP / password login to look up the account before verifying — so an expired account cannot mint a
+        fresh session bearer via `mint_session_bearer` (the login-bypass guard). `now` defaults to the live
+        clock."""
         if not isinstance(username, str) or not username:
             return None
-        return self._fold().get(username)
+        now = time.time() if now is None else now
+        acct = self._fold().get(username)
+        if acct is None or acct.expired(now):
+            return None
+        return acct
 
     def accounts(self) -> list[Account]:
-        """The current active fold (for the owner's Users & Roles list). The cred_hash/cred_salt live on the
-        Account object but the HTTP layer never surfaces them — only username/role/state/issued_at."""
+        """The current active fold (for the owner's Users & Roles list) — INCLUDING expired-but-active
+        accounts, each carrying its `expires_at`, so the UI can show an "expired"/"expires soon" pill and
+        the owner can revoke it. The cred_hash/cred_salt live on the Account object but the HTTP layer never
+        surfaces them — only username/role/state/issued_at + expires_at/remaining/expired."""
         fold = self._fold()
         return [fold[u] for u in sorted(fold)]

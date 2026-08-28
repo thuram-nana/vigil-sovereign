@@ -435,14 +435,20 @@ class Handler(BaseHTTPRequestHandler):
         self._json({**base, "oidc": oidc_enabled()})
 
     def _accounts(self):
-        """The owner's Users & Roles list — username/role/state/issued_at plus PURE BOOLEAN factor flags
+        """The owner's Users & Roles list — username/role/state/issued_at, the token's absolute `expires_at`
+        (None ⇒ never) plus derived `remaining`/`expired` for the expiry pill, and PURE BOOLEAN factor flags
         (has_pubkey / has_totp / has_password) so the enrolment UI (W17-3) can show which login factors are
         bound. cred_hash/salt, the bound pubkey, the sealed TOTP blob and the password hash NEVER leave the
-        server — only the booleans (no secret, mirroring whoami.oidc)."""
+        server — only the booleans + the (non-secret) expiry (no secret, mirroring whoami.oidc)."""
+        import time as _time
+
         from ..governor.accounts import AccountsRegistry
+        now = _time.time()
         accts = AccountsRegistry(self.server.store()).accounts()
         self._json({"accounts": [{"username": a.username, "role": a.role, "state": a.state,
                                   "issued_at": a.issued_at,
+                                  "expires_at": a.expires_at, "remaining": a.remaining(now),
+                                  "expired": a.expired(now),
                                   "has_pubkey": bool(a.user_pubkey), "has_totp": bool(a.totp_secret),
                                   "has_password": bool(a.password_hash)} for a in accts]})
 
