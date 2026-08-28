@@ -134,6 +134,7 @@ OWNER_ONLY = [
     ("create_account", {"username": "newbie", "role": "viewer"}),
     ("assign_role", {"username": "newbie", "role": "operator"}),
     ("revoke_account", {"username": "newbie"}),
+    ("revoke_all_teammates", {}),
     # W17-3 enrolment actions are user-management -> owner-only, same as create/assign/revoke. The RBAC gate
     # fires at the funnel BEFORE the registry is touched, so an unknown-account username is irrelevant here.
     ("enroll_pubkey", {"username": "newbie", "user_pubkey": "x"}),
@@ -171,6 +172,38 @@ def test_owner_can_manage_users_end_to_end():
                              store=s, principal=OWNER)["ok"]
     assert actions.do_action("revoke_account", {"username": "teammate"}, store=s, principal=OWNER)["ok"]
     assert AccountsRegistry(s).resolve(out["bearer_token"]) is None
+
+
+def test_owner_create_with_ttl_returns_expiry_and_it_enforces():
+    import time as _time
+
+    from sigil.governor.accounts import AccountsRegistry
+    s = _store()
+    out = actions.do_action("create_account", {"username": "temp", "role": "operator", "ttl_seconds": 3600},
+                            store=s, principal=OWNER)
+    assert out["ok"] and out["bearer_token"]
+    assert out["expires_at"] is not None and out["expires_at"] > _time.time()
+    reg = AccountsRegistry(s)
+    # valid now, denied once past the returned absolute deadline
+    assert reg.resolve(out["bearer_token"]) == Principal("temp", "operator")
+    assert reg.resolve(out["bearer_token"], now=out["expires_at"] + 1) is None
+
+
+def test_owner_create_without_ttl_never_expires():
+    s = _store()
+    out = actions.do_action("create_account", {"username": "perm", "role": "viewer"},
+                            store=s, principal=OWNER)
+    assert out["expires_at"] is None                                     # omitted ttl ⇒ never expires
+
+
+def test_owner_bulk_revoke_clears_every_teammate():
+    from sigil.governor.accounts import AccountsRegistry
+    s = _store()
+    for u in ("t1", "t2", "t3"):
+        actions.do_action("create_account", {"username": u, "role": "viewer"}, store=s, principal=OWNER)
+    out = actions.do_action("revoke_all_teammates", {}, store=s, principal=OWNER)
+    assert out["ok"] and out["count"] == 3 and sorted(out["revoked"]) == ["t1", "t2", "t3"]
+    assert AccountsRegistry(s).accounts() == []
 
 
 def test_owner_release_and_promote_succeed():

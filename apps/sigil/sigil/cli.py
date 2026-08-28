@@ -380,6 +380,28 @@ def cmd_capability(a) -> None:
         print(f"  {c} {'DISABLED' if a.state == 'off' else 'ENABLED (owner-signed)'} (seq {seq})")
 
 
+def _parse_ttl(value):
+    """Parse a ``--ttl`` duration into seconds, or None for 'never'. Accepts a bare number (seconds) or an
+    ``Ns``/``Nm``/``Nh``/``Nd``/``Nw`` suffix (e.g. ``24h``, ``7d``). Fail-fast (exit 2) on garbage or a
+    non-positive/non-finite value, so a bad flag never reaches the signing path as a traceback."""
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if s in ("", "never", "none"):
+        return None
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+    try:
+        secs = float(s[:-1]) * units[s[-1]] if s and s[-1] in units else float(s)
+        import math as _math
+        if not (_math.isfinite(secs) and secs > 0):
+            raise ValueError
+        return secs
+    except (ValueError, IndexError, KeyError):
+        print(f"  invalid --ttl {value!r}: use e.g. 24h, 7d, 30d, or a positive number of seconds",
+              file=sys.stderr)
+        sys.exit(2)
+
+
 def cmd_accounts(a) -> None:
     """Bootstrap + manage per-user RBAC accounts (Claim 6). Accounts are OWNER-SIGNED spine grants; the
     owner key (auto-created once) is the sole signer. `create` mints a per-user bearer token and prints it
@@ -428,10 +450,16 @@ def cmd_accounts(a) -> None:
     reg = AccountsRegistry(store, owner_key=ensure_owner_keypair())
     if a.accounts_cmd == "create":
         import secrets as _secrets
+        ttl_seconds = _parse_ttl(getattr(a, "ttl", None))
         bearer = _secrets.token_urlsafe(32)
-        seq = reg.create(a.username, a.role, bearer_token=bearer, issued_at=_time.time())
+        iat = _time.time()
+        seq = reg.create(a.username, a.role, bearer_token=bearer, issued_at=iat, ttl_seconds=ttl_seconds)
         print(f"  account CREATED: {a.username} → {a.role} (owner-signed, seq {seq})")
         print(f"  bearer token (shown ONCE — copy it now; only its salted hash is stored):\n    {bearer}")
+        if ttl_seconds is not None:
+            import datetime as _dt
+            exp = _dt.datetime.fromtimestamp(iat + ttl_seconds).isoformat(timespec="seconds")
+            print(f"  expires: {exp}  (in {ttl_seconds / 3600:.1f}h — the bearer stops authenticating then)")
     elif a.accounts_cmd == "assign":
         seq = reg.assign_role(a.username, a.role, issued_at=_time.time())
         print(f"  role ASSIGNED: {a.username} → {a.role} (owner-signed, seq {seq})")
@@ -1964,6 +1992,9 @@ def main(argv=None) -> None:
     pacc.add_argument("--pubkey", default=None,
                       help="enroll-pubkey: the account's base64 Ed25519 PUBLIC key (challenge/response PoP "
                            "login); the private half never touches the host")
+    pacc.add_argument("--ttl", default=None,
+                      help="OPTIONAL token lifetime for `create`, e.g. 1h / 8h / 24h / 7d / 30d (or a bare "
+                           "number of seconds). Omitted or 'never' ⇒ the bearer never expires.")
     pacc.add_argument("--pubkey-file", default=None,
                       help="enroll-pubkey: read the base64 public key from this file instead of --pubkey")
     pacc.set_defaults(fn=cmd_accounts)

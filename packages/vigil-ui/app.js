@@ -4347,6 +4347,17 @@
   // admission gate in front of it. This screen is owner-only both in the nav (V.can) and here (defence in
   // depth); the server also refuses create/assign/revoke to any non-owner (403).
   var USER_ROLES = ["viewer", "analyst", "operator"];
+  // Token-lifetime presets for the create form. `secs: null` ⇒ never expires (the backward-compatible
+  // default). The owner may also type a custom number of hours. The SERVER derives the absolute deadline
+  // from its own clock and signs it into the grant; the browser only chooses the length.
+  var TTL_PRESETS = [
+    { label: "Never expires", secs: null },
+    { label: "1 hour", secs: 3600 },
+    { label: "8 hours", secs: 28800 },
+    { label: "24 hours", secs: 86400 },
+    { label: "7 days", secs: 604800 },
+    { label: "30 days", secs: 2592000 },
+  ];
   function renderUsers(screen) {
     if (!V.can("manage_users")) {
       V.mount(screen, h("div.wrap", null, [
@@ -4377,18 +4388,32 @@
   function usersCreateForm() {
     var name = h("input.input", { placeholder: "username (letters, digits, . _ -)", autocomplete: "off" });
     var role = h("select.input", null, USER_ROLES.map(function (r) { return h("option", { value: r }, r); }));
+    var ttl = h("select.input", null, TTL_PRESETS.map(function (t, i) {
+      return h("option", { value: String(i) }, t.label); }));
+    var ttlCustom = h("input.input.sm", { type: "number", min: "0", step: "1",
+      placeholder: "or custom hours", style: { width: "140px" } });
     var out = h("div", null, "");
     var save = h("button.btn.owner", { onClick: function () {
       var u = (name.value || "").trim();
       if (!u) { V.toast("Enter a username.", true); return; }
+      // A custom hours value (if > 0) overrides the preset; else the preset's seconds (null ⇒ never).
+      var custH = parseFloat(ttlCustom.value);
+      var ttlSecs = (custH && custH > 0) ? custH * 3600
+        : (TTL_PRESETS[Number(ttl.value)] || TTL_PRESETS[0]).secs;
       save.disabled = true;
-      settingsAct({ action: "create_account", username: u, role: role.value,
+      settingsAct({ action: "create_account", username: u, role: role.value, ttl_seconds: ttlSecs,
         reason: "create account from Users & Roles" }, "Account created.", function (r) {
-        save.disabled = false; name.value = "";
+        save.disabled = false; name.value = ""; ttlCustom.value = "";
         if (r && r.bearer_token) {
           // show the one-time bearer with a copy control — it is NEVER retrievable again.
           var tokBox = h("input.input.mono", { value: r.bearer_token, readonly: true,
             onClick: function (e) { e.target.select(); } });
+          var expLine = r.expires_at
+            ? h("div.hint", { style: { marginTop: "6px" } },
+                "Expires " + new Date(r.expires_at * 1000).toLocaleString()
+                + " — after that the bearer stops authenticating.")
+            : h("div.hint", { style: { marginTop: "6px" } },
+                "This token never expires — revoke it to end access.");
           V.mount(out, h("div.set-status.ok", { style: { marginTop: "12px", flexDirection: "column", alignItems: "stretch" } }, [
             h("div", null, [V.icon("check"), h("span", null, " Copy this bearer for " + r.username
               + " (" + r.role + ") NOW — it is shown once and never stored in plaintext:")]),
@@ -4396,6 +4421,7 @@
               h("button.btn.sm", { onClick: function () {
                 try { navigator.clipboard.writeText(r.bearer_token); V.toast("Copied."); }
                 catch (e) { tokBox.select(); } } }, "Copy")]),
+            expLine,
           ]));
         }
         loadUsers();
@@ -4403,8 +4429,10 @@
     } }, [V.icon("key"), "Create account"]);
     return h("div", null, [
       h("div.hint", null, "The account gets a bearer token to sign in with. viewer = read-only; analyst = queue proposals; operator = run engagements, approve ≤A2, tune non-secret config. Only the owner approves A3, manages secrets, or manages users."),
-      h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } },
-        [name, role, save]),
+      h("div.hint", { style: { marginTop: "6px" } },
+        "Set a token lifetime (TTL) to auto-expire access, or leave it Never to revoke manually."),
+      h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" } },
+        [name, role, ttl, ttlCustom, save]),
       out,
     ]);
   }
@@ -4413,7 +4441,17 @@
       var host = V.$("#users-list"); if (!host) return;
       var accts = (d && d.accounts) || [];
       if (!accts.length) { V.mount(host, h("div.empty", null, "No accounts yet — create one on the left.")); return; }
-      V.mount(host, accts.map(usersRow));
+      var rows = accts.map(usersRow);
+      // Bulk revoke — the owner is never an account, so this cannot lock the owner out.
+      rows.push(h("div", { style: { marginTop: "12px", textAlign: "right" } }, [
+        h("button.btn.sm.danger", { onClick: function () {
+          if (!window.confirm("Revoke ALL " + accts.length + " teammate account(s)?\n\nEvery bearer token "
+            + "stops authenticating immediately. This cannot be undone — you would re-create the accounts.")) return;
+          settingsAct({ action: "revoke_all_teammates", reason: "bulk revoke from Users & Roles" },
+            "Revoked all teammate accounts.", loadUsers);
+        } }, [V.icon("x"), "Revoke all"]),
+      ]));
+      V.mount(host, rows);
     }).catch(function (e) {
       var host = V.$("#users-list"); if (!host) return;
       V.mount(host, h("div.empty", null, (e && e.status === 403)
@@ -4439,10 +4477,22 @@
       a.has_totp ? h("span.pill.sm.ok", null, "TOTP") : null,
       a.has_password ? h("span.pill.sm", null, "password") : null,
     ]);
+    // Token-expiry (TTL) pill: danger once expired, warn within a day, neutral countdown otherwise.
+    // a.expires_at === null (⇒ a.remaining === null, a.expired === false) ⇒ never expires ⇒ no pill.
+    var expPill = null;
+    if (a.expired) {
+      expPill = h("span.pill.sm.danger", null, "expired");
+    } else if (typeof a.remaining === "number") {
+      expPill = (a.remaining < 86400)
+        ? h("span.pill.sm.warn", null, "expires " + (a.remaining < 3600
+            ? "in " + Math.max(1, Math.round(a.remaining / 60)) + "m"
+            : "in " + Math.round(a.remaining / 3600) + "h"))
+        : h("span.pill.sm", null, "expires in " + Math.round(a.remaining / 86400) + "d");
+    }
     return h("div.approval", null, [
       h("div.ah", null, [V.icon("key"), h("span.t", null, a.username),
         h("span.pill.sm", null, a.role), a.state === "revoked" ? h("span.pill.sm.danger", null, "revoked") : null,
-        factorPills]),
+        expPill, factorPills]),
       h("div.acts", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } }, [role, assign, revoke]),
       a.state === "revoked" ? null : usersEnrolBlock(a),
     ]);

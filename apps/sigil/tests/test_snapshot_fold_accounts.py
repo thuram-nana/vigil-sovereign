@@ -143,6 +143,38 @@ def test_a_keyed_account_survives_a_prune_with_its_user_pubkey(monkeypatch):
     assert "carol" not in {a.username for a in reg2b.accounts()}
 
 
+# ---- (a3) an EXPIRING account survives a prune WITH its absolute deadline (Slice 1a TTL seed carry) ---
+def test_an_expiring_account_survives_a_prune_with_its_deadline(monkeypatch):
+    store = _store()
+    reg = _reg(store)
+    reg.create("erin", "operator", bearer_token="erin-bearer-wwwwwwwwwwww",
+               issued_at=5.0, ttl_seconds=3600)                                                 # seq 0 → exp 3605
+    k = store.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "marker"})  # seq 1
+    prefix = [r for r in store.iter_records() if r.seq < k]
+    snap = build(prefix, trusted_pubkey=OWNER_PUB, base_seq=k, snapshot_seq=k - 1)
+    # the seed's account_cred row carries erin's absolute deadline as the 8th field (index 7)
+    row = next(r for r in snap.account_cred if r[0] == "erin")
+    assert len(row) >= 8 and row[7] == 3605.0, "the snapshot seed must carry the absolute deadline"
+
+    pruned = PrunedView(store, k)                    # erin's grant physically GONE
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
+    reg2 = AccountsRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+    erin = next(a for a in reg2.accounts() if a.username == "erin")
+    assert erin.expires_at == 3605.0, "a pruned expiring account must keep its deadline via the seed"
+    assert reg2.resolve("erin-bearer-wwwwwwwwwwww", now=3600.0) is not None    # still enforces: valid before…
+    assert reg2.resolve("erin-bearer-wwwwwwwwwwww", now=3605.0) is None        # …denied after, from the seed
+
+    # NEUTERED control: strip ONLY the 8th seed field. Erin still SURVIVES the prune (via her other seed
+    # fields) but SILENTLY becomes never-expiring — the exact downgrade the carry prevents. This proves the
+    # expires_at carry (not just the account carry) is load-bearing.
+    snap_no_exp = snap.model_copy(update={"account_cred": [list(r[:7]) for r in snap.account_cred]})
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap_no_exp))
+    reg2b = AccountsRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+    erin_b = next(a for a in reg2b.accounts() if a.username == "erin")
+    assert erin_b.expires_at is None, "dropping the 8th seed field silently makes a pruned account never-expire"
+    assert reg2b.resolve("erin-bearer-wwwwwwwwwwww", now=1e18) is not None      # the silent downgrade, made visible
+
+
 # ---- (b) the per-username high-water SURVIVES the prune (no replay resurrection) ----------------------
 def test_high_water_survives_the_prune_no_replay_resurrection(monkeypatch):
     store = _store()
