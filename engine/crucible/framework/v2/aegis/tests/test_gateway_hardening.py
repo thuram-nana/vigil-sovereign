@@ -135,6 +135,33 @@ def test_malformed_target_yields_a_response_not_a_dropped_connection(upstream):
         gw.shutdown()
 
 
+# --------------------------------------------------------------------------- F-01: ambient env isolation
+
+def test_ambient_proxy_and_ca_env_do_not_divert_the_forward(upstream, monkeypatch):
+    """Audit F-01 regression: the forward must IGNORE the ambient environment — ALL_PROXY/HTTP(S)_PROXY
+    (which would re-route the httpx forward through an attacker/monitor) and SSL_CERT_FILE/SSL_CERT_DIR
+    (which would swap the TLS trust store). With those set to bogus values a benign request must STILL
+    reach the real local upstream DIRECTLY (the gateway builds its client with trust_env=False). Before the
+    fix, httpx honoured ALL_PROXY and dialed the dead proxy port, so the forward failed (502) instead of
+    reaching the upstream."""
+    for var in ("ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        monkeypatch.setenv(var, "http://127.0.0.1:1")           # a dead port: any diversion here fails the forward
+    monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent/ca.pem")
+    monkeypatch.setenv("SSL_CERT_DIR", "/nonexistent/ca.d")
+    gw = serve_gateway(f"http://127.0.0.1:{upstream}",
+                       config=AegisConfig(deployment_secret="k"), host="127.0.0.1", port=0)
+    threading.Thread(target=gw.serve_forever, daemon=True).start()
+    port = gw.server_address[1]
+    try:
+        resp = _raw(port, b"GET /alive HTTP/1.1\r\nHost: x\r\n\r\n")
+        first = resp.split(b"\r\n", 1)[0]
+        body = resp.split(b"\r\n\r\n", 1)[-1]
+        assert b"200" in first, f"the forward did not reach the local upstream (ambient proxy diverted it?): {first!r}"
+        assert b"UP /alive" in body, "the real upstream body did not come back — the ambient env diverted the forward"
+    finally:
+        gw.shutdown()
+
+
 # --------------------------------------------------------------------------- A11: XFF + response bound
 
 class _XffEcho(http.server.BaseHTTPRequestHandler):
