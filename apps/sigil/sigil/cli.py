@@ -760,6 +760,26 @@ def cmd_serve(a) -> None:
         out += [s.strip() for s in _os.environ.get(env_name, "").split(",") if s.strip()]
         return tuple(dict.fromkeys(out))   # de-dup, order-preserving
 
+    # Slice 1b — persistent owner bootstrap token (file operations short-circuit before serving).
+    from vigil_core.posture import is_production_posture
+
+    from .ui.bootstrap_token import mint_bootstrap_token, resolve_bootstrap_token, revoke_bootstrap_token
+    if getattr(a, "revoke_token", False) or getattr(a, "rotate_token", False):
+        if is_production_posture():
+            print("  the persistent bootstrap token is NOT used in PRODUCTION posture — the owner logs in "
+                  "with a passkey and the URL-token owner path is disabled. No change made.")
+            return
+        if getattr(a, "revoke_token", False):
+            revoke_bootstrap_token()
+            print("  bootstrap session token REVOKED — the next `sigil serve` / `vigil up` mints a fresh one; "
+                  "the previous ?token= URL no longer authenticates.")
+            return
+        tok = mint_bootstrap_token()
+        print("  bootstrap session token ROTATED — takes effect on the NEXT cockpit start (restart "
+              f"`vigil up` or re-run `sigil serve`). New URL after restart:\n    "
+              f"http://127.0.0.1:{a.port}/?token={tok}")
+        return
+
     host = a.host or _os.environ.get("SIGIL_UI_BIND", "127.0.0.1")
     if not bind_ok(host):
         print(f"  refusing to bind {host!r}: the cockpit binds loopback or a PRIVATE (WireGuard/Tailscale) "
@@ -769,8 +789,18 @@ def cmd_serve(a) -> None:
     allowed_hosts = _multi(a.allow_host, "SIGIL_UI_ALLOWED_HOSTS")
     allowed_origins = _multi(a.allow_origin, "SIGIL_UI_ALLOWED_ORIGINS")
 
+    # In the DEFAULT (dev/local) posture, PERSIST the owner bootstrap token so a restart keeps the same
+    # ?token= URL. In PRODUCTION posture keep an EPHEMERAL token — it grants nothing there (the legacy owner
+    # path is disabled by posture; the real login is the passkey/cookie session), and a persistent dev token
+    # must never become the production security boundary. (is_production_posture imported above.)
+    if is_production_posture():
+        token = secrets.token_urlsafe(24)
+    else:
+        token = resolve_bootstrap_token(override=(getattr(a, "token", None)
+                                                  or _os.environ.get("SIGIL_BOOTSTRAP_TOKEN")))
+
     from .ui.server import serve
-    serve(token=secrets.token_urlsafe(24), host=host, port=a.port,
+    serve(token=token, host=host, port=a.port,
           allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
 
 
@@ -2125,6 +2155,14 @@ def main(argv=None) -> None:
     psv.add_argument("--allow-origin", action="append", default=[],
                      help="reverse-proxy Origin to accept, e.g. https://cockpit.example.com (repeatable; "
                           "also $SIGIL_UI_ALLOWED_ORIGINS, comma-separated)")
+    psv.add_argument("--token", default=None,
+                     help="(dev posture) pin the owner bootstrap token to this value (also "
+                          "$SIGIL_BOOTSTRAP_TOKEN); persisted so it survives restarts. Omit to load-or-mint "
+                          "the persistent token.")
+    psv.add_argument("--rotate-token", action="store_true",
+                     help="rotate the persistent bootstrap token and exit (applies on the next start)")
+    psv.add_argument("--revoke-token", action="store_true",
+                     help="delete the persistent bootstrap token and exit (next start mints a fresh one)")
     psv.set_defaults(fn=cmd_serve)
     ph = sub.add_parser("host", help="this host's mesh capability descriptor")
     ph.add_argument("action", nargs="?", default="caps", choices=["caps"])

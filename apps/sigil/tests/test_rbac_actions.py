@@ -135,6 +135,8 @@ OWNER_ONLY = [
     ("assign_role", {"username": "newbie", "role": "operator"}),
     ("revoke_account", {"username": "newbie"}),
     ("revoke_all_teammates", {}),
+    ("rotate_bootstrap_token", {}),
+    ("revoke_bootstrap_token", {}),
     # W17-3 enrolment actions are user-management -> owner-only, same as create/assign/revoke. The RBAC gate
     # fires at the funnel BEFORE the registry is touched, so an unknown-account username is irrelevant here.
     ("enroll_pubkey", {"username": "newbie", "user_pubkey": "x"}),
@@ -204,6 +206,31 @@ def test_owner_bulk_revoke_clears_every_teammate():
     out = actions.do_action("revoke_all_teammates", {}, store=s, principal=OWNER)
     assert out["ok"] and out["count"] == 3 and sorted(out["revoked"]) == ["t1", "t2", "t3"]
     assert AccountsRegistry(s).accounts() == []
+
+
+def test_owner_can_rotate_and_revoke_the_session_token(monkeypatch, tmp_path):
+    # isolate the bootstrap-token file to tmp_path (do_action calls the module with no explicit path)
+    from sigil.ui import bootstrap_token as bt
+    monkeypatch.delenv("VIGIL_POSTURE", raising=False)   # dev posture
+    monkeypatch.setattr(bt, "SIGIL_HOME", tmp_path)
+    tok_file = tmp_path / ".vigil-live" / "cockpit-bootstrap-token"
+    s = _store()
+    out = actions.do_action("rotate_bootstrap_token", {}, store=s, principal=OWNER)
+    assert out["ok"] and out["new_url_path"].startswith("/?token=") and tok_file.exists()
+    out2 = actions.do_action("revoke_bootstrap_token", {}, store=s, principal=OWNER)
+    assert out2["ok"] and not tok_file.exists()
+
+
+def test_session_actions_are_noop_in_production(monkeypatch, tmp_path):
+    # In production the persistent bootstrap token is inert (owner logs in via passkey), so rotate/revoke
+    # refuse honestly and touch no file — the dev token must never masquerade as the production boundary.
+    from sigil.ui import bootstrap_token as bt
+    monkeypatch.setenv("VIGIL_POSTURE", "production")
+    monkeypatch.setattr(bt, "SIGIL_HOME", tmp_path)
+    s = _store()
+    out = actions.do_action("rotate_bootstrap_token", {}, store=s, principal=OWNER)
+    assert out["ok"] is False and out.get("production_noop") is True
+    assert not (tmp_path / ".vigil-live" / "cockpit-bootstrap-token").exists()
 
 
 def test_owner_release_and_promote_succeed():
