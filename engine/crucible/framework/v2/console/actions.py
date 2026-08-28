@@ -2604,6 +2604,39 @@ def set_token_budget(body: dict) -> dict:
     return {"ok": True, "tools": [s.as_dict() for s in tb.list_status()]}
 
 
+def run_verify(kind: str) -> dict:
+    """Parity (Wave 2): run a `vigil verify*` self-check from the Assurance screen and surface the result.
+    `integrity` → `vigil verify-integrity --json` (structured); `ledger` → `vigil verify-ledger`; `spine`
+    → `vigil verify` (segment table). Shells the exec-only `vigil` (never imports it), fail-closed on a bad
+    kind / unresolvable bin / non-JSON output. Read-recompute: it mints no run and mutates nothing."""
+    kind = str(kind or "").strip()
+    argv = {"integrity": ["verify-integrity", "--json"], "ledger": ["verify-ledger"],
+            "spine": ["verify"]}.get(kind)
+    if argv is None:
+        return {"ok": False, "error": "kind must be 'integrity', 'ledger', or 'spine'"}
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    try:
+        proc = subprocess.run([vigil, *argv], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    if kind == "integrity":       # verify-integrity emits --json (exit 0/1)
+        parsed = {}
+        if proc.stdout.strip():
+            try:
+                parsed = json.loads(proc.stdout)
+            except ValueError:
+                parsed = {"raw": proc.stdout[:4000]}
+        # spread the parsed report FIRST, then set `ok`/`kind` from the EXIT CODE last — so the process's
+        # exit status is authoritative over any stdout `ok` field (veracity: re-execution, not string trust).
+        return {**(parsed if isinstance(parsed, dict) else {"report": parsed}),
+                "kind": kind, "ok": proc.returncode == 0}
+    # text verbs (verify-ledger / verify exit 0 or 3): surface the text + the exit code, fail-closed on != 0
+    return {"ok": proc.returncode == 0, "kind": kind, "exit_code": proc.returncode,
+            "text": (proc.stdout or "")[:4000], "stderr": (proc.stderr or "")[:1000]}
+
+
 def knowledge_gitsync(action: str) -> dict:
     """A6c/K6: run ``vigil knowledge status|sync`` from the Knowledge screen and surface the result —
     ESPECIALLY the secret-scan REFUSAL. ``status`` shows what would commit; ``sync`` regenerates the

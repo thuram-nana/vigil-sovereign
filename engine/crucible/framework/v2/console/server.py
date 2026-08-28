@@ -892,6 +892,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # replay the who/when/what usage-attestation ledger + verify its chain (read-only).
                 self._json(actions.attestation_ledger())
                 return
+            if path == "/api/verify":
+                # Wave 2 (parity): run `vigil verify-integrity|verify-ledger|verify` from the Assurance screen.
+                # CSRF/rebind-gated above + _RUN in OFFENSE_ACTION_PERM; shells the exec-only vigil, read-only.
+                self._json(actions.run_verify(str(body.get("kind", "integrity"))))
+                return
             if path == "/api/knowledge/gitsync":
                 # A6c: run `vigil knowledge status|sync` (regenerate + secret-scan + local commit; NOT push).
                 # CSRF/rebind-gated above; shells the exec-only vigil, surfacing the secret-scan refusal.

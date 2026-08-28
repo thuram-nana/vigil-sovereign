@@ -97,6 +97,7 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/proof/export": _RUN,
     "/api/dossier/*/build": _RUN,
     "/api/verify-cert": _RUN,
+    "/api/verify": _RUN,                # Wave 2: run `vigil verify-integrity/verify-ledger/verify` (read-recompute)
     "/api/knowledge/gitsync": _RUN,
     "/api/evolve/*/tick": _RUN,
     "/api/knowledge/*/deeplearn": _RUN,

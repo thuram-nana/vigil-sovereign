@@ -416,6 +416,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/settings":
             from . import settings as _settings
             return self._json(_settings.settings_status())     # REDACTED — never a secret value
+        if path == "/api/verify":
+            # Parity (Wave 2): the sovereign spine self-verify — chain integrity + the owner-signed head
+            # anchor (exactly what `sigil verify` runs, in-process, same venv). Viewer+ read, no secret.
+            from .. import config as _config
+            from ..spine.checkpoint import verify_checkpoint
+            vstore = self.server.store()
+            try:
+                cok, cmsg = vstore.verify()
+            except Exception as e:  # noqa: BLE001 — a mid-file-corrupt spine ⇒ a structured fail-closed result,
+                cok, cmsg = False, f"verify raised: {type(e).__name__}"   # not a 500 (no path leaked in the detail)
+            hok, hmsg = verify_checkpoint(vstore)
+            head_present = _config.HEAD_PATH.exists()
+            return self._json({"chain_ok": bool(cok), "chain_detail": cmsg,
+                               "head_present": head_present, "head_ok": bool(hok), "head_detail": hmsg,
+                               "ok": bool(cok and (hok or not head_present))})
         if path.startswith("/api/record/"):
             return self._record(path.rsplit("/", 1)[-1])
         if path == "/api/stream":

@@ -9406,7 +9406,40 @@
           list("Regressions — newly-proven exposures", d.regressions || [], ".danger"),
           list("Fixed — no longer proven", d.fixed || [], ""),
           list("Stable — proven in both", d.stable || [], "")]);
-    V.mount(body, [telemetryCard(), picker, summary, h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
+    // Wave 2 (parity) — run the spine/ledger integrity self-checks from the browser (read-only, no traffic).
+    var vout = h("div", null, "");
+    function showVerify(title, promise) {
+      V.mount(vout, h("div.hint", { style: { marginTop: "8px" } }, title + ": running…"));
+      promise.then(function (r) {
+        var okv = !!(r && r.ok);
+        var lines = [];
+        if (r && typeof r.chain_ok !== "undefined") {   // the sovereign spine verify (chain + head)
+          lines.push((r.chain_ok ? "chain OK" : "chain FAIL") + " — " + (r.chain_detail || ""));
+          lines.push((r.head_present ? (r.head_ok ? "head OK" : "head FAIL") : "head —") + " — " + (r.head_detail || ""));
+        } else if (r && r.text) { lines.push(r.text); }
+        else if (r && r.error) { lines.push(r.error); }
+        else if (r && r.checks) { lines = r.checks.map(function (c) { return (c.ok ? "OK  " : "FAIL ") + c.id + " — " + (c.detail || ""); }); }
+        V.mount(vout, h("div.set-status" + (okv ? ".ok" : ".danger"), { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+          h("div", null, [V.icon(okv ? "check" : "x"), h("span", null, " " + title + ": " + (okv ? "VERIFIED" : "FAILED"))]),
+          lines.length ? h("pre.mono", { style: { marginTop: "6px", whiteSpace: "pre-wrap", fontSize: "12px", maxHeight: "240px", overflow: "auto" } }, lines.join("\n")) : null,
+        ]));
+      }).catch(function (e) {
+        V.mount(vout, h("div.set-status.danger", { style: { marginTop: "8px" } }, title + ": " + ((e && e.message) || e)));
+      });
+    }
+    var integrityCard = h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Integrity & verify")]),
+      h("div.hint", null, "Run the spine / ledger integrity self-checks from the browser — read-only, no traffic. "
+        + "The offense verbs shell `vigil` on the offense plane; the sovereign spine verify runs in-process."),
+      h("div.acts", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "10px" } }, [
+        h("button.btn.sm", { onClick: function () { showVerify("Offense integrity", V.postJSON(OFF("/api/verify"), { kind: "integrity" })); } }, [V.icon("shield"), "Verify integrity"]),
+        h("button.btn.sm", { onClick: function () { showVerify("Offense ledger", V.postJSON(OFF("/api/verify"), { kind: "ledger" })); } }, [V.icon("check"), "Verify ledger"]),
+        h("button.btn.sm", { onClick: function () { showVerify("Offense spine segments", V.postJSON(OFF("/api/verify"), { kind: "spine" })); } }, [V.icon("check"), "Verify spine segments"]),
+        h("button.btn.sm", { onClick: function () { showVerify("Sovereign spine", V.getJSON(SOV("/api/verify"))); } }, [V.icon("shield"), "Verify sovereign spine"]),
+      ]),
+      vout,
+    ]);
+    V.mount(body, [telemetryCard(), picker, integrityCard, summary, h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
   }
 
   // B3: the live assurance/metrics PROJECTION — a read-only, one-way view of the signed spine the
