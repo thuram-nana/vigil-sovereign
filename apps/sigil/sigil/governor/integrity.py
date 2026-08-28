@@ -169,7 +169,7 @@ def verify_kernel_bin(resolved: Optional[str]) -> KernelVerdict:
             _log.warning("WARDEN kernel binary is NOT pinned — run `sigil kernel pin` to enable "
                          "tamper-evidence. Proceeding unpinned (behaviour unchanged).")
         return KernelVerdict(True, "unpinned", "kernel binary not pinned (run `sigil kernel pin`)")
-    if state == "corrupt":
+    if state == "corrupt" or manifest is None:   # None only accompanies absent/corrupt — fold in fail-closed
         return KernelVerdict(False, "corrupt",
                              "security manifest is present but unreadable/corrupt — refusing to run the "
                              "kernel (fail-closed; a legitimately un-pinned install has NO manifest)")
@@ -208,7 +208,7 @@ def config_drift() -> list[str]:
     state, manifest = _read_manifest()
     if state == "absent":
         return []
-    if state == "corrupt":
+    if state == "corrupt" or manifest is None:   # None only accompanies absent/corrupt — fold in fail-closed
         return ["security manifest is present but corrupt/unreadable (possible tamper)"]
     if not _manifest_authentic(manifest):
         return ["security manifest present but its owner signature is INVALID (possible tamper)"]

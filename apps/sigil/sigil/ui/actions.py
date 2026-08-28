@@ -61,7 +61,7 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
     # the .gov/.mil/.edu safety floor (Claim 5) must not be an operator-level config change.
     if action not in ("approve", "deny"):
         if action == "set_config" and str(params.get("env", "")) == PROTECTED_GUARD_ENV:
-            perm = "toggle_protected_guard"
+            perm: str | None = "toggle_protected_guard"
         else:
             perm = PERMISSION_BY_ACTION.get(action)
         if not role_can(getattr(principal, "role", None), perm):
@@ -213,12 +213,12 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
         topic = str(params.get("topic", "")).strip()
         cancel = KillSwitch(store, owner_key=owner).is_engaged
         if url:
-            out = learn_from_url(store, url, cancel=cancel)
+            learn_out = learn_from_url(store, url, cancel=cancel)
         elif topic:
-            out = learn_from_topic(store, topic, cancel=cancel)
+            learn_out = learn_from_topic(store, topic, cancel=cancel)
         else:
             raise ValueError("start_learn requires a url or a topic")
-        return {"ok": True, "action": "start_learn", **out}
+        return {"ok": True, "action": "start_learn", **learn_out}
     if action in _CAP_ACTIONS:
         from ..governor import CapabilityGate
         cg = CapabilityGate(store, owner_key=owner)

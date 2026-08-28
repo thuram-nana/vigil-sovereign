@@ -266,11 +266,11 @@ class Handler(BaseHTTPRequestHandler):
             status_box["code"] = code
             return orig(code, body, ctype)
 
-        self._send = _send  # type: ignore[method-assign]
+        self._send = _send
         try:
             return fn()
         finally:
-            self._send = orig  # type: ignore[method-assign]
+            self._send = orig
             self._record_red(method, t0, status_box)
 
     def _metrics(self):
@@ -940,13 +940,14 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     srv = build_server(token=token, host=host, port=port, spine_path=spine_path,
                        allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
     bound = srv.server_address
-    bip = ipaddress.ip_address(bound[0])
-    disp = f"[{bound[0]}]" if bip.version == 6 else bound[0]     # bracket IPv6 in the URL
+    addr = bound[0].decode() if isinstance(bound[0], (bytes, bytearray)) else bound[0]
+    bip = ipaddress.ip_address(addr)
+    disp = f"[{addr}]" if bip.version == 6 else addr     # bracket IPv6 in the URL
     print(f"  SIGIL cockpit → http://{disp}:{bound[1]}/?token={token}")
     if bip.is_loopback:
         print("  (loopback only; the token gates every request — keep it to yourself)")
     else:
-        print(f"  (private bind {bound[0]} — reach it via a reverse proxy / tunnel, never a public listener)")
+        print(f"  (private bind {addr} — reach it via a reverse proxy / tunnel, never a public listener)")
     # the operator-configured reverse-proxy domains (printed from the inputs, not reverse-engineered)
     extras = ", ".join(sorted({h.strip() for h in allowed_hosts if h and h.strip()}))
     if extras:

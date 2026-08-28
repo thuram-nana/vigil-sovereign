@@ -56,14 +56,20 @@ from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 # so it can never be selected — the algorithm-confusion class (an attacker submitting `alg:HS256` and signing
 # with the RSA *public* key as the HMAC secret) is closed by construction: no HMAC code path exists, and the
 # per-alg key-type binding below (RS*/PS* ⇒ RSA JWK, ES* ⇒ EC JWK) rejects a family/key mismatch too.
-_RSA_PKCS1_ALGS = {"RS256": hashes.SHA256, "RS384": hashes.SHA384, "RS512": hashes.SHA512}
-_RSA_PSS_ALGS = {"PS256": hashes.SHA256, "PS384": hashes.SHA384, "PS512": hashes.SHA512}
+# Concrete class unions: mypy must keep each map value INSTANTIABLE (its abstract base HashAlgorithm /
+# EllipticCurve is not — a bare `type[HashAlgorithm]` value would make `h()` an abstract-instantiation
+# error) while still exposing `.__name__` for the curve-mismatch message. The join of a dict literal's
+# values is the abstract base, so the union must be stated explicitly.
+_HashCls = type[hashes.SHA256] | type[hashes.SHA384] | type[hashes.SHA512]
+_CurveCls = type[SECP256R1] | type[SECP384R1] | type[SECP521R1]
+_RSA_PKCS1_ALGS: dict[str, _HashCls] = {"RS256": hashes.SHA256, "RS384": hashes.SHA384, "RS512": hashes.SHA512}
+_RSA_PSS_ALGS: dict[str, _HashCls] = {"PS256": hashes.SHA256, "PS384": hashes.SHA384, "PS512": hashes.SHA512}
 # ES* → (hash, curve, coordinate byte-length). P-521 ⇒ 66 bytes per r/s (521 bits rounded up).
-_EC_ALGS = {"ES256": (hashes.SHA256, SECP256R1, 32),
+_EC_ALGS: dict[str, tuple[_HashCls, _CurveCls, int]] = {"ES256": (hashes.SHA256, SECP256R1, 32),
             "ES384": (hashes.SHA384, SECP384R1, 48),
             "ES512": (hashes.SHA512, SECP521R1, 66)}
 KNOWN_ASYMMETRIC_ALGS = frozenset(_RSA_PKCS1_ALGS) | frozenset(_RSA_PSS_ALGS) | frozenset(_EC_ALGS)
-_JWK_CRV = {"P-256": SECP256R1, "P-384": SECP384R1, "P-521": SECP521R1}
+_JWK_CRV: dict[str, _CurveCls] = {"P-256": SECP256R1, "P-384": SECP384R1, "P-521": SECP521R1}
 
 
 class OidcError(Exception):
