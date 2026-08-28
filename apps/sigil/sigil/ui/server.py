@@ -74,6 +74,7 @@ BOOTSTRAP_PATHS = frozenset({
     "/api/whoami",
     "/api/login",
     "/api/login/challenge",
+    "/api/webauthn/assert",
     "/api/oidc/login",
     "/api/oidc/callback",
 })
@@ -566,7 +567,7 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, KeyError):
             return self._deny(400, "bad request")
-        body = body or {}
+        body = body if isinstance(body, dict) else {}   # non-object JSON ⇒ empty (never .get() on a non-dict)
         username = str(body.get("username", "") or "")
         challenge = str(body.get("challenge", "") or "")
         signature = str(body.get("signature", "") or "")
@@ -718,6 +719,84 @@ class Handler(BaseHTTPRequestHandler):
         if sid:
             self._set_session_cookie(sid)      # Slice 1c-ii: fresh cookie session (rotation → no fixation)
         self._json({"ok": True, **self._principal_json(p), "bearer": bearer})
+
+    def _webauthn_rp_id(self) -> str:
+        """The WebAuthn RP id for THIS request = the hostname of the page the browser is on — i.e. the host
+        of the request's Origin (or the Host header), NOT an arbitrary member of the allowed-origin SET
+        (which is unordered and may hold both `localhost` and `127.0.0.1`). That is exactly the rpId the
+        browser's `navigator.credentials.get()` uses, so the rpIdHash matches. The request has already passed
+        `_origin_host_ok`, so this host is allow-listed."""
+        from urllib.parse import urlparse as _up
+        o = self.headers.get("Origin") or ""
+        host = (_up(o).hostname if o else None)
+        if not host:
+            host = (self.headers.get("Host") or "").rsplit(":", 1)[0] or "127.0.0.1"
+        return host
+
+    def _webauthn_fail(self, store, reason: str):
+        from .authn_audit import record_authn
+        record_authn(store, "authn.login.failure", username="owner", method="webauthn",
+                     outcome="failure", reason=str(reason)[:32])
+        return self._json({"ok": False, "authenticated": False, "error": "passkey assertion refused"}, 401)
+
+    def _webauthn_assert(self):
+        """WebAuthn (passkey) OWNER login — a BOOTSTRAP route (no prior token). Verify a
+        navigator.credentials.get() assertion against a registered owner credential and a CONSUMED single-use
+        challenge, enforce the signCount clone floor, then mint an OWNER cookie session. Same-origin gated;
+        fail-closed 401 on any check."""
+        if not self._origin_host_ok():
+            return self._deny(403, "denied (origin / host)")
+        from . import webauthn as wa
+        from .authn_audit import record_authn
+        from .webauthn_store import WebAuthnStore
+        store = self.server.store()
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > self._MAX_BODY:
+                return self._deny(413, "body too large")
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, KeyError):
+            return self._deny(400, "bad request")
+        body = body if isinstance(body, dict) else {}   # non-object JSON (5/"x"/[]/true) ⇒ empty, fail-closed
+        cid = str(body.get("credential_id", "") or "")
+        try:
+            authenticator_data = wa.b64url_decode(str(body.get("authenticator_data", "")))
+            client_data_json = wa.b64url_decode(str(body.get("client_data_json", "")))
+            signature = wa.b64url_decode(str(body.get("signature", "")))
+        except Exception:  # noqa: BLE001 — malformed base64 ⇒ refuse
+            return self._webauthn_fail(store, "malformed")
+        cred = WebAuthnStore().get(cid)
+        if cred is None:
+            return self._webauthn_fail(store, "unknown_credential")
+        # Derive the server challenge FROM clientData and CONSUME it (single-use replay guard) before crypto.
+        try:
+            cd = json.loads(client_data_json)
+            challenge = wa.b64url_decode(str(cd.get("challenge", ""))).decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return self._webauthn_fail(store, "client_data")
+        if not self._challenge_ledger().consume(challenge):
+            return self._webauthn_fail(store, "challenge")
+        try:
+            spki = wa.b64url_decode(str(cred.get("public_key_spki_b64", "")))
+        except Exception:  # noqa: BLE001
+            return self._webauthn_fail(store, "credential")
+        r = wa.verify_assertion(spki_der=spki, cose_alg=int(cred.get("cose_alg", 0)),
+                                authenticator_data=authenticator_data, client_data_json=client_data_json,
+                                signature=signature, expected_challenge=challenge,
+                                allowed_origins=self.server.allowed_origins, rp_id=self._webauthn_rp_id(),
+                                stored_sign_count=int(cred.get("sign_count", 0)))
+        if not r.ok:
+            return self._webauthn_fail(store, r.reason)
+        try:
+            WebAuthnStore().update_sign_count(cid, r.sign_count)    # persist the monotonic clone floor
+        except Exception:  # noqa: BLE001 — a store re-sign failure (e.g. a locked owner vault) must NOT crash
+            pass           #                a VERIFIED owner login; the single-use challenge is the replay guard
+        from ..governor.accounts import OWNER_PRINCIPAL
+        sid = self._session_ledger().create(OWNER_PRINCIPAL.username, OWNER_PRINCIPAL.role, is_owner=True)
+        if sid:
+            self._set_session_cookie(sid)                        # OWNER cookie session (the is_owner path)
+        record_authn(store, "authn.login.success", username="owner", method="webauthn", outcome="success")
+        self._json({"ok": True, **self._principal_json(OWNER_PRINCIPAL)})
 
     # --- OIDC Relying Party (S5, SHIPPED OFF BY DEFAULT) ------------------------------------------
     _OIDC_SID_COOKIE = "sigil_oidc_sid"                 # HttpOnly session cookie binding state↔browser
@@ -1011,6 +1090,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._login_challenge()
         if path == "/api/login":
             return self._login()
+        if path == "/api/webauthn/assert":
+            return self._webauthn_assert()
         if path == "/api/logout":
             return self._logout()
         # OIDC login initiation also accepts POST (a form/fetch), gated ON only when enabled (byte-identical

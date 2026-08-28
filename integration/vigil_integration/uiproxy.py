@@ -154,6 +154,7 @@ _BOOTSTRAP_ROUTES = (
     "/api/whoami",
     "/api/login",
     "/api/login/challenge",
+    "/api/webauthn/assert",
     "/api/oidc/login",
     "/api/oidc/callback",
 )

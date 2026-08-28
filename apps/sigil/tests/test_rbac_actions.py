@@ -138,6 +138,8 @@ OWNER_ONLY = [
     ("rotate_bootstrap_token", {}),
     ("revoke_bootstrap_token", {}),
     ("revoke_sessions", {}),
+    ("enroll_webauthn", {"credential_id": "c", "cose_alg": -7, "public_key_spki_b64": "x"}),
+    ("revoke_webauthn", {}),
     # W17-3 enrolment actions are user-management -> owner-only, same as create/assign/revoke. The RBAC gate
     # fires at the funnel BEFORE the registry is touched, so an unknown-account username is irrelevant here.
     ("enroll_pubkey", {"username": "newbie", "user_pubkey": "x"}),

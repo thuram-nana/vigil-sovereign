@@ -32,10 +32,12 @@ _ACCOUNT_ACTIONS = frozenset({"create_account", "assign_role", "revoke_account",
 _SESSION_ACTIONS = frozenset({"rotate_bootstrap_token", "revoke_bootstrap_token"})
 # Cookie-session actions (Slice 1c-ii): revoke_sessions signs out EVERY live cookie session immediately.
 _COOKIE_SESSION_ACTIONS = frozenset({"revoke_sessions"})
+# Owner passkey (WebAuthn) actions (Slice 1c-iii): enroll/revoke the owner's production passkey credentials.
+_WEBAUTHN_ACTIONS = frozenset({"enroll_webauthn", "revoke_webauthn"})
 ACTIONS = (frozenset({"approve", "deny", "kill", "release", "promote", "revoke",
                       "queue_learn", "start_learn"})
            | _CAP_ACTIONS | _SETTINGS_ACTIONS | _OFFENSE_APPROVAL_ACTIONS | _ACCOUNT_ACTIONS
-           | _SESSION_ACTIONS | _COOKIE_SESSION_ACTIONS)
+           | _SESSION_ACTIONS | _COOKIE_SESSION_ACTIONS | _WEBAUTHN_ACTIONS)
 
 
 def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
@@ -196,6 +198,31 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
         base = _Path(store.path)
         n = SessionLedger(base.parent / (base.name + ".sessions")).revoke_all()
         return {"ok": True, "action": "revoke_sessions", "revoked": n, "requested_by": requested_by}
+
+    if action in _WEBAUTHN_ACTIONS:
+        # Owner passkey management (Slice 1c-iii) — owner-only. The credential store is owner-signed at rest.
+        from . import webauthn as _wa
+        from .webauthn_store import WebAuthnStore
+        st = WebAuthnStore(owner_key=owner)
+        if action == "enroll_webauthn":
+            cid = str(params.get("credential_id", ""))
+            alg = int(params.get("cose_alg", 0))
+            spki = str(params.get("public_key_spki_b64", ""))
+            if not cid or not spki:
+                raise ValueError("enroll_webauthn requires credential_id and public_key_spki_b64")
+            if alg not in _wa.SUPPORTED_ALGS:
+                raise ValueError(f"unsupported COSE alg {alg} (accepted: {sorted(_wa.SUPPORTED_ALGS)})")
+            st.register(credential_id=cid, cose_alg=alg, public_key_spki_b64=spki,
+                        uv=bool(params.get("uv", False)))
+            return {"ok": True, "action": "enroll_webauthn", "credential_id": cid,
+                    "requested_by": requested_by,
+                    "note": "Passkey enrolled. In production posture the owner signs in with it."}
+        cid = str(params.get("credential_id", ""))
+        if cid:
+            return {"ok": True, "action": "revoke_webauthn", "credential_id": cid,
+                    "revoked": st.revoke(cid), "requested_by": requested_by}
+        return {"ok": True, "action": "revoke_webauthn", "revoked_all": st.revoke_all(),
+                "requested_by": requested_by}
 
     if action in _OFFENSE_APPROVAL_ACTIONS:
         # Route-via-sovereign: sign/deny a queued OFFENSE approval in-process with the owner key. The owner
