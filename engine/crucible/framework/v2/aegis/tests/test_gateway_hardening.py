@@ -144,6 +144,12 @@ def test_ambient_proxy_and_ca_env_do_not_divert_the_forward(upstream, monkeypatc
     reach the real local upstream DIRECTLY (the gateway builds its client with trust_env=False). Before the
     fix, httpx honoured ALL_PROXY and dialed the dead proxy port, so the forward failed (502) instead of
     reaching the upstream."""
+    # Clear any ambient NO_PROXY first: httpx (0.28) has no built-in localhost bypass, but an ambient
+    # NO_PROXY=127.0.0.1 would bypass the proxy even under trust_env=True and make this test VACUOUS. With
+    # NO_PROXY cleared, ALL_PROXY applies to the loopback forward, so the OLD (trust_env=True) code dials the
+    # dead proxy and 502s — proving the fix is what keeps the forward direct.
+    for var in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
     for var in ("ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
         monkeypatch.setenv(var, "http://127.0.0.1:1")           # a dead port: any diversion here fails the forward
     monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent/ca.pem")
