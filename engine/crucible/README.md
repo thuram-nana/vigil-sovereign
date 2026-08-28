@@ -25,7 +25,7 @@ being built. Jargon is defined the first time it appears.
 >
 > **You — the user — are solely responsible for how you use this Software and for all
 > consequences of that use, including obtaining authorization and obeying all applicable
-> laws.** The author, **Junior Thuram Nana** (Founder & CEO, SIGIL Limited), does **not** condone, encourage, or accept any
+> laws.** The author, **Junior Thuram Nana** (Founder & CEO, SIGIL SARL), does **not** condone, encourage, or accept any
 > responsibility or liability for any misuse. The Software is provided **“AS IS”, without
 > warranty of any kind**, and **the author is not liable for any damage, loss, or legal
 > consequence arising from its use or misuse by anyone.** By using CRUCIBLE you accept these

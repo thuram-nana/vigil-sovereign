@@ -1,6 +1,6 @@
 # Contributing to CRUCIBLE — branch & merge policy
 
-CRUCIBLE is maintained by **Junior Thuram Nana** (Founder & CEO of **SIGIL Limited**, the "Maintainer"). The `main`
+CRUCIBLE is maintained by **Junior Thuram Nana** (Founder & CEO of **SIGIL SARL**, the "Maintainer"). The `main`
 branch is **protected**. This document is the authoritative statement of how
 changes reach `main`.
 

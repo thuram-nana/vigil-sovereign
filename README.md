@@ -109,7 +109,7 @@ Think of VIGIL as a very disciplined, very honest security team that happens to 
 
 You run it on your own hardware. Your data, your memory, and your signing keys never leave your machine unless *you* explicitly, verifiably approve it.
 
-**Who builds it.** VIGIL is the flagship platform of **SIGIL Limited** — *Sovereign Integrity Governance Infrastructure Labs* — a GovTech / RegTech company registered in the Republic of Cameroon (founder & CEO: Junior Thuram Nana). SIGIL Limited owns VIGIL's first-party intellectual property; the code is dual-licensed (noncommercial-free / commercial-and-government-paid), and government or public-sector use requires a commercial license. See [`LICENSE`](LICENSE) and [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
+**Who builds it.** VIGIL is the flagship platform of **SIGIL SARL** — *Sovereign Integrity Governance Infrastructure Labs* — a GovTech / RegTech company registered in the Republic of Cameroon (founder & CEO: Junior Thuram Nana). SIGIL SARL owns VIGIL's first-party intellectual property; the code is dual-licensed (noncommercial-free / commercial-and-government-paid), and government or public-sector use requires a commercial license. See [`LICENSE`](LICENSE) and [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
 
 ---
 
@@ -922,7 +922,7 @@ See [`docs/AS-BUILT-LIVE.md`](docs/AS-BUILT-LIVE.md) for the honest, itemized st
 ## License & attribution
 
 **VIGIL's first-party code is dual-licensed: [PolyForm Noncommercial License 1.0.0](LICENSE) OR a
-[Commercial License](LICENSE-COMMERCIAL.md)** (© 2026 SIGIL Limited — Sovereign Integrity Governance Infrastructure Labs). In plain language:
+[Commercial License](LICENSE-COMMERCIAL.md)** (© 2026 SIGIL SARL — Sovereign Integrity Governance Infrastructure Labs). In plain language:
 
 - **Noncommercial use is free** — use, run, study, modify, and share VIGIL for any noncommercial purpose,
   under [PolyForm Noncommercial 1.0.0](LICENSE). You may **not** sell it or deploy it commercially/in

@@ -1,6 +1,6 @@
 # CRUCIBLE — Legal Disclaimer, Authorized-Use Policy & Limitation of Liability
 
-**Copyright © 2026 SIGIL Limited (Sovereign Integrity Governance Infrastructure Labs) (the “Author”/rights-holder). All rights reserved.**
+**Copyright © 2026 SIGIL SARL (Sovereign Integrity Governance Infrastructure Labs) (the “Author”/rights-holder). All rights reserved.**
 
 > **Read this before you download, clone, install, run, or otherwise use CRUCIBLE
 > (the “Software”). By doing any of those things you accept every term below. If you
