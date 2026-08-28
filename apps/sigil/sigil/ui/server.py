@@ -511,7 +511,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._login_password(username, password, body)
         tok = str(body.get("token", "") or "")
         p = self._principal_for_token(tok)
+        from .authn_audit import record_authn
+        store = self.server.store()
         if p is None:
+            record_authn(store, "authn.login.failure", method="bearer", outcome="failure",
+                         reason="invalid_token")
             return self._json({"ok": False, "authenticated": False, "error": "invalid token"}, 401)
         # S4 second factor (bearer branch, W17-1): a bearer is itself a possession credential and the SPA
         # login gate posts `{token}` with no code, so a TOTP enrolment must NOT be able to brick this path —
@@ -520,8 +524,25 @@ class Handler(BaseHTTPRequestHandler):
         # carrier and every downstream call site are UNCHANGED — the gate lives only at /api/login.
         terr = self._check_totp(p.username, body, require=False)
         if terr is not None:
+            record_authn(store, "authn.login.failure", username=p.username, method="bearer",
+                         outcome="failure", reason="totp")
             return self._json({"ok": False, "authenticated": False, "error": terr}, 401)
+        record_authn(store, "authn.login.success", username=p.username, method="bearer", outcome="success")
         self._json({"ok": True, **self._principal_json(p)})
+
+    def _logout(self):
+        """Record a logout for the current principal (best-effort AUDIT) and return ok. Same-origin gated.
+        The header/bearer model has no server-side session to invalidate here — the SPA clears its stored
+        token, a teammate bearer is revoked via manage_users, and the owner session via the bootstrap-token
+        rotate (Slice 1b) — so this endpoint's job is to make the logout AUDITABLE on the spine (a cookie
+        session ledger with true server-side invalidation lands in a later sub-slice)."""
+        if not self._origin_host_ok():
+            return self._deny(403, "denied (origin / host)")
+        from .authn_audit import record_authn
+        p = self._principal()
+        record_authn(self.server.store(), "authn.logout",
+                     username=(p.username if p else ""), method="logout", outcome="success")
+        self._json({"ok": True})
 
     def _login_pop(self, username: str, challenge: str, signature: str, body: dict):
         """The S3 proof-of-possession login. Fail-closed 401 unless: the account exists AND has an
@@ -533,6 +554,7 @@ class Handler(BaseHTTPRequestHandler):
         carrier)."""
         from ..governor.accounts import AccountsRegistry, Principal
         from ..governor.identity import ensure_owner_keypair
+        from .authn_audit import record_authn
         store = self.server.store()
         try:
             acct = AccountsRegistry(store).account(username)
@@ -541,11 +563,15 @@ class Handler(BaseHTTPRequestHandler):
         if acct is None or not acct.user_pubkey:
             # No cryptographic identity bound for this account → refuse (fail-closed, never fall back to a
             # weaker check). Same 401 shape whether the account is unknown, revoked, or bearer-only.
+            record_authn(store, "authn.login.failure", username=username, method="pop",
+                         outcome="failure", reason="no_identity")
             return self._json({"ok": False, "authenticated": False,
                                "error": "no cryptographic identity bound for this account"}, 401)
         # Consume the challenge FIRST (single-use + TTL). A replay of a captured triple finds it already
         # spent → refused here, before any signature work.
         if not self._challenge_ledger().consume(challenge):
+            record_authn(store, "authn.login.failure", username=username, method="pop",
+                         outcome="failure", reason="challenge")
             return self._json({"ok": False, "authenticated": False,
                                "error": "unknown, expired, or already-used challenge"}, 401)
         message = _LOGIN_POP_DOMAIN_TAG + challenge.encode("utf-8")
@@ -554,18 +580,23 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001 — malformed sig/key material is a fail-closed refusal, not a crash
             sig_ok = False
         if not sig_ok:
+            record_authn(store, "authn.login.failure", username=username, method="pop",
+                         outcome="failure", reason="signature")
             return self._json({"ok": False, "authenticated": False,
                                "error": "proof-of-possession signature invalid"}, 401)
         # S4 second factor (if enrolled) — required BEFORE a bearer is minted, so no session token is ever
         # handed out on the first factor alone.
         terr = self._check_totp(username, body)
         if terr is not None:
+            record_authn(store, "authn.login.failure", username=username, method="pop",
+                         outcome="failure", reason="totp")
             return self._json({"ok": False, "authenticated": False, "error": terr}, 401)
         # Proven. Mint a fresh owner-signed session bearer for this account (owner is the sole signer; the
         # user proved possession, the server re-binds). Returned through the same X-SIGIL-Token carrier.
         reg = AccountsRegistry(store, owner_key=ensure_owner_keypair())
         bearer, _seq = reg.mint_session_bearer(username, issued_at=time.time())
         p = Principal(username=acct.username, role=acct.role)
+        record_authn(store, "authn.login.success", username=username, method="pop", outcome="success")
         self._json({"ok": True, **self._principal_json(p), "bearer": bearer})
 
     def _login_password(self, username: str, password: str, body: dict):
@@ -581,6 +612,7 @@ class Handler(BaseHTTPRequestHandler):
             verify_password,
         )
         from ..governor.identity import ensure_owner_keypair
+        from .authn_audit import record_authn
         store = self.server.store()
         try:
             acct = AccountsRegistry(store).account(username)
@@ -593,14 +625,19 @@ class Handler(BaseHTTPRequestHandler):
         stored = acct.password_hash if (acct is not None and acct.password_hash) else DECOY_PASSWORD_HASH
         password_ok = verify_password(password, stored)
         if acct is None or not acct.password_hash or not password_ok:
+            record_authn(store, "authn.login.failure", username=username, method="password",
+                         outcome="failure", reason="bad_credentials")
             return self._json({"ok": False, "authenticated": False,
                                "error": "invalid username or password"}, 401)
         terr = self._check_totp(username, body)
         if terr is not None:
+            record_authn(store, "authn.login.failure", username=username, method="password",
+                         outcome="failure", reason="totp")
             return self._json({"ok": False, "authenticated": False, "error": terr}, 401)
         reg = AccountsRegistry(store, owner_key=ensure_owner_keypair())
         bearer, _seq = reg.mint_session_bearer(username, issued_at=time.time())
         p = Principal(username=acct.username, role=acct.role)
+        record_authn(store, "authn.login.success", username=username, method="password", outcome="success")
         self._json({"ok": True, **self._principal_json(p), "bearer": bearer})
 
     # --- OIDC Relying Party (S5, SHIPPED OFF BY DEFAULT) ------------------------------------------
@@ -895,6 +932,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._login_challenge()
         if path == "/api/login":
             return self._login()
+        if path == "/api/logout":
+            return self._logout()
         # OIDC login initiation also accepts POST (a form/fetch), gated ON only when enabled (byte-identical
         # otherwise). GET is handled in do_GET for a plain top-level navigation.
         if oidc_enabled() and path == "/api/oidc/login":
