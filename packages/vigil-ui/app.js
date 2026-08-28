@@ -279,6 +279,55 @@
       })
       .catch(function (e) { V.toast((e && (e.data && e.data.error || e.message)) || "SSO sign-in failed.", true); cb(false); });
   }
+  // ---- WebAuthn / passkey (Slice 1c-iii — production owner login) -------------
+  // Feature-detected + graceful: on a browser without WebAuthn the affordances hide. The LIVE ceremony needs
+  // a real authenticator + (in production) TLS; the server side is fully unit-tested with synthetic vectors.
+  function _bufToB64url(buf) {
+    var b = new Uint8Array(buf), s = "";
+    for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function _hasWebAuthn() { return !!(window.PublicKeyCredential && navigator.credentials); }
+  function passkeySignIn() {
+    if (!_hasWebAuthn()) { V.toast("This browser has no passkey support.", true); return; }
+    V.postJSON(SOV("/api/login/challenge"), {}).then(function (r) {
+      return navigator.credentials.get({ publicKey: {
+        challenge: new TextEncoder().encode(r.challenge),
+        rpId: location.hostname, userVerification: "preferred", timeout: 60000 } });
+    }).then(function (cred) {
+      if (!cred) return null;
+      return V.postJSON(SOV("/api/webauthn/assert"), {
+        credential_id: _bufToB64url(cred.rawId),
+        authenticator_data: _bufToB64url(cred.response.authenticatorData),
+        client_data_json: _bufToB64url(cred.response.clientDataJSON),
+        signature: _bufToB64url(cred.response.signature) });
+    }).then(function (r) {
+      if (r && r.authenticated) {
+        V.setPrincipal(r); V.toast("Signed in with your passkey.");
+        refreshTopbar(); renderNav(); location.hash = "#/home"; route();
+      } else if (r) { V.toast("Passkey sign-in was not accepted.", true); }
+    }).catch(function (e) { V.toast("Passkey sign-in failed: " + ((e && e.message) || e), true); });
+  }
+  function passkeyEnroll() {
+    if (!_hasWebAuthn()) { V.toast("This browser has no passkey support.", true); return; }
+    V.postJSON(SOV("/api/login/challenge"), {}).then(function (r) {
+      return navigator.credentials.create({ publicKey: {
+        challenge: new TextEncoder().encode(r.challenge),
+        rp: { name: "VIGIL", id: location.hostname },
+        user: { id: new TextEncoder().encode("owner"), name: "owner", displayName: "VIGIL owner" },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 },
+                           { type: "public-key", alg: -8 }],
+        authenticatorSelection: { userVerification: "preferred" }, timeout: 60000 } });
+    }).then(function (cred) {
+      if (!cred) return;
+      var spki = cred.response.getPublicKey && cred.response.getPublicKey();
+      var alg = cred.response.getPublicKeyAlgorithm && cred.response.getPublicKeyAlgorithm();
+      if (!spki || !alg) { V.toast("This authenticator did not expose a public key (WebAuthn L2 needed).", true); return; }
+      settingsAct({ action: "enroll_webauthn", credential_id: _bufToB64url(cred.rawId),
+        cose_alg: alg, public_key_spki_b64: _bufToB64url(spki), reason: "enroll owner passkey" },
+        "Passkey enrolled — the owner can now sign in with it (production posture).", function () {});
+    }).catch(function (e) { V.toast("Passkey enrolment failed: " + ((e && e.message) || e), true); });
+  }
   function renderLoginGate(screen) {
     if (!screen) return;
     const input = h("input.input", { type: "password", placeholder: "Paste your VIGIL bearer token",
@@ -325,6 +374,13 @@
         h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } },
           [input, totpInput, h("button.btn.primary", { onClick: submit }, [V.icon("key"), "Sign in"])]),
       ]),
+      _hasWebAuthn() ? V.card("Passkey", null, [
+        h("div.hint", null, "Sign in with a registered passkey (WebAuthn) — the production owner login: "
+          + "phishing-resistant and cryptographically bound to this site. Enrol one first from "
+          + "Users & Roles → Owner session (needs TLS in production)."),
+        h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } },
+          [h("button.btn.primary", { onClick: passkeySignIn }, [V.icon("shield"), "Sign in with a passkey"])]),
+      ]) : null,
       ssoCard,
     ]));
   }
@@ -4425,6 +4481,8 @@
       settingsAct({ action: "revoke_sessions", reason: "sign out all sessions from Users & Roles" },
         "All cookie sessions signed out.", function () {});
     } }, [V.icon("x"), "Sign out all sessions"]);
+    var enrollPk = _hasWebAuthn()
+      ? h("button.btn.owner", { onClick: passkeyEnroll }, [V.icon("shield"), "Enrol a passkey"]) : null;
     return h("div", null, [
       h("div.hint", null, "Your owner login token now PERSISTS across restarts (dev posture) — the same "
         + "?token= URL keeps working after a reboot. Rotate to issue a new token, or revoke to kill it; both "
@@ -4433,7 +4491,7 @@
         + "sessions” immediately invalidates every server-side cookie session (idle + absolute expiry are "
         + "enforced automatically)."),
       h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } },
-        [rotate, revoke, signoutAll]),
+        [rotate, revoke, signoutAll, enrollPk]),
       out,
     ]);
   }

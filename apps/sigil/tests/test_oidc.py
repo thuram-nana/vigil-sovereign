@@ -661,6 +661,7 @@ def test_bootstrap_paths_are_all_pre_auth_and_the_gate_is_enforced(monkeypatch):
             "/api/whoami": ("GET", "/api/whoami", None),
             "/api/login": ("POST", "/api/login", b"{}"),
             "/api/login/challenge": ("POST", "/api/login/challenge", b"{}"),
+            "/api/webauthn/assert": ("POST", "/api/webauthn/assert", b"{}"),
             "/api/oidc/login": ("GET", "/api/oidc/login", None),
             "/api/oidc/callback": ("GET", "/api/oidc/callback?code=x&state=y", None),
         }
