@@ -184,6 +184,14 @@ screens:
     description: Owner-only encrypted off-box backup of the trust root + spine, and a verify-first restore into a fresh staging home (never the live one in-place). You type the passphrase (used once, never stored); the owner key signs the backup in-process and never leaves the host. Download the encrypted archive to store it off-box.
     synonyms: [durability, backup, restore, disaster recovery, off-box backup, trust root backup, spine backup, encrypted backup, passphrase, staging restore, recover]
 
+  - id: ceremonies
+    label: Ceremonies
+    group: MANAGE
+    owner: true
+    plane: unified
+    description: The sovereign trust-root key material at a glance — the owner PUBLIC key and its signed succession chain (pinned genesis → epochs → validated tip), the at-rest vault seal (TPM-sealed KEK), and the WARDEN kernel integrity pin + config drift. Read-only and OPERATOR+ (the same config_nonsecret tier as the doctor report — key status surfaces sealed-key file paths + SEALED/PLAINTEXT posture); every panel shows public keys + sealing metadata only, the owner private key never leaves the host. Owner-only key-material mutations (rotate, provision, pin, authorize, reset) are wired in a later slice.
+    synonyms: [ceremonies, ceremony, key material, owner key, owner pubkey, succession, key rotation, vault seal, kek, dek, kernel pin, warden, mesh, delegate offense, floor reset, key ceremony, trust root keys]
+
   - id: budgets
     label: Token Budgets
     group: MANAGE

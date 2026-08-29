@@ -449,6 +449,23 @@ class Handler(BaseHTTPRequestHandler):
             # MUTATIONS stay CLI/owner-only (deferred).
             from . import antirollback as _ar
             return self._json(_ar.floor_status() if path.endswith("/floor") else _ar.spine_status())
+        if path in ("/api/ceremonies/vault", "/api/ceremonies/kernel", "/api/ceremonies/key",
+                    "/api/ceremonies/owner-pubkey"):
+            # Wave 10: read-only KEY-MATERIAL CEREMONY status (`sigil vault|kernel|key status`, `owner-pubkey`)
+            # — OPERATOR+ (`config_nonsecret`), the SAME tier as `/api/doctor`. Each prints only PUBLIC keys +
+            # at-rest sealing METADATA (succession epochs, KEK/DEK/warden sealed-state, kernel pin, config
+            # drift), and none unseal the private key — but `key status` also surfaces the ABSOLUTE sealed-key
+            # file PATHS, the SEALED/PLAINTEXT posture per key, and per-account TOTP labels, i.e. the same
+            # operational/FS-layout class `/api/doctor` already gates to operator+ (a viewer, who cannot read
+            # config, is refused — RBAC-consistent). The owner-key MUTATIONS (provision/pin/rotate/authorize/
+            # reset) are wired owner-only in a later slice.
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "config_nonsecret"):
+                return self._deny(403, "operator+ required")
+            from . import ceremonies as _cer
+            _READS = {"/api/ceremonies/vault": _cer.vault_status, "/api/ceremonies/kernel": _cer.kernel_status,
+                      "/api/ceremonies/key": _cer.key_status, "/api/ceremonies/owner-pubkey": _cer.owner_pubkey_show}
+            return self._json(_READS[path]())
         if path == "/api/verify":
             # Parity (Wave 2): the sovereign spine self-verify — chain integrity + the owner-signed head
             # anchor (exactly what `sigil verify` runs, in-process, same venv). Viewer+ read, no secret.
