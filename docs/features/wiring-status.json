@@ -1018,6 +1018,18 @@
       "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
     },
     {
+      "id": "ui.durability",
+      "name": "UI screen — Durability",
+      "surface": "ui-screen",
+      "status": "LIVE",
+      "screen": "durability",
+      "anchor": {
+        "file": "packages/vigil-ui/app.js"
+      },
+      "check": "ui-screen",
+      "rationale": "A top-level unified-UI screen: a real NAV entry AND a route() destination in packages/vigil-ui/app.js, so it is reachable in the shipped UI. The system-map drift invariant (NAV == route() == screens.yaml) holds it wired; this audit re-derives the same set from app.js and requires the registry to match it exactly."
+    },
+    {
       "id": "ui.terminal",
       "name": "UI screen — Terminal",
       "surface": "ui-screen",

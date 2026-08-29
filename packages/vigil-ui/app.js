@@ -130,6 +130,7 @@
       { id: "brain", label: "Brain", icon: "brain", ready: true },
       { id: "mcp", label: "MCP Servers", icon: "bolt", ready: true },
       { id: "system", label: "System & Services", icon: "gear", ready: true },
+      { id: "durability", label: "Durability", icon: "shield", owner: true, perm: "secrets", ready: true },
       { id: "budgets", label: "Token Budgets", icon: "bolt", ready: true },
       { id: "compliance", label: "Compliance", icon: "shield", ready: true },
       { id: "assurance", label: "Assurance", icon: "find", ready: true },
@@ -5811,6 +5812,115 @@
     ]);
   }
 
+  // Wave 3 (durability) — OWNER-ONLY encrypted off-box backup of the trust root + spine, and a verify-first
+  // restore into a FRESH staging home. The operator supplies the passphrase (used once, never stored); the
+  // server signs/encrypts in-process (the owner key never leaves the host). Download is a token-header blob.
+  function renderDurability(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Durability"),
+        h("span.sub", null, "Owner-only encrypted off-box backup of the trust root + spine, and a verify-first "
+          + "restore into a fresh staging home. Your passphrase encrypts the backup, is used once, and is never "
+          + "stored — keep it safe: lose it and the backup is unrecoverable.")]),
+      h("div#durability-body", { style: { marginTop: "16px" } }, h("div.empty", null, "Loading backups…")),
+    ]);
+    drawDurability();
+  }
+
+  function drawDurability() {
+    var body = V.$("#durability-body"); if (!body) return;
+
+    function fmtSize(n) { n = n || 0; return n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB"; }
+
+    function download(id) {
+      // fetch WITH the token header (keeps the secrets-tier token out of the URL), then save the blob.
+      var hh = { "X-SIGIL-Token": V.token() };
+      fetch(SOV("/api/backup/download/" + encodeURIComponent(id)), { headers: hh, credentials: "same-origin" })
+        .then(function (r) { if (!r.ok) throw new Error("download failed (" + r.status + ")"); return r.blob(); })
+        .then(function (b) {
+          var u = URL.createObjectURL(b);
+          var a = document.createElement("a"); a.href = u; a.download = id; document.body.appendChild(a);
+          a.click(); document.body.removeChild(a); setTimeout(function () { URL.revokeObjectURL(u); }, 4000);
+        })
+        .catch(function (e) { V.toast((e && e.message) || "download failed", true); });
+    }
+
+    var listWrap = h("div", null, "");
+    function refreshList() {
+      V.getJSON(SOV("/api/backup/list")).then(function (d) {
+        var rows = (d.backups || []).map(function (b) {
+          return h("div.kv", null, [
+            h("div.k", null, [V.icon("shield"), " " + b.id]),
+            h("div.v", { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" } }, [
+              h("span.mono", { style: { fontSize: "12px", color: "var(--text-2)" } }, fmtSize(b.size)),
+              h("button.btn.sm", { onClick: function () { download(b.id); } }, [V.icon("book"), "Download"]),
+              h("button.btn.sm", { onClick: function () { restorePick.value = b.id; V.toast("Selected " + b.id + " for restore"); } }, [V.icon("check"), "Use for restore"]),
+            ]),
+          ]);
+        });
+        V.mount(listWrap, rows.length ? h("div", null, rows) : h("div.empty", null, "No backups yet."));
+      }).catch(function (e) { V.mount(listWrap, offlineEmpty(e, "Could not list backups (owner token required).")); });
+    }
+
+    // --- backup card ---
+    var bpw = h("input.inp", { type: "password", placeholder: "backup passphrase (min 8 chars)", autocomplete: "new-password" });
+    var bpw2 = h("input.inp", { type: "password", placeholder: "confirm passphrase", autocomplete: "new-password" });
+    var bStatus = h("div", null, "");
+    var mkBtn = h("button.btn.owner", { onClick: function () {
+      var p = bpw.value || "", p2 = bpw2.value || "";
+      if (p.length < 8) { V.toast("passphrase must be at least 8 characters", true); return; }
+      if (p !== p2) { V.toast("passphrases do not match", true); return; }
+      mkBtn.disabled = true; V.mount(bStatus, h("div.hint", { style: { marginTop: "8px" } }, "Encrypting backup…"));
+      V.postJSON(SOV("/api/backup"), { passphrase: p }).then(function (r) {
+        if (r && r.error) { V.mount(bStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, r.error)); return; }
+        bpw.value = ""; bpw2.value = "";      // clear the secret from the DOM
+        V.mount(bStatus, h("div.set-status.ok", { style: { marginTop: "8px" } }, [V.icon("check"),
+          h("span", null, " Backup written: " + r.id + " (" + fmtSize(r.size) + ", " + r.files + " files). Download it and store it off-box.")]));
+        refreshList();
+      }).catch(function (e) { V.mount(bStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, (e && e.message) || "backup failed")); })
+        .then(function () { mkBtn.disabled = false; });
+    } }, [V.icon("shield"), "Create backup"]);
+    var backupCard = h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Create backup")]),
+      h("div.hint", null, "Encrypts the trust root + spine to a server-side archive with your passphrase (used once, never stored). "
+        + "The owner key signs it in-process and never leaves the host."),
+      h("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginTop: "10px", maxWidth: "420px" } }, [bpw, bpw2, mkBtn]),
+      bStatus,
+    ]);
+
+    // --- restore card ---
+    var restorePick = h("input.inp", { type: "text", placeholder: "backup id (or click 'Use for restore')" });
+    var rpw = h("input.inp", { type: "password", placeholder: "backup passphrase", autocomplete: "off" });
+    var rStatus = h("div", null, "");
+    var rsBtn = h("button.btn.owner", { onClick: function () {
+      var id = (restorePick.value || "").trim(), p = rpw.value || "";
+      if (!id) { V.toast("pick a backup to restore", true); return; }
+      if (!p) { V.toast("enter the backup passphrase", true); return; }
+      rsBtn.disabled = true; V.mount(rStatus, h("div.hint", { style: { marginTop: "8px" } }, "Verifying + staging restore…"));
+      V.postJSON(SOV("/api/restore"), { passphrase: p, backup_id: id }).then(function (r) {
+        if (r && r.error) { V.mount(rStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, r.error)); return; }
+        rpw.value = "";
+        V.mount(rStatus, h("div.set-status" + (r.verified ? ".ok" : ".danger"), { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+          h("div", null, [V.icon(r.verified ? "check" : "x"), h("span", null, " Restore " + (r.verified ? "VERIFIED" : "NOT verified") + " (" + (r.files || 0) + " files), staged — NOT applied to the live home.")]),
+          h("pre.mono", { style: { marginTop: "6px", whiteSpace: "pre-wrap", fontSize: "12px" } }, "staged at: " + (r.home || "") + "\npromote it deliberately (out of band); the live home was left intact."),
+        ]));
+      }).catch(function (e) { V.mount(rStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, (e && e.message) || "restore failed")); })
+        .then(function () { rsBtn.disabled = false; });
+    } }, [V.icon("bolt"), "Restore to staging"]);
+    var restoreCard = h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Restore (to a fresh staging home)")]),
+      h("div.hint", null, "Decrypts + verifies a backup, then stages it into a fresh home — it NEVER overwrites the live "
+        + "trust root. Fail-closed on a wrong passphrase or any tamper. Promote the verified staging tree yourself."),
+      h("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginTop: "10px", maxWidth: "420px" } }, [restorePick, rpw, rsBtn]),
+      rStatus,
+    ]);
+
+    V.mount(body, [
+      h("div.grid.cols-2", { style: { alignItems: "start" } }, [backupCard, restoreCard]),
+      h("div.card", { style: { marginTop: "16px" } }, [h("div.card-h", null, [h("h3", null, "Backups on this host")]), listWrap]),
+    ]);
+    refreshList();
+  }
+
   function renderBrain(screen) {
     var B = { tab: (hashQuery().tab) || "decide", runs: [], run: null, catalogQ: "" };
     V.mount(screen, [
@@ -9711,6 +9821,7 @@
     if (id === "strix") { renderStrix(screen); return; }
     if (id === "mcp") { renderMcp(screen); return; }
     if (id === "system") { renderSystem(screen); return; }
+    if (id === "durability") { renderDurability(screen); return; }
     if (id === "budgets") { renderBudgets(screen); return; }
     if (id === "compliance") { renderCompliance(screen); return; }
     if (id === "assurance") { renderAssurance(screen); return; }
