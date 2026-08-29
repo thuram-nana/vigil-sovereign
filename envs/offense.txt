@@ -12,3 +12,7 @@
 -e ./vendor/strix
 -e ./gateway
 -e ./integration
+# The cyber-range (MERIDIAN target + Range Control cockpit). Stdlib-only, offense-adjacent test infra: it
+# exposes the `target` console-script and its Range Control runner SHELLS the offense verbs, so it lives in
+# the offense env (never imported by the sovereign env; the two-env boundary proof is unaffected).
+-e ./range

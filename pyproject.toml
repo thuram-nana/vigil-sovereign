@@ -15,6 +15,7 @@ members = [
     "vendor/strix",
     "gateway",
     "integration",
+    "range",
 ]
 
 # Resolve every first-party member from the workspace, never the package index. Without this a
@@ -31,6 +32,7 @@ crucible = { workspace = true }
 strix-agent = { workspace = true }
 vigil-gateway = { workspace = true }
 vigil-integration = { workspace = true }
+vigil-range = { workspace = true }  # the cyber-range (MERIDIAN + Range Control); stdlib-only, offense-adjacent test infra
 
 # The two isolated environments, as documentation of the boundary (built via envs/):
 #   env-sovereign : vigil_core + apps/sigil + integration      (NEVER framework.* or strix.*)
