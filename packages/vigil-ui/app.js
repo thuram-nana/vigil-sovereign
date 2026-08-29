@@ -8600,9 +8600,62 @@
         + "alongside the defensive knowledge catalog. Every feed entry is an intel-tier LEAD, never a "
         + "fact — only a fired oracle confirms. The live pull is a gated, opt-in egress act; offline is "
         + "the default."),
+      hostOpsCard(),
       h("div#knowledge-body", null, h("div.empty", null, "Loading…")),
     ]);
     loadKnowledge();
+  }
+
+  // Wave 6 (parity) — the sovereign HOST-RUN BROKER: launch a CLOSED SET of long memory host-ops (rebuild
+  // the vector index, rebuild memory from transcripts/docs/git, dry-run consolidation) as tracked background
+  // subprocesses, from the browser. OWNER-only (the launch is owner-gated server-side; non-owners get a 403
+  // toast). Status/runs are viewer+. The server validates the verb + flags — the UI only offers the allowed set.
+  function hostOpsCard() {
+    var runsOut = h("div", null, "");
+    var iReset = h("input", { type: "checkbox" }), iDocs = h("input", { type: "checkbox" }), iGit = h("input", { type: "checkbox" });
+    function launch(verb, flags) {
+      V.postJSON(SOV("/api/hostcmd/" + verb), { flags: flags || [] }).then(function (r) {
+        if (r && r.ok) { V.toast((r.detail || (verb + " started")) ); setTimeout(refreshRuns, 800); }
+        else { V.toast((r && r.error) || (verb + " failed"), true); }
+      }).catch(function (e) { V.toast((e && e.message) || (verb + " failed (owner only?)"), true); });
+    }
+    function pill(st) {
+      var up = st === "done", run = st === "running" || st === "starting", bad = st === "failed" || st === "error" || st === "interrupted";
+      return V.pill(st || "?", up ? "up" : (run ? "idle" : (bad ? "danger" : "idle")), null);
+    }
+    function refreshRuns() {
+      V.getJSON(SOV("/api/hostcmd/runs")).then(function (d) {
+        var runs = (d && d.runs) || [];
+        if (!runs.length) { V.mount(runsOut, h("div.hint", { style: { marginTop: "8px" } }, "No host-op runs yet.")); return; }
+        V.mount(runsOut, h("div", { style: { marginTop: "8px" } }, runs.map(function (r) {
+          return h("div.kv", null, [
+            h("div.k", null, [pill(r.status), " " + r.verb + (r.flags && r.flags.length ? " (" + r.flags.join(",") + ")" : "")]),
+            h("div.v", { style: { fontSize: "12px", color: "var(--text-2)" } }, (r.status === "running" || r.status === "starting") ? "running…" : (r.exit_code != null ? ("exit " + r.exit_code) : (r.detail || ""))),
+          ]);
+        })));
+        // keep polling while anything is live
+        if (runs.some(function (r) { return r.status === "running" || r.status === "starting"; }) && current() === "knowledge") setTimeout(refreshRuns, 5000);
+      }).catch(function () {});
+    }
+    refreshRuns();
+    return h("div.card", { style: { marginBottom: "14px" } }, [
+      h("div.card-h", null, [h("h3", null, "Memory host operations"),
+        h("button.btn.sm", { style: { marginLeft: "auto" }, onClick: refreshRuns }, [V.icon("live"), "Refresh"])]),
+      h("div.hint", null, "Owner-only sovereign maintenance — rebuild the vector index / rebuild memory / dry-run "
+        + "consolidation. Each runs as a tracked background host process (poll below). A closed verb set; no free-form commands."),
+      h("div.acts", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "10px", alignItems: "center" } }, [
+        h("button.btn.sm.owner", { onClick: function () { launch("index", []); } }, [V.icon("bolt"), "Rebuild vector index"]),
+        h("button.btn.sm.owner", { onClick: function () {
+          var f = []; if (iReset.checked) f.push("reset"); if (iDocs.checked) f.push("docs"); if (iGit.checked) f.push("git");
+          launch("ingest", f);
+        } }, [V.icon("brain"), "Rebuild memory"]),
+        h("label", { style: { display: "flex", gap: "5px", alignItems: "center", fontSize: "12.5px" } }, [iReset, "reset"]),
+        h("label", { style: { display: "flex", gap: "5px", alignItems: "center", fontSize: "12.5px" } }, [iDocs, "docs"]),
+        h("label", { style: { display: "flex", gap: "5px", alignItems: "center", fontSize: "12.5px" } }, [iGit, "git"]),
+        h("button.btn.sm.owner", { onClick: function () { launch("consolidate", ["dry-run"]); } }, [V.icon("check"), "Consolidate (dry-run)"]),
+      ]),
+      runsOut,
+    ]);
   }
   function loadKnowledge() {
     V.getJSON(OFF("/api/engagements")).then(function (d) {
