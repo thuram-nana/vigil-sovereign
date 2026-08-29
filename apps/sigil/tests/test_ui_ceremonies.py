@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -230,3 +231,96 @@ def test_mesh_routes_are_owner_only(monkeypatch):
         assert _post(port, f"/api/ceremonies/{leaf}", token=operator)[0] == 403         # operator refused
         assert _post(port, f"/api/ceremonies/{leaf}", token=viewer)[0] == 403           # viewer refused
         assert _post(port, f"/api/ceremonies/{leaf}", token=None)[0] == 403             # unauth
+
+
+# --- Wave 10d: OWNER-ONLY offense delegation (preview + sign) -----------------------------------------
+
+GOOD_ID = {"schema": 1, "spine": {"key_id": "off-spine", "public_key_b64": GOOD_PUB},
+           "governance": {"key_id": "off-gov", "public_key_b64": GOOD_PUB}}
+
+
+def test_delegate_preview_is_pure_and_validates(monkeypatch):
+    called = []
+    monkeypatch.setattr(subprocess, "run", lambda a, **k: called.append(a))
+    r = ceremonies.delegate_offense_preview(GOOD_ID)
+    assert r["ok"] is True and r["spine"]["pubkey"] == GOOD_PUB and called == []       # pure, no spawn
+    assert ceremonies.delegate_offense_preview({"schema": 2})["ok"] is False           # wrong schema
+    assert ceremonies.delegate_offense_preview({"schema": 1, "spine": GOOD_ID["spine"]})["ok"] is False  # no gov
+    bad = {"schema": 1, "spine": {"key_id": "s", "public_key_b64": "nope"}, "governance": GOOD_ID["governance"]}
+    assert ceremonies.delegate_offense_preview(bad)["ok"] is False                     # bad base64 pubkey
+
+
+def test_delegate_uses_server_paths_and_validates(monkeypatch, tmp_path):
+    seen = {}
+
+    def _rec(a, **k):
+        seen["argv"] = a
+        idx = a.index("--offense-identity") + 1
+        seen["id_path"] = a[idx]
+        with open(a[idx], encoding="utf-8") as fh:               # temp file EXISTS during the run
+            seen["id_content"] = json.load(fh)
+        return _P(0, "owner-signed offense delegations written")
+    monkeypatch.setattr(subprocess, "run", _rec)
+    ceremonies.delegate_offense(GOOD_ID, "engagement-x", "24", str(tmp_path))
+    argv = seen["argv"]
+    assert argv[3] == "delegate-offense"
+    # the identity reaches argv ONLY via a server-controlled temp file (never a user path), holding the
+    # identity JSON, and it is cleaned up after the run
+    assert seen["id_content"] == GOOD_ID and not os.path.exists(seen["id_path"])
+    assert argv[argv.index("--scope") + 1] == "engagement-x"
+    assert argv[argv.index("--out-dir") + 1].startswith(str(tmp_path))                 # server out-dir
+    # validation negative controls — a flag-ish scope, out-of-range hours, or a bad identity NEVER spawn
+    seen.clear()
+    assert ceremonies.delegate_offense(GOOD_ID, "-flag", "24", str(tmp_path))["ok"] is False
+    assert ceremonies.delegate_offense(GOOD_ID, "ok", "0", str(tmp_path))["ok"] is False        # hours <= 0
+    assert ceremonies.delegate_offense(GOOD_ID, "ok", "999999", str(tmp_path))["ok"] is False   # hours too big
+    assert ceremonies.delegate_offense(GOOD_ID, "ok", "notnum", str(tmp_path))["ok"] is False
+    assert ceremonies.delegate_offense({"schema": 9}, "ok", "24", str(tmp_path))["ok"] is False
+    assert "argv" not in seen        # none of the rejected inputs reached a spawn
+
+
+def test_delegate_routes_are_owner_only(monkeypatch):
+    monkeypatch.setattr(ceremonies, "delegate_offense_preview", lambda i: {"ok": True, "spine": {}, "governance": {}})
+    monkeypatch.setattr(ceremonies, "delegate_offense", lambda i, s, h, home: {"ok": True, "text": "signed"})
+    _s, port = _serve()
+    viewer = _make_account(port, "dgv", "viewer")
+    operator = _make_account(port, "dgo", "operator")
+    for leaf in ("delegate/preview", "delegate"):
+        assert _post(port, f"/api/ceremonies/{leaf}")[0] == 200                         # owner
+        assert _post(port, f"/api/ceremonies/{leaf}", token=operator)[0] == 403         # operator refused
+        assert _post(port, f"/api/ceremonies/{leaf}", token=viewer)[0] == 403           # viewer refused
+        assert _post(port, f"/api/ceremonies/{leaf}", token=None)[0] == 403             # unauth
+
+
+def test_delegate_route_rejects_cross_origin(monkeypatch):
+    # the shared _ceremonies_post CSRF gate also protects the delegate routes (pinned here, not only on the
+    # vault/kernel routes): a cross-origin POST with a valid OWNER token is refused before the action.
+    monkeypatch.setattr(ceremonies, "delegate_offense", lambda i, s, h, home: {"ok": True, "text": "signed"})
+    _s, port = _serve()
+    h = {"Content-Type": "application/json", "Origin": "http://evil.example", "Host": f"127.0.0.1:{port}",
+         "X-SIGIL-Token": TOKEN}
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/ceremonies/delegate",
+                                 data=b"{}", headers=h, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            code = r.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    assert code == 403
+
+
+def test_ceremony_body_route_400s_on_malformed_json(monkeypatch):
+    # a malformed JSON body on a body-taking ceremony route returns a clean 400 (the shared parse is wrapped),
+    # never a connection drop / 500. Owner-authenticated so the failure is the PARSE, not the gate.
+    monkeypatch.setattr(ceremonies, "mesh_fingerprint", lambda p: {"ok": True, "fingerprint": "x"})
+    _s, port = _serve()
+    hh = {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}", "Host": f"127.0.0.1:{port}",
+          "X-SIGIL-Token": TOKEN}
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/ceremonies/mesh/fingerprint",
+                                 data=b"{ this is not json", headers=hh, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            code = r.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    assert code == 400

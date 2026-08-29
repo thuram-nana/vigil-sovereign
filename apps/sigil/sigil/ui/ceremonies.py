@@ -13,22 +13,32 @@ sealing is re-implemented here; the owner key is sealed on the host and never cr
 (TPM-seal a fresh KEK) + `kernel_pin` (owner-sign the kernel binary hash) are ZERO-arg. `mesh_*` enroll a
 phone DEVICE key: `mesh_fingerprint` is a PURE preview the operator eyeball-matches (anti key-swap),
 `mesh_authorize`/`mesh_revoke` owner-sign the mesh ledger — their device_id (slug) + pubkey (base64-32B)
-are STRICTLY validated so neither reaches argv as a flag. The remaining owner-key mutations
-(key rotate/re-genesis, warden-anchor-set, delegate-offense, floor reset) are wired in later slices.
-FATAL-2: pure sovereign — spawns `python -m sigil`, imports no framework/strix.
+are STRICTLY validated so neither reaches argv as a flag. `delegate_offense*` owner-sign a delegation over
+the OFFENSE plane's PUBLIC identity (the identity JSON reaches argv only via a server-controlled temp file;
+scope/hours validated). The remaining owner-key mutations (key rotate/re-genesis, warden-anchor-set, floor
+reset) are wired in later slices. FATAL-2: pure sovereign — spawns `python -m sigil`, imports no
+framework/strix.
 """
 from __future__ import annotations
 
 import base64
+import json as _json
+import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
+from pathlib import Path
 
 from ..reuse import sha256_hex
 
-# A device id is a short slug — LEADING alnum so it can never be read as a flag; `\Z` (not `$`) so a
-# trailing newline cannot smuggle a second token.
+# A device id / key id is a short slug — LEADING alnum so it can never be read as a flag; `\Z` (not `$`) so
+# a trailing newline cannot smuggle a second token.
 _DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
+# A delegation scope — a leading alnum (never a flag) then a permissive-but-bounded charset; passed as one
+# argv element (shell=False), so spaces/`:`/`/` are safe, only a leading `-` would be a flag.
+_SCOPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/ -]{0,127}\Z")
 
 
 def _valid_pubkey(pubkey) -> bool:
@@ -131,3 +141,80 @@ def mesh_revoke(device_id, pubkey) -> dict:
     if not _valid_pubkey(pubkey):
         return {"ok": False, "error": "pubkey must be base64 of a 32-byte Ed25519 key"}
     return _run(["mesh", "revoke", device_id, pubkey], timeout=60)
+
+
+# --- OWNER-ONLY offense delegation (route gates `secrets`) — the owner blesses the OFFENSE plane's PUBLIC
+#     identity. The identity JSON reaches argv only via a SERVER-controlled temp file (never a user path);
+#     the certs written are PUBLIC (no private key). The owner key signs on the host. ------------------
+
+_MAX_DELEG_HOURS = 24 * 365 * 10   # mirror cli.py cmd_delegate_offense's finite bound
+
+
+def _valid_offense_identity(identity) -> "tuple[bool, str]":
+    """Validate an offense-identity.json (schema 1 from `vigil identity`): a dict with schema==1 and a
+    `spine` + `governance` block, each carrying a key_id slug + a base64-32B public_key_b64. No signing."""
+    if not isinstance(identity, dict) or identity.get("schema") != 1:
+        return False, "offense identity must be a JSON object with schema: 1 (exported by `vigil identity`)"
+    for role in ("spine", "governance"):
+        blk = identity.get(role)
+        if not isinstance(blk, dict):
+            return False, f"missing '{role}' block in the offense identity"
+        kid, pub = blk.get("key_id"), blk.get("public_key_b64")
+        if not isinstance(kid, str) or not _DEVICE_ID_RE.match(kid):
+            return False, f"{role}.key_id must be a slug"
+        if not _valid_pubkey(pub):
+            return False, f"{role}.public_key_b64 must be base64 of a 32-byte Ed25519 key"
+    return True, ""
+
+
+def delegate_offense_preview(identity) -> dict:
+    """PURE parse + validate (no subprocess, no signing): the two offense PUBLIC keys + key_ids the owner is
+    about to bless. The operator confirms these OUT-OF-BAND against the offense host BEFORE signing — a
+    swapped identity file would otherwise get an attacker's key owner-blessed (the CLI's own caveat)."""
+    ok, err = _valid_offense_identity(identity)
+    if not ok:
+        return {"ok": False, "error": err}
+    return {"ok": True,
+            "spine": {"key_id": identity["spine"]["key_id"], "pubkey": identity["spine"]["public_key_b64"]},
+            "governance": {"key_id": identity["governance"]["key_id"], "pubkey": identity["governance"]["public_key_b64"]}}
+
+
+def delegate_offense(identity, scope, hours, home) -> dict:
+    """`sigil delegate-offense` — owner-sign an offense-spine + offense-governance delegation cert over the
+    offense PUBLIC identity. The identity JSON is written to a SERVER-controlled temp file and the out-dir is
+    a server path under `home`, so NO user path reaches argv; scope (slug) + hours (finite, bounded) are
+    validated. The owner key signs on the host; the certs are PUBLIC (no private key) and returned inline."""
+    ok, err = _valid_offense_identity(identity)
+    if not ok:
+        return {"ok": False, "error": err}
+    if not isinstance(scope, str) or not _SCOPE_RE.match(scope):
+        return {"ok": False, "error": "scope must be a slug: a leading letter/digit then [A-Za-z0-9_.:/ -], <=128"}
+    try:
+        h = float(hours)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "hours must be a number"}
+    if not (0 < h <= _MAX_DELEG_HOURS) or h != h or h in (float("inf"), float("-inf")):
+        return {"ok": False, "error": f"hours must be a finite value in (0, {_MAX_DELEG_HOURS}]"}
+    out_dir = Path(home) / "delegations" / (time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-" + os.urandom(3).hex())
+    fd, tmp_path = tempfile.mkstemp(prefix="offense-identity-", suffix=".json")   # SERVER path, never user input
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            _json.dump(identity, fh)
+        res = _run(["delegate-offense", "--offense-identity", tmp_path, "--scope", scope,
+                    "--hours", repr(h), "--out-dir", str(out_dir)], timeout=60)
+    finally:
+        try:
+            os.unlink(tmp_path)          # the offense identity is public, but keep no stray copy on disk
+        except OSError:
+            pass
+    certs = {}
+    for name in ("offense-spine.deleg.json", "offense-governance.deleg.json"):
+        p = out_dir / name
+        if p.exists():
+            try:
+                certs[name] = p.read_text(encoding="utf-8")[:8000]   # PUBLIC delegation cert (no private key)
+            except OSError:
+                pass
+    res["out_dir"] = str(out_dir)
+    res["certs"] = certs
+    return res
