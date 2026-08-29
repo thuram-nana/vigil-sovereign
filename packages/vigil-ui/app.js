@@ -6106,8 +6106,56 @@
       rStatus,
     ]);
 
+    // --- escrow card (Wave 9, SENSITIVE, owner-only, offense plane) ---
+    // Split-knowledge recovery of the backup passphrase (Shamir m-of-n). The passphrase is typed here,
+    // sent once over the authenticated channel, handed to the child via env (never argv/logged), and the
+    // SECRET shares are written 0600 ON THE HOST — the browser only ever sees their file names + the public
+    // metadata path. Opting in trades sole-owner custody for survivability of passphrase loss.
+    var epw = h("input.inp", { type: "password", placeholder: "backup passphrase to escrow (min 8 chars)", autocomplete: "off" });
+    var eThr = h("input.inp", { type: "number", value: "2", min: "2", max: "20", style: { maxWidth: "120px" } });
+    var eShr = h("input.inp", { type: "number", value: "3", min: "2", max: "20", style: { maxWidth: "120px" } });
+    var eHold = h("input.inp", { type: "text", placeholder: "holder names, comma-separated (optional; else auto-named)", autocomplete: "off" });
+    var eStatus = h("div", null, "");
+    var esBtn = h("button.btn.owner", { onClick: function () {
+      var p = epw.value || "";
+      var m = parseInt(eThr.value, 10), n = parseInt(eShr.value, 10);
+      if (p.length < 8) { V.toast("passphrase must be at least 8 characters", true); return; }
+      if (!(m >= 2 && n >= m && n <= 20)) { V.toast("need 2 ≤ threshold ≤ shares ≤ 20", true); return; }
+      var holders = (eHold.value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+      if (holders.length && holders.length !== n) { V.toast("give exactly " + n + " holder names, or none to auto-name", true); return; }
+      esBtn.disabled = true; V.mount(eStatus, h("div.hint", { style: { marginTop: "8px" } }, "Splitting the passphrase m-of-n on the host…"));
+      V.postJSON(OFF("/api/escrow"), { passphrase: p, threshold: m, shares: n, holders: holders }).then(function (r) {
+        if (r && (r.error || r.ok === false)) { V.mount(eStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, (r && (r.error || r.stderr)) || "escrow failed")); return; }
+        epw.value = "";      // clear the secret from the DOM
+        V.mount(eStatus, h("div.set-status.ok", { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+          h("div", null, [V.icon("check"), h("span", null, " Escrowed " + r.threshold + "-of-" + r.shares + ". SECRET shares written 0600 on the host (the browser never sees them):")]),
+          h("pre.mono", { style: { marginTop: "6px", whiteSpace: "pre-wrap", fontSize: "12px" } },
+            "out dir: " + (r.out_dir || "") + "\nfiles:   " + ((r.files || []).join("\n         ") || "(none)")
+            + "\n\nSOVEREIGNTY TRADE-OFF: any " + r.threshold + " of these " + r.shares + " holders can COLLECTIVELY\nrecover the passphrase. Distribute each share to a DIFFERENT holder, off any central box."),
+        ]));
+      }).catch(function (e) { V.mount(eStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, (e && e.message) || "escrow failed")); })
+        .then(function () { esBtn.disabled = false; });
+    } }, [V.icon("key"), "Escrow passphrase (m-of-n)"]);
+    var escrowCard = h("div.card", { style: { marginTop: "16px" } }, [
+      h("div.card-h", null, [h("h3", null, "Escrow the backup passphrase (opt-in, m-of-n)")]),
+      h("div.hint", null, "OPT-IN split-knowledge recovery: Shamir-splits the passphrase into "
+        + "shares recoverable at a threshold, so a quorum of holders can recover a lost passphrase. The SECRET "
+        + "shares are written 0600 on THIS host and never cross the browser; the passphrase is used once and never "
+        + "stored. Declining (not running this) keeps the sole-owner lose-it-and-it-is-gone guarantee."),
+      h("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginTop: "10px", maxWidth: "520px" } }, [
+        epw,
+        h("div", { style: { display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } }, [
+          h("span.dim", { style: { fontSize: "12px" } }, "threshold"), eThr,
+          h("span.dim", { style: { fontSize: "12px" } }, "of shares"), eShr,
+        ]),
+        eHold, esBtn,
+      ]),
+      eStatus,
+    ]);
+
     V.mount(body, [
       h("div.grid.cols-2", { style: { alignItems: "start" } }, [backupCard, restoreCard]),
+      escrowCard,
       h("div.card", { style: { marginTop: "16px" } }, [h("div.card-h", null, [h("h3", null, "Backups on this host")]), listWrap]),
     ]);
     refreshList();

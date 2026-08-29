@@ -2856,6 +2856,56 @@ def run_detect(access_log: str, auth_log: str, conn_log: str) -> dict:
             "text": (proc.stdout or "")[:8000], "stderr": (proc.stderr or "")[:1000]}
 
 
+_HOLDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_. -]{0,40}\Z")
+
+
+def run_escrow_passphrase(passphrase: str, threshold: object, shares: object,
+                          holders: object) -> dict:
+    """Wave 9 (parity, SENSITIVE): opt-in m-of-n Shamir ESCROW of the off-box backup passphrase —
+    `vigil escrow-passphrase`. The security posture (ORCHESTRATE-while-key-on-host):
+      * the passphrase is handed to the child via its ENV (VIGIL_BACKUP_PASSPHRASE) — NEVER on argv, never
+        logged (the console access log is off), never stored, never echoed back in the response;
+      * the SECRET shares are written 0600 ON THE HOST by the verb and STAY there — the UI returns ONLY their
+        file NAMES + the PUBLIC metadata + the CLI's own (secret-free) stdout, NEVER a share's contents, so
+        no share/key material ever enters the browser. The owner retrieves the share files from the host to
+        distribute to each holder out-of-band.
+    Owner-gated at the route. threshold/shares are bounded ints (2<=m<=n<=20); holder names are validated
+    slugs (exactly n, or none to auto-name) — no free-text / injection reaches argv."""
+    if not isinstance(passphrase, str) or len(passphrase) < 8:
+        return {"ok": False, "error": "passphrase must be at least 8 characters"}
+    try:
+        m, n = int(threshold), int(shares)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "threshold and shares must be integers"}
+    if not (2 <= m <= n <= 20):
+        return {"ok": False, "error": "need 2 <= threshold <= shares <= 20"}
+    if holders is not None and not isinstance(holders, (list, tuple)):
+        # a non-list (int, or a bare string that would silently split into per-character "names") is
+        # rejected with a clean error rather than a 500 or a nonsense holder set — clarity + fail-closed.
+        return {"ok": False, "error": "holders must be a list of names (or omitted to auto-name)"}
+    holders = [str(h).strip() for h in (holders or []) if str(h).strip()]
+    if holders and (len(holders) != n or not all(_HOLDER_RE.match(h) for h in holders)):
+        return {"ok": False, "error": f"give exactly {n} holder names (safe chars) or none to auto-name"}
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    out_dir = console_dir() / "escrow" / (time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-" + os.urandom(3).hex())
+    argv = [vigil, "escrow-passphrase", "--threshold", str(m), "--shares", str(n), "--out-dir", str(out_dir)]
+    for h in holders:
+        argv += ["--holder", h]
+    child_env = {**os.environ, "VIGIL_BACKUP_PASSPHRASE": passphrase}   # passphrase via ENV — never argv
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120, env=child_env)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    # the SECRET shares stay on the host; surface ONLY their names + the CLI's secret-free stdout (paths +
+    # public metadata + the sovereignty trade-off), NEVER a share's contents.
+    written = sorted(p.name for p in out_dir.glob("*")) if out_dir.exists() else []
+    return {"ok": proc.returncode == 0, "threshold": m, "shares": n, "holders": holders or None,
+            "out_dir": str(out_dir), "files": written, "exit_code": proc.returncode,
+            "text": (proc.stdout or "")[:6000], "stderr": (proc.stderr or "")[:1000]}
+
+
 def knowledge_gitsync(action: str) -> dict:
     """A6c/K6: run ``vigil knowledge status|sync`` from the Knowledge screen and surface the result —
     ESPECIALLY the secret-scan REFUSAL. ``status`` shows what would commit; ``sync`` regenerates the
