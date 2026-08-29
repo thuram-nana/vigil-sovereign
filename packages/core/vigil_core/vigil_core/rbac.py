@@ -115,6 +115,7 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/identity": _READ,             # Wave 7: export the offense PUBLIC identity keys — read-only
     "/api/detect": _OWN,                # Wave 7: Detection Mirror over arbitrary HOST log paths — owner (host access)
     "/api/escrow": _OWN,                # Wave 9 (SENSITIVE): m-of-n Shamir escrow of the backup passphrase — owner
+    "/api/destruction/status": _OWN,    # Wave 11: read-only PUBLIC m-of-n destruction quorum shape — owner
     "/api/knowledge/gitsync": _RUN,
     "/api/evolve/*/tick": _RUN,
     "/api/knowledge/*/deeplearn": _RUN,

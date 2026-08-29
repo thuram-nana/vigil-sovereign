@@ -962,6 +962,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._json(actions.run_escrow_passphrase(body.get("passphrase", ""), body.get("threshold"),
                                                          body.get("shares"), body.get("holders")))
                 return
+            if path == "/api/destruction/status":
+                # Wave 11 (SAFE orchestration console): read-only PUBLIC m-of-n destruction quorum SHAPE
+                # (provisioned? threshold-of-n? signer ids) — _OWN. Reads only the public trust root; the
+                # key-minting/enrol/authorize/fire legs stay CLI/host-driven (keys never in the browser).
+                self._json(actions.run_destruction_status())
+                return
             if path == "/api/knowledge/gitsync":
                 # A6c: run `vigil knowledge status|sync` (regenerate + secret-scan + local commit; NOT push).
                 # CSRF/rebind-gated above; shells the exec-only vigil, surfacing the secret-scan refusal.

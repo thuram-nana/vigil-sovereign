@@ -5137,8 +5137,60 @@
         V.card("Live verdicts", "LIVE", h("div.feed#def-feed", null, h("div.empty", null, "Connecting to the verdict stream…")), false),
       ]),
       h("div", { style: { marginTop: "16px" } }, detectIdentityCard()),
+      h("div", { style: { marginTop: "16px" } }, destructionQuorumCard()),
     ]);
     loadDefense();
+  }
+
+  // Wave 11 (parity, SAFE orchestration console) — the m-of-n DESTRUCTION quorum that gates `vigil patch
+  // --open-pr`. The browser shows only the PUBLIC quorum SHAPE (read-only) + the exact host/cosigner commands
+  // to run: the key-minting (`provision-destruction` prints PRIVATE keys), per-host `enroll-cosigner`, the
+  // `authorize-destruction`, and the actual `--open-pr` fire all run on the CLI — keys NEVER enter the browser
+  // and no real PR is ever opened from here (ORCHESTRATE-while-key-on-host).
+  function destructionQuorumCard() {
+    var st = h("div#dq-status", null, h("div.empty", null, "Loading quorum status…"));
+    function refresh() {
+      V.getJSON(OFF("/api/destruction/status")).then(function (r) {
+        r = r || {};
+        if (r.ok === false) { V.mount(st, h("div.set-status.danger", null, r.error || "could not read the quorum")); return; }
+        if (!r.provisioned) {
+          V.mount(st, h("div.set-status.warn", { style: { flexDirection: "column", alignItems: "stretch" } }, [
+            h("div", null, [V.icon("info"), h("span", null, " No destruction quorum provisioned")]),
+            h("div.hint", { style: { marginTop: "4px" } }, r.detail || ""),
+          ]));
+          return;
+        }
+        V.mount(st, h("div.set-status.ok", { style: { flexDirection: "column", alignItems: "stretch" } }, [
+          h("div", null, [V.icon("check"), h("span", null, " Provisioned: " + (r.threshold != null ? r.threshold : "?") + "-of-" + (r.signers != null ? r.signers : "?"))]),
+          h("div.hint", { style: { marginTop: "4px" } }, "signers: " + ((r.signer_ids || []).join(", ") || "—") + "   ·   base-dir: " + (r.base_dir || "")),
+        ]));
+      }).catch(function (e) { V.mount(st, offlineEmpty(e, "Could not read the quorum status (owner only).")); });
+    }
+    refresh();
+    // ORCHESTRATE-while-key-on-host: these run on the HOST / each cosigner's own host — never the browser.
+    var cmds = [
+      ["1. provision (mint keys — prints PRIVATE keys ONCE, on the host):", "vigil provision-destruction --threshold M --signers N"],
+      ["   (or, per-host separation of duties) each co-signer, on THEIR host:", "vigil enroll-cosigner --key-id <id>            # sends back a PUBLIC enrollment.json"],
+      ["   then assemble on the minting box (PUBLIC material only):", "vigil assemble-destruction --enrollment owner=owner.enrollment.json --enrollment w1=w1.enrollment.json --threshold M"],
+      ["2. dry-run a patch (opens NOTHING — prints the action + pr-denied):", "vigil patch --finding-envelope <F.json> --target-repo <R>"],
+      ["3. authorize ONE action (owner key from Settings, single-use):", "vigil authorize-destruction --action-id <pr-id> --slug <slug> --target <R>"],
+      ["4. fire the gated PR (opens a REAL PR — only when fully armed):", "vigil patch --finding-envelope <F.json> --target-repo <R> --open-pr"],
+    ];
+    var guide = cmds.map(function (c) {
+      return h("div", { style: { marginTop: "8px" } }, [
+        h("div.hint", null, c[0]),
+        h("pre.mono", { style: { margin: "2px 0 0", whiteSpace: "pre-wrap", fontSize: "12px" } }, c[1]),
+      ]);
+    });
+    return h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Destruction quorum (m-of-n) — orchestration")]),
+      h("div.hint", null, "The m-of-n quorum that gates `vigil patch --open-pr`. This view is READ-ONLY: it "
+        + "shows the PUBLIC quorum shape below, and the exact commands to run ON THE HOST / each co-signer's own "
+        + "host. The signing keys print ONCE on the host and NEVER enter the browser; no real PR is opened from "
+        + "here. Run the steps in order; the fire step (4) opens a real PR only when the quorum is fully armed."),
+      h("div", { style: { marginTop: "10px" } }, st),
+      h("div", { style: { marginTop: "12px" } }, [h("div.hint", { style: { fontWeight: "600" } }, "Run on the host / each co-signer's own host:")].concat(guide)),
+    ]);
   }
 
   // Wave 7 (parity) — the log-plane Detection Mirror (`vigil detect`, owner-only — it reads arbitrary host

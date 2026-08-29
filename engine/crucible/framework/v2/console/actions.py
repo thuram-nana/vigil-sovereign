@@ -2906,6 +2906,40 @@ def run_escrow_passphrase(passphrase: str, threshold: object, shares: object,
             "text": (proc.stdout or "")[:6000], "stderr": (proc.stderr or "")[:1000]}
 
 
+def run_destruction_status() -> dict:
+    """Wave 11 (parity, SAFE orchestration console): read the PUBLIC m-of-n destruction trust root that
+    `vigil patch --open-pr` auto-discovers under the base-dir, and report the quorum SHAPE — provisioned?
+    threshold-of-n? the registered signer ids + a short PUBLIC-key fingerprint. Reads ONLY public material
+    (the trust root holds signer PUBLIC keys + a threshold; `write_trust_root` itself notes "0644 is fine —
+    no secrets"). The KEY-MINTING (`vigil provision-destruction` prints PRIVATE keys ONCE), the per-host
+    `enroll-cosigner` (each key is born + kept on that signer's OWN host), the `authorize-destruction`, and
+    the actual `patch --open-pr` fire all stay CLI/host-driven — the browser NEVER holds key material and
+    NEVER fires a real PR (ORCHESTRATE-while-key-on-host). The base-dir is server-resolved (no request
+    input → no traversal)."""
+    base = _strix_runtime_base_dir()
+    tr_path = Path(base) / "destruction-trust-root.json"
+    if not tr_path.is_file():
+        return {"ok": True, "provisioned": False, "base_dir": str(base),
+                "detail": "no destruction quorum provisioned under this base-dir — run "
+                          "`vigil provision-destruction` (or the assemble-destruction flow) ON THE HOST; the "
+                          "signing keys print ONCE and never enter the browser."}
+    try:
+        tr = json.loads(tr_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return {"ok": False, "provisioned": True, "base_dir": str(base),
+                "error": f"trust root present but unreadable: {type(e).__name__}"}
+    authorizers = tr.get("authorizers") if isinstance(tr, dict) else None
+    signers = []
+    for a in authorizers if isinstance(authorizers, list) else []:
+        if isinstance(a, dict):
+            pub = str(a.get("public_key_b64") or "")
+            signers.append({"key_id": str(a.get("key_id") or a.get("name") or "?"),
+                            "pubkey_fp": (pub[:12] + "…") if pub else ""})   # PUBLIC key fingerprint only
+    return {"ok": True, "provisioned": True, "base_dir": str(base), "trust_root": str(tr_path),
+            "threshold": tr.get("threshold") if isinstance(tr, dict) else None,
+            "signers": len(signers), "signer_ids": [s["key_id"] for s in signers], "signer_fps": signers}
+
+
 def knowledge_gitsync(action: str) -> dict:
     """A6c/K6: run ``vigil knowledge status|sync`` from the Knowledge screen and surface the result —
     ESPECIALLY the secret-scan REFUSAL. ``status`` shows what would commit; ``sync`` regenerates the
