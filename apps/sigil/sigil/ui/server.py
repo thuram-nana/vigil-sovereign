@@ -1211,6 +1211,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._oidc_login()
         if path in ("/api/backup", "/api/restore"):
             return self._durability_post(path)
+        if path in ("/api/ceremonies/vault-provision", "/api/ceremonies/kernel-pin"):
+            return self._ceremonies_post(path)
         if path.startswith("/api/hostcmd/"):
             return self._hostcmd_post(path)
         if path != "/api/action":
@@ -1282,6 +1284,36 @@ class Handler(BaseHTTPRequestHandler):
         try:
             actor = getattr(principal, "username", None) or "owner"
             self.server.store().append(kind="event", source="durability", actor=str(actor),
+                                       payload={"action": action, **{k: v for k, v in detail.items()}})
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _ceremonies_post(self, path):
+        """Wave 10b — OWNER-ONLY key-material ceremonies, orchestrated in-process by shelling the AUDITED
+        `sigil` verb (reuse the proven sealing/signing; the owner key stays sealed on the host and never
+        crosses — only the CLI's secret-free stdout returns). `vault provision` TPM-seals a fresh KEK;
+        `kernel pin` owner-signs the kernel binary hash into the manifest. Both are ZERO-arg (no request
+        input reaches the subprocess). `secrets` = owner-only. CSRF/rebind-gated like /api/action."""
+        if not self._origin_host_ok():
+            return self._deny(403, "denied (origin / host)")
+        principal = self._principal()
+        if principal is None:
+            return self._deny(403, "denied (token / origin / host)")
+        from ..governor.accounts import role_can
+        if not role_can(principal.role, "secrets"):
+            return self._deny(403, "owner only")
+        from . import ceremonies as _cer
+        verb = path.rsplit("/", 1)[1]
+        res = _cer.vault_provision() if verb == "vault-provision" else _cer.kernel_pin()
+        self._audit_ceremony(verb, principal, {"ok": res.get("ok"), "exit_code": res.get("exit_code")})
+        return self._json(res)
+
+    def _audit_ceremony(self, action, principal, detail):
+        """Append a SECRET-FREE audit event for an owner key-material ceremony (never any key/seal material).
+        Best-effort — an audit failure must not fail the ceremony the owner already authorized."""
+        try:
+            actor = getattr(principal, "username", None) or "owner"
+            self.server.store().append(kind="event", source="ceremony", actor=str(actor),
                                        payload={"action": action, **{k: v for k, v in detail.items()}})
         except Exception:  # noqa: BLE001
             pass

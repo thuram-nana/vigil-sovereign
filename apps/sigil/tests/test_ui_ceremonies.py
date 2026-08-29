@@ -87,6 +87,22 @@ def _make_account(port, username, role):
         return json.loads(r.read())["bearer_token"]
 
 
+def _post(port, path, token=TOKEN, body=None):
+    h = {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}", "Host": f"127.0.0.1:{port}"}
+    if token is not None:
+        h["X-SIGIL-Token"] = token
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+                                 data=json.dumps(body or {}).encode(), headers=h, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except Exception:  # noqa: BLE001
+            return e.code, {}
+
+
 def test_routes_are_operator_plus(monkeypatch):
     # OPERATOR+ (config_nonsecret) — the same tier as /api/doctor, because `key status` surfaces absolute
     # sealed-key file PATHS + the SEALED/PLAINTEXT posture + TOTP labels (an operational/FS-layout class a
@@ -101,3 +117,62 @@ def test_routes_are_operator_plus(monkeypatch):
         assert _get(port, f"/api/ceremonies/{leaf}", token=operator)[0] == 200      # operator+
         assert _get(port, f"/api/ceremonies/{leaf}", token=viewer)[0] == 403        # viewer REFUSED
     assert _get(port, "/api/ceremonies/vault", token=None)[0] == 401                # unauth
+
+
+# --- Wave 10b: OWNER-ONLY mutations (vault provision / kernel pin) ------------------------------------
+
+def test_mutations_shell_fixed_argv(monkeypatch):
+    # zero-arg owner ceremonies — the argv is a LITERAL (never request-controlled), reusing the audited verb.
+    seen = []
+    monkeypatch.setattr(subprocess, "run", lambda a, **k: (seen.append(a) or _P(0, "vault provisioned")))
+    assert ceremonies.vault_provision()["ok"] is True
+    assert seen[-1] == [sys.executable, "-m", "sigil", "vault", "provision"]
+    ceremonies.kernel_pin()
+    assert seen[-1] == [sys.executable, "-m", "sigil", "kernel", "pin"]
+
+
+def test_mutations_failclose(monkeypatch):
+    # a non-zero exit (e.g. no TPM, locked vault, unresolved kernel binary) → ok:false, never a false green.
+    monkeypatch.setattr(subprocess, "run", lambda a, **k: _P(1, "", "!! could not provision"))
+    r = ceremonies.vault_provision()
+    assert r["ok"] is False and r["exit_code"] == 1
+
+    def _boom(*a, **k):
+        raise OSError("no exec")
+    monkeypatch.setattr(subprocess, "run", _boom)
+    assert ceremonies.kernel_pin()["ok"] is False
+
+
+def test_mutation_routes_are_owner_only(monkeypatch):
+    # OWNER-only (`secrets`): both ceremonies act on/with the owner trust root. operator+ and viewer are
+    # REFUSED; a POST with no credential is 403 (the action plane refuses with 403, not 401). Stub the spawns.
+    for fn in ("vault_provision", "kernel_pin"):
+        monkeypatch.setattr(ceremonies, fn, lambda: {"ok": True, "verb": "x", "text": "done"})
+    _s, port = _serve()
+    viewer = _make_account(port, "cmv", "viewer")
+    operator = _make_account(port, "cmo", "operator")
+    for leaf in ("vault-provision", "kernel-pin"):
+        assert _post(port, f"/api/ceremonies/{leaf}")[0] == 200                      # owner
+        assert _post(port, f"/api/ceremonies/{leaf}", token=operator)[0] == 403      # operator REFUSED
+        assert _post(port, f"/api/ceremonies/{leaf}", token=viewer)[0] == 403        # viewer REFUSED
+        assert _post(port, f"/api/ceremonies/{leaf}", token=None)[0] == 403          # unauth
+
+
+def test_mutation_routes_reject_cross_origin(monkeypatch):
+    # CSRF/rebind NEGATIVE CONTROL: a POST with a MISMATCHED Origin is refused BEFORE the action even with a
+    # valid OWNER token — `_origin_host_ok` fires first in _ceremonies_post. (Neutering that gate must flip
+    # this red; the owner-only tests above can't catch it because they always send a same-origin header.)
+    for fn in ("vault_provision", "kernel_pin"):
+        monkeypatch.setattr(ceremonies, fn, lambda: {"ok": True, "verb": "x", "text": "done"})
+    _s, port = _serve()
+    h = {"Content-Type": "application/json", "Origin": "http://evil.example", "Host": f"127.0.0.1:{port}",
+         "X-SIGIL-Token": TOKEN}   # valid owner token, but a cross-origin Origin
+    for leaf in ("vault-provision", "kernel-pin"):
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/ceremonies/{leaf}",
+                                     data=b"{}", headers=h, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=8) as r:
+                code = r.status
+        except urllib.error.HTTPError as e:
+            code = e.code
+        assert code == 403, f"{leaf} accepted a cross-origin POST (CSRF gate not firing first)"
