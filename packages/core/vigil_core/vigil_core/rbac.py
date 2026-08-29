@@ -110,6 +110,8 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/down": _RUN,                  # Wave 4: contain the running console — operator+
     "/api/services/down": _OWN,         # Wave 4: gateway lifecycle down — owner (mirrors /api/services/up)
     "/api/services/render": _OWN,       # Wave 4: rewrite the gateway compose file — owner
+    "/api/posture/attest": _RUN,        # Wave 5: mint a posture Certificate (`vigil posture attest`) — runs a scan
+    "/api/posture/verify": _READ,       # Wave 5: offline re-verify a posture bundle — no scan, no traffic
     "/api/knowledge/gitsync": _RUN,
     "/api/evolve/*/tick": _RUN,
     "/api/knowledge/*/deeplearn": _RUN,

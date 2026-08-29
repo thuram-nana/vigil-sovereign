@@ -934,6 +934,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # Wave 4: docker egress-gateway lifecycle (symmetry with the wired /api/services/up) — _OWN.
                 self._json(actions.run_services_lifecycle("down" if path.endswith("/down") else "render"))
                 return
+            if path == "/api/posture/attest":
+                # Wave 5: mint a Certificate of Non-Exploitability (`vigil posture attest`) INTO the console
+                # posture dir — _RUN (it runs a scan). DETACHED; the SPA polls /api/posture. `name` is a
+                # server-validated slug (no path passthrough).
+                self._json(actions.run_posture_attest(str(body.get("name", ""))))
+                return
+            if path == "/api/posture/verify":
+                # Wave 5: offline re-verify a posture bundle (`vigil posture verify`) — _READ (no scan, no
+                # traffic; re-runs the bundle's own shipped verifier). `name` server-validated.
+                self._json(actions.run_posture_verify(str(body.get("name", ""))))
+                return
             if path == "/api/knowledge/gitsync":
                 # A6c: run `vigil knowledge status|sync` (regenerate + secret-scan + local commit; NOT push).
                 # CSRF/rebind-gated above; shells the exec-only vigil, surfacing the secret-scan refusal.

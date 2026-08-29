@@ -2756,6 +2756,63 @@ def run_services_lifecycle(action: str) -> dict:
             "text": (proc.stdout or "")[:4000], "stderr": (proc.stderr or "")[:1000]}
 
 
+_POSTURE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")  # \Z (not $) — reject a trailing newline
+
+
+def _resolve_posture_name(name: str) -> "Path | None":
+    """Validate a posture bundle NAME (a slug) and resolve it strictly under <.console>/posture — path-
+    traversal-safe (exact slug shape + strict containment). Returns the Path, or None for a bad name."""
+    if not isinstance(name, str) or not _POSTURE_NAME.match(name):
+        return None
+    base = (console_dir() / "posture").resolve()
+    p = (base / name).resolve()
+    if p.parent != base:
+        return None
+    return p
+
+
+def run_posture_attest(name: str) -> dict:
+    """Wave 5 (parity): mint a Certificate of Non-Exploitability — `vigil posture attest --out <dir>` scans
+    the authorized loopback target + signs a bundle INTO <.console>/posture/<name>, so the existing
+    `/api/posture` read surfaces it. DETACHED (attest runs a scan, ~1-2 min); the SPA polls the posture read
+    until the certificate appears. `name` is a validated slug resolved strictly under the posture dir — NO
+    path passthrough reaches argv."""
+    dest = _resolve_posture_name(str(name or ""))
+    if dest is None:
+        return {"ok": False, "error": "name must be a slug [A-Za-z0-9_-] (no path separators)"}
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"ok": False, "error": f"could not create the posture dir: {e}"}
+    r = _spawn_detached(["posture", "attest", "--out", str(dest), "--engagement", dest.name])
+    if r.get("ok"):
+        r["name"] = dest.name
+        r["detail"] = (f"attesting into {dest.name} — this runs a scan of the authorized loopback target "
+                       f"(~1-2 min); the certificate appears on the Proof of Posture screen when it completes.")
+    return r
+
+
+def run_posture_verify(name: str) -> dict:
+    """Wave 5 (parity): offline re-verify a posture bundle — `vigil posture verify --bundle <dir>` re-runs the
+    bundle's OWN shipped offline verifier (no scan, no traffic). SYNC + fast. `name` validated + resolved
+    strictly under the posture dir; fail-closed on a bad name / missing bundle / unresolvable bin."""
+    bundle = _resolve_posture_name(str(name or ""))
+    if bundle is None:
+        return {"ok": False, "error": "name must be a slug [A-Za-z0-9_-] (no path separators)"}
+    if not bundle.is_dir():
+        return {"ok": False, "error": f"no posture bundle named {bundle.name!r} under the console posture dir"}
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    try:
+        proc = subprocess.run([vigil, "posture", "verify", "--bundle", str(bundle)],
+                              capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"ok": proc.returncode == 0, "name": bundle.name, "exit_code": proc.returncode,
+            "text": (proc.stdout or "")[:4000], "stderr": (proc.stderr or "")[:1000]}
+
+
 def knowledge_gitsync(action: str) -> dict:
     """A6c/K6: run ``vigil knowledge status|sync`` from the Knowledge screen and surface the result —
     ESPECIALLY the secret-scan REFUSAL. ``status`` shows what would commit; ``sync`` regenerates the

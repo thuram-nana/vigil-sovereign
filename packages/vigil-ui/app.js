@@ -1472,10 +1472,53 @@
           + "offline-verifiable proof that, over the surface the scanner REACHED, an applicable oracle "
           + "had a live channel and did not fire. The boundary (denominator + residual) is the point.")]),
       h("div.acts", { style: { margin: "0 0 12px", gap: "8px", display: "flex", flexWrap: "wrap" } }, [refreshBtn, dlBtn]),
+      postureActionsCard(),
       h("div#posture-doctrine", { style: { marginBottom: "14px" } }),
       h("div#posture-body", null, h("div.empty", null, "Loading posture certificates…")),
     ]);
     loadPosture();
+  }
+
+  // Wave 5 (parity) — mint a Certificate of Non-Exploitability (attest) and offline re-verify a bundle,
+  // from the browser. Attest DETACHES on the server (it runs a scan, ~1-2 min) → we poll the posture read
+  // until the cert appears. Verify is a fast offline re-run of the bundle's own verifier. The bundle NAME is
+  // a slug the server validates + resolves strictly under the console posture dir.
+  function postureActionsCard() {
+    var nameInp = h("input.inp", { type: "text", placeholder: "bundle name (slug, e.g. prod-2026-08)", value: "posture-" + nowStamp().slice(0, 10) });
+    var out = h("div", null, "");
+    function poll(name, n) {
+      loadPosture();
+      if (n > 0) setTimeout(function () { if (current() === "posture") poll(name, n - 1); }, 12000);
+    }
+    return h("div.card", { style: { marginBottom: "14px" } }, [
+      h("div.card-h", null, [h("h3", null, "Attest & verify")]),
+      h("div.hint", null, "Attest scans the authorized loopback target and mints a signed, offline-verifiable "
+        + "certificate (~1-2 min — it appears below when done). Verify re-runs the bundle's own offline verifier."),
+      h("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", marginTop: "10px" } }, [
+        h("div", { style: { minWidth: "260px" } }, nameInp),
+        h("button.btn.sm.owner", { onClick: function () {
+          var nm = (nameInp.value || "").trim();
+          if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(nm)) { V.toast("name must be a slug [A-Za-z0-9_-]", true); return; }
+          V.postJSON(OFF("/api/posture/attest"), { name: nm }).then(function (r) {
+            if (r && r.ok) { V.mount(out, h("div.set-status.ok", { style: { marginTop: "8px" } }, [V.icon("check"), h("span", null, " " + (r.detail || "attesting…"))])); poll(nm, 12); }
+            else { V.mount(out, h("div.set-status.danger", { style: { marginTop: "8px" } }, (r && r.error) || "attest failed")); }
+          }).catch(function (e) { V.mount(out, h("div.set-status.danger", { style: { marginTop: "8px" } }, (e && e.message) || "attest failed")); });
+        } }, [V.icon("shield"), "Attest new certificate"]),
+        h("button.btn.sm", { onClick: function () {
+          var nm = (nameInp.value || "").trim();
+          if (!nm) { V.toast("enter the bundle name to verify", true); return; }
+          V.mount(out, h("div.hint", { style: { marginTop: "8px" } }, "Verifying " + nm + "…"));
+          V.postJSON(OFF("/api/posture/verify"), { name: nm }).then(function (r) {
+            var okv = !!(r && r.ok);
+            V.mount(out, h("div.set-status" + (okv ? ".ok" : ".danger"), { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+              h("div", null, [V.icon(okv ? "check" : "x"), h("span", null, " " + nm + ": " + (okv ? "VERIFIED offline" : "NOT verified"))]),
+              (r && (r.text || r.error)) ? h("pre.mono", { style: { marginTop: "6px", whiteSpace: "pre-wrap", fontSize: "12px", maxHeight: "220px", overflow: "auto" } }, r.text || r.error) : null,
+            ]));
+          }).catch(function (e) { V.mount(out, h("div.set-status.danger", { style: { marginTop: "8px" } }, (e && e.message) || "verify failed")); });
+        } }, [V.icon("check"), "Verify bundle"]),
+      ]),
+      out,
+    ]);
   }
   function loadPosture() {
     var body = V.$("#posture-body");
