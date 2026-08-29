@@ -25,8 +25,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from .posture import production_posture
+
+
+def strip_url_credentials(value):
+    """Strip inline ``user:pass@`` / ``token@`` credentials from any URL-shaped VALUE, regardless of any
+    key name. The doctor reports (both planes) surface config values and health details — including DSNs
+    like ``QDRANT_URL`` / ``LLM_API_BASE`` — to operator+ over ``/api/doctor``; a name-based redactor cannot
+    catch a credential embedded in a value under a non-secret-named key.
+
+    It parses with the SAME ``urllib`` the code uses to CONNECT and rebuilds the authority without its
+    userinfo (``netloc.rpartition('@')`` — the last ``@``), so the redacted display can never diverge from
+    the host urllib would actually reach. Using urllib (not a hand-rolled regex) means it inherits urllib's
+    own parsing: a password containing an unescaped ``@`` is stripped whole; ``\\t\\r\\n`` that urllib deletes
+    before parsing can't smuggle a second authority past it; and a scheme-relative ``//user:pass@host`` is
+    covered too. An ``@`` in a path / query / fragment sits OUTSIDE the netloc, so such a value (and any
+    non-credential URL — a plain endpoint, an OIDC issuer) is returned verbatim. Shared by BOTH trust planes
+    so the redaction can never drift between them (FATAL-2-safe: pure stdlib)."""
+    if not (isinstance(value, str) and "@" in value):
+        return value
+    try:
+        parts = urlsplit(value)
+    except ValueError:                       # unparseable but carries a scheme sep + '@' → redact defensively
+        return "***" if ("://" in value or value.startswith("//")) else value
+    if "@" not in parts.netloc:              # the '@' is in a path/query/fragment, not the authority
+        return value                         # leave verbatim → byte-identical for non-credential URLs
+    host_part = parts.netloc.rpartition("@")[2]   # everything AFTER the last '@' = host[:port], per urllib
+    try:
+        return urlunsplit((parts.scheme, f"***@{host_part}", parts.path, parts.query, parts.fragment))
+    except ValueError:
+        return "***"
+
 
 # ── the shared production-posture control registry ────────────────────────────────────────────────────
 # (control, good-states, requirement text). ORDER is the plan's five conditions plus W10-7's legacy-token

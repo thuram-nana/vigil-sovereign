@@ -431,6 +431,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"chain_ok": bool(cok), "chain_detail": cmsg,
                                "head_present": head_present, "head_ok": bool(hok), "head_detail": hmsg,
                                "ok": bool(cok and (hok or not head_present))})
+        if path == "/api/doctor":
+            # Parity (Wave 2b): the sovereign install self-check — the SAME report `sigil doctor --json`
+            # emits, in-process (shared `cli.sigil_doctor_report`). Gated OPERATOR+ via `config_nonsecret`:
+            # the report surfaces the effective config (FS layout / OIDC issuer+client_id / paths) — the
+            # exact NON-secret configuration the same role can already `set_config`, so reading it back is
+            # RBAC-consistent (a viewer, who cannot set config, is refused). Secret VALUES are redacted by
+            # `config._redact` (name-hint) + URL-userinfo stripping; no key/bearer/DEK/password/TOTP is in
+            # the payload. It is a deliberately higher tier than the plain viewer+ verify read.
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "config_nonsecret"):
+                return self._deny(403, "operator+ required")
+            from ..cli import sigil_doctor_report
+            return self._json(sigil_doctor_report())
         if path.startswith("/api/record/"):
             return self._record(path.rsplit("/", 1)[-1])
         if path == "/api/stream":

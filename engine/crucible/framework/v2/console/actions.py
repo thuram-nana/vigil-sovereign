@@ -2637,6 +2637,31 @@ def run_verify(kind: str) -> dict:
             "text": (proc.stdout or "")[:4000], "stderr": (proc.stderr or "")[:1000]}
 
 
+def run_doctor() -> dict:
+    """Parity (Wave 2b): run `vigil doctor --json` from the System screen and surface the install/health
+    report — prerequisite binaries, both venvs, writable dirs, UI ports, docker services. Shells the
+    exec-only `vigil` (never imports it), fail-closed on an unresolvable bin / non-JSON output. Read-only:
+    a preflight that mints no run and mutates nothing. `--install` stays a deliberate CLI act (installing
+    host prerequisites is not a browser action)."""
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    try:
+        proc = subprocess.run([vigil, "doctor", "--json"], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    parsed = {}
+    if proc.stdout.strip():
+        try:
+            parsed = json.loads(proc.stdout)
+        except ValueError:
+            parsed = {"raw": proc.stdout[:8000]}
+    # spread the parsed report FIRST, then set `ok` from the EXIT CODE last — the process's exit status is
+    # authoritative over any stdout `ok` field (veracity: re-execution, not string trust).
+    return {**(parsed if isinstance(parsed, dict) else {"report": parsed}),
+            "ok": proc.returncode == 0}
+
+
 def knowledge_gitsync(action: str) -> dict:
     """A6c/K6: run ``vigil knowledge status|sync`` from the Knowledge screen and surface the result —
     ESPECIALLY the secret-scan REFUSAL. ``status`` shows what would commit; ``sync`` regenerates the

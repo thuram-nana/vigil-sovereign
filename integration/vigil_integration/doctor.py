@@ -149,8 +149,13 @@ def _probe_llm_backend() -> dict:
     out: dict = {"tier": tier, "override": override or None, "anthropic_api_key": has_key}
 
     def _describe_local(backend: str) -> None:
+        from vigil_core.doctor import strip_url_credentials
         ep = _local_endpoint(backend)
-        out.update(backend=backend, local=True, endpoint=(ep or None))
+        # This report is surfaced to operator+ over the offense /api/doctor. A credentialed endpoint
+        # (LLM_API_BASE=https://user:key@proxy) must never leak its userinfo into a field or detail — the
+        # real `ep` is used for probing (host/port carry no userinfo), the redacted copy is what surfaces.
+        safe_ep = strip_url_credentials(ep) if ep else ep
+        out.update(backend=backend, local=True, endpoint=(safe_ep or None))
         if not ep:
             out["reachable"] = None
             out["detail"] = (f"local backend {backend!r}: no endpoint configured "
@@ -159,12 +164,12 @@ def _probe_llm_backend() -> dict:
         host, port = _endpoint_host_port(ep)
         if not _host_is_loopback(host):
             out["reachable"] = None                     # the engine refuses this; do NOT egress-probe it
-            out["detail"] = (f"local backend {backend!r} points at a NON-loopback endpoint ({ep}); the engine "
+            out["detail"] = (f"local backend {backend!r} points at a NON-loopback endpoint ({safe_ep}); the engine "
                              f"REFUSES it (it would send the prompt off-host). Point it at localhost / 127.0.0.1.")
             return
         reachable = _tcp_reachable(host, port)
         out["reachable"] = reachable
-        out["detail"] = (f"local backend {backend!r} at {ep} is "
+        out["detail"] = (f"local backend {backend!r} at {safe_ep} is "
                          f"{'reachable' if reachable else 'NOT answering'} on loopback.")
 
     if override:

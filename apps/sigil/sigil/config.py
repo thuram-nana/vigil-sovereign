@@ -284,11 +284,20 @@ def ensure_install_manifest():
 _SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
 
 
+def _strip_url_credentials(value):
+    """Thin wrapper over the SHARED scrubber in ``vigil_core.doctor`` (imported lazily, like this module's
+    other vigil_core uses). Sharing it with the offense doctor means the URL-credential redaction can never
+    drift between the two trust planes — both surface DSNs to operator+ over /api/doctor."""
+    from vigil_core.doctor import strip_url_credentials
+    return strip_url_credentials(value)
+
+
 def _redact(name: str, value):
-    """Redact any value whose KEY NAME looks like a secret. Never inspect the value itself."""
+    """Redact any value whose KEY NAME looks like a secret; then strip URL-embedded credentials from
+    whatever survives (a value-level backstop for creds under a non-secret-named key)."""
     if value and any(h in name.upper() for h in _SECRET_HINTS):
         return "***redacted***"
-    return value
+    return _strip_url_credentials(value)
 
 
 def effective_config() -> dict:
@@ -355,13 +364,19 @@ def _check_qdrant() -> tuple[str, bool, str]:
     url = os.environ.get("SIGIL_QDRANT_URL", "")
     if not url:
         return ("qdrant", True, f"embedded/local-mode at {_resolve_home() / 'qdrant'} (no server configured)")
+    safe = _strip_url_credentials(url)   # the detail is surfaced to operator+ over /api/doctor — never inline creds
     try:
         import urllib.request
         with urllib.request.urlopen(url.rstrip("/") + "/readyz", timeout=2) as r:
             code = getattr(r, "status", None) or r.getcode()
-        return ("qdrant", 200 <= int(code) < 300, f"{url} → HTTP {code}")
+        return ("qdrant", 200 <= int(code) < 300, f"{safe} → HTTP {code}")
     except Exception as e:  # noqa: BLE001 — any failure = not reachable
-        return ("qdrant", False, f"{url} unreachable: {e}")
+        # NEVER echo the raw exception text: a malformed-URL error can quote a credential FRAGMENT that is
+        # neither the whole URL nor a parseable URL (so neither replace nor the URL scrubber would catch it).
+        # A socket error's `.reason` is URL-free and useful; a parse error (no `.reason`) → just the type.
+        reason = getattr(e, "reason", None)
+        why = str(reason) if reason is not None else type(e).__name__
+        return ("qdrant", False, f"{safe} unreachable: {_strip_url_credentials(why)}")
 
 
 def _check_keyring() -> tuple[str, bool, str]:

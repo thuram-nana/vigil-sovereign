@@ -5759,7 +5759,55 @@
     V.mount(body, [
       h("div.grid.cols-2", { style: { alignItems: "start" } }, [prereq, portCard]),
       h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "16px" } }, [svcCard, issuesCard].filter(Boolean)),
+      h("div", { style: { marginTop: "16px" } }, doctorCard()),
       notes.length ? h("div.legend", { style: { marginTop: "12px" } }, [V.icon("info"), notes.join("  ·  ")]) : null,
+    ]);
+  }
+
+  // Wave 2b (parity) — run the `vigil doctor` / `sigil doctor` install-health verbs from the browser.
+  // The board above already reflects the offense readiness read (`/api/services`); this card runs the
+  // actual doctor CLI verbs on demand: the offense plane shells `vigil doctor --json`, the sovereign plane
+  // returns the same report `sigil doctor --json` emits, in-process. Read-only — a preflight, no mutation.
+  function doctorCard() {
+    var out = h("div", null, "");
+    function showDoctor(title, promise) {
+      V.mount(out, h("div.hint", { style: { marginTop: "8px" } }, title + ": running…"));
+      promise.then(function (r) {
+        var okv = !!(r && r.ok);
+        var lines = [];
+        if (r && r.error) { lines.push(r.error); }
+        if (r && r.checks && r.checks.length) {          // sovereign report: {checks:[{id,ok,required,detail}], ...}
+          lines = lines.concat(r.checks.map(function (c) {
+            return (c.ok ? "OK   " : (c.required ? "FAIL " : "warn ")) + c.id + (c.detail ? " — " + c.detail : ""); }));
+          (r.posture || []).forEach(function (p) {        // posture: [{control,state,detail}] — security controls
+            lines.push("posture " + (p.control || "?") + ": " + (p.state || "?") + (p.detail ? " — " + p.detail : "")); });
+          if (r.production_gate) {                        // {armed, ok, controls} — the prod bring-up gate
+            lines.push("production gate: " + (r.production_gate.armed ? "ARMED" : "not armed") + (r.production_gate.ok ? " (ok)" : " (blocking)")); }
+        } else {                                          // offense report: {ok, binaries, venvs, issues, notes, ...}
+          (r && r.issues || []).forEach(function (m) { lines.push("issue: " + m); });
+          var bins = (r && r.binaries) || {}, venvs = (r && r.venvs) || {};
+          Object.keys(bins).forEach(function (b) { lines.push((bins[b] ? "OK   " : "FAIL ") + b); });
+          Object.keys(venvs).forEach(function (v) { lines.push((venvs[v] ? "OK   " : "FAIL ") + v + " venv"); });
+          (r && r.notes || []).forEach(function (m) { lines.push("note: " + m); });
+        }
+        V.mount(out, h("div.set-status" + (okv ? ".ok" : ".danger"), { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+          h("div", null, [V.icon(okv ? "check" : "x"), h("span", null, " " + title + ": " + (okv ? "HEALTHY" : "ACTION NEEDED"))]),
+          lines.length ? h("pre.mono", { style: { marginTop: "6px", whiteSpace: "pre-wrap", fontSize: "12px", maxHeight: "280px", overflow: "auto" } }, lines.join("\n")) : null,
+        ]));
+      }).catch(function (e) {
+        V.mount(out, h("div.set-status.danger", { style: { marginTop: "8px" } }, title + ": " + ((e && e.message) || e)));
+      });
+    }
+    return h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Run doctor")]),
+      h("div.hint", null, "Run the install/health self-check from the browser — read-only, no traffic. "
+        + "The offense plane shells `vigil doctor`; the sovereign plane returns the `sigil doctor` report in-process. "
+        + "(`doctor --install`, which mutates the host, stays a deliberate CLI act.)"),
+      h("div.acts", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "10px" } }, [
+        h("button.btn.sm", { onClick: function () { showDoctor("Offense doctor", V.postJSON(OFF("/api/doctor"), {})); } }, [V.icon("shield"), "Run offense doctor"]),
+        h("button.btn.sm", { onClick: function () { showDoctor("Sovereign doctor", V.getJSON(SOV("/api/doctor"))); } }, [V.icon("shield"), "Run sovereign doctor"]),
+      ]),
+      out,
     ]);
   }
 
