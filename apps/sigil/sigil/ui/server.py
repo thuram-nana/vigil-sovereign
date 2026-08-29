@@ -443,6 +443,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/settings":
             from . import settings as _settings
             return self._json(_settings.settings_status())     # REDACTED — never a secret value
+        if path == "/api/antirollback/floor" or path == "/api/antirollback/spine":
+            # Wave 8: read-only anti-rollback status (`sigil floor status` / `sigil spine status`) — viewer+
+            # (metadata: last_seq / anchor / segment set; no key or secret). The reset/rotate/compact
+            # MUTATIONS stay CLI/owner-only (deferred).
+            from . import antirollback as _ar
+            return self._json(_ar.floor_status() if path.endswith("/floor") else _ar.spine_status())
         if path == "/api/verify":
             # Parity (Wave 2): the sovereign spine self-verify — chain integrity + the owner-signed head
             # anchor (exactly what `sigil verify` runs, in-process, same venv). Viewer+ read, no secret.

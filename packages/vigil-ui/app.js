@@ -1278,11 +1278,40 @@
         h("span.sub", null, "VIGIL's signed, offline-verifiable certificates — rendered as certificates: "
           + "trust root, out-of-band fingerprint pin, and a live offline PASS/FAIL verification.")]),
       h("div#trust-doctrine", { style: { marginBottom: "14px" } }),
+      antiRollbackCard(),
       h("div#trust-body", null, h("div.empty", null, "Loading certificates…")),
     ]);
     V.getJSON(OFF("/api/certs")).then(renderTrustData).catch(function (e) {
       V.mount(V.$("#trust-body"), offlineEmpty(e, "Could not reach the offense console to read certificates. Start it (vigil up) and reload."));
     });
+  }
+
+  // Wave 8 (parity) — read-only sovereign ANTI-ROLLBACK status: the durable external floor (`sigil floor
+  // status`) + the spine's segment-rotation state (`sigil spine status`). Metadata only. The reset / rotate /
+  // compact mutations stay CLI/owner-only (deferred).
+  function antiRollbackCard() {
+    var out = h("div", null, h("div.empty", null, "Loading anti-rollback status…"));
+    function draw(floor, spine) {
+      function block(title, r) {
+        var okv = !!(r && r.ok);
+        return h("div", { style: { flex: "1", minWidth: "260px" } }, [
+          h("div", { style: { display: "flex", gap: "6px", alignItems: "center", marginBottom: "4px" } }, [V.pill(okv ? "ok" : "check", okv ? "up" : "danger", null), h("strong", null, title)]),
+          h("pre.mono", { style: { whiteSpace: "pre-wrap", fontSize: "12px", maxHeight: "220px", overflow: "auto", margin: "0" } }, (r && (r.text || r.error)) || "—"),
+        ]);
+      }
+      V.mount(out, h("div", { style: { display: "flex", gap: "18px", flexWrap: "wrap" } }, [block("Anti-rollback floor", floor), block("Spine segments", spine)]));
+    }
+    Promise.all([
+      V.getJSON(SOV("/api/antirollback/floor")).catch(function (e) { return { ok: false, error: (e && e.message) || "unreachable" }; }),
+      V.getJSON(SOV("/api/antirollback/spine")).catch(function (e) { return { ok: false, error: (e && e.message) || "unreachable" }; }),
+    ]).then(function (r) { draw(r[0], r[1]); });
+    return h("div.card", { style: { marginBottom: "14px" } }, [
+      h("div.card-h", null, [h("h3", null, "Anti-rollback status"),
+        h("button.btn.sm", { style: { marginLeft: "auto" }, onClick: function () { if (current() === "trust") renderTrust(V.$("#screen") || document.body); } }, [V.icon("live"), "Refresh"])]),
+      h("div.hint", null, "The durable external floor + the spine's segment-rotation state — read-only. "
+        + "A downward floor RESET or a spine rotate/compact stays a deliberate owner CLI act."),
+      h("div", { style: { marginTop: "10px" } }, out),
+    ]);
   }
 
   function renderTrustData(d) {
