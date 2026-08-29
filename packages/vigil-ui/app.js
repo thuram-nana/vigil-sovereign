@@ -5752,16 +5752,101 @@
       h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" } }, [
         upBtn,
         h("label", { style: { display: "flex", gap: "6px", alignItems: "center", fontSize: "13px", color: "var(--text-1)" } }, [allChk, "include Neo4j + otel"]),
+        // Wave 4 — gateway lifecycle down/render (owner). `render` only rewrites the compose file (safe);
+        // `down` stops+removes the gateway container (networks left in place).
+        h("button.btn.sm", { onClick: function () {
+          if (!confirm("Stop + remove the egress-gateway container? (docker networks are left in place)")) return;
+          V.postJSON(OFF("/api/services/down"), {}).then(function (r) { V.toast(r && r.ok ? "Gateway stopped." : (r && r.error) || "down failed", !(r && r.ok)); setTimeout(function () { if (V.$("#system-body")) V.getJSON(OFF("/api/services")).then(drawSystem).catch(function () {}); }, 1200); }).catch(function (e) { V.toast((e && e.message) || "down failed", true); });
+        } }, [V.icon("x"), "Gateway down"]),
+        h("button.btn.sm", { onClick: function () {
+          V.postJSON(OFF("/api/services/render"), {}).then(function (r) { V.toast(r && r.ok ? "Compose file re-rendered." : (r && r.error) || "render failed", !(r && r.ok)); }).catch(function (e) { V.toast((e && e.message) || "render failed", true); });
+        } }, [V.icon("gear"), "Re-render compose"]),
       ]),
     ], false);
     var issues = d.issues || [];
     var issuesCard = issues.length ? V.card("Action needed", "!", h("ul", { style: { margin: "0", paddingLeft: "18px" } }, issues.map(function (m) { return h("li", null, m); })), false) : null;
     var notes = d.notes || [];
     V.mount(body, [
-      h("div.grid.cols-2", { style: { alignItems: "start" } }, [prereq, portCard]),
+      h("div", null, daemonsCard()),
+      h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "16px" } }, [prereq, portCard]),
       h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "16px" } }, [svcCard, issuesCard].filter(Boolean)),
       h("div", { style: { marginTop: "16px" } }, doctorCard()),
+      h("div", { style: { marginTop: "16px" } }, lifecycleCard()),
       notes.length ? h("div.legend", { style: { marginTop: "12px" } }, [V.icon("info"), notes.join("  ·  ")]) : null,
+    ]);
+  }
+
+  // Wave 4 (parity) — the read-only daemon/unit health strip (`vigil alerts --status --json`): a light per
+  // HA/scheduled unit (backup, off-host push, recovery drill, HA mirror-sync, integrity, posture, reprove).
+  function daemonsCard() {
+    var out = h("div", null, h("div.empty", null, "Loading daemon health…"));
+    function pill(state) {
+      var up = state === "HEALTHY", absent = state === "ABSENT";
+      return V.pill(state || "?", up ? "up" : (absent ? "idle" : "danger"), null);
+    }
+    V.postJSON(OFF("/api/daemons/status"), {}).then(function (r) {
+      if (r && r.error) { V.mount(out, h("div.set-status.danger", null, [V.icon("x"), h("span", null, " " + r.error)])); return; }
+      var st = (r && r.statuses) || [];
+      if (!st.length) {
+        // distinguish "the read failed" (ok:false, no statuses) from "genuinely nothing registered"
+        var msg = (r && r.ok) ? "No scheduled units registered." : "Could not read daemon health (the check did not return a unit list).";
+        V.mount(out, h("div.empty", null, msg)); return;
+      }
+      V.mount(out, [
+        h("div", null, st.map(function (s) {
+          return h("div.kv", null, [
+            h("div.k", null, [pill(s.state), " " + s.unit]),
+            h("div.v", { style: { fontSize: "12.5px", color: "var(--text-2)" } }, s.detail || ""),
+          ]);
+        })),
+        (r.delivery_stale ? h("div.set-status.danger", { style: { marginTop: "8px" } }, [V.icon("x"), h("span", null, " alert delivery is STALE — " + (r.delivery_detail || ""))]) : null),
+      ]);
+    }).catch(function (e) { V.mount(out, offlineEmpty(e, "Could not reach the offense console for daemon health.")); });
+    return h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Daemons & scheduled units"),
+        h("button.btn.sm", { style: { marginLeft: "auto" }, onClick: function () { drawSystem({}); V.getJSON(OFF("/api/services")).then(drawSystem).catch(function () {}); } }, [V.icon("play"), "Refresh"])]),
+      h("div.hint", null, "Heartbeat staleness for every HA / scheduled unit — read-only. A stale or failed heartbeat lights amber/red."),
+      h("div", { style: { marginTop: "10px" } }, out),
+    ]);
+  }
+
+  // Wave 4 (parity) — Lifecycle & Emergency: Restricted Mode (emergency-stop), the emergency hard-stop
+  // (panic), and containing the console (down). panic/down are DETACHED on the server — they stop THIS
+  // console, so the connection drops after the request; both are double-confirmed here.
+  function lifecycleCard() {
+    var esOut = h("div", null, "");
+    function esStatus() {
+      V.postJSON(OFF("/api/emergency-stop"), { action: "status" }).then(function (r) {
+        V.mount(esOut, h("pre.mono", { style: { marginTop: "8px", whiteSpace: "pre-wrap", fontSize: "12px" } }, (r && r.text) || (r && r.error) || ""));
+      }).catch(function (e) { V.mount(esOut, h("div.hint", { style: { marginTop: "8px" } }, (e && e.message) || "status failed")); });
+    }
+    return h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Lifecycle & Emergency")]),
+      h("div.hint", null, "Restricted Mode trips every kill-switch but keeps the process UP for diagnosis. "
+        + "The hard-stop and Contain the console are DETACHED — they stop this console, so the page will drop after you confirm."),
+      h("div.acts", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "10px" } }, [
+        h("button.btn.sm", { onClick: esStatus }, [V.icon("find"), "Mode status"]),
+        h("button.btn.sm.danger", { onClick: function () {
+          if (!confirm("Enter RESTRICTED MODE? Every engagement's kill-switch is tripped — all target-touching actions are refused until an owner lifts it. The process stays up.")) return;
+          V.postJSON(OFF("/api/emergency-stop"), { action: "enter" }).then(function (r) { V.toast(r && r.ok ? "Restricted Mode ON." : (r && r.error) || "failed", !(r && r.ok)); esStatus(); }).catch(function (e) { V.toast((e && e.message) || "failed", true); });
+        } }, [V.icon("shield"), "Enter Restricted Mode"]),
+        h("button.btn.sm.owner", { onClick: function () {
+          if (!confirm("Leave Restricted Mode and restore full operation? (owner only)")) return;
+          V.postJSON(OFF("/api/emergency-stop/leave"), {}).then(function (r) { V.toast(r && r.ok ? "Restricted Mode OFF." : (r && r.error) || "failed", !(r && r.ok)); esStatus(); }).catch(function (e) { V.toast((e && e.message) || "failed", true); });
+        } }, [V.icon("check"), "Leave (owner)"]),
+      ]),
+      esOut,
+      h("div", { style: { height: "1px", background: "var(--line)", margin: "14px 0" } }),
+      h("div.acts", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } }, [
+        h("button.btn.sm.danger", { onClick: function () {
+          if (!confirm("EMERGENCY HARD-STOP (panic)?\n\nThis trips every kill-switch, masks + stops the command unit, disables the cadence timers, and kills tracked processes. THIS CONSOLE WILL STOP — the page will go blank. Clearing containment is a manual CLI act.\n\nProceed?")) return;
+          V.postJSON(OFF("/api/panic"), { reason: "UI panic" }).then(function (r) { V.toast(r && r.ok ? "Panic initiated — the console is stopping." : (r && r.error) || "failed", !(r && r.ok)); }).catch(function () { V.toast("Panic initiated — the console is stopping (connection dropped).", false); });
+        } }, [V.icon("bolt"), "Emergency hard-stop (panic)"]),
+        h("button.btn.sm", { onClick: function () {
+          if (!confirm("Contain the running console (vigil down)?\n\nStops + disables the systemd unit (so it won't restore) and kills the backends + proxy. THIS CONSOLE WILL STOP.\n\nProceed?")) return;
+          V.postJSON(OFF("/api/down"), {}).then(function (r) { V.toast(r && r.ok ? "Containment initiated — the console is stopping." : (r && r.error) || "failed", !(r && r.ok)); }).catch(function () { V.toast("Containment initiated — the console is stopping (connection dropped).", false); });
+        } }, [V.icon("x"), "Contain the console (down)"]),
+      ]),
     ]);
   }
 

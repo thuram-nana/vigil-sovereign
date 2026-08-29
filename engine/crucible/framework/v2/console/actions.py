@@ -2662,6 +2662,100 @@ def run_doctor() -> dict:
             "ok": proc.returncode == 0}
 
 
+def daemons_status() -> dict:
+    """Wave 4 (parity): the offense daemon/unit health strip — `vigil alerts --status --json` (read-only
+    heartbeat staleness for every HA/scheduled unit: backup, off-host push, recovery drill, HA mirror-sync,
+    integrity, posture, reprove). Shells the exec-only `vigil`, fail-closed. `ok` reflects NO-alarm (exit 0);
+    a present alarm is exit 1 with the per-unit `statuses` still populated — the strip renders those lights."""
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    try:
+        proc = subprocess.run([vigil, "alerts", "--status", "--json"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    parsed = {}
+    if proc.stdout.strip():
+        try:
+            parsed = json.loads(proc.stdout)
+        except ValueError:
+            parsed = {"raw": proc.stdout[:4000]}
+    return {**(parsed if isinstance(parsed, dict) else {"report": parsed}),
+            "ok": proc.returncode == 0}
+
+
+def run_emergency_stop(action: str) -> dict:
+    """Wave 4 (parity): RESTRICTED MODE from the browser — `vigil emergency-stop`. `status` (read) shows the
+    current mode; `enter` trips every engagement's kill-switch (the process stays UP for diagnosis/evidence)
+    and records the transition on the chain; `leave` lifts it (owner-gated at the route). Shells the exec-only
+    `vigil`, fail-closed on a bad action / unresolvable bin. Enter/leave are NOT terminal — the console stays up."""
+    action = str(action or "").strip()
+    argv = {"status": ["emergency-stop", "--status"],
+            "enter": ["emergency-stop", "--reason", "UI-initiated"],
+            "leave": ["emergency-stop", "--leave"]}.get(action)
+    if argv is None:
+        return {"ok": False, "error": "action must be 'status', 'enter', or 'leave'"}
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    try:
+        proc = subprocess.run([vigil, *argv], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"ok": proc.returncode == 0, "action": action, "exit_code": proc.returncode,
+            "text": (proc.stdout or "")[:4000], "stderr": (proc.stderr or "")[:1000]}
+
+
+def _spawn_detached(cmd: list) -> dict:
+    """Fire-and-forget a lifecycle verb that CONTAINS this very console (panic/down): the child MUST survive
+    the parent's death, so it runs in its OWN session (`start_new_session`) and is NOT waited on — the route
+    returns 'initiated' before the child stops the units + kills this process. argv is a FIXED literal list
+    (no request-controlled token), `shell=False`."""
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    try:
+        subprocess.Popen([vigil, *cmd], start_new_session=True,           # noqa: S603 — fixed argv, shell=False
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"ok": True, "initiated": True,
+            "detail": "containment initiated — this console will now stop; the connection will drop shortly."}
+
+
+def run_panic(reason: str) -> dict:
+    """Wave 4 (parity): the emergency HARD-STOP — `vigil panic`. Trips EVERY kill-switch, masks+stops the
+    command unit, disables the cadence sidecars (no catch-up replay), kills tracked processes, verifies
+    containment. DETACHED — it contains THIS console. Returns 'initiated' immediately; the double-confirm
+    lives in the SPA. Clearing containment stays a deliberate CLI act."""
+    return _spawn_detached(["panic", "--reason", str(reason or "UI panic")[:200]])
+
+
+def run_down() -> dict:
+    """Wave 4 (parity): CONTAIN a running `vigil up` — `vigil down` (stop+disable the `vigil-command`
+    systemd unit so `Restart=always` cannot restore it, then kill the backends + proxy). DETACHED — it stops
+    THIS console. `vigil up` itself stays intentionally-CLI-only (you can't be in the UI before it runs)."""
+    return _spawn_detached(["down"])
+
+
+def run_services_lifecycle(action: str) -> dict:
+    """Wave 4 (parity): docker egress-gateway lifecycle — `vigil services down|render` (symmetry with the
+    already-wired `services up`). `down` stops+removes the gateway container (networks left in place);
+    `render` only rewrites the compose file (safe). Shells the exec-only `vigil`, fail-closed on a bad action."""
+    action = str(action or "").strip()
+    if action not in ("down", "render"):
+        return {"ok": False, "error": "action must be 'down' or 'render'"}
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    try:
+        proc = subprocess.run([vigil, "services", action], capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"ok": proc.returncode == 0, "action": action, "exit_code": proc.returncode,
+            "text": (proc.stdout or "")[:4000], "stderr": (proc.stderr or "")[:1000]}
+
+
 def knowledge_gitsync(action: str) -> dict:
     """A6c/K6: run ``vigil knowledge status|sync`` from the Knowledge screen and surface the result —
     ESPECIALLY the secret-scan REFUSAL. ``status`` shows what would commit; ``sync`` regenerates the

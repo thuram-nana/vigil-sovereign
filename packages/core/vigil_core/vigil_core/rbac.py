@@ -99,6 +99,17 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/verify-cert": _RUN,
     "/api/verify": _RUN,                # Wave 2: run `vigil verify-integrity/verify-ledger/verify` (read-recompute)
     "/api/doctor": _RUN,                # Wave 2b: run `vigil doctor --json` (install/health preflight, read-only)
+    "/api/daemons/status": _READ,       # Wave 4: read-only daemon/unit health strip (`vigil alerts --status`)
+    "/api/emergency-stop": _READ,       # Wave 4: ENTER/STATUS restricted mode — halt is the safe direction (mirrors kill trip)
+    "/api/emergency-stop/leave": _OWN,  # Wave 4: LIFT restricted mode — owner-only (restores full operation)
+    # `panic` is MORE destructive than `down` (it masks the unit + kills cadence) yet sits at a LOWER tier
+    # (read vs run_engagement) ON PURPOSE: both are halt-direction and neither enables offense or restores
+    # operation, so the safe-to-HALT convention (== killswitch trip == read) governs, not the blast radius.
+    # Clearing containment is always a deliberate owner CLI act (unmask + re-enable), never a UI tier.
+    "/api/panic": _READ,                # Wave 4: emergency HARD-STOP — any principal may HALT; clearing is CLI-only
+    "/api/down": _RUN,                  # Wave 4: contain the running console — operator+
+    "/api/services/down": _OWN,         # Wave 4: gateway lifecycle down — owner (mirrors /api/services/up)
+    "/api/services/render": _OWN,       # Wave 4: rewrite the gateway compose file — owner
     "/api/knowledge/gitsync": _RUN,
     "/api/evolve/*/tick": _RUN,
     "/api/knowledge/*/deeplearn": _RUN,

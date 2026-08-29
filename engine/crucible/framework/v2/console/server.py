@@ -903,6 +903,37 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # read-only (`--install` stays a deliberate CLI act).
                 self._json(actions.run_doctor())
                 return
+            if path == "/api/daemons/status":
+                # Wave 4 (parity): the read-only daemon/unit health strip (`vigil alerts --status --json`).
+                # _READ in OFFENSE_ACTION_PERM; shells the exec-only vigil, no mutation.
+                self._json(actions.daemons_status())
+                return
+            if path == "/api/emergency-stop":
+                # Wave 4: ENTER / STATUS of RESTRICTED MODE (`vigil emergency-stop`). _READ (halt is the safe
+                # direction, mirroring the kill-switch trip). LEAVE is a SEPARATE owner-gated route — so a
+                # read-tier caller can NEVER lift the restriction here (any non-{status,enter} → status).
+                act = str(body.get("action", "status"))
+                if act not in ("status", "enter"):
+                    act = "status"
+                self._json(actions.run_emergency_stop(act))
+                return
+            if path == "/api/emergency-stop/leave":
+                # Wave 4: LIFT restricted mode — _OWN (offense_authority) in OFFENSE_ACTION_PERM.
+                self._json(actions.run_emergency_stop("leave"))
+                return
+            if path == "/api/panic":
+                # Wave 4: the emergency HARD-STOP (`vigil panic`) — _READ (any authenticated principal may
+                # HALT; clearing containment stays a deliberate CLI act). DETACHED: it contains THIS console.
+                self._json(actions.run_panic(str(body.get("reason", "UI panic"))))
+                return
+            if path == "/api/down":
+                # Wave 4: CONTAIN the running console (`vigil down`) — _RUN (operator). DETACHED.
+                self._json(actions.run_down())
+                return
+            if path == "/api/services/down" or path == "/api/services/render":
+                # Wave 4: docker egress-gateway lifecycle (symmetry with the wired /api/services/up) — _OWN.
+                self._json(actions.run_services_lifecycle("down" if path.endswith("/down") else "render"))
+                return
             if path == "/api/knowledge/gitsync":
                 # A6c: run `vigil knowledge status|sync` (regenerate + secret-scan + local commit; NOT push).
                 # CSRF/rebind-gated above; shells the exec-only vigil, surfacing the secret-scan refusal.
