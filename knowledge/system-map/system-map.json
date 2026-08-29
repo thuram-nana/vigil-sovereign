@@ -182,6 +182,27 @@
       ]
     },
     {
+      "description": "Owner-only encrypted off-box backup of the trust root + spine, and a verify-first restore into a fresh staging home (never the live one in-place). You type the passphrase (used once, never stored); the owner key signs the backup in-process and never leaves the host. Download the encrypted archive to store it off-box.",
+      "group": "MANAGE",
+      "id": "durability",
+      "label": "Durability",
+      "owner": true,
+      "plane": "unified",
+      "synonyms": [
+        "durability",
+        "backup",
+        "restore",
+        "disaster recovery",
+        "off-box backup",
+        "trust root backup",
+        "spine backup",
+        "encrypted backup",
+        "passphrase",
+        "staging restore",
+        "recover"
+      ]
+    },
+    {
       "description": "The confirmed findings and attack paths from your runs, oracle-graded.",
       "group": "DO",
       "id": "findings",
@@ -581,5 +602,5 @@
       ]
     }
   ],
-  "source_sha": "cf712cb1468d94314827cf29beae3239a9452460603fd67e8b4d37f8c3c733d7"
+  "source_sha": "c525ff6549d592de9f1dbd4517a14273eeba79d08bd2db1294c245d5e22c9835"
 }

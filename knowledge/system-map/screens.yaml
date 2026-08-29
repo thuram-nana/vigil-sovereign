@@ -176,6 +176,14 @@ screens:
     description: The whole system's readiness at a glance (the `vigil doctor` report surfaced in the UI) — prerequisites (binaries + both venvs + writable dirs), the four UI ports (free / in-use), and every docker service's live state (gateway + qdrant / neo4j / otel). Read-only; create the absent services with `vigil services up`.
     synonyms: [system, services, doctor, readiness, health, prerequisites, docker services, qdrant, neo4j, otel, gateway status, ports, venvs, bring up]
 
+  - id: durability
+    label: Durability
+    group: MANAGE
+    owner: true
+    plane: unified
+    description: Owner-only encrypted off-box backup of the trust root + spine, and a verify-first restore into a fresh staging home (never the live one in-place). You type the passphrase (used once, never stored); the owner key signs the backup in-process and never leaves the host. Download the encrypted archive to store it off-box.
+    synonyms: [durability, backup, restore, disaster recovery, off-box backup, trust root backup, spine backup, encrypted backup, passphrase, staging restore, recover]
+
   - id: budgets
     label: Token Budgets
     group: MANAGE

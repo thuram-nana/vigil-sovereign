@@ -292,6 +292,33 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code=200):
         self._send(code, _json_bytes(obj))
 
+    def _download(self, path, filename):
+        """Stream a file as an attachment (Wave 3 backup download). `filename` is already regex-validated by
+        `durability.resolve_backup` (only `backup-…enc`), so it is safe in the Content-Disposition header."""
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return self._deny(404, "no such backup")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Security-Policy", _CSP)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except OSError:
+            pass   # headers already sent; a mid-stream read error just truncates (never a 500-leak)
+
     def _deny(self, code=403, msg="forbidden"):
         self._json({"error": msg}, code)
 
@@ -444,6 +471,28 @@ class Handler(BaseHTTPRequestHandler):
                 return self._deny(403, "operator+ required")
             from ..cli import sigil_doctor_report
             return self._json(sigil_doctor_report())
+        if path == "/api/backup/list":
+            # Wave 3 (durability) — OWNER-ONLY (`secrets`): the server-side backups (id/size/created; no secret).
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "secrets"):
+                return self._deny(403, "owner only")
+            from .. import config as _config
+            from . import durability as _dur
+            return self._json({"backups": _dur.list_backups(_config.SIGIL_HOME)})
+        if path.startswith("/api/backup/download/"):
+            # Wave 3 — OWNER-ONLY (`secrets`): stream ONE encrypted archive. `resolve_backup` is
+            # path-traversal-safe (exact minted-name shape + strict containment); the ciphertext is useless
+            # without the operator's passphrase, which the server never holds.
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "secrets"):
+                return self._deny(403, "owner only")
+            from .. import config as _config
+            from . import durability as _dur
+            backup_id = path.rsplit("/", 1)[-1]
+            src = _dur.resolve_backup(_config.SIGIL_HOME, backup_id)
+            if src is None:
+                return self._deny(404, "no such backup")
+            return self._download(src, backup_id)
         if path.startswith("/api/record/"):
             return self._record(path.rsplit("/", 1)[-1])
         if path == "/api/stream":
@@ -1126,6 +1175,8 @@ class Handler(BaseHTTPRequestHandler):
         # otherwise). GET is handled in do_GET for a plain top-level navigation.
         if oidc_enabled() and path == "/api/oidc/login":
             return self._oidc_login()
+        if path in ("/api/backup", "/api/restore"):
+            return self._durability_post(path)
         if path != "/api/action":
             return self._deny(404, "not found")
         # Anti-CSRF/rebinding (Host+Origin) first, THEN the principal. A per-user bearer or the legacy owner
@@ -1152,6 +1203,52 @@ class Handler(BaseHTTPRequestHandler):
             self._deny(400, f"bad request: {e}")
         except Exception as e:  # noqa: BLE001 — ApprovalError etc. → 400, never 500-leak internals
             self._deny(400, f"action failed: {str(e)[:200]}")
+
+    def _durability_post(self, path):
+        """Wave 3 (durability) — OWNER-ONLY trust-root backup/restore, orchestrated in-process. The operator's
+        passphrase is used TRANSIENTLY and never stored/logged (log_message is a no-op)/audited/echoed; the
+        owner key + DEK never leave the host. backup → `secrets`; restore → `offense_authority` (and always
+        into a FRESH staging home, never the live one). CSRF/rebind-gated like /api/action."""
+        if not self._origin_host_ok():
+            return self._deny(403, "denied (origin / host)")
+        principal = self._principal()
+        if principal is None:
+            return self._deny(403, "denied (token / origin / host)")
+        from ..governor.accounts import role_can
+        need = "secrets" if path == "/api/backup" else "offense_authority"
+        if not role_can(principal.role, need):
+            return self._deny(403, "owner only")
+        from .. import config as _config
+        from . import durability as _dur
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > self._MAX_BODY:
+                return self._deny(413, "body too large")
+            body = json.loads(self.rfile.read(length) or b"{}")
+            body = body if isinstance(body, dict) else {}
+            passphrase = body.get("passphrase", "")
+            if path == "/api/backup":
+                res = _dur.run_backup(passphrase, home=_config.SIGIL_HOME)
+                self._audit_durability("backup", principal, {"id": res.get("id"), "files": res.get("files")})
+            else:
+                res = _dur.run_restore(passphrase, str(body.get("backup_id", "")), home=_config.SIGIL_HOME)
+                self._audit_durability("restore", principal,
+                                       {"backup_id": res.get("backup_id"), "verified": res.get("verified")})
+            self._json(res)
+        except ValueError as e:                                # bad passphrase length / unknown backup id
+            self._deny(400, f"bad request: {str(e)[:200]}")
+        except Exception as e:  # noqa: BLE001 — BackupError etc. → 400, never a 500-leak of internals
+            self._deny(400, f"durability failed: {str(e)[:200]}")
+
+    def _audit_durability(self, action, principal, detail):
+        """Append a SECRET-FREE audit event for an owner backup/restore (never the passphrase). Best-effort —
+        an audit failure must not fail the operation the operator already authorized."""
+        try:
+            actor = getattr(principal, "username", None) or "owner"
+            self.server.store().append(kind="event", source="durability", actor=str(actor),
+                                       payload={"action": action, **{k: v for k, v in detail.items()}})
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def build_server(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=None,
