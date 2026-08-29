@@ -955,6 +955,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._json(actions.run_detect(str(body.get("access_log", "")), str(body.get("auth_log", "")),
                                               str(body.get("conn_log", ""))))
                 return
+            if path == "/api/escrow":
+                # Wave 9 (SENSITIVE): opt-in m-of-n Shamir ESCROW of the backup passphrase — _OWN. The
+                # passphrase is handed to the child via ENV (never argv/logged/stored/echoed); the SECRET
+                # shares stay 0600 ON THE HOST (only their names + the public metadata cross). CSRF-gated above.
+                self._json(actions.run_escrow_passphrase(body.get("passphrase", ""), body.get("threshold"),
+                                                         body.get("shares"), body.get("holders")))
+                return
             if path == "/api/knowledge/gitsync":
                 # A6c: run `vigil knowledge status|sync` (regenerate + secret-scan + local commit; NOT push).
                 # CSRF/rebind-gated above; shells the exec-only vigil, surfacing the secret-scan refusal.
