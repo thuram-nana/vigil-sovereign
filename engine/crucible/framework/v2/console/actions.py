@@ -2813,6 +2813,49 @@ def run_posture_verify(name: str) -> dict:
             "text": (proc.stdout or "")[:4000], "stderr": (proc.stderr or "")[:1000]}
 
 
+def run_identity() -> dict:
+    """Wave 7 (parity): export the offense stable identity PUBLIC keys — `vigil identity` (spine + governance
+    pubkeys, for owner delegation/pinning). Read-only; the keys are PUBLIC. Shells the exec-only `vigil`."""
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    try:
+        proc = subprocess.run([vigil, "identity"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"ok": proc.returncode == 0, "exit_code": proc.returncode,
+            "text": (proc.stdout or "")[:8000], "stderr": (proc.stderr or "")[:1000]}
+
+
+def run_detect(access_log: str, auth_log: str, conn_log: str) -> dict:
+    """Wave 7 (parity): the log-plane Detection Mirror — `vigil detect --access-log/--auth-log/--conn-log`.
+    OWNER-gated at the route (reading arbitrary HOST log paths is an owner capability; the owner has host
+    access regardless). Each provided path MUST be an existing regular FILE (fail-closed on a dir/device/
+    missing/symlink-to-non-file), so a UI slip can't point an oracle at a device node. shell=False; the paths
+    are argv elements, never a shell string. At least one log must be given."""
+    import os as _os
+    logs = {"--access-log": str(access_log or "").strip(), "--auth-log": str(auth_log or "").strip(),
+            "--conn-log": str(conn_log or "").strip()}
+    given = {flag: p for flag, p in logs.items() if p}
+    if not given:
+        return {"ok": False, "error": "provide at least one log file (access / auth / connection)"}
+    for flag, p in given.items():
+        if not _os.path.isfile(p):                     # isfile follows symlinks + is False for dirs/devices/missing
+            return {"ok": False, "error": f"{flag} {p!r} is not a readable regular file"}
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    argv = [vigil, "detect"]
+    for flag, p in given.items():
+        argv += [flag, p]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"ok": proc.returncode == 0, "exit_code": proc.returncode, "logs": sorted(given),
+            "text": (proc.stdout or "")[:8000], "stderr": (proc.stderr or "")[:1000]}
+
+
 def knowledge_gitsync(action: str) -> dict:
     """A6c/K6: run ``vigil knowledge status|sync`` from the Knowledge screen and surface the result —
     ESPECIALLY the secret-scan REFUSAL. ``status`` shows what would commit; ``sync`` regenerates the

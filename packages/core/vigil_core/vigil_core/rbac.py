@@ -112,6 +112,8 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/services/render": _OWN,       # Wave 4: rewrite the gateway compose file — owner
     "/api/posture/attest": _RUN,        # Wave 5: mint a posture Certificate (`vigil posture attest`) — runs a scan
     "/api/posture/verify": _READ,       # Wave 5: offline re-verify a posture bundle — no scan, no traffic
+    "/api/identity": _READ,             # Wave 7: export the offense PUBLIC identity keys — read-only
+    "/api/detect": _OWN,                # Wave 7: Detection Mirror over arbitrary HOST log paths — owner (host access)
     "/api/knowledge/gitsync": _RUN,
     "/api/evolve/*/tick": _RUN,
     "/api/knowledge/*/deeplearn": _RUN,

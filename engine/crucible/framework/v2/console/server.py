@@ -945,6 +945,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # traffic; re-runs the bundle's own shipped verifier). `name` server-validated.
                 self._json(actions.run_posture_verify(str(body.get("name", ""))))
                 return
+            if path == "/api/identity":
+                # Wave 7: export the offense stable identity PUBLIC keys (`vigil identity`) — _READ.
+                self._json(actions.run_identity())
+                return
+            if path == "/api/detect":
+                # Wave 7: the log-plane Detection Mirror (`vigil detect`) — _OWN (reading arbitrary HOST log
+                # paths is an owner capability). Each provided path is validated as a regular file in run_detect.
+                self._json(actions.run_detect(str(body.get("access_log", "")), str(body.get("auth_log", "")),
+                                              str(body.get("conn_log", ""))))
+                return
             if path == "/api/knowledge/gitsync":
                 # A6c: run `vigil knowledge status|sync` (regenerate + secret-scan + local commit; NOT push).
                 # CSRF/rebind-gated above; shells the exec-only vigil, surfacing the secret-scan refusal.
