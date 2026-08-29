@@ -6198,12 +6198,50 @@
       }).catch(function (e) { V.mount(pre, ""); V.mount(note, offlineEmpty(e, "Could not read this status (sovereign plane).")); });
       return h("div.card", null, [h("div.card-h", null, [h("h3", null, [V.icon(icon), " " + title])]), h("div.hint", null, hint), note, pre]);
     }
-    V.mount(body, h("div.grid.cols-2", { style: { alignItems: "start" } }, [
+    var grid = h("div.grid.cols-2", { style: { alignItems: "start" } }, [
       readCard("Owner public key", "The base64 owner PUBLIC signing key. The private half is sealed at rest and never leaves the host.", "/api/ceremonies/owner-pubkey", "key"),
       readCard("Owner-key succession", "The signed key history: pinned genesis root → each epoch → the validated current tip. Fail-closed if the chain is forked or tampered.", "/api/ceremonies/key", "shield"),
       readCard("Vault (at-rest seal)", "Whether the trust root + secrets are sealed at rest under a TPM-sealed KEK.", "/api/ceremonies/vault", "shield"),
       readCard("Kernel integrity pin", "The owner-signed WARDEN kernel content pin + any config drift from the signed manifest.", "/api/ceremonies/kernel", "gear"),
-    ]));
+    ]);
+    var parts = [grid];
+
+    // OWNER-only (secrets) mutations — run the real `sigil` verb ON THE HOST; the owner key stays sealed on
+    // the host and never crosses the browser. Only rendered for an owner; the SERVER re-enforces `secrets`.
+    if (V.can("secrets")) {
+      function cerBtn(label, url, confirmMsg, icon) {
+        var st = h("div", null, "");
+        var btn = h("button.btn.owner", { onClick: function () {
+          if (!window.confirm(confirmMsg)) return;
+          btn.disabled = true; V.mount(st, h("div.hint", { style: { marginTop: "8px" } }, "Running the ceremony on the host…"));
+          V.postJSON(SOV(url), {}).then(function (r) {
+            r = r || {};
+            var failed = (r.ok === false);
+            V.mount(st, h("div.set-status" + (failed ? ".danger" : ".ok"), { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+              h("div", null, [V.icon(failed ? "x" : "check"), h("span", null, " " + (failed ? "Ceremony did not complete" : "Ceremony complete"))]),
+              h("pre.mono", { style: { marginTop: "6px", whiteSpace: "pre-wrap", fontSize: "12px" } }, ((r.text || "") + (r.stderr ? "\n" + r.stderr : "")).trim() || (r.error || "(no output)")),
+            ]));
+            drawCeremonies();   // refresh the read panels so the new sealed/pinned state shows
+          }).catch(function (e) { V.mount(st, h("div.set-status.danger", { style: { marginTop: "8px" } }, (e && e.message) || "ceremony failed")); })
+            .then(function () { btn.disabled = false; });
+        } }, [V.icon(icon), label]);
+        return h("div", null, [btn, st]);
+      }
+      parts.push(h("div.card", { style: { marginTop: "16px" } }, [
+        h("div.card-h", null, [h("h3", null, "Seal & pin (owner)")]),
+        h("div.hint", null, "Owner ceremonies that run the real `sigil` verb ON THE HOST — the owner key is "
+          + "sealed on the host and never crosses the browser. Provisioning the vault TPM-seals a fresh KEK so "
+          + "the trust root seals at rest (idempotent); pinning the kernel owner-signs the WARDEN kernel binary "
+          + "hash so it fails closed on tamper."),
+        h("div", { style: { display: "flex", gap: "10px", marginTop: "10px", flexWrap: "wrap" } }, [
+          cerBtn("Provision vault (TPM-seal a KEK)", "/api/ceremonies/vault-provision",
+            "Provision the vault? This TPM-seals a fresh KEK to THIS machine so the trust root seals at rest. Idempotent — a no-op if already provisioned.", "shield"),
+          cerBtn("Pin kernel binary", "/api/ceremonies/kernel-pin",
+            "Pin the WARDEN kernel binary? This owner-signs its content hash into the security manifest; the kernel then fails CLOSED on tamper.", "gear"),
+        ]),
+      ]));
+    }
+    V.mount(body, parts);
   }
 
   function renderBrain(screen) {
