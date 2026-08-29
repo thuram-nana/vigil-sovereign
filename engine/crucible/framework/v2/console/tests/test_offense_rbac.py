@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import sys
 import threading
 import time
@@ -124,6 +125,46 @@ def test_analyst_stamped_post_to_launch_preview_is_forbidden():
             st = _post(base, LAUNCH_PREVIEW_ROUTE,
                        extra_headers=_hop_headers(role, LAUNCH_PREVIEW_ROUTE))
             assert st == 403, f"{role} lacking run_engagement must be refused on launch-preview, got {st}"
+
+
+# --- Wave 4 lifecycle/emergency tiers, end-to-end over HTTP ---------------------------------------
+
+def test_wave4_lifecycle_tiers_enforced_over_http():
+    """A viewer may TRIP (halt is safe) but must NOT lift restriction, contain the console, or touch the
+    gateway; an operator may contain but not the owner-only gateway ops. (A non-403 = the RBAC gate passed
+    and it reached the handler — which then fail-closes at the absent `vigil` bin; the point is auth.)"""
+    with _running() as base:
+        # viewer: trip OK (read), everything owner/operator refused
+        assert _post(base, "/api/emergency-stop", extra_headers=_hop_headers("viewer", "/api/emergency-stop")) != 403
+        assert _post(base, "/api/panic", extra_headers=_hop_headers("viewer", "/api/panic")) != 403
+        assert _post(base, "/api/emergency-stop/leave", extra_headers=_hop_headers("viewer", "/api/emergency-stop/leave")) == 403
+        assert _post(base, "/api/down", extra_headers=_hop_headers("viewer", "/api/down")) == 403
+        assert _post(base, "/api/services/down", extra_headers=_hop_headers("viewer", "/api/services/down")) == 403
+        # operator: contain OK, gateway/leave still owner-only
+        assert _post(base, "/api/down", extra_headers=_hop_headers("operator", "/api/down")) != 403
+        assert _post(base, "/api/services/down", extra_headers=_hop_headers("operator", "/api/services/down")) == 403
+        assert _post(base, "/api/emergency-stop/leave", extra_headers=_hop_headers("operator", "/api/emergency-stop/leave")) == 403
+
+
+def test_emergency_stop_read_route_cannot_be_coerced_to_leave(monkeypatch):
+    """The sharpest attack: a read-tier caller passing `{"action":"leave"}` to the READ-gated
+    /api/emergency-stop must NEVER run `--leave` — do_POST coerces any action ∉ {status,enter} → status."""
+    from framework.v2.console import actions, server
+    seen = []
+    monkeypatch.setattr(server.actions, "run_emergency_stop", lambda a: seen.append(a) or {"ok": True})
+    with _running() as base:
+        req = urllib.request.Request(base + "/api/emergency-stop", method="POST",
+                                     data=json.dumps({"action": "leave"}).encode())
+        req.add_header("X-Requested-With", "vigil-ui")
+        req.add_header("X-SIGIL-Token", CONSOLE_TEST_TOKEN)
+        for k, v in _hop_headers("viewer", "/api/emergency-stop").items():
+            req.add_header(k, v)
+        try:
+            urllib.request.urlopen(req, timeout=5).read()   # noqa: S310 (loopback test)
+        except urllib.error.HTTPError:
+            pass
+    assert seen == ["status"], f"read route must coerce leave->status, ran {seen!r}"
+    _ = actions  # keep the import meaningful (server.actions is the same module)
 
 
 def test_operator_stamped_post_to_owner_route_is_forbidden():
