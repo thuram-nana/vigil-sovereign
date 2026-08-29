@@ -15,8 +15,9 @@ phone DEVICE key: `mesh_fingerprint` is a PURE preview the operator eyeball-matc
 `mesh_authorize`/`mesh_revoke` owner-sign the mesh ledger — their device_id (slug) + pubkey (base64-32B)
 are STRICTLY validated so neither reaches argv as a flag. `delegate_offense*` owner-sign a delegation over
 the OFFENSE plane's PUBLIC identity (the identity JSON reaches argv only via a server-controlled temp file;
-scope/hours validated). The remaining owner-key mutations (key rotate/re-genesis, warden-anchor-set, floor
-reset) are wired in later slices. FATAL-2: pure sovereign — spawns `python -m sigil`, imports no
+scope/hours validated). `key_rotate`/`key_re_genesis`/`floor_reset` are the DESTRUCTIVE ceremonies (their
+route requires a server-checked typed confirmation phrase on top of owner auth). The only owner-key mutation
+left CLI-only is `warden-anchor-set` (a machine-signed tuple). FATAL-2: pure sovereign — spawns `python -m sigil`, imports no
 framework/strix.
 """
 from __future__ import annotations
@@ -218,3 +219,31 @@ def delegate_offense(identity, scope, hours, home) -> dict:
     res["out_dir"] = str(out_dir)
     res["certs"] = certs
     return res
+
+
+# --- OWNER-ONLY DESTRUCTIVE key-material ceremonies (route gates `secrets` AND a server-checked typed
+#     confirmation phrase) — reuse the AUDITED `sigil` verb with its exact danger flags; ZERO request-arg
+#     (fixed argv). Each WEAKENS or ABANDONS part of the trust root, so the route requires the operator to
+#     type an exact phrase before it fires (defence against a fat-fingered click, on top of owner auth). The
+#     CLI verbs are themselves fail-closed/gated: `key rotate` refuses on a locked vault (needs the incumbent
+#     private key to cross-sign); `re-genesis` needs BOTH danger flags; `floor reset` needs `--yes`. ------
+
+def key_rotate() -> dict:
+    """`sigil key rotate --yes` — mint a SUCCESSOR owner key, cross-signed into the append-only key history,
+    and re-anchor. Every pre-rotation head/grant still verifies (walked from the pinned genesis). NON-
+    destructive but sensitive (the current signer changes). Fail-closed on a locked vault at the CLI."""
+    return _run(["key", "rotate", "--yes"], timeout=120)
+
+
+def key_re_genesis() -> dict:
+    """`sigil key re-genesis --yes --i-understand-continuity-is-abandoned` — the COMPROMISE fallback: fresh
+    genesis, REPIN the root, DELIBERATELY ABANDON continuity of ALL prior history (every prior head/grant/
+    succession record stops being authenticated). Out-of-band verifiers MUST re-pin to the printed new key."""
+    return _run(["key", "re-genesis", "--yes", "--i-understand-continuity-is-abandoned"], timeout=120)
+
+
+def floor_reset() -> dict:
+    """`sigil floor reset --yes` — DELIBERATELY LOWER the durable anti-rollback floor to the current spine
+    (the only path that may lower it). For a legitimate reset/restore only; owner-key re-signs the re-seeded
+    floor. Weakens the anti-rollback guarantee, so it is behind the typed confirmation."""
+    return _run(["floor", "reset", "--yes"], timeout=120)
