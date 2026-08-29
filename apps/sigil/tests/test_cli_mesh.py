@@ -3,6 +3,8 @@ Authorizations are owner-signed via the persisted owner identity. Driven through
 helpers `cmd_mesh` delegates to, over a temp spine (no real ~/.sigil writes).
 Run: ~/.sigil/venv/bin/python tests/test_cli_mesh.py"""
 import tempfile
+import types
+from unittest import mock
 
 from sigil.cli import _device_fingerprint, _mesh_authorize, _mesh_list, _mesh_revoke
 from sigil.mesh import authorized_devices
@@ -77,6 +79,48 @@ def test_authorization_not_signed_by_owner_is_ignored():
     _mesh_authorize(s, "evil", DEV.public_key_b64, attacker, assume_yes=True)  # signed by attacker, not OWNER
     assert DEV.public_key_b64 not in authorized_devices(s, OP), \
         "an authorization not signed by the owner key is not owner-minted — ignored"
+
+
+# ---- fail-closed on a locked/tampered vault (must NOT mint a new owner identity over the old one) ---
+def test_cmd_mesh_refuses_to_mint_over_a_locked_vault():
+    """With an owner PUBKEY present but the private half unavailable (locked/tampered vault), `sigil mesh
+    authorize|revoke` must REFUSE (exit non-zero) and NOT mint a fresh owner identity over the old one —
+    which would silently fork the sovereign trust-root and owner-sign the enrollment under a key no verifier
+    trusts, while exiting 0. Mirrors the `kernel pin` guard. (cmd_mesh reads the identity fns at call time,
+    so patching the identity module attributes is picked up; SpineStore is stubbed since the guard fires
+    before any ledger write.)"""
+    from sigil import cli
+    from sigil.governor import identity
+    minted = []
+    with mock.patch.object(cli, "SpineStore", lambda *a, **k: None), \
+         mock.patch.object(identity, "owner_keypair", lambda: None), \
+         mock.patch.object(identity, "owner_pubkey", lambda: OP), \
+         mock.patch.object(identity, "ensure_owner_keypair", lambda: (minted.append(1), OWNER)[1]):
+        for action in ("authorize", "revoke"):
+            ns = types.SimpleNamespace(action=action, device_id="phone1", pubkey=DEV.public_key_b64, yes=True)
+            code = 0
+            try:
+                cli.cmd_mesh(ns)
+            except SystemExit as e:
+                code = e.code if e.code is not None else 0
+            assert code != 0, f"mesh {action} must fail-closed (non-zero) on a locked vault, not proceed"
+        assert minted == [], "mesh must NOT mint a new owner identity when a pubkey is already present"
+
+
+def test_cmd_mesh_mints_on_genuine_first_run():
+    """The complement: with NO owner identity at all (no pubkey), a first-run authorize DOES mint — the guard
+    only refuses when a pubkey is already present. Proves the guard is not simply refusing everything."""
+    from sigil import cli
+    from sigil.governor import identity
+    minted = []
+    with mock.patch.object(cli, "SpineStore", lambda *a, **k: None), \
+         mock.patch.object(identity, "owner_keypair", lambda: None), \
+         mock.patch.object(identity, "owner_pubkey", lambda: None), \
+         mock.patch.object(identity, "ensure_owner_keypair", lambda: (minted.append(1), OWNER)[1]), \
+         mock.patch.object(cli, "_mesh_authorize", lambda *a, **k: 1):
+        ns = types.SimpleNamespace(action="authorize", device_id="phone1", pubkey=DEV.public_key_b64, yes=True)
+        cli.cmd_mesh(ns)
+        assert minted == [1], "a genuine first run (no pubkey) mints the owner identity"
 
 
 if __name__ == "__main__":

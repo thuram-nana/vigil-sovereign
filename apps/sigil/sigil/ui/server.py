@@ -466,6 +466,14 @@ class Handler(BaseHTTPRequestHandler):
             _READS = {"/api/ceremonies/vault": _cer.vault_status, "/api/ceremonies/kernel": _cer.kernel_status,
                       "/api/ceremonies/key": _cer.key_status, "/api/ceremonies/owner-pubkey": _cer.owner_pubkey_show}
             return self._json(_READS[path]())
+        if path == "/api/ceremonies/mesh/devices":
+            # Wave 10c: the authorized phone-DEVICE roster (`sigil mesh list-devices`) — OWNER (`secrets`),
+            # matching the mesh authorize/revoke mutations (the device roster is a trust-boundary read).
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "secrets"):
+                return self._deny(403, "owner only")
+            from . import ceremonies as _cer
+            return self._json(_cer.mesh_list())
         if path == "/api/verify":
             # Parity (Wave 2): the sovereign spine self-verify — chain integrity + the owner-signed head
             # anchor (exactly what `sigil verify` runs, in-process, same venv). Viewer+ read, no secret.
@@ -1211,7 +1219,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._oidc_login()
         if path in ("/api/backup", "/api/restore"):
             return self._durability_post(path)
-        if path in ("/api/ceremonies/vault-provision", "/api/ceremonies/kernel-pin"):
+        if path.startswith("/api/ceremonies/"):
+            # Owner key-material ceremonies (Wave 10b/10c). _ceremonies_post enforces the gate chain and then
+            # dispatches over a CLOSED exact-match set of ceremony paths (unknown → 404); the zero-arg ones
+            # ignore the body, the mesh ones parse a validated {device_id, pubkey}.
             return self._ceremonies_post(path)
         if path.startswith("/api/hostcmd/"):
             return self._hostcmd_post(path)
@@ -1289,11 +1300,13 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def _ceremonies_post(self, path):
-        """Wave 10b — OWNER-ONLY key-material ceremonies, orchestrated in-process by shelling the AUDITED
+        """Wave 10b/10c — OWNER-ONLY key-material ceremonies, orchestrated in-process by shelling the AUDITED
         `sigil` verb (reuse the proven sealing/signing; the owner key stays sealed on the host and never
         crosses — only the CLI's secret-free stdout returns). `vault provision` TPM-seals a fresh KEK;
-        `kernel pin` owner-signs the kernel binary hash into the manifest. Both are ZERO-arg (no request
-        input reaches the subprocess). `secrets` = owner-only. CSRF/rebind-gated like /api/action."""
+        `kernel pin` owner-signs the kernel binary hash (both ZERO-arg — the body is ignored). `mesh/*`
+        enroll a phone DEVICE key: fingerprint is a pure preview, authorize/revoke owner-sign the mesh ledger
+        over a STRICTLY validated {device_id, pubkey} (neither can be a flag). `secrets` = owner-only.
+        CSRF/rebind-gated like /api/action; dispatch is a CLOSED exact-match set (unknown → 404)."""
         if not self._origin_host_ok():
             return self._deny(403, "denied (origin / host)")
         principal = self._principal()
@@ -1303,10 +1316,38 @@ class Handler(BaseHTTPRequestHandler):
         if not role_can(principal.role, "secrets"):
             return self._deny(403, "owner only")
         from . import ceremonies as _cer
-        verb = path.rsplit("/", 1)[1]
-        res = _cer.vault_provision() if verb == "vault-provision" else _cer.kernel_pin()
-        self._audit_ceremony(verb, principal, {"ok": res.get("ok"), "exit_code": res.get("exit_code")})
-        return self._json(res)
+        # zero-arg ceremonies — the POST body is never read
+        if path == "/api/ceremonies/vault-provision":
+            res = _cer.vault_provision()
+            self._audit_ceremony("vault-provision", principal, {"ok": res.get("ok"), "exit_code": res.get("exit_code")})
+            return self._json(res)
+        if path == "/api/ceremonies/kernel-pin":
+            res = _cer.kernel_pin()
+            self._audit_ceremony("kernel-pin", principal, {"ok": res.get("ok"), "exit_code": res.get("exit_code")})
+            return self._json(res)
+        # mesh device enrollment — parse a bounded JSON body of {device_id, pubkey} (validated in ceremonies)
+        if path in ("/api/ceremonies/mesh/fingerprint", "/api/ceremonies/mesh/authorize",
+                    "/api/ceremonies/mesh/revoke"):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length > self._MAX_BODY:
+                    return self._deny(413, "body too large")
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, OSError) as e:      # malformed Content-Length / JSON → clean 400, not a drop
+                return self._deny(400, f"bad request: {type(e).__name__}")
+            body = body if isinstance(body, dict) else {}
+            pubkey = body.get("pubkey", "")
+            if path == "/api/ceremonies/mesh/fingerprint":
+                return self._json(_cer.mesh_fingerprint(pubkey))       # pure preview — no signing, no audit
+            device_id = str(body.get("device_id", ""))
+            if path == "/api/ceremonies/mesh/authorize":
+                res = _cer.mesh_authorize(device_id, pubkey)
+                self._audit_ceremony("mesh-authorize", principal, {"device_id": device_id[:64], "ok": res.get("ok")})
+            else:
+                res = _cer.mesh_revoke(device_id, pubkey)
+                self._audit_ceremony("mesh-revoke", principal, {"device_id": device_id[:64], "ok": res.get("ok")})
+            return self._json(res)
+        return self._deny(404, "not found")
 
     def _audit_ceremony(self, action, principal, detail):
         """Append a SECRET-FREE audit event for an owner key-material ceremony (never any key/seal material).

@@ -726,7 +726,7 @@ def cmd_mesh(a) -> None:
     """Phase 9 W1-E — the PC-side mesh pairing back-end: authorize / revoke / list phone device keys.
     Authorizations are owner-signed via the PERSISTED owner identity (never a supplied key); a thin
     wrapper over the tested mesh ledger. `list-devices` needs no signing (a fail-closed read)."""
-    from .governor.identity import ensure_owner_keypair, owner_pubkey
+    from .governor.identity import ensure_owner_keypair, owner_keypair, owner_pubkey
     store = SpineStore()
     if a.action == "list-devices":
         _mesh_list(store, owner_pubkey())
@@ -734,7 +734,17 @@ def cmd_mesh(a) -> None:
     if not a.device_id or not a.pubkey:
         print(f"  usage: sigil mesh {a.action} <device-id> <pubkey>", file=sys.stderr)
         sys.exit(2)
-    owner = ensure_owner_keypair()   # the persisted owner key IS the trusted signer (doctrine)
+    # Fail CLOSED on a locked/tampered vault (mirror `kernel pin`): if an owner identity already exists
+    # (pubkey present) but its private half is unavailable, do NOT mint a fresh identity over the old one —
+    # that would silently FORK the sovereign trust-root and owner-sign the enrollment under a key no verifier
+    # trusts, while exiting 0. Only a genuine first run (no pubkey at all) mints.
+    owner = owner_keypair()
+    if owner is None:
+        if owner_pubkey() is not None:
+            print("!! the owner key is present but its private half is unavailable (locked vault) — run "
+                  "`sigil vault provision`/unlock first; refusing to mint a new owner identity.", file=sys.stderr)
+            sys.exit(1)
+        owner = ensure_owner_keypair()   # genuine first run: mint the owner identity
     if a.action == "authorize":
         _mesh_authorize(store, a.device_id, a.pubkey, owner, assume_yes=a.yes)
     elif a.action == "revoke":
