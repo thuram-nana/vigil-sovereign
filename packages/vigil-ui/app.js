@@ -6296,6 +6296,62 @@
         h("div", { style: { marginTop: "12px" } }, [h("div.hint", { style: { marginBottom: "6px" } }, "Authorized devices (pubkey [fingerprint]):"), roster]),
       ]));
       refreshRoster();
+
+      // --- Delegate offense authority — the owner blesses the OFFENSE plane's PUBLIC identity. Preview the
+      //     two keys and confirm them out-of-band against the offense host BEFORE signing (a swapped identity
+      //     file would get an attacker key owner-blessed). The owner key signs on the host; the certs are PUBLIC.
+      var idJson = h("textarea.inp", { rows: "6", placeholder: "paste the offense-identity.json exported by `vigil identity` (schema 1)", style: { fontFamily: "var(--mono, monospace)", fontSize: "12px", resize: "vertical" } });
+      var dScope = h("input.inp", { type: "text", placeholder: "engagement scope/slug the delegation is valid for" });
+      var dHours = h("input.inp", { type: "number", value: "24", min: "1", style: { maxWidth: "140px" } });
+      var dStatus = h("div", null, "");
+      function parseIdentity() {
+        try { return JSON.parse(idJson.value || "null"); }
+        catch (e) { V.mount(dStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, "the offense identity is not valid JSON")); return undefined; }
+      }
+      var dPrevBtn = h("button.btn", { onClick: function () {
+        var id = parseIdentity(); if (id === undefined) return;
+        V.mount(dStatus, h("div.hint", { style: { marginTop: "8px" } }, "Validating identity…"));
+        V.postJSON(SOV("/api/ceremonies/delegate/preview"), { identity: id }).then(function (r) {
+          r = r || {};
+          if (r.ok === false) { V.mount(dStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, r.error || "invalid offense identity")); return; }
+          V.mount(dStatus, h("div.set-status.ok", { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+            h("div", null, [V.icon("key"), h("span", null, " Keys to be owner-blessed — confirm these EXACTLY match the offense host before signing:")]),
+            h("pre.mono", { style: { marginTop: "6px", whiteSpace: "pre-wrap", fontSize: "12px" } },
+              "spine      " + r.spine.key_id + "  " + r.spine.pubkey + "\ngovernance " + r.governance.key_id + "  " + r.governance.pubkey),
+          ]));
+        }).catch(function (e) { V.mount(dStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, (e && e.message) || "failed")); });
+      } }, [V.icon("find"), "Preview keys"]);
+      var dSignBtn = h("button.btn.owner", { onClick: function () {
+        var id = parseIdentity(); if (id === undefined) return;
+        if (!window.confirm("Owner-sign the offense delegation? Only proceed if the previewed keys match the offense host — a swapped identity would bless an attacker's key.")) return;
+        dSignBtn.disabled = true; V.mount(dStatus, h("div.hint", { style: { marginTop: "8px" } }, "Signing on the host…"));
+        V.postJSON(SOV("/api/ceremonies/delegate"), { identity: id, scope: dScope.value || "", hours: dHours.value || "24" }).then(function (r) {
+          r = r || {}; var failed = (r.ok === false);
+          var kids = Object.keys(r.certs || {});
+          V.mount(dStatus, h("div.set-status" + (failed ? ".danger" : ".ok"), { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+            h("div", null, [V.icon(failed ? "x" : "check"), h("span", null, " " + (failed ? "Delegation failed" : "Delegation signed"))]),
+            h("pre.mono", { style: { marginTop: "6px", whiteSpace: "pre-wrap", fontSize: "12px" } },
+              ((r.text || "") + (r.stderr ? "\n" + r.stderr : "")).trim() || (r.error || "(no output)")
+              + (kids.length ? "\n\nwritten (PUBLIC certs): " + kids.join(", ") + " → " + (r.out_dir || "") : "")),
+          ]));
+        }).catch(function (e) { V.mount(dStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, (e && e.message) || "failed")); })
+          .then(function () { dSignBtn.disabled = false; });
+      } }, [V.icon("shield"), "Sign delegation"]);
+      parts.push(h("div.card", { style: { marginTop: "16px" } }, [
+        h("div.card-h", null, [h("h3", null, "Delegate offense authority (owner)")]),
+        h("div.hint", null, "Owner-sign a time-boxed delegation over the OFFENSE plane's PUBLIC identity "
+          + "(exported by `vigil identity`). Paste the identity, PREVIEW the two keys and confirm they match "
+          + "the offense host out-of-band, then Sign. The owner key signs on the host; the delegation certs are "
+          + "public (no private key)."),
+        h("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginTop: "10px", maxWidth: "620px" } }, [
+          idJson,
+          h("div", { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" } }, [
+            dScope, h("span.dim", { style: { fontSize: "12px" } }, "hours"), dHours,
+          ]),
+          h("div", { style: { display: "flex", gap: "10px", flexWrap: "wrap" } }, [dPrevBtn, dSignBtn]),
+        ]),
+        dStatus,
+      ]));
     }
     V.mount(body, parts);
   }

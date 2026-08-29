@@ -1325,9 +1325,11 @@ class Handler(BaseHTTPRequestHandler):
             res = _cer.kernel_pin()
             self._audit_ceremony("kernel-pin", principal, {"ok": res.get("ok"), "exit_code": res.get("exit_code")})
             return self._json(res)
-        # mesh device enrollment — parse a bounded JSON body of {device_id, pubkey} (validated in ceremonies)
-        if path in ("/api/ceremonies/mesh/fingerprint", "/api/ceremonies/mesh/authorize",
-                    "/api/ceremonies/mesh/revoke"):
+        # the remaining ceremony POSTs take a bounded JSON body; parse it once (malformed → clean 400)
+        _BODY_PATHS = ("/api/ceremonies/mesh/fingerprint", "/api/ceremonies/mesh/authorize",
+                       "/api/ceremonies/mesh/revoke", "/api/ceremonies/delegate/preview",
+                       "/api/ceremonies/delegate")
+        if path in _BODY_PATHS:
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if length > self._MAX_BODY:
@@ -1336,16 +1338,28 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, OSError) as e:      # malformed Content-Length / JSON → clean 400, not a drop
                 return self._deny(400, f"bad request: {type(e).__name__}")
             body = body if isinstance(body, dict) else {}
-            pubkey = body.get("pubkey", "")
-            if path == "/api/ceremonies/mesh/fingerprint":
-                return self._json(_cer.mesh_fingerprint(pubkey))       # pure preview — no signing, no audit
-            device_id = str(body.get("device_id", ""))
-            if path == "/api/ceremonies/mesh/authorize":
-                res = _cer.mesh_authorize(device_id, pubkey)
-                self._audit_ceremony("mesh-authorize", principal, {"device_id": device_id[:64], "ok": res.get("ok")})
-            else:
-                res = _cer.mesh_revoke(device_id, pubkey)
-                self._audit_ceremony("mesh-revoke", principal, {"device_id": device_id[:64], "ok": res.get("ok")})
+            # mesh device enrollment — {device_id, pubkey} (validated in ceremonies)
+            if path.startswith("/api/ceremonies/mesh/"):
+                pubkey = body.get("pubkey", "")
+                if path.endswith("/fingerprint"):
+                    return self._json(_cer.mesh_fingerprint(pubkey))   # pure preview — no signing, no audit
+                device_id = str(body.get("device_id", ""))
+                if path.endswith("/authorize"):
+                    res = _cer.mesh_authorize(device_id, pubkey)
+                    self._audit_ceremony("mesh-authorize", principal, {"device_id": device_id[:64], "ok": res.get("ok")})
+                else:
+                    res = _cer.mesh_revoke(device_id, pubkey)
+                    self._audit_ceremony("mesh-revoke", principal, {"device_id": device_id[:64], "ok": res.get("ok")})
+                return self._json(res)
+            # offense delegation — bless the offense PUBLIC identity {identity, scope, hours}; the identity
+            # JSON reaches argv only via a server-controlled temp file (ceremonies handles it)
+            if path == "/api/ceremonies/delegate/preview":
+                return self._json(_cer.delegate_offense_preview(body.get("identity")))   # pure — no signing
+            from .. import config as _config
+            res = _cer.delegate_offense(body.get("identity"), str(body.get("scope", "")),
+                                        body.get("hours", "24"), _config.SIGIL_HOME)
+            self._audit_ceremony("delegate-offense", principal,
+                                 {"scope": str(body.get("scope", ""))[:128], "ok": res.get("ok")})
             return self._json(res)
         return self._deny(404, "not found")
 
