@@ -471,6 +471,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._deny(403, "operator+ required")
             from ..cli import sigil_doctor_report
             return self._json(sigil_doctor_report())
+        if path == "/api/hostcmd/runs" or path == "/api/hostcmd/status":
+            # Wave 6: host-op run status/list — OWNER-ONLY (`secrets`), matching the launch: the run `tail`
+            # (child stdout, e.g. a consolidate dry-run report) can embed memory-record content, so it is not
+            # for a viewer. `run_id` is validated in hostcmd.run_status (isalnum → path-traversal-safe).
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "secrets"):
+                return self._deny(403, "owner only")
+            from . import hostcmd as _hc
+            if path == "/api/hostcmd/runs":
+                return self._json({"runs": _hc.list_runs()})
+            return self._json(_hc.run_status(self._query().get("run_id", [""])[0]))
         if path == "/api/backup/list":
             # Wave 3 (durability) — OWNER-ONLY (`secrets`): the server-side backups (id/size/created; no secret).
             from ..governor.accounts import role_can
@@ -1177,6 +1188,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._oidc_login()
         if path in ("/api/backup", "/api/restore"):
             return self._durability_post(path)
+        if path.startswith("/api/hostcmd/"):
+            return self._hostcmd_post(path)
         if path != "/api/action":
             return self._deny(404, "not found")
         # Anti-CSRF/rebinding (Host+Origin) first, THEN the principal. A per-user bearer or the legacy owner
@@ -1247,6 +1260,45 @@ class Handler(BaseHTTPRequestHandler):
             actor = getattr(principal, "username", None) or "owner"
             self.server.store().append(kind="event", source="durability", actor=str(actor),
                                        payload={"action": action, **{k: v for k, v in detail.items()}})
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _hostcmd_post(self, path):
+        """Wave 6 (parity) — the OWNER-ONLY sovereign host-run broker: launch a CLOSED-SET long `sigil` host
+        op (`/api/hostcmd/<verb>`) as a tracked background subprocess. CSRF/rebind-gated like /api/action;
+        owner-only (`secrets` — these rebuild the memory trust-root). The broker itself validates the verb +
+        flags against fixed allowlists (no free-text / path / injection reaches argv); status/list are reads."""
+        if not self._origin_host_ok():
+            return self._deny(403, "denied (origin / host)")
+        principal = self._principal()
+        if principal is None:
+            return self._deny(403, "denied (token / origin / host)")
+        from ..governor.accounts import role_can
+        if not role_can(principal.role, "secrets"):
+            return self._deny(403, "owner only")
+        from . import hostcmd as _hc
+        verb = path.rsplit("/", 1)[-1]
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > self._MAX_BODY:
+                return self._deny(413, "body too large")
+            body = json.loads(self.rfile.read(length) or b"{}")
+            body = body if isinstance(body, dict) else {}
+            res = _hc.launch(verb, body.get("flags", []))
+            if res.get("ok"):
+                self._audit_hostcmd(principal, res)
+            self._json(res)
+        except ValueError as e:
+            self._deny(400, f"bad request: {str(e)[:200]}")
+        except Exception as e:  # noqa: BLE001
+            self._deny(400, f"hostcmd failed: {str(e)[:200]}")
+
+    def _audit_hostcmd(self, principal, res):
+        try:
+            actor = getattr(principal, "username", None) or "owner"
+            self.server.store().append(kind="event", source="hostcmd", actor=str(actor),
+                                       payload={"verb": res.get("verb"), "flags": res.get("flags"),
+                                                "run_id": res.get("run_id")})
         except Exception:  # noqa: BLE001
             pass
 
