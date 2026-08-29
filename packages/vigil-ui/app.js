@@ -5106,8 +5106,43 @@
         ]),
         V.card("Live verdicts", "LIVE", h("div.feed#def-feed", null, h("div.empty", null, "Connecting to the verdict stream…")), false),
       ]),
+      h("div", { style: { marginTop: "16px" } }, detectIdentityCard()),
     ]);
     loadDefense();
+  }
+
+  // Wave 7 (parity) — the log-plane Detection Mirror (`vigil detect`, owner-only — it reads arbitrary host
+  // log paths) + the offense stable PUBLIC identity keys (`vigil identity`, read). Both offense CLI-spawn.
+  function detectIdentityCard() {
+    var acc = h("input.inp", { type: "text", placeholder: "access log path (CLF) — optional" });
+    var aut = h("input.inp", { type: "text", placeholder: "auth log path — optional" });
+    var con = h("input.inp", { type: "text", placeholder: "connection/flow log path — optional" });
+    var out = h("div", null, "");
+    function show(title, promise) {
+      V.mount(out, h("div.hint", { style: { marginTop: "8px" } }, title + "…"));
+      promise.then(function (r) {
+        var okv = !!(r && r.ok);
+        V.mount(out, h("div.set-status" + (okv ? ".ok" : ".danger"), { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+          h("div", null, [V.icon(okv ? "check" : "x"), h("span", null, " " + title + ": " + (okv ? "done" : "failed"))]),
+          (r && (r.text || r.error)) ? h("pre.mono", { style: { marginTop: "6px", whiteSpace: "pre-wrap", fontSize: "12px", maxHeight: "260px", overflow: "auto" } }, r.text || r.error) : null,
+        ]));
+      }).catch(function (e) { V.mount(out, h("div.set-status.danger", { style: { marginTop: "8px" } }, title + ": " + ((e && e.message) || e))); });
+    }
+    return h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Log detection & offense identity")]),
+      h("div.hint", null, "Run the Detection Mirror over your host log files (owner-only — it reads host paths), "
+        + "and export the offense stable PUBLIC identity keys for owner delegation / pinning."),
+      h("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginTop: "10px", maxWidth: "520px" } }, [acc, aut, con,
+        h("div.acts", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } }, [
+          h("button.btn.sm.owner", { onClick: function () {
+            if (!(acc.value || aut.value || con.value).trim()) { V.toast("enter at least one log path", true); return; }
+            show("Detection Mirror", V.postJSON(OFF("/api/detect"), { access_log: acc.value || "", auth_log: aut.value || "", conn_log: con.value || "" }));
+          } }, [V.icon("shield"), "Run Detection Mirror"]),
+          h("button.btn.sm", { onClick: function () { show("Offense identity keys", V.postJSON(OFF("/api/identity"), {})); } }, [V.icon("key"), "Show identity keys"]),
+        ]),
+      ]),
+      out,
+    ]);
   }
 
   function loadDefense() {
