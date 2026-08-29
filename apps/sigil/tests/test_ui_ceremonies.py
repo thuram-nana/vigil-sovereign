@@ -4,6 +4,7 @@ metadata only — no private key, and none of these reads unseal one). The owner
 (provision/pin/rotate/authorize/reset) stay owner-only, deferred to a later slice."""
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 import sys
@@ -176,3 +177,56 @@ def test_mutation_routes_reject_cross_origin(monkeypatch):
         except urllib.error.HTTPError as e:
             code = e.code
         assert code == 403, f"{leaf} accepted a cross-origin POST (CSRF gate not firing first)"
+
+
+# --- Wave 10c: OWNER-ONLY mesh device enrollment (authorize / revoke / fingerprint preview) ------------
+
+GOOD_PUB = base64.b64encode(bytes(range(32))).decode()   # valid base64 of EXACTLY 32 bytes (Ed25519-shaped)
+
+
+def test_mesh_fingerprint_is_pure_and_matches_cli(monkeypatch):
+    # the preview is PURE (no subprocess), deterministic, and byte-identical to the CLI's _device_fingerprint
+    # (so the operator eyeball-matches the SAME code the phone/CLI show — the anti-key-swap guard).
+    called = []
+    monkeypatch.setattr(subprocess, "run", lambda a, **k: called.append(a))
+    r = ceremonies.mesh_fingerprint(GOOD_PUB)
+    assert r["ok"] is True and r["fingerprint"] and called == []       # computed in-process, no spawn
+    from sigil.cli import _device_fingerprint
+    assert r["fingerprint"] == _device_fingerprint(GOOD_PUB)
+    assert ceremonies.mesh_fingerprint("not base64!!")["ok"] is False
+    assert ceremonies.mesh_fingerprint(base64.b64encode(b"short").decode())["ok"] is False   # not 32 bytes
+
+
+def test_mesh_argv_shape_and_injection_rejected(monkeypatch):
+    seen = []
+    monkeypatch.setattr(subprocess, "run", lambda a, **k: (seen.append(a) or _P(0, "ok")))
+    ceremonies.mesh_authorize("junior-pixel", GOOD_PUB)
+    assert seen[-1] == [sys.executable, "-m", "sigil", "mesh", "authorize", "junior-pixel", GOOD_PUB, "--yes"]
+    ceremonies.mesh_revoke("junior-pixel", GOOD_PUB)
+    assert seen[-1] == [sys.executable, "-m", "sigil", "mesh", "revoke", "junior-pixel", GOOD_PUB]
+    # ARGV-INJECTION negative controls: a flag-ish/spaced/newline device_id or a non-base64/wrong-length
+    # pubkey is REJECTED before any spawn, so a hostile value can never become an argv flag.
+    n = len(seen)
+    for bad_dev in ("-rf", "a b", "ok\ninject", "--yes"):
+        assert ceremonies.mesh_authorize(bad_dev, GOOD_PUB)["ok"] is False
+    for bad_pub in ("--evil", GOOD_PUB + " --x", "not-base64", base64.b64encode(b"x" * 31).decode()):
+        assert ceremonies.mesh_authorize("dev", bad_pub)["ok"] is False
+    assert len(seen) == n            # NONE of the rejected inputs reached a spawn
+
+
+def test_mesh_routes_are_owner_only(monkeypatch):
+    monkeypatch.setattr(ceremonies, "mesh_list", lambda: {"ok": True, "text": "no authorized devices"})
+    monkeypatch.setattr(ceremonies, "mesh_authorize", lambda d, p: {"ok": True, "text": "authorized"})
+    monkeypatch.setattr(ceremonies, "mesh_revoke", lambda d, p: {"ok": True, "text": "revoked"})
+    monkeypatch.setattr(ceremonies, "mesh_fingerprint", lambda p: {"ok": True, "fingerprint": "aaaa-bbbb-cccc-dddd"})
+    _s, port = _serve()
+    viewer = _make_account(port, "mmv", "viewer")
+    operator = _make_account(port, "mmo", "operator")
+    assert _get(port, "/api/ceremonies/mesh/devices")[0] == 200                        # owner roster read
+    assert _get(port, "/api/ceremonies/mesh/devices", token=operator)[0] == 403        # operator refused
+    assert _get(port, "/api/ceremonies/mesh/devices", token=viewer)[0] == 403
+    for leaf in ("mesh/fingerprint", "mesh/authorize", "mesh/revoke"):
+        assert _post(port, f"/api/ceremonies/{leaf}")[0] == 200                         # owner
+        assert _post(port, f"/api/ceremonies/{leaf}", token=operator)[0] == 403         # operator refused
+        assert _post(port, f"/api/ceremonies/{leaf}", token=viewer)[0] == 403           # viewer refused
+        assert _post(port, f"/api/ceremonies/{leaf}", token=None)[0] == 403             # unauth

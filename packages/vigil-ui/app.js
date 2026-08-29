@@ -6240,6 +6240,62 @@
             "Pin the WARDEN kernel binary? This owner-signs its content hash into the security manifest; the kernel then fails CLOSED on tamper.", "gear"),
         ]),
       ]));
+
+      // --- Device mesh (phone pairing) — enroll/revoke a phone DEVICE key, owner-signed on the host. The
+      //     ENROLL flow preserves the CLI's anti-key-swap guard: preview the fingerprint the SERVER computes,
+      //     eyeball-match it against what the phone shows, THEN authorize.
+      var did = h("input.inp", { type: "text", placeholder: "device id (e.g. junior-pixel)", autocomplete: "off" });
+      var dpub = h("input.inp", { type: "text", placeholder: "device pubkey (base64, 32-byte Ed25519)", autocomplete: "off", style: { fontFamily: "var(--mono, monospace)" } });
+      var mStatus = h("div", null, "");
+      var roster = h("pre.mono", { style: { whiteSpace: "pre-wrap", fontSize: "12px", margin: "0" } }, "Loading…");
+      function refreshRoster() {
+        V.getJSON(SOV("/api/ceremonies/mesh/devices")).then(function (r) {
+          r = r || {}; V.mount(roster, h("span", null, ((r.text || "") + (r.ok === false && r.stderr ? "\n" + r.stderr : "")).trim() || "(no authorized devices)"));
+        }).catch(function (e) { V.mount(roster, ""); V.mount(mStatus, offlineEmpty(e, "Could not read the device roster (owner only).")); });
+      }
+      function meshAct(url, confirmMsg) {
+        if (confirmMsg && !window.confirm(confirmMsg)) return;
+        V.mount(mStatus, h("div.hint", { style: { marginTop: "8px" } }, "Running on the host…"));
+        V.postJSON(SOV(url), { device_id: did.value || "", pubkey: dpub.value || "" }).then(function (r) {
+          r = r || {}; var failed = (r.ok === false);
+          V.mount(mStatus, h("div.set-status" + (failed ? ".danger" : ".ok"), { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+            h("div", null, [V.icon(failed ? "x" : "check"), h("span", null, " " + (failed ? "Failed" : "Done"))]),
+            h("pre.mono", { style: { marginTop: "6px", whiteSpace: "pre-wrap", fontSize: "12px" } }, ((r.text || "") + (r.stderr ? "\n" + r.stderr : "")).trim() || (r.error || "(no output)")),
+          ]));
+          refreshRoster();
+        }).catch(function (e) { V.mount(mStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, (e && e.message) || "failed")); });
+      }
+      var previewBtn = h("button.btn", { onClick: function () {
+        V.mount(mStatus, h("div.hint", { style: { marginTop: "8px" } }, "Computing fingerprint…"));
+        V.postJSON(SOV("/api/ceremonies/mesh/fingerprint"), { pubkey: dpub.value || "" }).then(function (r) {
+          r = r || {};
+          if (r.ok === false) { V.mount(mStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, r.error || "invalid pubkey")); return; }
+          V.mount(mStatus, h("div.set-status.ok", { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+            h("div", null, [V.icon("key"), h("span", null, " Fingerprint: "), h("strong.mono", null, r.fingerprint)]),
+            h("div.hint", { style: { marginTop: "4px" } }, "Confirm this EXACTLY matches the code the phone shows, THEN Authorize. A mismatch means a key swap — do not authorize."),
+          ]));
+        }).catch(function (e) { V.mount(mStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, (e && e.message) || "failed")); });
+      } }, [V.icon("find"), "Preview fingerprint"]);
+      var authBtn = h("button.btn.owner", { onClick: function () {
+        meshAct("/api/ceremonies/mesh/authorize", "Authorize this device? Only proceed if the fingerprint you previewed matches what the phone shows.");
+      } }, [V.icon("check"), "Authorize device"]);
+      var revBtn = h("button.btn.owner", { onClick: function () {
+        meshAct("/api/ceremonies/mesh/revoke", "Revoke this device key? It will no longer be trusted by the mesh.");
+      } }, [V.icon("x"), "Revoke device"]);
+      parts.push(h("div.card", { style: { marginTop: "16px" } }, [
+        h("div.card-h", null, [h("h3", null, "Device mesh (phone pairing)")]),
+        h("div.hint", null, "Owner-sign a phone DEVICE key into the mesh, on the host. Enter the device id + its "
+          + "base64 public key, PREVIEW the fingerprint and eyeball-match it against what the phone shows (this "
+          + "defeats a key swap), then Authorize. The phone's private key never leaves the phone; the owner key "
+          + "signs on the host."),
+        h("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginTop: "10px", maxWidth: "560px" } }, [
+          did, dpub,
+          h("div", { style: { display: "flex", gap: "10px", flexWrap: "wrap" } }, [previewBtn, authBtn, revBtn]),
+        ]),
+        mStatus,
+        h("div", { style: { marginTop: "12px" } }, [h("div.hint", { style: { marginBottom: "6px" } }, "Authorized devices (pubkey [fingerprint]):"), roster]),
+      ]));
+      refreshRoster();
     }
     V.mount(body, parts);
   }
