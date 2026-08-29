@@ -112,6 +112,33 @@
       ]
     },
     {
+      "description": "The sovereign trust-root key material at a glance — the owner PUBLIC key and its signed succession chain (pinned genesis → epochs → validated tip), the at-rest vault seal (TPM-sealed KEK), and the WARDEN kernel integrity pin + config drift. Read-only and OPERATOR+ (the same config_nonsecret tier as the doctor report — key status surfaces sealed-key file paths + SEALED/PLAINTEXT posture); every panel shows public keys + sealing metadata only, the owner private key never leaves the host. Owner-only key-material mutations (rotate, provision, pin, authorize, reset) are wired in a later slice.",
+      "group": "MANAGE",
+      "id": "ceremonies",
+      "label": "Ceremonies",
+      "owner": true,
+      "plane": "unified",
+      "synonyms": [
+        "ceremonies",
+        "ceremony",
+        "key material",
+        "owner key",
+        "owner pubkey",
+        "succession",
+        "key rotation",
+        "vault seal",
+        "kek",
+        "dek",
+        "kernel pin",
+        "warden",
+        "mesh",
+        "delegate offense",
+        "floor reset",
+        "key ceremony",
+        "trust root keys"
+      ]
+    },
+    {
       "description": "Authorization + the who/when/what usage-attestation ledger; provision a loopback authority (a remote charter needs an out-of-band ceremony).",
       "group": "MANAGE",
       "id": "charter",
@@ -602,5 +629,5 @@
       ]
     }
   ],
-  "source_sha": "c525ff6549d592de9f1dbd4517a14273eeba79d08bd2db1294c245d5e22c9835"
+  "source_sha": "925b18e01b915d90fda5d9ea3265465f93d389852c783a58e2e334160ba84c6c"
 }

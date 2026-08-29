@@ -131,6 +131,7 @@
       { id: "mcp", label: "MCP Servers", icon: "bolt", ready: true },
       { id: "system", label: "System & Services", icon: "gear", ready: true },
       { id: "durability", label: "Durability", icon: "shield", owner: true, perm: "secrets", ready: true },
+      { id: "ceremonies", label: "Ceremonies", icon: "key", owner: true, perm: "config_nonsecret", ready: true },
       { id: "budgets", label: "Token Budgets", icon: "bolt", ready: true },
       { id: "compliance", label: "Compliance", icon: "shield", ready: true },
       { id: "assurance", label: "Assurance", icon: "find", ready: true },
@@ -6161,6 +6162,50 @@
     refreshList();
   }
 
+  // Wave 10 (ceremonies) — read-only KEY-MATERIAL CEREMONY status: the owner PUBLIC key + its signed
+  // succession chain, the at-rest vault seal, and the WARDEN kernel integrity pin. Every panel shows public
+  // keys + sealing metadata only — no secret ever crosses, and none of these reads unseal the private key.
+  // The owner-key MUTATIONS (provision/pin/rotate/authorize/reset) are wired owner-only in a later slice.
+  // Sovereign plane (SOV), viewer+.
+  function renderCeremonies(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Ceremonies"),
+        h("span.sub", null, "The sovereign trust-root key material at a glance — the owner public key and its "
+          + "signed succession chain, the at-rest vault seal, and the WARDEN kernel integrity pin. Read-only: "
+          + "these panels show public keys + sealing metadata only, and the owner private key never leaves the "
+          + "host. Key-material mutations (rotate, provision, pin, authorize, reset) land here next, owner-only.")]),
+      h("div#ceremonies-body", { style: { marginTop: "16px" } }, h("div.empty", null, "Loading…")),
+    ]);
+    drawCeremonies();
+  }
+
+  function drawCeremonies() {
+    var body = V.$("#ceremonies-body"); if (!body) return;
+    // one read card: title + hint, an optional danger note, and a <pre> filled from a GET. Two distinct
+    // problem states are surfaced, never hidden behind a false green: (1) the status command itself FAILED
+    // (non-zero exit — e.g. a forked/tampered succession chain sys.exit(2), or a spawn error) → ok:false;
+    // (2) the command RAN but its output carries the CLI's `!!` problem marker (a tampered kernel pin or an
+    // incomplete KEK rotation exit 0 yet print `!!`) — that would otherwise look green, so we flag it too.
+    function readCard(title, hint, url, icon) {
+      var note = h("div", null, "");
+      var pre = h("pre.mono", { style: { whiteSpace: "pre-wrap", fontSize: "12px", margin: "10px 0 0", maxHeight: "280px", overflow: "auto" } }, "Loading…");
+      V.getJSON(SOV(url)).then(function (r) {
+        r = r || {};
+        var txt = (r.text || "").trim();
+        if (r.ok === false) V.mount(note, h("div.set-status.danger", { style: { marginTop: "10px" } }, (r.error || r.stderr || "the status command failed (non-zero exit)")));
+        else if (txt.indexOf("!!") >= 0) V.mount(note, h("div.set-status.danger", { style: { marginTop: "10px" } }, "This status flags a problem (see the “!!” line below) — the command ran, but it is NOT clean."));
+        V.mount(pre, h("span", null, txt || "(nothing reported)"));
+      }).catch(function (e) { V.mount(pre, ""); V.mount(note, offlineEmpty(e, "Could not read this status (sovereign plane).")); });
+      return h("div.card", null, [h("div.card-h", null, [h("h3", null, [V.icon(icon), " " + title])]), h("div.hint", null, hint), note, pre]);
+    }
+    V.mount(body, h("div.grid.cols-2", { style: { alignItems: "start" } }, [
+      readCard("Owner public key", "The base64 owner PUBLIC signing key. The private half is sealed at rest and never leaves the host.", "/api/ceremonies/owner-pubkey", "key"),
+      readCard("Owner-key succession", "The signed key history: pinned genesis root → each epoch → the validated current tip. Fail-closed if the chain is forked or tampered.", "/api/ceremonies/key", "shield"),
+      readCard("Vault (at-rest seal)", "Whether the trust root + secrets are sealed at rest under a TPM-sealed KEK.", "/api/ceremonies/vault", "shield"),
+      readCard("Kernel integrity pin", "The owner-signed WARDEN kernel content pin + any config drift from the signed manifest.", "/api/ceremonies/kernel", "gear"),
+    ]));
+  }
+
   function renderBrain(screen) {
     var B = { tab: (hashQuery().tab) || "decide", runs: [], run: null, catalogQ: "" };
     V.mount(screen, [
@@ -10115,6 +10160,7 @@
     if (id === "mcp") { renderMcp(screen); return; }
     if (id === "system") { renderSystem(screen); return; }
     if (id === "durability") { renderDurability(screen); return; }
+    if (id === "ceremonies") { renderCeremonies(screen); return; }
     if (id === "budgets") { renderBudgets(screen); return; }
     if (id === "compliance") { renderCompliance(screen); return; }
     if (id === "assurance") { renderAssurance(screen); return; }
