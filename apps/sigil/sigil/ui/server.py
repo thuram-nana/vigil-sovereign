@@ -1328,7 +1328,8 @@ class Handler(BaseHTTPRequestHandler):
         # the remaining ceremony POSTs take a bounded JSON body; parse it once (malformed → clean 400)
         _BODY_PATHS = ("/api/ceremonies/mesh/fingerprint", "/api/ceremonies/mesh/authorize",
                        "/api/ceremonies/mesh/revoke", "/api/ceremonies/delegate/preview",
-                       "/api/ceremonies/delegate")
+                       "/api/ceremonies/delegate", "/api/ceremonies/key/rotate",
+                       "/api/ceremonies/key/re-genesis", "/api/ceremonies/floor/reset")
         if path in _BODY_PATHS:
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1355,12 +1356,29 @@ class Handler(BaseHTTPRequestHandler):
             # JSON reaches argv only via a server-controlled temp file (ceremonies handles it)
             if path == "/api/ceremonies/delegate/preview":
                 return self._json(_cer.delegate_offense_preview(body.get("identity")))   # pure — no signing
-            from .. import config as _config
-            res = _cer.delegate_offense(body.get("identity"), str(body.get("scope", "")),
-                                        body.get("hours", "24"), _config.SIGIL_HOME)
-            self._audit_ceremony("delegate-offense", principal,
-                                 {"scope": str(body.get("scope", ""))[:128], "ok": res.get("ok")})
-            return self._json(res)
+            if path == "/api/ceremonies/delegate":
+                from .. import config as _config
+                res = _cer.delegate_offense(body.get("identity"), str(body.get("scope", "")),
+                                            body.get("hours", "24"), _config.SIGIL_HOME)
+                self._audit_ceremony("delegate-offense", principal,
+                                     {"scope": str(body.get("scope", ""))[:128], "ok": res.get("ok")})
+                return self._json(res)
+            # DESTRUCTIVE key-material ceremonies — owner (secrets, already checked above) AND a
+            # SERVER-checked typed confirmation phrase: an irreversible op must not fire on a fat-fingered
+            # click. The verb + its danger flags are hardcoded server-side; the body carries ONLY the phrase.
+            _DESTRUCTIVE = {
+                "/api/ceremonies/key/rotate": ("ROTATE OWNER KEY", _cer.key_rotate, "key-rotate"),
+                "/api/ceremonies/key/re-genesis": ("ABANDON CONTINUITY", _cer.key_re_genesis, "key-re-genesis"),
+                "/api/ceremonies/floor/reset": ("LOWER THE FLOOR", _cer.floor_reset, "floor-reset"),
+            }
+            if path in _DESTRUCTIVE:
+                phrase, fn, label = _DESTRUCTIVE[path]
+                if str(body.get("confirm", "")) != phrase:
+                    return self._json({"ok": False,
+                                       "error": f'type the exact phrase "{phrase}" to confirm this destructive ceremony'})
+                res = fn()
+                self._audit_ceremony(label, principal, {"ok": res.get("ok"), "exit_code": res.get("exit_code")})
+                return self._json(res)
         return self._deny(404, "not found")
 
     def _audit_ceremony(self, action, principal, detail):

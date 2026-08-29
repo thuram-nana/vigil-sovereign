@@ -324,3 +324,53 @@ def test_ceremony_body_route_400s_on_malformed_json(monkeypatch):
     except urllib.error.HTTPError as e:
         code = e.code
     assert code == 400
+
+
+# --- Wave 10e: OWNER-ONLY DESTRUCTIVE ceremonies (key rotate / re-genesis / floor reset) --------------
+
+def test_destructive_shell_exact_danger_flags(monkeypatch):
+    # the exact CLI danger flags are hardcoded (re-genesis needs BOTH --yes AND the continuity flag); ZERO
+    # request input reaches argv.
+    seen = []
+    monkeypatch.setattr(subprocess, "run", lambda a, **k: (seen.append(a) or _P(0, "done")))
+    ceremonies.key_rotate()
+    assert seen[-1] == [sys.executable, "-m", "sigil", "key", "rotate", "--yes"]
+    ceremonies.key_re_genesis()
+    assert seen[-1] == [sys.executable, "-m", "sigil", "key", "re-genesis", "--yes",
+                        "--i-understand-continuity-is-abandoned"]
+    ceremonies.floor_reset()
+    assert seen[-1] == [sys.executable, "-m", "sigil", "floor", "reset", "--yes"]
+
+
+def test_destructive_routes_require_the_exact_typed_phrase(monkeypatch):
+    # a destructive verb NEVER runs without the exact server-checked confirmation phrase (defence against a
+    # fat-fingered click on an irreversible op). Wrong/missing phrase → ok:false and NO verb runs.
+    ran = []
+    monkeypatch.setattr(ceremonies, "key_rotate", lambda: (ran.append("rotate"), {"ok": True, "text": "rotated"})[1])
+    monkeypatch.setattr(ceremonies, "key_re_genesis", lambda: (ran.append("regen"), {"ok": True, "text": "regen"})[1])
+    monkeypatch.setattr(ceremonies, "floor_reset", lambda: (ran.append("floor"), {"ok": True, "text": "reset"})[1])
+    _s, port = _serve()
+    cases = [("key/rotate", "ROTATE OWNER KEY"), ("key/re-genesis", "ABANDON CONTINUITY"),
+             ("floor/reset", "LOWER THE FLOOR")]
+    for leaf, phrase in cases:
+        assert _post(port, f"/api/ceremonies/{leaf}", body={"confirm": "nope"})[1].get("ok") is False
+        assert _post(port, f"/api/ceremonies/{leaf}", body={})[1].get("ok") is False
+        assert _post(port, f"/api/ceremonies/{leaf}", body={"confirm": phrase.lower()})[1].get("ok") is False  # case-exact
+    assert ran == []          # NO destructive verb ran without the exact phrase
+    for leaf, phrase in cases:
+        code, body = _post(port, f"/api/ceremonies/{leaf}", body={"confirm": phrase})
+        assert code == 200 and body.get("ok") is True
+    assert set(ran) == {"rotate", "regen", "floor"}    # each ran once, only with its exact phrase
+
+
+def test_destructive_routes_are_owner_only(monkeypatch):
+    # RBAC precedes the confirm check: a non-owner is refused (403) even WITH a would-be-valid phrase.
+    for fn in ("key_rotate", "key_re_genesis", "floor_reset"):
+        monkeypatch.setattr(ceremonies, fn, lambda: {"ok": True, "text": "done"})
+    _s, port = _serve()
+    viewer = _make_account(port, "dzv", "viewer")
+    operator = _make_account(port, "dzo", "operator")
+    for leaf in ("key/rotate", "key/re-genesis", "floor/reset"):
+        assert _post(port, f"/api/ceremonies/{leaf}", token=operator, body={"confirm": "ROTATE OWNER KEY"})[0] == 403
+        assert _post(port, f"/api/ceremonies/{leaf}", token=viewer, body={"confirm": "ROTATE OWNER KEY"})[0] == 403
+        assert _post(port, f"/api/ceremonies/{leaf}", token=None, body={"confirm": "ROTATE OWNER KEY"})[0] == 403

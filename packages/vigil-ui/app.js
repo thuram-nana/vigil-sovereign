@@ -6352,6 +6352,42 @@
         ]),
         dStatus,
       ]));
+
+      // --- DANGER ZONE — destructive owner ceremonies. Each requires TYPING an exact phrase (a window.prompt
+      //     match) before the POST fires, and the SERVER re-checks the same phrase — an irreversible op must
+      //     not go off on a fat-fingered click. The `sigil` verb's own danger flags are hardcoded server-side.
+      var dzStatus = h("div", null, "");
+      function dangerBtn(label, url, phrase, warn, icon) {
+        return h("button.btn.danger", { onClick: function () {
+          var typed = window.prompt(warn + "\n\nType exactly \"" + phrase + "\" to proceed (or Cancel):", "");
+          if (typed !== phrase) { if (typed !== null) V.mount(dzStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, "phrase did not match — nothing was done")); return; }
+          V.mount(dzStatus, h("div.hint", { style: { marginTop: "8px" } }, "Running the ceremony on the host…"));
+          V.postJSON(SOV(url), { confirm: typed }).then(function (r) {
+            r = r || {}; var failed = (r.ok === false);
+            V.mount(dzStatus, h("div.set-status" + (failed ? ".danger" : ".ok"), { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+              h("div", null, [V.icon(failed ? "x" : "check"), h("span", null, " " + (failed ? "Did not complete" : "Ceremony complete"))]),
+              h("pre.mono", { style: { marginTop: "6px", whiteSpace: "pre-wrap", fontSize: "12px" } }, ((r.text || "") + (r.stderr ? "\n" + r.stderr : "")).trim() || (r.error || "(no output)")),
+            ]));
+            drawCeremonies();   // refresh the read panels (succession/floor state changed)
+          }).catch(function (e) { V.mount(dzStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, (e && e.message) || "failed")); });
+        } }, [V.icon(icon), label]);
+      }
+      parts.push(h("div.card", { style: { marginTop: "16px", borderColor: "var(--danger, #b00)" } }, [
+        h("div.card-h", null, [h("h3", null, "Danger zone (owner) — destructive")]),
+        h("div.hint", null, "Irreversible or trust-weakening owner ceremonies. Each runs the real `sigil` verb "
+          + "ON THE HOST and requires you to TYPE an exact phrase; the server re-checks it. Rotating mints a "
+          + "successor key (old heads still verify); re-genesis ABANDONS continuity (out-of-band verifiers must "
+          + "re-pin); resetting the floor LOWERS the anti-rollback guarantee."),
+        h("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginTop: "10px" } }, [
+          dangerBtn("Rotate owner key", "/api/ceremonies/key/rotate", "ROTATE OWNER KEY",
+            "Rotate the owner key? A successor is cross-signed into the key history; every pre-rotation head/grant still verifies. Re-pin any out-of-band verifier that pins the CURRENT key.", "key"),
+          dangerBtn("Re-genesis (abandon continuity)", "/api/ceremonies/key/re-genesis", "ABANDON CONTINUITY",
+            "RE-GENESIS is the COMPROMISE fallback. It mints a fresh genesis and DELIBERATELY ABANDONS verifiable continuity of ALL prior history. Use ONLY for an actual key compromise. Out-of-band verifiers MUST re-pin to the new key.", "shield"),
+          dangerBtn("Reset anti-rollback floor", "/api/ceremonies/floor/reset", "LOWER THE FLOOR",
+            "Reset (LOWER) the durable anti-rollback floor to the current spine? Only after a legitimate reset/restore — never routinely. This weakens the anti-rollback guarantee.", "bolt"),
+        ]),
+        dzStatus,
+      ]));
     }
     V.mount(body, parts);
   }
