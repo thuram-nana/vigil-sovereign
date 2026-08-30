@@ -64,9 +64,12 @@ def test_findings_view_reports_active_findings_as_facts(range_client):
     rc_dir = os.path.join(range_client.config.base_dir, "rc")  # type: ignore[attr-defined]
     os.makedirs(rc_dir, exist_ok=True)
     with open(os.path.join(rc_dir, "records.reverify.json"), "w", encoding="utf-8") as fh:
-        json.dump({"active_findings": [{"bug_class": "error_based_sqli", "param": "q"},
-                                       {"bug_class": "xss", "param": "q"}],
-                   "passive_findings": [{"bug_class": "missing_csp", "title": "Missing CSP"}]}, fh)
+        # real active findings carry a re-executable oracle_context — that (not the array name) is what
+        # earns the FACT label in the findings view.
+        json.dump({"active_findings": [
+            {"bug_class": "error_based_sqli", "param": "q", "oracle_context": {"kind": "error_signature"}},
+            {"bug_class": "xss", "param": "q", "oracle_context": {"kind": "reflection_context"}}],
+            "passive_findings": [{"bug_class": "missing_csp", "title": "Missing CSP"}]}, fh)
     with urllib.request.urlopen(range_client.control_base + "/findings.json", timeout=10) as r:  # type: ignore[attr-defined]
         doc = json.load(r)
     facts = [f for f in doc["findings"] if f["grounding"] == "fact"]

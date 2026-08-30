@@ -7,8 +7,23 @@ step needs (no restart between the OPEN scan and the CLOSED re-prove).
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass
+
+_LOOPBACK_NAMES = {"localhost", "ip6-localhost", "localhost.localdomain"}
+
+
+def is_loopback_host(host: str) -> bool:
+    """True iff `host` is a loopback address/name. Everything else (0.0.0.0, LAN, tunnel, routable, a DNS
+    name) is False. The range binds LOOPBACK ONLY — stricter than VIGIL's uiproxy.bind_ok."""
+    h = (host or "").strip().strip("[]").lower()
+    if h in _LOOPBACK_NAMES:
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
 
 DEFAULT_TARGET_PORT = 19010
 DEFAULT_CONTROL_PORT = 19011

@@ -40,9 +40,12 @@ target and streams every step. Or run the verbs yourself against http://127.0.0.
 re-prove → restore** — `target harden on`, then a re-scan returns **0 confirmed FACTs** (a sound CLOSED
 negative), then back to vulnerable. Governed **engage** is available as an extra (approve-then-run).
 
-## Proven against the real engine
+## What the real engine produces (reproduce it: Range Control → Run all ▸)
 
-Every planted weakness is confirmed by a VIGIL deterministic oracle — not asserted:
+Every planted weakness is confirmed by a VIGIL deterministic oracle, not asserted. The results below are
+from a live loopback run against this range — reproduce them yourself from Range Control (the confidences
+are what that run reported; the range's own tests pin the *signal* each sink emits, and the engine assigns
+the grounding):
 
 | Capability | Result the engine produced |
 |---|---|

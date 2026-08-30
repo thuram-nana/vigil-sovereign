@@ -8,27 +8,15 @@ guard exists to prevent).
 from __future__ import annotations
 
 import atexit
-import ipaddress
 import os
 import signal
 import socket
 import sys
 
 from . import apps
-from .meridian.config import Config, default_base_dir, read_mode
+from .meridian.config import Config, default_base_dir, is_loopback_host, read_mode
 
-_LOOPBACK_NAMES = {"localhost", "ip6-localhost", "localhost.localdomain"}
-
-
-def is_loopback_host(host: str) -> bool:
-    """True iff `host` is a loopback address/name. Everything else (0.0.0.0, LAN, tunnel, routable) → False."""
-    h = (host or "").strip().strip("[]").lower()
-    if h in _LOOPBACK_NAMES:
-        return True
-    try:
-        return ipaddress.ip_address(h).is_loopback
-    except ValueError:
-        return False
+__all__ = ["is_loopback_host", "run_up", "run_down", "run_status"]
 
 
 def _pid_alive(pid: int) -> bool:

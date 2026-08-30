@@ -134,6 +134,11 @@ def serve(config: cfg.Config, *, hardened: bool = False, block: bool = True,
     driven by the generic `tools/livefire` harness, which treats MERIDIAN as just another loopback target.
     When block=False the caller owns shutdown (used by tests). Each listener runs its own daemon thread.
     """
+    # Defense-in-depth: refuse a non-loopback bind AT THE BIND SITE, not only in run_up. The invariant is
+    # also enforced by construction (Config defaults host to 127.0.0.1), but a future --host must never
+    # bind the deliberately-vulnerable target to a routable/LAN address.
+    if not cfg.is_loopback_host(config.host):
+        raise ValueError(f"refusing to bind {config.host!r}: the range binds LOOPBACK ONLY")
     config.ensure_dirs()
     cfg.write_mode(config.base_dir, cfg.MODE_HARDENED if hardened else cfg.MODE_VULN)
     from . import db

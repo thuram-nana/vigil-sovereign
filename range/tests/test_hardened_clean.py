@@ -44,6 +44,17 @@ def test_open_redirect_is_refused_but_route_lives(range_client):
     assert range_client.location_of("/auth/continue?next=/records")[0] == 302
 
 
+def test_open_redirect_backslash_and_protocol_relative_bypasses_are_refused(range_client):
+    """Mutation-sensitive: browsers normalize '\\' to '/', so /\\evil.com and //evil.com must be refused in
+    hardened mode (they are external redirects). In vuln mode /\\evil.com IS honoured (the sink exists)."""
+    range_client.set_mode("vuln")
+    assert range_client.location_of("/auth/continue?next=" + range_client.q("/\\evil.com"))[0] == 302
+    range_client.set_mode("hardened")
+    for bad in ("/\\evil.com", "//evil.com", "\\/evil.com"):
+        status, location = range_client.location_of("/auth/continue?next=" + range_client.q(bad))
+        assert status == 400 and location is None, bad
+
+
 def test_exposure_paths_are_404(range_client):
     range_client.set_mode("hardened")
     assert range_client.get("/.env")[0] == 404

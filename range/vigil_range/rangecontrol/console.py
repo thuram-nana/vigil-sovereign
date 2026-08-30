@@ -142,12 +142,16 @@ def build_control_router(config: Config) -> Router:
         except (OSError, ValueError):
             return Response.json({"findings": []})
         slim = []
-        # active_findings are the oracle-confirmed FACTs (each carries a re-executable oracle_context)
+        # active findings: label FACT only when the finding carries a re-executable oracle_context (the
+        # proof `framework.v2 verify` re-runs) — not merely because it sits in the active array.
         for f in doc.get("active_findings", []):
             where = f.get("param") or f.get("endpoint") or f.get("insertion_point") or ""
-            slim.append({"bug_class": f.get("bug_class") or "finding", "grounding": "fact",
+            proven = bool(f.get("oracle_context"))
+            slim.append({"bug_class": f.get("bug_class") or "finding",
+                         "grounding": "fact" if proven else "lead",
                          "severity": f.get("severity", "high"),
-                         "title": f"confirmed at {where}" if where else "confirmed by oracle"})
+                         "title": (f"confirmed at {where}" if where else "confirmed by oracle")
+                                  if proven else (f"active at {where}" if where else "active finding")})
         # passive findings are leads (missing headers, banners) — shown but not as FACTs
         for f in doc.get("passive_findings", []):
             slim.append({"bug_class": f.get("bug_class") or "passive",

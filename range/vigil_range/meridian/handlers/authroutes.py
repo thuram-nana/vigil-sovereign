@@ -37,10 +37,15 @@ def _record_fail(ip: str) -> None:
 
 
 def _safe_next(nxt: str, hardened: bool) -> tuple[bool, str]:
-    """(ok, location). In hardened mode only a same-origin relative path is allowed."""
+    """(ok, location). In hardened mode only a clean same-origin relative path is allowed.
+
+    A relative path must start with a single '/', and must NOT be protocol-relative. Browsers normalize a
+    backslash to '/', so `/\\evil.com` (and `\\`-tricks generally) resolve to `//evil.com` (external) — those
+    are rejected too, along with any control character an origin-parser might treat as a delimiter."""
     if not hardened:
         return True, nxt or "/"
-    if nxt and nxt.startswith("/") and not nxt.startswith("//"):
+    if (nxt and nxt.startswith("/") and not nxt.startswith("//")
+            and "\\" not in nxt and not any(ord(c) < 0x20 for c in nxt)):
         return True, nxt
     return False, "/"
 
