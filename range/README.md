@@ -28,6 +28,31 @@ target charter          # print the engagement charter authorizing VIGIL against
 
 `target` is installed as an offense-env console-script (`~/.local/bin/target`, symlinked by `bootstrap.sh`).
 
+Then open **Range Control** at http://127.0.0.1:19011/ and click **Run all ▸** — it drives VIGIL against the
+target and streams every step. Or run the verbs yourself against http://127.0.0.1:19010/.
+
+## The end-to-end tour (what Range Control runs)
+
+1. **Recon** — crawl the surface. 2. **Confirm SQLi + XSS** — `framework.v2 scan` → oracle FACTs.
+3. **Confirm IDOR/BOLA** — two-identity `scan --access-control`. 4. **Confirm SSRF** — OOB oracle.
+5. **Verify offline** — `framework.v2 verify` re-executes the retained oracle context (prove-don't-guess).
+6. **Detect** — `vigil detect` fires the attack signatures from MERIDIAN's own logs. 7–9. **Harden →
+re-prove → restore** — `target harden on`, then a re-scan returns **0 confirmed FACTs** (a sound CLOSED
+negative), then back to vulnerable. Governed **engage** is available as an extra (approve-then-run).
+
+## Proven against the real engine
+
+Every planted weakness is confirmed by a VIGIL deterministic oracle — not asserted:
+
+| Capability | Result the engine produced |
+|---|---|
+| SQL injection | `error_based_sqli \| fact` at `q` (re-verified offline, conf 0.88) |
+| Reflected XSS | `xss \| fact` at `q` (re-verified offline, conf 0.95) |
+| IDOR / BOLA | `idor \| fact` at `id` (two-identity access-control) |
+| SSRF | `ssrf \| fact` at `url` (out-of-band callback) |
+| Defensive detect | 6 detection FACTs — forced_browsing · sqli_structure · path_traversal · cmd_injection · port_scan · brute_force |
+| Posture (hardened) | **0** confirmed FACTs on a live channel — a sound CLOSED negative |
+
 ## Why it's safe
 
 - **Loopback only.** The launcher refuses any non-loopback bind — stricter than VIGIL's own bind guard.

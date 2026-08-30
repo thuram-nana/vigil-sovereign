@@ -145,7 +145,8 @@ def _spec_ssrf(config: Config) -> list[str]:
 
 
 def _spec_verify(config: Config) -> list[str]:
-    return _py("vigil_integration.cli", "verify", _reverifiable(config))
+    # framework.v2 verify re-executes each finding's retained oracle_context offline (prove-don't-guess)
+    return _py("framework.v2", "verify", _reverifiable(config))
 
 
 def _spec_detect(config: Config) -> list[str]:
