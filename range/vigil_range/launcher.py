@@ -144,7 +144,7 @@ def run_status(app_name: str, *, base_dir: str | None = None) -> int:
     running = bool(pid and _pid_alive(pid))
     mode = read_mode(config.base_dir)
     print(f"app       : {app_name}")
-    print(f"running   : {'yes (pid %d)' % pid if running else 'no'}")
+    print(f"running   : {f'yes (pid {pid})' if running else 'no'}")
     print(f"mode      : {mode}")
     print(f"target    : http://127.0.0.1:{config.target_port}/  ({'up' if not _port_free('127.0.0.1', config.target_port) else 'down'})")
     print(f"control   : http://127.0.0.1:{config.control_port}/  ({'up' if not _port_free('127.0.0.1', config.control_port) else 'down'})")

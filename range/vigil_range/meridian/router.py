@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 
 @dataclass
@@ -84,7 +84,8 @@ class StreamResponse:
     headers: dict[str, str] = field(default_factory=dict)
 
 
-Handler = Callable[[Ctx], Response]
+AnyResponse = Union[Response, StreamResponse]
+Handler = Callable[[Ctx], AnyResponse]
 
 
 class Router:
@@ -118,7 +119,7 @@ class Router:
                 return None
         return params
 
-    def dispatch(self, ctx: Ctx) -> Optional[Response]:
+    def dispatch(self, ctx: Ctx) -> Optional[AnyResponse]:
         parts = ctx.path.strip("/").split("/") if ctx.path != "/" else [""]
         for method, pattern, handler in self._routes:
             if method != ctx.method:
