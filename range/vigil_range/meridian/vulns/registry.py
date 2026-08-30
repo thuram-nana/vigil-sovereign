@@ -86,6 +86,20 @@ VULNS: list[Vuln] = [
          "POST", "/login", "password", "n/a (drives detect brute-force/spray)", "medium",
          "plaintext credential check with NO rate limit; every attempt is written to auth.log",
          "a per-IP rate limit returns 429 after repeated failures", "S2"),
+    Vuln("ssrf-fetch", "SSRF in the document fetch", "CWE-918", "ssrf",
+         "GET", "/documents/fetch", "url", "OOB_CALLBACK", "high",
+         "the server fetches an arbitrary user-supplied http(s) URL — the engine's loopback OOB callback "
+         "URL lands on its receiver and the OOB oracle fires (file:// is refused, so this is SSRF not LFI)",
+         "only the allowlisted document host may be fetched (private/loopback refused)", "S3"),
+    Vuln("xxe-import", "XXE in the XML document import", "CWE-611", "blind_xxe",
+         "POST", "/documents/import", "(body)", "OOB_CALLBACK", "high",
+         "an imported XML document's external SYSTEM entity is resolved (fetched) → an outbound request to "
+         "the entity URL (the OOB signal)",
+         "external entities are never resolved", "S3"),
+    Vuln("llm-injection-permitbot", "Prompt injection in the PermitBot assistant", "CWE-1427", "llm_injection",
+         "GET", "/assistant", "q", "catalog/manual (web scan does not auto-fire an LLM oracle)", "medium",
+         "an injection message makes the mock model leak its system prompt + the internal secret token",
+         "a guardrail refuses the injection and the secret never appears in output", "S3"),
 ]
 
 

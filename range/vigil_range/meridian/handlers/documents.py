@@ -7,8 +7,21 @@ mode refuses the escape with a 404.
 
 from __future__ import annotations
 
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
+
 from .. import theme
 from ..router import Ctx, Response, Router
+
+# Hardened mode only lets the document-fetch reach this allowlisted host (everything else — including any
+# private/loopback address, which is where an SSRF/OOB callback lives — is refused).
+_ALLOWED_FETCH_HOST = "docs.meridian.gov.example"
+_FETCH_TIMEOUT = 3.0
+_FETCH_CAP = 4096
+# A SYSTEM external-entity declaration in an imported XML doc (the XXE vector).
+_SYSTEM_ENTITY_RE = re.compile(r"""<!ENTITY\s+\w+\s+SYSTEM\s+["']([^"']+)["']""", re.IGNORECASE)
 
 # Returned on a traversal attempt — a fake /etc/passwd. It contains the `root:x:0:0:` signature the engine's
 # side-effect oracle keys on, but leaks nothing real.
@@ -36,7 +49,15 @@ def _documents_home(ctx: Ctx) -> Response:
         '<form method="get" action="/documents/download" style="margin-top:var(--sp-4)">'
         '<label class="field"><span>Document name</span>'
         '<input name="file" placeholder="readme"></label>'
-        '<button class="btn" type="submit">Download</button></form></div></main>'
+        '<button class="btn" type="submit">Download</button></form></div>'
+        '<div class="card" style="margin-top:var(--sp-4)"><div class="card-h">'
+        '<span class="label">Import</span><h3>Fetch a supporting document by URL</h3></div>'
+        '<form method="get" action="/documents/fetch">'
+        '<label class="field"><span>Document URL</span>'
+        '<input name="url" placeholder="https://docs.meridian.gov.example/form.pdf"></label>'
+        '<button class="btn" type="submit">Fetch</button></form>'
+        '<p style="color:var(--text-2);margin-top:var(--sp-3)">You can also POST an XML manifest to '
+        '<code>/documents/import</code>.</p></div></main>'
     )
     return Response.html(theme.page("Documents", body, active="documents", mode=ctx.mode))
 
@@ -54,6 +75,56 @@ def _download(ctx: Ctx) -> Response:
     return Response.text(doc, content_type="text/plain; charset=utf-8")
 
 
+def _http_get(url: str) -> tuple[bool, str]:
+    """Server-side fetch of an http(s) URL (bounded). Returns (ok, detail). file://, gopher:// etc. are
+    refused even in vuln mode, so this is an SSRF surface but never a local-file-read (LFI) one."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ("http", "https"):
+        return False, f"unsupported scheme: {parsed.scheme or '(none)'}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "MERIDIAN-doc-fetch/1.0"})
+        with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT) as r:  # noqa: S310 — intentional SSRF sink
+            body = r.read(_FETCH_CAP)
+        return True, f"fetched {len(body)} bytes (status {r.status}) from {url}"
+    except urllib.error.HTTPError as e:
+        return True, f"fetched (status {e.code}) from {url}"  # the request still egressed (OOB fired)
+    except Exception as e:  # noqa: BLE001 — a target must not crash on a bad fetch
+        return False, f"fetch error: {type(e).__name__}"
+
+
+def _fetch(ctx: Ctx) -> Response:
+    """SSRF: the server fetches an arbitrary user-supplied URL. When the engine injects its loopback OOB
+    callback URL here, the outbound request lands on the receiver and the OOB oracle fires. Hardened mode
+    only permits the allowlisted document host."""
+    url = ctx.q1("url")
+    if not url:
+        return Response.text("provide a ?url=", status=400)
+    if ctx.hardened:
+        host = urllib.parse.urlsplit(url).hostname or ""
+        if host != _ALLOWED_FETCH_HOST:
+            return Response.text(f"refused: only {_ALLOWED_FETCH_HOST} may be fetched", status=400)
+    ok, detail = _http_get(url)
+    return Response.text(detail, status=200 if ok else 502)
+
+
+def _import_xml(ctx: Ctx) -> Response:
+    """XXE: an imported XML document's external SYSTEM entity is resolved (fetched). Hardened mode never
+    resolves external entities. The observable effect — an outbound request to the entity's SYSTEM URL — is
+    exactly the OOB signal the engine's oracle confirms."""
+    xml_text = ctx.body.decode("utf-8", "replace")
+    matches = _SYSTEM_ENTITY_RE.findall(xml_text)
+    if ctx.hardened:
+        # external entities are disabled: parse structurally, resolve NOTHING
+        return Response.json({"imported": True, "external_entities_resolved": 0, "hardened": True})
+    resolved = []
+    for system_url in matches:
+        ok, _ = _http_get(system_url)  # a vulnerable parser fetches the external entity
+        resolved.append({"system": system_url, "fetched": ok})
+    return Response.json({"imported": True, "external_entities_resolved": len(resolved), "entities": resolved})
+
+
 def register(r: Router) -> None:
     r.add("GET", "/documents", _documents_home)
     r.add("GET", "/documents/download", _download)
+    r.add("GET", "/documents/fetch", _fetch)
+    r.add("POST", "/documents/import", _import_xml)
