@@ -74,6 +74,23 @@ CAPABILITIES: list[Capability] = [
                "The full governed engagement — charter-scoped, approve-then-run, mirrored on the event spine.",
                (), f"python -m vigil_integration.cli engage {_T}/ --slug meridian --scope 127.0.0.1",
                "a governed engagement (WARDEN gates autonomous fire)", "engage"),
+    Capability("compliance", "Compliance / standards mapping",
+               "Every confirmed finding mapped to OWASP ASVS · NIST 800-53 · ISO 27001 · CIS · MITRE ATT&CK, "
+               "plus a SARIF export CI and government tooling ingest.",
+               (), f"python -m framework.v2 scan '{_T}/records/search?q=test' --format sarif",
+               "a SARIF 2.1.0 document + the Compliance tab mapping", "sarif"),
+    Capability("evidence", "Signed evidence certificate (auditor-proof)",
+               "Build a signed, hash-linked evidence bundle and re-verify it OFFLINE with no trust in the "
+               "tool that produced it — the sovereignty guarantee.",
+               (), "python -m framework.v2 evidence certify --report <r> --out <bundle> --signer <k>  "
+                   "&&  evidence verify --bundle <bundle> --trust-root <tr>",
+               "bundle SOUND — signatures + oracle re-execution verified offline", "evidence-cert"),
+    Capability("impact", "Attack path → business impact",
+               "Translate the confirmed findings into agency impact (citizen-register breach, revenue loss, "
+               "back-office takeover). Multi-host attack-path graphs use `attack-paths` over an engagement spine.",
+               ("bola-applications", "privesc-role", "bizlogic-pay"),
+               "python -m framework.v2 attack-paths meridian --spine <spine> --source web:foothold",
+               "confirmed findings chained into plain-language impact (Business impact tab)", ""),
 ]
 
 
