@@ -24,6 +24,7 @@ then the [CLI & subsystem reference](CLI-REFERENCE.md) (what you can run), then 
 | Document | What it is |
 |---|---|
 | [CLI-REFERENCE.md](CLI-REFERENCE.md) | Every `vigil` verb, passthrough verb, and CRUCIBLE subcommand + subsystem, code-grounded. |
+| [MERIDIAN.md](MERIDIAN.md) | The bundled deliberately-vulnerable test app (`target up`) — what it is, all the commands, the 17 weaknesses it tests, and the OWASP/NIST/ISO/CIS/ATT&CK mapping. |
 | [HTTP-API.md](HTTP-API.md) | The loopback gated HTTP API (`crucible api`) and the product's other web surfaces. |
 | [DEPLOY.md](DEPLOY.md) | Deployment guide. |
 | [OBSERVABILITY.md](OBSERVABILITY.md) | Metrics, telemetry, and the assurance collector. |

@@ -90,6 +90,7 @@ The AI is only ever allowed to *propose*. A separate **oracle** must *prove*. A 
 - [Setup](#setup)
 - [Running it](#running-it)
 - [The unified web UI — `vigil up`](#the-unified-web-ui--vigil-up)
+- [Try it on the built-in test range — MERIDIAN](#try-it-on-the-built-in-test-range--meridian)
 - [Repository layout](#repository-layout)
 - [Security & trust model](#security--trust-model)
 - [Glossary](#glossary)
@@ -842,6 +843,37 @@ offline backend renders an honest empty state, never fake data):
 
 ---
 
+## Try it on the built-in test range — MERIDIAN
+
+VIGIL ships its own **deliberately-vulnerable practice target** so you can watch the whole engine work end to
+end without pointing it at anything real. **MERIDIAN** is a *fictional* National Permits & Licensing Authority
+— a realistic government service (citizen portal + a five-role staff back office) that is intentionally
+vulnerable, in the spirit of OWASP Juice Shop / DVWA. It lives in [`range/`](range/) and runs with one command.
+
+> ⚠ **Loopback only. Synthetic data only.** MERIDIAN binds `127.0.0.1` only, holds no real records, and every
+> "leak" is a decoy. It is a safe lab; do not deploy it or enter real data.
+
+```bash
+make setup           # one-time: builds the engine + installs the `target` launcher
+target up            # MERIDIAN portal :19010  +  Range Control cockpit :19011
+#   → open http://127.0.0.1:19011/ and click “Run all ▸”
+target harden on     # neutralize every planted weakness → re-prove CLOSED
+target down          # stop
+```
+
+Range Control drives the **real** VIGIL verbs against MERIDIAN and shows what it finds — recon →
+oracle-confirmed **FACTs** (SQLi, XSS, IDOR/BOLA, SSRF) → offline re-verify → **compliance mapping**
+(OWASP · NIST · ISO · CIS · ATT&CK) + SARIF → a **signed, offline-verifiable evidence certificate** →
+**business impact** → defensive **detection** from the app's own logs → **harden and re-prove CLOSED**. It
+plants **17** weaknesses across injection, access control, SSRF/XXE, misconfiguration, business logic, weak
+auth, and LLM prompt injection.
+
+**Full guide → [`docs/MERIDIAN.md`](docs/MERIDIAN.md)** (what it is, every command, the 17 weaknesses, and the
+complete compliance matrix). Quick start → [`range/README.md`](range/README.md); presenter script →
+[`range/DEMO.md`](range/DEMO.md).
+
+---
+
 ## Repository layout
 
 ```
@@ -862,6 +894,7 @@ vigil/
 │       ├── live/   engine.py, wiring.py, + six connectors    the unified engine
 │       └── cli.py                                     the `vigil` command
 ├── infra/                      The loopback target + sidecar configs
+├── range/                      MERIDIAN — the bundled deliberately-vulnerable test app + Range Control (`target up`)
 ├── targets/                    Engagement charters (authorization documents)
 ├── envs/                       The two isolated environments + the boundary-verifying build script
 └── docs/                       AS-BUILT · AS-BUILT-LIVE · PLAN · CONTINUATION · architecture · knowledge · research
