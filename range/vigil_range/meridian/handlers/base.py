@@ -6,9 +6,26 @@ URL; robots.txt + sitemap.xml add discovery hints (and a `Disallow:` the recon o
 
 from __future__ import annotations
 
-from .. import theme
+from .. import db, theme
 from ..config import READY_MARKER
 from ..router import Ctx, Response, Router
+
+
+def _stats(ctx: Ctx) -> dict[str, int]:
+    """Live counts for the landing dashboard (best-effort; a fresh/absent DB yields zeros)."""
+    try:
+        con = db.from_ctx(ctx)
+    except Exception:  # noqa: BLE001
+        return {"permits": 0, "active": 0, "review": 0}
+    try:
+        permits = con.execute("SELECT COUNT(*) FROM permits").fetchone()[0]
+        active = con.execute("SELECT COUNT(*) FROM permits WHERE status='active'").fetchone()[0]
+        review = con.execute("SELECT COUNT(*) FROM applications WHERE status IN ('under_review','submitted')").fetchone()[0]
+        return {"permits": permits, "active": active, "review": review}
+    except Exception:  # noqa: BLE001
+        return {"permits": 0, "active": 0, "review": 0}
+    finally:
+        con.close()
 
 # The public service tiles shown on the home page (id, href, title, blurb).
 _SERVICES = [
@@ -28,21 +45,31 @@ _SERVICES = [
 
 
 def _home(ctx: Ctx) -> Response:
+    st = _stats(ctx)
     tiles = "".join(
         f'<a class="card" href="{href}" style="text-decoration:none">'
         f'<div class="card-h"><span class="label">Service</span><h3>{theme.esc(title)}</h3></div>'
         f'<p style="color:var(--text-1)">{theme.esc(blurb)}</p></a>'
         for _sid, href, title, blurb in _SERVICES
     )
+    stat_tiles = (
+        f'<div class="tile"><div class="k">Permits on register</div><div class="v tnum">{st["permits"]:,}</div></div>'
+        f'<div class="tile"><div class="k">Active licences</div><div class="v tnum">{st["active"]:,}</div></div>'
+        f'<div class="tile"><div class="k">Applications in review</div><div class="v tnum">{st["review"]:,}</div></div>'
+        f'<div class="tile"><div class="k">Online services</div><div class="v tnum">{len(_SERVICES)}</div></div>'
+    )
     body = (
         '<main class="wrap">'
-        '<div class="screen-head">'
-        '<span class="label">Government of Meridia · fictional</span>'
-        # READY_MARKER lives verbatim in this heading (the range-registry readiness check asserts it).
-        f'<h1>{theme.esc(READY_MARKER)} &amp; Licensing Authority</h1>'
-        '<p class="sub">Apply for, track and verify national permits and licences. '
-        'This portal is a fictional target for authorized security testing of VIGIL.</p>'
-        '</div>'
+        # official hero band
+        '<div class="card" style="display:flex;gap:var(--sp-5);align-items:center;margin-bottom:var(--sp-5)">'
+        f'<div style="flex:0 0 auto;width:64px">{theme.CREST_SVG}</div>'
+        '<div><span class="label">Government of Meridia · a fictional state</span>'
+        f'<h1 style="margin:2px 0">{theme.esc(READY_MARKER)} &amp; Licensing Authority</h1>'
+        '<p class="sub" style="margin:0">Apply for, track and verify national permits and licences. '
+        'A fictional target for authorized VIGIL security testing.</p></div></div>'
+        f'<div class="grid cols-4" style="grid-template-columns:repeat(4,minmax(0,1fr))">{stat_tiles}</div>'
+        '<div class="screen-head" style="margin-top:var(--sp-6)"><span class="label">Services</span>'
+        '<h2 style="margin:2px 0">Do it online</h2></div>'
         f'<div class="grid cols-3">{tiles}</div>'
         '<footer class="foot" style="border:0;margin-top:var(--sp-6)">'
         'Open data: <a href="/robots.txt">robots.txt</a> · <a href="/sitemap.xml">sitemap.xml</a> · '

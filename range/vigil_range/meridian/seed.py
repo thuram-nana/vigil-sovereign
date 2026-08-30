@@ -75,10 +75,41 @@ _ACCOUNTS = [
 ]
 
 
+# Bulk synthetic register so the public search (and a SQLi dump) look like a real national registry.
+# Deterministic generation (no RNG) — fabricated names, tagged with a lab issued-date year.
+_SURNAMES = [
+    "Okonkwo", "Nakamura", "Silva", "Andersson", "Haddad", "Novak", "Ibrahim", "Costa", "Popescu", "Diallo",
+    "Kowalski", "Fernandez", "Bauer", "Rossi", "Kim", "Nguyen", "Adeyemi", "Petrov", "Dubois", "Meyer",
+    "Santos", "Bianchi", "Larsson", "Weber", "Moreau", "Hansen", "Kaur", "Traore", "Mensah", "Yilmaz",
+    "Johansson", "Romano", "Schmidt", "Laurent", "Oyelaran", "Kovac", "Marino", "Eriksson", "Bello", "Farah",
+]
+_GIVEN = ["Amara", "Wei", "Luca", "Sofia", "Omar", "Elena", "Kwame", "Ingrid", "Priya", "Mateo",
+          "Fatima", "Noah", "Aisha", "Hugo", "Mei", "Ravi", "Lena", "Diego", "Zara", "Emil"]
+_GEN_TYPES = ["Business Licence", "Building Permit", "Vehicle Licence", "Professional Licence",
+              "Trade Permit", "Import Licence", "Food Service Permit", "Signage Permit"]
+_GEN_STATUS = ["active", "active", "active", "active", "under_review", "suspended", "expired"]
+
+
+def _bulk_permits(start_id: int, count: int) -> list[tuple]:
+    rows = []
+    for n in range(count):
+        pid = start_id + n
+        given = _GIVEN[n % len(_GIVEN)]
+        surname = _SURNAMES[(n // len(_GIVEN)) % len(_SURNAMES)]
+        ptype = _GEN_TYPES[n % len(_GEN_TYPES)]
+        status = _GEN_STATUS[n % len(_GEN_STATUS)]
+        month = (n % 12) + 1
+        day = (n % 27) + 1
+        rows.append((pid, f"PL-2026-{pid:04d}", f"{given} {surname}", ptype, status,
+                     f"2026-{month:02d}-{day:02d}"))
+    return rows
+
+
 def seed_rows(con: sqlite3.Connection) -> None:
     con.executemany("INSERT INTO citizens VALUES (?,?,?,?,?)", _CITIZENS)
     con.executemany(
         "INSERT INTO applications (id, ref, citizen_id, permit_type, status, notes, fee_cents, created) "
         "VALUES (?,?,?,?,?,?,?,?)", _APPLICATIONS)
     con.executemany("INSERT INTO permits VALUES (?,?,?,?,?,?)", _PERMITS)
+    con.executemany("INSERT INTO permits VALUES (?,?,?,?,?,?)", _bulk_permits(100, 200))  # a real-sized register
     con.executemany("INSERT INTO accounts VALUES (?,?,?,?,?)", _ACCOUNTS)
