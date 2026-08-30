@@ -54,7 +54,20 @@ the grounding):
 | IDOR / BOLA | `idor \| fact` at `id` (two-identity access-control) |
 | SSRF | `ssrf \| fact` at `url` (out-of-band callback) |
 | Defensive detect | 6 detection FACTs — forced_browsing · sqli_structure · path_traversal · cmd_injection · port_scan · brute_force |
+| Signed evidence | a signed bundle that re-verifies **offline** — *"verified 2/2 certificate(s) crypto-sound, bundle SOUND"* |
 | Posture (hardened) | **0** confirmed FACTs on a live channel — a sound CLOSED negative |
+
+## For a government demo
+
+Range Control frames the results the way a government buyer evaluates them, under **Assessment results**:
+- **Compliance** — every confirmed finding mapped to OWASP ASVS · NIST 800-53 · ISO 27001 · CIS · MITRE
+  ATT&CK, plus a **SARIF** export CI and security tooling ingest.
+- **Business impact** — the confirmed findings translated to agency impact (citizen-register breach, revenue
+  loss, back-office takeover); a chain appears only when every finding it needs is actually confirmed.
+- **Evidence** — a **signed, offline-verifiable** evidence certificate an auditor re-checks without trusting
+  the tool (the sovereignty guarantee).
+
+A ready-to-run presenter script is in [DEMO.md](DEMO.md).
 
 ## Why it's safe
 

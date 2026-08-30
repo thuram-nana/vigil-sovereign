@@ -10,7 +10,9 @@ apply). It is a convenience launcher + viewer, like tools/livefire/range.sh with
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -98,6 +100,34 @@ def _synthetic_conn_log(config: Config) -> str:
     return path
 
 
+def _evidence_dir(config: Config) -> str:
+    return os.path.join(_rc_dir(config), "evidence")
+
+
+def _trust_root_path(config: Config) -> str:
+    return os.path.join(_rc_dir(config), "trust-root.json")
+
+
+def _ensure_evidence_keys(config: Config) -> str:
+    """Generate (once) an Ed25519 authoriser keypair via the ENGINE's own `evidence keygen`, cache it, and
+    write the public trust root. Returns the private key. The signer is minted server-side — never from a
+    request — so the operator can sign the range's own evidence bundle."""
+    keyfile = os.path.join(_rc_dir(config), "evidence-keys.json")
+    if not os.path.exists(keyfile):
+        proc = subprocess.run(_py("framework.v2", "evidence", "keygen"),  # noqa: S603 — fixed argv
+                              cwd=str(repo_root()), env=_child_env(), capture_output=True, text=True, timeout=60)
+        kp = json.loads(proc.stdout)
+        with open(keyfile, "w", encoding="utf-8") as fh:
+            json.dump(kp, fh)
+    with open(keyfile, encoding="utf-8") as fh:
+        kp = json.load(fh)
+    with open(_trust_root_path(config), "w", encoding="utf-8") as fh:
+        json.dump({"schema_version": 1, "threshold": 1, "authorizers": [
+            {"key_id": "meridian-signer", "name": "MERIDIA Range Authorizer",
+             "public_key_b64": kp["public_key_b64"]}]}, fh)
+    return kp["private_key_b64"]
+
+
 # --- the closed set of runnable specs --------------------------------------------------------------
 @dataclass(frozen=True)
 class RunSpec:
@@ -149,6 +179,25 @@ def _spec_verify(config: Config) -> list[str]:
     return _py("framework.v2", "verify", _reverifiable(config))
 
 
+def _spec_sarif(config: Config) -> list[str]:
+    # SARIF is the interchange format government security tooling / CI ingests
+    return _py("framework.v2", "scan", target_url(config, "/records/search?q=test"),
+               "--max-pages", "2", "--max-depth", "0", "--format", "sarif")
+
+
+def _spec_evidence_cert(config: Config) -> list[str]:
+    priv = _ensure_evidence_keys(config)
+    shutil.rmtree(_evidence_dir(config), ignore_errors=True)  # certify wants a fresh --out dir
+    return _py("framework.v2", "evidence", "certify", "--report", _reverifiable(config), "--slug", "meridian",
+               "--out", _evidence_dir(config), "--signer", f"meridian-signer:{priv}")
+
+
+def _spec_evidence_verify(config: Config) -> list[str]:
+    _ensure_evidence_keys(config)  # ensure the trust root exists
+    return _py("framework.v2", "evidence", "verify", "--report", _reverifiable(config),
+               "--bundle", _evidence_dir(config), "--trust-root", _trust_root_path(config))
+
+
 def _spec_detect(config: Config) -> list[str]:
     _drive_brute_force(config)
     conn = _synthetic_conn_log(config)
@@ -190,16 +239,26 @@ SPECS: dict[str, RunSpec] = {s.id: s for s in [
     RunSpec("verify", "5 · Verify offline (prove-don't-guess)", "tour",
             "Re-execute the retained oracle context from step 2 with no trust in the scanner.",
             "the SQLi/XSS FACTs re-verify offline", _spec_verify, timeout=180),
-    RunSpec("detect", "6 · Defensive detect (Detection Mirror)", "tour",
+    RunSpec("sarif", "6 · Export SARIF (for CI / gov tooling)", "tour",
+            "Emit the findings as SARIF — the interchange format security tooling and CI pipelines ingest.",
+            "a SARIF 2.1.0 document of the confirmed findings", _spec_sarif),
+    RunSpec("evidence-cert", "7 · Sign an evidence certificate", "tour",
+            "Build a signed, hash-linked evidence bundle from the confirmed findings.",
+            "a signed bundle (certificates + anchored chain)", _spec_evidence_cert, timeout=120),
+    RunSpec("evidence-verify", "8 · Verify it offline (auditor-proof)", "tour",
+            "Independently re-verify the signed bundle with no trust in the tool that produced it.",
+            "bundle SOUND — signatures + oracle re-execution check out offline", _spec_evidence_verify,
+            timeout=120),
+    RunSpec("detect", "9 · Defensive detect (Detection Mirror)", "tour",
             "Point vigil detect at MERIDIAN's own access/auth/conn logs.",
             "recon / injection / brute-force / port-scan signatures fire", _spec_detect, timeout=180),
-    RunSpec("harden-on", "7 · Harden the target", "tour",
+    RunSpec("harden-on", "10 · Harden the target", "tour",
             "Flip MERIDIAN to hardened mode (every planted sink neutralized, routes kept).",
             "mode → hardened (applied live)", _spec_harden_on, timeout=60),
-    RunSpec("reprove", "8 · Re-prove → CLOSED", "tour",
+    RunSpec("reprove", "11 · Re-prove → CLOSED", "tour",
             "Re-audit the records search in hardened mode — the oracle runs and does not fire.",
             "0 confirmed SQLi/XSS FACTs (a sound CLOSED negative)", _spec_reprove),
-    RunSpec("harden-off", "9 · Restore vulnerable mode", "tour",
+    RunSpec("harden-off", "12 · Restore vulnerable mode", "tour",
             "Flip MERIDIAN back to vulnerable mode for the next run.",
             "mode → vuln", _spec_harden_off, timeout=60),
     RunSpec("engage", "Governed engage (OODA, approve-then-run)", "extra",
