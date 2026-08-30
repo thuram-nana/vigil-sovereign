@@ -8,9 +8,32 @@ in hardened mode.
 
 from __future__ import annotations
 
+import threading
+import time
+
 from .. import auth, db, logs, theme
 from ..config import Config
 from ..router import Ctx, Response, Router
+
+# In-memory login-failure tracker — used ONLY in hardened mode (vuln mode has no rate limit, the weak-authn
+# plant). Real wall-clock here is fine: this is the target app, not the engine's deterministic path.
+_FAILS: dict[str, list[float]] = {}
+_FAILS_LOCK = threading.Lock()
+_FAIL_WINDOW = 300.0
+_MAX_FAILS = 8
+
+
+def _rate_limited(ip: str) -> bool:
+    now = time.time()
+    with _FAILS_LOCK:
+        hist = [t for t in _FAILS.get(ip, []) if now - t < _FAIL_WINDOW]
+        _FAILS[ip] = hist
+        return len(hist) >= _MAX_FAILS
+
+
+def _record_fail(ip: str) -> None:
+    with _FAILS_LOCK:
+        _FAILS.setdefault(ip, []).append(time.time())
 
 
 def _safe_next(nxt: str, hardened: bool) -> tuple[bool, str]:
@@ -44,16 +67,26 @@ def _login_submit(ctx: Ctx) -> Response:
     password = ctx.f1("password")
     nxt = ctx.f1("next")
     auth_log = Config(base_dir=ctx.base_dir).auth_log
+
+    if ctx.hardened and _rate_limited(ctx.client_ip):
+        logs.write_auth(auth_log, ctx.client_ip, username or "-", "failure")
+        return Response.text("Too many attempts. Try again later.", status=429)
+
     con = db.from_ctx(ctx)
     try:
         account = auth.authenticate(con, username, password)
         if account is None:
-            logs.write_auth(auth_log, ctx.client_ip, username or "-", "failure")  # NO rate limit (weak authn)
+            logs.write_auth(auth_log, ctx.client_ip, username or "-", "failure")  # vuln: NO rate limit
+            if ctx.hardened:
+                _record_fail(ctx.client_ip)
             return _login_form(ctx, error="Invalid username or password.")
         logs.write_auth(auth_log, ctx.client_ip, username, "success")
-        kind = "staff" if account["role"] != "citizen" else "citizen"
-        token = auth.create_session(con, kind=kind, subject_id=account["id"],
-                                    username=account["username"], role=account["role"])
+        role = account["role"]
+        kind = "citizen" if role == "citizen" else "staff"
+        # a citizen session is keyed to its CITIZEN id (the object owner), a staff session to the account id
+        subject = account["citizen_id"] if (role == "citizen" and account["citizen_id"] is not None) else account["id"]
+        token = auth.create_session(con, kind=kind, subject_id=subject,
+                                    username=account["username"], role=role)
     finally:
         con.close()
     ok, location = _safe_next(nxt, ctx.hardened)

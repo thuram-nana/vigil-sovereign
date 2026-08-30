@@ -16,7 +16,8 @@ CREATE TABLE citizens (
 CREATE TABLE applications (
   id INTEGER PRIMARY KEY,
   ref TEXT, citizen_id INTEGER, permit_type TEXT, status TEXT,
-  notes TEXT, fee_cents INTEGER, created TEXT
+  notes TEXT, fee_cents INTEGER, created TEXT,
+  paid INTEGER DEFAULT 0, amount_paid_cents INTEGER DEFAULT 0
 );
 CREATE TABLE permits (
   id INTEGER PRIMARY KEY,
@@ -24,7 +25,7 @@ CREATE TABLE permits (
 );
 CREATE TABLE accounts (
   id INTEGER PRIMARY KEY,
-  username TEXT, password TEXT, role TEXT
+  username TEXT, password TEXT, role TEXT, citizen_id INTEGER
 );
 CREATE TABLE sessions (
   token TEXT PRIMARY KEY, kind TEXT, subject_id INTEGER, username TEXT, role TEXT
@@ -61,18 +62,23 @@ _PERMITS = [
     (8, "PL-2026-0008", "Harbour Bakery", "Business Licence", "active", "2026-06-09"),
 ]
 
-# Staff accounts across the five roles. Passwords are deliberately weak (the weak-authn surface).
+# Accounts across the five roles (citizen_id links a citizen account to its citizens row). Passwords are
+# deliberately weak (the weak-authn surface). aturing/glovelace are two DISTINCT citizens — the attacker
+# and victim identities the BOLA/IDOR demo uses.
 _ACCOUNTS = [
-    (1, "admin", "Password1!", "admin"),
-    (2, "registrar", "registrar", "registrar"),
-    (3, "inspector", "inspector", "inspector"),
-    (4, "clerk", "clerk123", "clerk"),
-    (5, "aturing", "letmein", "citizen"),
+    (1, "admin", "Password1!", "admin", None),
+    (2, "registrar", "registrar", "registrar", None),
+    (3, "inspector", "inspector", "inspector", None),
+    (4, "clerk", "clerk123", "clerk", None),
+    (5, "aturing", "letmein", "citizen", 1),       # Ada Turing → citizen 1
+    (6, "glovelace", "password", "citizen", 2),     # Grace Lovelace → citizen 2
 ]
 
 
 def seed_rows(con: sqlite3.Connection) -> None:
     con.executemany("INSERT INTO citizens VALUES (?,?,?,?,?)", _CITIZENS)
-    con.executemany("INSERT INTO applications VALUES (?,?,?,?,?,?,?,?)", _APPLICATIONS)
+    con.executemany(
+        "INSERT INTO applications (id, ref, citizen_id, permit_type, status, notes, fee_cents, created) "
+        "VALUES (?,?,?,?,?,?,?,?)", _APPLICATIONS)
     con.executemany("INSERT INTO permits VALUES (?,?,?,?,?,?)", _PERMITS)
-    con.executemany("INSERT INTO accounts VALUES (?,?,?,?)", _ACCOUNTS)
+    con.executemany("INSERT INTO accounts VALUES (?,?,?,?,?)", _ACCOUNTS)

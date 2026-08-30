@@ -68,6 +68,46 @@ class RangeClient:
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode("utf-8", "replace")
 
+    def post_form(self, path: str, data: dict, headers: dict | None = None) -> tuple[int, str, dict]:
+        body = urllib.parse.urlencode(data).encode()
+        h = {"User-Agent": "pytest/1.0"}
+        h.update(headers or {})
+        req = urllib.request.Request(self.base + path, data=body, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.read().decode("utf-8", "replace"), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8", "replace"), dict(e.headers)
+
+    def get_h(self, path: str, headers: dict | None = None) -> tuple[int, str, dict]:
+        h = {"User-Agent": "pytest/1.0"}
+        h.update(headers or {})
+        req = urllib.request.Request(self.base + path, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.read().decode("utf-8", "replace"), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8", "replace"), dict(e.headers)
+
+    def login(self, username: str, password: str) -> str | None:
+        """Log in and return the session cookie token (or None)."""
+        import http.cookiejar
+        cj = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+        body = urllib.parse.urlencode({"username": username, "password": password, "next": "/"}).encode()
+        req = urllib.request.Request(self.base + "/login", data=body, headers={"User-Agent": "pytest/1.0"})
+        try:
+            opener.open(req, timeout=5)
+        except urllib.error.HTTPError:
+            pass
+        for ck in cj:
+            if ck.name == "session":
+                return ck.value
+        return None
+
+    def cookie(self, token: str) -> dict:
+        return {"Cookie": f"session={token}"}
+
     @staticmethod
     def q(s: str) -> str:
         return urllib.parse.quote(s)

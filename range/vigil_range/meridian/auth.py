@@ -25,6 +25,16 @@ def role_rank(role: str) -> int:
         return -1
 
 
+def at_least(role: str, minimum: str) -> bool:
+    """True iff `role` sits at or above `minimum` on the authority ladder."""
+    return role_rank(role) >= role_rank(minimum)
+
+
+def is_staff(role: str) -> bool:
+    """Any back-office role (clerk and above)."""
+    return at_least(role, "clerk")
+
+
 def authenticate(con: sqlite3.Connection, username: str, password: str) -> Optional[sqlite3.Row]:
     """Return the account row on a correct username+password, else None. (Plaintext compare — weak by design.)"""
     cur = con.execute("SELECT * FROM accounts WHERE username = ?", (username,))
