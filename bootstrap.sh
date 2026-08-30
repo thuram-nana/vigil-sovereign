@@ -398,6 +398,11 @@ install_launcher() {  # name  target
 }
 install_launcher vigil "$REPO/.venv-offense/bin/vigil"
 install_launcher sigil "$REPO/.venv-sovereign/bin/sigil"
+# The cyber-range launcher (MERIDIAN). Lives in the offense env alongside `vigil` (the Range Control runner
+# shells the offense verbs). Best-effort: the range is optional dev/test infra, so a missing binary warns
+# rather than failing the bootstrap.
+[ -x "$REPO/.venv-offense/bin/target" ] && install_launcher target "$REPO/.venv-offense/bin/target" \
+  || warn "range launcher not installed (.venv-offense/bin/target absent — rebuild envs to get \`target up\`)"
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) : ;;
   *) warn "add ~/.local/bin to your PATH — WITHOUT 'vigil' resolvable, TWO features degrade silently: the"

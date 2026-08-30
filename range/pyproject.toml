@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vigil-range"
+version = "0.1.0"
+description = "The VIGIL cyber-range: MERIDIAN — a deliberately-vulnerable, loopback-only government-themed target + a Range Control cockpit that drives VIGIL end-to-end. Authorized owner-test lab only."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0-OR-Commercial"  # first-party; see repo-root LICENSE
+dependencies = []  # STDLIB ONLY — the range never imports framework.*/strix.*; the Range Control runner
+                   # shells the offense verbs as subprocesses, so the two-env boundary proof stays green.
+
+[project.scripts]
+target = "vigil_range.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["vigil_range"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E9", "F", "B", "C4", "PIE", "PLE", "ISC", "FLY", "T10", "SLOT"]

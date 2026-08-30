@@ -38,6 +38,19 @@
       "notes": "The repository's own target. No docker, no pull — useful when the point is to test a driver rather than an image."
     },
 
+    "meridian": {
+      "kind": "process",
+      "title": "MERIDIAN — National Permits & Licensing Authority (fictional VIGIL range)",
+      "script": "range/meridian_target.py",
+      "ports": [{ "name": "http", "host": 19010, "container": 19010 }],
+      "ready": { "port": "http", "path": "/", "status": 200, "marker": "MERIDIAN National Permits" },
+      "seed": null,
+      "weakness_probe": null,
+      "weakness_probe_note": "MERIDIAN is a whole government-themed application driven end-to-end by its own Range Control cockpit (`target up`) and by a full `framework.v2 scan --library`; it is deliberately NOT reduced to a single differential probe here. The generic harness only brings it up and asserts it answers.",
+      "credentials": null,
+      "notes": "The estate's own government-themed range (stdlib, no image). `target up` gives the full experience (deliberately-vulnerable target + Range Control operator cockpit). Registered here as a plain loopback target so the uniform range harness can bring it up too; started target-only, it hard-pins 127.0.0.1 and the assertions re-check it. `--safe` serves the hardened twin (every planted sink neutralized)."
+    },
+
     "juice": {
       "kind": "container",
       "title": "OWASP Juice Shop",

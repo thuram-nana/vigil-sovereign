@@ -1,0 +1,12 @@
+{
+  "lab": true,
+  "intentionally_vulnerable": true,
+  "no_real_data": true,
+  "loopback_only": true,
+  "name": "MERIDIAN",
+  "title": "MERIDIAN — National Permits & Licensing Authority (FICTIONAL)",
+  "purpose": "An authorized owner-test target range for exercising VIGIL end-to-end. Every vulnerability is planted on purpose and is confirmable by a VIGIL oracle. This is NOT a real government service, holds NO real data, and must NEVER be exposed beyond loopback.",
+  "authorization": "targets/meridian/charter.md",
+  "ports": { "target": 19010, "control": 19011 },
+  "warning": "INTENTIONALLY VULNERABLE — LAB ONLY. Do not deploy, do not expose to a network, do not enter real data."
+}
