@@ -135,6 +135,8 @@ def serve(config: cfg.Config, *, hardened: bool = False, block: bool = True,
     """
     config.ensure_dirs()
     cfg.write_mode(config.base_dir, cfg.MODE_HARDENED if hardened else cfg.MODE_VULN)
+    from . import db
+    db.ensure(config)  # build + seed the synthetic DB if absent
 
     target = RangeHTTPServer((config.host, config.target_port), config, build_router(), plane="gov")
     control_srv: Optional[RangeHTTPServer] = None
