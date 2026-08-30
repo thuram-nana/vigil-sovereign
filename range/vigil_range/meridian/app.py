@@ -19,7 +19,7 @@ from typing import Optional
 from . import config as cfg
 from . import logs
 from .handlers import base, build_router
-from .router import Ctx, Response, Router
+from .router import Ctx, Response, Router, StreamResponse
 
 
 class RangeHTTPServer(http.server.ThreadingHTTPServer):
@@ -79,6 +79,24 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self.headers.get("Referer", "-"), self.headers.get("User-Agent", "-"),
             )
 
+    def _write_stream(self, resp: StreamResponse) -> None:
+        self.send_response(resp.status)
+        self.send_header("Content-Type", resp.content_type)
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        for key, val in resp.headers.items():
+            self.send_header(key, val)
+        self.end_headers()
+        self.close_connection = True
+        if self.command == "HEAD":
+            return
+        try:
+            for chunk in resp.chunks:
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def _handle(self, method: str) -> None:
         ctx = self._ctx(method)
         try:
@@ -87,7 +105,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 resp = base.not_found(ctx)
         except Exception as exc:  # a target must never 500-crash the whole listener
             resp = Response.text(f"internal error: {type(exc).__name__}", status=500)
-        self._write(resp)
+        if isinstance(resp, StreamResponse):
+            self._write_stream(resp)
+        else:
+            self._write(resp)
 
     def do_GET(self) -> None:
         self._handle("GET")
@@ -99,30 +120,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._handle("POST")
 
 
-def _control_router() -> Router:
-    """The Range Control router. Full cockpit lands in S4; S0 ships a themed placeholder + health."""
-    from . import theme
-    r = Router()
-
-    def _placeholder(ctx: Ctx) -> Response:
-        body = (
-            '<main class="wrap"><div class="screen-head">'
-            '<span class="label">Operator cockpit</span>'
-            '<h1>Range Control</h1>'
-            '<p class="sub">Drives the real VIGIL verbs against MERIDIAN and streams the results — '
-            'recon, oracle-confirmed findings, access-control, verify, evidence, detect, and '
-            'harden → re-prove CLOSED.</p></div>'
-            '<div class="card owner"><div class="card-h"><span class="label">Status</span>'
-            '<h3>Cockpit coming online</h3></div>'
-            '<p style="color:var(--text-1)">The live command-center is wired in a later build slice. '
-            '<span class="mono">The target portal is live at '
-            '<a href="http://127.0.0.1:19010/">http://127.0.0.1:19010/</a>.</span></p></div></main>'
-        )
-        return Response.html(theme.page("Range Control", body, plane="control", mode=ctx.mode))
-
-    r.add("GET", "/", _placeholder)
-    r.add("GET", "/healthz", lambda _c: Response.json({"status": "ok", "plane": "control"}))
-    return r
+def _control_router(config: cfg.Config) -> Router:
+    """The Range Control cockpit router (drives the real VIGIL verbs against MERIDIAN)."""
+    from ..rangecontrol import build_control_router
+    return build_control_router(config)
 
 
 def serve(config: cfg.Config, *, hardened: bool = False, block: bool = True,
@@ -142,7 +143,7 @@ def serve(config: cfg.Config, *, hardened: bool = False, block: bool = True,
     control_srv: Optional[RangeHTTPServer] = None
     threading.Thread(target=target.serve_forever, name="meridian-target", daemon=True).start()
     if control:
-        control_srv = RangeHTTPServer((config.host, config.control_port), config, _control_router(),
+        control_srv = RangeHTTPServer((config.host, config.control_port), config, _control_router(config),
                                       plane="control")
         threading.Thread(target=control_srv.serve_forever, name="meridian-control", daemon=True).start()
 

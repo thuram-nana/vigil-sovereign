@@ -125,7 +125,10 @@ def range_client(tmp_path):
     cfg = Config(base_dir=str(tmp_path), target_port=free_port(), control_port=free_port())
     target, control = serve(cfg, hardened=False, block=False)
     time.sleep(0.3)
+    client = RangeClient(f"http://127.0.0.1:{cfg.target_port}", str(tmp_path))
+    client.control_base = f"http://127.0.0.1:{cfg.control_port}"  # type: ignore[attr-defined]
+    client.config = cfg  # type: ignore[attr-defined]
     try:
-        yield RangeClient(f"http://127.0.0.1:{cfg.target_port}", str(tmp_path))
+        yield client
     finally:
         stop_servers(target, control)

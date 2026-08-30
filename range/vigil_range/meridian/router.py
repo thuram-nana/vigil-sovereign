@@ -6,6 +6,7 @@ Handlers are `(Ctx) -> Response`. Kept deliberately small and dependency-free.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -70,6 +71,17 @@ class Response:
     @classmethod
     def redirect(cls, location: str, status: int = 302) -> "Response":
         return cls(status=status, body=b"", headers={"Location": location})
+
+
+@dataclass
+class StreamResponse:
+    """A streaming response: the handler writes each chunk as the generator yields it, then closes the
+    connection (Connection: close). Used by Range Control to stream a live verb's stdout to the browser."""
+
+    chunks: Iterator[bytes]
+    content_type: str = "text/plain; charset=utf-8"
+    status: int = 200
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 Handler = Callable[[Ctx], Response]
