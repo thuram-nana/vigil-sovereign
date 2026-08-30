@@ -18,10 +18,13 @@ Authority* — that serves as the estate's own end-to-end **lab** for VIGIL. It 
 ## Run it
 
 ```
+make setup              # one-time: builds the engine + installs the `target` launcher (~/.local/bin/target)
+
 target up               # start MERIDIAN (:19010) + Range Control (:19011), loopback only
 target up --hardened    # start with every planted sink neutralized (the negative control)
 target status           # show running state / mode / ports
 target harden on|off    # flip vuln ↔ hardened live (no restart) — for the harden → re-prove demo
+target seed             # rebuild the synthetic database from scratch
 target down             # stop
 target charter          # print the engagement charter authorizing VIGIL against the range
 ```
@@ -30,6 +33,8 @@ target charter          # print the engagement charter authorizing VIGIL against
 
 Then open **Range Control** at http://127.0.0.1:19011/ and click **Run all ▸** — it drives VIGIL against the
 target and streams every step. Or run the verbs yourself against http://127.0.0.1:19010/.
+
+**Full guide (all commands, the 17 weaknesses, the OWASP/NIST/ISO/CIS/ATT&CK mapping): [`docs/MERIDIAN.md`](../docs/MERIDIAN.md).**
 
 ## The end-to-end tour (what Range Control runs)
 
@@ -86,9 +91,9 @@ range/
   vigil_range/
     cli.py · launcher.py · apps.py     # the `target` command + loopback launcher + app registry
     meridian/                          # the MERIDIAN application
-      app.py · router.py · config.py · logs.py · theme.py
-      handlers/                        # the target surface (portal, records, api, staff, admin, …)
-      rangecontrol/                    # the Range Control cockpit (live command-center)
+      app.py · router.py · config.py · logs.py · theme.py · db.py · seed.py · auth.py
+      handlers/                        # the target surface (base, portal, records, api, staff, documents, …)
+    rangecontrol/                      # the Range Control cockpit (live command-center)
   meridian_target.py                   # standalone launcher registered in the loopback-range manifest
   tests/                               # stdlib pytest (bind guard, vuln/hardened, logs, charter, registry)
 ```
