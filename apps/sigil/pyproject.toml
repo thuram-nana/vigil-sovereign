@@ -6,7 +6,7 @@
 # Building from source therefore requires a Rust toolchain (rustc/cargo) — expected for this repo, which
 # already carries the kernel crate. See [[tool.setuptools-rust.bins]] below.
 [build-system]
-requires = ["setuptools>=61", "wheel", "setuptools-rust>=1.9"]
+requires = ["setuptools>=84.0.0", "wheel", "setuptools-rust>=1.9"]
 build-backend = "setuptools.build_meta"
 
 [project]
