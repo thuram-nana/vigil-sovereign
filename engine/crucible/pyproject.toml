@@ -18,7 +18,7 @@
 #   This is PACKAGING only — it changes no runtime behaviour and is off the gate path.
 
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=84.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -31,7 +31,7 @@ authors = [{name = "OBSIDIAN-FORGE"}]
 # NOTE: use the classic table form (not the PEP 639 SPDX-string `license = "..."` + `license-files`),
 # which those forms require setuptools>=77 — bumping the build-system floor that high would break
 # `pip install` on stock LTS setuptools (e.g. Ubuntu 24.04 ships ~68), defeating the installability
-# goal. The table form builds on the declared setuptools>=61 and matches framework/v2/pyproject.toml.
+# goal. The table form builds on the declared setuptools>=84.0.0 and matches framework/v2/pyproject.toml.
 # setuptools auto-includes the LICENSE file in the wheel metadata.
 license = {text = "PolyForm-Noncommercial-1.0.0 OR Commercial"}
 readme = "README.md"
