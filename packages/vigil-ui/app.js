@@ -5272,17 +5272,28 @@
   }
 
   function defRunningPanel(gw, eff, req) {
+    var cur = eff || req;   // the mode actually in force
+    var next = cur === "enforce" ? "observe" : "enforce";
+    var toggleLabel = cur === "enforce" ? "Switch to Observe (watch-only)" : "Switch to Enforce (blocking)";
+    var toggleBtn = h("button.btn.primary", { onClick: function () {
+      if (next === "enforce" && !confirm("Enforce will BLOCK requests proven to be attacks — live, no restart. (Needs the AEGIS_RESPOND entitlement, else it stays observe.) Continue?")) return;
+      V.postJSON(OFF("/api/aegis/mode"), { mode: next })
+        .then(function (r) { if (r && r.error) { V.toast(r.error, true); return; } V.toast("Mode → " + next + "."); loadDefense(); })
+        .catch(function (e) { V.toast((e && e.message) || "Could not change mode", true); });
+    } }, [V.icon(next === "enforce" ? "shield" : "info"), toggleLabel]);
     return [
       h("div.set-status.ok", null, [V.icon("check"),
         h("span", null, "Gateway running — " + (gw.bind || "") + " → " + (gw.upstream || "") + " · mode " + (eff || req))]),
       req === "enforce" && eff !== "enforce"
         ? h("div.set-status.off", null, [V.icon("info"), h("span", null, "You requested ENFORCE but it downgraded to observe (the AEGIS_RESPOND entitlement isn’t available here) — nothing is being blocked.")])
         : null,
-      h("div.acts", { style: { marginTop: "12px" } },
+      h("div.acts", { style: { marginTop: "12px" } }, [
+        toggleBtn,
         h("button.btn.danger", { onClick: function () {
           V.postJSON(OFF("/api/aegis/stop"), {}).then(function () { V.toast("Gateway stopped."); loadDefense(); })
             .catch(function (e) { V.toast((e && e.message) || "Could not stop the gateway", true); });
-        } }, [V.icon("x"), "Stop gateway"])),
+        } }, [V.icon("x"), "Stop gateway"]),
+      ]),
       h("div.hint", { style: { marginTop: "10px" } }, "Watch proven attacks in the live verdicts stream. To run this on your real edge, use the production command shown when you started it (bind your routable interface there, never here)."),
     ];
   }

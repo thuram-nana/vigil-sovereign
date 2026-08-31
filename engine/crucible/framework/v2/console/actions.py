@@ -4415,6 +4415,33 @@ def aegis_stop(_body: dict | None = None) -> dict:
     return {"stopped": True, "pid": pid}
 
 
+def aegis_set_mode(body: dict) -> dict:
+    """Live-switch a RUNNING AEGIS gateway between observe and enforce WITHOUT a restart, by writing the
+    per-request mode-control file the gateway re-reads (mirrors the kill-switch). Owner-gated. enforce
+    takes effect only if AEGIS_RESPOND is entitled; otherwise the gateway stays observe."""
+    mode = str(body.get("mode", "")).strip()
+    if mode not in _AEGIS_MODES:
+        return {"error": "mode must be 'observe' or 'enforce'"}
+    cur = _read_aegis_current()
+    pid = cur.get("pid") if cur else None
+    if not pid or not _pid_alive(pid):
+        if cur:
+            _write_aegis_current({})
+        return {"error": "no AEGIS gateway is running"}
+    slug = str(cur.get("slug") or "aegis-gateway")
+    try:
+        paths.secure_write(paths.aegis_mode_path(slug), mode)
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"could not set mode: {type(e).__name__}: {e}"}
+    prev = cur.get("mode")
+    cur["mode"] = mode
+    _write_aegis_current(cur)
+    note = ("enforce is live only if the AEGIS_RESPOND entitlement is granted; otherwise the gateway "
+            "downgrades to observe — read effective_mode from /api/aegis/status") if mode == "enforce" \
+        else "observe: detect-only; nothing is blocked"
+    return {"switched": prev != mode, "from": prev, "to": mode, "mode": mode, "slug": slug, "note": note}
+
+
 def services_up(body: dict) -> dict:
     """Gated bring-up of the docker services (create-if-absent, idempotent): qdrant by default; +neo4j+otel
     with all=True; plus the egress gateway. Takes NO free input that reaches docker — only the fixed `all`
