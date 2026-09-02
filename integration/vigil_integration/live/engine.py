@@ -310,7 +310,13 @@ class VigilEngine:
             self._spine_post("decision", {
                 "question": f"phase={state.phase.value} iteration={it}: what is the next action?",
                 "choice": str(decision.action.value),
-                "rationale": decision.reasoning or ""})
+                "rationale": decision.reasoning or "",
+                # Carry the agent's REAL operator-facing question when it pauses to ask (ASK_USER). The
+                # blackboard decision handler forwards only question/choice/rationale, but the progress.jsonl
+                # mirror writes the full payload — so the console can surface this question as a chat bubble
+                # the operator actually answers (without it, an ask_user pause looks like an empty run).
+                "agent_question": (str(decision.question or "")
+                                   if decision.action == ActionType.ASK_USER else "")})
             if decision.action == ActionType.USE_TOOL and decision.tool is not None:
                 _oa = decision.output_analysis
                 _info = getattr(_oa, "extracted_info", {}) if _oa is not None else {}
