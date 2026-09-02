@@ -45,8 +45,11 @@ env:
 
 jobs:
   # ================================================================================================
-  # 1. CodeQL — semantic analysis of the Python sources. Findings surface in the Security tab; the
-  #    analyze step exits 0 regardless, so this job is green by construction and purely additive.
+  # 1. CodeQL — semantic analysis of the Python sources. Findings surface in the Security tab WHEN the
+  #    repo has code scanning (GitHub Advanced Security) enabled; on a private repo WITHOUT GHAS the SARIF
+  #    upload is rejected ("Code scanning is not enabled for this repository"). The analyze step is
+  #    `continue-on-error` so that upload rejection does NOT fail the job — the analysis still runs, results
+  #    are purely additive when GHAS is present, and the job is green by construction either way (advisory).
   # ================================================================================================
   codeql-python:
     name: CodeQL Python (advisory)
@@ -79,6 +82,11 @@ jobs:
               - '**/corpus_apps/**'
 
       - name: analyze (python)
+        # continue-on-error: a private repo without GitHub Advanced Security rejects the SARIF upload; the
+        # analysis has already run by then, so a rejected upload must not redden this advisory job (the job's
+        # own contract is "green by construction, purely additive"). When GHAS is enabled the upload succeeds
+        # and findings populate the Security tab unchanged.
+        continue-on-error: true
         uses: github/codeql-action/analyze@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-action v3 (codeql-bundle-v2.26.3)
         with:
           category: "/language:python"

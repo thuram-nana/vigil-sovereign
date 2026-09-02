@@ -309,6 +309,12 @@ def killswitch_path(slug: str) -> Path:
     return authority_dir() / f"{slug}.halt"
 
 
+def aegis_mode_path(slug: str) -> Path:
+    """Control file for a LIVE AEGIS observe<->enforce switch. The gateway re-reads it per request
+    (mirrors killswitch_path); the console writes 'observe'/'enforce'. Absent -> the startup mode."""
+    return authority_dir() / f"{slug}.mode"
+
+
 # ---------------------------------------------------------------------------
 # Per-target paths
 # ---------------------------------------------------------------------------

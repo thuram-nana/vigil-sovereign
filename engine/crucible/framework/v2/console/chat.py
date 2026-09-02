@@ -491,6 +491,31 @@ def _append(chat_id: str, rec: dict) -> None:
         fh.write(line + "\n")
 
 
+def post_agent_question(chat_id: str, question: str, *, run_id: str = "", slug: str = "") -> bool:
+    """Surface the agent's ASK_USER question as an assistant bubble in the chat, so the operator can SEE
+    what the run is waiting on and answer it (their reply then auto-resumes the run — see
+    ``actions.resume_engage_with_message``). Called by the run supervisor when an integration engage run
+    pauses at ask_user. Guarded three ways so it never fabricates a chat: a path-safe id, a NON-empty
+    question, and an ALREADY-EXISTING transcript (only a real chat session has one — an engage launched
+    from the New-Assessment screen has a session id but no chat file, and must not grow one). Best-effort;
+    returns True iff a bubble was appended. Runs in the supervisor's daemon thread, so it never raises."""
+    try:
+        cid = _safe_chat_id(str(chat_id or ""))
+    except (ValueError, Exception):  # noqa: BLE001
+        return False
+    q = str(question or "").strip()
+    if not q:
+        return False
+    if not _chat_path(cid).exists():        # not a chat session → never materialise a transcript for it
+        return False
+    try:
+        _append(cid, {"role": "assistant", "kind": "agent_question", "text": q,
+                      "run_id": str(run_id or ""), "slug": str(slug or "")})
+        return True
+    except Exception:  # noqa: BLE001 — a transcript write must never perturb the run's teardown
+        return False
+
+
 def read_session(chat_id: str) -> list[dict]:
     """Replay one transcript in order. A torn/blank last line (crash mid-write) is skipped, never fatal."""
     p = _chat_path(chat_id)
@@ -2385,6 +2410,11 @@ def chat_stream(body: dict, emit) -> dict:
         return fallback
     if _git_repo_in_message(message) or _URL_RE.search(message) or _path_in_message(message):
         return fallback
+    # AUTO-RESUME-ON-REPLY: a target-less reply to a chat whose engagement is PAUSED at ask_user is an
+    # ANSWER, not a question — it must go through the RESUME path (chat_send), not be streamed as a fresh
+    # reasoning answer. Fall back BEFORE the append (chat_send appends on the re-POST, so no double-record).
+    if actions.paused_engage_run(chat_id):
+        return fallback
     _ensure_session(chat_id)
     # ESTABLISH the stream BEFORE the first append (red-pen LOW-1). Once the client has received any SSE
     # frame it takes the "committed" path on a later abort (reload the saved record, never re-POST to /send),
@@ -2532,10 +2562,35 @@ def chat_send(body: dict) -> dict:
     resolution_note = (clone_note + str(resolved.get("note") or "")).strip()
 
     if not target or mode not in actions._MODES:
-        # No launchable target: this is a QUESTION turn. When the chat has material to reason over —
-        # attachments, or another chat the operator CONNECTED — answer it with the model. The answer is a
-        # LEAD (see _CHAT_SYSTEM); where a codebase was extracted the reply also carries the offer of a
-        # GATED real scan of those same files, which the interface starts through launch_assessment.
+        # AUTO-RESUME-ON-REPLY (A5): before treating a target-less turn as a fresh question, check whether
+        # THIS chat's engagement is PAUSED waiting for the operator's answer (the agent's first OODA move is
+        # often `ask_user`, which ends the run until answered). If so, this reply IS that answer: fold it in
+        # and RESUME the run, so answering the agent seamlessly continues it to real tools/FACTs — instead of
+        # queuing behind a resume the operator would have to trigger by hand. Nothing is relaxed (the resumed
+        # think still passes the gate + oracle); a reply changes what the model READS, never what it may fire.
+        resumed = actions.resume_engage_with_message(chat_id, message)
+        if resumed.get("ok"):
+            reply = ("Resuming the engagement with your answer — it picks up where it paused and continues to "
+                     "run tools and steer live. Watch it below.")
+            rec = {"role": "assistant", "text": reply, "kind": "launched",
+                   "run_id": resumed.get("run_id"), "slug": resumed.get("slug"),
+                   "stream": resumed.get("stream"), "engine": "integration", "mode": "url"}
+            _append(chat_id, rec)
+            return {"chat_id": chat_id, "status": "running", "reply": reply, "engine": "integration",
+                    "run_id": resumed.get("run_id"), "slug": resumed.get("slug"),
+                    "stream": resumed.get("stream")}
+        if resumed.get("error"):
+            # a resume was DUE (an engagement is paused) but could not be started — say so honestly rather
+            # than silently answering as a question and stranding the paused run.
+            _append(chat_id, {"role": "assistant", "text": resumed["error"], "kind": "refused",
+                              "error": resumed["error"]})
+            return {"chat_id": chat_id, "status": "refused", "reply": resumed["error"],
+                    "error": resumed["error"], "stream": "none"}
+
+        # No launchable target and nothing to resume: this is a QUESTION turn. When the chat has material to
+        # reason over — attachments, or another chat the operator CONNECTED — answer it with the model. The
+        # answer is a LEAD (see _CHAT_SYSTEM); where a codebase was extracted the reply also carries the offer
+        # of a GATED real scan of those same files, which the interface starts through launch_assessment.
         offer = _scan_offer(chat_id)
         if _reason_wanted(chat_id, body):
             # E3: the reasoning call honours the operator's per-session model choice — a local pick routes
