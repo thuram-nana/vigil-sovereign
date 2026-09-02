@@ -21,8 +21,8 @@
 # Overriding --build-arg PYTHON_BASE=<unpinned> remains possible and is the operator's call; the
 # committed default is what CI and `vigil services up` actually build, and that is pinned.
 # Re-pin with: bash infra/supply-chain/resolve-image-digests.sh   (see docs/SUPPLY-CHAIN.md)
-# python:3.13-slim, resolved 2026-08-12.
-ARG PYTHON_BASE=python:3.13-slim@sha256:7ce4b6dfe35e55397b7cda544f8a13f191b7ae28dc5aad71fe664dbc9bc2623f
+# python:3.13-slim, resolved 2026-09-02 (A14 drift re-pin).
+ARG PYTHON_BASE=python:3.13-slim@sha256:881d80734ee05dca6f7f42dcb080975652a53c7eda9ba1f03bb8da31aa6a6ec2
 FROM ${PYTHON_BASE}
 
 # A dedicated unprivileged user — the proxy drops all capabilities and runs read-only in compose.
