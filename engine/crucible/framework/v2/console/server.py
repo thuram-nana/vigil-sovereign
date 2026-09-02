@@ -1156,6 +1156,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path == "/api/aegis/stop":
                 self._json(actions.aegis_stop(body))
                 return
+            if path == "/api/aegis/mode":
+                # LIVE observe<->enforce switch on the running gateway (no restart). Same-origin +
+                # RBAC (_OWN) already enforced above, exactly like /api/aegis/setup.
+                self._json(actions.aegis_set_mode(body))
+                return
             self._json({"error": "unknown action"}, status=404)
         except ValueError as e:  # an unsafe run id (run_dir guard) → honest 404, consistent with do_GET
             self._json({"error": str(e)}, status=404)
