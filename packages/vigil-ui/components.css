@@ -178,6 +178,13 @@ button { font: inherit; }
   border-radius: var(--r-pill); padding: 1px 8px; min-width: 20px; text-align: center; }
 .nav-item .badge-count.owner { background: var(--owner-dim); color: var(--owner); }
 #app.nav-collapsed .nav-item .badge-count { display: none; }
+/* An approval is waiting: make the Approvals & Safety item unmissable — owner-gold glow that pulses
+   (reuses @keyframes pulse; currentColor drives the ring), a solid badge, and a bright left rail. */
+.nav-item.needs-approval { color: var(--owner); background: var(--owner-dim); border-left-color: var(--owner);
+  font-weight: 600; animation: pulse 1.8s ease-in-out infinite; }
+.nav-item.needs-approval .glyph { opacity: 1; }
+.nav-item.needs-approval .badge-count.owner { background: var(--owner); color: #1a1205; }
+@media (prefers-reduced-motion: reduce) { .nav-item.needs-approval { animation: none; box-shadow: inset 3px 0 0 var(--owner); } }
 
 /* main + screen head ------------------------------------------------------- */
 #main { grid-area: main; overflow-y: auto; padding: var(--sp-6); }

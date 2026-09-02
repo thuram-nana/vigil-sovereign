@@ -166,6 +166,7 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/terminal/run": _OWN,
     "/api/remediate/*/apply": _OWN,
     "/api/aegis/setup": _OWN,
+    "/api/aegis/mode": _OWN,
     "/api/tools/install": _OWN,
     "/api/services/up": _OWN,
 }
