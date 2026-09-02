@@ -8193,6 +8193,11 @@
     function drawMain() {
       const host = V.$("#chat-main"); if (!host) return;
       const st = C.st || {};
+      // A PENDING engagement question = the transcript's LAST message is an unanswered agent_question. When
+      // present we pin a banner above the transcript and steer the operator to the ONE composer where the
+      // answer goes (a reply auto-resumes the paused run) — so the question can never scroll out of view.
+      const _pendingQ = (C.messages.length && C.messages[C.messages.length - 1].kind === "agent_question")
+        ? C.messages[C.messages.length - 1] : null;
       // THESE controls are SYSTEM-WIDE: they set the model + effort the ENGINE reasons with (engagements,
       // scans, the codebase agent) via the SAME owner-plane actions the Settings screen posts
       // (`set_model` / `set_effort`), effective on the engine's next `vigil up`. They are DISTINCT from the
@@ -8539,8 +8544,21 @@
       }
       function removeStreamBubble() { const w = V.$("#chat-stream-wrap"); if (w && w.parentNode) w.parentNode.removeChild(w); }
 
+      // AWAITING-REPLY banner: pinned above the transcript so a paused engagement's question can't scroll out
+      // of view; "Reply now" focuses the ONE composer where the answer goes (typing there auto-resumes the run).
+      const askBanner = _pendingQ ? h("div.chat-askbanner", {
+        style: { marginBottom: "8px", padding: "10px 12px", borderRadius: "var(--r-3)",
+          border: "1px solid var(--owner, #d4af37)", borderLeft: "3px solid var(--owner, #d4af37)",
+          background: "var(--owner-bg, var(--bg-2))", display: "flex", alignItems: "center",
+          gap: "10px", flexWrap: "wrap" } }, [
+        h("span.shield", { style: { color: "var(--owner, #d4af37)", fontWeight: "600", whiteSpace: "nowrap" } },
+          [V.icon("info"), "Waiting for your answer"]),
+        h("div", { style: { flex: "1 1 240px", minWidth: "0" } }, String(_pendingQ.text || _pendingQ.reply || "")),
+        h("button.btn.sm.owner", { onClick: function () { try { input.focus(); input.scrollIntoView({ block: "center" }); } catch (e) {} } }, "Reply now"),
+      ]) : null;
       V.mount(host, [
         controls,
+        askBanner,
         list,
         h("div#chat-attach"),
         h("div#chat-links"),
@@ -8561,6 +8579,7 @@
           + "gated run (scope charter-signed, target-touching steps wait for your approval). The conversation "
           + "is saved locally under .vigil-live/chats/."),
       ]);
+      if (_pendingQ) { try { input.focus(); } catch (e) {} }   // steer the operator straight to the reply box
       drawAttach();
       drawLinks();
       drawHyps();
