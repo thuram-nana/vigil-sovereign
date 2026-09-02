@@ -779,10 +779,10 @@
   }
   function navItem(it) {
     const active = current() === it.id;
-    const badge = it.id === "safety" && app.get().waiting > 0
-      ? h("span.badge-count.owner", null, String(app.get().waiting)) : null;
+    const attn = it.id === "safety" && app.get().waiting > 0;
+    const badge = attn ? h("span.badge-count.owner", null, String(app.get().waiting)) : null;
     function go() { location.hash = "#/" + it.id; }
-    return h("div.nav-item" + (it.owner ? ".owner" : "") + (active ? ".active" : ""),
+    return h("div.nav-item" + (it.owner ? ".owner" : "") + (active ? ".active" : "") + (attn ? ".needs-approval" : ""),
       { dataset: { nav: it.id }, role: "link", tabindex: "0",
         "aria-current": active ? "page" : null, "aria-label": it.label,
         onClick: go,
@@ -6940,7 +6940,7 @@
   const CHAT_MAX_ATTACH = 12;
   // Records the ENGINE authors itself: a launch, a refusal, an error, a prompt for a target, an
   // attachment receipt. Anything else an assistant says is model prose → a LEAD, and is badged as one.
-  const CHAT_ENGINE_KINDS = { launched: 1, refused: 1, error: 1, need_target: 1, attached: 1, system: 1 };
+  const CHAT_ENGINE_KINDS = { launched: 1, refused: 1, error: 1, need_target: 1, attached: 1, system: 1, agent_question: 1 };
 
   function fmtBytes(n) {
     const b = Number(n) || 0;
@@ -7355,9 +7355,19 @@
 
     function openSession(id) {
       C.id = id || "";
-      C.messages = []; C.attach = [];
+      C.messages = []; C.attach = []; C.hyps = [];
       history.replaceState(null, "", "#/chat" + (id ? ("?id=" + encodeURIComponent(id)) : ""));
-      load();
+      // SWITCHING chats only needs THIS chat's transcript + hypotheses — the models/settings/tool
+      // roster/session-list are session-global and already cached from the first load(), so re-fetching
+      // them on every click made opening a saved chat pay ~6 serial cross-plane round-trips (incl. the
+      // 143ms models probe + the proxy's per-request auth). Redraw instantly from cache, then fetch the
+      // two per-chat things IN PARALLEL. (First-ever load still runs the full load() from renderChat.)
+      restoreModel();
+      drawSessions(); drawMain();
+      if (!C.id) return;
+      Promise.all([refreshTranscript(), refreshHyps()])
+        .then(function () { drawMain(); scrollDown(); })
+        .catch(function () { drawMain(); });
     }
 
     function drawSessions() {
@@ -7782,6 +7792,21 @@
       if (isLead) {
         kids.push(h("div", { style: { marginBottom: "6px" } },
           [h("span.shield.lead", null, [V.icon("info"), "Lead — not a confirmed finding"])]));
+      }
+      // AGENT ASK_USER: the engagement paused to ask the operator something. Render it as a distinct,
+      // owner-gold prompt (not a lead) so it's unmistakable that a reply is expected — typing an answer in
+      // the composer below auto-resumes the run (server-side resume_engage_with_message). Styled + labelled
+      // so the operator knows exactly where to answer.
+      if (m.kind === "agent_question") {
+        box.style.borderColor = "var(--owner, #d4af37)";
+        box.style.borderLeftWidth = "3px";
+        box.style.background = "var(--owner-bg, var(--bg-2))";
+        kids.push(h("div", { style: { marginBottom: "6px", display: "flex", alignItems: "center", gap: "6px" } },
+          [h("span.shield", { style: { color: "var(--owner, #d4af37)" } }, [V.icon("info"), "The engagement is asking you"])]));
+        kids.push(h("div", null, String(m.text || m.reply || "")));
+        kids.push(h("div.dim", { style: { fontSize: "var(--fs-xs)", marginTop: "8px" } },
+          "Reply below and I'll resume the engagement with your answer."));
+        return h("div", wrap, h("div", box, kids));
       }
       kids.push(h("div", null, String(m.text || m.reply || "")));
       const atts = recordAttachments(m);
