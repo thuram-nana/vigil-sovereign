@@ -2177,7 +2177,7 @@
       "id": "W3-7-strix-selfhosted",
       "title": "Strix sandbox live-image-scan is a shape-pinned, self-hosted-guarded advisory scaffold (W3-7 #653)",
       "claim": "A committed, dormant-by-design workflow scaffold builds and `trivy image`-scans the Strix sandbox image at the gateway image's exact threshold (HIGH,CRITICAL with --ignore-unfixed), advisory; it triggers only on schedule/workflow_dispatch and is guarded to a self-hosted `runs-on` label plus an opt-in repository variable, so it never runs on a pull request and stays inert until an operator provisions a self-hosted/large runner (a human/infra action); a required-CI guard pins its shape, and it is enumerated in KNOWN_NONPR_ADVISORY so it can never become a required check.",
-      "source": "docs/SUPPLY-CHAIN.md:411",
+      "source": "docs/SUPPLY-CHAIN.md:406",
       "enforced_by": {
         "file": "docs/tests/test_strix_sandbox_image_scan_workflow.py",
         "symbol": "strix_sandbox_scan_workflow_defects"
