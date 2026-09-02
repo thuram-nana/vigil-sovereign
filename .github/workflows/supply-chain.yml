@@ -116,15 +116,25 @@ jobs:
           fi
           echo "negative control OK — the drift gate exits ${rc} on a deliberately drifted resolvable pin."
 
-      # THE DRIFT GATE (W3-8, issue #431). Three-valued, not two: a pin on a registry the resolver CAN
-      # query (Docker Hub) that has MOVED is real drift and BLOCKS (`--fail-on-drift`); a pin on any other
-      # registry is an explicit UNKNOWN, written to the job summary ($GITHUB_STEP_SUMMARY) and NEVER a
-      # silent `??` pass. UNKNOWNs do not block — a gate cannot honestly fail on a state it could not check
-      # (an operator wanting the strictest posture adds `--fail-on-unknown`). Re-pinning after resolvable
-      # drift is still a deliberate act (read the upstream changelog), but it is now a REQUIRED one.
-      - name: base-image drift — resolvable drift BLOCKS; other registries reported UNKNOWN (W3-8)
+      # THE DRIFT REPORT (W3-8, issue #431; posture updated — pinned-base drift is ADVISORY). Three-valued,
+      # not two: a pin on a registry the resolver CAN query (Docker Hub) that has MOVED is resolvable drift;
+      # a pin on any other registry is an explicit UNKNOWN, written to the job summary ($GITHUB_STEP_SUMMARY)
+      # and NEVER a silent `??` pass.
+      #
+      # POSTURE: resolvable drift on an already-digest-pinned base is ADVISORY here (surfaced, NOT blocking) —
+      # this step runs `--drift` WITHOUT `--fail-on-drift`. The digest pin already guarantees a reproducible
+      # build (a moved TAG does not change the bytes that ship), so blocking every open PR on upstream tag
+      # movement is toil, not signal. Drift stays fully visible — this report, the $GITHUB_STEP_SUMMARY block,
+      # and the scheduled-supply-chain-scan job — and pins are re-advanced DELIBERATELY on a cadence (read the
+      # upstream changelog first).
+      #
+      # WHAT STILL BLOCKS: an UNPINNED image — the `--check` step above — which is the real supply-chain
+      # guarantee (content-addressed reproducibility). The `--fail-on-drift` MECHANISM is retained and proven
+      # live by the negative-control step above; a stricter operator can re-add `--fail-on-drift` here (or
+      # `--fail-on-unknown`) to make drift block again.
+      - name: base-image drift — resolvable drift is ADVISORY (unpinned still blocks); UNKNOWN reported (W3-8)
         if: always()
-        run: python3 infra/supply-chain/image_pins.py --drift --fail-on-drift
+        run: python3 infra/supply-chain/image_pins.py --drift
 
       # ------------------------------------------------------------------------------
       # 2. Dependency locks. Regeneration comes FIRST and its output is uploaded
