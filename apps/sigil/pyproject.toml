@@ -6,7 +6,7 @@
 # Building from source therefore requires a Rust toolchain (rustc/cargo) — expected for this repo, which
 # already carries the kernel crate. See [[tool.setuptools-rust.bins]] below.
 [build-system]
-requires = ["setuptools>=61", "wheel", "setuptools-rust>=1.9"]
+requires = ["setuptools>=84.0.0", "wheel", "setuptools-rust>=1.9"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -38,7 +38,7 @@ dependencies = [
     "fastembed==0.8.0",
     "kuzu==0.11.3",
     "mcp==1.28.1",
-    "numpy>=1.26,<3",
+    "numpy>=2.4.6,<3",
     "onnxruntime==1.29.0",
     "pydantic==2.13.4",
     "PyYAML>=6",                  # structural kubeconfig safety gate (refuse exec/cmd-path plugins)
