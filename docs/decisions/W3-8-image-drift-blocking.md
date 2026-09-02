@@ -1,14 +1,20 @@
-# W3-8 — Base-image drift is BLOCKING where resolvable, and the registry limit is stated
+# W3-8 — Base-image drift is ADVISORY where resolvable (unpinned still blocks), and the registry limit is stated
 
 Issue: [#431](https://github.com/thuram-nana/vigil-sovereign/issues/431) ·
 Milestone: W3 — SUPPLY CHAIN.
 
+> **Posture update.** W3-8 originally made resolvable drift *blocking*. It is now **advisory**: a digest
+> pin already guarantees a reproducible build, so gating every PR on Docker's routine tag rebuilds was
+> toil, not signal (it reddened all open PRs at once when `python:3.13-slim` moved). The real guarantee —
+> an *unpinned* image blocks — is unchanged, and the `--fail-on-drift` blocking mechanism is retained and
+> still proven live by the negative control. The claim below reflects the current (advisory) posture.
+
 ## The claim (registered in the claims registry, [W0-3] #398)
 
 <!-- CLAIM:W3-8 -->
-> Resolvable base-image drift (a Docker Hub tag that has moved) BLOCKS the A14 gate under `--fail-on-drift` — except a documented, reasoned rolling-base allowlist (`image_pins.py::_ADVISORY_ROLLING_DRIFT`, currently only `kalilinux/kali-rolling`) whose drift is ADVISORY (surfaced, never blocking); every other resolvable drift blocks. A pin on any registry the resolver cannot query is reported as an explicit UNKNOWN — surfaced in the job summary, never a silent pass.
+> Base-image drift is three-valued, and resolvable drift on an already-digest-pinned base is ADVISORY in the A14 gate — surfaced in the drift report and the job summary, but not blocking, because a digest pin already gives a reproducible build (a moved tag does not change the bytes that ship). What still BLOCKS is an UNPINNED image (the `--check` step). The `--fail-on-drift` mechanism is retained and still blocks resolvable drift when armed — proven live by the drift-gate negative control — and a documented, reasoned rolling-base allowlist (`image_pins.py::_ADVISORY_ROLLING_DRIFT`, currently `kalilinux/kali-rolling` and `library/neo4j`) is advisory too. A pin on any registry the resolver cannot query is reported as an explicit UNKNOWN — surfaced in the job summary, never a silent pass.
 
-This claim is TRUE of the code as of W3-8.
+This claim is TRUE of the code as of the W3-8 posture update.
 
 ## The defect
 
@@ -29,10 +35,12 @@ goes green, and proves nothing.
 Drift is now three-valued (`infra/supply-chain/image_pins.py`):
 
 - **resolvable & up-to-date** → nothing to do.
-- **resolvable & MOVED** (`DRIFT_MOVED`) → real drift. The A14 gate runs
-  `image_pins.py --drift --fail-on-drift`, and `run_drift` returns a non-zero exit that BLOCKS the
-  job. Re-pinning stays a deliberate act (read the upstream changelog first) but is now *required*,
-  not advisory.
+- **resolvable & MOVED** (`DRIFT_MOVED`) → real drift. The A14 gate runs `image_pins.py --drift`
+  (WITHOUT `--fail-on-drift`), so this is **ADVISORY**: surfaced in the report and `$GITHUB_STEP_SUMMARY`,
+  but `run_drift` exits 0 and the job stays green. A digest pin already guarantees a reproducible build, so
+  re-pinning is a deliberate act on a cadence (read the upstream changelog first), not a per-PR block.
+  `--fail-on-drift` still makes it BLOCK — retained for a strict operator and exercised by the live
+  negative control below; and an UNPINNED image still blocks unconditionally via `--check`.
 - **resolvable & MOVED for a documented rolling base** (`DRIFT_MOVED_ADVISORY`) → a repository in the
   reasoned `_ADVISORY_ROLLING_DRIFT` allowlist (currently only `kalilinux/kali-rolling`, the strix
   sandbox base — a rolling distro tracked-latest by design whose ~1000-package SBOM is regenerated
@@ -59,8 +67,10 @@ argument and are pure, so the gate can be driven OFFLINE by a stub resolver.
   non-zero on a deliberately drifted resolvable pin AND zero when nothing moved, asserted in the
   same run, so the gate is neither a no-op nor stuck-on.
 - `test_drift_summary_makes_unknowns_visible` — the UNKNOWN entry is named in the job-summary text.
-- `test_workflow_drift_step_blocks_and_is_not_advisory` — the real gate runs `--fail-on-drift` and
-  is not `continue-on-error`, so a future edit cannot make it advisory again.
+- `test_workflow_drift_step_is_advisory_and_negative_control_still_blocks` — the real gate runs
+  `--drift` (advisory, NOT armed with `--fail-on-drift`), while the drift-gate negative control and the
+  unpinned `--check` step stay blocking and are not `continue-on-error`, so a future edit cannot silently
+  re-arm a per-PR block on drift, drop the mechanism's live proof, or defeat the unpinned guarantee.
 
 A live end-to-end negative control also runs in the A14 job: it points the exact blocking config at
 a fixture with a deliberately-wrong digest on a resolvable (Docker Hub) registry and requires it to

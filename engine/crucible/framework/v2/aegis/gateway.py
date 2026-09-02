@@ -166,10 +166,10 @@ class GatewaySettings:
                 pass
 
     def _authorize_enforce(self) -> bool:
-        """Entitlement check, once. Only meaningful when mode==enforce; a denied grant downgrades to
+        """AEGIS_RESPOND entitlement check, independent of the CURRENT mode so a LIVE observe->enforce
+        switch can take effect (the `enforce` property still requires the effective mode to be enforce;
+        this term is purely 'is blocking entitled at all?'). A denied grant downgrades enforcement to
         observe. Total: any entitlement-subsystem error fails CLOSED (no enforcement)."""
-        if self.config.mode != "enforce":
-            return False
         try:
             from ..entitlement import Capability
             from ..entitlement.policy import is_capability_available
@@ -188,11 +188,29 @@ class GatewaySettings:
         except Exception:
             return False   # a kill-switch read error must not itself start blocking traffic
 
+    def _mode_override(self) -> str | None:
+        """LIVE mode override, re-read per request from a control file the console writes — the exact
+        cross-process, restart-free pattern the kill-switch uses. Returns 'observe'/'enforce' when the
+        file holds a valid value, else None (fall back to the configured startup mode). Any read error
+        -> None (availability-first: a control-file glitch never silently starts blocking)."""
+        try:
+            from ..common.paths import aegis_mode_path
+            raw = aegis_mode_path(self.slug).read_text(encoding="utf-8").strip()
+            return raw if raw in ("observe", "enforce") else None
+        except Exception:
+            return None
+
+    def intended_mode(self) -> str:
+        """The mode the operator has asked for: the live console-set override if present, else the
+        startup --mode. (Whether it is actually ENFORCING is the `enforce` property.)"""
+        return self._mode_override() or self.config.mode
+
     @property
     def enforce(self) -> bool:
-        """Block ONLY when configured enforce AND entitled AND the kill-switch is not tripped. Every
-        term fails toward NOT blocking (availability-first)."""
-        return (self.config.mode == "enforce"
+        """Block ONLY when the EFFECTIVE mode is enforce AND entitled AND the kill-switch is not
+        tripped. The effective mode is re-read per request (live observe<->enforce switch), exactly
+        like the kill-switch. Every term fails toward NOT blocking (availability-first)."""
+        return (self.intended_mode() == "enforce"
                 and self._enforce_authorized
                 and not self._killswitch_tripped())
 
