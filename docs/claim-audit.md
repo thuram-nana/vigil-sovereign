@@ -73,7 +73,7 @@ Each row: the surface, the `path:line` the claim lives at, the verdict, the deci
 | CA-SUP-01 | SUPPLY-CHAIN | `docs/SUPPLY-CHAIN.md:367` | TRUE | `integration/tests/test_supply_chain.py` | n-a | CRITICAL findings block; trivy exits non-zero. Asserted statically by test_supply_chain.py in required jobs. |
 | CA-SUP-02 | SUPPLY-CHAIN | `docs/SUPPLY-CHAIN.md:368` | TRUE | `integration/tests/test_supply_chain.py` | n-a | HIGH now blocks (raised in W3-9 once the vendored HIGH backlog cleared); the gate-severity tests pin HIGH,CRITICAL. |
 | CA-SUP-03 | SUPPLY-CHAIN | `docs/SUPPLY-CHAIN.md:482` | TRUE | `integration/tests/test_supply_chain.py`::`test_every_workflow_action_is_sha_pinned` | n-a | Every uses: in every workflow is a 40-hex SHA; the drift test fails on any tag/branch ref, with a negative control. |
-| CA-SUP-04 | SUPPLY-CHAIN | `docs/SUPPLY-CHAIN.md:92` | SCOPED | `infra/supply-chain/image_pins.py`::`main` | W3-8 | Resolvable (Docker Hub) drift blocks; an UNKNOWN registry blocks only under --fail-on-unknown, and a documented rolling-base allowlist is advisory. Registry W3-8 pins the carve-out. |
+| CA-SUP-04 | SUPPLY-CHAIN | `docs/SUPPLY-CHAIN.md:89` | SCOPED | `infra/supply-chain/image_pins.py`::`main` | W3-8 | Posture updated (W3-8): resolvable Docker Hub drift on a digest-pinned base is ADVISORY (surfaced, not blocking) since the pin already gives a reproducible build; an UNPINNED image still BLOCKS via --check, --fail-on-drift still blocks when armed (proven by the negative control), and an UNKNOWN registry blocks only under --fail-on-unknown. Registry W3-8 pins the posture. |
 | CA-SUP-05 | SUPPLY-CHAIN | `docs/SUPPLY-CHAIN.md:566` | TRUE | `integration/tests/test_supply_chain.py` | n-a | A deliberate, disclosed trade: MEDIUM and below are surfaced not enforced; HIGH/CRITICAL block. TRUE as written. |
 | CA-SUP-06 | SUPPLY-CHAIN | `docs/SUPPLY-CHAIN.md:132` | TRUE | `integration/tests/test_supply_chain.py` | n-a | pip rejects the whole file if one line lacks a hash; every runtime dep is installed under --require-hashes, asserted by test_supply_chain.py. |
 | CA-SUP-07 | SUPPLY-CHAIN | `docs/SUPPLY-CHAIN.md:529` | TRUE | `infra/supply-chain/verify_native_locks.py` | n-a | Build backends are hash-locked in build-backends.lock.txt; verify_native_locks.py checks offline that every direct native dep is pinned in its lock. |
@@ -99,7 +99,7 @@ Per the no-network constraint, these are enumerated here for the orchestrator to
 | CA-RDM-10 | SCOPED | W9-4 | W9 | unless **all eight** of these production preconditions hold |
 | CA-RDM-11 | SCOPED | W10-8 | W10 | off-by-default and opt-in outside production |
 | CA-ASB-11 | SCOPED | W9-5 | W9 | REQUIRES a genuine multi-signer quorum |
-| CA-SUP-04 | SCOPED | W3-8 | W3 | base-image drift (a Docker Hub tag that has moved) BLOCKS |
+| CA-SUP-04 | SCOPED | W3-8 | W3 | resolvable drift on an already-digest-pinned base is ADVISORY |
 | CA-LAD-01 | SCOPED | REM-LADDER | W17 | ONLY an oracle-confirmed FACT with signed evidence is eligible. |
 | CA-LAD-02 | SCOPED | REM-LADDER | W17 | above the A1 offense auto-ceiling, so it QUEUES for |
 | CA-LAD-03 | SCOPED | REM-LADDER | W17 | OFF by default and NEVER run from this console: |

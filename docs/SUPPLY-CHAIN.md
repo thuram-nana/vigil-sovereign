@@ -81,30 +81,25 @@ runtime-check **logic** are covered offline against a fake docker.
 ### Re-pinning
 
 ```bash
-python3 infra/supply-chain/image_pins.py --drift          # drift report (resolvable drift is BLOCKING)
-python3 infra/supply-chain/image_pins.py --check          # offline: is everything pinned?
+python3 infra/supply-chain/image_pins.py --drift                  # drift report (resolvable drift is ADVISORY)
+python3 infra/supply-chain/image_pins.py --drift --fail-on-drift  # strict: make resolvable drift BLOCK
+python3 infra/supply-chain/image_pins.py --check                  # offline: is everything pinned? (this BLOCKS)
 ```
 
-**Drift is three-valued, and resolvable drift BLOCKS (W3-8, issue #431)** — except a documented, reasoned rolling-base allowlist (`_ADVISORY_ROLLING_DRIFT`, currently only `kalilinux/kali-rolling`) whose drift is advisory (surfaced, not blocking); every other resolvable drift blocks. The old check was
-two-valued — a Docker Hub pin either matched or reported `??`, and `??` (any non-Hub registry, or a
-network blip) was *presented as a pass*. It is now three-valued:
+**Drift is three-valued, and — POSTURE — resolvable drift on an already-digest-pinned base is ADVISORY (W3-8, issue #431; posture updated).** The A14 PR gate runs `image_pins.py --drift` **without** `--fail-on-drift`, so a Docker Hub tag that has moved past its pin is *surfaced* (this report, the `$GITHUB_STEP_SUMMARY` block, and the `scheduled-supply-chain-scan` job) but does **not** block a PR. The reasoning: a digest pin (`@sha256:…`) already guarantees a reproducible build — a moved *tag* does not change the bytes that ship — so blocking every open PR on Docker's routine tag rebuilds is toil, not signal. Pins are re-advanced **deliberately on a cadence** (read the upstream changelog first). The check is also honestly three-valued (the old two-valued form presented any non-Hub `??` as a pass):
 
-Resolvable base-image drift (a Docker Hub tag that has moved) BLOCKS the A14 gate under
-`--fail-on-drift`; a pin on any registry the resolver cannot query is reported as an explicit
-UNKNOWN — surfaced in the job summary, never a silent pass.
-
-- **resolvable & moved** → the A14 gate runs `image_pins.py --drift --fail-on-drift` and this fails
-  the job. Re-pinning is still a deliberate act (read the upstream changelog first), but it is now a
-  *required* one, not an advisory nudge.
+- **resolvable & moved** → **ADVISORY**: `image_pins.py --drift` surfaces it (a `!!` line, a job-summary
+  entry) and exits 0. Re-pin deliberately on a cadence with `resolve-image-digests.sh`. A stricter
+  operator can add `--fail-on-drift` (or re-arm it in the workflow step) to make it block again.
 - **UNKNOWN (registry the resolver cannot query — anything but Docker Hub)** → written to
   `$GITHUB_STEP_SUMMARY` and counted, never a silent `??` pass. It does not block by default (a gate
   cannot honestly fail on a state it could not check); `--fail-on-unknown` makes it block for the
   strictest posture.
 - **resolvable & up-to-date** → nothing to do.
 
-A live negative control in the A14 job points the exact blocking config at a fixture with a
-deliberately-wrong digest on Docker Hub and requires it to fail, so the gate is proven not a no-op;
-the pure drift logic has an offline negative control in `integration/tests/test_supply_chain.py`.
+**What still BLOCKS the gate:** an **unpinned** image — `image_pins.py --check` (offline) fails the job if any registry image is not `@sha256:…`-pinned. That content-addressed-reproducibility guarantee is the real supply-chain gate; drift is the softer, advisory signal on top of it.
+
+A live negative control in the A14 job points the exact **`--fail-on-drift`** blocking config at a fixture with a deliberately-wrong digest on Docker Hub and requires it to fail — so the blocking *mechanism* is proven live and cannot silently rot even though the real-repo step is advisory; the pure drift logic has an offline negative control in `integration/tests/test_supply_chain.py`.
 
 ---
 

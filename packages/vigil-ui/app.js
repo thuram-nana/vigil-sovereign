@@ -779,10 +779,10 @@
   }
   function navItem(it) {
     const active = current() === it.id;
-    const badge = it.id === "safety" && app.get().waiting > 0
-      ? h("span.badge-count.owner", null, String(app.get().waiting)) : null;
+    const attn = it.id === "safety" && app.get().waiting > 0;
+    const badge = attn ? h("span.badge-count.owner", null, String(app.get().waiting)) : null;
     function go() { location.hash = "#/" + it.id; }
-    return h("div.nav-item" + (it.owner ? ".owner" : "") + (active ? ".active" : ""),
+    return h("div.nav-item" + (it.owner ? ".owner" : "") + (active ? ".active" : "") + (attn ? ".needs-approval" : ""),
       { dataset: { nav: it.id }, role: "link", tabindex: "0",
         "aria-current": active ? "page" : null, "aria-label": it.label,
         onClick: go,
@@ -2695,7 +2695,7 @@
 
   function renderLive(screen) {
     const L = { run: null, runs: [], events: [], seen: {}, filter: "all", snapshot: null, started: null,
-      inbox: [], inboxLoaded: false, inboxLoading: false, elsewhere: "" };
+      inbox: [], inboxLoaded: false, inboxLoading: false, elsewhere: "", scanDone: false, reconciled: false };
     const want = hashQuery().run || "";
 
     V.mount(screen, [
@@ -2721,6 +2721,7 @@
       L.run = L.runs.find(function (r) { return r.run_id === runId; }) || null;
       L.events = []; L.seen = {}; L.snapshot = null; L.started = L.run && L.run.started; L.elsewhere = "";
       L.inbox = []; L.inboxLoaded = false; L.inboxLoading = false;   // per-engagement advisory inbox (B4)
+      L.scanDone = false; L.reconciled = false;   // per-run: re-arm the terminal reconcile for the new run
       history.replaceState(null, "", "#/live?run=" + encodeURIComponent(runId));
       if (L.run) attachStream();
       drawBody();
@@ -2752,20 +2753,64 @@
           // replaying stream would re-count every event and the tiles would read a fabricated total.
           if (ev && ev._seq != null) { if (L.seen["p" + ev._seq]) return; L.seen["p" + ev._seq] = 1; }
           const norm = progressToEvent(ev); if (norm) { L.events.push(norm); onEvents(); }
+          // scan.done is the LAST progress row — once it lands, every scan.finding has landed, so it is the
+          // safe point to reconcile the streamed (conservative-LEAD) findings against the graded report.
+          if (ev && ev.event === "scan.done") { L.scanDone = true; maybeReconcile(); }
         });
       }
       // No completion signal in the stream → poll run status instead. 'none' (aegis) has no feed at all;
       // a codebase (Strix) run now streams ACTIVITY (W6c: strix.graph / warden.block) but still emits no
-      // terminal event, so without this its header would never leave "running".
-      if (run.stream === "none" || run.mode === "codebase") {
+      // terminal event, so without this its header would never leave "running". A 'progress' loopback scan
+      // needs the same poll so its header flips to done AND a terminal run can reconcile its Live
+      // tally/labels to the graded report (see maybeReconcile).
+      if (run.stream === "none" || run.mode === "codebase" || run.stream === "progress") {
         liveTimers.push(setInterval(refreshRunMeta, 3000));
       }
     }
     function refreshRunMeta() {
       V.getJSON(runsURL()).then(function (d) {
         const r = runsOf(d).find(function (x) { return x.run_id === L.run.run_id; });
-        if (r) { L.run = r; updateHeader(); }
+        if (r) { L.run = r; updateHeader(); maybeReconcile(); }
       }).catch(function () {});
+    }
+    // On COMPLETION, reconcile the Live view to the run's AUTHORITATIVE graded findings — the SAME
+    // /api/report source the Findings screen reads. A loopback scan streams each finding as a conservative
+    // LEAD (progressToEvent hardcodes verified_by_oracle:false because only the report's grounding pass —
+    // re-executing each oracle over retained evidence — decides FACT), so Live's Facts tile would otherwise
+    // stay 0 while Findings/Report show the same findings CONFIRMED. Only progress-stream runs that CAPTURE
+    // a report need this; a blackboard engage run already streams the grounded verdict. Runs at most once,
+    // and ONLY when the run is terminal AND the whole progress log has replayed (scanDone) AND the report is
+    // present — so a still-running run is never touched and no finding is relabelled before it has streamed.
+    function maybeReconcile() {
+      if (L.reconciled || !L.run) return;
+      if (L.run.stream !== "progress" || p3RunCapturesNoReport(L.run)) return;   // nothing to reconcile against
+      const st = L.run.status;
+      if (st !== "done" && st !== "error" && st !== "cancelled" && st !== "interrupted") return;
+      if (!L.scanDone) return;   // wait for the terminal scan.done row to replay — then all findings are in
+      V.getJSON(OFF("/api/report/" + encodeURIComponent(L.run.run_id))).then(function (rep) {
+        if (!rep || rep.pending || L.reconciled) return;   // report not captured yet → a later poll retries
+        L.reconciled = true;
+        // The streamed finding events mirror the report's ACTIVE findings; relabel each to the graded truth,
+        // consuming each authoritative finding at most once (by bug class, preferring an exact oracle match).
+        // p3IsFact reads the report's live `grounding` verdict, so a demoted finding stays a LEAD — the
+        // reconcile can PROMOTE a confirmed lead to a fact but never over-claims one the oracle did not prove.
+        const auth = ((rep.findings) || []).filter(function (f) { return f && f.kind === "active"; });
+        L.events.forEach(function (e) {
+          if (e.kind !== "finding") return;
+          const p = e.payload || {};
+          let pick = -1, exact = -1;
+          for (let i = 0; i < auth.length; i++) {
+            if (auth[i]._used) continue;
+            if (String(auth[i].bug_class || "") !== String(p.bug_class || "")) continue;
+            if (pick < 0) pick = i;
+            const ok = auth[i].confirmed_by || auth[i].oracle_kind || "";
+            if (ok && ok === (p.oracle_kind || "")) { exact = i; break; }
+          }
+          const idx = exact >= 0 ? exact : pick;
+          if (idx >= 0) { auth[idx]._used = true; p.verified_by_oracle = p3IsFact(auth[idx]); e.payload = p; }
+        });
+        onEvents();   // recompute the Facts/Leads tiles + relabel the timeline from the reconciled events
+      }).catch(function () { /* report unreachable — keep the honest streamed (conservative) state */ });
     }
     function pollSnapshot() {
       V.getJSON(SOV("/api/snapshot")).then(function (s) {
@@ -5263,7 +5308,16 @@
       V.tile("Actors seen", String(st.actor_count || 0), "with a belief", actors.length ? "warn" : null),
     ]);
     var setup = V.$("#def-setup");
-    if (setup) { if (running) V.mount(setup, defRunningPanel(gw, eff, req)); else V.mount(setup, defSetupForm()); }
+    // The status poll re-runs defDrawStatus every 4s; re-mounting defSetupForm() each tick replaces the
+    // uncontrolled <input> nodes and wipes whatever the operator is mid-typing (upstream/port/secret/slug/
+    // honeypot). Only (re)build the form when it is not already on screen — first paint, or after the
+    // running panel / an offline message cleared it (detected by the absence of the upstream url input,
+    // which is unique to the form). While the form is present, leave its live inputs untouched. The
+    // running panel has no inputs, so re-mounting it every tick to refresh live status is harmless.
+    if (setup) {
+      if (running) V.mount(setup, defRunningPanel(gw, eff, req));
+      else if (!setup.querySelector('input[type="url"]')) V.mount(setup, defSetupForm());
+    }
     var ab = V.$("#def-actors");
     if (ab) {
       if (!actors.length) V.mount(ab, h("div.empty", null, running ? "No actors yet — drive some traffic through the gateway." : "Start the gateway to build per-actor beliefs."));
@@ -5272,17 +5326,28 @@
   }
 
   function defRunningPanel(gw, eff, req) {
+    var cur = eff || req;   // the mode actually in force
+    var next = cur === "enforce" ? "observe" : "enforce";
+    var toggleLabel = cur === "enforce" ? "Switch to Observe (watch-only)" : "Switch to Enforce (blocking)";
+    var toggleBtn = h("button.btn.primary", { onClick: function () {
+      if (next === "enforce" && !confirm("Enforce will BLOCK requests proven to be attacks — live, no restart. (Needs the AEGIS_RESPOND entitlement, else it stays observe.) Continue?")) return;
+      V.postJSON(OFF("/api/aegis/mode"), { mode: next })
+        .then(function (r) { if (r && r.error) { V.toast(r.error, true); return; } V.toast("Mode → " + next + "."); loadDefense(); })
+        .catch(function (e) { V.toast((e && e.message) || "Could not change mode", true); });
+    } }, [V.icon(next === "enforce" ? "shield" : "info"), toggleLabel]);
     return [
       h("div.set-status.ok", null, [V.icon("check"),
         h("span", null, "Gateway running — " + (gw.bind || "") + " → " + (gw.upstream || "") + " · mode " + (eff || req))]),
       req === "enforce" && eff !== "enforce"
         ? h("div.set-status.off", null, [V.icon("info"), h("span", null, "You requested ENFORCE but it downgraded to observe (the AEGIS_RESPOND entitlement isn’t available here) — nothing is being blocked.")])
         : null,
-      h("div.acts", { style: { marginTop: "12px" } },
+      h("div.acts", { style: { marginTop: "12px" } }, [
+        toggleBtn,
         h("button.btn.danger", { onClick: function () {
           V.postJSON(OFF("/api/aegis/stop"), {}).then(function () { V.toast("Gateway stopped."); loadDefense(); })
             .catch(function (e) { V.toast((e && e.message) || "Could not stop the gateway", true); });
-        } }, [V.icon("x"), "Stop gateway"])),
+        } }, [V.icon("x"), "Stop gateway"]),
+      ]),
       h("div.hint", { style: { marginTop: "10px" } }, "Watch proven attacks in the live verdicts stream. To run this on your real edge, use the production command shown when you started it (bind your routable interface there, never here)."),
     ];
   }
@@ -6940,7 +7005,7 @@
   const CHAT_MAX_ATTACH = 12;
   // Records the ENGINE authors itself: a launch, a refusal, an error, a prompt for a target, an
   // attachment receipt. Anything else an assistant says is model prose → a LEAD, and is badged as one.
-  const CHAT_ENGINE_KINDS = { launched: 1, refused: 1, error: 1, need_target: 1, attached: 1, system: 1 };
+  const CHAT_ENGINE_KINDS = { launched: 1, refused: 1, error: 1, need_target: 1, attached: 1, system: 1, agent_question: 1 };
 
   function fmtBytes(n) {
     const b = Number(n) || 0;
@@ -7355,9 +7420,19 @@
 
     function openSession(id) {
       C.id = id || "";
-      C.messages = []; C.attach = [];
+      C.messages = []; C.attach = []; C.hyps = [];
       history.replaceState(null, "", "#/chat" + (id ? ("?id=" + encodeURIComponent(id)) : ""));
-      load();
+      // SWITCHING chats only needs THIS chat's transcript + hypotheses — the models/settings/tool
+      // roster/session-list are session-global and already cached from the first load(), so re-fetching
+      // them on every click made opening a saved chat pay ~6 serial cross-plane round-trips (incl. the
+      // 143ms models probe + the proxy's per-request auth). Redraw instantly from cache, then fetch the
+      // two per-chat things IN PARALLEL. (First-ever load still runs the full load() from renderChat.)
+      restoreModel();
+      drawSessions(); drawMain();
+      if (!C.id) return;
+      Promise.all([refreshTranscript(), refreshHyps()])
+        .then(function () { drawMain(); scrollDown(); })
+        .catch(function () { drawMain(); });
     }
 
     function drawSessions() {
@@ -7782,6 +7857,21 @@
       if (isLead) {
         kids.push(h("div", { style: { marginBottom: "6px" } },
           [h("span.shield.lead", null, [V.icon("info"), "Lead — not a confirmed finding"])]));
+      }
+      // AGENT ASK_USER: the engagement paused to ask the operator something. Render it as a distinct,
+      // owner-gold prompt (not a lead) so it's unmistakable that a reply is expected — typing an answer in
+      // the composer below auto-resumes the run (server-side resume_engage_with_message). Styled + labelled
+      // so the operator knows exactly where to answer.
+      if (m.kind === "agent_question") {
+        box.style.borderColor = "var(--owner, #d4af37)";
+        box.style.borderLeftWidth = "3px";
+        box.style.background = "var(--owner-bg, var(--bg-2))";
+        kids.push(h("div", { style: { marginBottom: "6px", display: "flex", alignItems: "center", gap: "6px" } },
+          [h("span.shield", { style: { color: "var(--owner, #d4af37)" } }, [V.icon("info"), "The engagement is asking you"])]));
+        kids.push(h("div", null, String(m.text || m.reply || "")));
+        kids.push(h("div.dim", { style: { fontSize: "var(--fs-xs)", marginTop: "8px" } },
+          "Reply below and I'll resume the engagement with your answer."));
+        return h("div", wrap, h("div", box, kids));
       }
       kids.push(h("div", null, String(m.text || m.reply || "")));
       const atts = recordAttachments(m);
