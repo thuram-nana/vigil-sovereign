@@ -477,11 +477,13 @@ def test_a14_workflow_declares_every_leg_of_the_gate() -> None:
         "the built gateway image is scanned": "trivy image",
         "the image is tagged by content address": "--context-tag",
         "the shipped Strix image layer is scanned via its SBOM": "trivy sbom",
-        # W3-8 (#431): the drift STEP runs --fail-on-drift, so resolvable drift BLOCKS the job. Option A
-        # (#431) makes ONLY a documented rolling base (image_pins.py::_ADVISORY_ROLLING_DRIFT) advisory
-        # WITHIN the tool; the workflow step itself is never continue-on-error and still blocks every other
-        # resolvable move — asserted by test_workflow_drift_step_blocks_and_is_not_advisory.
-        "base-image drift blocks resolvable movement": "--fail-on-drift",
+        # W3-8 (#431); POSTURE updated: resolvable drift on an already-digest-pinned base is ADVISORY, so
+        # the real-repo drift step runs `--drift` (surfaced, not blocking) — the digest pin already gives a
+        # reproducible build. The `--fail-on-drift` MECHANISM is retained and proven LIVE by the drift-gate
+        # negative control, so the gate can still fire; the real block is the UNPINNED `--check` step. All
+        # three facts are guarded by test_workflow_drift_step_is_advisory_and_negative_control_still_blocks.
+        "the drift report runs (drift surfaced for visibility)": "image_pins.py --drift",
+        "the drift-blocking mechanism is proven live by the negative control": "--fail-on-drift",
         # W3-10 (#433): the PEP 517 build backends are hash-locked and the non-Python locks are verified.
         "build backends are hash-locked": "build-backends.lock.txt",
         "non-Python locks are regenerate-checked": "verify_native_locks.py",
@@ -1998,22 +2000,58 @@ def _workflow_steps(body: str) -> list[str]:
     return steps
 
 
-def test_workflow_drift_step_blocks_and_is_not_advisory() -> None:
-    """The real drift GATE (not the --root negative-control fixture) must run --fail-on-drift and must
-    NOT be continue-on-error — otherwise resolvable drift would be advisory again, the W3-8 regression.
+def test_workflow_drift_step_is_advisory_and_negative_control_still_blocks() -> None:
+    """POSTURE (updated): resolvable drift on an already-digest-pinned base is ADVISORY in the A14 PR
+    gate. The real-repo drift step runs ``image_pins.py --drift`` WITHOUT ``--fail-on-drift``, so upstream
+    tag movement is surfaced (this report + the $GITHUB_STEP_SUMMARY block + the scheduled scan) but does
+    NOT block a PR — the digest pin already guarantees a reproducible build, and a moved tag does not
+    change the bytes that ship. The real blocking guarantee is the UNPINNED check (``--check``); the
+    ``--fail-on-drift`` MECHANISM is retained and proven LIVE by the drift-gate negative control, so the
+    gate can still fire — it just isn't armed against the real repo.
 
-    Reconciled with Option A (#431): the per-repo advisory carve-out lives WITHIN image_pins.py and
-    covers only a DOCUMENTED rolling base (_ADVISORY_ROLLING_DRIFT). It does not touch this STEP: the
-    workflow still runs --fail-on-drift and is not continue-on-error, so every OTHER resolvable move
-    still blocks the job. This test guards the step; the in-tool classification is guarded by the
-    W3-8 Option-A tests below (advisory vs. the non-allowlisted negative control)."""
+    This guards THREE facts so a future edit cannot silently (a) re-arm a per-PR block on drift, (b) drop
+    the negative control that proves the mechanism, or (c) drop the unpinned check that is the real block.
+    The in-tool drift classification (and that ``--fail-on-drift`` still blocks resolvable moves) is
+    guarded by the tool-level tests above (test_resolvable_drift_blocks, the Option-A tests, etc.)."""
     body = WORKFLOW.read_text(encoding="utf-8")
-    gate = [s for s in _workflow_steps(body)
-            if "image_pins.py" in s and "--drift --fail-on-drift" in s and "--root" not in s]
-    assert gate, "no blocking base-image drift step (`image_pins.py --drift --fail-on-drift`) in the A14 gate"
-    for step in gate:
+    steps = _workflow_steps(body)
+
+    # (a) the REAL-REPO drift step runs --drift and is NOT armed with --fail-on-drift (advisory).
+    real = [s for s in steps if "image_pins.py --drift" in s and "--root" not in s]
+    assert real, "no real-repo base-image drift step (`image_pins.py --drift`) in the A14 gate"
+    for step in real:
+        assert "--fail-on-drift" not in step, (
+            "the real-repo drift step is armed with --fail-on-drift — resolvable drift would block a PR "
+            "again. The posture is that pinned-base drift is ADVISORY (surfaced, not blocking); the real "
+            "block is the unpinned --check step:\n" + step
+        )
+
+    # (b) the NEGATIVE CONTROL still runs the blocking mechanism (--root fixture + --fail-on-drift), so a
+    # future no-op of --fail-on-drift is caught — advisory drift must never hide a broken mechanism. And it
+    # must NOT swallow its own failure: with the real drift step now advisory, the negative control is the
+    # ONLY live proof the mechanism fires, so a `continue-on-error` on it would silently mask a dead gate
+    # (red-pen BLOCK-2 — the old test's continue-on-error guard was on the real gate; that gate is gone, so
+    # the guard moves here, where enforcement now lives).
+    negctl = [s for s in steps if "--drift --fail-on-drift" in s and "--root" in s]
+    assert negctl, (
+        "the drift-gate negative control (`--root <fixture> --drift --fail-on-drift`) is gone — the "
+        "blocking mechanism is no longer proven to fire, so advisory drift could mask a dead gate"
+    )
+    for step in negctl:
         assert "continue-on-error: true" not in step, (
-            "the base-image drift GATE is continue-on-error — resolvable drift would not block:\n" + step
+            "the drift-gate negative control is continue-on-error — a dead --fail-on-drift mechanism would "
+            "be masked, and advisory drift would hide that the gate can no longer fire:\n" + step
+        )
+
+    # (c) the UNPINNED check — the real supply-chain guarantee — still runs (offline) AND still BLOCKS: it
+    # must not be continue-on-error, or an unpinned (tag-only) image would reach a green PR. This is now the
+    # primary block (drift is advisory), so its continue-on-error guard is load-bearing (red-pen BLOCK-2).
+    check = [s for s in steps if "image_pins.py --check" in s]
+    assert check, "the offline unpinned-image check (`image_pins.py --check`) is gone — that is the real block"
+    for step in check:
+        assert "continue-on-error: true" not in step, (
+            "the unpinned-image --check step is continue-on-error — an UNPINNED image would no longer block "
+            "a PR, defeating the real supply-chain guarantee:\n" + step
         )
 
 

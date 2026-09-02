@@ -74,7 +74,8 @@ def _start_status_writer(httpd: object, path: str, *, interval: float = 2.0) -> 
             actors = [{"id": aid, "mean": b.mean, "lcb": b.lcb, "n": b.n_observations,
                        "action": graduated_action(b)} for aid, b in s.actor_graph.snapshot()]
         snap = {"ts": time.time(), "effective_mode": "enforce" if s.enforce else "observe",
-                "requested_mode": s.config.mode, "slug": getattr(s, "slug", ""),
+                "requested_mode": s.intended_mode() if hasattr(s, "intended_mode") else s.config.mode,
+                "slug": getattr(s, "slug", ""),
                 "actors": actors, "actor_count": len(actors)}
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
