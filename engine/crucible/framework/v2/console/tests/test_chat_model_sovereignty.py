@@ -2,7 +2,7 @@
 is a SOVEREIGNTY control: a LOCAL model means an uploaded codebase never leaves the machine. These tests pin:
 
   * ``chat_models()`` surfaces each model's trust class, whether the current tier permits it (and why not),
-    and the plain-language consequence; the default is Opus 5;
+    and the plain-language consequence; the default is Opus 4.8;
   * under AIR_GAPPED a local model is permitted and a cloud model is refused WITH A REASON (told up front,
     not at send time);
   * a CLOUD choice uses the CHOSEN model string (Sonnet), not a hardcoded one;
@@ -129,7 +129,7 @@ def _forbid_cloud(monkeypatch) -> dict:
 
 def test_chat_models_surfaces_trust_class_and_consequence():
     d = chat.chat_models()
-    assert d["default"] == "claude-opus-5"
+    assert d["default"] == "claude-opus-4-8"
     by = {m["id"]: m for m in d["models"]}
     assert "claude-opus-5" in by and "ollama" in by
     loc = by["ollama"]
@@ -172,14 +172,92 @@ def test_forbidden_cloud_tier_refuses_before_asking_for_a_key(monkeypatch):
     assert cloud["called"] is False
 
 
-def test_blank_model_defaults_to_opus5(captured):
+def test_blank_model_defaults_to_opus48(captured):
     out = chat._reason(CHAT, "hi", model="")
-    assert out["ok"] is True and captured["create_kw"]["model"] == "claude-opus-5"
+    assert out["ok"] is True and captured["create_kw"]["model"] == "claude-opus-4-8"
 
 
 def test_unknown_model_degrades_to_the_default_cloud(captured):
     out = chat._reason(CHAT, "hi", model="totally-made-up-9000")
-    assert out["ok"] is True and captured["create_kw"]["model"] == "claude-opus-5"
+    assert out["ok"] is True and captured["create_kw"]["model"] == "claude-opus-4-8"
+
+
+# ── AUTO-FALLBACK: a chosen model that REFUSES falls back to the default and SAYS SO ─────────────────────────
+@pytest.fixture()
+def captured_refusing(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Cloud SDK fake where the CHOSEN model declines (stop_reason='refusal', no text) and the FALLBACK
+    model (claude-opus-4-8) answers. Records every model create() saw, in order."""
+    cap: dict = {"models": []}
+    mod = types.ModuleType("anthropic")
+
+    class _Block:
+        type = "text"
+
+        def __init__(self, text):
+            self.text = text
+
+    class _Resp:
+        def __init__(self, text, stop="end_turn"):
+            self.stop_reason = stop
+            self.content = [_Block(text)] if text else []
+
+    class _Client:
+        def __init__(self, api_key=None, **kw):
+            self.messages = self
+
+        def create(self, **kw):
+            m = kw.get("model")
+            cap["models"].append(m)
+            if m == "claude-opus-4-8":
+                return _Resp("A cloud lead from the fallback model.")
+            return _Resp("", stop="refusal")           # the chosen model declines
+
+    mod.Anthropic = _Client
+    monkeypatch.setitem(sys.modules, "anthropic", mod)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    return cap
+
+
+def test_chat_falls_back_to_default_when_chosen_model_refuses(captured_refusing):
+    out = chat._reason(CHAT, "any weakness?", model="claude-opus-5")
+    assert out["ok"] is True
+    # tried the chosen model, then fell back exactly ONCE to the default
+    assert captured_refusing["models"] == ["claude-opus-5", "claude-opus-4-8"]
+    # and the answer CLEARLY SAYS the fallback happened
+    assert "claude-opus-4-8" in out.get("reply", "") and "fallback" in out.get("reply", "").lower()
+
+
+def test_chat_default_model_refusal_does_not_recurse(monkeypatch):
+    # the default IS the fallback target → a refusal there cannot fall back to itself; it surfaces the decline
+    cap: dict = {"models": []}
+    mod = types.ModuleType("anthropic")
+
+    class _Block:
+        type = "text"
+
+        def __init__(self, text):
+            self.text = text
+
+    class _Resp:
+        stop_reason = "refusal"                     # EVERY model declines here
+
+        def __init__(self):
+            self.content = []
+
+    class _Client:
+        def __init__(self, api_key=None, **kw):
+            self.messages = self
+
+        def create(self, **kw):
+            cap["models"].append(kw.get("model"))
+            return _Resp()
+
+    mod.Anthropic = _Client
+    monkeypatch.setitem(sys.modules, "anthropic", mod)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    out = chat._reason(CHAT, "any weakness?", model="claude-opus-4-8")
+    assert out["ok"] is False and "declined" in out["error"].lower()
+    assert cap["models"] == ["claude-opus-4-8"]                     # exactly one call, no recursion to itself
 
 
 # ── local choice routes through the provider layer, keyless, NO cloud fallback ────────────────────────────
@@ -276,7 +354,7 @@ def test_resolve_session_model_maps_local_cloud_and_no_pick():
     assert chat.resolve_session_model("   ") == ("", "")
     # an UNKNOWN non-blank id degrades to the tested cloud default (same as the chat's own reasoning path),
     # never to a fabricated local backend that would skip the cloud gate
-    assert chat.resolve_session_model("totally-made-up-9000") == ("claude-opus-5", "")
+    assert chat.resolve_session_model("totally-made-up-9000") == ("claude-opus-4-8", "")
 
 
 def test_integration_engage_cmd_local_pick_emits_backend_flag_not_model(monkeypatch):

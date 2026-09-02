@@ -1591,8 +1591,9 @@ def _resolve_reason_mode(raw) -> str:
 # not a preference: a LOCAL model means an uploaded codebase never leaves this machine. Each entry maps to a
 # kernel backend whose trust class the sovereignty ladder already gates; a local pick routes through the
 # provider layer with NO cloud failover — a local-reach failure REFUSES rather than silently egressing.
-_CHAT_MODEL_DEFAULT = "claude-opus-5"
+_CHAT_MODEL_DEFAULT = "claude-opus-4-8"
 _CHAT_MODELS: tuple[dict, ...] = (
+    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "kind": "cloud", "model": "claude-opus-4-8"},
     {"id": "claude-opus-5",   "label": "Claude Opus 5",   "kind": "cloud", "model": "claude-opus-5"},
     {"id": "claude-sonnet-5", "label": "Claude Sonnet 5", "kind": "cloud", "model": "claude-sonnet-5"},
     {"id": "claude-haiku-4-5","label": "Claude Haiku 4.5","kind": "cloud", "model": "claude-haiku-4-5"},
@@ -2034,50 +2035,70 @@ def _reason(chat_id: str, question: str, *, reason_mode: str = "ask", model: str
     if thinks:
         notes.append(f"{reason_mode} mode — reasoning with extended thinking.")
 
+    active_model = entry["model"]
+
     def _call(blocks):
         client = anthropic.Anthropic(api_key=key, timeout=600.0) if thinks \
             else anthropic.Anthropic(api_key=key)
-        kwargs = {"model": entry["model"], "max_tokens": _mx, "system": system,
+        kwargs = {"model": active_model, "max_tokens": _mx, "system": system,
                   "messages": history + [{"role": "user", "content": blocks}]}
         if thinks:
-            kwargs["thinking"] = {"type": "adaptive"}   # Opus 5 adaptive thinking (budget_tokens rejected)
+            kwargs["thinking"] = {"type": "adaptive"}   # adaptive thinking (budget_tokens rejected)
         return client.messages.create(**kwargs)
 
-    try:
-        resp = _chat_call_with_backoff(_call, content)   # auto-heal a transient blip before giving up
-    except Exception as e:  # noqa: BLE001 — never surface the key; an API error is an honest refusal
-        if not images:
-            return {"ok": False,
-                    "error": f"the model could not be reached ({type(e).__name__}); the gated assessment "
-                             f"still runs."}
-        # The images may be what it could not accept — retry TEXT-ONLY and SAY SO, never drop them silently.
+    def _run_and_read():
+        """One transport-safe call on the CURRENT ``active_model`` → ``(kind, payload)``: kind is
+        ``ok`` (payload = the reply text) | ``refusal`` | ``empty`` | ``error`` (payload = operator message).
+        Charges the token budget and preserves the image-rejection text-only retry + note."""
         try:
-            resp = _chat_call_with_backoff(_call, [content[0]])
-        except Exception as e2:  # noqa: BLE001
-            return {"ok": False,
-                    "error": f"the model could not be reached ({type(e2).__name__}); the gated assessment "
-                             f"still runs."}
-        notes.append(f"the attached image(s) were rejected by the model ({type(e).__name__}); this answer "
-                     f"covers the attached TEXT only.")
+            resp = _chat_call_with_backoff(_call, content)   # auto-heal a transient blip before giving up
+        except Exception as e:  # noqa: BLE001 — never surface the key; an API error is an honest refusal
+            if not images:
+                return "error", (f"the model could not be reached ({type(e).__name__}); the gated "
+                                 f"assessment still runs.")
+            # The images may be what it could not accept — retry TEXT-ONLY and SAY SO, never drop silently.
+            try:
+                resp = _chat_call_with_backoff(_call, [content[0]])
+            except Exception as e2:  # noqa: BLE001
+                return "error", (f"the model could not be reached ({type(e2).__name__}); the gated "
+                                 f"assessment still runs.")
+            notes.append(f"the attached image(s) were rejected by the model ({type(e).__name__}); this "
+                         f"answer covers the attached TEXT only.")
+        if _tb is not None:                # charge the ACTUAL tokens the chat call spent (either attempt)
+            try:
+                _tb.record_usage("chat", getattr(resp, "usage", None))
+            except Exception:  # noqa: BLE001
+                pass
+        # A safety classifier can decline (HTTP 200, stop_reason == "refusal") — before reading content.
+        if getattr(resp, "stop_reason", None) == "refusal":
+            return "refusal", ""
+        txt = "".join(getattr(b, "text", "") for b in (getattr(resp, "content", None) or [])
+                      if getattr(b, "type", None) == "text").strip()
+        return ("ok", txt) if txt else ("empty", "")
 
-    if _tb is not None:                # charge the ACTUAL tokens the chat call spent (either attempt)
-        try:
-            _tb.record_usage("chat", getattr(resp, "usage", None))
-        except Exception:  # noqa: BLE001
-            pass
+    kind, payload = _run_and_read()
+    # AUTO-FALLBACK (owner ask): a REFUSAL (a model's safety can decline an AUTHORIZED offensive-security
+    # question) or an EMPTY reply is MODEL-SPECIFIC, so retry ONCE on the default fallback model and SAY SO
+    # in the answer. NOT for a transport error (the same key/SDK would fail again), never a model → itself.
+    if kind in ("refusal", "empty") and active_model != _CHAT_MODEL_DEFAULT:
+        _prev = active_model
+        active_model = _CHAT_MODEL_DEFAULT
+        kind, payload = _run_and_read()
+        if kind == "ok":
+            notes.append(f"'{_prev}' declined or returned nothing — answered with '{_CHAT_MODEL_DEFAULT}' instead.")
+            payload = (f"_(Model fallback: **{_prev}** declined or returned nothing on this request, so this "
+                       f"answer is from **{_CHAT_MODEL_DEFAULT}**.)_\n\n" + payload)
 
-    # Opus 5 safety classifiers can decline (HTTP 200, stop_reason == "refusal") — handle before reading content.
-    if getattr(resp, "stop_reason", None) == "refusal":
+    if kind == "refusal":
         return {"ok": False, "error": "the model declined this request. Rephrase it, or run the gated "
                                       "assessment over the same files for oracle-confirmed findings."}
-
-    text = "".join(getattr(b, "text", "") for b in (getattr(resp, "content", None) or [])
-                   if getattr(b, "type", None) == "text").strip()
-    if not text:
+    if kind == "empty":
         return {"ok": False, "error": "the model returned nothing usable; the gated assessment still runs."}
+    if kind == "error":
+        return {"ok": False, "error": payload}
     # Shared tail: split off the fenced proposal / source-legend / hypothesis blocks and validate sources
     # against what was actually sent (same path the local reasoner runs).
-    return _reason_finish(chat_id, text, view, notes, coverage)
+    return _reason_finish(chat_id, payload, view, notes, coverage)
 
 
 def chat_hypotheses(chat_id: str) -> dict:

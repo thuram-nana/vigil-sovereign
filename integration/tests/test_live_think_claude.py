@@ -90,6 +90,49 @@ def test_valid_json_decision_via_fake_client(state):
     assert d.action == ActionType.USE_TOOL and d.tool.tool_name == "nmap"
 
 
+# --- AUTO-FALLBACK: a model that returns NO usable decision (a refusal → empty text) falls back ONCE ------
+# to _FALLBACK_MODEL (claude-opus-4-8) and SAYS SO in the rationale; a genuine ask_user never falls back;
+# the fallback model itself never recurses.
+
+
+def test_no_usable_decision_falls_back_to_opus48(state):
+    from vigil_integration.live.think_claude import _think_via_client
+    valid = json.dumps({"action": "use_tool", "tool": {"tool_name": "nmap"}, "reasoning": "recon"})
+
+    class _ModelAware:
+        def __init__(self):
+            self.models: list = []
+            self.messages = self
+
+        def create(self, **kw):
+            self.models.append(kw.get("model"))
+            # the CHOSEN model "declines" (a refusal comes back as empty text); the fallback answers
+            return _Response(valid if kw.get("model") == "claude-opus-4-8" else "")
+
+    c = _ModelAware()
+    d = _think_via_client(c, "sys", "user", model="claude-opus-5", max_tokens=1024)
+    assert d.action == ActionType.USE_TOOL and d.tool.tool_name == "nmap"
+    assert c.models == ["claude-opus-5", "claude-opus-4-8"]          # tried the chosen, fell back exactly ONCE
+    assert "claude-opus-4-8" in (d.reasoning or "") and "fallback" in (d.reasoning or "").lower()
+
+
+def test_genuine_ask_user_does_not_trigger_a_fallback(state):
+    from vigil_integration.live.think_claude import _think_via_client
+    ask = json.dumps({"action": "ask_user", "reasoning": "need scope", "question": "which host?"})
+    c = FakeClient(text=ask)
+    d = _think_via_client(c, "s", "u", model="claude-opus-5", max_tokens=1024)
+    assert d.action == ActionType.ASK_USER and d.question == "which host?"
+    assert c.captured["model"] == "claude-opus-5"                    # a DELIBERATE ask_user → no second call
+
+
+def test_fallback_model_itself_never_recurses(state):
+    from vigil_integration.live.think_claude import _think_via_client
+    c = FakeClient(text="")                                          # opus-4-8 also returns nothing usable
+    d = _think_via_client(c, "s", "u", model="claude-opus-4-8", max_tokens=1024)
+    assert d.action == ActionType.ASK_USER                           # fail-closed pause, NO infinite fallback
+    assert c.captured["model"] == "claude-opus-4-8"                  # exactly one call (model == fallback)
+
+
 def test_resolve_model_explicit_then_env_then_default(monkeypatch):
     monkeypatch.delenv("CRUCIBLE_ANTHROPIC_MODEL", raising=False)
     monkeypatch.delenv("SIGIL_LLM_MODEL", raising=False)

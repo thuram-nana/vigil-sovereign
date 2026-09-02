@@ -66,7 +66,12 @@ from ..tools import redact_tool_args
 logger = logging.getLogger("vigil.live.think_claude")
 
 # The think step is a decision-shaped call; correctness matters more than cost → default to Opus.
-DEFAULT_MODEL = "claude-opus-5"
+DEFAULT_MODEL = "claude-opus-4-8"
+# AUTO-FALLBACK target (owner ask): when the chosen/current model returns NO usable decision — a refusal
+# comes back as EMPTY text, and garbage/oversized output also lands on the fail-closed ASK_USER pause — the
+# live think step retries ONCE on this model and SAYS SO in the decision rationale. Model-specific only:
+# never for a transport/auth error (the same client/key would fail again), and never a model → itself.
+_FALLBACK_MODEL = "claude-opus-4-8"
 DEFAULT_MAX_TOKENS = 4096
 
 # The env vars the Settings model picker writes (see apps/sigil/.../ui/settings.py). Reading them here is
@@ -686,6 +691,16 @@ def _invoke_with_backoff(client: Any, params: dict) -> Any:
         raise last
 
 
+def _no_usable_decision(decision: LLMDecision) -> bool:
+    """True when ``parse_decision`` could extract NO decision from the model — the fail-closed ASK_USER
+    default (a REFUSAL returns empty text; garbage / oversized output also land here). This is
+    MODEL-SPECIFIC (a different model may not decline), so it is worth ONE fallback to ``_FALLBACK_MODEL``.
+    A model that DELIBERATELY chose ask_user (carrying its OWN question) is NOT this and never falls back."""
+    from ..agent.react import _FAILCLOSED_DEFAULT
+    return (decision.action == _FAILCLOSED_DEFAULT.action
+            and (decision.reasoning or "") == _FAILCLOSED_DEFAULT.reasoning)
+
+
 def _think_via_client(client: Any, system: str, user: str, *, model: str, max_tokens: int) -> LLMDecision:
     """One live think call through an injected/real client, fail-closed on ANY error. Current-generation
     models get adaptive extended thinking (``thinking: {type: "adaptive"}``) and the effort chosen in the UI;
@@ -727,6 +742,15 @@ def _think_via_client(client: Any, system: str, user: str, *, model: str, max_to
     if len(text) > _MAX_RESPONSE_CHARS:  # bound hostile oversized output before the parser sees it
         text = text[:_MAX_RESPONSE_CHARS]
     decision = parse_decision(text)
+    if _no_usable_decision(decision) and model != _FALLBACK_MODEL:
+        logger.warning("live think: model %r returned no usable decision (refusal/empty/unparseable) — "
+                       "falling back once to %r", model, _FALLBACK_MODEL)
+        fb = _think_via_client(client, system, user, model=_FALLBACK_MODEL, max_tokens=max_tokens)
+        if not _no_usable_decision(fb) and not getattr(fb, "error_class", None):
+            note = (f"[model fallback: '{model}' returned no usable decision (it likely declined the "
+                    f"request); reasoning continued on '{_FALLBACK_MODEL}'.] ")
+            return fb.model_copy(update={"reasoning": (note + (fb.reasoning or "")).strip()})
+        return decision  # the fallback ALSO failed → keep the original fail-closed human pause
     logger.debug("live think decision: action=%s", decision.action.value)
     return decision
 

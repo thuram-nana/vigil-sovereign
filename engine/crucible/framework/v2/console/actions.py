@@ -4173,7 +4173,7 @@ def terminal_propose(intent, run_id=None, session_id=None) -> dict:
     try:
         client = anthropic.Anthropic(api_key=key)
         resp = client.messages.create(
-            model="claude-opus-5", max_tokens=_term_mx,
+            model="claude-opus-4-8", max_tokens=_term_mx,
             system=_TERM_ROUTER_SYSTEM,
             messages=[{"role": "user", "content": user}],
         )
