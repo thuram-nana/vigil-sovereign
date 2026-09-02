@@ -1004,7 +1004,7 @@ def _vigil_bin() -> "str | None":
 
 
 def _integration_engage_cmd(target: str, slug: str, session_id: str, scan_mode: str,
-                            *, model: str = "", backend: str = "") -> "list | None":
+                            *, model: str = "", backend: str = "", objective: str = "") -> "list | None":
     """The argv for a LOOPBACK agentic engage via the integration `vigil engage` engine — the OODA loop
     with mid-run operator-message steering, ``--resume``, the owner-signed approval broker, and fireteam —
     or None if no `vigil` entrypoint resolves. Graph projection is OPTIONAL: the engine mirrors facts to
@@ -1030,6 +1030,12 @@ def _integration_engage_cmd(target: str, slug: str, session_id: str, scan_mode: 
     cmd = [vigil, "engage", target, "--slug", slug, "--scope", "127.0.0.1",
            "--session", session_id, "--base-dir", _live_base(),
            "--max-iterations", str(_GRAPH_ITERS.get(scan_mode, 12))]
+    # Thread the operator's OBJECTIVE (the chat prompt) into the engage so the OODA loop has a goal from
+    # iteration 0 — without it the engine's first think has an empty objective and (correctly) pauses at
+    # ask_user "no objective or scope is defined", which felt like a dead end on a fresh chat send. Bounded.
+    obj = str(objective or "").strip()[:400]
+    if obj:
+        cmd += ["--objective", obj]
     be = str(backend or "").strip()
     md = str(model or "").strip()
     if be:
@@ -2369,7 +2375,7 @@ def launch_assessment(body: dict) -> dict:
         # Prefer the turn's model, else the session's persisted pin (so a later/steered launch stays pinned).
         launch_model, launch_backend = _resolve_launch_model(model, session_id)
         gcmd = _integration_engage_cmd(target, gslug, session_id, scan_mode,
-                                       model=launch_model, backend=launch_backend)
+                                       model=launch_model, backend=launch_backend, objective=objective)
         if gcmd is not None:
             unapplied = _unapplied("an agentic `vigil engage` run (the bridge takes no pack flags)",
                                        "Re-run it with the agentic engine OFF to use them.")

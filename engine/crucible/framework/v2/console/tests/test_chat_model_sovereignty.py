@@ -381,6 +381,19 @@ def test_integration_engage_cmd_no_pick_emits_neither(monkeypatch):
     assert cmd is not None and "--model" not in cmd and "--backend" not in cmd
 
 
+def test_integration_engage_cmd_threads_the_objective(monkeypatch):
+    """The operator's objective (the chat prompt) must reach the engage argv as --objective, so the OODA
+    loop has a goal from iteration 0 instead of pausing at ask_user 'no objective or scope is defined'."""
+    monkeypatch.setattr(actions_mod, "_vigil_bin", lambda: "vigil")
+    cmd = actions_mod._integration_engage_cmd("http://127.0.0.1:8080", "s", "sess", "standard",
+                                              objective="find and prove SQL injection")
+    assert cmd is not None
+    assert "--objective" in cmd and cmd[cmd.index("--objective") + 1] == "find and prove SQL injection"
+    # no objective → no flag (behaviour unchanged for callers that pass none)
+    bare = actions_mod._integration_engage_cmd("http://127.0.0.1:8080", "s", "sess", "standard")
+    assert "--objective" not in bare
+
+
 def test_integration_engage_cmd_backend_wins_over_model_failclosed(monkeypatch):
     """If both are somehow set, the LOCAL backend wins — never silently prefer the cloud model (an egress the
     operator did not intend). (The CLI additionally refuses both-at-once; this is defence in depth.)"""
