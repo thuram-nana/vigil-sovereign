@@ -607,8 +607,38 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
         _write_meta(run_id, **{**meta, "status": status, "pid": proc.pid,
                                "rc": rc, "stderr": (err or "")[-2000:] if not ok else "",
                                "finished": time.time()})
+        # AUTO-RESUME loop, first half: if an integration engage linked to a CHAT session just paused at
+        # ask_user, surface the agent's real question as a chat bubble so the operator can see it and answer
+        # (their reply auto-resumes the run — resume_engage_with_message). Best-effort, chat-only, never
+        # raises: a question-surfacing hiccup must not perturb the run's teardown.
+        try:
+            _maybe_surface_agent_question(run_id, meta)
+        except Exception:  # noqa: BLE001
+            pass
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _maybe_surface_agent_question(run_id: str, meta: dict) -> None:
+    """If ``run_id`` is an integration engage run bound to a session that just PAUSED at ask_user, append
+    the agent's question to that session's chat transcript (no-op for anything else). The engine writes the
+    real question into the last decision event's ``agent_question`` (progress.jsonl); chat.post_agent_question
+    only writes when a real chat transcript already exists, so a non-chat engage never grows one."""
+    if not isinstance(meta, dict) or str(meta.get("engine") or "") != "integration":
+        return
+    sid = str(meta.get("session_id") or "")
+    if not sid:
+        return
+    dec = _last_decision(run_id)
+    if str(dec.get("choice") or "") != "ask_user":
+        return
+    question = str(dec.get("agent_question") or "").strip()
+    if not question:
+        # honest fallback: the engine paused to ask but the model gave no question text — say so, so the
+        # bubble is never empty (the operator still knows a reply will resume the run).
+        question = "I need your input to continue. Reply here with your answer and I'll resume the engagement."
+    from . import chat                                  # local import — chat imports actions (avoid a cycle)
+    chat.post_agent_question(sid, question, run_id=str(run_id), slug=str(meta.get("slug") or ""))
 
 
 def reconcile_orphaned_runs() -> int:
@@ -1548,6 +1578,110 @@ def engage_instruct(slug: str, text: str) -> dict:
     return {"ok": True, "slug": out.get("slug"), "seq": out.get("seq"), "running": running}
 
 
+def _last_decision(run_id: str) -> dict:
+    """The payload of the LAST OODA ``decision`` event in a run's progress.jsonl (``{}`` if none).
+    The integration engage engine posts exactly one decision event per think (wiring.spine_post →
+    append_progress), in order, so the last one reflects the run's FINAL think — its ``choice`` says
+    what the run decided, and (for an ask_user pause) ``agent_question`` carries the operator-facing
+    question. Total; a missing or torn progress file yields ``{}`` (treated as 'no pause detected')."""
+    last: dict = {}
+    try:
+        p = run_dir(run_id) / "progress.jsonl"
+        with p.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:            # one torn/oversized line never sinks the read
+                    continue
+                if isinstance(ev, dict) and ev.get("kind") == "decision":
+                    pl = ev.get("payload")
+                    if isinstance(pl, dict) and pl.get("choice"):
+                        last = pl
+    except OSError:
+        return {}
+    return last
+
+
+def paused_engage_run(session_id: str) -> "dict | None":
+    """The session's most-recent integration ``vigil engage`` run that is PAUSED at ``ask_user`` (the
+    agent asked the operator a question and the run ended waiting for the answer), or ``None``.
+
+    Detection is fail-CLOSED against a false resume: the run must be (a) an integration-engine engage,
+    (b) TERMINAL (not still running — a live run drains a chat reply via the mid-run instruction seam,
+    no resume needed), and (c) its progress.jsonl's LAST ``decision`` chose ``ask_user`` (a run that
+    continued past the question would have a later decision/tool event). ``awaiting_approval`` is
+    deliberately NOT treated as resumable-by-reply — an approval needs a SIGNED operator approval, not
+    a chat message. Newest-first over the session's linked runs; the first match wins."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    try:
+        from . import sessions
+        resp = sessions.get_session(sid)
+    except Exception:  # noqa: BLE001 — no resolvable session → nothing to resume
+        return None
+    sess = resp.get("session") if isinstance(resp, dict) else None    # get_session wraps as {ok, session}
+    run_ids = list((sess or {}).get("run_ids", []) or [])
+    for rid in reversed(run_ids):             # newest linked run first
+        meta = _read_run_meta(str(rid))
+        if not isinstance(meta, dict):
+            continue
+        if str(meta.get("engine") or "") != "integration":
+            continue
+        if meta.get("status") == "running":   # a live run steers via engage_instruct, never resume
+            return None                       # ...and it is the newest engage — don't reach past it
+        if str(_last_decision(str(rid)).get("choice") or "") == "ask_user":
+            return {"run_id": str(rid), "slug": str(meta.get("slug") or "")}
+        # the newest engage run is terminal but did NOT pause at ask_user (it completed / errored) —
+        # a reply is a fresh question, not an answer to a pending one. Stop at the newest engage run.
+        return None
+    return None
+
+
+def resume_engage_with_message(session_id: str, message: str) -> dict:
+    """Auto-resume-on-reply: when a chat's engagement is PAUSED waiting for the operator's answer
+    (``ask_user``), fold this reply in AS that answer and RESUME the run — instead of leaving it queued
+    behind a resume the operator has to trigger by hand. Two steps, in order:
+
+      1. ENQUEUE the reply on the slug's operator-instruction queue (``engage_instruct``). The resumed
+         engine drains it BEFORE its next think, so the answer is in context when the run re-thinks.
+      2. RESUME the paused run (``retry_run`` → appends ``--resume``), continuing the SAME slug's spine
+         from its last checkpoint. Nothing is relaxed: the resumed think's proposals still pass the
+         conjunctive gate + oracle exactly like a fresh one — a reply can change what the model READS,
+         never fire a tool or widen scope.
+
+    Returns ``{ok: True, run_id, slug, stream, engine}`` on resume; ``{ok: False, none: True}`` when
+    there is no paused engagement (the caller then answers the turn as a normal question); or
+    ``{ok: False, error}`` when a resume was due but could not be started."""
+    paused = paused_engage_run(session_id)
+    if not paused:
+        return {"ok": False, "none": True}
+    slug, run_id = str(paused.get("slug") or ""), str(paused.get("run_id") or "")
+    # (1) enqueue the answer for the resumed run to drain. A queue hiccup is fatal to the resume — do
+    # NOT resume a run that would re-hit the same unanswered ask_user (an infinite ask/answer loop).
+    enq = engage_instruct(slug, message)
+    if not enq.get("ok"):
+        return {"ok": False, "error": f"could not deliver your answer to the run: {enq.get('error') or 'queue error'}"}
+    # (2) resume the paused run.
+    r = retry_run(run_id)
+    if not r.get("ok"):
+        return {"ok": False, "error": f"could not resume the run: {r.get('error') or 'resume failed'}"}
+    new_id = str(r.get("run_id") or "")
+    # keep the session pointing at the resumed run so a reload follows it (retry_run carries session_id
+    # in the child meta but does not touch the registry; link it here). Best-effort — the response
+    # carries the run pointer regardless, so the chat follows it even if the link write hiccups.
+    try:
+        from . import sessions
+        sessions.link_run(str(session_id or ""), new_id, slug=slug)
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "run_id": new_id, "slug": slug, "stream": "progress", "engine": "integration",
+            "resumed": bool(r.get("resumed"))}
+
+
 # The ONLY hosts a chat clone may fetch from — the SSRF/scope boundary for git egress (red-pen BLOCK-2).
 # Public git hosts only: a `.git` URL to an internal/loopback/metadata host is NOT cloneable. This is the
 # single source of truth; chat.py's git-repo detector reads it, so detection and the clone can never drift.
@@ -2242,6 +2376,12 @@ def launch_assessment(body: dict) -> dict:
             graphed = bool(os.environ.get("NEO4J_URI"))
             meta = {**base, **unapplied, "slug": gslug, "cmd": gcmd, "stream": "progress", "status": "running",
                     "engine": "integration", "graph": graphed, "graph_partition": session_id,
+                    # the integration engage engine takes a bare `--resume` (W2b) that continues the SAME
+                    # slug's spine from its last checkpoint, so mark it resumable at launch: a run PAUSED at
+                    # ask_user resumes (folding in the operator's answer) rather than restarting, and a
+                    # COMPLETED run resumes to a safe no-op (the engine's done-guard short-circuits). This is
+                    # what lets `resume_engage_with_message` continue a chat's paused engagement on reply.
+                    "resumable": True,
                     "model_backend": launch_backend, "model_string": launch_model}
             _write_meta(run_id, **meta)
             # the child needs the run dir so its OODA-timeline mirror (wiring.py spine_post → progress.jsonl)
