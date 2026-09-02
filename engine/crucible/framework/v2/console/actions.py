@@ -4526,7 +4526,9 @@ def aegis_setup(body: dict) -> dict:
     meta = {"run_id": run_id, "kind": "aegis", "upstream": upstream, "host": host, "port": port,
             "mode": mode, "slug": slug, "pid": proc.pid, "status": "running", "started": time.time(),
             "verdicts": str(verdicts), "status_file": str(status_file)}
-    _write_meta(run_id, **meta)
+    # `meta` carries "run_id" for _write_aegis_current below, but _write_meta already takes run_id
+    # positionally — pass the rest WITHOUT it, or Python raises "got multiple values for argument 'run_id'".
+    _write_meta(run_id, **{k: v for k, v in meta.items() if k != "run_id"})
     _write_aegis_current(meta)
     # the production edge command (secret REDACTED) — the operator runs this on their own routable edge.
     prod = ["aegis", "gateway", "--upstream", upstream, "--host", "0.0.0.0", "--port", str(port),

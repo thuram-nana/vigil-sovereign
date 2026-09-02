@@ -2695,7 +2695,7 @@
 
   function renderLive(screen) {
     const L = { run: null, runs: [], events: [], seen: {}, filter: "all", snapshot: null, started: null,
-      inbox: [], inboxLoaded: false, inboxLoading: false, elsewhere: "" };
+      inbox: [], inboxLoaded: false, inboxLoading: false, elsewhere: "", scanDone: false, reconciled: false };
     const want = hashQuery().run || "";
 
     V.mount(screen, [
@@ -2721,6 +2721,7 @@
       L.run = L.runs.find(function (r) { return r.run_id === runId; }) || null;
       L.events = []; L.seen = {}; L.snapshot = null; L.started = L.run && L.run.started; L.elsewhere = "";
       L.inbox = []; L.inboxLoaded = false; L.inboxLoading = false;   // per-engagement advisory inbox (B4)
+      L.scanDone = false; L.reconciled = false;   // per-run: re-arm the terminal reconcile for the new run
       history.replaceState(null, "", "#/live?run=" + encodeURIComponent(runId));
       if (L.run) attachStream();
       drawBody();
@@ -2752,20 +2753,64 @@
           // replaying stream would re-count every event and the tiles would read a fabricated total.
           if (ev && ev._seq != null) { if (L.seen["p" + ev._seq]) return; L.seen["p" + ev._seq] = 1; }
           const norm = progressToEvent(ev); if (norm) { L.events.push(norm); onEvents(); }
+          // scan.done is the LAST progress row — once it lands, every scan.finding has landed, so it is the
+          // safe point to reconcile the streamed (conservative-LEAD) findings against the graded report.
+          if (ev && ev.event === "scan.done") { L.scanDone = true; maybeReconcile(); }
         });
       }
       // No completion signal in the stream → poll run status instead. 'none' (aegis) has no feed at all;
       // a codebase (Strix) run now streams ACTIVITY (W6c: strix.graph / warden.block) but still emits no
-      // terminal event, so without this its header would never leave "running".
-      if (run.stream === "none" || run.mode === "codebase") {
+      // terminal event, so without this its header would never leave "running". A 'progress' loopback scan
+      // needs the same poll so its header flips to done AND a terminal run can reconcile its Live
+      // tally/labels to the graded report (see maybeReconcile).
+      if (run.stream === "none" || run.mode === "codebase" || run.stream === "progress") {
         liveTimers.push(setInterval(refreshRunMeta, 3000));
       }
     }
     function refreshRunMeta() {
       V.getJSON(runsURL()).then(function (d) {
         const r = runsOf(d).find(function (x) { return x.run_id === L.run.run_id; });
-        if (r) { L.run = r; updateHeader(); }
+        if (r) { L.run = r; updateHeader(); maybeReconcile(); }
       }).catch(function () {});
+    }
+    // On COMPLETION, reconcile the Live view to the run's AUTHORITATIVE graded findings — the SAME
+    // /api/report source the Findings screen reads. A loopback scan streams each finding as a conservative
+    // LEAD (progressToEvent hardcodes verified_by_oracle:false because only the report's grounding pass —
+    // re-executing each oracle over retained evidence — decides FACT), so Live's Facts tile would otherwise
+    // stay 0 while Findings/Report show the same findings CONFIRMED. Only progress-stream runs that CAPTURE
+    // a report need this; a blackboard engage run already streams the grounded verdict. Runs at most once,
+    // and ONLY when the run is terminal AND the whole progress log has replayed (scanDone) AND the report is
+    // present — so a still-running run is never touched and no finding is relabelled before it has streamed.
+    function maybeReconcile() {
+      if (L.reconciled || !L.run) return;
+      if (L.run.stream !== "progress" || p3RunCapturesNoReport(L.run)) return;   // nothing to reconcile against
+      const st = L.run.status;
+      if (st !== "done" && st !== "error" && st !== "cancelled" && st !== "interrupted") return;
+      if (!L.scanDone) return;   // wait for the terminal scan.done row to replay — then all findings are in
+      V.getJSON(OFF("/api/report/" + encodeURIComponent(L.run.run_id))).then(function (rep) {
+        if (!rep || rep.pending || L.reconciled) return;   // report not captured yet → a later poll retries
+        L.reconciled = true;
+        // The streamed finding events mirror the report's ACTIVE findings; relabel each to the graded truth,
+        // consuming each authoritative finding at most once (by bug class, preferring an exact oracle match).
+        // p3IsFact reads the report's live `grounding` verdict, so a demoted finding stays a LEAD — the
+        // reconcile can PROMOTE a confirmed lead to a fact but never over-claims one the oracle did not prove.
+        const auth = ((rep.findings) || []).filter(function (f) { return f && f.kind === "active"; });
+        L.events.forEach(function (e) {
+          if (e.kind !== "finding") return;
+          const p = e.payload || {};
+          let pick = -1, exact = -1;
+          for (let i = 0; i < auth.length; i++) {
+            if (auth[i]._used) continue;
+            if (String(auth[i].bug_class || "") !== String(p.bug_class || "")) continue;
+            if (pick < 0) pick = i;
+            const ok = auth[i].confirmed_by || auth[i].oracle_kind || "";
+            if (ok && ok === (p.oracle_kind || "")) { exact = i; break; }
+          }
+          const idx = exact >= 0 ? exact : pick;
+          if (idx >= 0) { auth[idx]._used = true; p.verified_by_oracle = p3IsFact(auth[idx]); e.payload = p; }
+        });
+        onEvents();   // recompute the Facts/Leads tiles + relabel the timeline from the reconciled events
+      }).catch(function () { /* report unreachable — keep the honest streamed (conservative) state */ });
     }
     function pollSnapshot() {
       V.getJSON(SOV("/api/snapshot")).then(function (s) {
@@ -5263,7 +5308,16 @@
       V.tile("Actors seen", String(st.actor_count || 0), "with a belief", actors.length ? "warn" : null),
     ]);
     var setup = V.$("#def-setup");
-    if (setup) { if (running) V.mount(setup, defRunningPanel(gw, eff, req)); else V.mount(setup, defSetupForm()); }
+    // The status poll re-runs defDrawStatus every 4s; re-mounting defSetupForm() each tick replaces the
+    // uncontrolled <input> nodes and wipes whatever the operator is mid-typing (upstream/port/secret/slug/
+    // honeypot). Only (re)build the form when it is not already on screen — first paint, or after the
+    // running panel / an offline message cleared it (detected by the absence of the upstream url input,
+    // which is unique to the form). While the form is present, leave its live inputs untouched. The
+    // running panel has no inputs, so re-mounting it every tick to refresh live status is harmless.
+    if (setup) {
+      if (running) V.mount(setup, defRunningPanel(gw, eff, req));
+      else if (!setup.querySelector('input[type="url"]')) V.mount(setup, defSetupForm());
+    }
     var ab = V.$("#def-actors");
     if (ab) {
       if (!actors.length) V.mount(ab, h("div.empty", null, running ? "No actors yet — drive some traffic through the gateway." : "Start the gateway to build per-actor beliefs."));
