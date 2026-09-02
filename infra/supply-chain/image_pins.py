@@ -15,12 +15,15 @@ This module is the single source of truth for that rule. It has four users:
   3. ``python3 infra/supply-chain/image_pins.py --drift`` — the only networked mode. Re-resolves
      each pinned TAG against the registry and reports where upstream has moved on. Its outcome is
      three-valued, never two (W3-8, issue #431): a pin whose registry the resolver CAN query and
-     which has MOVED is real, resolvable drift; a pin on a registry the resolver CANNOT query
+     which has MOVED is resolvable drift; a pin on a registry the resolver CANNOT query
      (anything but Docker Hub) is an explicit UNKNOWN, surfaced and counted, NEVER a silent pass.
-     With ``--fail-on-drift`` (what the "A14 supply-chain gate" runs) resolvable drift BLOCKS the
-     job; the UNKNOWNs are reported — to stdout and to the GitHub step summary — but do not block,
-     because a gate cannot honestly fail on a state it could not check. ``--fail-on-unknown``
-     tightens that for an operator who wants the strictest posture.
+     POSTURE: the "A14 supply-chain gate" runs this mode WITHOUT ``--fail-on-drift``, so resolvable
+     drift on an already-digest-pinned base is ADVISORY — surfaced (stdout + the GitHub step summary)
+     but NOT blocking, because the digest pin already guarantees a reproducible build and a moved TAG
+     does not change the bytes that ship. Re-pin deliberately on a cadence (read the upstream
+     changelog). ``--fail-on-drift`` makes resolvable drift BLOCK — the drift-gate negative control
+     runs it, and a stricter operator may too; ``--fail-on-unknown`` additionally blocks on UNKNOWNs.
+     The real blocking guarantee is ``--check`` (user 2 below): an UNPINNED image ALWAYS fails.
   4. ``python3 infra/supply-chain/image_pins.py --runtime-check`` — the RUNTIME visibility gate
      (issue #511 / W5-6). The two scanners above see only DECLARED images; they cannot see the
      image the gateway is ACTUALLY running. This mode content-addresses the gateway build context,
@@ -631,21 +634,27 @@ def evaluate_drift(refs, resolver) -> list[DriftResult]:
     return out
 
 
-def _drift_summary_markdown(results: list[DriftResult]) -> str:
+def _drift_summary_markdown(results: list[DriftResult], *, fail_on_drift: bool) -> str:
     """A GitHub step-summary block: resolvable drift, the documented-rolling ADVISORY moves (W3-8 #431 —
     surfaced, never blocking), and — the point of W3-8 — the explicit UNKNOWNs, so neither an advisory
-    rolling move nor an unqueryable registry is INVISIBLE in the run, and nothing is a silent pass."""
+    rolling move nor an unqueryable registry is INVISIBLE in the run, and nothing is a silent pass.
+
+    ``fail_on_drift`` decides whether RESOLVABLE drift is labelled BLOCKING or ADVISORY — it MUST track the
+    same flag ``run_drift`` keys its exit code on, or the rendered summary would claim "BLOCKING" on a green
+    (advisory) run, contradicting the stdout report and lying to a reviewer (red-pen BLOCK-1)."""
     drifted = [d for d in results if d.is_drift]
     advisory = [d for d in results if d.is_advisory_drift]
     unknown = [d for d in results if d.is_unknown]
     matched = [d for d in results if d.status == DRIFT_MATCH]
+    _drift_word = "blocking" if fail_on_drift else "advisory, not blocking"
     lines = ["## A14 base-image drift (W3-8)", ""]
     lines.append(f"- resolvable & up-to-date: **{len(matched)}**")
-    lines.append(f"- resolvable & DRIFTED (blocking): **{len(drifted)}**")
+    lines.append(f"- resolvable & DRIFTED ({_drift_word}): **{len(drifted)}**")
     lines.append(f"- documented rolling base MOVED (advisory, NOT blocking): **{len(advisory)}**")
     lines.append(f"- UNKNOWN (registry not queryable / unreachable): **{len(unknown)}**")
     if drifted:
-        lines += ["", "### Resolvable drift — BLOCKING", ""]
+        _drift_hdr = "BLOCKING" if fail_on_drift else "ADVISORY, not blocking (re-pin deliberately)"
+        lines += ["", f"### Resolvable drift — {_drift_hdr}", ""]
         for d in drifted:
             lines.append(f"- `{d.ref.source}:{d.ref.line}` {d.ref.repository}:{d.ref.tag} — "
                          f"pinned `{d.ref.digest}` → live `{d.current}`")
@@ -674,13 +683,15 @@ def run_drift(refs, resolver, *, fail_on_drift: bool, fail_on_unknown: bool = Fa
     unresolved = [d for d in results if d.status == DRIFT_UNKNOWN_NETWORK]
     matched = [d for d in results if d.status == DRIFT_MATCH]
 
-    print("\nA14 image-pin DRIFT report — resolvable drift BLOCKS; other registries are explicit "
+    _drift_posture = "BLOCKS" if fail_on_drift else "is ADVISORY (surfaced, not blocking)"
+    print(f"\nA14 image-pin DRIFT report — resolvable drift {_drift_posture}; other registries are explicit "
           "UNKNOWN, never a silent pass (W3-8)\n")
     for d in results:
         if d.status == DRIFT_MATCH:
             print(f"  ok  {d.ref.source}:{d.ref.line} {d.ref.repository}:{d.ref.tag} — pin matches the live tag")
         elif d.is_drift:
-            print(f"  !!  {d.ref.source}:{d.ref.line} {d.ref.repository}:{d.ref.tag} has MOVED (resolvable — BLOCKING)")
+            _resolvable_note = "resolvable — BLOCKING" if fail_on_drift else "resolvable — ADVISORY"
+            print(f"  !!  {d.ref.source}:{d.ref.line} {d.ref.repository}:{d.ref.tag} has MOVED ({_resolvable_note})")
             print(f"        pinned:  {d.ref.digest}")
             print(f"        current: {d.current}")
         elif d.is_advisory_drift:
@@ -700,16 +711,23 @@ def run_drift(refs, resolver, *, fail_on_drift: bool, fail_on_unknown: bool = Fa
     if summary_path:
         try:
             with open(summary_path, "a", encoding="utf-8") as fh:
-                fh.write(_drift_summary_markdown(results))
+                fh.write(_drift_summary_markdown(results, fail_on_drift=fail_on_drift))
         except OSError as exc:
             print(f"  [warn] could not write drift summary to {summary_path}: {exc}", file=sys.stderr)
 
     code = 0
     if drifted:
-        print("\nResolvable drift is BLOCKING: re-pin deliberately (read the upstream changelog first), "
-              "then commit the new image:tag@sha256:<digest>.")
         if fail_on_drift:
+            print("\nResolvable drift is BLOCKING: re-pin deliberately (read the upstream changelog first), "
+                  "then commit the new image:tag@sha256:<digest>.")
             code = 1
+        else:
+            # POSTURE: a digest pin already guarantees a reproducible build, so a moved TAG is surfaced here
+            # but does NOT block. Re-pin deliberately on a cadence (read the upstream changelog first), then
+            # commit the new image:tag@sha256:<digest>. --fail-on-drift makes this blocking again.
+            print("\nResolvable drift is ADVISORY (surfaced, not blocking): the pinned digest still builds "
+                  "reproducibly. Re-pin deliberately on a cadence (read the upstream changelog first), then "
+                  "commit the new image:tag@sha256:<digest>. (--fail-on-drift makes resolvable drift block.)")
     if advisory:
         print("\nDocumented rolling bases MOVED (advisory — surfaced, NOT blocking): re-pin deliberately on "
               "a cadence (read the upstream changelog first), not under a red build. The reasoned allowlist "
