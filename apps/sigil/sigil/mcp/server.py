@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from ..config import EMBED_MODEL, QDRANT_URL
 from ..reuse import assert_no_offense
@@ -19,7 +19,7 @@ from ..vectors.index import VectorIndex
 
 assert_no_offense()  # doctrine §12: no engine module may be loaded in a SIGIL process
 
-mcp = FastMCP("sigil-memory")
+mcp = MCPServer("sigil-memory")
 _index: VectorIndex | None = None
 
 

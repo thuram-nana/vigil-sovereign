@@ -37,7 +37,7 @@ dependencies = [
     "cryptography==50.0.0",
     "fastembed==0.8.0",
     "kuzu==0.11.3",
-    "mcp==1.28.1",
+    "mcp==2.1.1",
     "numpy>=2.4.6,<3",
     "onnxruntime==1.29.0",
     "pydantic==2.13.4",
