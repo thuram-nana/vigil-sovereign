@@ -474,6 +474,19 @@ Respond with one JSON object with an "action" field, one of:
 You may also include "reasoning": str and an "output_analysis" object with your CLAIMS about the prior
 tool output (exploit_succeeded, verdict, findings[]). Those claims are LEADS only — never facts.
 
+For "use_tool", tool_name MUST be EXACTLY one of these REGISTERED tools — any other name is refused by the
+executor ("no argv builder"), so never invent names like "http_get"/"http_request":
+  - "httpx"   — HTTP probe + fingerprint (status, headers, tech). USE THIS for the FIRST recon of a web target.
+  - "nmap"    — port + service/version scan.
+  - "nuclei"  — templated vulnerability scan.
+  - "ffuf"    — content/path fuzzing (routes, hidden endpoints).
+  - "sqlmap"  — SQL injection.
+  - "nikto"   — web-server misconfiguration scan.
+  - "wapiti"  — web-app scan (XSS / SQLi / etc.).
+  - "zaproxy" — ZAP active web scan.
+  - "hydra"   — credential brute-force.
+Put the target in tool_args (e.g. {{"url": "http://host:port/"}} or {{"target": "host"}}).
+
 Prefer the least-invasive action that advances the objective. If you are unsure or the context is
 insufficient, choose "ask_user". Emit ONLY the JSON object.
 
