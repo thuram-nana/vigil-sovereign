@@ -8004,8 +8004,15 @@
       const host = V.$("#chat-hyps"); if (!host) return;
       const hyps = C.hyps || [];
       if (!hyps.length) { V.clear(host); return; }
+      // S9: render the live plan/hypothesis ledger as a Claude-Code-style CHECKLIST — a state icon per item
+      // (✓ confirmed by a finding · ✗ refuted · ○ open) with a running progress count. Data is the same
+      // engine-driven ledger (C.hyps); each item still closes only when an oracle confirms a matching finding.
+      const done = hyps.filter(function (hp) { return String(hp.status || "open") === "confirmed"; }).length;
       const rows = hyps.map(function (hp) {
         const st = String(hp.status || "open");
+        const chk = st === "confirmed" ? h("span.chk.chk-done", null, V.icon("check"))
+          : st === "refuted" ? h("span.chk.chk-no", null, V.icon("x"))
+            : h("span.chk.chk-open", null, V.icon("dot"));
         // "Confirmed by a finding" (not a bare FACT badge): the hypothesis is LINKED to a real
         // oracle-confirmed finding (shown by its ref below), it is not itself the minted fact (red-pen F3).
         const badge = st === "confirmed" ? h("span.shield", null, [V.icon("check"), "Confirmed by a finding"])
@@ -8015,15 +8022,16 @@
         if (hp.would_confirm) meta.push(h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, "Confirm if: " + hp.would_confirm));
         if (hp.would_refute) meta.push(h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, "Refute if: " + hp.would_refute));
         if (st === "confirmed" && hp.finding_ref) meta.push(h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, "Closed by run: " + hp.finding_ref));
-        return h("div.hyp-row", null, [
+        return h("div.hyp-row.chk-row" + (st === "confirmed" ? ".is-done" : ""), null, [
           h("div", { style: { display: "flex", gap: "8px", alignItems: "baseline", flexWrap: "wrap" } },
-            [badge, h("span", null, String(hp.statement || ""))]),
+            [chk, badge, h("span", null, String(hp.statement || ""))]),
         ].concat(meta));
       });
       V.mount(host, h("div.hyp-panel", null, [
-        h("div.label", null, "Hypotheses"),
+        h("div.label", null, [h("span", null, "Plan · hypotheses"),
+          h("span.chk-count", null, "  " + done + " / " + hyps.length + " confirmed")]),
         h("div.hint", { style: { marginBottom: "6px", fontSize: "var(--fs-xs)" } },
-          "Suspicions recorded from this conversation. Each closes itself when an oracle confirms a matching finding."),
+          "The live plan for this conversation — each item closes itself (✓) only when an oracle confirms a matching finding."),
       ].concat(rows)));
     }
 
@@ -8737,6 +8745,44 @@
       }
       input.addEventListener("input", updateSlash);
       input.addEventListener("blur", function () { setTimeout(hideSlash, 150); });   // let a menu click land first
+
+      // S8: @-mentions — reference an attached FILE or a LINKED CHAT from the composer. Frontend-only; it
+      // inserts "@name" (files are already in the answer context — a mention just points the question at one).
+      const mentionMenu = h("div.slash-menu", { style: { display: "none" } });
+      document.body.appendChild(mentionMenu);
+      function hideMention() { mentionMenu.style.display = "none"; }
+      function mentionSources() {
+        const out = [];
+        (C.attach || []).forEach(function (a) { if (a && a.name) out.push({ label: a.name, kind: "file" }); });
+        const row = rowOf(C.id); const conns = (row && row.connections) || [];
+        conns.forEach(function (cid) { out.push({ label: titleOf(cid) || String(cid), kind: "linked chat" }); });
+        return out;
+      }
+      function currentMention() {
+        const v = input.value || ""; const pos = (input.selectionStart != null) ? input.selectionStart : v.length;
+        const mm = /@([\w.\-]*)$/.exec(v.slice(0, pos));
+        return mm ? { q: mm[1], start: pos - mm[0].length, end: pos } : null;
+      }
+      function updateMention() {
+        const cm = currentMention();
+        if (!cm) { hideMention(); return; }
+        const q = cm.q.toLowerCase();
+        const hits = mentionSources().filter(function (s) { return !q || s.label.toLowerCase().indexOf(q) >= 0; }).slice(0, 8);
+        if (!hits.length) { hideMention(); return; }
+        hideSlash();
+        V.mount(mentionMenu, hits.map(function (s) {
+          return h("button.slash-item", { onClick: function () {
+            const v = input.value; input.value = v.slice(0, cm.start) + "@" + s.label + " " + v.slice(cm.end);
+            hideMention(); try { input.focus(); } catch (e) {}
+          } }, [h("span.slash-cmd", null, "@" + s.label), h("span.slash-desc", null, s.kind)]);
+        }));
+        const r = input.getBoundingClientRect();
+        mentionMenu.style.display = "block"; mentionMenu.style.position = "fixed";
+        mentionMenu.style.left = r.left + "px"; mentionMenu.style.bottom = (window.innerHeight - r.top + 6) + "px";
+        mentionMenu.style.width = Math.min(r.width || 460, 460) + "px"; mentionMenu.style.zIndex = "70";
+      }
+      input.addEventListener("input", updateMention);
+      input.addEventListener("blur", function () { setTimeout(hideMention, 150); });
 
       // The plain-language consequence of the current pick — shown under the picker so the sovereignty
       // trade-off is visible at the moment of choosing, not buried.

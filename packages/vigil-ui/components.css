@@ -756,3 +756,8 @@ select:focus-visible, textarea:focus-visible { outline: 2px solid var(--st-runni
 .md a { color: var(--accent, #6b8afd); text-decoration: underline; }
 /* S11: attachment image thumbnail */
 .att-thumb { width: 28px; height: 28px; object-fit: cover; border-radius: var(--r-1); border: 1px solid var(--border); vertical-align: middle; margin-right: 4px; }
+/* S9: plan/hypothesis checklist */
+.chk { display: inline-flex; align-items: center; }
+.chk .glyph svg { width: 15px; height: 15px; }
+.chk-done { color: var(--ok, #3fb950); } .chk-no { color: var(--sev-high, #e5a13a); } .chk-open { color: var(--text-2); }
+.chk-row.is-done .shield { opacity: .85; } .chk-count { color: var(--text-2); font-weight: 400; font-size: var(--fs-xs); }
