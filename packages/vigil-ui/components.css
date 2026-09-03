@@ -683,6 +683,11 @@ textarea { min-height: 80px; resize: vertical; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 0 auto; }
 .pb-feed { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; padding: 2px 0; }
 .pb-empty { padding: 18px 14px; color: var(--text-2); font-size: var(--fs-sm); text-align: center; line-height: 1.5; }
+/* S1: pending-approval cards inside the process box (chat approval interrupt) */
+.pb-approvals { flex: 0 0 auto; max-height: 45%; overflow-y: auto; border-bottom: 1px solid var(--border);
+  padding: 8px 10px; background: color-mix(in srgb, var(--accent, #6b8afd) 8%, transparent); }
+.pb-approvals-h { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); font-weight: 600;
+  color: var(--text-1); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em; }
 .pb-row { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; padding: 5px 10px;
   border-bottom: 1px solid var(--border); animation: fadein .3s ease; }
 .pb-row .pb-ico { width: 20px; height: 20px; display: grid; place-items: center; color: var(--text-2); }

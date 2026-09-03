@@ -2772,12 +2772,84 @@
     if (liveApprovalModal) { try { liveApprovalModal.close(); } catch (e) {} liveApprovalModal = null; }  // don't leave a proposal popup floating after navigation
   }
 
+  // Shared approval interaction (Claude-Code "propose" interrupt: Approve / Deny / Deny-&-redirect), used by
+  // BOTH the Live view and Chat so there is ONE implementation. `ctx` = { mem:{popped,seen,modal}, slugOf():
+  // string, reason:string, after():void, onModal(m):void }. `mem` is per-surface — its own baseline +
+  // one-at-a-time guard. The signed-approval model is untouched: Approve/Deny post the signed SOV /api/action;
+  // "Deny & redirect" DENIES the exact proposal and sends the note as ordinary mid-run guidance (/api/instruct).
+  function makeApprovalUX(ctx) {
+    function act(action, seq) {
+      V.postJSON(SOV("/api/action"), { action: action, seq: seq, reason: action + " " + (ctx.reason || "") })
+        .then(function (r) { if (r && r.error) { V.toast(r.error, true); return; }
+          V.toast(action === "approve" ? "Approved." : "Denied."); if (ctx.after) ctx.after(); })
+        .catch(function (e) { V.toast((e && e.message) || "Action failed", true); });
+    }
+    function popModal(a) {
+      ctx.mem.popped[a.seq] = true;   // never re-pop the same proposal (dismiss = "I'll use the list")
+      const redirect = h("input.input", { type: "text",
+        placeholder: "Tell the agent what to do instead… (for Deny & redirect)" });
+      const body = h("div.stack", null, [
+        h("div.why", null, (a.agent ? a.agent + " proposes: " : "The agent proposes an action that ")
+          + (a.subject || "requires your sign-off")),
+        h("div.kv", null, [
+          h("span.k", null, "Action"), h("span.v", null, a.kind || "action"),
+          h("span.k", null, "Tier"), h("span.v", null, a.tier || "—"),
+          h("span.k", null, "Request"), h("span.v.mono", null, "seq " + a.seq),
+        ]),
+        redirect,
+        h("p.helper", null, "Approve runs exactly this one action under the gates. Deny refuses it. "
+          + "Deny & redirect refuses it AND sends your note to steer the agent so it re-plans. "
+          + "Dismiss (Esc) to decide later from the list."),
+      ]);
+      const done = function () { if (m) m.close(); ctx.mem.modal = null; if (ctx.onModal) ctx.onModal(null); };
+      const denyRedirect = function () {
+        const t = (redirect.value || "").trim();
+        if (!t) { V.toast("Type what the agent should do instead first.", true); if (redirect.focus) redirect.focus(); return; }
+        injectIntoRun(ctx.slugOf && ctx.slugOf(), redirect);   // steer (honest toast about live vs queued)
+        act("deny", a.seq);                                    // and refuse the exact proposal
+        done();
+      };
+      redirect.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); denyRedirect(); } });
+      const m = openModal("Approve this action?", body, [
+        h("button.btn", { onClick: denyRedirect }, [V.icon("edit"), "Deny & redirect"]),
+        h("button.btn.danger", { onClick: function () { act("deny", a.seq); done(); } }, [V.icon("x"), "Deny"]),
+        h("button.btn.owner", { onClick: function () { act("approve", a.seq); done(); } }, [V.icon("check"), "Approve"]),
+      ], { onCancel: function () { ctx.mem.modal = null; if (ctx.onModal) ctx.onModal(null); } });
+      ctx.mem.modal = m; if (ctx.onModal) ctx.onModal(m);   // module-ref so a teardown can close it on navigation
+    }
+    // baseline whatever is already pending on entry (no nag), then INTERRUPT for a NEW proposal; one at a time.
+    function maybePop(pend) {
+      if (ctx.mem.modal) return;
+      if (!ctx.mem.seen) { pend.forEach(function (a) { ctx.mem.popped[a.seq] = true; }); ctx.mem.seen = true; return; }
+      for (let i = 0; i < pend.length; i++) { if (!ctx.mem.popped[pend[i].seq]) { popModal(pend[i]); return; } }
+    }
+    function card(a) {
+      return h("div.approval", null, [
+        h("div.ah", null, [V.icon("key"), h("span.t", null, (a.kind || "action") + " · seq " + a.seq),
+          a.tier ? h("span.pill.sm", null, "tier " + a.tier) : null]),
+        h("div.why", null, (a.agent ? a.agent + " → " : "") + (a.subject || "requires owner sign-off")),
+        h("div.acts", null, [
+          h("button.btn.owner", { onClick: function () { act("approve", a.seq); } }, [V.icon("check"), "Approve"]),
+          h("button.btn.danger", { onClick: function () { act("deny", a.seq); } }, [V.icon("x"), "Deny"]),
+          h("button.btn", { title: "Deny this proposal and tell the agent what to do instead",
+            onClick: function () { if (!ctx.mem.modal) popModal(a); } }, [V.icon("edit"), "Deny & redirect"]),
+        ]),
+      ]);
+    }
+    function reset() { ctx.mem.popped = {}; ctx.mem.seen = false; if (ctx.mem.modal) { try { ctx.mem.modal.close(); } catch (e) {} } ctx.mem.modal = null; }
+    return { act: act, popModal: popModal, maybePop: maybePop, card: card, reset: reset };
+  }
+
   function renderLive(screen) {
     const L = { run: null, runs: [], events: [], seen: {}, filter: "all", snapshot: null, started: null,
       inbox: [], inboxLoaded: false, inboxLoading: false, elsewhere: "", scanDone: false, reconciled: false,
-      // approval "propose" popup: baseline whatever is already pending on entry, then INTERRUPT with a modal
-      // only when a NEW proposal arrives while watching (approvalSeen flips true after the first snapshot).
-      approvalPopped: {}, approvalModal: null, approvalSeen: false };
+      // approval "propose" popup memory (baseline-on-entry + one-at-a-time), driven by the shared makeApprovalUX.
+      approvalMem: { popped: {}, seen: false, modal: null } };
+    // the shared approve/deny/deny-&-redirect interaction, bound to THIS view's run + snapshot refresh.
+    const AUX = makeApprovalUX({ mem: L.approvalMem, reason: "from Live view",
+      slugOf: function () { return L.run && L.run.slug; },
+      after: function () { pollSnapshot(); },
+      onModal: function (m) { liveApprovalModal = m; } });
     const want = hashQuery().run || "";
 
     V.mount(screen, [
@@ -2804,8 +2876,7 @@
       L.events = []; L.seen = {}; L.snapshot = null; L.started = L.run && L.run.started; L.elsewhere = "";
       L.inbox = []; L.inboxLoaded = false; L.inboxLoading = false;   // per-engagement advisory inbox (B4)
       L.scanDone = false; L.reconciled = false;   // per-run: re-arm the terminal reconcile for the new run
-      if (L.approvalModal) { try { L.approvalModal.close(); } catch (e) {} }
-      L.approvalPopped = {}; L.approvalModal = null; L.approvalSeen = false;   // re-baseline approvals for the new run
+      AUX.reset();   // re-baseline approvals + close any open modal for the new run
       history.replaceState(null, "", "#/live?run=" + encodeURIComponent(runId));
       if (L.run) attachStream();
       drawBody();
@@ -3031,77 +3102,13 @@
         .catch(function (e) { V.toast((e && e.message) || "Could not halt the engagement", true); });
     }
 
-    // ---- approvals (sovereign plane) ----
+    // ---- approvals (sovereign plane) — the interrupt + cards come from the shared makeApprovalUX (AUX) ----
     function drawApprovals() {
       const host = V.$("#live-approvals"); if (!host) return;
       const pend = (L.snapshot && L.snapshot.pending_approvals) || [];
-      maybePopApproval(pend);
+      AUX.maybePop(pend);
       if (!pend.length) { V.mount(host, null); return; }
-      V.mount(host, V.card("Waiting for your approval", "OWNER", h("div.stack", null, pend.map(approvalCard)), true));
-    }
-    // Claude-Code-style "propose" interrupt: the inline cards below are always there, but when the agent
-    // raises a NEW proposal mid-watch, pop a modal so a decision is never silently sitting in a list. The
-    // FIRST snapshot only baselines what is already pending (no nag on entry); one modal at a time.
-    function maybePopApproval(pend) {
-      if (L.approvalModal) return;
-      if (!L.approvalSeen) { pend.forEach(function (a) { L.approvalPopped[a.seq] = true; }); L.approvalSeen = true; return; }
-      for (let i = 0; i < pend.length; i++) { if (!L.approvalPopped[pend[i].seq]) { popApprovalModal(pend[i]); return; } }
-    }
-    function popApprovalModal(a) {
-      L.approvalPopped[a.seq] = true;   // never re-pop the same proposal (dismiss = "I'll use the list")
-      // "Deny & redirect" (Claude-Code reject-with-feedback): a note that steers the agent to re-plan. The
-      // signed-approval model is NOT relaxed — the exact proposal is DENIED, and the note is sent as ordinary
-      // mid-run guidance via /api/instruct; the agent proposes afresh (every new proposal is re-gated).
-      const redirect = h("input.input", { type: "text",
-        placeholder: "Tell the agent what to do instead… (for Deny & redirect)" });
-      const body = h("div.stack", null, [
-        h("div.why", null, (a.agent ? a.agent + " proposes: " : "The agent proposes an action that ")
-          + (a.subject || "requires your sign-off")),
-        h("div.kv", null, [
-          h("span.k", null, "Action"), h("span.v", null, a.kind || "action"),
-          h("span.k", null, "Tier"), h("span.v", null, a.tier || "—"),
-          h("span.k", null, "Request"), h("span.v.mono", null, "seq " + a.seq),
-        ]),
-        redirect,
-        h("p.helper", null, "Approve runs exactly this one action under the gates. Deny refuses it. "
-          + "Deny & redirect refuses it AND sends your note to steer the agent so it re-plans. "
-          + "Dismiss (Esc) to decide later from the list."),
-      ]);
-      const done = function () { if (m) m.close(); L.approvalModal = null; liveApprovalModal = null; };
-      const denyRedirect = function () {
-        const t = (redirect.value || "").trim();
-        if (!t) { V.toast("Type what the agent should do instead first.", true); if (redirect.focus) redirect.focus(); return; }
-        injectIntoRun(L.run && L.run.slug, redirect);   // steer (honest toast about live vs queued)
-        act("deny", a.seq);                              // and refuse the exact proposal
-        done();
-      };
-      redirect.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); denyRedirect(); } });
-      const m = openModal("Approve this action?", body, [
-        h("button.btn", { onClick: denyRedirect }, [V.icon("edit"), "Deny & redirect"]),
-        h("button.btn.danger", { onClick: function () { act("deny", a.seq); done(); } }, [V.icon("x"), "Deny"]),
-        h("button.btn.owner", { onClick: function () { act("approve", a.seq); done(); } }, [V.icon("check"), "Approve"]),
-      ], { onCancel: function () { L.approvalModal = null; liveApprovalModal = null; } });
-      L.approvalModal = m; liveApprovalModal = m;   // module-ref so teardownLive() closes it on navigation
-    }
-    function approvalCard(a) {
-      return h("div.approval", null, [
-        h("div.ah", null, [V.icon("key"), h("span.t", null, (a.kind || "action") + " · seq " + a.seq),
-          a.tier ? h("span.pill.sm", null, "tier " + a.tier) : null]),
-        h("div.why", null, (a.agent ? a.agent + " → " : "") + (a.subject || "requires owner sign-off")),
-        h("div.acts", null, [
-          h("button.btn.owner", { onClick: function () { act("approve", a.seq); } }, [V.icon("check"), "Approve"]),
-          h("button.btn.danger", { onClick: function () { act("deny", a.seq); } }, [V.icon("x"), "Deny"]),
-          // reuse the modal (with its redirect input) so a card can also deny-and-steer; guarded to one modal
-          h("button.btn", { title: "Deny this proposal and tell the agent what to do instead",
-            onClick: function () { if (!L.approvalModal) popApprovalModal(a); } }, [V.icon("edit"), "Deny & redirect"]),
-        ]),
-      ]);
-    }
-    function act(action, seq) {
-      V.postJSON(SOV("/api/action"), { action: action, seq: seq, reason: action + " from Live view" })
-        .then(function (r) { if (r && r.error) { V.toast(r.error, true); return; }
-          V.toast(action === "approve" ? "Approved." : "Denied."); pollSnapshot(); })
-        .catch(function (e) { V.toast((e && e.message) || "Action failed", true); });
+      V.mount(host, V.card("Waiting for your approval", "OWNER", h("div.stack", null, pend.map(AUX.card)), true));
     }
 
     // ---- graph + timeline ----
@@ -9804,7 +9811,16 @@
   var PBOX_KEY = "vigil-process-box";
   var PBOX_CAP = 200;                                   // rows kept in the scrollback ring buffer
   var PBOX = { es: null, run: null, following: "", events: [], seen: {}, poll: null,
+               // S1: the approve/deny/deny-&-redirect interrupt in CHAT — the PBOX follows the run globally,
+               // so it surfaces approvals on any screen (chat included) via the SHARED makeApprovalUX.
+               approvalMem: { popped: {}, seen: false, modal: null }, pendingApprovals: [],
                ui: { open: false, dismissed: false } };
+  var pboxApprovalModal = null;
+  var PBOX_AUX = makeApprovalUX({
+    mem: PBOX.approvalMem, reason: "from chat",
+    slugOf: function () { return PBOX.run && PBOX.run.slug; },
+    after: function () { pboxApprovalPoll(); },
+    onModal: function (m) { pboxApprovalModal = m; } });
 
   function pboxLoadUI() {
     try {
@@ -9983,6 +9999,11 @@
       ]),
     ]);
     var step = h("div.pb-step#pb-step", null, pboxStepText() || "waiting…");
+    // S1: pending approvals for the followed run — cards (approve / deny / deny-&-redirect) right in the box.
+    var approvals = (PBOX.pendingApprovals && PBOX.pendingApprovals.length)
+      ? h("div.pb-approvals", null, [h("div.pb-approvals-h", null, [V.icon("key"), h("span", null, "Waiting for your approval")])]
+          .concat(PBOX.pendingApprovals.map(PBOX_AUX.card)))
+      : null;
     var body;
     if (PBOX.run && PBOX.run.stream === "none") {
       body = h("div.pb-feed#pb-feed", null,
@@ -9994,7 +10015,7 @@
     } else {
       body = h("div.pb-feed#pb-feed", null, PBOX.events.slice(-PBOX_CAP).map(pboxRow));
     }
-    V.mount(host, h("div.pb-card", null, [head, step, body]));
+    V.mount(host, h("div.pb-card", null, [head, step, approvals, body]));
     var f = V.$("#pb-feed"); if (f) f.scrollTop = f.scrollHeight;   // land at the newest on (re)open
   }
   function pboxOnEvent(e) {
@@ -10015,6 +10036,16 @@
     if (PBOX.es) { try { PBOX.es.close(); } catch (e) {} PBOX.es = null; }
     PBOX.events = []; PBOX.seen = {};
   }
+  // S1: poll the sovereign-plane pending approvals for the followed run and INTERRUPT with the shared
+  // approve/deny/deny-&-redirect modal — so a chat operator never misses a proposal. Live owns the interrupt
+  // on its own screen (it has its own AUX + inline cards); everywhere else the global PBOX pops it.
+  function pboxApprovalPoll() {
+    V.getJSON(SOV("/api/snapshot")).then(function (s) {
+      PBOX.pendingApprovals = (s && s.pending_approvals) || [];
+      if ((location.hash || "").indexOf("#/live") !== 0) PBOX_AUX.maybePop(PBOX.pendingApprovals);
+      if (PBOX.ui.open && !PBOX.ui.dismissed) pboxRenderShell();
+    }).catch(function () { /* sovereign plane offline — approvals just won't show */ });
+  }
   function pboxFollow(run) {
     // (re)subscribe to a run's live feed. Held in PBOX.es (never liveES), so a route change can't kill it.
     pboxDetach();
@@ -10022,6 +10053,7 @@
     // permanent kill). It comes back as whatever it was (pill if collapsed), never force-expanded.
     if (run && PBOX.ui.dismissed) { PBOX.ui.dismissed = false; pboxSaveUI(); }
     PBOX.run = run; PBOX.following = run ? run.run_id : "";
+    PBOX_AUX.reset();   // S1: re-baseline approvals for the newly-followed run
     if (run && run.stream === "blackboard" && run.slug) {
       PBOX.es = V.sse(OFF("/api/blackboard?slug=" + encodeURIComponent(run.slug)), pboxOnEvent, function () {});
     } else if (run && run.stream === "progress") {
@@ -10098,7 +10130,8 @@
     pboxLoadUI();
     pboxRenderShell();
     pboxPoll();
-    PBOX.poll = setInterval(function () { if (!document.hidden) pboxPoll(); }, 4000);
+    pboxApprovalPoll();
+    PBOX.poll = setInterval(function () { if (!document.hidden) { pboxPoll(); pboxApprovalPoll(); } }, 4000);
   }
 
   // ---- boot ------------------------------------------------------------------
