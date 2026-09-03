@@ -155,6 +155,14 @@ class AgentState(BaseModel):
     phase: Phase = Phase.INFORMATIONAL
     iteration: int = 0
     objective: str = ""
+    # The authoritative in-scope target the operator seeded the engagement with (the `vigil engage`
+    # seed URL, e.g. "http://127.0.0.1:19010/records/search?q=test"). ADVISORY to the think step: it is
+    # surfaced in the TRUSTED prompt header so the model aims tool calls at the real host:port instead
+    # of fabricating one from the engagement name (the observed failure was the model targeting
+    # "http://<slug>/..." → out-of-scope deny). It can NEVER relax scope: the executor's egress guard
+    # and the conjunctive gate re-enforce the signed scope on the executor-resolved host regardless of
+    # what the model proposes here.
+    target: str = ""
     facts: list[Finding] = Field(default_factory=list)     # oracle-confirmed only
     leads: list[Finding] = Field(default_factory=list)     # LLM/tool proposals
     execution_trace: list[dict[str, Any]] = Field(default_factory=list)

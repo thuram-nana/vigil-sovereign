@@ -90,6 +90,50 @@ def test_valid_json_decision_via_fake_client(state):
     assert d.action == ActionType.USE_TOOL and d.tool.tool_name == "nmap"
 
 
+# --- REGRESSION: the authoritative in-scope target is surfaced in the TRUSTED header so the model aims
+# tool calls at the real host:port instead of fabricating "http://<engagement-slug>/..." (the observed
+# failure: the model built the URL from the engagement name → out-of-scope deny, zero tools, zero FACTs).
+
+
+def test_target_is_rendered_in_the_trusted_header():
+    from vigil_integration.live.think_claude import _build_messages
+    st = AgentState(
+        engagement_slug="chatfact-diag",
+        objective="Confirm error-based SQL injection at /records/search on the q parameter.",
+        phase=Phase.INFORMATIONAL,
+        target="http://127.0.0.1:19010/records/search?q=test",
+    )
+    _system, user = _build_messages(st, {})
+    # the real host:port is present, ABOVE the untrusted context region (i.e. in the trusted framing)
+    assert "http://127.0.0.1:19010/records/search?q=test" in user
+    head = user.split("UNTRUSTED", 1)[0]
+    assert "http://127.0.0.1:19010" in head
+    # and the model is told to aim at it and NOT to treat the engagement name as a host
+    assert "aim EVERY tool call" in user
+    assert "NOT a hostname" in user
+
+
+def test_no_target_keeps_the_header_backward_compatible():
+    from vigil_integration.live.think_claude import _build_messages
+    st = AgentState(engagement_slug="loopback", objective="probe", phase=Phase.INFORMATIONAL)
+    _system, user = _build_messages(st, {})
+    # no target set → no target line at all (unchanged prompt shape for callers that never set it)
+    assert "target (" not in user
+
+
+def test_engine_seeds_state_target_reaches_the_think_prompt():
+    """End-to-end through think(): the state.target the engine sets from the seed URL is what the model
+    is shown as the host to hit — captured from the client kwargs, not asserted on internal strings only."""
+    from vigil_integration.live.think_claude import _build_messages  # noqa: F401  (import-safety)
+    st = AgentState(engagement_slug="loopback", objective="confirm sqli",
+                    phase=Phase.INFORMATIONAL, target="http://127.0.0.1:18080/search?q=x")
+    fc = FakeClient(text=json.dumps({"action": "ask_user", "reasoning": "need more"}))
+    think(st, {}, client=fc)
+    msgs = fc.captured.get("messages") or []
+    blob = json.dumps(msgs)
+    assert "http://127.0.0.1:18080/search?q=x" in blob
+
+
 # --- AUTO-FALLBACK: a model that returns NO usable decision (a refusal → empty text) falls back ONCE ------
 # to _FALLBACK_MODEL (claude-opus-4-8) and SAYS SO in the rationale; a genuine ask_user never falls back;
 # the fallback model itself never recurses.

@@ -243,7 +243,8 @@ class VigilEngine:
         # crash AFTER a tool ran but BEFORE its checkpoint resumes at that iteration and RE-RUNS its tool.
         # Every re-run still re-gates + re-confirms through the oracle (no auth bypass), but an offense tool
         # CAN re-fire on resume — resume is at-least-once, not exactly-once. A COMPLETED run is a no-op.
-        state = AgentState(engagement_slug=self.slug, objective=objective, phase=Phase.INFORMATIONAL)
+        state = AgentState(engagement_slug=self.slug, objective=objective, phase=Phase.INFORMATIONAL,
+                           target=str(seed_url or ""))
         seq = 1
         start_it = 0
         if resume and self.seams.rebuild is not None:
@@ -262,6 +263,7 @@ class VigilEngine:
             if has_progress and hs >= 1:                    # real state AND a real seq to continue past
                 state = prior
                 state.engagement_slug = self.slug          # identity/objective stay authoritative
+                state.target = str(seed_url or "")         # the authoritative in-scope target for this run
                 if objective:
                     state.objective = objective
                 report.resumed = True

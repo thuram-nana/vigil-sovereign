@@ -485,7 +485,9 @@ executor ("no argv builder"), so never invent names like "http_get"/"http_reques
   - "wapiti"  — web-app scan (XSS / SQLi / etc.).
   - "zaproxy" — ZAP active web scan.
   - "hydra"   — credential brute-force.
-Put the target in tool_args (e.g. {{"url": "http://host:port/"}} or {{"target": "host"}}).
+Put the target in tool_args (e.g. {{"url": "http://host:port/"}} or {{"target": "host"}}). ALWAYS use the
+host:port from the "target" line in the header above — NEVER build a URL from the engagement name (it is a
+label, not a hostname); a tool call to any host outside the authorized scope is refused before it runs.
 
 Prefer the least-invasive action that advances the objective. If you are unsure or the context is
 insufficient, choose "ask_user". Emit ONLY the JSON object.
@@ -543,6 +545,7 @@ def _build_messages(state: object, prompt_ctx: object) -> tuple[str, str]:
     Never raises: a broken ``state`` degrades to a minimal-but-valid prompt."""
     slug = str(getattr(state, "engagement_slug", "") or "")[:200]
     objective = str(getattr(state, "objective", "") or "")[:2000]
+    target = str(getattr(state, "target", "") or "")[:500]
     phase = getattr(getattr(state, "phase", None), "value", None) or str(getattr(state, "phase", ""))
     iteration = getattr(state, "iteration", 0)
     try:
@@ -554,7 +557,9 @@ def _build_messages(state: object, prompt_ctx: object) -> tuple[str, str]:
     header = (
         "Decide the next action for this engagement.\n"
         f"engagement: {slug}\n"
-        f"phase: {phase}\n"
+        + (f"target (the authoritative in-scope URL — aim EVERY tool call at THIS host:port; the\n"
+           f"  engagement name above is NOT a hostname): {target}\n" if target else "")
+        + f"phase: {phase}\n"
         f"iteration: {iteration}\n"
         f"confirmed_facts: {n_facts}\n"
         f"open_leads: {n_leads}\n"
