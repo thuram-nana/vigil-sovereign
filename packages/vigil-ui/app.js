@@ -2762,16 +2762,20 @@
   }
 
   // ---- Live run view ---------------------------------------------------------
-  let liveES = null, liveTimers = [];
+  let liveES = null, liveTimers = [], liveApprovalModal = null;
   function teardownLive() {
     if (liveES) { try { liveES.close(); } catch (e) {} liveES = null; }
     liveTimers.forEach(function (t) { clearInterval(t); });
     liveTimers = [];
+    if (liveApprovalModal) { try { liveApprovalModal.close(); } catch (e) {} liveApprovalModal = null; }  // don't leave a proposal popup floating after navigation
   }
 
   function renderLive(screen) {
     const L = { run: null, runs: [], events: [], seen: {}, filter: "all", snapshot: null, started: null,
-      inbox: [], inboxLoaded: false, inboxLoading: false, elsewhere: "", scanDone: false, reconciled: false };
+      inbox: [], inboxLoaded: false, inboxLoading: false, elsewhere: "", scanDone: false, reconciled: false,
+      // approval "propose" popup: baseline whatever is already pending on entry, then INTERRUPT with a modal
+      // only when a NEW proposal arrives while watching (approvalSeen flips true after the first snapshot).
+      approvalPopped: {}, approvalModal: null, approvalSeen: false };
     const want = hashQuery().run || "";
 
     V.mount(screen, [
@@ -2798,6 +2802,8 @@
       L.events = []; L.seen = {}; L.snapshot = null; L.started = L.run && L.run.started; L.elsewhere = "";
       L.inbox = []; L.inboxLoaded = false; L.inboxLoading = false;   // per-engagement advisory inbox (B4)
       L.scanDone = false; L.reconciled = false;   // per-run: re-arm the terminal reconcile for the new run
+      if (L.approvalModal) { try { L.approvalModal.close(); } catch (e) {} }
+      L.approvalPopped = {}; L.approvalModal = null; L.approvalSeen = false;   // re-baseline approvals for the new run
       history.replaceState(null, "", "#/live?run=" + encodeURIComponent(runId));
       if (L.run) attachStream();
       drawBody();
@@ -3014,8 +3020,36 @@
     function drawApprovals() {
       const host = V.$("#live-approvals"); if (!host) return;
       const pend = (L.snapshot && L.snapshot.pending_approvals) || [];
+      maybePopApproval(pend);
       if (!pend.length) { V.mount(host, null); return; }
       V.mount(host, V.card("Waiting for your approval", "OWNER", h("div.stack", null, pend.map(approvalCard)), true));
+    }
+    // Claude-Code-style "propose" interrupt: the inline cards below are always there, but when the agent
+    // raises a NEW proposal mid-watch, pop a modal so a decision is never silently sitting in a list. The
+    // FIRST snapshot only baselines what is already pending (no nag on entry); one modal at a time.
+    function maybePopApproval(pend) {
+      if (L.approvalModal) return;
+      if (!L.approvalSeen) { pend.forEach(function (a) { L.approvalPopped[a.seq] = true; }); L.approvalSeen = true; return; }
+      for (let i = 0; i < pend.length; i++) { if (!L.approvalPopped[pend[i].seq]) { popApprovalModal(pend[i]); return; } }
+    }
+    function popApprovalModal(a) {
+      L.approvalPopped[a.seq] = true;   // never re-pop the same proposal (dismiss = "I'll use the list")
+      const body = h("div.stack", null, [
+        h("div.why", null, (a.agent ? a.agent + " proposes: " : "The agent proposes an action that ")
+          + (a.subject || "requires your sign-off")),
+        h("div.kv", null, [
+          h("span.k", null, "Action"), h("span.v", null, a.kind || "action"),
+          h("span.k", null, "Tier"), h("span.v", null, a.tier || "—"),
+          h("span.k", null, "Request"), h("span.v.mono", null, "seq " + a.seq),
+        ]),
+        h("p.helper", null, "Approve runs exactly this one action under the gates. Deny refuses it — the run "
+          + "continues and may propose something else. Dismiss (Esc) to decide later from the list."),
+      ]);
+      const m = openModal("Approve this action?", body, [
+        h("button.btn.danger", { onClick: function () { act("deny", a.seq); if (m) m.close(); L.approvalModal = null; liveApprovalModal = null; } }, [V.icon("x"), "Deny"]),
+        h("button.btn.owner", { onClick: function () { act("approve", a.seq); if (m) m.close(); L.approvalModal = null; liveApprovalModal = null; } }, [V.icon("check"), "Approve"]),
+      ], { onCancel: function () { L.approvalModal = null; liveApprovalModal = null; } });
+      L.approvalModal = m; liveApprovalModal = m;   // module-ref so teardownLive() closes it on navigation
     }
     function approvalCard(a) {
       return h("div.approval", null, [
