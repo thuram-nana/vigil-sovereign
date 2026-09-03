@@ -8615,6 +8615,54 @@
           + "bounded members when its plan calls for it; each member's steps stream below, attributed.", false);
       }
 
+      // S6: composer SLASH-COMMANDS. Type "/" for a discovery menu; a leading /command runs a chat action
+      // instead of sending a message. Each maps to an EXISTING gated action (no new powers) — a slash is a
+      // shortcut, never a bypass. An unrecognised /token is sent as an ordinary message (never swallowed).
+      const SLASH = [
+        { cmd: "/scan", arg: "<path|url>", desc: "Gated scan of a codebase path or a URL", run: function (a) {
+            if (!a) { V.toast("Usage: /scan <path or url>", true); return; }
+            if (/^https?:\/\//i.test(a)) launchUrlScan(a); else launchScan(a); } },
+        { cmd: "/url", arg: "<url>", desc: "Scan a website / API URL", run: function (a) { if (a) launchUrlScan(a); else V.toast("Usage: /url <url>", true); } },
+        { cmd: "/plan", desc: "Switch to Plan reasoning", run: function () { C.reasonMode = "plan"; if (reasonSel) reasonSel.value = "plan"; V.toast("Plan mode — ask your question.", false); try { input.focus(); } catch (e) {} } },
+        { cmd: "/research", desc: "Switch to Research reasoning", run: function () { C.reasonMode = "research"; if (reasonSel) reasonSel.value = "research"; V.toast("Research mode.", false); try { input.focus(); } catch (e) {} } },
+        { cmd: "/model", desc: "Pick the model for this chat", run: function () { try { sessModelSel.focus(); } catch (e) {} } },
+        { cmd: "/fireteam", desc: "Compose a fireteam directive", run: function () { requestFireteam(); } },
+        { cmd: "/new", desc: "Start a new chat", run: function () { openSession(""); } },
+        { cmd: "/clear", desc: "Start a new chat", run: function () { openSession(""); } },
+      ];
+      function runSlash(msg) {
+        const sp = msg.search(/\s/);
+        const cmd = (sp < 0 ? msg : msg.slice(0, sp)).toLowerCase();
+        const arg = sp < 0 ? "" : msg.slice(sp + 1).trim();
+        const hit = SLASH.find(function (s) { return s.cmd === cmd; });
+        if (!hit) return false;                    // not a known command → send as an ordinary message
+        hideSlash(); hit.run(arg); return true;
+      }
+      const slashMenu = h("div.slash-menu", { style: { display: "none" } });
+      document.body.appendChild(slashMenu);
+      function hideSlash() { slashMenu.style.display = "none"; }
+      function updateSlash() {
+        const v = input.value || "";
+        if (v.charAt(0) !== "/" || /\s/.test(v)) { hideSlash(); return; }
+        const q = v.toLowerCase();
+        const hits = SLASH.filter(function (s) { return s.cmd.indexOf(q) === 0; });
+        if (!hits.length) { hideSlash(); return; }
+        V.mount(slashMenu, hits.map(function (s) {
+          return h("button.slash-item", { onClick: function () {
+            if (s.arg) { input.value = s.cmd + " "; try { input.focus(); } catch (e) {} updateSlash(); }
+            else { input.value = ""; hideSlash(); s.run(""); }
+          } }, [h("span.slash-cmd", null, s.cmd + (s.arg ? " " + s.arg : "")), h("span.slash-desc", null, s.desc)]);
+        }));
+        const r = input.getBoundingClientRect();
+        slashMenu.style.display = "block"; slashMenu.style.position = "fixed";
+        slashMenu.style.left = r.left + "px";
+        slashMenu.style.bottom = (window.innerHeight - r.top + 6) + "px";
+        slashMenu.style.width = Math.min(r.width || 460, 460) + "px";
+        slashMenu.style.zIndex = "70";
+      }
+      input.addEventListener("input", updateSlash);
+      input.addEventListener("blur", function () { setTimeout(hideSlash, 150); });   // let a menu click land first
+
       // The plain-language consequence of the current pick — shown under the picker so the sovereignty
       // trade-off is visible at the moment of choosing, not buried.
       function modelConsequence() {
@@ -8634,6 +8682,8 @@
       // remove it — which now really deletes it on the console.
       function doSend() {
         const msg = (input.value || "").trim();
+        // S6: a leading /command runs a chat action instead of sending it as a message (unknown → sent normally).
+        if (msg && msg.charAt(0) === "/" && runSlash(msg)) { input.value = ""; hideSlash(); return; }
         const outgoing = C.attach.filter(function (a) { return a.status === "ready"; });
         if (C.busy) return;
         if (!msg && !outgoing.length) return;
