@@ -798,7 +798,7 @@
       h("div#nav", { role: "navigation", "aria-label": "Primary" }),
       h("div#main", null, h("div.wrap#screen")),
     ]));
-    document.body.appendChild(h("div#drawer", null, [
+    document.body.appendChild(h("div#drawer", { "aria-hidden": "true" }, [
       h("div.dz#drawer-dz", { role: "separator", "aria-label": "Resize panel (drag)" }),
       h("div.dh", null, [
         h("h2#drawer-title", null, "Detail"),
@@ -817,9 +817,9 @@
     V.$("#drawer-title").textContent = title || "Detail";
     V.mount(V.$("#drawer-body"), body);
     applyDrawerState();                       // honour the operator's remembered dock/size each open
-    V.$("#drawer").classList.add("open");
+    const d = V.$("#drawer"); d.classList.add("open"); d.setAttribute("aria-hidden", "false");
   }
-  function closeDrawer() { V.$("#drawer").classList.remove("open"); }
+  function closeDrawer() { const d = V.$("#drawer"); d.classList.remove("open"); d.setAttribute("aria-hidden", "true"); }
 
   // ---- drawer dock / resize / maximize (the "expand the activity box" controls) --------------------
   // A single detail/activity panel the whole app opens things into. The operator can drag it wider (or,
@@ -8567,9 +8567,8 @@
 
       const list = h("div#chat-list.dropzone.chat-transcript", null,
         C.messages.length ? C.messages.map(bubble)
-          : h("div.empty", { style: { padding: "24px" } }, [h("div.big", null, "What should we test?"),
-              h("p", null, "Ask in plain language — “scan http://127.0.0.1:8080 for auth bugs” — or drop a zip of a codebase, loose files or screenshots here and ask about them (“does this have weaknesses in its authentication?”)."),
-              h("p", { style: { marginTop: "8px" } }, "Answers about uploaded material are leads. Findings are oracle-confirmed; target-touching steps wait for your approval.")]));
+          : h("div.empty.chat-empty", null, [h("div.big", null, "What should we test?"),
+              h("p", null, "Ask in plain language — e.g. “scan http://127.0.0.1:8080 for auth bugs” — or drop a zip, files or screenshots and ask about them. Type “/” for commands or “@” to reference an attachment.")]));
 
       // drag-and-drop onto the transcript. The counter survives the dragleave that fires when the
       // pointer crosses a CHILD element, which is why a bare boolean flickers here.

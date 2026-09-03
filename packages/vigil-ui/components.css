@@ -806,3 +806,4 @@ select:focus-visible, textarea:focus-visible { outline: 2px solid var(--st-runni
 .chat-session-t { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); }
 .chat-session-m { font-size: var(--fs-xs); color: var(--text-2); }
 .iconbtn.sm { width: 30px; height: 30px; }
+.chat-empty { padding: 24px; }
