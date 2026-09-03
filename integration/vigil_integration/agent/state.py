@@ -101,6 +101,10 @@ class LLMDecision(BaseModel):
     skill: Optional[str] = None
     # ask_user / complete
     question: Optional[str] = None
+    # ask_user: OPTIONAL suggested answers, so the operator can pick one (or "Other → type your own"). ADVISORY
+    # only — the chosen text is folded back as the resume answer exactly like a free-text reply; it authorises
+    # nothing and relaxes no gate (a picked option still steers, never runs, on its own).
+    question_options: list[str] = Field(default_factory=list)
     summary: Optional[str] = None
     # inline analysis of the PRIOR tool output (claims → leads)
     output_analysis: Optional[OutputAnalysis] = None

@@ -469,7 +469,9 @@ Respond with one JSON object with an "action" field, one of:
     "informational" | "exploitation" | "post_exploitation".
   - "deploy_fireteam": spawn specialists. Include "fireteam": [ <member objects> ].
   - "switch_skill": change playbook. Include "skill": str.
-  - "ask_user": pause for a human. Include "question": str.
+  - "ask_user": pause for a human. Include "question": str, and OPTIONALLY "options": [str, ...] — a short
+    list of suggested answers the operator can pick with one click (they can always type their own instead).
+    Use options when the answer is a choice (which target / which approach / yes-no-with-a-reason).
   - "complete": end the engagement. Include "summary": str.
 You may also include "reasoning": str and an "output_analysis" object with your CLAIMS about the prior
 tool output (exploit_succeeded, verdict, findings[]). Those claims are LEADS only — never facts.

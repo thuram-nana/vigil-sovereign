@@ -321,7 +321,11 @@ class VigilEngine:
                 # mirror writes the full payload — so the console can surface this question as a chat bubble
                 # the operator actually answers (without it, an ask_user pause looks like an empty run).
                 "agent_question": (str(decision.question or "")
-                                   if decision.action == ActionType.ASK_USER else "")})
+                                   if decision.action == ActionType.ASK_USER else ""),
+                # S2: the agent's suggested answers (click-to-pick + "Other → type your own"), carried so the
+                # console can render option buttons on the chat question bubble. Advisory; authorises nothing.
+                "agent_question_options": ([str(o) for o in (decision.question_options or [])][:12]
+                                           if decision.action == ActionType.ASK_USER else [])})
             if decision.action == ActionType.USE_TOOL and decision.tool is not None:
                 _oa = decision.output_analysis
                 _info = getattr(_oa, "extracted_info", {}) if _oa is not None else {}

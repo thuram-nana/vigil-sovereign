@@ -637,8 +637,11 @@ def _maybe_surface_agent_question(run_id: str, meta: dict) -> None:
         # honest fallback: the engine paused to ask but the model gave no question text — say so, so the
         # bubble is never empty (the operator still knows a reply will resume the run).
         question = "I need your input to continue. Reply here with your answer and I'll resume the engagement."
+    # S2: the agent's suggested answers (click-to-pick); advisory. Sanitised to a bounded list of strings.
+    opts = dec.get("agent_question_options")
+    options = [str(o).strip() for o in opts if str(o).strip()][:12] if isinstance(opts, list) else []
     from . import chat                                  # local import — chat imports actions (avoid a cycle)
-    chat.post_agent_question(sid, question, run_id=str(run_id), slug=str(meta.get("slug") or ""))
+    chat.post_agent_question(sid, question, run_id=str(run_id), slug=str(meta.get("slug") or ""), options=options)
 
 
 def reconcile_orphaned_runs() -> int:

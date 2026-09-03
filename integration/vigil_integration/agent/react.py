@@ -41,6 +41,10 @@ def _downgrade(obj: Any) -> LLMDecision:
     """Validate the raw dict into an ``LLMDecision`` and downgrade a structurally-incomplete action to
     the safest still-valid one (never up, never a silent no-op that proceeds). Raises on a
     fundamentally invalid object so ``parse_proposal`` falls back to the caller's fail-closed default."""
+    # accept the model's suggested ask_user answers under either key ("options" is the natural one to emit;
+    # the field is question_options). ADVISORY only — a picked option is folded back as the resume answer.
+    if isinstance(obj, dict) and obj.get("options") and not obj.get("question_options"):
+        obj = {**obj, "question_options": obj.get("options")}
     decision = LLMDecision.model_validate(obj)
     a = decision.action
     if a == ActionType.USE_TOOL and decision.tool is None:

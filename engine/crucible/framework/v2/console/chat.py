@@ -491,14 +491,18 @@ def _append(chat_id: str, rec: dict) -> None:
         fh.write(line + "\n")
 
 
-def post_agent_question(chat_id: str, question: str, *, run_id: str = "", slug: str = "") -> bool:
+def post_agent_question(chat_id: str, question: str, *, run_id: str = "", slug: str = "",
+                        options: "list | None" = None) -> bool:
     """Surface the agent's ASK_USER question as an assistant bubble in the chat, so the operator can SEE
     what the run is waiting on and answer it (their reply then auto-resumes the run — see
     ``actions.resume_engage_with_message``). Called by the run supervisor when an integration engage run
     pauses at ask_user. Guarded three ways so it never fabricates a chat: a path-safe id, a NON-empty
     question, and an ALREADY-EXISTING transcript (only a real chat session has one — an engage launched
     from the New-Assessment screen has a session id but no chat file, and must not grow one). Best-effort;
-    returns True iff a bubble was appended. Runs in the supervisor's daemon thread, so it never raises."""
+    returns True iff a bubble was appended. Runs in the supervisor's daemon thread, so it never raises.
+
+    ``options`` (S2): the agent's suggested answers, rendered as click-to-pick buttons (+ "Other → type your
+    own"). ADVISORY — a picked option is folded back as the resume answer exactly like free text."""
     try:
         cid = _safe_chat_id(str(chat_id or ""))
     except (ValueError, Exception):  # noqa: BLE001
@@ -508,9 +512,13 @@ def post_agent_question(chat_id: str, question: str, *, run_id: str = "", slug: 
         return False
     if not _chat_path(cid).exists():        # not a chat session → never materialise a transcript for it
         return False
+    opts = [str(o).strip() for o in options if str(o).strip()][:12] if isinstance(options, list) else []
     try:
-        _append(cid, {"role": "assistant", "kind": "agent_question", "text": q,
-                      "run_id": str(run_id or ""), "slug": str(slug or "")})
+        rec = {"role": "assistant", "kind": "agent_question", "text": q,
+               "run_id": str(run_id or ""), "slug": str(slug or "")}
+        if opts:
+            rec["options"] = opts
+        _append(cid, rec)
         return True
     except Exception:  # noqa: BLE001 — a transcript write must never perturb the run's teardown
         return False

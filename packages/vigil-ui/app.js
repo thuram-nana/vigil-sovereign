@@ -8060,7 +8060,20 @@
       }));
     }
 
-    function bubble(m) {
+    // S2: click-to-pick suggested answers for an agent question, with an "Other → type your own" escape
+    // hatch. A pick just fills the composer and sends it — the SAME reply path that auto-resumes the run
+    // (no new endpoint, no relaxed gate). Rendered only on the PENDING question.
+    function answerOptions(opts) {
+      const btns = (opts || []).map(function (opt) {
+        return h("button.btn.sm", { onClick: function () { input.value = String(opt); doSend(); } }, String(opt));
+      });
+      btns.push(h("button.btn.sm.ghost", { title: "Type your own answer in the composer below",
+        onClick: function () { try { input.focus(); input.scrollIntoView({ block: "center" }); } catch (e) {} } },
+        [V.icon("edit"), "Other…"]));
+      return h("div.answer-options", null, btns);
+    }
+    function bubble(m, i, arr) {
+      const isPendingQ = m.kind === "agent_question" && arr && i === arr.length - 1;
       const isUser = m.role === "user";
       const wrap = { style: { display: "flex", justifyContent: isUser ? "flex-end" : "flex-start", margin: "8px 0" } };
       const box = {
@@ -8089,8 +8102,12 @@
         kids.push(h("div", { style: { marginBottom: "6px", display: "flex", alignItems: "center", gap: "6px" } },
           [h("span.shield", { style: { color: "var(--owner, #d4af37)" } }, [V.icon("info"), "The engagement is asking you"])]));
         kids.push(h("div", null, String(m.text || m.reply || "")));
+        // click-to-pick options on the PENDING question (a historical one just shows its text).
+        if (isPendingQ && Array.isArray(m.options) && m.options.length) kids.push(answerOptions(m.options));
         kids.push(h("div.dim", { style: { fontSize: "var(--fs-xs)", marginTop: "8px" } },
-          "Reply below and I'll resume the engagement with your answer."));
+          (isPendingQ && m.options && m.options.length)
+            ? "Pick an answer above, or type your own below — I'll resume the engagement with it."
+            : "Reply below and I'll resume the engagement with your answer."));
         return h("div", wrap, h("div", box, kids));
       }
       kids.push(h("div", null, String(m.text || m.reply || "")));
@@ -8774,7 +8791,10 @@
         h("span.shield", { style: { color: "var(--owner, #d4af37)", fontWeight: "600", whiteSpace: "nowrap" } },
           [V.icon("info"), "Waiting for your answer"]),
         h("div", { style: { flex: "1 1 240px", minWidth: "0" } }, String(_pendingQ.text || _pendingQ.reply || "")),
-        h("button.btn.sm.owner", { onClick: function () { try { input.focus(); input.scrollIntoView({ block: "center" }); } catch (e) {} } }, "Reply now"),
+        // S2: the same click-to-pick options as the bubble, so the operator can answer without scrolling up.
+        (_pendingQ && Array.isArray(_pendingQ.options) && _pendingQ.options.length)
+          ? h("div", { style: { flex: "1 1 100%" } }, answerOptions(_pendingQ.options))
+          : h("button.btn.sm.owner", { onClick: function () { try { input.focus(); input.scrollIntoView({ block: "center" }); } catch (e) {} } }, "Reply now"),
       ]) : null;
       V.mount(host, [
         controls,
