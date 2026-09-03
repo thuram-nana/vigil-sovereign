@@ -3049,6 +3049,11 @@
     }
     function popApprovalModal(a) {
       L.approvalPopped[a.seq] = true;   // never re-pop the same proposal (dismiss = "I'll use the list")
+      // "Deny & redirect" (Claude-Code reject-with-feedback): a note that steers the agent to re-plan. The
+      // signed-approval model is NOT relaxed — the exact proposal is DENIED, and the note is sent as ordinary
+      // mid-run guidance via /api/instruct; the agent proposes afresh (every new proposal is re-gated).
+      const redirect = h("input.input", { type: "text",
+        placeholder: "Tell the agent what to do instead… (for Deny & redirect)" });
       const body = h("div.stack", null, [
         h("div.why", null, (a.agent ? a.agent + " proposes: " : "The agent proposes an action that ")
           + (a.subject || "requires your sign-off")),
@@ -3057,12 +3062,24 @@
           h("span.k", null, "Tier"), h("span.v", null, a.tier || "—"),
           h("span.k", null, "Request"), h("span.v.mono", null, "seq " + a.seq),
         ]),
-        h("p.helper", null, "Approve runs exactly this one action under the gates. Deny refuses it — the run "
-          + "continues and may propose something else. Dismiss (Esc) to decide later from the list."),
+        redirect,
+        h("p.helper", null, "Approve runs exactly this one action under the gates. Deny refuses it. "
+          + "Deny & redirect refuses it AND sends your note to steer the agent so it re-plans. "
+          + "Dismiss (Esc) to decide later from the list."),
       ]);
+      const done = function () { if (m) m.close(); L.approvalModal = null; liveApprovalModal = null; };
+      const denyRedirect = function () {
+        const t = (redirect.value || "").trim();
+        if (!t) { V.toast("Type what the agent should do instead first.", true); if (redirect.focus) redirect.focus(); return; }
+        injectIntoRun(L.run && L.run.slug, redirect);   // steer (honest toast about live vs queued)
+        act("deny", a.seq);                              // and refuse the exact proposal
+        done();
+      };
+      redirect.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); denyRedirect(); } });
       const m = openModal("Approve this action?", body, [
-        h("button.btn.danger", { onClick: function () { act("deny", a.seq); if (m) m.close(); L.approvalModal = null; liveApprovalModal = null; } }, [V.icon("x"), "Deny"]),
-        h("button.btn.owner", { onClick: function () { act("approve", a.seq); if (m) m.close(); L.approvalModal = null; liveApprovalModal = null; } }, [V.icon("check"), "Approve"]),
+        h("button.btn", { onClick: denyRedirect }, [V.icon("edit"), "Deny & redirect"]),
+        h("button.btn.danger", { onClick: function () { act("deny", a.seq); done(); } }, [V.icon("x"), "Deny"]),
+        h("button.btn.owner", { onClick: function () { act("approve", a.seq); done(); } }, [V.icon("check"), "Approve"]),
       ], { onCancel: function () { L.approvalModal = null; liveApprovalModal = null; } });
       L.approvalModal = m; liveApprovalModal = m;   // module-ref so teardownLive() closes it on navigation
     }
@@ -3074,6 +3091,9 @@
         h("div.acts", null, [
           h("button.btn.owner", { onClick: function () { act("approve", a.seq); } }, [V.icon("check"), "Approve"]),
           h("button.btn.danger", { onClick: function () { act("deny", a.seq); } }, [V.icon("x"), "Deny"]),
+          // reuse the modal (with its redirect input) so a card can also deny-and-steer; guarded to one modal
+          h("button.btn", { title: "Deny this proposal and tell the agent what to do instead",
+            onClick: function () { if (!L.approvalModal) popApprovalModal(a); } }, [V.icon("edit"), "Deny & redirect"]),
         ]),
       ]);
     }
