@@ -65,6 +65,10 @@ def status_data() -> dict[str, Any]:
         # showed as 0). Read-only + total; same import-clean broker path api.approvals() uses. Base-wide
         # (approvals are keyed under VIGIL_BASE_DIR, not per-engagement), matching api.approvals().
         try:
+            import os  # local import: `os` is NOT module-level in this file, so a bare `os.environ` ref
+                       # below raised NameError that the broad except silently turned into 0 — the offense
+                       # pending count read 0 forever (the exact "showed as 0" bug this counter was added to
+                       # fix). Mirrors the sibling api.approvals(), which already imports os locally.
             from vigil_integration.live.approval_broker import approvals_root, list_pending
             base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
             return len(list_pending(approvals_root(base)))
