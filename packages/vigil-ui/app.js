@@ -2877,6 +2877,65 @@
     return out;
   }
 
+  // S10: a SAFE markdown renderer for assistant replies. XSS-safe by construction — every text run becomes a
+  // DOM text node (h() → createTextNode), NEVER innerHTML; links accept only http(s)/mailto hrefs (any other
+  // scheme renders as plain text). Supports a practical subset: fenced + inline code, bold/italic, links,
+  // bullet/numbered lists, headings, and paragraphs with line breaks.
+  function _mdInline(text) {
+    const rest = String(text);
+    const nodes = [];
+    const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)\s]+\))/g;
+    let last = 0, m;
+    while ((m = re.exec(rest)) !== null) {
+      if (m.index > last) nodes.push(rest.slice(last, m.index));
+      const tok = m[0];
+      if (tok.charAt(0) === "`") nodes.push(h("code.md-ic", null, tok.slice(1, -1)));
+      else if (tok.slice(0, 2) === "**") nodes.push(h("strong", null, tok.slice(2, -2)));
+      else if (tok.charAt(0) === "*") nodes.push(h("em", null, tok.slice(1, -1)));
+      else {
+        const mm = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(tok);
+        if (mm && /^(https?:|mailto:)/i.test(mm[2])) nodes.push(h("a", { href: mm[2], target: "_blank", rel: "noopener noreferrer" }, mm[1]));
+        else nodes.push(mm ? mm[1] : tok);        // unsafe/relative scheme → just the visible text
+      }
+      last = re.lastIndex;
+    }
+    if (last < rest.length) nodes.push(rest.slice(last));
+    return nodes.length ? nodes : [rest];
+  }
+  function renderMarkdown(text) {
+    const lines = String(text || "").split("\n");
+    const out = []; let i = 0;
+    const special = /^```|^\s*[-*]\s+|^\s*\d+\.\s+|^#{1,4}\s+/;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (/^```/.test(line.trim())) {
+        const fence = []; i++;
+        while (i < lines.length && !/^```/.test(lines[i].trim())) { fence.push(lines[i]); i++; }
+        i++;                                        // skip the closing fence
+        out.push(h("pre.md-code", null, h("code", null, fence.join("\n")))); continue;
+      }
+      const hm = /^(#{1,4})\s+(.*)$/.exec(line);
+      if (hm) { out.push(h("div.md-h" + hm[1].length, null, _mdInline(hm[2]))); i++; continue; }
+      if (/^\s*[-*]\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) { items.push(h("li", null, _mdInline(lines[i].replace(/^\s*[-*]\s+/, "")))); i++; }
+        out.push(h("ul.md-ul", null, items)); continue;
+      }
+      if (/^\s*\d+\.\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { items.push(h("li", null, _mdInline(lines[i].replace(/^\s*\d+\.\s+/, "")))); i++; }
+        out.push(h("ol.md-ol", null, items)); continue;
+      }
+      if (line.trim() === "") { i++; continue; }
+      const para = [line]; i++;
+      while (i < lines.length && lines[i].trim() !== "" && !special.test(lines[i])) { para.push(lines[i]); i++; }
+      const pn = [];
+      para.forEach(function (ln, idx) { if (idx) pn.push(h("br")); _mdInline(ln).forEach(function (n) { pn.push(n); }); });
+      out.push(h("div.md-p", null, pn));
+    }
+    return out.length ? out : [String(text || "")];
+  }
+
   function renderLive(screen) {
     const L = { run: null, runs: [], events: [], seen: {}, filter: "all", snapshot: null, started: null,
       inbox: [], inboxLoaded: false, inboxLoading: false, elsewhere: "", scanDone: false, reconciled: false,
@@ -8110,7 +8169,10 @@
             : "Reply below and I'll resume the engagement with your answer."));
         return h("div", wrap, h("div", box, kids));
       }
-      kids.push(h("div", null, String(m.text || m.reply || "")));
+      // S10: assistant replies render as SAFE markdown (code/bold/lists/links); user messages stay literal.
+      kids.push(isLead
+        ? h("div.md", null, renderMarkdown(m.text || m.reply || ""))
+        : h("div", { style: { whiteSpace: "pre-wrap", wordBreak: "break-word" } }, String(m.text || m.reply || "")));
       const atts = recordAttachments(m);
       if (atts) kids.push(atts);
       // GROUNDED-IN legend (A2): the VERIFIED sources this lead drew on, in visibly distinct registers —
