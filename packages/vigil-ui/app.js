@@ -8180,6 +8180,25 @@
         ]));
       }
       if (m.kind === "refused" || m.kind === "error") { box.style.borderColor = "var(--sev-high, #e5a13a)"; }
+      // S3: per-message actions (copy / edit-&-resend / regenerate) on plain text bubbles — a hover row like
+      // Claude Code. Copy reuses copyText; Edit repopulates the composer for the operator to tweak + send;
+      // Regenerate re-sends the preceding user turn. All go through the normal send path (no new endpoint).
+      if (isUser || isLead) {
+        const text = String(m.text || m.reply || "");
+        const acts = [h("button.msg-act", { title: "Copy this message", onClick: function () { copyText(text); } }, [V.icon("clip"), "Copy"])];
+        if (isUser) {
+          acts.push(h("button.msg-act", { title: "Put this back in the composer to edit and resend",
+            onClick: function () { input.value = text; try { input.focus(); input.scrollIntoView({ block: "center" }); } catch (e) {} } }, [V.icon("edit"), "Edit & resend"]));
+        }
+        if (isLead) {
+          acts.push(h("button.msg-act", { title: "Re-run the question that produced this reply",
+            onClick: function () {
+              var prev = ""; for (var j = (i || 0) - 1; j >= 0; j--) { if (arr[j] && arr[j].role === "user") { prev = String(arr[j].text || ""); break; } }
+              if (prev) { input.value = prev; doSend(); } else { V.toast("No earlier message to regenerate from.", true); }
+            } }, [V.icon("live"), "Regenerate"]));
+        }
+        kids.push(h("div.msg-actions", null, acts));
+      }
       return h("div", wrap, h("div", box, kids));
     }
 
