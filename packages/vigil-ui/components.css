@@ -695,6 +695,9 @@ div:hover > div > .msg-actions, .msg-actions:focus-within { opacity: 1; }
 .answer-options .btn.sm { font-size: var(--fs-xs); }
 .btn.ghost { background: transparent; border: 1px dashed var(--border-strong); }
 .btn.ghost:hover { background: var(--bg-3); }
+/* S5: a tool step in the process box is clickable → opens the command/output card */
+.pb-row.pb-clickable { cursor: pointer; }
+.pb-row.pb-clickable:hover { background: var(--bg-3); }
 /* S1: pending-approval cards inside the process box (chat approval interrupt) */
 .pb-approvals { flex: 0 0 auto; max-height: 45%; overflow-y: auto; border-bottom: 1px solid var(--border);
   padding: 8px 10px; background: color-mix(in srgb, var(--accent, #6b8afd) 8%, transparent); }

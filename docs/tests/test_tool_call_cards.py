@@ -33,7 +33,7 @@ def test_engine_enriches_tool_result_from_the_redacted_record_not_raw_stdout():
 
 
 def test_ui_renders_a_paired_command_output_card():
-    assert "function toolPairFor(e)" in APPJS and "function toolCardBody(call, result)" in APPJS
+    assert "function toolPairFrom(events, e)" in APPJS and "function toolCardBody(call, result)" in APPJS
     # tool_call / tool_result open the card, not the raw-JSON dump
     assert 'if (e.kind === "tool_call" || e.kind === "tool_result")' in APPJS
     assert 'openDrawer("Tool call", toolCardBody(' in APPJS
@@ -45,3 +45,10 @@ def test_ui_renders_a_paired_command_output_card():
 def test_inline_row_shows_exit_and_output_size_at_a_glance():
     assert 'p.exit_code != null ? " · exit " + p.exit_code' in APPJS
     assert 'p.output_bytes ? " · " + p.output_bytes + " B"' in APPJS
+
+
+def test_chat_process_box_tool_rows_open_the_card():
+    # S5: a tool step in the chat process box is clickable and opens the SAME shared command/output card.
+    assert 'var isTool = e.kind === "tool_call" || e.kind === "tool_result";' in APPJS
+    assert 'openDrawer("Tool call", toolCardBody(pr.call, pr.result))' in APPJS
+    assert 'toolPairFrom(PBOX.events, e)' in APPJS
