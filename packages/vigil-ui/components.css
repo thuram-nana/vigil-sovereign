@@ -290,6 +290,25 @@ table.tbl tr.click { cursor: pointer; } table.tbl tr.click:hover td { background
   border-left: 1px solid var(--border-strong); box-shadow: var(--shadow-2); transform: translateX(100%); transition: transform .2s ease;
   z-index: 60; display: flex; flex-direction: column; }
 #drawer.open { transform: translateX(0); }
+
+/* dockable / resizable / maximizable activity panel -------------------------- */
+/* Bottom dock: full width, height driven by --drawer-h (or an inline style JS sets while dragging). */
+#drawer.dock-bottom { top: auto; left: 0; right: 0; bottom: 0; width: auto; max-width: none;
+  height: var(--drawer-h, 46vh); max-height: 94vh; border-left: none; border-top: 1px solid var(--border-strong);
+  transform: translateY(100%); }
+#drawer.dock-bottom.open { transform: translateY(0); }
+/* Maximized: fill the viewport regardless of dock, and the drag handle stands down. */
+#drawer.max { top: 0; left: 0; right: 0; bottom: 0; width: auto !important; height: auto !important;
+  max-width: none; max-height: none; }
+/* The drag strip — left edge when side-docked, top edge when bottom-docked. */
+#drawer .dz { position: absolute; z-index: 2; background: transparent; touch-action: none; }
+#drawer .dz:hover, #drawer .dz.active { background: var(--border-strong); opacity: .8; }
+#drawer:not(.dock-bottom) .dz { left: -3px; top: 0; width: 8px; height: 100%; cursor: ew-resize; }
+#drawer.dock-bottom .dz { top: -3px; left: 0; height: 8px; width: 100%; cursor: ns-resize; }
+#drawer.max .dz { display: none; }
+#drawer.resizing { transition: none; user-select: none; }
+#drawer .dh .iconbtn.on { color: var(--text-0); background: var(--bg-3); }
+
 #drawer .dh { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-5); border-bottom: 1px solid var(--border); }
 #drawer .dh h2 { font-size: var(--fs-xl); flex: 1; }
 #drawer .db { padding: var(--sp-5); overflow-y: auto; }

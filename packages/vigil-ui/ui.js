@@ -371,6 +371,10 @@
       link: "M10.5 13.5a4 4 0 005.7 0l2.8-2.8a4 4 0 10-5.7-5.7L12 6.3M13.5 10.5a4 4 0 00-5.7 0l-2.8 2.8a4 4 0 105.7 5.7L12 17.7",
       edit: "M4 20h4L19 9a2.1 2.1 0 00-3-3L5 17z M14 6l4 4",
       trash: "M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13",
+      maximize: "M8 3H5a2 2 0 00-2 2v3M16 3h3a2 2 0 012 2v3M8 21H5a2 2 0 01-2-2v-3M16 21h3a2 2 0 002-2v-3",
+      minimize: "M9 4v3a2 2 0 01-2 2H4M15 4v3a2 2 0 002 2h3M9 20v-3a2 2 0 00-2-2H4M15 20v-3a2 2 0 012-2h3",
+      "dock-right": "M4 5h16v14H4zM14 5v14",
+      "dock-bottom": "M4 5h16v14H4zM4 14h16",
     };
     return h("span.glyph", { html: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="' + (P[name] || P.dot) + '"/></svg>' });
   }

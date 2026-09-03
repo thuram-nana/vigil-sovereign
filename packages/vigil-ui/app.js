@@ -798,8 +798,17 @@
       h("div#nav", { role: "navigation", "aria-label": "Primary" }),
       h("div#main", null, h("div.wrap#screen")),
     ]));
-    document.body.appendChild(h("div#drawer", null, [h("div.dh", null, [h("h2#drawer-title", null, "Detail"),
-      h("button.iconbtn", { "aria-label": "Close detail panel", onClick: closeDrawer }, V.icon("x"))]), h("div.db#drawer-body")]));
+    document.body.appendChild(h("div#drawer", null, [
+      h("div.dz#drawer-dz", { role: "separator", "aria-label": "Resize panel (drag)" }),
+      h("div.dh", null, [
+        h("h2#drawer-title", null, "Detail"),
+        h("button.iconbtn#drawer-dock", { "aria-label": "Dock the panel to the bottom or the side", title: "Dock to bottom / side", onClick: cycleDrawerDock }, V.icon("dock-bottom")),
+        h("button.iconbtn#drawer-max", { "aria-label": "Maximize or restore the panel", title: "Maximize / restore", onClick: toggleDrawerMax }, V.icon("maximize")),
+        h("button.iconbtn", { "aria-label": "Close detail panel", onClick: closeDrawer }, V.icon("x")),
+      ]),
+      h("div.db#drawer-body"),
+    ]));
+    installDrawerControls();
     renderNav();
   }
 
@@ -807,9 +816,76 @@
   function openDrawer(title, body) {
     V.$("#drawer-title").textContent = title || "Detail";
     V.mount(V.$("#drawer-body"), body);
+    applyDrawerState();                       // honour the operator's remembered dock/size each open
     V.$("#drawer").classList.add("open");
   }
   function closeDrawer() { V.$("#drawer").classList.remove("open"); }
+
+  // ---- drawer dock / resize / maximize (the "expand the activity box" controls) --------------------
+  // A single detail/activity panel the whole app opens things into. The operator can drag it wider (or,
+  // when docked to the bottom, taller), flip it between a right dock and a bottom dock, or maximize it to
+  // fill the viewport — and the choice + size PERSIST across opens and reloads (localStorage, per browser).
+  const DRAWER_KEY = "vigil.drawer";
+  function drawerState() {
+    try { return JSON.parse(localStorage.getItem(DRAWER_KEY) || "{}") || {}; } catch (e) { return {}; }
+  }
+  function saveDrawerState(s) { try { localStorage.setItem(DRAWER_KEY, JSON.stringify(s || {})); } catch (e) { /* private mode / blocked — the panel just won't remember */ } }
+  function applyDrawerState() {
+    const el = V.$("#drawer"); if (!el) return;
+    const s = drawerState();
+    const bottom = s.dock === "bottom";
+    el.classList.toggle("dock-bottom", bottom);
+    el.classList.toggle("max", !!s.max);
+    // inline size wins over the CSS default; cleared when maximized so .max fills the viewport
+    el.style.width = ""; el.style.height = "";
+    if (!s.max) {
+      if (bottom) { if (s.height) el.style.height = s.height + "px"; }
+      else { if (s.width) el.style.width = s.width + "px"; }
+    }
+    const maxBtn = V.$("#drawer-max");
+    if (maxBtn) { V.mount(maxBtn, V.icon(s.max ? "minimize" : "maximize")); maxBtn.classList.toggle("on", !!s.max);
+      maxBtn.title = s.max ? "Restore panel" : "Maximize panel"; }
+    const dockBtn = V.$("#drawer-dock");
+    if (dockBtn) { V.mount(dockBtn, V.icon(bottom ? "dock-right" : "dock-bottom")); dockBtn.classList.toggle("on", bottom);
+      dockBtn.title = bottom ? "Dock to the right" : "Dock to the bottom"; }
+  }
+  function toggleDrawerMax() { const s = drawerState(); s.max = !s.max; saveDrawerState(s); applyDrawerState(); }
+  function cycleDrawerDock() { const s = drawerState(); s.dock = (s.dock === "bottom") ? "right" : "bottom"; s.max = false; saveDrawerState(s); applyDrawerState(); }
+  function installDrawerControls() {
+    const el = V.$("#drawer"); const dz = V.$("#drawer-dz"); if (!el || !dz) return;
+    let drag = null;
+    dz.addEventListener("pointerdown", function (e) {
+      const s = drawerState(); if (s.max) return;            // nothing to resize while maximized
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      drag = { bottom: s.dock === "bottom", startX: e.clientX, startY: e.clientY, startW: r.width, startH: r.height };
+      dz.classList.add("active"); el.classList.add("resizing");
+      try { dz.setPointerCapture(e.pointerId); } catch (_e) { /* older engines: falls back to window move */ }
+    });
+    dz.addEventListener("pointermove", function (e) {
+      if (!drag) return;
+      if (drag.bottom) {
+        let hh = drag.startH - (e.clientY - drag.startY);     // drag the top edge UP = taller
+        el.style.height = Math.max(160, Math.min(window.innerHeight * 0.94, hh)) + "px";
+      } else {
+        let ww = drag.startW - (e.clientX - drag.startX);      // panel hugs the right edge: drag LEFT = wider
+        el.style.width = Math.max(320, Math.min(window.innerWidth * 0.94, ww)) + "px";
+      }
+    });
+    function endDrag() {
+      if (!drag) return;
+      // Persist the size we actually APPLIED this drag (the inline style), not a re-measured rect — they
+      // agree in a browser, and this is the value the operator dragged to.
+      const s = drawerState();
+      if (drag.bottom) s.height = parseInt(el.style.height, 10) || Math.round(el.getBoundingClientRect().height);
+      else s.width = parseInt(el.style.width, 10) || Math.round(el.getBoundingClientRect().width);
+      saveDrawerState(s);
+      drag = null; dz.classList.remove("active"); el.classList.remove("resizing");
+    }
+    dz.addEventListener("pointerup", endDrag);
+    dz.addEventListener("pointercancel", endDrag);
+    applyDrawerState();                                       // paint the remembered state at boot
+  }
 
   function toggleTheme() {
     const cur = document.documentElement.getAttribute("data-theme");
