@@ -113,6 +113,16 @@ def test_target_is_rendered_in_the_trusted_header():
     assert "NOT a hostname" in user
 
 
+def test_system_prompt_documents_the_error_based_sqli_redrive_fields():
+    """The non-destructive SQLi FACT path needs the model to fill extracted_info with the exact fields the
+    engine's re-drive spec reads (bug_class / insertion_point / request_payload). Guard that the roster
+    prompt still documents them, so the model can trigger the oracle re-drive instead of only ever proposing
+    a destructive tool."""
+    from vigil_integration.live.think_claude import _SYSTEM_PROMPT
+    for needle in ("error_based_sqli", "insertion_point", "request_payload", "exploit_succeeded"):
+        assert needle in _SYSTEM_PROMPT, f"system prompt no longer documents {needle!r} for the re-drive path"
+
+
 def test_no_target_keeps_the_header_backward_compatible():
     from vigil_integration.live.think_claude import _build_messages
     st = AgentState(engagement_slug="loopback", objective="probe", phase=Phase.INFORMATIONAL)

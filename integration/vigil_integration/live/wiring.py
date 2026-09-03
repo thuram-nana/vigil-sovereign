@@ -354,6 +354,13 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     prov = config.provisioned or provision_authority(
         slug=config.slug, scope=config.scope, base_dir=config.base_dir, vault=op_vault)
 
+    # Materialize the CRUCIBLE charter form of this run's LOOPBACK authorization so the T2 SQLi re-drive's
+    # HttpExecutor scope gate (which reads targets/<slug>/charter.md) agrees with the engine's own signed
+    # --scope authority. Loopback-only + never-overwrite + honestly-labelled; a no-op for non-loopback scope
+    # or an existing charter. Without this, an autonomous engage's confirmed SQLi stays a LEAD (re-drive
+    # refused as charter_missing). See ensure_loopback_charter.
+    ensure_loopback_charter(config.slug, config.scope)
+
     # -- attestation (WS-6): operator identity + signer + durable ledger writer ---------------------
     op_kp = config.operator_keypair or load_or_create_operator_keypair(
         path=str(base / "operator.key"), vault=op_vault)
@@ -1015,6 +1022,67 @@ def coerce_int_safe(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _host_is_loopback(host: str) -> bool:
+    """True IFF ``host`` is a loopback literal (127.0.0.0/8 or ::1) or ``localhost``."""
+    import ipaddress
+    h = str(host or "").strip().strip("`").rstrip(".").lower()
+    if not h:
+        return False
+    if h == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(h.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def ensure_loopback_charter(slug: str, scope: Sequence[str]) -> Optional[str]:
+    """Materialize a signed CRUCIBLE charter for ``slug`` scoped to ``scope`` when — and ONLY when —
+    every in-scope host is a loopback literal (the owner's own machine).
+
+    WHY: the integration engine authorizes tool calls through the signed ``--scope`` authority (its own
+    executor's egress guard), but the T2 SQLi re-drive rides a CRUCIBLE ``HttpExecutor`` whose scope gate
+    reads ``targets/<slug>/charter.md`` (``ethics.require_charter_signed`` + ``require_in_scope``). An
+    autonomously-launched engage (e.g. the chat's per-session slug) has no charter file, so the re-drive is
+    refused as ``charter_missing`` → ``reachable=False`` → a confirmed SQLi stays a LEAD instead of a FACT,
+    even though the engine's own executor reached the same host. This writes the charter form of the SAME
+    authorization the run already enforces so BOTH gates agree.
+
+    FAIL-CLOSED + honest: (1) writes ONLY when EVERY scope host is loopback — a non-loopback target still
+    requires a real, human-signed charter (this never auto-authorizes an external host); (2) NEVER overwrites
+    an existing charter (a real one wins); (3) the ``Signed:`` line is honestly labelled as an auto-charter
+    for an owner loopback owner-test, not a forged human signature. Returns the charter path written, or None
+    (nothing written / not applicable / any error — never raises into engine construction)."""
+    try:
+        hosts = [str(h).strip() for h in (scope or ()) if str(h).strip()]
+        if not hosts or not all(_host_is_loopback(h) for h in hosts):
+            return None    # external host in scope → require a real signed charter (fail-closed)
+        from framework.v2.common import paths as _paths
+        cp = _paths.charter_path(slug)
+        if cp.exists():
+            return None    # respect an existing (possibly human-signed) charter — never overwrite
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        rows = "\n".join(f"| {h} | owner loopback (auto-provisioned) |" for h in hosts)
+        date = datetime.date.today().isoformat()
+        charter = (
+            f"# Engagement Charter — {slug}\n\n"
+            "Auto-provisioned by `vigil engage` for an OWNER LOOPBACK owner-test. This materializes, in the\n"
+            "CRUCIBLE charter form the re-drive scope gate reads, the SAME loopback authorization the run\n"
+            "already enforces end-to-end (the signed `--scope` authority + the console's `is_loopback` gate).\n"
+            "It is written ONLY when every in-scope host is a loopback literal, and never overwrites an\n"
+            "existing charter.\n\n"
+            "## 2. In-scope systems\n\n"
+            "| Host | Notes |\n|------|-------|\n"
+            f"{rows}\n\n"
+            "## 3. Authorization\n\n"
+            f"Signed: `vigil-engage auto-charter (owner loopback)`  Date: `{date}`\n"
+        )
+        cp.write_text(charter, encoding="utf-8")
+        return str(cp)
+    except Exception:  # noqa: BLE001 — charter provisioning is best-effort; failure just leaves the re-drive
+        return None    # LEAD-only (fail-closed), never a crash in engine construction
 
 
 def _build_gate(prov: Provisioned, *, ceiling: str = "A1",

@@ -474,6 +474,19 @@ Respond with one JSON object with an "action" field, one of:
 You may also include "reasoning": str and an "output_analysis" object with your CLAIMS about the prior
 tool output (exploit_succeeded, verdict, findings[]). Those claims are LEADS only — never facts.
 
+When a prior tool result shows an ERROR-BASED SQL INJECTION signature (a database error surfaced in the
+response — e.g. "SQL error", "unrecognized token", "syntax error near", an OperationalError — or a clear
+boolean/error differential between a benign value and an injected quote), set exploit_succeeded=true AND
+fill "extracted_info" so VIGIL's oracle can RE-VERIFY it against fresh target bytes (its re-drive is what
+mints the FACT — your claim alone never does):
+  "output_analysis": {{"exploit_succeeded": true, "extracted_info": {{
+     "bug_class": "error_based_sqli",
+     "insertion_point": "<the injected parameter name, e.g. q>",
+     "request_payload": "<the exact payload that triggered the DB error, e.g. '>" }}}}
+Keep the SAME use_tool decision's tool_args pointed at the vulnerable endpoint URL (scheme://host:port/path)
+— the oracle re-drives THAT endpoint with the payload on the named parameter and confirms independently.
+This is the non-destructive path to a confirmed SQLi FACT; it needs no destructive tool.
+
 For "use_tool", tool_name MUST be EXACTLY one of these REGISTERED tools — any other name is refused by the
 executor ("no argv builder"), so never invent names like "http_get"/"http_request":
   - "httpx"   — HTTP probe + fingerprint (status, headers, tech). USE THIS for the FIRST recon of a web target.
