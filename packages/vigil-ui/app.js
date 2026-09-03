@@ -7746,15 +7746,23 @@
     }
 
     function renameChat(s) {
+      // S12: a proper modal (Esc/backdrop-cancel, focus-managed) instead of window.prompt.
       const cur = titleOf(s.id);
-      const name = window.prompt("Rename chat:", cur === "(empty)" ? "" : cur);
-      if (name === null) return;                 // cancelled
-      const t = String(name).trim();
-      if (!t) { V.toast("Title must not be empty.", true); return; }
-      V.postJSON(OFF("/api/chat/rename"), { chat_id: s.id, title: t }).then(function (d) {
-        if (d && d.error) { V.toast(d.error, true); return; }
-        loadChatList().then(function () { drawSessions(); drawMain(); });
-      }).catch(function (e) { V.toast(String(e), true); });
+      const nameInput = h("input.input", { type: "text", value: cur === "(empty)" ? "" : cur,
+        placeholder: "Chat title", style: { width: "100%" } });
+      function save() {
+        const t = (nameInput.value || "").trim();
+        if (!t) { V.toast("Title must not be empty.", true); if (nameInput.focus) nameInput.focus(); return; }
+        if (m) m.close();
+        V.postJSON(OFF("/api/chat/rename"), { chat_id: s.id, title: t }).then(function (d) {
+          if (d && d.error) { V.toast(d.error, true); return; }
+          loadChatList().then(function () { drawSessions(); drawMain(); });
+        }).catch(function (e) { V.toast(String(e), true); });
+      }
+      nameInput.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); save(); } });
+      const m = openModal("Rename chat", h("div.stack", null, [nameInput]), [
+        h("button.btn.primary", { onClick: save }, [V.icon("check"), "Rename"]),
+      ]);
     }
 
     function deleteChat(s) {
@@ -7783,8 +7791,11 @@
           key: "att" + (++C.seq), name: String(f.name || "file"), size: Number(f.size) || 0,
           status: "uploading", pct: 0, err: "", refusals: [], consented: false, sent: false,
           id: "", sha256: "", kind: "", files: null, fileList: [], more: 0, path: "",
-          abortRef: { aborted: false },
+          abortRef: { aborted: false }, previewUrl: "",
         };
+        // S11: a local image thumbnail (object URL from the picked File — never leaves the browser; the
+        // actual bytes still upload + gate exactly as before).
+        try { if (f.type && f.type.indexOf("image/") === 0) a.previewUrl = URL.createObjectURL(f); } catch (e) {}
         C.attach.push(a);
         drawAttach();
         V.uploadChunked({
@@ -7895,7 +7906,9 @@
       const cls = a.status === "failed" ? ".chip.bad"
         : ((a.status === "uploading" || a.status === "removing") ? ".chip.busy"
           : (a.sent ? ".chip.sent" : ".chip"));
-      const bits = [h("span.nm", { title: a.name }, a.name), h("span.meta", null, fmtBytes(a.size))];
+      const bits = [];
+      if (a.previewUrl) bits.push(h("img.att-thumb", { src: a.previewUrl, alt: a.name, title: a.name }));   // S11
+      bits.push(h("span.nm", { title: a.name }, a.name), h("span.meta", null, fmtBytes(a.size)));
       if (a.files != null) bits.push(h("span.meta", null, "· " + a.files + " file" + (a.files === 1 ? "" : "s")));
       if (a.status === "uploading") {
         bits.push(h("span.bar", null, h("span.bar-fill", { style: { width: a.pct + "%" } })));
