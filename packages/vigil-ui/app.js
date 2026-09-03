@@ -8728,6 +8728,11 @@
         if (r && r.run_id && r.slug) setEngagement(String(r.slug));   // a LAUNCH turn scopes to its run
         if (r && r.chat_id) adoptChatId(String(r.chat_id));
         if (r && Array.isArray(r.hypotheses)) C.hyps = r.hypotheses;  // Phase C: show the ledger at once
+        // S7: remember this turn's token usage + accumulate a running context estimate for the meter.
+        if (r && r.usage && (r.usage.input_tokens != null || r.usage.output_tokens != null)) {
+          C.lastUsage = r.usage;
+          C.ctxTokens = (C.ctxTokens || 0) + (r.usage.input_tokens || 0) + (r.usage.output_tokens || 0);
+        }
         (outgoing || []).forEach(function (a) { a.sent = true; });
         input.value = ""; target.value = "";
       }
@@ -8858,7 +8863,8 @@
           l.appendChild(wrap);
         }
         const te = V.$("#chat-stream-text");
-        if (te) te.textContent = (C.stream.text || "") + " ▌";
+        // S7: an honest thinking indicator — until the first token flows, the model is thinking.
+        if (te) te.textContent = C.stream.text ? (C.stream.text + " ▌") : "Thinking…";
         l.scrollTop = l.scrollHeight;
       }
       function removeStreamBubble() { const w = V.$("#chat-stream-wrap"); if (w && w.parentNode) w.parentNode.removeChild(w); }
@@ -8895,6 +8901,11 @@
           toolRow,
         ]),
         h("div.chat-composer", null, [attachBtn, fileInput, input, send]),
+        // S7: per-turn token usage + a running context estimate for this conversation.
+        (C.lastUsage ? h("div.chat-usage", null,
+          "Last turn: " + (C.lastUsage.input_tokens != null ? C.lastUsage.input_tokens + " in" : "—")
+          + " / " + (C.lastUsage.output_tokens != null ? C.lastUsage.output_tokens + " out" : "—") + " tokens"
+          + (C.ctxTokens ? "  ·  ~" + C.ctxTokens.toLocaleString() + " this conversation" : "")) : null),
         h("div.hint", { style: { marginTop: "6px" } },
           "Attachments are read on this machine and only sent to the model after you approve them once. "
           + "An answer about them is a lead — a finding becomes a fact only when an oracle confirms it in a "

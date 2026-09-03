@@ -1968,7 +1968,17 @@ def _reason_stream_cloud(chat_id: str, question: str, *, reason_mode: str, model
                        if getattr(b, "type", None) == "text").strip()
     if not text:
         return {"ok": False, "error": "the model returned nothing usable; the gated assessment still runs."}
-    return _reason_finish(chat_id, text, view, notes, coverage)
+    res = _reason_finish(chat_id, text, view, notes, coverage)
+    # S7: surface token usage so the UI can show a per-turn tokens / running-context indicator. Best-effort;
+    # a missing usage object just omits the meter (never an error).
+    try:
+        u = getattr(final, "usage", None)
+        if isinstance(res, dict) and u is not None:
+            res["usage"] = {"input_tokens": getattr(u, "input_tokens", None),
+                            "output_tokens": getattr(u, "output_tokens", None)}
+    except Exception:  # noqa: BLE001
+        pass
+    return res
 
 
 def _reason(chat_id: str, question: str, *, reason_mode: str = "ask", model: str = "") -> dict:
