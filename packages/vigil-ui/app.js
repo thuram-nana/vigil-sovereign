@@ -10052,6 +10052,10 @@
                // S1: the approve/deny/deny-&-redirect interrupt in CHAT — the PBOX follows the run globally,
                // so it surfaces approvals on any screen (chat included) via the SHARED makeApprovalUX.
                approvalMem: { popped: {}, seen: false, modal: null }, pendingApprovals: [],
+               // S1b: OFFENSE engage approvals (request_id-keyed, keyless broker) — a chat-launched engage's
+               // queued tool lives HERE, not in the sovereign snapshot the seq-based AUX polls. Own baseline
+               // + one-at-a-time guard (mirrors approvalMem, keyed by request_id).
+               offenseApprovals: [], offenseMem: { popped: {}, seen: false, modal: null, base: ".vigil-live" },
                ui: { open: false, dismissed: false } };
   var pboxApprovalModal = null;
   var PBOX_AUX = makeApprovalUX({
@@ -10059,6 +10063,59 @@
     slugOf: function () { return PBOX.run && PBOX.run.slug; },
     after: function () { pboxApprovalPoll(); },
     onModal: function (m) { pboxApprovalModal = m; } });
+
+  // S1b: the OFFENSE-approval interrupt for chat. Offense engage approvals are request_id-keyed and are
+  // signed route-via-sovereign (offenseApprove/offenseDeny → SOV /api/action; the cockpit signs with the
+  // owner key, the offense console stays keyless), so they need their own card/pop distinct from the
+  // seq-based sovereign AUX. Same discipline: baseline what is already queued on entry (no nag), then
+  // interrupt for a NEW one, one modal at a time across BOTH approval kinds.
+  function pboxOffenseCard(p) {
+    var refresh = function () { pboxApprovalPoll(); };
+    return h("div.approval", null, [
+      h("div.ah", null, [V.icon("key"),
+        h("span.t", null, (p.tool_name || "action") + " → " + (p.target || "—")),
+        h("span.pill.sm", null, "offense")]),
+      p.args_preview ? h("div.why", null,
+        h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } }, p.args_preview)) : null,
+      h("div.acts", null, [
+        h("button.btn.owner", { onClick: function () { offenseApprove(p, refresh); } }, [V.icon("check"), "Approve"]),
+        h("button.btn.danger", { onClick: function () { offenseDeny(p, refresh); } }, [V.icon("x"), "Deny"]),
+      ]),
+    ]);
+  }
+  function pboxOffensePop(p) {
+    PBOX.offenseMem.popped[p.request_id] = true;   // never re-pop the same request (dismiss = use the card)
+    var cmd = "vigil approve sign --base-dir " + (PBOX.offenseMem.base || ".vigil-live")
+            + " --request-id " + p.request_id;
+    var body = h("div.stack", null, [
+      h("div.why", null, "The agent's next step needs your signed approval before it can run."),
+      h("div.kv", null, [
+        h("span.k", null, "Tool"), h("span.v", null, p.tool_name || "action"),
+        h("span.k", null, "Target"), h("span.v.mono", null, p.target || "—"),
+      ]),
+      p.args_preview ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } }, p.args_preview) : null,
+      h("p.helper", null, "Approve signs it in the sovereign cockpit with your owner key (it never reaches "
+        + "the offense console) and the run continues. Deny refuses it. You can also sign from a terminal:"),
+      h("code.mono", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all", display: "block" } }, cmd),
+    ]);
+    var done = function () { if (m) { try { m.close(); } catch (e) {} } PBOX.offenseMem.modal = null; };
+    var refresh = function () { pboxApprovalPoll(); };
+    var m = openModal("Approve this action?", body, [
+      h("button.btn.danger", { onClick: function () { offenseDeny(p, refresh); done(); } }, [V.icon("x"), "Deny"]),
+      h("button.btn.owner", { onClick: function () { offenseApprove(p, refresh); done(); } }, [V.icon("check"), "Approve"]),
+    ], { onCancel: function () { PBOX.offenseMem.modal = null; } });
+    PBOX.offenseMem.modal = m;
+  }
+  function pboxOffenseMaybePop(pend) {
+    if (PBOX.offenseMem.modal || PBOX.approvalMem.modal) return;   // one modal at a time across both kinds
+    if (!PBOX.offenseMem.seen) { pend.forEach(function (p) { PBOX.offenseMem.popped[p.request_id] = true; }); PBOX.offenseMem.seen = true; return; }
+    for (var i = 0; i < pend.length; i++) { if (!PBOX.offenseMem.popped[pend[i].request_id]) { pboxOffensePop(pend[i]); return; } }
+  }
+  function pboxOffenseReset() {
+    PBOX.offenseMem.popped = {}; PBOX.offenseMem.seen = false;
+    if (PBOX.offenseMem.modal) { try { PBOX.offenseMem.modal.close(); } catch (e) {} }
+    PBOX.offenseMem.modal = null;
+  }
 
   function pboxLoadUI() {
     try {
@@ -10241,10 +10298,16 @@
       ]),
     ]);
     var step = h("div.pb-step#pb-step", null, pboxStepText() || "waiting…");
-    // S1: pending approvals for the followed run — cards (approve / deny / deny-&-redirect) right in the box.
-    var approvals = (PBOX.pendingApprovals && PBOX.pendingApprovals.length)
+    // S1/S1b: pending approvals for the followed run — sovereign (seq-based) AND offense-engage (request_id)
+    // cards right in the box, so a chat-launched engage's queued tool is actionable without leaving the chat.
+    var sovCards = (PBOX.pendingApprovals && PBOX.pendingApprovals.length)
+      ? PBOX.pendingApprovals.map(PBOX_AUX.card) : [];
+    var offCards = (PBOX.offenseApprovals && PBOX.offenseApprovals.length)
+      ? PBOX.offenseApprovals.map(pboxOffenseCard) : [];
+    var allCards = sovCards.concat(offCards);
+    var approvals = allCards.length
       ? h("div.pb-approvals", null, [h("div.pb-approvals-h", null, [V.icon("key"), h("span", null, "Waiting for your approval")])]
-          .concat(PBOX.pendingApprovals.map(PBOX_AUX.card)))
+          .concat(allCards))
       : null;
     var body;
     if (PBOX.run && PBOX.run.stream === "none") {
@@ -10287,6 +10350,16 @@
       if ((location.hash || "").indexOf("#/live") !== 0) PBOX_AUX.maybePop(PBOX.pendingApprovals);
       if (PBOX.ui.open && !PBOX.ui.dismissed) pboxRenderShell();
     }).catch(function () { /* sovereign plane offline — approvals just won't show */ });
+    // S1b: ALSO surface OFFENSE engage approvals. The chat launches an offense `vigil engage`; its queued
+    // higher-tier tool is published to the keyless offense broker (OFF /api/approvals/), which the sovereign
+    // snapshot above does NOT carry — so without this a chat-launched engage that paused at awaiting_approval
+    // would never surface its approval in the chat (the gap this closes).
+    V.getJSON(OFF("/api/approvals/loopback")).then(function (d) {
+      PBOX.offenseApprovals = (d && d.pending) || [];
+      PBOX.offenseMem.base = (d && d.base_dir) || PBOX.offenseMem.base;
+      if ((location.hash || "").indexOf("#/live") !== 0) pboxOffenseMaybePop(PBOX.offenseApprovals);
+      if (PBOX.ui.open && !PBOX.ui.dismissed) pboxRenderShell();
+    }).catch(function () { /* offense plane offline — offense approvals just won't show */ });
   }
   function pboxFollow(run) {
     // (re)subscribe to a run's live feed. Held in PBOX.es (never liveES), so a route change can't kill it.
@@ -10296,6 +10369,7 @@
     if (run && PBOX.ui.dismissed) { PBOX.ui.dismissed = false; pboxSaveUI(); }
     PBOX.run = run; PBOX.following = run ? run.run_id : "";
     PBOX_AUX.reset();   // S1: re-baseline approvals for the newly-followed run
+    pboxOffenseReset(); // S1b: re-baseline OFFENSE approvals too
     if (run && run.stream === "blackboard" && run.slug) {
       PBOX.es = V.sse(OFF("/api/blackboard?slug=" + encodeURIComponent(run.slug)), pboxOnEvent, function () {});
     } else if (run && run.stream === "progress") {
