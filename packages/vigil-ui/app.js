@@ -2964,15 +2964,27 @@
       const running = run.status === "running";
       const statusPill = running ? V.pill("Live", "live", null) : V.pill(run.status || "done", run.status === "error" ? "danger" : "idle", null);
       const elapsed = L.started ? fmtElapsed((Date.now() / 1000) - L.started) : "—";
-      // TWO distinct controls (Claude-Code-style): "Stop run" cancels THIS run's process only — so one of
-      // two same-prompt runs can be killed without touching the other; "Halt engagement" is the heavier
-      // kill-switch that stops EVERY run of this job and blocks new tool calls until cleared.
+      // Lifecycle controls (Claude-Code-style). WHILE RUNNING: "Stop run" cancels THIS run's process only
+      // (its memory — the signed engagement spine — is KEPT, so it can be resumed; siblings keep going), and
+      // "Halt engagement" is the heavier kill-switch that stops EVERY run of the job. ONCE ENDED: "Resume
+      // run" continues it from the last checkpoint (memory intact), or restarts if the run's kind can't
+      // resume mid-flight. So an operator can pause (Stop → later Resume) or end (Stop and walk away — the
+      // memory stays on the spine as history) without ever losing progress.
+      const ended = !running && !!run.status &&
+        ["error", "interrupted", "cancelled", "done", "completed"].indexOf(run.status) >= 0;
       const stop = h("button.btn.danger", { disabled: !running || !run.run_id,
-        title: "Stop just THIS run — signals its process (SIGTERM→SIGKILL). Other runs of the same job keep going.",
+        title: "Stop just THIS run — signals its process (SIGTERM→SIGKILL). Its memory (the engagement spine) is KEPT, so you can Resume it later. Other runs of the same job keep going.",
         onClick: cancelThisRun }, [V.icon("x"), "Stop run"]);
       const halt = h("button.btn", { disabled: !running || !run.slug,
         title: "Emergency halt: trip this engagement's kill-switch — stops EVERY run of this job and blocks new tool calls until you clear it in Approvals & Safety.",
         onClick: haltEngagement }, [V.icon("shield"), "Halt engagement"]);
+      const resume = (ended && run.run_id) ? h("button.btn.owner", {
+        title: run.resumable
+          ? "Resume this run from its last signed checkpoint — its memory is intact, so it continues where it left off."
+          : "Relaunch this run — this run's kind can't resume mid-flight, so it restarts from the beginning (a new linked run).",
+        onClick: function () { runRetry(run.run_id, function () { selectRun(run.run_id); }); } },
+        [V.icon("play"), run.resumable ? "Resume run" : "Restart run"]) : null;
+      const controls = running ? [stop, halt] : (resume ? [resume] : []);
       return [
         h("div", { style: { display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" } }, [
           statusPill,
@@ -2980,9 +2992,10 @@
           h("span.pill.sm", null, run.mode || "url"),
           // the run id distinguishes two runs of the SAME prompt/target in the selector + when killing one
           run.run_id ? h("span.pill.sm.mono", { title: "This run's id — use it to tell two same-prompt runs apart" }, "run " + run.run_id) : null,
+          // once ended, say the memory is kept so "stopped" never reads as "lost"
+          ended ? h("span.pill.sm", { title: "This run's memory (the signed engagement spine) is kept — Resume continues from the last checkpoint" }, "memory kept") : null,
           h("span.muted", { style: { marginLeft: "auto" } }, [V.icon("live"), " ", elapsed]),
-          stop, halt,
-        ]),
+        ].concat(controls)),
         h("div.muted", { style: { marginTop: "8px" } }, "Phase: " + phaseLabel()),
         h("div.grid.cols-4", { style: { marginTop: "12px" } }, [
           V.tile("Actions", String(c.calls), "tool calls"),
