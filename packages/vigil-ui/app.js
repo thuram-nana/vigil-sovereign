@@ -2958,15 +2958,24 @@
       const running = run.status === "running";
       const statusPill = running ? V.pill("Live", "live", null) : V.pill(run.status || "done", run.status === "error" ? "danger" : "idle", null);
       const elapsed = L.started ? fmtElapsed((Date.now() / 1000) - L.started) : "—";
-      const stop = h("button.btn.danger", { disabled: !running || !run.slug, title: "Trip this engagement's kill-switch (offense-side hard stop)",
-        onClick: stopRun }, [V.icon("x"), "Stop run"]);
+      // TWO distinct controls (Claude-Code-style): "Stop run" cancels THIS run's process only — so one of
+      // two same-prompt runs can be killed without touching the other; "Halt engagement" is the heavier
+      // kill-switch that stops EVERY run of this job and blocks new tool calls until cleared.
+      const stop = h("button.btn.danger", { disabled: !running || !run.run_id,
+        title: "Stop just THIS run — signals its process (SIGTERM→SIGKILL). Other runs of the same job keep going.",
+        onClick: cancelThisRun }, [V.icon("x"), "Stop run"]);
+      const halt = h("button.btn", { disabled: !running || !run.slug,
+        title: "Emergency halt: trip this engagement's kill-switch — stops EVERY run of this job and blocks new tool calls until you clear it in Approvals & Safety.",
+        onClick: haltEngagement }, [V.icon("shield"), "Halt engagement"]);
       return [
         h("div", { style: { display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" } }, [
           statusPill,
           h("b.mono", null, run.target || run.slug || run.run_id),
           h("span.pill.sm", null, run.mode || "url"),
+          // the run id distinguishes two runs of the SAME prompt/target in the selector + when killing one
+          run.run_id ? h("span.pill.sm.mono", { title: "This run's id — use it to tell two same-prompt runs apart" }, "run " + run.run_id) : null,
           h("span.muted", { style: { marginLeft: "auto" } }, [V.icon("live"), " ", elapsed]),
-          stop,
+          stop, halt,
         ]),
         h("div.muted", { style: { marginTop: "8px" } }, "Phase: " + phaseLabel()),
         h("div.grid.cols-4", { style: { marginTop: "12px" } }, [
@@ -2977,12 +2986,28 @@
         ]),
       ];
     }
-    function stopRun() {
-      if (!L.run || !L.run.slug) return;
-      V.postJSON(OFF("/api/killswitch/" + encodeURIComponent(L.run.slug) + "/trip"), { reason: "stopped from Live view" })
+    // Per-run cancel: SIGTERM→SIGKILL only THIS run's process (server: /api/run/<id>/cancel → cancel_run).
+    // The one-of-two-same-prompt-runs control — it never touches sibling runs or the kill-switch.
+    function cancelThisRun() {
+      const run = L.run; if (!run || !run.run_id) return;
+      V.postJSON(OFF("/api/run/" + encodeURIComponent(run.run_id) + "/cancel"), {})
+        .then(function (r) {
+          if (r && r.error) { V.toast(r.error, true); return; }
+          const st = (r && r.status) || "cancelled";
+          // honest wording: say what the server reports, and that siblings are untouched
+          V.toast("Run " + run.run_id + " is now " + st + (r && r.terminated ? " (process stopped)" : "") + ". Other runs of this job keep going.");
+          run.status = st; updateHeader();
+        })
+        .catch(function (e) { V.toast((e && e.message) || "Could not stop this run", true); });
+    }
+    // Emergency halt for the WHOLE engagement — the kill-switch (all runs of this slug + new tool calls).
+    function haltEngagement() {
+      const run = L.run; if (!run || !run.slug) return;
+      if (!confirm("Halt the WHOLE engagement \"" + run.slug + "\"?\n\nThis trips the kill-switch: every run of this job stops and no new tool calls run until you clear it in Approvals & Safety. To stop just this one run, use \"Stop run\" instead.")) return;
+      V.postJSON(OFF("/api/killswitch/" + encodeURIComponent(run.slug) + "/trip"), { reason: "halted from Live view" })
         .then(function (r) { if (r && r.error) { V.toast(r.error, true); return; } V.toast("Kill-switch tripped — the engagement will halt.");
           L.run.status = "stopping"; updateHeader(); })
-        .catch(function (e) { V.toast((e && e.message) || "Could not stop the run", true); });
+        .catch(function (e) { V.toast((e && e.message) || "Could not halt the engagement", true); });
     }
 
     // ---- approvals (sovereign plane) ----

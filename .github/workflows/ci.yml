@@ -573,6 +573,7 @@ jobs:
               integration/tests/test_panic.py \
               integration/tests/test_sovereign_bridge_offense.py \
               integration/tests/test_restricted_mode_offense.py \
+              integration/tests/test_per_run_cancel_isolation.py \
               integration/tests/test_mesh_cicd_posture.py -q
           else
             # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
