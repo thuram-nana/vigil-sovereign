@@ -7595,9 +7595,9 @@
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Chat"),
         h("span.sub", null, "Ask in plain language, or attach a zip, files and images and ask about them. Answers are leads; the gated run is what mints facts.")]),
-      h("div#chat-wrap", { style: { display: "flex", gap: "16px", alignItems: "stretch", marginTop: "12px", minHeight: "60vh" } }, [
-        h("div#chat-sessions", { style: { width: "240px", flex: "0 0 240px", display: "flex", flexDirection: "column", gap: "8px" } }, h("div.empty", null, "…")),
-        h("div#chat-main", { style: { flex: "1 1 auto", display: "flex", flexDirection: "column", minWidth: "0" } }, h("div.empty", null, "Loading…")),
+      h("div#chat-wrap", null, [
+        h("div#chat-sessions", null, h("div.empty", null, "…")),
+        h("div#chat-main", null, h("div.empty", null, "Loading…")),
       ]),
     ]);
 
@@ -7716,30 +7716,30 @@
 
     function drawSessions() {
       const host = V.$("#chat-sessions"); if (!host) return;
-      const rows = [h("button.btn.primary", { style: { width: "100%" }, onClick: function () { openSession(""); } }, [V.icon("bolt"), "New chat"])];
+      const rows = [
+        h("button.btn.primary.chat-new", { onClick: function () { openSession(""); } }, [V.icon("bolt"), "New chat"]),
+        h("div.chat-rail-cap", null, "Chats"),
+      ];
       if (!C.sessions.length) {
-        rows.push(h("div.hint", { style: { marginTop: "8px" } }, "No saved chats yet. Start one above."));
+        rows.push(h("div.hint", null, "No saved chats yet. Start one above."));
       } else {
         C.sessions.forEach(function (s) {
           const active = s.id === C.id;
           const turns = turnsOf(s.id);
           const links = (s.connections || []).length;
-          const main = h("button.btn" + (active ? ".owner" : ""), {
-            style: { flex: "1 1 auto", minWidth: "0", textAlign: "left", justifyContent: "flex-start", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+          const main = h("button.chat-session" + (active ? ".on" : ""), {
             title: titleOf(s.id) + (links ? ("\ndraws on " + links + " other chat" + (links === 1 ? "" : "s")) : ""),
             onClick: function () { openSession(s.id); },
           }, [
-            h("span", null, titleOf(s.id)),
-            h("span.dim", { style: { marginLeft: "6px", fontSize: "var(--fs-xs)" } },
-              (turns != null ? "· " + turns : "") + (links ? " · " + links + "⛓" : "")),
+            h("span.chat-session-t", null, titleOf(s.id)),
+            h("span.chat-session-m", null,
+              (turns != null ? turns + (turns === 1 ? " turn" : " turns") : "") + (links ? " · " + links + "⛓" : "")),
           ]);
-          const rn = h("button.btn", { title: "Rename chat", "aria-label": "Rename chat",
-            style: { flex: "0 0 auto", padding: "0 8px" },
+          const rn = h("button.iconbtn.sm", { title: "Rename chat", "aria-label": "Rename chat",
             onClick: function (e) { if (e) e.stopPropagation(); renameChat(s); } }, V.icon("edit"));
-          const del = h("button.btn", { title: "Delete chat", "aria-label": "Delete chat",
-            style: { flex: "0 0 auto", padding: "0 8px" },
+          const del = h("button.iconbtn.sm", { title: "Delete chat", "aria-label": "Delete chat",
             onClick: function (e) { if (e) e.stopPropagation(); deleteChat(s); } }, V.icon("trash"));
-          rows.push(h("div", { style: { display: "flex", gap: "4px", alignItems: "stretch" } }, [main, rn, del]));
+          rows.push(h("div.chat-session-row" + (active ? ".on" : ""), null, [main, rn, del]));
         });
       }
       V.mount(host, rows);
@@ -8565,7 +8565,7 @@
         h("button.btn.sm.owner", { onClick: function () { settingsAct({ action: "set_effort", effort: effortSel.value, reason: "set effort from Chat" }, "System effort set — effective on the next `vigil up`.", load); } }, "Set system effort"),
       ]) : h("div.hint", { style: { marginBottom: "8px" } }, "The system-wide model & effort controls need the owner plane (start with `vigil up`).");
 
-      const list = h("div#chat-list.dropzone", { style: { flex: "1 1 auto", overflowY: "auto", padding: "4px 2px", border: "1px solid var(--border)", borderRadius: "var(--r-3)", background: "var(--bg-1)" } },
+      const list = h("div#chat-list.dropzone.chat-transcript", null,
         C.messages.length ? C.messages.map(bubble)
           : h("div.empty", { style: { padding: "24px" } }, [h("div.big", null, "What should we test?"),
               h("p", null, "Ask in plain language — “scan http://127.0.0.1:8080 for auth bugs” — or drop a zip of a codebase, loose files or screenshots here and ask about them (“does this have weaknesses in its authentication?”)."),
@@ -9005,34 +9005,39 @@
           ? h("div", { style: { flex: "1 1 100%" } }, answerOptions(_pendingQ.options))
           : h("button.btn.sm.owner", { onClick: function () { try { input.focus(); input.scrollIntoView({ block: "center" }); } catch (e) {} } }, "Reply now"),
       ]) : null;
-      V.mount(host, [
-        controls,
-        askBanner,
-        list,
-        h("div#chat-attach"),
-        h("div#chat-links"),
-        h("div#chat-hyps"),
-        // F2 — the accreted controls grouped into ONE labeled "Run options" cluster (how the NEXT message is
-        // handled: target, mode, reasoning depth, model sovereignty, the agentic engine, a fireteam), visually
-        // set apart from the message composer below. Same controls, same behaviour — just legible.
-        h("div.chat-runopts", null, [
-          h("div.chat-runopts-cap", null, "Run options — how the next message is handled"),
-          h("div.chat-runopts-row", null, [target, modeSel, reasonSel, sessModelSel, agenticTog, fireteamBtn]),
-          modelNote,
-          toolRow,
-        ]),
-        h("div.chat-composer", null, [attachBtn, fileInput, input, send]),
-        // S7: per-turn token usage + a running context estimate for this conversation.
-        (C.lastUsage ? h("div.chat-usage", null,
-          "Last turn: " + (C.lastUsage.input_tokens != null ? C.lastUsage.input_tokens + " in" : "—")
-          + " / " + (C.lastUsage.output_tokens != null ? C.lastUsage.output_tokens + " out" : "—") + " tokens"
-          + (C.ctxTokens ? "  ·  ~" + C.ctxTokens.toLocaleString() + " this conversation" : "")) : null),
-        h("div.hint", { style: { marginTop: "6px" } },
-          "Attachments are read on this machine and only sent to the model after you approve them once. "
-          + "An answer about them is a lead — a finding becomes a fact only when an oracle confirms it in a "
-          + "gated run (scope charter-signed, target-touching steps wait for your approval). The conversation "
-          + "is saved locally under .vigil-live/chats/."),
+      // Clean, professional hierarchy: the TRANSCRIPT is the focus (fills); a single docked COMPOSER CARD
+      // holds the attachments strip, the run-options, the input row, the usage meter and a one-line footer;
+      // secondary CONTEXT (plan checklist + linked chats) sits below; and the system-wide engine settings are
+      // tucked into a collapsed disclosure at the very bottom so they never dominate the conversation.
+      const usage = (C.lastUsage ? h("div.chat-usage", null,
+        "Last turn: " + (C.lastUsage.input_tokens != null ? C.lastUsage.input_tokens + " in" : "—")
+        + " / " + (C.lastUsage.output_tokens != null ? C.lastUsage.output_tokens + " out" : "—") + " tokens"
+        + (C.ctxTokens ? "  ·  ~" + C.ctxTokens.toLocaleString() + " this conversation" : "")) : null);
+      // F2 — run options grouped into ONE compact, collapsible cluster (target/mode/reasoning/model/agentic/
+      // fireteam) so they're one line by default and out of the way when not needed. Same controls, same
+      // behaviour. Open by default the first time; the operator can fold it.
+      const runopts = h("details.chat-runopts", { open: "open" }, [
+        h("summary.chat-runopts-cap", null, [V.icon("gear"), h("span", null, "Run options — how the next message is handled")]),
+        h("div.chat-runopts-row", null, [target, modeSel, reasonSel, sessModelSel, agenticTog, fireteamBtn]),
+        modelNote,
+        toolRow,
       ]);
+      const dock = h("div.chat-dock", null, [
+        h("div#chat-attach"),                                  // attachments strip (drawn by drawAttach)
+        runopts,
+        h("div.chat-composer", null, [attachBtn, fileInput, input, send]),
+        usage,
+        h("div.chat-foot", { title: "Attachments are read on this machine and only sent to the model after you "
+          + "approve them once. A chat answer is a LEAD — a finding becomes a FACT only when an oracle confirms "
+          + "it in a gated run. Conversations are saved locally under .vigil-live/chats/." },
+          [V.icon("info"), h("span", null, "Answers are leads · a gated run mints facts · saved locally")]),
+      ]);
+      const contextPanels = h("div.chat-context", null, [h("div#chat-hyps"), h("div#chat-links")]);
+      const engineSettings = h("details.chat-engine-settings", null, [
+        h("summary", null, [V.icon("gear"), h("span", null, "Engine model & effort — system-wide (not this chat)")]),
+        controls,
+      ]);
+      V.mount(host, [askBanner, list, dock, contextPanels, engineSettings]);
       if (_pendingQ) { try { input.focus(); } catch (e) {} }   // steer the operator straight to the reply box
       drawAttach();
       drawLinks();
