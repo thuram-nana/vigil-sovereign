@@ -8572,7 +8572,10 @@
         title: "Ask the agentic engine to fan out into a bounded fireteam — multiple agents on parallel subtasks (each ≤A2, oracle-bounded). Their steps stream below, attributed per member.",
         onClick: function () { requestFireteam(); } }, [V.icon("brain"), "Fireteam"]);
       const send = h("button.btn.primary", { onClick: doSend }, [V.icon("bolt"), "Send"]);
-      input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); } });
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); return; }
+        if (e.key === "Escape" && C.stream && C.stream.stop) { e.preventDefault(); C.stream.stop(); }   // S4: stop the streaming reply
+      });
 
       // E3 — build the model <select> from the sovereignty-aware roster. A model the current tier FORBIDS is
       // rendered disabled with the reason in its tooltip; the trust class rides each label. If the roster
@@ -8701,14 +8704,18 @@
       // authoritative bubble with its lead badge / proposals / sources / coverage). Any fallback or error
       // routes to the reliable /send path so a turn is never dropped.
       function streamSend(payload, msg, outgoing) {
-        C.stream = { text: "", msg: msg };
+        // S4: an AbortController so the operator can STOP the streaming reply (button + Esc). `aborted` tells
+        // the catch/incomplete paths this was a deliberate Stop (never a dropped connection) so we don't re-send.
+        const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+        let aborted = false;
+        C.stream = { text: "", msg: msg, stop: function () { aborted = true; if (ctrl) { try { ctrl.abort(); } catch (e) {} } } };
         drawStreamBubble();
         // `committed` guards against a DUPLICATE turn (red-pen MEDIUM-1): once the server has sent an
         // event-stream response it has ALREADY persisted the turn (it appends before emitting `done`), so a
         // later abort or a render error must NOT re-POST to /send — that would double-record the turn AND
         // make a second billable model call. We only re-send when the stream never established.
         let committed = false;
-        return streamChat(payload, function (tok) { C.stream.text += tok; drawStreamBubble(); })
+        return streamChat(payload, function (tok) { C.stream.text += tok; drawStreamBubble(); }, ctrl && ctrl.signal)
           .then(function (res) {
             if (res && res.fallback) {                 // not streamable — the server persisted NOTHING → /send
               C.stream = null; removeStreamBubble();
@@ -8717,7 +8724,8 @@
             committed = true;                          // got an event-stream ⇒ the server committed the turn
             if (res && res.incomplete) {               // stream aborted after commit — reload the saved answer
               C.stream = null; removeStreamBubble();
-              V.toast("The connection dropped mid-reply — the answer was saved; reloading it.", false);
+              V.toast(aborted ? "Stopped — reloading whatever the run had already saved."
+                              : "The connection dropped mid-reply — the answer was saved; reloading it.", false);
               return refreshTranscript().then(finishSend);
             }
             afterSendResult(res, outgoing);
@@ -8725,6 +8733,7 @@
           })
           .catch(function () {
             C.stream = null; removeStreamBubble();
+            if (aborted) { V.toast("Stopped.", false); return finishSend(); }   // deliberate Stop — never re-send
             if (committed) return finishSend();        // a post-commit (e.g. render) error — never re-send
             return sendViaPost(payload, outgoing);     // the stream never established — safe to send once
           });
@@ -8734,11 +8743,13 @@
       // "text/event-stream" response streams `token`/`done` events (onToken per delta, resolves with the
       // final result); a JSON response (the server couldn't stream this turn) resolves with {fallback:true}.
       // Same credentials the rest of the page uses (custom header + token); the browser sets Sec-Fetch-Site.
-      function streamChat(payload, onToken) {
+      function streamChat(payload, onToken, signal) {
         const hh = { "X-Requested-With": "vigil-ui", "Content-Type": "application/json" };
         const t = V.token(); if (t) hh["X-SIGIL-Token"] = t;
-        return fetch(OFF("/api/chat/stream"), { method: "POST", headers: hh, credentials: "same-origin",
-            cache: "no-store", body: JSON.stringify(payload) }).then(function (resp) {
+        const opts = { method: "POST", headers: hh, credentials: "same-origin",
+            cache: "no-store", body: JSON.stringify(payload) };
+        if (signal) opts.signal = signal;              // S4: lets the operator abort the streaming reply
+        return fetch(OFF("/api/chat/stream"), opts).then(function (resp) {
           const ct = (resp.headers.get("Content-Type") || "").toLowerCase();
           if (ct.indexOf("text/event-stream") < 0) {
             // not streamable (fallback) or an error status — read JSON and signal fallback
@@ -8786,8 +8797,10 @@
           const textEl = h("div#chat-stream-text", { style: { whiteSpace: "pre-wrap", wordBreak: "break-word" } }, "");
           const box = h("div", { style: { maxWidth: "80%", padding: "10px 12px", borderRadius: "var(--r-3)",
             background: "var(--bg-2)", color: "var(--text-0)", border: "1px solid var(--border)" } },
-            [h("div", { style: { marginBottom: "6px" } },
-               h("span.shield.lead", null, [V.icon("info"), "Lead — streaming…"])), textEl]);
+            [h("div", { style: { marginBottom: "6px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" } },
+               [h("span.shield.lead", null, [V.icon("info"), "Lead — streaming…"]),
+                // S4: stop generating (also Esc in the composer). Keeps the partial shown; reloads saved state.
+                h("button.btn.sm", { title: "Stop generating (Esc)", onClick: function () { if (C.stream && C.stream.stop) C.stream.stop(); } }, [V.icon("x"), "Stop"])]), textEl]);
           wrap = h("div#chat-stream-wrap", null, [
             bubble({ role: "user", text: C.stream.msg }),
             h("div", { style: { display: "flex", justifyContent: "flex-start", margin: "8px 0" } }, box),
