@@ -110,6 +110,9 @@ PersistSpineFn = Callable[[], None]
 SpinePostFn = Callable[..., Optional[int]]
 
 _GENESIS = "0" * 64
+# Display cap (chars) for the REDACTED command-output excerpt carried on a tool_result spine event so the UI
+# can render a real tool-call card. Bounds the event size; the full redacted output stays in the signed record.
+_CARD_EXCERPT_CAP = 4000
 
 
 @dataclass(frozen=True)
@@ -397,11 +400,32 @@ class VigilEngine:
             # T3b — record the tool OUTCOME (a provenance-labelled observation, never a fact), linked to its
             # tool_call. Covers BOTH the ran and the refused/errored branch below with one post point.
             _ran = bool(getattr(exec_res, "ran", False))
-            self._spine_post("tool_result", {
+            _tr_payload = {
                 "tool": (getattr(exec_res, "tool", "") or (decision.tool.tool_name if decision.tool else "")),
                 "ok": _ran, "refused": not _ran, "gate": "" if _ran else "executor",
                 "summary": str(getattr(exec_res, "outcome", "") or ""),
-                "note": "" if _ran else str(getattr(exec_res, "reason", "") or "")}, parent_id=_tc_id)
+                "note": "" if _ran else str(getattr(exec_res, "reason", "") or "")}
+            # Richer tool-call card (W-UX5): surface the REDACTED command + a capped, ALREADY-redacted output
+            # excerpt + exit/timing so the UI can render a real command/output card. SECRET-SAFE by
+            # construction: `argv` and `record.stdout/stderr` are the executor's F3-redacted fields (built via
+            # `_redact_str` in `_build_record`) — the RAW `exec_res.stdout` is NEVER put on the spine. Bounded
+            # to _CARD_EXCERPT_CAP for the event; the full redacted output stays in the signed ExecRecord.
+            if _ran:
+                _rec = getattr(exec_res, "record", None)
+                _out = str(getattr(_rec, "stdout", "") or "")
+                _err = str(getattr(_rec, "stderr", "") or "")
+                _argv = list(getattr(_rec, "argv", None) or getattr(exec_res, "argv", ()) or [])
+                _tr_payload.update({
+                    "argv": [str(a) for a in _argv],                 # REDACTED command (F3 vocabulary + secret positions masked)
+                    "exit_code": getattr(exec_res, "exit_code", None),
+                    "timed_out": bool(getattr(exec_res, "timed_out", False)),
+                    "truncated": bool(getattr(exec_res, "truncated", False)),
+                    "output_bytes": len(str(getattr(exec_res, "stdout", "") or "")),
+                    "output_excerpt": _out[:_CARD_EXCERPT_CAP],       # REDACTED (record.stdout is _redact_str'd)
+                    "output_excerpt_truncated": len(_out) > _CARD_EXCERPT_CAP,
+                    "stderr_excerpt": _err[:_CARD_EXCERPT_CAP],
+                })
+            self._spine_post("tool_result", _tr_payload, parent_id=_tc_id)
             if not getattr(exec_res, "ran", False):
                 report.denied_edges.append(getattr(exec_res, "reason", "tool call not run"))
                 self._spine_post("refusal", {                # T3b — the executor's fail-closed deny as evidence

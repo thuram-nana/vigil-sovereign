@@ -2059,7 +2059,9 @@
     result:        { label: "Result", icon: function (p) { return p.success ? "check" : "x"; }, cat: "result",
       sum: function (p) { return (p.success ? "ok" : "fail") + (p.status_code ? " · HTTP " + p.status_code : "") + (p.note ? " · " + p.note : ""); } },
     tool_result:   { label: "Tool result", icon: function (p) { return p.refused ? "x" : (p.ok ? "check" : "dot"); }, cat: "result",
-      sum: function (p) { return (p.tool || "") + " · " + (p.refused ? "refused by " + (p.gate || "gate") : (p.ok ? "ok" : "no result")) + (p.summary ? " · " + p.summary : (p.note ? " · " + p.note : "")); } },
+      sum: function (p) { return (p.tool || "") + " · " + (p.refused ? "refused by " + (p.gate || "gate") : (p.ok ? "ok" : "no result"))
+        + (p.exit_code != null ? " · exit " + p.exit_code : "") + (p.output_bytes ? " · " + p.output_bytes + " B" : "")
+        + (p.summary ? " · " + p.summary : (p.note ? " · " + p.note : "")); } },
     finding:       { label: "Finding", icon: "shield", cat: "finding",
       sum: function (p) { return (p.bug_class || "") + (p.title ? " — " + p.title : (p.summary ? " — " + p.summary : "")); } },
     critique:      { label: "Critique", icon: "book", cat: "review",
@@ -3176,7 +3178,50 @@
         h("div.meta", null, meta.concat([h("span.t", null, e.posted_at ? String(e.posted_at).slice(11, 19) : (e.id != null ? "#" + e.id : ""))])),
       ]);
     }
+    // Pair a tool_call with its tool_result (linked by parent_id) so the card shows the command AND its
+    // outcome together — Claude-Code-style.
+    function toolPairFor(e) {
+      if (e.kind === "tool_call") return { call: e, result: L.events.find(function (x) { return x.kind === "tool_result" && x.parent_id === e.id; }) || null };
+      if (e.kind === "tool_result") return { call: L.events.find(function (x) { return x.kind === "tool_call" && x.id === e.parent_id; }) || null, result: e };
+      return { call: null, result: null };
+    }
+    // A real tool-call CARD: the REDACTED command, status/tier/target/exit/timing/output-size badges, and the
+    // REDACTED output excerpt (the raw output never leaves the executor — see engine tool_result enrichment).
+    function toolCardBody(call, result) {
+      const cp = (call && call.payload) || {}; const rp = (result && result.payload) || {};
+      const argv = (rp.argv && rp.argv.length) ? rp.argv.join(" ") : "";
+      const ran = rp.ok === true; const refused = rp.refused === true;
+      const badges = [];
+      const badge = function (label, cls) { if (label != null && label !== "") badges.push(h("span.pill.sm" + (cls ? "." + cls : ""), null, String(label))); };
+      badge((cp.tier || rp.tier) ? "tier " + (cp.tier || rp.tier) : "");
+      badge(cp.target || "");
+      badge(refused ? ("refused" + (rp.gate ? " · " + rp.gate : "")) : (ran ? "ran" : (rp.summary || "pending")), refused ? "danger" : (ran ? "ok" : ""));
+      if (rp.exit_code != null) badge("exit " + rp.exit_code, rp.exit_code === 0 ? "ok" : "danger");
+      if (rp.timed_out) badge("timed out", "danger");
+      if (rp.truncated) badge("truncated");
+      if (rp.output_bytes != null) badge(rp.output_bytes + " B out");
+      const out = [];
+      out.push(h("div.dsection", null, [h("span.label", null, "COMMAND"),
+        argv ? h("pre.code", { style: { marginTop: "8px" } }, argv)
+             : h("div.hint", null, "No command — this call did not run" + (rp.note ? " (" + rp.note + ")" : "") + ".")]));
+      if (badges.length) out.push(h("div.dsection", { style: { display: "flex", gap: "6px", flexWrap: "wrap" } }, badges));
+      if (rp.output_excerpt) out.push(h("div.dsection", null, [
+        h("span.label", null, "OUTPUT" + (rp.output_excerpt_truncated ? " (truncated — the full redacted output is in the signed record)" : "")),
+        h("pre.code", { style: { marginTop: "8px" } }, rp.output_excerpt)]));
+      if (rp.stderr_excerpt) out.push(h("div.dsection", null, [h("span.label", null, "STDERR"),
+        h("pre.code", { style: { marginTop: "8px" } }, rp.stderr_excerpt)]));
+      if (refused && rp.note) out.push(h("div.legend", null, [V.icon("info"), rp.note]));
+      out.push(h("div.dsection", null, [h("span.label", null, "RAW PAYLOAD (redacted)"),
+        h("pre.code", { style: { marginTop: "8px" } }, JSON.stringify({ tool_call: cp, tool_result: rp }, null, 2))]));
+      return out;
+    }
     function openEventDrawer(e) {
+      // tool_call / tool_result → the richer paired command/output card (uses the now-resizable drawer)
+      if (e.kind === "tool_call" || e.kind === "tool_result") {
+        const pair = toolPairFor(e);
+        openDrawer("Tool call", toolCardBody(pair.call, pair.result));
+        return;
+      }
       const p = e.payload || {};
       const kv = [];
       const put = function (k, v) { kv.push(h("div.kv", null, [h("div.k", null, k), h("div.v", null, String(v))])); };
