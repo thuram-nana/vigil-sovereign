@@ -46,3 +46,35 @@ def test_status_pending_count_matches_approvals_listing(tmp_path, monkeypatch):
         f"status pending_approvals={counted} != approvals listing={listed} "
         "— the offense pending counter is under-reporting (regression of the os-NameError→0 bug)"
     )
+
+
+def test_a_signed_request_is_excluded_from_the_listing_and_count(tmp_path, monkeypatch):
+    """After the operator APPROVES (a signed token exists), the request is no longer 'awaiting your
+    signature' — it must drop out of the listing AND the counter, or the UI keeps showing the approve card
+    after approval (the 'popup after I approve' bug)."""
+    import json as _json
+    base = str(tmp_path)
+    monkeypatch.setenv("VIGIL_BASE_DIR", base)
+    from vigil_integration.live import approval_broker as B
+    from vigil_integration.live.approval_token import ApprovalAction, action_digest
+    from framework.v2.console import api
+
+    root = B.approvals_root(base)
+    reqs = []
+    for i, url in enumerate(("http://127.0.0.1:19010/a", "http://127.0.0.1:19010/b")):
+        args = {"url": url}
+        act = ApprovalAction("httpx", "127.0.0.1:19010", action_digest("httpx", "127.0.0.1:19010", args))
+        reqs.append(B.publish_pending(root, act, nonce=f"n{i:031x}", args_preview=args,
+                                      now_iso="2026-01-01T00:00:00+00:00").request_id)
+    assert api.status_data()["pending_approvals"] == 2
+    assert len(api.approvals()["pending"]) == 2
+
+    # APPROVE the first: drop a signed token for its request_id (content irrelevant to the exclusion check).
+    signed_dir = B._signed_dir(root); signed_dir.mkdir(parents=True, exist_ok=True)
+    (signed_dir / f"{reqs[0]}.json").write_text(_json.dumps({"schema": "x", "request_id": reqs[0]}), encoding="utf-8")
+
+    assert reqs[0] in B.signed_request_ids(root)
+    listed = [p["request_id"] for p in api.approvals()["pending"]]
+    assert reqs[0] not in listed, "an APPROVED (signed) request must not still be listed as awaiting approval"
+    assert listed == [reqs[1]]
+    assert api.status_data()["pending_approvals"] == 1, "the counter must not count already-approved requests"

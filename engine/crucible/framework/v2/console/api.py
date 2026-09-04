@@ -69,9 +69,12 @@ def status_data() -> dict[str, Any]:
                        # below raised NameError that the broad except silently turned into 0 — the offense
                        # pending count read 0 forever (the exact "showed as 0" bug this counter was added to
                        # fix). Mirrors the sibling api.approvals(), which already imports os locally.
-            from vigil_integration.live.approval_broker import approvals_root, list_pending
+            from vigil_integration.live.approval_broker import (approvals_root, list_pending,
+                                                                 signed_request_ids)
             base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
-            return len(list_pending(approvals_root(base)))
+            root = approvals_root(base)
+            signed = signed_request_ids(root)   # already-approved requests are no longer "waiting for you"
+            return len([p for p in list_pending(root) if p.request_id not in signed])
         except Exception:  # noqa: BLE001 — a count is best-effort; never break /api/status
             return 0
 
@@ -554,10 +557,17 @@ def approvals(slug: str = "") -> dict[str, Any]:
     def _read() -> list[dict[str, Any]]:
         # approval_broker is import-clean (vigil_core + stdlib only) — safe to import in the offense plane
         # (unlike the rest of vigil_integration, which is FATAL-2 to import here). It holds NO private key.
-        from vigil_integration.live.approval_broker import approvals_root, list_pending
+        from vigil_integration.live.approval_broker import (approvals_root, list_pending,
+                                                                 signed_request_ids)
+        root = approvals_root(base)
+        # A request that already carries a SIGNED token has been APPROVED — it is no longer awaiting your
+        # signature, so exclude it. Without this the UI kept showing the "needs approval" card AFTER the
+        # operator approved (the pending file lingers on disk until the run consumes the token).
+        signed = signed_request_ids(root)
         return [{"request_id": p.request_id, "tool_name": p.tool_name, "target": p.target,
                  "action_digest": p.action_digest, "nonce": p.nonce, "args_preview": p.args_preview,
-                 "created_at_iso": p.created_at_iso} for p in list_pending(approvals_root(base))]
+                 "created_at_iso": p.created_at_iso}
+                for p in list_pending(root) if p.request_id not in signed]
 
     pending = _safe(_read, default=[]) or []
     return {"ok": True, "slug": str(slug or ""), "base_dir": base, "pending": pending}

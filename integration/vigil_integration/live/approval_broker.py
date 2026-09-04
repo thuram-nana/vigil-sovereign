@@ -48,6 +48,7 @@ __all__ = [
     "ApprovalBroker",
     "publish_pending",
     "list_pending",
+    "signed_request_ids",
     "write_signed_token",
     "find_signed_token",
     "approvals_root",
@@ -232,6 +233,19 @@ def list_pending(root: Any) -> list[PendingRequest]:
         if req is not None:
             out.append(req)
     return out
+
+
+def signed_request_ids(root: Any) -> set:
+    """The request_ids that already carry a SIGNED token under ``root/signed`` — i.e. approvals the owner has
+    already granted. A pending in this set is NO LONGER awaiting a signature (it is approved, running, or
+    done), so the UI/CLI/counter must stop listing it as "needs approval". Total: an absent/unreadable
+    signed dir yields an empty set. Read-only."""
+    d = _signed_dir(root)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return set()
+    return {n[:-5] for n in names if n.endswith(".json")}
 
 
 # ---------------------------------------------------------------------------------------------------

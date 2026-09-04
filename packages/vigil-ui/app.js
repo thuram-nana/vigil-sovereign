@@ -5344,13 +5344,13 @@
             if (b && b.error) { V.toast(b.error, true); return; }
             V.postJSON(SOV("/api/action"), { action: "offense_approve", request_id: p.request_id })
               .then(function (r2) {
-                if (r2 && r2.ok) { V.toast("Approved — the action can run."); if (then) then(); }
+                if (r2 && r2.ok) { pboxForgetApproval(p.request_id); V.toast("Approved — the action can run."); if (then) then(); }
                 else { V.toast((r2 && r2.error) || "Approve failed", true); }
               }).catch(function (e) { V.toast((e && e.message) || "Approve failed", true); });
           }).catch(function (e) { V.toast((e && e.message) || "Bind failed", true); });
           return;
         }
-        if (r && r.ok) { V.toast("Approved — the action can run."); if (then) then(); }
+        if (r && r.ok) { pboxForgetApproval(p.request_id); V.toast("Approved — the action can run."); if (then) then(); }
         else { V.toast((r && r.error) || "Approve failed — are you on the owner plane?", true); }
       })
       .catch(function (e) { V.toast((e && e.message) || "Approve failed", true); });
@@ -5360,7 +5360,7 @@
     if (!confirm("Deny this action? It is removed from the queue and the run's request is refused.")) return;
     V.postJSON(SOV("/api/action"), { action: "offense_deny", request_id: p.request_id })
       .then(function (r) {
-        if (r && r.ok) { V.toast("Denied."); if (then) then(); }
+        if (r && r.ok) { pboxForgetApproval(p.request_id); V.toast("Denied."); if (then) then(); }
         else { V.toast((r && r.error) || "Deny failed", true); }
       })
       .catch(function (e) { V.toast((e && e.message) || "Deny failed", true); });
@@ -10119,6 +10119,17 @@
     PBOX.offenseMem.popped = {}; PBOX.offenseMem.seen = false;
     if (PBOX.offenseMem.modal) { try { PBOX.offenseMem.modal.close(); } catch (e) {} }
     PBOX.offenseMem.modal = null;
+  }
+
+  // #1b: the moment an offense approval is ACTED on (approve/deny), drop it from the box optimistically so
+  // the card/popup disappears at once — the pending file lingers on disk until the run consumes the token,
+  // and the 4s poll would otherwise keep re-showing an already-approved card (the "popup after I approve" bug).
+  function pboxForgetApproval(rid) {
+    if (!rid) return;
+    PBOX.offenseApprovals = (PBOX.offenseApprovals || []).filter(function (x) { return x.request_id !== rid; });
+    if (PBOX.offenseMem) { PBOX.offenseMem.popped[rid] = true;                 // never re-pop it
+      if (PBOX.offenseMem.modal) { try { PBOX.offenseMem.modal.close(); } catch (e) {} PBOX.offenseMem.modal = null; } }
+    if (PBOX.ui.open && !PBOX.ui.dismissed) pboxRenderShell();
   }
 
   function pboxLoadUI() {
