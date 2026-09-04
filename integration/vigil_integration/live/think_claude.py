@@ -504,6 +504,16 @@ Put the target in tool_args (e.g. {{"url": "http://host:port/"}} or {{"target": 
 host:port from the "target" line in the header above — NEVER build a URL from the engagement name (it is a
 label, not a hostname); a tool call to any host outside the authorized scope is refused before it runs.
 
+COMPLETE when the objective is met — do not keep going. If VIGIL's oracle has already CONFIRMED the
+finding(s) your objective asked for (the header shows "confirmed_facts", and the Recent-actions block marks
+an action "outcome=ran (oracle confirmed N fact(s))"), choose "complete" now with a "summary" of what was
+confirmed. One confirmed FACT that satisfies the objective is success; stop there unless the objective
+EXPLICITLY asks for more. NEVER re-propose the SAME tool call two turns running: an action marked
+"outcome=refused: awaiting ... approval" will stay refused until the operator signs it (re-proposing only
+floods them with duplicate prompts — instead COMPLETE, or propose a DIFFERENT action), and an action already
+marked "oracle confirmed" needs no re-run. If nothing new can advance the objective, "complete" (or
+"ask_user" if a human decision is genuinely needed) — never spin on a settled action.
+
 Prefer the least-invasive action that advances the objective. If you are unsure or the context is
 insufficient, choose "ask_user". Emit ONLY the JSON object.
 
@@ -550,7 +560,23 @@ def _recent_actions_digest(state: object) -> str:
             red = redact_tool_args(args) if isinstance(args, dict) else {}
         except Exception:  # noqa: BLE001 — redaction must never crash; drop the args instead
             red = {}
-        lines.append(wrap_untrusted_inline(f"tool={tool} args={red}", label="PRIOR_ACTION"))
+        # OUTCOME so the model does not blindly RE-PROPOSE an action that already RAN (and confirmed a
+        # fact) or was REFUSED pending the operator's signature — re-proposing a refused action changes
+        # nothing and floods the operator with duplicate approvals. outcome/reason are engine-set (the
+        # conjunctive gate's / executor's own verdict), not attacker-influenced.
+        _oc = str(entry.get("outcome") or "")
+        _rsn = str(entry.get("reason") or "")
+        if _oc == "ran":
+            _nf = entry.get("facts")
+            tail = " outcome=ran" + (f" (oracle confirmed {_nf} fact(s) — do NOT re-run this)" if _nf else "")
+        elif _oc == "deny":
+            tail = (" outcome=refused: awaiting your operator's signed approval — re-proposing will NOT "
+                    "change this; COMPLETE or choose a DIFFERENT action"
+                    if "approval" in _rsn.lower()
+                    else " outcome=refused (" + _rsn[:80] + ")")
+        else:
+            tail = (" outcome=" + _oc) if _oc else ""
+        lines.append(wrap_untrusted_inline(f"tool={tool} args={red}{tail}", label="PRIOR_ACTION"))
     return "\n".join(lines)
 
 

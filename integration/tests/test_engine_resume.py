@@ -18,7 +18,7 @@ from vigil_core import generate_keypair
 from vigil_integration.agent import checkpoint as cp
 from vigil_integration.agent.checkpoint import GENESIS_PREV, SnapshotRecord, _content_hash
 from vigil_integration.agent.state import ActionType, AgentState, Finding, LLMDecision, ToolCall
-from vigil_integration.live.engine import EngineSeams, VigilEngine
+from vigil_integration.live.engine import _MAX_IDENTICAL_REPROPOSALS, EngineSeams, VigilEngine
 from vigil_integration.live.spine_vigilcore import VigilCoreSpine
 from vigil_integration.live.think_claude import ReplayThinker
 
@@ -258,3 +258,39 @@ def test_rebuild_head_is_chain_contiguous_across_a_fresh_binder(tmp_path):
 def test_rebuild_head_is_empty_on_an_empty_spine(tmp_path):
     st, sq = VigilCoreSpine(generate_keypair(), str(tmp_path / "empty.spine")).rebuild_head()
     assert sq == 0 and st.iteration == 0
+
+
+# --- BLOCK-4 (finding #1): ANTI-SPIN — a run that re-proposes the IDENTICAL action must STOP, not flood ----
+def _ran_ns(tool):
+    return SimpleNamespace(ran=True, outcome="ran", stdout="x", stderr="", tool=tool.tool_name,
+                           tier="A1", target="127.0.0.1", destructive=False,
+                           record=SimpleNamespace(record_id="r"))
+
+
+def test_anti_spin_stops_a_run_that_re_proposes_the_identical_action():
+    ran = {"n": 0}
+    def _run_tool(tool, phase, seq, **kw):
+        ran["n"] += 1
+        return _ran_ns(tool)
+    rep = VigilEngine(slug="loopback", max_iterations=8, seams=EngineSeams(
+        attest=_attest_allow, think=lambda st: _use_tool(),          # ALWAYS the identical action
+        gate=lambda *a: SimpleNamespace(allowed=True, outcome="allow", reason="ok"),
+        run_tool=_run_tool)).engage(TARGET)
+    # the guard ends the run WELL before max_iterations, with the anti-spin completion marker.
+    assert rep.iterations <= _MAX_IDENTICAL_REPROPOSALS + 1, f"anti-spin did not stop the spin ({rep.iterations} iters)"
+    assert rep.decisions[-1] == "complete(anti-spin)"
+    assert rep.done is True
+    assert ran["n"] <= _MAX_IDENTICAL_REPROPOSALS + 1           # the tool did NOT fire 8 times
+
+
+def test_anti_spin_does_not_trip_on_varied_actions():
+    # distinct target each turn (distinct signatures) then an explicit complete — the guard must NOT fire.
+    varied = [LLMDecision(action=ActionType.USE_TOOL,
+                          tool=ToolCall(tool_name="httpx", tool_args={"url": f"http://127.0.0.1:18080/p{i}"}))
+              for i in range(4)] + [_complete()]
+    rep = VigilEngine(slug="loopback", max_iterations=8, seams=EngineSeams(
+        attest=_attest_allow, think=ReplayThinker(varied),
+        gate=lambda *a: SimpleNamespace(allowed=True, outcome="allow", reason="ok"),
+        run_tool=lambda tool, phase, seq, **kw: _ran_ns(tool))).engage(TARGET)
+    assert "complete(anti-spin)" not in rep.decisions, "anti-spin wrongly tripped on VARIED actions"
+    assert rep.done is True                                     # completed via the explicit _complete()

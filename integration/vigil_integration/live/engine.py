@@ -113,6 +113,28 @@ _GENESIS = "0" * 64
 # Display cap (chars) for the REDACTED command-output excerpt carried on a tool_result spine event so the UI
 # can render a real tool-call card. Bounds the event size; the full redacted output stays in the signed record.
 _CARD_EXCERPT_CAP = 4000
+# Anti-spin backstop (finding #1 follow-up): end a run that re-proposes the IDENTICAL use_tool action every
+# turn. The (this-many + 1)'th consecutive identical proposal ends the run with COMPLETE — the first
+# proposal's fate (ran+confirmed, or refused pending approval) is already settled, so re-proposing changes
+# nothing, floods the operator with duplicate approvals, and burns iterations. ONLY identical repeats trip
+# it; varied exploration never does. The think prompt already tells a well-behaved agent to COMPLETE after
+# its objective FACT is confirmed — this is the deterministic guard for when it does not.
+_MAX_IDENTICAL_REPROPOSALS = 2
+
+
+def _action_signature(tool: Any) -> str:
+    """A stable (tool_name, canonical args) signature for anti-spin repeat detection. Deterministic (sorted
+    keys) and total (odd args → their repr). Empty on a missing/broken tool."""
+    try:
+        name = str(getattr(tool, "tool_name", "") or "")
+        args = getattr(tool, "tool_args", None)
+        if isinstance(args, dict):
+            argrepr = "{" + ",".join(f"{k}={args[k]!r}" for k in sorted(args, key=str)) + "}"
+        else:
+            argrepr = repr(args)
+        return name + "|" + argrepr
+    except Exception:  # noqa: BLE001 — a hostile tool object must not crash the loop
+        return ""
 
 
 @dataclass(frozen=True)
@@ -280,6 +302,8 @@ class VigilEngine:
                     start_it = int(getattr(prior, "iteration", 0) or 0) + 1
                     report.iterations = start_it
 
+        # anti-spin repeat tracking (finding #1): the last USE_TOOL signature + its consecutive-repeat count.
+        last_tool_sig, tool_repeat = "", 0
         for it in range(start_it, self.max_iterations):
             state.iteration = it
             report.iterations = it + 1
@@ -297,6 +321,30 @@ class VigilEngine:
                 report.paused = "plan-only"
                 state.done = True
                 break
+
+            # ANTI-SPIN (finding #1): if the SAME use_tool action is proposed on consecutive turns, the agent
+            # is stuck on a settled action (already ran+confirmed, or refused pending the operator's signed
+            # approval). Re-proposing it changes nothing and floods the operator, so end the run with COMPLETE
+            # once it repeats past the cap. ONLY identical repeats trip this; a different tool/target/args
+            # resets the counter. No gate/oracle/scope change — it can only STOP a run early, never run more.
+            if decision.action == ActionType.USE_TOOL and decision.tool is not None:
+                _sig = _action_signature(decision.tool)
+                if _sig and _sig == last_tool_sig:
+                    tool_repeat += 1
+                else:
+                    last_tool_sig, tool_repeat = _sig, 0
+                if tool_repeat >= _MAX_IDENTICAL_REPROPOSALS:
+                    report.decisions[-1] = "complete(anti-spin)"
+                    self._spine_post("observation", {
+                        "source": "anti-spin",
+                        "summary": (f"stopped: the agent re-proposed the identical action {tool_repeat + 1} "
+                                    f"turns running; {len(report.facts)} fact(s) confirmed. Re-proposing a "
+                                    "settled (confirmed or approval-pending) action changes nothing — "
+                                    "completing to avoid flooding the operator with duplicate approvals.")})
+                    state.done = True
+                    break
+            else:
+                last_tool_sig, tool_repeat = "", 0
 
             # W6b — a classified BACKEND-CALL failure the think seam fail-closed over (network / api /
             # api_transient) is mirrored to the spine as an OBSERVATION so the operator's process box shows
