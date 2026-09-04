@@ -267,20 +267,46 @@ def _ran_ns(tool):
                            record=SimpleNamespace(record_id="r"))
 
 
-def test_anti_spin_stops_a_run_that_re_proposes_the_identical_action():
+def _refused_ns(tool):
+    # the executor REFUSED the tool (e.g. an >=A2 action with no signed token) — ran=False, no progress.
+    return SimpleNamespace(ran=False, outcome="", stdout="", stderr="",
+                           reason="authorization denied: A2 requires owner approval",
+                           tool=tool.tool_name, record=SimpleNamespace(record_id="r"))
+
+
+def test_anti_spin_stops_a_run_that_re_proposes_a_REFUSED_identical_action():
+    # token mode (approval grants → reach execute) but the executor REFUSES every turn (no signed token), so
+    # the identical action never advances → the counter accumulates → the run STOPS as PAUSED anti-spin.
+    tries = {"n": 0}
+    def _run_refused(tool, phase, seq, **kw):
+        tries["n"] += 1
+        return _refused_ns(tool)
+    rep = VigilEngine(slug="loopback", max_iterations=8, seams=EngineSeams(
+        attest=_attest_allow, think=lambda st: _use_tool(),                       # ALWAYS the identical action
+        gate=lambda *a: SimpleNamespace(allowed=False, outcome="queue", reason="A2 requires owner approval"),
+        approval=lambda *a: True,                                                 # reach execute; executor refuses
+        run_tool=_run_refused)).engage(TARGET)
+    assert rep.iterations <= _MAX_IDENTICAL_REPROPOSALS + 1, f"anti-spin did not stop the refused spin ({rep.iterations})"
+    assert rep.decisions[-1] == "stopped(anti-spin)"
+    assert rep.paused == "anti-spin"                            # a give-up is marked distinctly, NOT as done
+    assert rep.done is False                                    # ...so it is NOT mistaken for objective-met
+    assert tries["n"] <= _MAX_IDENTICAL_REPROPOSALS + 1         # the refused tool was not attempted 8 times
+
+
+def test_anti_spin_does_NOT_trip_when_the_identical_action_RUNS_each_turn():
+    # B (red-pen): a legitimate poll/retry — identical args, but the tool RUNS successfully every turn
+    # (progress) — must NOT be force-completed. A successful run resets the counter, so it runs to the end.
     ran = {"n": 0}
-    def _run_tool(tool, phase, seq, **kw):
+    def _run_ok(tool, phase, seq, **kw):
         ran["n"] += 1
         return _ran_ns(tool)
-    rep = VigilEngine(slug="loopback", max_iterations=8, seams=EngineSeams(
-        attest=_attest_allow, think=lambda st: _use_tool(),          # ALWAYS the identical action
+    rep = VigilEngine(slug="loopback", max_iterations=5, seams=EngineSeams(
+        attest=_attest_allow, think=lambda st: _use_tool(),
         gate=lambda *a: SimpleNamespace(allowed=True, outcome="allow", reason="ok"),
-        run_tool=_run_tool)).engage(TARGET)
-    # the guard ends the run WELL before max_iterations, with the anti-spin completion marker.
-    assert rep.iterations <= _MAX_IDENTICAL_REPROPOSALS + 1, f"anti-spin did not stop the spin ({rep.iterations} iters)"
-    assert rep.decisions[-1] == "complete(anti-spin)"
-    assert rep.done is True
-    assert ran["n"] <= _MAX_IDENTICAL_REPROPOSALS + 1           # the tool did NOT fire 8 times
+        run_tool=_run_ok)).engage(TARGET)
+    assert "stopped(anti-spin)" not in rep.decisions, "anti-spin wrongly killed a run that keeps making progress"
+    assert rep.paused != "anti-spin"
+    assert ran["n"] == 5                                        # ran every turn to max_iterations (reset-on-success)
 
 
 def test_anti_spin_does_not_trip_on_varied_actions():
@@ -292,5 +318,5 @@ def test_anti_spin_does_not_trip_on_varied_actions():
         attest=_attest_allow, think=ReplayThinker(varied),
         gate=lambda *a: SimpleNamespace(allowed=True, outcome="allow", reason="ok"),
         run_tool=lambda tool, phase, seq, **kw: _ran_ns(tool))).engage(TARGET)
-    assert "complete(anti-spin)" not in rep.decisions, "anti-spin wrongly tripped on VARIED actions"
+    assert "stopped(anti-spin)" not in rep.decisions, "anti-spin wrongly tripped on VARIED actions"
     assert rep.done is True                                     # completed via the explicit _complete()

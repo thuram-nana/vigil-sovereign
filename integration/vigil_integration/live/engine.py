@@ -37,6 +37,7 @@ Import-clean: pydantic + stdlib + the already-import-clean sibling modules; heav
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
@@ -123,16 +124,18 @@ _MAX_IDENTICAL_REPROPOSALS = 2
 
 
 def _action_signature(tool: Any) -> str:
-    """A stable (tool_name, canonical args) signature for anti-spin repeat detection. Deterministic (sorted
-    keys) and total (odd args → their repr). Empty on a missing/broken tool."""
+    """A stable (tool_name, canonical args) signature for anti-spin repeat detection. json.dumps with
+    sort_keys recurses into NESTED dicts (so insertion order can never make two identical actions look
+    different and defeat the guard); default=str tolerates odd values. tool_name is length-prefixed so the
+    name/args boundary can never collide two different actions. Empty on a missing/broken tool."""
     try:
         name = str(getattr(tool, "tool_name", "") or "")
         args = getattr(tool, "tool_args", None)
-        if isinstance(args, dict):
-            argrepr = "{" + ",".join(f"{k}={args[k]!r}" for k in sorted(args, key=str)) + "}"
-        else:
+        try:
+            argrepr = json.dumps(args, sort_keys=True, default=str, ensure_ascii=False)
+        except Exception:  # noqa: BLE001 — a non-serialisable arg still gets a stable-enough fallback
             argrepr = repr(args)
-        return name + "|" + argrepr
+        return f"{len(name)}:{name}|{argrepr}"
     except Exception:  # noqa: BLE001 — a hostile tool object must not crash the loop
         return ""
 
@@ -322,11 +325,17 @@ class VigilEngine:
                 state.done = True
                 break
 
-            # ANTI-SPIN (finding #1): if the SAME use_tool action is proposed on consecutive turns, the agent
-            # is stuck on a settled action (already ran+confirmed, or refused pending the operator's signed
-            # approval). Re-proposing it changes nothing and floods the operator, so end the run with COMPLETE
-            # once it repeats past the cap. ONLY identical repeats trip this; a different tool/target/args
-            # resets the counter. No gate/oracle/scope change — it can only STOP a run early, never run more.
+            # ANTI-SPIN (finding #1): stop a run that keeps re-proposing the IDENTICAL use_tool action on
+            # consecutive turns WITHOUT making progress. A successful run RESETS the counter (see the run
+            # branches below), so only a signature that repeats while NOT advancing — the same tool refused
+            # (executor deny / gate deny, e.g. an >=A2 tool with no signed token) or re-proposed after already
+            # running — accumulates. On the (cap+1)'th such repeat the run STOPS as PAUSED "anti-spin": it is
+            # deliberately NOT marked done (a give-up is not an objective-met COMPLETE), so a consumer can tell
+            # them apart and the run stays RESUMABLE (approve the pending action, then resume). SCOPE, honestly:
+            # this is a WITHIN-RUN, per-`engage()` counter — it declutters the process view and stops burning
+            # iterations; it does NOT dedupe approval prompts ACROSS resumes, and an ALTERNATING two-action
+            # cycle (A,B,A,B…) resets it every turn and is bounded only by max_iterations. It can only STOP a
+            # run early — never run a tool, never touch the gate / oracle / scope.
             if decision.action == ActionType.USE_TOOL and decision.tool is not None:
                 _sig = _action_signature(decision.tool)
                 if _sig and _sig == last_tool_sig:
@@ -334,14 +343,14 @@ class VigilEngine:
                 else:
                     last_tool_sig, tool_repeat = _sig, 0
                 if tool_repeat >= _MAX_IDENTICAL_REPROPOSALS:
-                    report.decisions[-1] = "complete(anti-spin)"
+                    report.decisions[-1] = "stopped(anti-spin)"
                     self._spine_post("observation", {
                         "source": "anti-spin",
                         "summary": (f"stopped: the agent re-proposed the identical action {tool_repeat + 1} "
-                                    f"turns running; {len(report.facts)} fact(s) confirmed. Re-proposing a "
-                                    "settled (confirmed or approval-pending) action changes nothing — "
-                                    "completing to avoid flooding the operator with duplicate approvals.")})
-                    state.done = True
+                                    f"turns running without progress; {len(report.facts)} fact(s) confirmed. "
+                                    "Re-proposing a settled action (already run, or refused with no new "
+                                    "approval) advances nothing — stopping to save iterations. Resumable.")})
+                    report.paused = "anti-spin"
                     break
             else:
                 last_tool_sig, tool_repeat = "", 0
@@ -491,6 +500,12 @@ class VigilEngine:
                 self._checkpoint(state, seq, report)
                 seq += 1
                 continue
+
+            # ANTI-SPIN RESET (finding #1, part B): the tool RAN this turn — that is progress, so clear the
+            # repeat counter. Only NON-advancing identical repeats (a tool refused / re-proposed without
+            # running) accumulate toward the stop, so a legitimate poll or a transient-error retry that
+            # actually runs is never force-completed.
+            last_tool_sig, tool_repeat = "", 0
 
             # T3 — a governed LOCAL terminal command inspects HOST state (a file, a process, uname): its output
             # is NOT target-produced evidence, so it is ADVISORY ONLY and must NEVER enter oracle intake — a
