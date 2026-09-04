@@ -10142,8 +10142,15 @@
   }
   function pboxTag(e) {
     var p = e.payload || {};
-    if (e.kind === "refusal") return { cls: "pb-blocked", label: "blocked" };
-    if (e.kind === "tool_result" && p.refused) return { cls: "pb-blocked", label: "blocked" };
+    if (e.kind === "refusal" || (e.kind === "tool_result" && p.refused)) {
+      // A >=A2 offense action QUEUED for your signature is NOT an error — it is WAITING ON YOU. Render it as
+      // a distinct amber "needs approval", not a red "blocked". Only a genuine gate DENY (out-of-scope,
+      // kill-switch, structurally-invalid) is "blocked". This is the per-action gate working, not a failure.
+      var _rsn = String(p.reason || p.note || "").toLowerCase();
+      if (/owner approval|requires\s+(?:a\s+)?signed|requires\s+.*approval|awaiting\s+.*approval|needs\s+.*approval/.test(_rsn))
+        return { cls: "pb-approval", label: "needs approval" };
+      return { cls: "pb-blocked", label: "blocked" };
+    }
     if (e.kind === "tool_result" && p.ok === false) return { cls: "pb-failed", label: "failed" };
     if (e.kind === "result" && p.success === false) return { cls: "pb-failed", label: "failed" };
     var ec = pboxErrClass(e);                          // W6b: network vs API vs blocked, so WHY is clear

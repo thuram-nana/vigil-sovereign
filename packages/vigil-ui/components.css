@@ -752,6 +752,8 @@ div:hover > div > .msg-actions, .msg-actions:focus-within { opacity: 1; }
 .pb-tag.pb-blocked { color: var(--st-blocked); background: color-mix(in srgb, var(--st-blocked) 16%, transparent); }
 .pb-tag.pb-failed { color: var(--st-blocked); background: color-mix(in srgb, var(--st-blocked) 12%, transparent); }
 .pb-row.pb-blocked .pb-ico, .pb-row.pb-failed .pb-ico { color: var(--st-blocked); }
+.pb-tag.pb-approval { color: var(--st-queued); background: color-mix(in srgb, var(--st-queued) 16%, transparent); }
+.pb-row.pb-approval .pb-ico { color: var(--st-queued); }  /* a >=A2 action awaiting your signature — not an error */
 /* an oracle-CONFIRMED finding earns the proven-fact colour; a LEAD stays neutral (never the fact colour). */
 .pb-row.pb-finding .pb-ico { color: var(--st-confirmed); }
 .pb-row.pb-finding .pb-tag { color: var(--st-confirmed); background: color-mix(in srgb, var(--st-confirmed) 14%, transparent); }
