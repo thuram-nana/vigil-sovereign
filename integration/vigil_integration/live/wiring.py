@@ -202,6 +202,17 @@ class EngineConfig:
     # owns a disjoint graph + its own accumulating prior context); empty falls back to the slug. It is a
     # partition/organisation key only — it grants no authority and never widens scope.
     session_id: str = ""
+    # F2b: the RESUMABLE-UNIT id (the console run_id) — the run-state CHECKPOINT partition key. Each run owns
+    # a DISJOINT checkpoint partition so a --resume reads its OWN paused state, never a prior/foreign run's
+    # done=True head. Finding #3: slug is the constant "loopback" for every loopback run AND all loopback runs
+    # share one {slug}.spine file + one "loopback" engagement tag, so rebuild_head returned the GLOBAL latest
+    # loopback snapshot (usually a prior COMPLETED run) and a resumed pause NO-OP'd. session_id is too coarse
+    # (one chat drives many runs under one stable session, so an earlier COMPLETED engagement's higher-seq
+    # done=True snapshot outranks a later paused one in the same session partition — the hole stays open). A
+    # partition key ONLY — grants no authority, never widens scope. Empty falls back to the slug (byte-identical
+    # to pre-fix). retry_run reuses the parent argv, so a --resume inherits the parent's run_key = the resume
+    # link; a pre-fix run with no --run-key falls back to slug = correct automatic migration.
+    run_key: str = ""
     # F4: the operator-CONSENTED connected session ids whose graph partitions this run may UNION as priors
     # (a read-time scope; each unioned prior stays origin-tagged and non-authoritative). Empty = isolated.
     connections: Sequence[str] = ()
@@ -649,18 +660,25 @@ def build_engine(config: EngineConfig) -> VigilEngine:
             return True
         return bool(config.owner_approves_offense)
 
+    # F2b state partition (finding #3): key the run-state checkpoint by the RUN (fall back to the slug). ONE
+    # expression used by BOTH the WRITE (checkpoint) and the READ (rebuild) seams — key them apart and
+    # rebuild(run) misses the writes, has_progress goes False, and a paused run FRESH-starts, re-firing every
+    # pre-pause offense tool (the fatal asymmetric-keying mode). Mirrors graph_partition (below) but per-RUN,
+    # because one session drives many runs and the resume must read THIS run's own paused head, not a sibling's.
+    _ckpt_key = (config.run_key or "").strip() or config.slug
+
     def checkpoint(state: AgentState, seq: int) -> Any:
         try:
-            return spine.write_state(state, seq=seq, engagement=config.slug)
+            return spine.write_state(state, seq=seq, engagement=_ckpt_key)
         except Exception:  # noqa: BLE001 — a spine outage is a recorded no-op, never fatal to the run
             return None
 
     def rebuild() -> "tuple[AgentState, int]":
-        # W2b resume: ONE read → (last SIGNED offline-verified AgentState, its head_seq) for this slug, so
-        # the state and the seq are always from the SAME snapshot (no two-read race). (fresh, 0) on an
-        # empty/unreadable/forged spine (deny-by-default). Total; never raises.
+        # W2b resume: ONE read → (last SIGNED offline-verified AgentState, its head_seq) for THIS RUN (slug
+        # fallback), so the state and the seq are always from the SAME snapshot (no two-read race). (fresh, 0)
+        # on an empty/unreadable/forged spine (deny-by-default). Total; never raises.
         try:
-            return spine.rebuild_head(engagement=config.slug)
+            return spine.rebuild_head(engagement=_ckpt_key)
         except Exception:  # noqa: BLE001
             return (AgentState(), 0)
 

@@ -2380,6 +2380,12 @@ def launch_assessment(body: dict) -> dict:
         gcmd = _integration_engage_cmd(target, gslug, session_id, scan_mode,
                                        model=launch_model, backend=launch_backend, objective=objective)
         if gcmd is not None:
+            # F2b (finding #3): give THIS run a disjoint run-state checkpoint partition keyed by its run_id, so
+            # a later --resume reads its OWN paused state, not a prior/foreign loopback run's completed head.
+            # Recorded in meta["cmd"] below; retry_run reuses this argv verbatim (only run-dir PATHS are
+            # rewritten, and this bare run_id is not a path), so a --resume inherits the parent's --run-key and
+            # reads the parent's partition. A partition key only — grants no authority.
+            gcmd = [*gcmd, "--run-key", run_id]
             unapplied = _unapplied("an agentic `vigil engage` run (the bridge takes no pack flags)",
                                        "Re-run it with the agentic engine OFF to use them.")
             graphed = bool(os.environ.get("NEO4J_URI"))

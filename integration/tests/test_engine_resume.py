@@ -149,6 +149,76 @@ def test_completed_run_persists_done_and_resume_off_the_real_spine_is_a_noop(tmp
     assert ran["n"] == before                                 # offense did NOT re-fire after completion
 
 
+# --- BLOCK-3 (finding #3): RUN-scoped checkpoint partitions — a PAUSED run resumes to ITS OWN state, never
+# a sibling/foreign COMPLETED run's done=True head that shares the same per-slug {slug}.spine file. Before the
+# fix, checkpoint/rebuild keyed the partition by the SLUG ("loopback" for every loopback run), so a paused
+# run's --resume read the GLOBAL-latest loopback snapshot (a prior completed run, done=True) and NO-OP'd.
+def test_run_keyed_partition_lets_a_paused_run_resume_over_a_completed_siblings_head(tmp_path):
+    kp = generate_keypair()
+    path = str(tmp_path / "loopback.spine")           # ONE shared per-slug spine file for BOTH runs
+    ran = {"n": 0}
+
+    def _run_tool(tool, phase, seq, **kw):
+        ran["n"] += 1
+        return SimpleNamespace(ran=True, outcome="ran", stdout="x", stderr="", tool=tool.tool_name,
+                               tier="A1", target="127.0.0.1", destructive=False,
+                               record=SimpleNamespace(record_id="r%d" % ran["n"]))
+
+    def _allow(*a):
+        return SimpleNamespace(allowed=True, outcome="allow", reason="ok")
+
+    def _queue(*a):
+        return SimpleNamespace(allowed=False, outcome="queue", reason="A2 requires owner approval")
+
+    def _mk(think, sp, key, *, gate=_allow, approval=None):
+        # a fresh spine binder per engine = a real restart; the WRITE + READ seams share ONE file but are
+        # partitioned by `key` (the run_key). approval=None ⇒ a queued tool stays unapproved (pauses).
+        return VigilEngine(slug="loopback", max_iterations=6, seams=EngineSeams(
+            attest=_attest_allow, think=think, gate=gate, run_tool=_run_tool, approval=approval,
+            checkpoint=lambda st, sq: sp.write_state(st, seq=sq, engagement=key),
+            rebuild=lambda: sp.rebuild_head(engagement=key)))
+
+    # run A (run_key "RA"): a tool then COMPLETE — done=True at a HIGH seq into loopback.spine.
+    repA = _mk(ReplayThinker([_use_tool(), _complete()]), VigilCoreSpine(kp, path), "RA").engage(TARGET)
+    assert repA.done is True
+
+    # run B (run_key "RB"): the gate QUEUEs + no approval → PAUSE at awaiting_approval, a LOW seq, SAME file.
+    repB = _mk(ReplayThinker([_use_tool()]), VigilCoreSpine(kp, path), "RB",
+               gate=_queue, approval=lambda *a: False).engage(TARGET)
+    assert repB.paused == "awaiting_approval" and repB.done is False
+    b_fired_at_pause = ran["n"]                        # exactly A's one tool; B fired none (queued upstream)
+
+    # ISOLATION over ONE file: RB reads B's PAUSED state; RA reads A's DONE state; and the BARE-SLUG partition
+    # is EMPTY — both runs wrote under their run_key, NOT the slug. That emptiness is the direct proof the fix
+    # keys by run_key (a slug-keyed regression would put both runs in the "loopback" partition).
+    b_state, b_hs = VigilCoreSpine(kp, path).rebuild_head(engagement="RB")
+    a_state, a_hs = VigilCoreSpine(kp, path).rebuild_head(engagement="RA")
+    slug_state, slug_hs = VigilCoreSpine(kp, path).rebuild_head(engagement="loopback")
+    assert b_state.awaiting_approval is True and b_state.done is False, "RB partition = B's OWN paused state"
+    assert a_state.done is True, "RA partition = A's completed state"
+    assert a_hs >= b_hs, "A completed at a seq >= B's pause"
+    assert slug_hs == 0 and slug_state.done is False, "bare-slug partition is EMPTY — writes are run-keyed, not slug-keyed"
+
+    # PRE-FIX BUG demonstration: had both runs written under the SLUG (the old key), a slug read returns the
+    # GLOBAL-latest (A' completed, done=True) even when we mean to resume B' — so B's slug-keyed resume hits
+    # the done-guard and NO-OPs. This is exactly finding #3, reproduced on a separate file.
+    old = str(tmp_path / "old-slugkeyed.spine")
+    _mk(ReplayThinker([_use_tool(), _complete()]), VigilCoreSpine(kp, old), "loopback").engage(TARGET)      # A' done
+    _mk(ReplayThinker([_use_tool()]), VigilCoreSpine(kp, old), "loopback",
+        gate=_queue, approval=lambda *a: False).engage(TARGET)                                              # B' paused
+    old_state, _old_hs = VigilCoreSpine(kp, old).rebuild_head(engagement="loopback")
+    assert old_state.done is True, "PRE-FIX: a shared slug partition returns A's done=True — B's resume would no-op"
+
+    # RESUME B off ITS OWN partition (approval now satisfied) → the OODA loop RE-ENTERS, re-proposes, the
+    # previously-queued tool FIRES exactly once (approval now True). This is the finding-#3 fix end to end.
+    before = ran["n"]
+    repB2 = _mk(ReplayThinker([_use_tool(), _complete()]), VigilCoreSpine(kp, path), "RB",
+                gate=_allow, approval=lambda *a: True).engage(TARGET, resume=True)
+    assert repB2.resumed is True, "resume restored B's OWN paused state (not a no-op off A's done head)"
+    assert repB2.decisions, "the OODA loop re-entered (non-empty decisions) instead of the 12-empty-iteration no-op"
+    assert ran["n"] > before, "the previously-queued tool fired on resume once approval was satisfied"
+
+
 # --- BLOCK-2: head_seq returns the SAME record rebuild returns (never one rebuild rejects) ----------
 def test_head_seq_never_counts_a_record_rebuild_rejects():
     good = cp.serialize(AgentState(engagement_slug="e", iteration=2), seq=2,

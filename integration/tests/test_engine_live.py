@@ -138,6 +138,33 @@ def test_live_remote_in_scope_tool_runs_end_to_end(hermetic_root, tmp_path, monk
     assert any(t.outcome == "ran" for t in report.tool_calls)      # the remote in-scope tool actually ran
 
 
+def test_build_engine_keys_the_checkpoint_partition_by_run_key_not_slug(hermetic_root, tmp_path):
+    # F2b (finding #3): build_engine must thread config.run_key into BOTH the checkpoint (write) and rebuild
+    # (read) seams so each run owns a DISJOINT checkpoint partition. Proven end-to-end THROUGH build_engine
+    # (not hand-wired seams): a resume under the SAME run_key restores that run's own state; a DIFFERENT
+    # run_key — and the bare-slug fallback (run_key="") — read an EMPTY partition and fresh-start, proving the
+    # write did NOT land under the slug (the exact root cause of the resume no-op). A regression that keys by
+    # config.slug again would make the run_key="" case resumed=True and this test RED.
+    prov = provision_authority(slug="loopback", scope=["127.0.0.1"])
+    base = str(tmp_path / "live")
+
+    def _run(run_key, replay, *, resume):
+        cfg = EngineConfig(slug="loopback", base_dir=base, replay=replay, provisioned=prov,
+                           runner=_echo_runner, max_iterations=6, owner_approves_offense=True,
+                           run_key=run_key)
+        return build_engine(cfg).engage(LOOPBACK, resume=resume)
+
+    # a run under run_key "R1" COMPLETES, writing its terminal checkpoint under the R1 partition.
+    assert _run("R1", ReplayThinker([_use_tool(), _complete()]), resume=False).done is True
+    # resume under the SAME run_key restores R1's OWN state (a completed run → resumed no-op, but resumed=True).
+    assert _run("R1", ReplayThinker([_complete()]), resume=True).resumed is True
+    # resume under a DIFFERENT run_key finds an EMPTY partition → fresh start (never reads R1's head).
+    assert _run("R2", ReplayThinker([_complete()]), resume=True).resumed is False
+    # run_key="" falls back to the SLUG partition, which R1 did NOT write to → fresh start. Direct proof the
+    # fix keys by run_key, not the slug.
+    assert _run("", ReplayThinker([_complete()]), resume=True).resumed is False
+
+
 def test_real_gate_in_scope_is_in_envelope_out_of_scope_denies(hermetic_root):
     # The sovereign posture: an in-scope offense tool is IN-ENVELOPE but QUEUES for the owner (an
     # autonomous agent may never auto-fire an offense tool >= A2); an out-of-scope host is a hard DENY
