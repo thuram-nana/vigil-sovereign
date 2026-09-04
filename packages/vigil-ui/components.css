@@ -686,9 +686,19 @@ textarea { min-height: 80px; resize: vertical; }
 .pb-pill:hover { color: var(--text-0); }
 .pb-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-2); }
 .pb-pill.live .dot { background: var(--st-running); animation: pulse 1.4s ease-in-out infinite; }
-.pb-card { width: 380px; max-width: 92vw; height: 340px; min-width: 260px; min-height: 150px; max-height: 82vh;
+.pb-card { width: 380px; max-width: 96vw; height: 340px; min-width: 260px; min-height: 150px; max-height: 90vh;
   display: flex; flex-direction: column; background: var(--bg-2); border: 1px solid var(--border-strong);
-  border-radius: var(--r-2); box-shadow: var(--shadow-2); overflow: hidden; resize: both; animation: fadein .2s ease; }
+  border-radius: var(--r-2); box-shadow: var(--shadow-2); overflow: hidden; position: relative; animation: fadein .2s ease; }
+/* #2 RESIZE: the box is anchored bottom-right, so a native bottom-right `resize` handle grows off-screen and
+   is unusable. A custom TOP-LEFT grip (dragged up/left) grows the box INTO the screen; size is persisted. */
+.pb-grip { position: absolute; top: 0; left: 0; width: 18px; height: 18px; cursor: nwse-resize; z-index: 3;
+  touch-action: none; }
+.pb-grip::before { content: ""; position: absolute; top: 4px; left: 4px; width: 8px; height: 8px;
+  border-top: 2px solid var(--text-2); border-left: 2px solid var(--text-2); border-radius: 1px; }
+.pb-grip:hover::before { border-color: var(--owner); }
+.pb-card.pb-max { width: 96vw !important; height: 90vh !important; }
+/* #3 THINKING rows: show the model's full plain-words rationale (wrap, don't ellipsis-truncate). */
+.pb-row.pb-think-row .pb-m { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.45; }
 .pb-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px;
   border-bottom: 1px solid var(--border); flex: 0 0 auto; }
 .pb-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
@@ -737,10 +747,11 @@ div:hover > div > .msg-actions, .msg-actions:focus-within { opacity: 1; }
 .pb-row.pb-clickable { cursor: pointer; }
 .pb-row.pb-clickable:hover { background: var(--bg-3); }
 /* S1: pending-approval cards inside the process box (chat approval interrupt) */
-.pb-approvals { flex: 0 0 auto; max-height: 45%; overflow-y: auto; border-bottom: 1px solid var(--border);
-  padding: 8px 10px; background: color-mix(in srgb, var(--accent, #6b8afd) 8%, transparent); }
-.pb-approvals-h { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); font-weight: 600;
-  color: var(--text-1); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em; }
+.pb-approvals { flex: 0 0 auto; max-height: 55%; overflow-y: auto; border-bottom: 2px solid var(--owner-line);
+  padding: 10px; background: var(--owner-dim); }
+.pb-approvals-h { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); font-weight: 700;
+  color: var(--owner); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .04em; }
+.pb-approvals-h .dot, .pb-approvals-h svg { animation: pulse 1.4s ease-in-out infinite; }
 .pb-row { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; padding: 5px 10px;
   border-bottom: 1px solid var(--border); animation: fadein .3s ease; }
 .pb-row .pb-ico { width: 20px; height: 20px; display: grid; place-items: center; color: var(--text-2); }

@@ -2047,11 +2047,15 @@
     observation:   { label: "Observed", icon: "find", cat: "observe",
       sum: function (p) { return (p.source ? p.source + ": " : "") + (p.summary || p.surface || ""); } },
     hypothesis:    { label: "Hypothesis", icon: "brain", cat: "orient",
-      sum: function (p) { return (p.handle ? p.handle + " · " : "") + (p.bug_class || "") + (p.surface ? " @ " + p.surface : "") + (p.status ? " — " + p.status : ""); } },
+      sum: function (p) { var head = (p.bug_class || "") + (p.surface ? " @ " + p.surface : "") + (p.status ? " — " + p.status : "");
+        var r = (p.rationale || "").trim(); return r ? (head ? head + " — " + r : r) : head; } },
     plan:          { label: "Plan", icon: "assess", cat: "plan",
       sum: function (p) { return p.next_action || p.plan_id || ""; } },
-    decision:      { label: "Decision", icon: "gear", cat: "plan",
-      sum: function (p) { return (p.question || "") + (p.choice ? " → " + p.choice : ""); } },
+    decision:      { label: "Thinking", icon: "gear", cat: "plan",
+      // Show the model's PLAIN-WORDS reasoning (its "why"), like Claude Code narrates — with the chosen
+      // action in brackets. Falls back to the question→choice when no rationale was carried.
+      sum: function (p) { var r = (p.rationale || "").trim(); var c = p.choice || "";
+        return r ? (r + (c ? "  [" + c + "]" : "")) : ((p.question || "") + (c ? " → " + c : "")); } },
     action:        { label: "Action", icon: "bolt", cat: "act",
       sum: function (p) { return (p.tool || "") + (p.args_summary ? " · " + p.args_summary : ""); } },
     tool_call:     { label: "Tool call", icon: "bolt", cat: "act",
@@ -10056,7 +10060,7 @@
                // queued tool lives HERE, not in the sovereign snapshot the seq-based AUX polls. Own baseline
                // + one-at-a-time guard (mirrors approvalMem, keyed by request_id).
                offenseApprovals: [], offenseMem: { popped: {}, seen: false, modal: null, base: ".vigil-live" },
-               ui: { open: false, dismissed: false } };
+               ui: { open: false, dismissed: false, w: 0, h: 0, max: false } };
   var pboxApprovalModal = null;
   var PBOX_AUX = makeApprovalUX({
     mem: PBOX.approvalMem, reason: "from chat",
@@ -10120,7 +10124,8 @@
   function pboxLoadUI() {
     try {
       var s = JSON.parse(localStorage.getItem(PBOX_KEY) || "{}");
-      if (s && typeof s === "object") { PBOX.ui.open = !!s.open; PBOX.ui.dismissed = !!s.dismissed; }
+      if (s && typeof s === "object") { PBOX.ui.open = !!s.open; PBOX.ui.dismissed = !!s.dismissed;
+        PBOX.ui.w = Number(s.w) || 0; PBOX.ui.h = Number(s.h) || 0; PBOX.ui.max = !!s.max; }
     } catch (e) { /* storage off — defaults (collapsed, visible) */ }
   }
   function pboxSaveUI() {
@@ -10178,9 +10183,12 @@
     var sum = isErr ? (p.summary || p.detail || p.error_class || "the model call failed") : (m.sum(p) || "—");
     // S5: a tool step opens the full command/output CARD in the (resizable) drawer — inline tool cards in chat.
     var isTool = e.kind === "tool_call" || e.kind === "tool_result";
+    // THINKING rows (decision/hypothesis/reasoning) show the model's plain-words rationale — let them WRAP
+    // (full text) instead of the one-line-ellipsis every other row uses.
+    var isThink = e.kind === "decision" || e.kind === "hypothesis" || e.kind === "reasoning";
     var attrs = isTool ? { style: { cursor: "pointer" }, title: "Show the command + output",
       onClick: function () { var pr = toolPairFrom(PBOX.events, e); openDrawer("Tool call", toolCardBody(pr.call, pr.result)); } } : null;
-    return h("div.pb-row" + (st.cls ? "." + st.cls : "") + (isTool ? ".pb-clickable" : ""), attrs, [
+    return h("div.pb-row" + (st.cls ? "." + st.cls : "") + (isTool ? ".pb-clickable" : "") + (isThink ? ".pb-think-row" : ""), attrs, [
       h("span.pb-ico", null, V.icon(isErr ? "x" : kindIcon(e.kind, p))),
       h("div.pb-body", null, [
         h("div.pb-k", null, [isErr ? "Backend error" : m.label,
@@ -10273,6 +10281,31 @@
   function pboxRetry() {
     if (PBOX.run) runRetry(PBOX.run.run_id, function () { PBOX.following = ""; pboxPoll(); });  // follow the NEW run
   }
+  // #2 RESIZE/MAXIMIZE: the process box is a bottom-right HUD, so a native bottom-right resize handle grows
+  // off-screen. A TOP-LEFT grip dragged up/left grows it INTO the screen; the size + maximized state persist.
+  function pboxToggleMax() { PBOX.ui.max = !PBOX.ui.max; pboxSaveUI(); pboxRenderShell(); }
+  function pboxStartResize(ev) {
+    ev.preventDefault();
+    var card = V.$(".pb-card"); if (!card) return;
+    var sx = ev.clientX, sy = ev.clientY;
+    var r = card.getBoundingClientRect(), sw = r.width, sh = r.height;
+    var maxW = window.innerWidth * 0.96, maxH = window.innerHeight * 0.90;
+    function move(e2) {
+      // bottom-right anchored → dragging the grip up/left (negative delta) ENLARGES the box.
+      var w = Math.max(260, Math.min(maxW, sw + (sx - e2.clientX)));
+      var h = Math.max(150, Math.min(maxH, sh + (sy - e2.clientY)));
+      card.style.width = w + "px"; card.style.height = h + "px";
+      PBOX.ui.w = Math.round(w); PBOX.ui.h = Math.round(h); PBOX.ui.max = false;
+    }
+    function up() {
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+      pboxSaveUI();
+    }
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+  }
+
   function pboxRenderShell() {
     var host = pboxHost();
     if (PBOX.ui.dismissed) { host.style.display = "none"; return; }
@@ -10298,6 +10331,9 @@
             ? h("button.pb-act.pb-retry", { title: pboxRetryTitle(), onClick: pboxRetry },
                 (PBOX.run && PBOX.run.resumable) ? "Resume" : "Retry")
             : null)),
+        h("button.pb-x", { title: PBOX.ui.max ? "Restore size" : "Maximize",
+          "aria-label": PBOX.ui.max ? "Restore activity size" : "Maximize activity",
+          onClick: pboxToggleMax }, V.icon(PBOX.ui.max ? "minimize" : "maximize")),
         h("button.pb-x", { title: "Minimize", "aria-label": "Minimize activity",
           onClick: function () { PBOX.ui.open = false; pboxSaveUI(); pboxRenderShell(); } }, "–"),
         h("button.pb-x", { title: "Hide", "aria-label": "Hide activity",
@@ -10327,7 +10363,12 @@
     } else {
       body = h("div.pb-feed#pb-feed", null, PBOX.events.slice(-PBOX_CAP).map(pboxRow));
     }
-    V.mount(host, h("div.pb-card", null, [head, step, approvals, body]));
+    var cardStyle = {};
+    if (!PBOX.ui.max && PBOX.ui.w && PBOX.ui.h) { cardStyle.width = PBOX.ui.w + "px"; cardStyle.height = PBOX.ui.h + "px"; }
+    var grip = h("div.pb-grip#pb-grip", { title: "Drag to resize" });
+    V.mount(host, h("div.pb-card" + (PBOX.ui.max ? ".pb-max" : ""), { style: cardStyle },
+      [grip, head, step, approvals, body]));
+    var g = V.$("#pb-grip"); if (g) g.addEventListener("pointerdown", pboxStartResize);
     var f = V.$("#pb-feed"); if (f) f.scrollTop = f.scrollHeight;   // land at the newest on (re)open
   }
   function pboxOnEvent(e) {
@@ -10362,8 +10403,17 @@
     // snapshot above does NOT carry — so without this a chat-launched engage that paused at awaiting_approval
     // would never surface its approval in the chat (the gap this closes).
     V.getJSON(OFF("/api/approvals/loopback")).then(function (d) {
+      var had = (PBOX.offenseApprovals || []).length;
       PBOX.offenseApprovals = (d && d.pending) || [];
       PBOX.offenseMem.base = (d && d.base_dir) || PBOX.offenseMem.base;
+      // #1: an offense action is BLOCKING the run on your signature — make it impossible to miss. A NEWLY
+      // pending approval un-hides + opens the process box so the actionable Approve/Deny card is visible
+      // (the operator asked "why can I only SEE 'needs approval', not act on it" — the card lives in the box).
+      if (PBOX.offenseApprovals.length && !had) {
+        if (PBOX.ui.dismissed) { PBOX.ui.dismissed = false; }
+        if (!PBOX.ui.open) { PBOX.ui.open = true; }
+        pboxSaveUI(); pboxHost().style.display = "";
+      }
       if ((location.hash || "").indexOf("#/live") !== 0) pboxOffenseMaybePop(PBOX.offenseApprovals);
       if (PBOX.ui.open && !PBOX.ui.dismissed) pboxRenderShell();
     }).catch(function () { /* offense plane offline — offense approvals just won't show */ });
