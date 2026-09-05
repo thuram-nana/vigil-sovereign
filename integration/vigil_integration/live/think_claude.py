@@ -476,18 +476,35 @@ Respond with one JSON object with an "action" field, one of:
 You may also include "reasoning": str and an "output_analysis" object with your CLAIMS about the prior
 tool output (exploit_succeeded, verdict, findings[]). Those claims are LEADS only — never facts.
 
-When a prior tool result shows an ERROR-BASED SQL INJECTION signature (a database error surfaced in the
-response — e.g. "SQL error", "unrecognized token", "syntax error near", an OperationalError — or a clear
-boolean/error differential between a benign value and an injected quote), set exploit_succeeded=true AND
-fill "extracted_info" so VIGIL's oracle can RE-VERIFY it against fresh target bytes (its re-drive is what
-mints the FACT — your claim alone never does):
+When a prior tool result REVEALS a vulnerability VIGIL can INDEPENDENTLY RE-VERIFY, set
+exploit_succeeded=true AND fill "extracted_info" with the "bug_class" so VIGIL's oracle RE-DRIVES the
+endpoint and mints the FACT over FRESH target bytes (your claim alone never mints — the re-drive is what
+confirms). Keep the SAME use_tool decision's tool_args pointed at the vulnerable endpoint URL
+(scheme://host:port/path); VIGIL re-drives THAT endpoint. These re-drives are NON-DESTRUCTIVE — they need
+NO destructive tool and NO second tool call, so do this on the SAME step the recon response revealed it,
+rather than proposing another tool.
+
+Re-verifiable "bug_class" values (set exploit_succeeded=true + extracted_info.bug_class the moment the
+recon response shows one — do NOT wait for a second probe):
+  - "error_based_sqli" — a datastore error in the response (SQL error / "unrecognized token" /
+    OperationalError / a benign-vs-quote differential). ALSO give "insertion_point" (the parameter name,
+    e.g. q) and "request_payload" (the exact payload, e.g. ').
+  - "open_redirect" — a 30x Location (or a meta/JS redirect) driven by a request parameter (e.g. next=).
+  - "cors" — Access-Control-Allow-Origin reflects the request Origin together with Allow-Credentials:true.
+  - "host_header_injection" — a hostile Host header became a redirect Location authority.
+  - "graphql_introspection" — a GraphQL endpoint returns a schema to an introspection query.
+  - "path_traversal" — a file-content signature (e.g. root:x:0:0:) is returned for a traversal payload.
+  - "xss" — a request value is reflected UNESCAPED into the HTML (a live element / script context).
+  - "exposure" — a secret/config file is served (e.g. /.env with DB_PASSWORD=, /actuator/env).
+For every class EXCEPT error_based_sqli, JUST set bug_class and keep tool_args on the endpoint URL — VIGIL
+crafts and injects its OWN canary/probe and the deterministic oracle judges the fresh bytes:
+  "output_analysis": {{"exploit_succeeded": true, "extracted_info": {{"bug_class": "path_traversal"}}}}
+For error_based_sqli include insertion_point + request_payload:
   "output_analysis": {{"exploit_succeeded": true, "extracted_info": {{
      "bug_class": "error_based_sqli",
-     "insertion_point": "<the injected parameter name, e.g. q>",
-     "request_payload": "<the exact payload that triggered the DB error, e.g. '>" }}}}
-Keep the SAME use_tool decision's tool_args pointed at the vulnerable endpoint URL (scheme://host:port/path)
-— the oracle re-drives THAT endpoint with the payload on the named parameter and confirms independently.
-This is the non-destructive path to a confirmed SQLi FACT; it needs no destructive tool.
+     "insertion_point": "<parameter name, e.g. q>",
+     "request_payload": "<the payload that triggered the DB error, e.g. '>" }}}}
+This is the non-destructive path to a confirmed FACT; it needs no destructive tool.
 
 For "use_tool", tool_name MUST be EXACTLY one of these REGISTERED tools — any other name is refused by the
 executor ("no argv builder"), so never invent names like "http_get"/"http_request":
