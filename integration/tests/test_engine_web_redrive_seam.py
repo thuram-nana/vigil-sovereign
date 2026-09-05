@@ -44,7 +44,7 @@ def _decision(bug_class: str, *, url: str = "http://127.0.0.1:19010/auth/continu
 
 
 @pytest.mark.parametrize("claimed", ["open_redirect", "cors", "host_header_injection",
-                                     "graphql_introspection", "oidc_redirect_uri"])
+                                     "graphql_introspection"])
 def test_redrive_spec_emits_a_web_spec_for_web_fact_classes(claimed):
     from vigil_integration.live.engine import VigilEngine
     spec = VigilEngine._redrive_spec(_decision(claimed), None)
@@ -52,6 +52,15 @@ def test_redrive_spec_emits_a_web_spec_for_web_fact_classes(claimed):
     assert spec["kind"] == "web"
     assert spec["bug_class"] == claimed
     assert spec["url"].endswith("/auth/continue?next=x")   # the FULL url (query preserved for param grounding)
+
+
+@pytest.mark.parametrize("claimed", ["oidc_redirect_uri", "oidc_open_redirect", "redirect_uri_validation"])
+def test_redrive_spec_excludes_oidc_from_the_llm_claim_seam_block_1(claimed):
+    """red-pen BLOCK-1: an OIDC (A07) class is NOT oracle-verifiable from the wire (evidence is byte-identical
+    to a plain open_redirect), so an LLM-supplied oidc label must NOT route through the web-fact seam — else
+    a plain open redirect would mint a signed A07 certificate the oracle only proved as A01."""
+    from vigil_integration.live.engine import VigilEngine
+    assert VigilEngine._redrive_spec(_decision(claimed), None) is None
 
 
 def test_redrive_spec_normalizes_the_class_authoritatively_landmine_2():
@@ -246,3 +255,18 @@ def test_live_seam_out_of_scope_url_mints_nothing(monkeypatch, tmp_path):
     ref = _live_web_redrive_fact(
         _prov(), {}, _redrive("http://10.99.99.99/redirect?next=orig", "open_redirect"))
     assert ref is None, "an out-of-scope target must never mint a FACT"
+
+
+def test_live_seam_oidc_claim_on_a_plain_open_redirect_mints_nothing_block_1(monkeypatch, tmp_path):
+    """red-pen BLOCK-1 (live): an oidc_redirect_uri claim over an endpoint that is only a plain open redirect
+    must mint NO FACT via the LLM-claim seam (the OIDC impact is unverified; the class is claim-carried)."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_web_redrive_fact
+    srv = _serve(); port = srv.server_address[1]
+    try:
+        ref = _live_web_redrive_fact(
+            _prov(), {}, _redrive(f"http://127.0.0.1:{port}/redirect?next=orig", "oidc_redirect_uri"))
+    finally:
+        srv.shutdown()
+    assert ref is None, "an LLM oidc claim over a plain open redirect must not mint an A07 FACT"

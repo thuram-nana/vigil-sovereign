@@ -1627,12 +1627,15 @@ def _live_web_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict
         return None
     try:
         from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
-        from .web_redrive import WEB_FACT_CLASSES, web_redrive  # noqa: PLC0415 (pulls framework at CALL time)
+        # LLM_CLAIM_WEB_FACT_CLASSES excludes oidc_redirect_uri: from an LLM-supplied class the OIDC (A07)
+        # impact is unverifiable (live evidence == a plain open_redirect), so this seam never upgrades to
+        # oidc (red-pen BLOCK-1). web_redrive still accepts oidc from a tool-report claim in proof.run.
+        from .web_redrive import LLM_CLAIM_WEB_FACT_CLASSES, web_redrive  # noqa: PLC0415 (framework at CALL)
     except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
         return None
     claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
-    if claimed not in WEB_FACT_CLASSES:
-        return None    # not a web-fact class → nothing for this engine to confirm → LEAD
+    if claimed not in LLM_CLAIM_WEB_FACT_CLASSES:
+        return None    # not an LLM-claimable web-fact class → nothing for this seam to confirm → LEAD
 
     try:
         # ``prov.slug`` is BOTH the gate-authorization slug and the certificate-binding slug (the run's

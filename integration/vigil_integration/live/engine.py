@@ -764,10 +764,12 @@ class VigilEngine:
         # WEB-FACT classes: the reviewed live.web_redrive engine only needs the URL (it injects its OWN
         # canary across query/path/cookie/body surfaces and runs the shipped checks + predicate oracle).
         try:
-            from .web_redrive import WEB_FACT_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
+            # oidc_redirect_uri is excluded from the LLM-claim seam (red-pen BLOCK-1): its A07 impact is not
+            # oracle-verifiable, so it must never be upgraded from the model's free-text class label.
+            from .web_redrive import LLM_CLAIM_WEB_FACT_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
         except Exception:  # noqa: BLE001 — module unavailable ⇒ no web re-drive (SQLi path still works)
-            WEB_FACT_CLASSES = ()
-        if bug_class in WEB_FACT_CLASSES:
+            LLM_CLAIM_WEB_FACT_CLASSES = ()
+        if bug_class in LLM_CLAIM_WEB_FACT_CLASSES:
             full = target if "://" in target else "http://" + target
             return {"kind": "web", "url": full, "bug_class": bug_class}
 
