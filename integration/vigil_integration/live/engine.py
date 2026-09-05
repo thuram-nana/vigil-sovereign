@@ -718,12 +718,16 @@ class VigilEngine:
 
     @staticmethod
     def _redrive_spec(decision: LLMDecision, exec_res: Any) -> Optional[dict]:
-        """Derive the T2 live-re-drive request-spec (``base_url`` / ``endpoint_path`` / ``param`` /
-        ``payload`` / ``nonce_param``) for an ``error_based_sqli`` ``exploit_succeeded`` candidate, from the
+        """Derive the T2 live-re-drive request-spec for an ``exploit_succeeded`` candidate, from the
         candidate's TOOL ARGS (the target the tool call named) + the LLM's ``output_analysis`` (its proposed
-        insertion point + payload — the "where to look", which the LLM is allowed to propose). Returns None
-        unless it is an error_based_sqli exploit claim with a COMPLETE, reconstructable spec (fail-closed →
-        the seam stays LEAD-only).
+        insertion point + payload — the "where to look", which the LLM is allowed to propose). Returns one of
+        two shapes, or None when the claim is not re-drivable (fail-closed → the seam stays LEAD-only):
+
+          * ``{"kind": "sqli", base_url, endpoint_path, param, payload, nonce_param, bug_class}`` — the
+            error_signature SQLi family (LiveHttpAdapter path); needs a COMPLETE, reconstructable spec.
+          * ``{"kind": "web", "url", "bug_class"}`` — a web-fact class (open_redirect / cors /
+            host_header_injection / graphql_introspection / oidc_redirect_uri); the reviewed web_redrive
+            engine only needs the URL.
 
         The LLM's claimed ``oracle_context`` (the response bytes) is NEVER read for the fact — only the
         request-side "where to look" is sourced from the model here; the FACT is decided by the re-driven
@@ -739,9 +743,16 @@ class VigilEngine:
         if not isinstance(info, dict):
             return None
         octx = info.get("oracle_context") if isinstance(info.get("oracle_context"), dict) else {}
-        # CLASS GATE (cheap; the seam re-normalizes authoritatively): only error_based_sqli re-drives.
-        bug_class = str(info.get("bug_class") or octx.get("bug_class") or "")
-        if bug_class.strip().lower().replace("-", "_").replace(" ", "_") != "error_based_sqli":
+        # CLASS GATE. Normalize AUTHORITATIVELY via the verifier (never a hand-rolled normalizer — that
+        # missed the alias/`__`-collapse folds and could disagree with the wiring gate; landmine 2). The
+        # seam re-normalizes again, so this is proposal-triage only. Two re-drive families are reachable:
+        # the error_signature SQLi family (sqli/sql_injection/error_based_sqli → the LiveHttpAdapter path)
+        # and the web-fact classes (open_redirect/cors/host_header_injection/graphql_introspection/
+        # oidc_redirect_uri → the reviewed web_redrive engine). Any other class returns None (LEAD-only).
+        try:
+            from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415 (FATAL-2)
+            bug_class = normalize_bug_class(str(info.get("bug_class") or octx.get("bug_class") or ""))
+        except Exception:  # noqa: BLE001 — cannot normalize ⇒ cannot honestly triage → LEAD (fail-closed)
             return None
         target = extract_target(getattr(tool, "tool_args", None))   # the ONE shared tool-args target reader
         if not target:
@@ -749,16 +760,33 @@ class VigilEngine:
         sp = urlsplit(target if "://" in target else "http://" + target)
         if not sp.hostname:
             return None
-        base_url = f"{(sp.scheme or 'http')}://{sp.netloc}"
-        endpoint_path = sp.path or "/"
-        param = str(info.get("insertion_point") or octx.get("payload_param") or "").strip()
-        payload = str(info.get("request_payload") or info.get("payload")
-                      or octx.get("request_payload") or "").strip()
-        nonce_param = str(info.get("nonce_param") or "rc").strip() or "rc"
-        if not (param and payload):
-            return None
-        return {"base_url": base_url, "endpoint_path": endpoint_path, "param": param,
-                "payload": payload, "nonce_param": nonce_param, "bug_class": "error_based_sqli"}
+
+        # WEB-FACT classes: the reviewed live.web_redrive engine only needs the URL (it injects its OWN
+        # canary across query/path/cookie/body surfaces and runs the shipped checks + predicate oracle).
+        try:
+            from .web_redrive import WEB_FACT_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no web re-drive (SQLi path still works)
+            WEB_FACT_CLASSES = ()
+        if bug_class in WEB_FACT_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "web", "url": full, "bug_class": bug_class}
+
+        # error_signature SQLi FAMILY (landmine 1): MERIDIAN labels its error-based plant `sqli`, and the
+        # model may say `sqli`/`sql_injection`/`error_based_sqli`. Accept them all — the error_signature
+        # oracle only fires over a real datastore-error signature, so a boolean/time-based `sqli` that
+        # leaks no error simply re-drives and stays a LEAD (sound: the oracle, not the label, decides).
+        if bug_class in ("error_based_sqli", "sqli"):
+            base_url = f"{(sp.scheme or 'http')}://{sp.netloc}"
+            endpoint_path = sp.path or "/"
+            param = str(info.get("insertion_point") or octx.get("payload_param") or "").strip()
+            payload = str(info.get("request_payload") or info.get("payload")
+                          or octx.get("request_payload") or "").strip()
+            nonce_param = str(info.get("nonce_param") or "rc").strip() or "rc"
+            if not (param and payload):
+                return None
+            return {"kind": "sqli", "base_url": base_url, "endpoint_path": endpoint_path, "param": param,
+                    "payload": payload, "nonce_param": nonce_param, "bug_class": "error_based_sqli"}
+        return None
 
     def _approved(self, decision: LLMDecision, state: AgentState) -> bool:
         if self.seams.approval is None:

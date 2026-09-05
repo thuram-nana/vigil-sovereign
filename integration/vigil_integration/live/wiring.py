@@ -1451,11 +1451,21 @@ def _build_oracle(
         if not isinstance(info, dict):
             return None
 
-        # T2 — LIVE RE-DRIVE (error_based_sqli only): a FACT from the TARGET's FRESH response bytes, NOT the
-        # LLM's claimed context. Any failure/refusal/silence returns None → the claim stays a LEAD below.
+        # T2 — LIVE RE-DRIVE (error_signature SQLi family): a FACT from the TARGET's FRESH response bytes,
+        # NOT the LLM's claimed context. Any failure/refusal/silence returns None → the claim stays a LEAD.
         fact_ref = _live_redrive_fact(prov, redrive_executor_factory, info, redrive)
         if fact_ref:
             return fact_ref
+
+        # T2 — WEB-FACT RE-DRIVE (open_redirect / cors / host_header_injection / graphql_introspection /
+        # oidc_redirect_uri): route the claim through the reviewed ``live.web_redrive`` engine, which injects
+        # its OWN canary through a gated, DNS-pinned send, runs the shipped checks + deterministic oracle,
+        # admits each atomic branch against its declared capability, and mints via
+        # certify_admitted(provenance="live_redrive"). A gate refusal / no channel / an oracle non-fire all
+        # yield family_verdict != FACT → the claim stays a LEAD below (fail-closed).
+        web_ref = _live_web_redrive_fact(prov, info, redrive)
+        if web_ref:
+            return web_ref
 
         # LEAD-ONLY fallback (AUDIT G4): a boolean/other-class candidate, or an error_based_sqli whose live
         # re-drive did not reproduce, lands here. The deterministic oracle still runs so the LEAD is honestly
@@ -1592,6 +1602,65 @@ def _live_redrive_fact(
                                observed={"channel_established": True})
     except Exception:  # noqa: BLE001 — a cert/admission error confirms nothing (fail-closed)
         return None
+
+
+def _live_web_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
+    """T2 — RE-DRIVE a web-fact class (``open_redirect`` / ``cors`` / ``host_header_injection`` /
+    ``graphql_introspection`` / ``oidc_redirect_uri``) through the reviewed :mod:`live.web_redrive` engine
+    and return a signed FACT's ``finding_ref`` ONLY when web_redrive independently confirms the CLAIMED class
+    over VIGIL's OWN gated, DNS-pinned live capture.
+
+    web_redrive injects its OWN canary (never the LLM's proposed value), runs the shipped ``scanner.checks``
+    probes + the deterministic ``predicate_oracle``, fans the response into atomic evidence branches, admits
+    each against its declared capability, and mints via ``certify_admitted(provenance="live_redrive")`` — the
+    same non-LLM channel the sovereign anti-hallucination gate requires. The FACT is tied to the CLAIM: a
+    minted certificate is returned only when ``family_verdict(claimed) == "FACT"`` (a sibling class web_redrive
+    also probes and confirms does NOT relabel THIS claim). A gate refusal / no established channel / an oracle
+    non-fire all yield a non-FACT family verdict → None → the claim stays a LEAD (fail-closed). The LLM's
+    claimed ``oracle_context`` is never read for the fact.
+
+    FATAL-2: every framework/web_redrive import is function-local (this is the offense-side re-drive path)."""
+    if not isinstance(redrive, dict):
+        return None
+    url = str(redrive.get("url") or "").strip()
+    if not url:
+        return None
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .web_redrive import WEB_FACT_CLASSES, web_redrive  # noqa: PLC0415 (pulls framework at CALL time)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
+        return None
+    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    if claimed not in WEB_FACT_CLASSES:
+        return None    # not a web-fact class → nothing for this engine to confirm → LEAD
+
+    try:
+        # ``prov.slug`` is BOTH the gate-authorization slug and the certificate-binding slug (the run's
+        # authority is provisioned under it), so the two scopes are identical by construction — mirrors
+        # ``proof.run._web_redrive_mint``. ``claimed_class`` gates the oidc branch (identical predicate to
+        # open_redirect, so it must fire only when the claim IS oidc, never as a severity upgrade).
+        wr = web_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
+                         claimed_class=claimed)
+    except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
+        return None
+
+    # Tie the FACT to the CLAIMED class: mint only if web_redrive independently confirmed THAT class.
+    try:
+        if wr.family_verdict(claimed) != "FACT":
+            return None
+    except Exception:  # noqa: BLE001 — cannot read the verdict ⇒ treat as unconfirmed → LEAD
+        return None
+    # Return the FACT certificate that belongs to the CLAIMED class (web_redrive may also have signed
+    # sibling-class facts on the same URL; those are persisted but must not relabel this claim).
+    for f in getattr(wr, "facts", []) or []:
+        try:
+            if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
+                ref = str(getattr(f, "finding_ref", "") or "")
+                if ref:
+                    return ref
+        except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
+            continue
+    return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
 
 
 # ---------------------------------------------------------------------------------------------------
