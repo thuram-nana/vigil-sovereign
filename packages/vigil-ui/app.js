@@ -7304,7 +7304,7 @@
   const CHAT_MAX_ATTACH = 12;
   // Records the ENGINE authors itself: a launch, a refusal, an error, a prompt for a target, an
   // attachment receipt. Anything else an assistant says is model prose → a LEAD, and is badged as one.
-  const CHAT_ENGINE_KINDS = { launched: 1, refused: 1, error: 1, need_target: 1, attached: 1, system: 1, agent_question: 1 };
+  const CHAT_ENGINE_KINDS = { launched: 1, refused: 1, error: 1, need_target: 1, attached: 1, system: 1, agent_question: 1, awaiting_approval: 1 };
 
   function fmtBytes(n) {
     const b = Number(n) || 0;
@@ -8208,6 +8208,21 @@
           (isPendingQ && m.options && m.options.length)
             ? "Pick an answer above, or type your own below — I'll resume the engagement with it."
             : "Reply below and I'll resume the engagement with your answer."));
+        return h("div", wrap, h("div", box, kids));
+      }
+      // AWAITING APPROVAL (Wave 8): the engagement paused because its next step needs a SIGNED owner
+      // approval. Surface it IN the transcript (not only the floating process box), styled amber so a
+      // blocked run never reads as idle. The interactive Approve / Deny / Deny & redirect live in the
+      // process box below (owner key stays sovereign-side); a reply here steers + resumes.
+      if (m.kind === "awaiting_approval") {
+        box.style.borderColor = "var(--st-queued, #d4af37)";
+        box.style.borderLeftWidth = "3px";
+        kids.push(h("div", { style: { marginBottom: "6px", display: "flex", alignItems: "center", gap: "6px" } },
+          [h("span.shield", { style: { color: "var(--st-queued, #d4af37)" } },
+            [V.icon("key"), "Paused — awaiting your approval"])]));
+        kids.push(h("div", null, String(m.text || "")));
+        kids.push(h("div.dim", { style: { fontSize: "var(--fs-xs)", marginTop: "8px" } },
+          "Approve it in the process box (Approve / Deny / Deny & redirect), or reply here to steer me — then I continue."));
         return h("div", wrap, h("div", box, kids));
       }
       // S10: assistant replies render as SAFE markdown (code/bold/lists/links); user messages stay literal.
@@ -10126,6 +10141,8 @@
     PBOX.offenseMem.popped[p.request_id] = true;   // never re-pop the same request (dismiss = use the card)
     var cmd = "vigil approve sign --base-dir " + (PBOX.offenseMem.base || ".vigil-live")
             + " --request-id " + p.request_id;
+    var redirect = h("input.input", { type: "text",
+      placeholder: "Tell the agent what to do instead\u2026 (for Deny & redirect)" });
     var body = h("div.stack", null, [
       h("div.why", null, "The agent's next step needs your signed approval before it can run."),
       h("div.kv", null, [
@@ -10133,13 +10150,24 @@
         h("span.k", null, "Target"), h("span.v.mono", null, p.target || "—"),
       ]),
       p.args_preview ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } }, p.args_preview) : null,
+      redirect,
       h("p.helper", null, "Approve signs it in the sovereign cockpit with your owner key (it never reaches "
-        + "the offense console) and the run continues. Deny refuses it. You can also sign from a terminal:"),
+        + "the offense console) and the run continues. Deny refuses it. Deny & redirect refuses it AND sends "
+        + "your note to steer the agent so it re-plans. You can also sign from a terminal:"),
       h("code.mono", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all", display: "block" } }, cmd),
     ]);
     var done = function () { if (m) { try { m.close(); } catch (e) {} } PBOX.offenseMem.modal = null; };
     var refresh = function () { pboxApprovalPoll(); };
+    var denyRedirect = function () {
+      var t = (redirect.value || "").trim();
+      if (!t) { V.toast("Type what the agent should do instead first.", true); if (redirect.focus) redirect.focus(); return; }
+      injectIntoRun((PBOX.run && PBOX.run.slug) || "", redirect);   // steer (honest toast: live vs queued)
+      offenseDeny(p, refresh);                                       // and refuse the exact action
+      done();
+    };
+    redirect.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); denyRedirect(); } });
     var m = openModal("Approve this action?", body, [
+      h("button.btn", { onClick: denyRedirect }, [V.icon("edit"), "Deny & redirect"]),
       h("button.btn.danger", { onClick: function () { offenseDeny(p, refresh); done(); } }, [V.icon("x"), "Deny"]),
       h("button.btn.owner", { onClick: function () { offenseApprove(p, refresh); done(); } }, [V.icon("check"), "Approve"]),
     ], { onCancel: function () { PBOX.offenseMem.modal = null; } });

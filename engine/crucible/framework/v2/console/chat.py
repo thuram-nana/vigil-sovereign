@@ -531,6 +531,29 @@ def post_agent_question(chat_id: str, question: str, *, run_id: str = "", slug: 
         return False
 
 
+def post_engine_notice(chat_id: str, text: str, *, run_id: str = "", slug: str = "",
+                       kind: str = "system") -> bool:
+    """Append a short ENGINE notice (e.g. an ``awaiting_approval`` pause) to a chat transcript, so a
+    blocked run TELLS the operator in the conversation instead of only in the floating process box. Same
+    three guards as ``post_agent_question`` (path-safe id, non-empty text, an already-existing transcript),
+    so a non-chat engage never grows one. Best-effort; never raises (runs in the supervisor daemon thread)."""
+    try:
+        cid = _safe_chat_id(str(chat_id or ""))
+    except (ValueError, Exception):  # noqa: BLE001
+        return False
+    t = str(text or "").strip()
+    if not t:
+        return False
+    if not _chat_path(cid).exists():
+        return False
+    try:
+        _append(cid, {"role": "assistant", "kind": str(kind or "system"), "text": t,
+                      "run_id": str(run_id or ""), "slug": str(slug or "")})
+        return True
+    except Exception:  # noqa: BLE001 — a transcript write must never perturb the run's teardown
+        return False
+
+
 def read_session(chat_id: str) -> list[dict]:
     """Replay one transcript in order. A torn/blank last line (crash mid-write) is skipped, never fatal."""
     p = _chat_path(chat_id)

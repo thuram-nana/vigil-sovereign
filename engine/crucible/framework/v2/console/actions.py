@@ -639,7 +639,19 @@ def _maybe_surface_agent_question(run_id: str, meta: dict) -> None:
     if not sid:
         return
     dec = _last_decision(run_id)
-    if str(dec.get("choice") or "") != "ask_user":
+    choice = str(dec.get("choice") or "")
+    if choice != "ask_user":
+        # AWAITING APPROVAL (Wave 8): the run paused for a SIGNED owner approval (not ask_user). Post one
+        # transcript notice so the chat isn't silent while the process box shows the approvable action. The
+        # terminal run_summary carries the pause reason; a non-chat engage has no transcript so it no-ops.
+        if str((_run_outcome(run_id) or {}).get("paused") or "") == "awaiting_approval":
+            tool = str(dec.get("tool") or "").strip()
+            note = ("I'm paused — my next step" + (f" ({tool})" if tool else "")
+                    + " needs your signed approval before it can run. Approve it in the process box "
+                      "(Approve / Deny / Deny & redirect), or reply here to steer me, and I'll continue.")
+            from . import chat                          # local import — chat imports actions (avoid a cycle)
+            chat.post_engine_notice(sid, note, run_id=str(run_id), slug=str(meta.get("slug") or ""),
+                                    kind="awaiting_approval")
         return
     question = str(dec.get("agent_question") or "").strip()
     if not question:
