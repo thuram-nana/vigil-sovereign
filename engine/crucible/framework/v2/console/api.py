@@ -573,18 +573,77 @@ def approvals(slug: str = "") -> dict[str, Any]:
     return {"ok": True, "slug": str(slug or ""), "base_dir": base, "pending": pending}
 
 
+def _findings_from_progress(run_dir: Any) -> list[dict[str, Any]]:
+    """Recover a run's findings from its ``progress.jsonl`` stream (the offense reasoning spine mirror) —
+    the source of truth for an INTEGRATION `vigil engage` (chat-launched), which is spawned with
+    ``capture_report=False`` and so never writes a ``report.json``. Each ``kind=="finding"`` event is mapped
+    to the same finding shape the Findings screen renders, marking a FACT (``verified_by_oracle``) vs a LEAD.
+    Console-safe: reads a local file only, no imports. Deduped by (title, location, grounding). Total."""
+    from pathlib import Path
+    prog = Path(run_dir) / "progress.jsonl"
+    out: list[dict[str, Any]] = []
+    try:
+        text = prog.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    for line in text.splitlines():
+        rec = _safe(lambda l=line: json.loads(l), default=None)
+        if not isinstance(rec, dict) or rec.get("kind") != "finding":
+            continue
+        pl = rec.get("payload") or {}
+        fact = bool(pl.get("verified_by_oracle"))
+        out.append({
+            "title": pl.get("title") or pl.get("summary") or pl.get("bug_class") or "finding",
+            "bug_class": pl.get("bug_class") or pl.get("surface") or "",
+            "severity": pl.get("severity") or ("High" if fact else "Info"),
+            "confidence": "Certain" if fact else "Tentative",
+            "confirmed_by": pl.get("surface") or ("oracle" if fact else ""),
+            "verified_by_oracle": fact,
+            "grounding": "fact" if fact else "lead",
+            "kind": "finding",
+            "location": pl.get("target") or pl.get("host") or "",
+            "evidence": pl.get("summary") or pl.get("ref") or "",
+            "re_verifiable": fact,
+            "references": [],
+            "remediation": "",
+            "ref": pl.get("ref") or "",
+        })
+    seen, dedup = set(), []
+    for f in out:
+        k = (f["title"], f["location"], f["grounding"])
+        if k in seen:
+            continue
+        seen.add(k)
+        dedup.append(f)
+    return dedup
+
+
 def run_report(run_id: str) -> dict[str, Any]:
     """The saved `build_report` document for a console run (findings + attack_paths +
-    summary), or an error marker if it has not finished yet."""
+    summary), or an error marker if it has not finished yet. When there is no rendered ``report.json`` (an
+    INTEGRATION chat-launched `vigil engage`, spawned capture_report=False), fall back to the run's
+    ``progress.jsonl`` so its oracle-confirmed FACTs still appear on the Findings screen (fixing the
+    'Findings screen is empty for chat runs' limitation)."""
     from . import actions
 
     rep = actions.run_dir(run_id) / "report.json"
     doc = _safe(lambda: json.loads(rep.read_text(encoding="utf-8")), default=None)
-    if doc is None:
-        meta = _safe(lambda: json.loads((actions.run_dir(run_id) / "meta.json").read_text(encoding="utf-8")), default={})
-        return {"run_id": run_id, "pending": True, "status": meta.get("status", "unknown")}
-    doc["run_id"] = run_id
-    return doc
+    if doc is not None:
+        doc["run_id"] = run_id
+        return doc
+
+    meta = _safe(lambda: json.loads((actions.run_dir(run_id) / "meta.json").read_text(encoding="utf-8")), default={})
+    findings = _findings_from_progress(actions.run_dir(run_id))
+    status = str(meta.get("status", "unknown"))
+    # Still nothing AND still going ⇒ genuinely pending. Otherwise return what the stream produced (possibly
+    # an empty list for a finished run that found nothing — the screen then honestly shows "no findings").
+    if not findings and status == "running":
+        return {"run_id": run_id, "pending": True, "status": status}
+    facts = sum(1 for f in findings if f.get("verified_by_oracle"))
+    return {"run_id": run_id, "status": status, "source": "progress-stream",
+            "target": meta.get("target", ""), "tool": meta.get("engine", "integration"),
+            "findings": findings, "attack_paths": [], "discovered_endpoints": [],
+            "summary": {"findings": len(findings), "facts": facts, "leads": len(findings) - facts}}
 
 
 def _no_send(_request):  # pragma: no cover - chaining is pure reasoning, never sends
