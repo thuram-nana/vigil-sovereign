@@ -8763,6 +8763,23 @@
         { cmd: "/research", desc: "Switch to Research reasoning", run: function () { C.reasonMode = "research"; if (reasonSel) reasonSel.value = "research"; V.toast("Research mode.", false); try { input.focus(); } catch (e) {} } },
         { cmd: "/model", desc: "Pick the model for this chat", run: function () { try { sessModelSel.focus(); } catch (e) {} } },
         { cmd: "/fireteam", desc: "Compose a fireteam directive", run: function () { requestFireteam(); } },
+        { cmd: "/resume", desc: "Resume the paused run from its last checkpoint", run: function () {
+            if (PBOX.run && runIsRetryable(PBOX.run)) pboxRetry();
+            else V.toast("No paused/resumable run to resume.", true); } },
+        { cmd: "/stop", desc: "Stop the running engagement", run: function () {
+            if (PBOX.run && PBOX.run.status === "running") pboxCancel();
+            else V.toast("No running engagement to stop.", true); } },
+        { cmd: "/approve", desc: "Approve the pending owner action", run: function () {
+            var pend = PBOX.offenseApprovals || [];
+            if (pend.length) offenseApprove(pend[0], function () { pboxApprovalPoll(); });
+            else V.toast("Nothing is awaiting your approval.", true); } },
+        { cmd: "/findings", desc: "Open the Findings screen", run: function () { location.hash = "#/findings"; } },
+        { cmd: "/report", desc: "Open the Report screen", run: function () { location.hash = "#/report"; } },
+        { cmd: "/status", desc: "Show the followed run's status", run: function () {
+            var r = PBOX.run;
+            V.toast(r ? ("Run " + (r.slug || r.run_id) + " \u2014 " + (r.status || "unknown")
+                         + (r.paused ? " (" + r.paused + ")" : ""))
+                      : "No run is being followed.", false); } },
         { cmd: "/new", desc: "Start a new chat", run: function () { openSession(""); } },
         { cmd: "/clear", desc: "Start a new chat", run: function () { openSession(""); } },
       ];

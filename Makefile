@@ -104,3 +104,6 @@ smoke: ## run the boundary + core smoke checks (no pytest needed)
 
 clean-services: ## stop services AND delete their data volumes (destructive)
 	docker compose down -v
+
+deploy-console: ## mirror the console UI + backend to the running-demo tree (VIGIL_DEPLOY_DIR, default /home/kali/vigil) and restart the unit
+	bash tools/deploy-console.sh
