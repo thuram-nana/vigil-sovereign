@@ -931,6 +931,90 @@
         "posture_oracle_selection",
         "artifact_completeness_proof"
       ]
+    },
+    {
+      "id": "path_traversal.file_signature",
+      "check": "ContentSignatureCheck",
+      "evidence": "a distinctive KNOWN-CONTENT signature of the target file (root:x:0:0:) appears in the response body after a traversal payload — proof the file was READ, not that the path merely reflected",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "Body-derived, POSITIVE-only: fires ONLY when the file-content signature is present in a decoded body. A non-firing cannot distinguish 'no traversal' from 'the file is not one we hold a signature for' or 'the body could not be decoded'. Bounded to the probed query-parameter names and the single canonical ../../../../etc/passwd payload.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/checks.py:ContentSignatureCheck",
+        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive"
+      ],
+      "blocking_work": "A sound path_traversal CLEAN needs (1) the same response-body decode-completeness guarantee as open_redirect.body_markup (spec HTML/charset determination, bounded streaming brotli/zstd, concatenated members, truncation-free reads) so a non-firing is a channel-confirmed negative, AND (2) exhaustive insertion-surface + encoding coverage (path segment, cookie, body params; url/double/utf-8 encodings) so absence-of-read over one param+payload is not mistaken for absence-of-traversal.",
+      "oracle_version": "side_effect",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "response_body_decode",
+        "sink_observation_capture"
+      ]
+    },
+    {
+      "id": "xss.reflected_execution",
+      "check": "MarkerReflectionCheck",
+      "evidence": "a unique VIGIL canary injected into a request parameter is reflected into an EXECUTABLE HTML position in the response body — a tag name, inside <script>, or an on*/javascript: attribute — proven by the HTML-standard lexer, not a substring match",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "Body-derived, POSITIVE-only: fires ONLY when the canary reaches an executable context; an HTML-encoded reflection is inert TEXT and does not fire. A non-firing cannot distinguish 'not reflected/escaped' from 'the body could not be decoded'. Reflected only — stored XSS (write-then-read) is a separate branch. Bounded to the probed query-parameter names.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/checks.py:MarkerReflectionCheck",
+        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive"
+      ],
+      "blocking_work": "A sound reflected-xss CLEAN needs (1) the response-body decode-completeness guarantee shared with open_redirect.body_markup so a non-firing is a channel-confirmed negative, AND (2) exhaustive insertion-surface coverage (path/cookie/body/JSON params, not only the query) plus DOM-rendered contexts (headless render), since a marker inert in the raw body can still execute after client-side templating.",
+      "oracle_version": "reflection_context",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_canary_injection",
+        "response_body_decode",
+        "js_lexer_executable_context",
+        "sink_observation_capture"
+      ]
+    },
+    {
+      "id": "exposure.secret_signature",
+      "check": "PathProbeCheck",
+      "evidence": "a distinctive secret/config signature (DB_PASSWORD, propertySources) is present in the body of a non-404 response at a fixed framework/CMS path (/.env, /actuator/env) — adjudicated by the predicate oracle over the observed {status, body}, not a mere 2xx",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "Body-derived, POSITIVE-only: fires ONLY when a known signature is present; a 404 or signature-less body yields no context to adjudicate. A non-firing cannot distinguish 'not exposed' from 'exposed under a path/signature not probed' or 'body could not be decoded'. Bounded to the fixed probe-path + signature set.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/checks.py:PathProbeCheck",
+        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive"
+      ],
+      "blocking_work": "A sound exposure CLEAN needs (1) the response-body decode-completeness guarantee shared with open_redirect.body_markup, AND (2) an exhaustive, maintained probe-path + signature corpus so absence over the current fixed set is not mistaken for absence of any framework/secret exposure.",
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "response_body_decode"
+      ]
     }
   ]
 }

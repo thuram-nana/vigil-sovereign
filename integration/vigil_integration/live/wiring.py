@@ -1467,6 +1467,13 @@ def _build_oracle(
         if web_ref:
             return web_ref
 
+        # T2 — RUNTIME RE-DRIVE (path_traversal / reflected xss / exposure): route through the runner-owned
+        # runtime_redrive engine (gated send → the matching deterministic oracle → per-branch admit →
+        # certify_admitted provenance="live_redrive"). A non-confirmation stays a LEAD below (fail-closed).
+        runtime_ref = _live_runtime_redrive_fact(prov, info, redrive)
+        if runtime_ref:
+            return runtime_ref
+
         # LEAD-ONLY fallback (AUDIT G4): a boolean/other-class candidate, or an error_based_sqli whose live
         # re-drive did not reproduce, lands here. The deterministic oracle still runs so the LEAD is honestly
         # labelled with what fired, but an LLM-provenanced context is never signed into a FACT.
@@ -1656,6 +1663,53 @@ def _live_web_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict
     # Return the FACT certificate that belongs to the CLAIMED class (web_redrive may also have signed
     # sibling-class facts on the same URL; those are persisted but must not relabel this claim).
     for f in getattr(wr, "facts", []) or []:
+        try:
+            if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
+                ref = str(getattr(f, "finding_ref", "") or "")
+                if ref:
+                    return ref
+        except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
+            continue
+    return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
+
+
+def _live_runtime_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
+    """T2 — RE-DRIVE a RESPONSE-DERIVED class (``path_traversal`` / ``xss`` reflected / ``exposure``) through
+    the runner-owned :mod:`live.runtime_redrive` engine and return a signed FACT's ``finding_ref`` ONLY when
+    the matching deterministic oracle (side_effect / reflection_context / predicate) confirms the CLAIMED
+    class over VIGIL's OWN gated live capture.
+
+    Mirrors :func:`_live_web_redrive_fact`: the runner crafts its own probe (never the LLM's payload), mints
+    via ``certify_admitted(provenance="live_redrive")``, and the FACT is tied to the CLAIM
+    (``family_verdict(claimed) == "FACT"`` and the returned cert's ``bug_class == claimed``). A gate refusal /
+    no channel / an oracle non-fire all yield a non-FACT → None → the claim stays a LEAD (fail-closed). Unlike
+    the web seam, runtime_redrive runs ONLY the claimed class, so there is no sibling to disambiguate.
+
+    FATAL-2: every framework/runtime_redrive import is function-local (offense-side re-drive path)."""
+    if not isinstance(redrive, dict):
+        return None
+    url = str(redrive.get("url") or "").strip()
+    if not url:
+        return None
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .runtime_redrive import RUNTIME_FACT_CLASSES, runtime_redrive  # noqa: PLC0415 (framework at CALL)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
+        return None
+    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    if claimed not in RUNTIME_FACT_CLASSES:
+        return None    # not a runtime-redrive class → nothing for this seam to confirm → LEAD
+    try:
+        rr = runtime_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
+                             claimed_class=claimed)
+    except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
+        return None
+    try:
+        if rr.family_verdict(claimed) != "FACT":
+            return None
+    except Exception:  # noqa: BLE001 — cannot read the verdict ⇒ treat as unconfirmed → LEAD
+        return None
+    for f in getattr(rr, "facts", []) or []:
         try:
             if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
                 ref = str(getattr(f, "finding_ref", "") or "")
