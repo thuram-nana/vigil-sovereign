@@ -1474,13 +1474,6 @@ def _build_oracle(
         if runtime_ref:
             return runtime_ref
 
-        # T2 — ACCESS RE-DRIVE (bola / idor): a two-identity cross-object read via runtime_redrive.access_redrive
-        # (attacker vs privileged/victim session), minting only when the attacker actually received the
-        # victim's object content. A non-confirmation stays a LEAD below (fail-closed).
-        access_ref = _live_access_redrive_fact(prov, info, redrive)
-        if access_ref:
-            return access_ref
-
         # LEAD-ONLY fallback (AUDIT G4): a boolean/other-class candidate, or an error_based_sqli whose live
         # re-drive did not reproduce, lands here. The deterministic oracle still runs so the LEAD is honestly
         # labelled with what fired, but an LLM-provenanced context is never signed into a FACT.
@@ -1709,52 +1702,6 @@ def _live_runtime_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[
     try:
         rr = runtime_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
                              claimed_class=claimed)
-    except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
-        return None
-    try:
-        if rr.family_verdict(claimed) != "FACT":
-            return None
-    except Exception:  # noqa: BLE001 — cannot read the verdict ⇒ treat as unconfirmed → LEAD
-        return None
-    for f in getattr(rr, "facts", []) or []:
-        try:
-            if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
-                ref = str(getattr(f, "finding_ref", "") or "")
-                if ref:
-                    return ref
-        except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
-            continue
-    return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
-
-
-def _live_access_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
-    """T2 — RE-DRIVE a broken-object-level-authorization claim (bola / idor) as a TWO-IDENTITY cross-object
-    read via :func:`live.runtime_redrive.access_redrive`, minting a signed FACT ONLY when the attacker
-    identity actually received the privileged (victim) identity's object content over VIGIL's own gated
-    capture. The session cookies + object reference ride in ``redrive`` (the operator/engage-supplied 'where
-    to look'); the FACT is decided by the wire bytes. A missing victim session, a same-identity read, a
-    403/empty attacker response, or a privileged body the attacker did not receive all stay a LEAD
-    (fail-closed). FATAL-2: imports function-local."""
-    if not isinstance(redrive, dict) or redrive.get("kind") != "access":
-        return None
-    url = str(redrive.get("url") or "").strip()
-    victim_cookie = str(redrive.get("victim_cookie") or "").strip()
-    if not url or not victim_cookie:
-        return None
-    try:
-        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
-        from .runtime_redrive import ACCESS_FACT_CLASSES, access_redrive  # noqa: PLC0415 (framework at CALL)
-    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
-        return None
-    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
-    if claimed not in ACCESS_FACT_CLASSES:
-        return None
-    try:
-        rr = access_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
-                            claimed_class=claimed, victim_cookie=victim_cookie,
-                            attacker_cookie=str(redrive.get("attacker_cookie") or "").strip() or None,
-                            ref_param=str(redrive.get("ref_param") or "").strip(),
-                            victim_ref=str(redrive.get("victim_ref") or "").strip())
     except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
         return None
     try:

@@ -1015,60 +1015,6 @@
         "vigil_owned_live_redrive",
         "response_body_decode"
       ]
-    },
-    {
-      "id": "bola.cross_tenant_read",
-      "check": "IdorCheck",
-      "evidence": "an UNDER-privileged identity's response actually contains the object content only the PRIVILEGED (owning) identity should see — attacker got HTTP 200, the victim's body has real content (>=8 chars), and the attacker's body contains it — judged by the achieved-state predicate oracle over VIGIL's own two-identity gated capture",
-      "fact_capable": true,
-      "clean_capable": false,
-      "preconditions": [
-        "channel_established"
-      ],
-      "limitation": "POSITIVE-only two-identity read: fires ONLY on a confirmed cross-tenant read (two DISTINCT identities; a same-identity read is refused). A non-firing (attacker 403 / empty / different body) is not proof of correct authorization elsewhere. Requires a privileged (owner) session to establish the ground truth; without it the claim stays a LEAD. Bounded to the probed object reference and identity pair.",
-      "target_fact_capable": true,
-      "target_clean_capable": false,
-      "target_downgrade_rationale": "A cross-tenant read is a POSITIVE-only proof: a non-firing over one object reference / identity pair cannot prove the absence of broken object-level authorization across all objects, parameters and identities, so a sound CLEAN is not achievable from this differential.",
-      "evidence_surface": "service_response",
-      "implementation_refs": [
-        "engine/crucible/framework/v2/scanner/checks.py:IdorCheck",
-        "integration/vigil_integration/live/runtime_redrive.py:access_redrive"
-      ],
-      "blocking_work": "",
-      "oracle_version": "achieved_state",
-      "control_requirements": [
-        "warden_active_recon_gate",
-        "vigil_owned_gated_probe",
-        "authenticated_vs_unauthenticated_paired_capture",
-        "confirming_identity_call"
-      ]
-    },
-    {
-      "id": "idor.cross_tenant_read",
-      "check": "IdorCheck",
-      "evidence": "an UNDER-privileged identity's response actually contains the object content only the PRIVILEGED (owning) identity should see — attacker got HTTP 200, the victim's body has real content (>=8 chars), and the attacker's body contains it — judged by the achieved-state predicate oracle over VIGIL's own two-identity gated capture",
-      "fact_capable": true,
-      "clean_capable": false,
-      "preconditions": [
-        "channel_established"
-      ],
-      "limitation": "POSITIVE-only two-identity read: fires ONLY on a confirmed cross-tenant read (two DISTINCT identities; a same-identity read is refused). A non-firing (attacker 403 / empty / different body) is not proof of correct authorization elsewhere. Requires a privileged (owner) session to establish the ground truth; without it the claim stays a LEAD. Bounded to the probed object reference and identity pair.",
-      "target_fact_capable": true,
-      "target_clean_capable": false,
-      "target_downgrade_rationale": "A cross-tenant read is a POSITIVE-only proof: a non-firing over one object reference / identity pair cannot prove the absence of broken object-level authorization across all objects, parameters and identities, so a sound CLEAN is not achievable from this differential.",
-      "evidence_surface": "service_response",
-      "implementation_refs": [
-        "engine/crucible/framework/v2/scanner/checks.py:IdorCheck",
-        "integration/vigil_integration/live/runtime_redrive.py:access_redrive"
-      ],
-      "blocking_work": "",
-      "oracle_version": "achieved_state",
-      "control_requirements": [
-        "warden_active_recon_gate",
-        "vigil_owned_gated_probe",
-        "authenticated_vs_unauthenticated_paired_capture",
-        "confirming_identity_call"
-      ]
     }
   ]
 }

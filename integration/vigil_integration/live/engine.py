@@ -783,24 +783,6 @@ class VigilEngine:
             full = target if "://" in target else "http://" + target
             return {"kind": "runtime", "url": full, "bug_class": bug_class}
 
-        # ACCESS two-identity read differential (bola / idor): needs a privileged (victim) session to
-        # establish the ground truth. The session cookies + object reference are the LLM/operator-supplied
-        # "where to look" — the oracle decides over the wire bytes. No victim session ⇒ LEAD (fail-closed).
-        try:
-            from .runtime_redrive import ACCESS_FACT_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
-        except Exception:  # noqa: BLE001 — module unavailable ⇒ no access re-drive (other paths work)
-            ACCESS_FACT_CLASSES = ()
-        if bug_class in ACCESS_FACT_CLASSES:
-            victim_cookie = str(info.get("victim_cookie") or info.get("victim_session") or "").strip()
-            if not victim_cookie:
-                return None
-            full = target if "://" in target else "http://" + target
-            return {"kind": "access", "url": full, "bug_class": bug_class, "victim_cookie": victim_cookie,
-                    "attacker_cookie": str(info.get("attacker_cookie") or info.get("attacker_session")
-                                           or "").strip(),
-                    "ref_param": str(info.get("ref_param") or info.get("insertion_point") or "").strip(),
-                    "victim_ref": str(info.get("victim_ref") or "").strip()}
-
         # error_signature SQLi FAMILY (landmine 1): MERIDIAN labels its error-based plant `sqli`, and the
         # model may say `sqli`/`sql_injection`/`error_based_sqli`. Accept them all — the error_signature
         # oracle only fires over a real datastore-error signature, so a boolean/time-based `sqli` that

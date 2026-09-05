@@ -386,7 +386,6 @@ jobs:
               --ignore=integration/tests/test_web_redrive_proof_sink.py \
               --ignore=integration/tests/test_engine_web_redrive_seam.py \
               --ignore=integration/tests/test_engine_runtime_redrive_seam.py \
-              --ignore=integration/tests/test_engine_access_redrive_seam.py \
               --ignore=integration/tests/test_typed_outcomes.py \
               --ignore=integration/tests/test_engine_live.py \
               --ignore=integration/tests/test_engine_terminal.py \
@@ -483,7 +482,6 @@ jobs:
               integration/tests/test_web_redrive_proof_sink.py \
               integration/tests/test_engine_web_redrive_seam.py \
               integration/tests/test_engine_runtime_redrive_seam.py \
-              integration/tests/test_engine_access_redrive_seam.py \
               integration/tests/test_release_gate_deceptive_tool.py \
               integration/tests/test_release_gate_false_fact.py \
               integration/tests/test_release_gate_offline_replay.py \
