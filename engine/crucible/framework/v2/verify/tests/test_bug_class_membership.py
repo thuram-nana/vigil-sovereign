@@ -74,3 +74,10 @@ def test_require_known_helper_raises_on_unknown() -> None:
     assert require_known_bug_class("IDOR") == "idor"
     with pytest.raises(ValueError):
         require_known_bug_class("made_up_class")
+
+
+def test_llm_injection_folds_onto_prompt_injection() -> None:
+    """The LLM/user-facing spelling ``llm_injection`` must canonicalise to the oracle-provable
+    ``prompt_injection`` class (so a claimed LLM-injection is recognised, not flagged as invented)."""
+    assert canonical_bug_class("llm_injection") == "prompt_injection"
+    assert is_known_bug_class("llm_injection")
