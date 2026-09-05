@@ -484,18 +484,25 @@ confirms). Keep the SAME use_tool decision's tool_args pointed at the vulnerable
 NO destructive tool and NO second tool call, so do this on the SAME step the recon response revealed it,
 rather than proposing another tool.
 
-Re-verifiable "bug_class" values (set exploit_succeeded=true + extracted_info.bug_class the moment the
-recon response shows one — do NOT wait for a second probe):
-  - "error_based_sqli" — a datastore error in the response (SQL error / "unrecognized token" /
-    OperationalError / a benign-vs-quote differential). ALSO give "insertion_point" (the parameter name,
-    e.g. q) and "request_payload" (the exact payload, e.g. ').
-  - "open_redirect" — a 30x Location (or a meta/JS redirect) driven by a request parameter (e.g. next=).
-  - "cors" — Access-Control-Allow-Origin reflects the request Origin together with Allow-Credentials:true.
-  - "host_header_injection" — a hostile Host header became a redirect Location authority.
-  - "graphql_introspection" — a GraphQL endpoint returns a schema to an introspection query.
-  - "path_traversal" — a file-content signature (e.g. root:x:0:0:) is returned for a traversal payload.
-  - "xss" — a request value is reflected UNESCAPED into the HTML (a live element / script context).
-  - "exposure" — a secret/config file is served (e.g. /.env with DB_PASSWORD=, /actuator/env).
+IMPORTANT — you do NOT receive the raw tool response (secret-safety keeps target bytes out of this
+prompt). Decide from the REQUEST you sent, not from a response you cannot see. When you probe an endpoint
+whose SHAPE matches a re-verifiable class below, set exploit_succeeded=true + extracted_info.bug_class on
+THAT SAME use_tool step. VIGIL's deterministic oracle then RE-DRIVES the endpoint itself and mints ONLY if
+it truly reproduces over fresh bytes — so a wrong guess COSTS NOTHING (it stays a LEAD, never a false FACT).
+Therefore: claim it on the FIRST probe of a matching endpoint; never wait to "see" the response, and never
+re-run the same probe hoping to observe more.
+
+Re-verifiable "bug_class" values — match on the endpoint/payload you PROBED:
+  - "open_redirect" — the endpoint takes a redirect parameter (next/url/redirect/return/dest/continue) and
+    you pointed it at an off-site host. (JUST set bug_class + keep tool_args on that URL.)
+  - "path_traversal" — a file/download/path/include parameter you fed a traversal payload (../../etc/passwd).
+  - "exposure" — a secret/config path you requested (/.env, /actuator/env, /.git/config).
+  - "cors" — an API endpoint you probed for cross-origin credentialed reads.
+  - "host_header_injection" — an endpoint you probed with a hostile Host header.
+  - "graphql_introspection" — a GraphQL endpoint (/graphql) you probed for schema introspection.
+  - "xss" — a parameter you injected an HTML/script canary into (search/q/ref/comment/name).
+  - "error_based_sqli" — a parameter you injected a SQL quote/payload into. ALSO give "insertion_point"
+    (the parameter name, e.g. q) and "request_payload" (the exact payload, e.g. ').
 For every class EXCEPT error_based_sqli, JUST set bug_class and keep tool_args on the endpoint URL — VIGIL
 crafts and injects its OWN canary/probe and the deterministic oracle judges the fresh bytes:
   "output_analysis": {{"exploit_succeeded": true, "extracted_info": {{"bug_class": "path_traversal"}}}}
