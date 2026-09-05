@@ -641,6 +641,17 @@ class VigilEngine:
         # offline reader can verify it (making overclaim O9 true for the last chain that wasn't file-backed).
         # Best-effort + fail-closed: a persist error is swallowed and never affects the run's truth.
         self._persist_spine()
+
+        # TERMINAL RUN SUMMARY (Wave 7) — one machine-readable event so a supervisor reading progress.jsonl
+        # can tell a PAUSED run (awaiting a signature / anti-spin / ask_user / plan-only) from a genuinely
+        # DONE one. The CLI exits 0 either way (a pause is resumable, not an error), so without this the
+        # console would key off the exit code alone and mislabel every pause "done" (no Resume affordance).
+        self._spine_post("run_summary", {
+            "paused": report.paused or "",
+            "done": bool(getattr(report, "done", False)),
+            "fact_count": int(getattr(report, "fact_count", 0) or 0),
+            "iterations": int(getattr(report, "iterations", 0) or 0),
+        })
         return report
 
     # -- seam adapters (each fail-closed / total) ---------------------------------------------------

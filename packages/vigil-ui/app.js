@@ -5334,6 +5334,22 @@
   // Approve ONE queued offense action from the UI. The sovereign cockpit signs in-process with your owner
   // key (route-via-sovereign). First time, it needs the offense authority bound to that key — if the backend
   // says so, confirm the one-time bind and retry. `then` refreshes the queue.
+  function _afterOffenseApprove(p, then) {
+    pboxForgetApproval(p.request_id);
+    V.toast("Approved — the action can run.");
+    if (then) then();
+    // APPROVE-THEN-CONTINUE (Wave 7): a run still block-waiting for the signature consumes the token
+    // and continues on its own; a run that already PAUSED (operator slow past the wait window) needs
+    // an explicit Resume. Only resume one that is actually paused-awaiting-approval, so this never
+    // double-fires (the backend also refuses a second running run of a slug). Followed-run only.
+    setTimeout(function () {
+      if (PBOX.run && PBOX.run.status === "paused" && String(PBOX.run.paused || "") === "awaiting_approval") {
+        V.toast("Resuming the run with your approval…");
+        pboxRetry();
+      }
+    }, 1500);
+  }
+
   function offenseApprove(p, then) {
     V.postJSON(SOV("/api/action"), { action: "offense_approve", request_id: p.request_id })
       .then(function (r) {
@@ -5344,13 +5360,13 @@
             if (b && b.error) { V.toast(b.error, true); return; }
             V.postJSON(SOV("/api/action"), { action: "offense_approve", request_id: p.request_id })
               .then(function (r2) {
-                if (r2 && r2.ok) { pboxForgetApproval(p.request_id); V.toast("Approved — the action can run."); if (then) then(); }
+                if (r2 && r2.ok) { _afterOffenseApprove(p, then); }
                 else { V.toast((r2 && r2.error) || "Approve failed", true); }
               }).catch(function (e) { V.toast((e && e.message) || "Approve failed", true); });
           }).catch(function (e) { V.toast((e && e.message) || "Bind failed", true); });
           return;
         }
-        if (r && r.ok) { pboxForgetApproval(p.request_id); V.toast("Approved — the action can run."); if (then) then(); }
+        if (r && r.ok) { _afterOffenseApprove(p, then); }
         else { V.toast((r && r.error) || "Approve failed — are you on the owner plane?", true); }
       })
       .catch(function (e) { V.toast((e && e.message) || "Approve failed", true); });
@@ -10266,6 +10282,17 @@
     // TERMINAL: when the run has FINISHED, print a clear "Done" (with the confirmed-fact count) instead of
     // leaving the last mid-run step up, so the operator plainly sees it completed (operator ask).
     if (pboxIsTerminal()) {
+      // PAUSED (Wave 7): not Done — the run stopped resumably. Say WHY and what unblocks it, so the
+      // operator never reads a blocked run as finished, and can approve/reply then Resume.
+      if (PBOX.run.status === "paused") {
+        var _pr = String((PBOX.run && PBOX.run.paused) || "");
+        var _pm = _pr === "awaiting_approval" ? "Paused \u2014 awaiting your approval; approve the pending action, then Resume"
+                : _pr === "anti-spin" ? "Paused \u2014 stopped after repeating an action; Resume to continue"
+                : _pr === "ask_user" ? "Paused \u2014 waiting for your reply below"
+                : _pr === "plan-only" ? "Paused \u2014 plan ready (no tools were run)"
+                : ("Paused" + (_pr ? " \u2014 " + _pr : ""));
+        return "\u23F8 " + _pm;
+      }
       var _facts = 0;
       for (var j = 0; j < PBOX.events.length; j++) {
         if (PBOX.events[j].kind === "finding" && isFact(PBOX.events[j].payload || {})) _facts++;
@@ -10295,7 +10322,8 @@
     // update just the pill/step/dot without rebuilding the feed (so scroll position is preserved).
     var step = V.$("#pb-step");
     if (step) { step.textContent = pboxStepText() || "waiting…";
-      step.className = "pb-step" + (pboxIsTerminal() ? " pb-done" : ""); }
+      step.className = "pb-step" + ((PBOX.run && PBOX.run.status === "paused") ? " pb-paused"
+                                    : (pboxIsTerminal() ? " pb-done" : "")); }
     var pill = V.$("#pb-pill");
     if (pill) {
       pill.className = "pb-pill" + (pboxIsRunning() ? " live" : "");
@@ -10322,7 +10350,10 @@
   // W4 — run control (shared by the process box and the Runs table). Non-destructive lifecycle: Cancel
   // terminates the run's process; Retry relaunches its recorded argv (Resume where the CLI supports it).
   function runIsRetryable(r) {
-    return !!(r && r.run_id && (r.status === "error" || r.status === "interrupted" || r.status === "cancelled"));
+    // "paused" (Wave 7): a run that exited resumably (awaiting a signature / anti-spin / ask_user /
+    // plan-only) offers Resume — the same runRetry path, which resumes from the last signed checkpoint.
+    return !!(r && r.run_id && (r.status === "error" || r.status === "interrupted"
+                                || r.status === "cancelled" || r.status === "paused"));
   }
   // in-flight guard: a second click on the same run's control is ignored until the first resolves, so a
   // double-click can never fire two concurrent cancels/retries (the backend also refuses a second running
@@ -10418,7 +10449,8 @@
           onClick: function () { PBOX.ui.dismissed = true; pboxSaveUI(); pboxHost().style.display = "none"; } }, "×"),
       ]),
     ]);
-    var step = h("div.pb-step" + (pboxIsTerminal() ? ".pb-done" : "") + "#pb-step", null, pboxStepText() || "waiting…");
+    var step = h("div.pb-step" + ((PBOX.run && PBOX.run.status === "paused") ? ".pb-paused"
+                 : (pboxIsTerminal() ? ".pb-done" : "")) + "#pb-step", null, pboxStepText() || "waiting…");
     // S1/S1b: pending approvals for the followed run — sovereign (seq-based) AND offense-engage (request_id)
     // cards right in the box, so a chat-launched engage's queued tool is actionable without leaving the chat.
     var sovCards = (PBOX.pendingApprovals && PBOX.pendingApprovals.length)

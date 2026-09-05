@@ -378,6 +378,10 @@ def list_runs(slug: str = "") -> dict[str, Any]:
                 # carries a short reason so the UI can say WHAT failed, not just "error".
                 "run_kind": meta.get("run_kind", meta.get("mode", "")),
                 "resumable": bool(meta.get("resumable", False)),
+                # Wave 7: a run that exited 0 but PAUSED carries the resumable pause reason
+                # (awaiting_approval / anti-spin / ask_user / plan-only) so the UI shows an honest Paused
+                # state + Resume affordance instead of a false "Done".
+                "paused": str(meta.get("paused", "") or ""),
                 "interrupted_reason": meta.get("interrupted_reason", ""),
                 "rc": meta.get("rc"),
                 "error": str(meta.get("error", "") or "")[:500],

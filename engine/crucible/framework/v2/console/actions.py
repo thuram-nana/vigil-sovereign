@@ -604,7 +604,16 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
         # writer for a live run: cancel_run signals and then waits for THIS write (it only writes the status
         # itself for an ORPHANED run with no live supervisor), so there is no double-write race.
         status = "done" if ok else ("cancelled" if (rc is not None and rc < 0) else "error")
-        _write_meta(run_id, **{**meta, "status": status, "pid": proc.pid,
+        # A run that exited 0 but PAUSED (awaiting a signature / anti-spin / ask_user / plan-only) is not
+        # "done": read the engine's terminal run_summary and mark it "paused" so the UI shows an honest
+        # Paused state + a Resume affordance instead of a false "Done" (Wave 7). Any other engine (no
+        # run_summary event) is unaffected — paused_reason stays "".
+        paused_reason = ""
+        if ok:
+            paused_reason = str((_run_outcome(run_id) or {}).get("paused") or "").strip()
+            if paused_reason:
+                status = "paused"
+        _write_meta(run_id, **{**meta, "status": status, "pid": proc.pid, "paused": paused_reason,
                                "rc": rc, "stderr": (err or "")[-2000:] if not ok else "",
                                "finished": time.time()})
         # AUTO-RESUME loop, first half: if an integration engage linked to a CHAT session just paused at
@@ -1609,6 +1618,31 @@ def _last_decision(run_id: str) -> dict:
                     pl = ev.get("payload")
                     if isinstance(pl, dict) and pl.get("choice"):
                         last = pl
+    except OSError:
+        return {}
+    return last
+
+
+def _run_outcome(run_id: str) -> dict:
+    """The payload of the LAST ``run_summary`` event in a run's progress.jsonl (``{}`` if none). The
+    integration engine posts exactly one at the end of ``engage`` (engine.py) carrying ``paused`` (the
+    resumable pause reason: awaiting_approval / anti-spin / ask_user / plan-only, or "" when the run truly
+    finished), ``done``, and ``fact_count``. It lets the supervisor tell a PAUSED run from a DONE one even
+    though the CLI exits 0 for both. Total; a missing/torn file yields ``{}`` (treated as 'no pause')."""
+    last: dict = {}
+    try:
+        p = run_dir(run_id) / "progress.jsonl"
+        with p.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(ev, dict) and ev.get("kind") == "run_summary" and isinstance(ev.get("payload"), dict):
+                    last = ev["payload"]
     except OSError:
         return {}
     return last
