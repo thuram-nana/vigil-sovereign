@@ -293,20 +293,22 @@ def test_anti_spin_stops_a_run_that_re_proposes_a_REFUSED_identical_action():
     assert tries["n"] <= _MAX_IDENTICAL_REPROPOSALS + 1         # the refused tool was not attempted 8 times
 
 
-def test_anti_spin_does_NOT_trip_when_the_identical_action_RUNS_each_turn():
-    # B (red-pen): a legitimate poll/retry — identical args, but the tool RUNS successfully every turn
-    # (progress) — must NOT be force-completed. A successful run resets the counter, so it runs to the end.
+def test_an_already_run_action_is_SKIPPED_not_re_refused():
+    # Operator ask: re-proposing a tool that ALREADY RAN must NOT surface "refused by executor" (its spent
+    # single-use approval would otherwise deny it). The engine runs it ONCE, then SKIPS the duplicates —
+    # a benign skip, never a refusal, never a second execution, and it never trips anti-spin as a "stop".
     ran = {"n": 0}
     def _run_ok(tool, phase, seq, **kw):
         ran["n"] += 1
         return _ran_ns(tool)
     rep = VigilEngine(slug="loopback", max_iterations=5, seams=EngineSeams(
-        attest=_attest_allow, think=lambda st: _use_tool(),
+        attest=_attest_allow, think=lambda st: _use_tool(),          # ALWAYS the identical action
         gate=lambda *a: SimpleNamespace(allowed=True, outcome="allow", reason="ok"),
         run_tool=_run_ok)).engage(TARGET)
-    assert "stopped(anti-spin)" not in rep.decisions, "anti-spin wrongly killed a run that keeps making progress"
-    assert rep.paused != "anti-spin"
-    assert ran["n"] == 5                                        # ran every turn to max_iterations (reset-on-success)
+    assert ran["n"] == 1, "the identical action must run exactly ONCE — duplicates are skipped, not re-run"
+    assert "skip(already-ran)" in rep.decisions, "the duplicate re-proposals must be SKIPPED"
+    assert "stopped(anti-spin)" not in rep.decisions            # a skip is not an anti-spin give-up
+    assert not rep.denied_edges, "a skipped duplicate must NEVER show as refused/denied"
 
 
 def test_anti_spin_does_not_trip_on_varied_actions():

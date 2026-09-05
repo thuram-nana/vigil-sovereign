@@ -305,8 +305,11 @@ class VigilEngine:
                     start_it = int(getattr(prior, "iteration", 0) or 0) + 1
                     report.iterations = start_it
 
-        # anti-spin repeat tracking (finding #1): the last USE_TOOL signature + its consecutive-repeat count.
-        last_tool_sig, tool_repeat = "", 0
+        # anti-spin repeat tracking (finding #1): the last USE_TOOL signature + its consecutive-repeat count,
+        # and the set of signatures that already RAN this engagement (so a re-proposal of a completed action is
+        # skipped rather than re-sent to the executor — where its spent single-use approval would surface a
+        # scary "refused by executor" for an action that in fact already succeeded).
+        last_tool_sig, tool_repeat, ran_sigs = "", 0, set()
         for it in range(start_it, self.max_iterations):
             state.iteration = it
             report.iterations = it + 1
@@ -324,6 +327,24 @@ class VigilEngine:
                 report.paused = "plan-only"
                 state.done = True
                 break
+
+            # DEDUPE (operator ask): the agent sometimes RE-PROPOSES a tool it already ran this engagement.
+            # Re-running it needs a fresh single-use approval it does not have, so the executor would deny it
+            # and the operator would see "refused by executor" for an action that ALREADY SUCCEEDED. Its
+            # result stands, so SKIP the duplicate — a benign note, NEVER a refusal, never a second execution,
+            # never a second approval prompt. A DIFFERENT action (different tool/target/args) is not a dupe.
+            if (decision.action == ActionType.USE_TOOL and decision.tool is not None
+                    and _action_signature(decision.tool) in ran_sigs):
+                report.decisions[-1] = "skip(already-ran)"
+                self._spine_post("observation", {"source": "dedupe",
+                    "summary": ("skipped a re-proposal of a tool that already ran this engagement — its result "
+                                "stands, so it is not re-run (and never shows as refused).")})
+                state.execution_trace.append({"iteration": it, "action": "use_tool",
+                    "tool": (decision.tool.tool_name if decision.tool else ""), "outcome": "skipped",
+                    "reason": "already ran this engagement — duplicate skipped"})
+                self._checkpoint(state, seq, report)
+                seq += 1
+                continue
 
             # ANTI-SPIN (finding #1): stop a run that keeps re-proposing the IDENTICAL use_tool action on
             # consecutive turns WITHOUT making progress. A successful run RESETS the counter (see the run
@@ -504,8 +525,13 @@ class VigilEngine:
             # ANTI-SPIN RESET (finding #1, part B): the tool RAN this turn — that is progress, so clear the
             # repeat counter. Only NON-advancing identical repeats (a tool refused / re-proposed without
             # running) accumulate toward the stop, so a legitimate poll or a transient-error retry that
-            # actually runs is never force-completed.
+            # actually runs is never force-completed. Also record the RAN signature so a later re-proposal of
+            # the exact same action is SKIPPED (dedupe above) instead of re-denied as "refused by executor".
             last_tool_sig, tool_repeat = "", 0
+            if decision.action == ActionType.USE_TOOL and decision.tool is not None:
+                _rs = _action_signature(decision.tool)
+                if _rs:
+                    ran_sigs.add(_rs)
 
             # T3 — a governed LOCAL terminal command inspects HOST state (a file, a process, uname): its output
             # is NOT target-produced evidence, so it is ADVISORY ONLY and must NEVER enter oracle intake — a
