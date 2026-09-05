@@ -54,8 +54,8 @@ _MAX_CANDIDATE_NAMES = 12
 # specific enough that its presence is the proof (the predicate oracle over the response body); a 404 or a
 # signature-less body does not fire (PathProbeCheck returns None on 404 — nothing to adjudicate).
 _EXPOSURE_PROBES = (
-    ("/.env", "DB_PASSWORD"),
-    ("/actuator/env", "propertySources"),
+    ("/.env", "DB_PASSWORD="),                 # value form (key=value), not the bare key a JS bundle names
+    ("/actuator/env", "spring.datasource"),    # a Spring config property, not merely "propertySources"
     ("/.git/config", "[core]"),
 )
 
@@ -123,9 +123,22 @@ def _url_with_param(url: str, name: str, value: str = "x") -> str:
 def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
                     claimed_class: str, timeout: float = 8.0) -> RuntimeRedriveResult:
     """Re-drive ``url`` for the single CLAIMED response-derived class through a gated send + the matching
-    deterministic oracle, and mint a signed FACT for the one registered evidence branch the oracle confirms
-    over VIGIL's OWN live capture. A probe that established no channel is INCONCLUSIVE (never CLEAN). Returns
-    a :class:`RuntimeRedriveResult`. Never raises (a probe error is recorded and what held is returned)."""
+    deterministic oracle, and mint a signed FACT ONLY when the oracle confirms CAUSATION (not mere presence)
+    over VIGIL's OWN live capture:
+
+      * path_traversal — a benign CONTROL request (a non-traversal file value) must NOT already contain the
+        file-content signature; only when the signature appears under the TRAVERSAL payload but not the
+        control is it attributable to a file read (a docs page that merely prints ``root:x:0:0:`` is refused).
+      * xss (reflected) — the reflection oracle must report the ``html_tag`` context (the canary became a live
+        element); mere presence inside a ``<script>`` string literal or a ``<noscript>`` block is NOT accepted.
+      * exposure — a random CONTROL path must NOT return the signature (a 200 soft-404 / catch-all that serves
+        the signature everywhere is refused); the signature is value-shaped so a JS bundle naming the key does
+        not match.
+
+    A probe that established no channel is INCONCLUSIVE (never CLEAN). Returns a :class:`RuntimeRedriveResult`.
+    Never raises (a probe error is recorded and what held is returned)."""
+    import hashlib  # noqa: PLC0415 — stdlib; deterministic control tokens (no rng, determinism invariant)
+
     from framework.v2.scanner.checks import (  # noqa: PLC0415
         ContentSignatureCheck, MarkerReflectionCheck, PathProbeCheck)
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
@@ -148,8 +161,6 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
         res.notes.append(f"branch {branch!r} is not registered — cannot admit (fail-closed)")
         return res
 
-    # PRE-FLIGHT the gate ONCE: a refused engagement (kill-switch / out-of-scope / no-slug / bad URL) means
-    # VIGIL never observed the target — return refused with zero adjudications (never a mislabelled CLEAN).
     refusal = _authorize(url, slug)
     if refusal is not None:
         res.refused = True
@@ -157,47 +168,24 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
         return res
 
     send, state = _gated_web_send(slug, timeout=timeout)
+    nonce = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
 
-    # Pick the oracle for this class (each returns an OracleSignal with .fired/.conclusive). A fired signal
-    # is always conclusive (OracleSignal validator); a non-firing side_effect/reflection is NON-conclusive —
-    # INCONCLUSIVE, never CLEAN — which is exactly what these not-clean-capable branches require.
-    def _oracle(ctx: dict):
-        if bug_class == "path_traversal":
-            return side_effect_oracle(ctx.get("marker", ""), ctx.get("observed_sink", ""))
-        if bug_class == "xss":
-            return reflection_context_oracle(ctx.get("marker", ""), ctx.get("observed_sink", ""))
-        return predicate_oracle(ctx.get("observed_evidence", {}), ctx.get("predicate", {}))
+    def _body(resp: Any) -> str:
+        return str(resp.get("body", "")) if isinstance(resp, dict) else str(resp)
 
-    def _run(probe_fn: Callable[[], Any], item: str, *, surface: str) -> None:
-        before, before_bodies = state["channels"], state["body_unavailable"]
-        try:
-            ctx_obj = probe_fn()
-        except Exception as e:  # noqa: BLE001 — one probe error never fabricates a fact; record + move on
-            res.notes.append(f"probe error [{item}]: {type(e).__name__}: {e}")
-            return
-        if state["channels"] <= before:
-            res.inconclusive.append((bug_class, item))   # no channel established → never a CLEAN
-            return
+    def _admit(context: dict, item: str, surface: str, *, fired: bool, conclusive: bool,
+               body_unreadable: bool) -> None:
         res.surfaces.setdefault(bug_class, set()).add(surface)
-        body_unreadable = state["body_unavailable"] > before_bodies
-        if ctx_obj is None:
-            return                                        # a channel, but the probe found nothing to adjudicate
-        context = ctx_obj.to_verifier_context()
-        signal = _oracle(context)
-        observed = {
-            "channel_established": True,
-            "body_semantically_available": not body_unreadable,
-            "gate_authorized": True,
-        }
-        finding = {"check_id": f"rt:{bug_class}:{item}", "bug_class": bug_class,
+        observed = {"channel_established": True, "body_semantically_available": not body_unreadable,
+                    "gate_authorized": True}
+        finding = {"check_id": f"rt:{bug_class}:{item}#{branch}", "bug_class": bug_class,
                    "insertion_point": item, "oracle_context": context}
-        admitted = admit(branch, fired=signal.fired, conclusive=signal.conclusive, observed=observed)
+        admitted = admit(branch, fired=fired, conclusive=conclusive, observed=observed)
         res.admissions.append((branch, admitted.verdict.value, admitted.reason))
         bm = res.branch_verdicts.setdefault(bug_class, {})
         prior = bm.get(branch)
         bm[branch] = compose([prior, admitted.verdict.value]).value if prior else admitted.verdict.value
-        r = certify_admitted(dict(finding, check_id=f"{finding['check_id']}#{branch}"),
-                             admitted, engagement_slug=engagement_slug, signers=signers,
+        r = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
                              provenance="live_redrive")
         res.contexts[r.finding_ref] = context
         if r.is_fact:
@@ -209,16 +197,45 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
 
     try:
         if bug_class == "path_traversal":
+            sig = "root:x:0:0:"
             chk = ContentSignatureCheck(id="path-traversal", bug_class="path_traversal",
-                                        payload="../../../../etc/passwd", signature="root:x:0:0:")
+                                        payload="../../../../etc/passwd", signature=sig)
+            control_value = f"vigilctl{nonce}.txt"    # a benign, non-traversal file value (baseline)
             for name in _candidate_query_names(url, _PATH_TRAVERSAL_PARAMS):
                 probe_url = _url_with_param(url, name)
                 tmpl = RequestTemplate(HttpRequest(method="GET", url=probe_url))
-                for point in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,)):
-                    if point.name.lower() != name.lower():
-                        continue   # probe exactly the one param this carrier introduced
-                    _run(lambda t=tmpl, p=point: chk.probe(t, p, send),
-                         f"{probe_url}#{point.id}", surface=f"query:{name}")
+                point = next((p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,))
+                              if p.name.lower() == name.lower()), None)
+                if point is None:
+                    continue
+                # CONTROL first: if the benign response already carries the file signature, the page prints it
+                # regardless of input — NOT attributable to a traversal → refuse (BLOCK-1 fix).
+                before = state["channels"]
+                try:
+                    control = send(tmpl.render(point, control_value))
+                except Exception as e:  # noqa: BLE001
+                    res.notes.append(f"path_traversal control error [{name}]: {type(e).__name__}: {e}")
+                    continue
+                if state["channels"] <= before:
+                    res.inconclusive.append((bug_class, f"{probe_url}#control"))
+                    continue
+                if sig in _body(control):
+                    res.notes.append(f"path_traversal: signature present in the benign control on {name!r} — "
+                                     "not attributable to a traversal → LEAD")
+                    continue
+                # TREATMENT: the traversal payload. The signature is now attributable to the file read.
+                before2, before_bodies = state["channels"], state["body_unavailable"]
+                ctx_obj = chk.probe(tmpl, point, send)
+                if state["channels"] <= before2:
+                    res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
+                    continue
+                if ctx_obj is None:
+                    continue
+                context = ctx_obj.to_verifier_context()
+                signal = side_effect_oracle(context.get("marker", ""), context.get("observed_sink", ""))
+                _admit(context, f"{probe_url}#{point.id}", f"query:{name}",
+                       fired=signal.fired, conclusive=signal.conclusive,
+                       body_unreadable=state["body_unavailable"] > before_bodies)
 
         elif bug_class == "xss":
             chk = MarkerReflectionCheck(id="reflected-xss", bug_class="xss",
@@ -226,18 +243,67 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
             for name in _candidate_query_names(url, _XSS_PARAMS):
                 probe_url = _url_with_param(url, name)
                 tmpl = RequestTemplate(HttpRequest(method="GET", url=probe_url))
-                for point in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,)):
-                    if point.name.lower() != name.lower():
-                        continue
-                    _run(lambda t=tmpl, p=point: chk.probe(t, p, send),
-                         f"{probe_url}#{point.id}", surface=f"query:{name}")
+                point = next((p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,))
+                              if p.name.lower() == name.lower()), None)
+                if point is None:
+                    continue
+                before, before_bodies = state["channels"], state["body_unavailable"]
+                try:
+                    ctx_obj = chk.probe(tmpl, point, send)
+                except Exception as e:  # noqa: BLE001
+                    res.notes.append(f"xss probe error [{name}]: {type(e).__name__}: {e}")
+                    continue
+                if state["channels"] <= before:
+                    res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
+                    continue
+                if ctx_obj is None:
+                    continue
+                context = ctx_obj.to_verifier_context()
+                signal = reflection_context_oracle(context.get("marker", ""), context.get("observed_sink", ""))
+                # SOUND breakout ONLY: the canary must have become a live ELEMENT (html_tag). Mere presence
+                # inside a <script> string literal or a <noscript> block is NOT a proven breakout (BLOCK-3 fix).
+                ctxkind = (getattr(signal, "observed", {}) or {}).get("context")
+                accepted = bool(signal.fired) and ctxkind == "html_tag"
+                _admit(context, f"{probe_url}#{point.id}", f"query:{name}",
+                       fired=accepted, conclusive=(signal.conclusive if accepted else False),
+                       body_unreadable=state["body_unavailable"] > before_bodies)
 
-        else:  # exposure — a request-level fixed-path probe (no insertion point)
+        else:  # exposure — a request-level fixed-path probe with a random-path (soft-404) control
             tmpl = RequestTemplate(HttpRequest(method="GET", url=url))
-            for path, signature in _EXPOSURE_PROBES:
-                chk = PathProbeCheck(id=f"exposure{path}", bug_class="exposure",
-                                     probe_path=path, signature=signature)
-                _run(lambda c=chk: c.probe(tmpl, send), f"{url}#{path}", surface=f"path:{path}")
+            rand_path = f"/vigil-{nonce}-notfound"
+            for probe_path, signature in _EXPOSURE_PROBES:
+                # CONTROL: a definitely-nonexistent path. PathProbeCheck returns a context only for a non-404
+                # response whose body carries the signature, so a non-None control means the signature is
+                # served EVERYWHERE (a 200 soft-404 / catch-all) — refuse (BLOCK-2 fix).
+                ctl = PathProbeCheck(id=f"exposure-ctl{probe_path}", bug_class="exposure",
+                                     probe_path=rand_path, signature=signature)
+                try:
+                    control_ctx = ctl.probe(tmpl, send)
+                except Exception as e:  # noqa: BLE001
+                    res.notes.append(f"exposure control error [{probe_path}]: {type(e).__name__}: {e}")
+                    continue
+                if control_ctx is not None:
+                    res.notes.append(f"exposure: signature {signature!r} also served at a random path "
+                                     "(soft-404 / catch-all) — not path-specific → LEAD")
+                    continue
+                chk = PathProbeCheck(id=f"exposure{probe_path}", bug_class="exposure",
+                                     probe_path=probe_path, signature=signature)
+                before, before_bodies = state["channels"], state["body_unavailable"]
+                try:
+                    ctx_obj = chk.probe(tmpl, send)
+                except Exception as e:  # noqa: BLE001
+                    res.notes.append(f"exposure probe error [{probe_path}]: {type(e).__name__}: {e}")
+                    continue
+                if state["channels"] <= before:
+                    res.inconclusive.append((bug_class, f"{url}#{probe_path}"))
+                    continue
+                if ctx_obj is None:
+                    continue
+                context = ctx_obj.to_verifier_context()
+                signal = predicate_oracle(context.get("observed_evidence", {}), context.get("predicate", {}))
+                _admit(context, f"{url}#{probe_path}", f"path:{probe_path}",
+                       fired=signal.fired, conclusive=signal.conclusive,
+                       body_unreadable=state["body_unavailable"] > before_bodies)
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
         res.notes.append(f"runtime_redrive error: {type(e).__name__}: {e}")
     return res

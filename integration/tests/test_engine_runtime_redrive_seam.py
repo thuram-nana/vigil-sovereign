@@ -218,3 +218,75 @@ def test_out_of_scope_url_mints_nothing(monkeypatch, tmp_path):
     ref = _live_runtime_redrive_fact(
         _prov(), {}, _redrive("http://10.99.99.99/download?file=x", "path_traversal"))
     assert ref is None, "an out-of-scope target must never mint a FACT"
+
+
+# ---------------------------------------------------------------------------------------------------
+# red-pen near-miss negative controls (BLOCK-1/2/3): presence != causation
+# ---------------------------------------------------------------------------------------------------
+
+class _DocsApp(http.server.BaseHTTPRequestHandler):
+    """BLOCK-1 near-miss: a benign docs page that IGNORES ?file and always prints the passwd signature as
+    documentation. A presence-only check would false-FACT; the control differential must refuse it."""
+    def do_GET(self):  # noqa: N802
+        body = ("<html><body><h1>Docs</h1><p>An /etc/passwd line looks like: "
+                "<code>root:x:0:0:root:/root:/bin/bash</code></p></body></html>")
+        raw = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers(); self.wfile.write(raw)
+
+    def log_message(self, *a):
+        return
+
+
+class _SpaApp(http.server.BaseHTTPRequestHandler):
+    """BLOCK-2 near-miss: a 200 soft-404 SPA that serves the SAME bundle (naming DB_PASSWORD=... in a JS
+    config) at EVERY path. The random-path control must catch the catch-all and refuse."""
+    def do_GET(self):  # noqa: N802
+        body = ("<html><head><script>window.__CFG='APP_ENV=prod;DB_PASSWORD=placeholder;'</script></head>"
+                "<body>app</body></html>")
+        raw = body.encode("utf-8")
+        self.send_response(200)   # 200 for EVERYTHING (soft-404)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers(); self.wfile.write(raw)
+
+    def log_message(self, *a):
+        return
+
+
+class _JsStringApp(http.server.BaseHTTPRequestHandler):
+    """BLOCK-3 near-miss: /search reflects q into a QUOTE-ESCAPED JS string literal inside <script> (the SAFE
+    server-side pattern). The canary is present in <script> text but did NOT break out — must NOT mint."""
+    def do_GET(self):  # noqa: N802
+        from urllib.parse import parse_qs, urlsplit
+        v = (parse_qs(urlsplit(self.path).query).get("q") or [""])[0]
+        safe = v.replace("\\", "\\\\").replace('"', '\\"')   # escape the JS string literal
+        body = f'<html><head><script>var searchTerm = "{safe}";</script></head><body>ok</body></html>'
+        raw = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers(); self.wfile.write(raw)
+
+    def log_message(self, *a):
+        return
+
+
+def test_negctl_path_traversal_docs_page_with_signature_mints_nothing(monkeypatch, tmp_path):
+    """BLOCK-1: a page that always shows root:x:0:0: (docs) but does not READ the file must not mint."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/docs", "path_traversal", handler=_DocsApp)
+    assert ref is None, "a docs page that merely prints the signature must not mint a traversal FACT"
+
+
+def test_negctl_exposure_soft_404_spa_mints_nothing(monkeypatch, tmp_path):
+    """BLOCK-2: a 200 soft-404 SPA that names DB_PASSWORD everywhere must not mint (control catches it)."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/", "exposure", handler=_SpaApp)
+    assert ref is None, "a soft-404 catch-all naming the signature everywhere must not mint an exposure FACT"
+
+
+def test_negctl_xss_quote_escaped_js_string_mints_nothing(monkeypatch, tmp_path):
+    """BLOCK-3: a canary reflected into a quote-escaped <script> string literal (no breakout) must not mint."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/search?q=hello", "xss", handler=_JsStringApp)
+    assert ref is None, "a quote-escaped JS-string reflection (presence, not breakout) must not mint an xss FACT"
