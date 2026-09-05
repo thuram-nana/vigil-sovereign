@@ -268,15 +268,19 @@ def _ran_ns(tool):
 
 
 def _refused_ns(tool):
-    # the executor REFUSED the tool (e.g. an >=A2 action with no signed token) — ran=False, no progress.
+    # the executor HARD-refused the tool (out of scope) — ran=False, no progress, and NOT an approval pause
+    # (a needs-owner-approval refusal now PAUSES at awaiting_approval instead — see
+    # test_executor_deny_awaiting_approval_pauses_resumably_not_antispin). A hard-refused identical action
+    # still accumulates toward anti-spin.
     return SimpleNamespace(ran=False, outcome="", stdout="", stderr="",
-                           reason="authorization denied: A2 requires owner approval",
+                           reason="authorization denied: target out of scope (fail-closed)",
                            tool=tool.tool_name, record=SimpleNamespace(record_id="r"))
 
 
 def test_anti_spin_stops_a_run_that_re_proposes_a_REFUSED_identical_action():
-    # token mode (approval grants → reach execute) but the executor REFUSES every turn (no signed token), so
-    # the identical action never advances → the counter accumulates → the run STOPS as PAUSED anti-spin.
+    # the executor HARD-refuses the identical action every turn (out of scope — NOT a needs-approval pause),
+    # so it never advances → the counter accumulates → the run STOPS as PAUSED anti-spin. (A needs-owner-
+    # approval refusal instead pauses at awaiting_approval so the operator can sign + resume.)
     tries = {"n": 0}
     def _run_refused(tool, phase, seq, **kw):
         tries["n"] += 1
@@ -322,3 +326,53 @@ def test_anti_spin_does_not_trip_on_varied_actions():
         run_tool=lambda tool, phase, seq, **kw: _ran_ns(tool))).engage(TARGET)
     assert "stopped(anti-spin)" not in rep.decisions, "anti-spin wrongly tripped on VARIED actions"
     assert rep.done is True                                     # completed via the explicit _complete()
+
+
+# --- awaiting-approval pause (approve-then-continue fix) -------------------------------------------
+def test_executor_deny_awaiting_approval_pauses_resumably_not_antispin():
+    """When the executor denies because the action needs a SIGNED owner approval (the WARDEN queue
+    condition — pending already published), the engine PAUSES at awaiting_approval on the FIRST deny, so the
+    operator can sign + RESUME. It must NOT let the model re-propose the identical tool into anti-spin (which
+    killed approve-then-continue right as the signature landed)."""
+    calls = {"n": 0}
+
+    def _run_tool(tool, phase, seq, **kw):
+        calls["n"] += 1
+        return SimpleNamespace(
+            ran=False, outcome="deny", tool=tool.tool_name, record=None,
+            reason="authorization denied: in envelope, but WARDEN needs owner approval: "
+                   "A2 requires owner approval (>= A2 or above the offense ceiling A1)")
+
+    seams = EngineSeams(
+        attest=_attest_allow,
+        think=ReplayThinker([_use_tool(), _use_tool(), _use_tool(), _complete()]),
+        gate=lambda *a: SimpleNamespace(allowed=True, outcome="allow", reason="ok"),
+        run_tool=_run_tool)
+    rep = _engine(seams).engage(TARGET)
+    assert rep.paused == "awaiting_approval", f"expected awaiting_approval, got {rep.paused!r}"
+    assert calls["n"] == 1, f"paused on the FIRST deny, not after re-proposing (ran {calls['n']}x)"
+
+
+def test_hard_deny_is_not_treated_as_an_approval_pause():
+    """A HARD deny (out of scope / kill-switch) is NOT an approval pause — the run must not stop at
+    awaiting_approval for it (it pivots / eventually anti-spins), so a real refusal is never mistaken for
+    'waiting for your signature'."""
+    def _run_tool(tool, phase, seq, **kw):
+        return SimpleNamespace(ran=False, outcome="deny", tool=tool.tool_name, record=None,
+                               reason="authorization denied: target out of scope (fail-closed)")
+    seams = EngineSeams(
+        attest=_attest_allow,
+        think=ReplayThinker([_use_tool(), _use_tool(), _use_tool(), _complete()]),
+        gate=lambda *a: SimpleNamespace(allowed=True, outcome="allow", reason="ok"),
+        run_tool=_run_tool)
+    rep = _engine(seams).engage(TARGET)
+    assert rep.paused != "awaiting_approval", "a hard deny must not pause as awaiting_approval"
+
+
+def test_is_awaiting_approval_denial_helper():
+    from vigil_integration.live.engine import _is_awaiting_approval_denial
+    assert _is_awaiting_approval_denial("... WARDEN needs owner approval: A2 requires owner approval")
+    assert _is_awaiting_approval_denial("A2 requires owner approval (>= A2 ...)")
+    assert not _is_awaiting_approval_denial("target out of scope")
+    assert not _is_awaiting_approval_denial("kill-switch tripped")
+    assert not _is_awaiting_approval_denial("")

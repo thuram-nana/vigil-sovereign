@@ -123,6 +123,15 @@ _CARD_EXCERPT_CAP = 4000
 _MAX_IDENTICAL_REPROPOSALS = 2
 
 
+def _is_awaiting_approval_denial(reason: str) -> bool:
+    """True when an executor deny is really the WARDEN QUEUE condition — an in-envelope action that just
+    needs a SIGNED owner approval (the pending is already published by the approval binding) — as opposed to
+    a HARD deny (out of scope / kill-switch / bad host). Used to PAUSE the run resumably at awaiting_approval
+    instead of letting the model re-propose the same action into anti-spin while the signature is in flight."""
+    r = (reason or "").lower()
+    return ("needs owner approval" in r) or ("requires owner approval" in r)
+
+
 def _action_signature(tool: Any) -> str:
     """A stable (tool_name, canonical args) signature for anti-spin repeat detection. json.dumps with
     sort_keys recurses into NESTED dicts (so insertion order can never make two identical actions look
@@ -520,6 +529,17 @@ class VigilEngine:
                 self._emit(getattr(exec_res, "record", None))
                 self._checkpoint(state, seq, report)
                 seq += 1
+                # AWAITING-APPROVAL PAUSE: when the executor denied specifically because the action needs a
+                # SIGNED owner approval (a QUEUE condition — in-envelope, pending already published by the
+                # approval binding), PAUSE the run RESUMABLY at awaiting_approval instead of letting the model
+                # re-propose the identical action into anti-spin. The operator signs it and RESUMES; on resume
+                # the token exists and the executor allows it. Without this, approve-then-continue dies on
+                # anti-spin right as the signature lands (the pre-approval denials had already accumulated).
+                if _is_awaiting_approval_denial(str(getattr(exec_res, "reason", "") or "")):
+                    report.queued_edges.append(str(getattr(exec_res, "reason", "") or "awaiting approval"))
+                    report.paused = "awaiting_approval"
+                    state.awaiting_approval = True
+                    break
                 continue
 
             # ANTI-SPIN RESET (finding #1, part B): the tool RAN this turn — that is progress, so clear the
