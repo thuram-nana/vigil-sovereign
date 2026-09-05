@@ -721,6 +721,8 @@ textarea { min-height: 80px; resize: vertical; }
 .pb-act:focus-visible { outline: 2px solid var(--owner); outline-offset: 1px; }
 .pb-step { padding: 6px 10px; font-size: var(--fs-xs); color: var(--text-1); border-bottom: 1px solid var(--border);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 0 auto; }
+/* operator ask: a clear terminal "Done" — green + bold when the followed run has finished. */
+.pb-step.pb-done { color: var(--st-confirmed); font-weight: 700; }
 .pb-feed { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; padding: 2px 0; }
 .pb-empty { padding: 18px 14px; color: var(--text-2); font-size: var(--fs-sm); text-align: center; line-height: 1.5; }
 /* S3: per-message actions (copy / edit-&-resend / regenerate) — a subtle hover row */

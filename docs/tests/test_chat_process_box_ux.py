@@ -32,3 +32,12 @@ def test_thinking_shows_the_models_plain_words_reasoning():
     assert "p.rationale" in APP
     assert "pb-think-row" in APP
     assert ".pb-row.pb-think-row .pb-m { white-space: normal;" in CSS
+
+
+def test_process_box_prints_done_when_the_run_finishes():
+    # operator ask: the box must clearly print "Done" (with the confirmed-fact count) when the run finishes,
+    # not leave the last mid-run step up.
+    assert "function pboxIsTerminal" in APP
+    assert 'PBOX.run.status !== "running"' in APP
+    assert '"Done"' in APP and "fact(s) confirmed" in APP
+    assert "pb-done" in APP and ".pb-step.pb-done" in CSS

@@ -10209,7 +10209,23 @@
       h("span.pb-t", null, t),
     ]);
   }
+  // is the followed run in a TERMINAL (finished) state? (anything but running / no status yet)
+  function pboxIsTerminal() {
+    return !!(PBOX.run && PBOX.run.status && PBOX.run.status !== "running");
+  }
   function pboxStepText() {
+    // TERMINAL: when the run has FINISHED, print a clear "Done" (with the confirmed-fact count) instead of
+    // leaving the last mid-run step up, so the operator plainly sees it completed (operator ask).
+    if (pboxIsTerminal()) {
+      var _facts = 0;
+      for (var j = 0; j < PBOX.events.length; j++) {
+        if (PBOX.events[j].kind === "finding" && isFact(PBOX.events[j].payload || {})) _facts++;
+      }
+      var _lbl = ({ done: "Done", completed: "Done", error: "Ended with an error",
+                    interrupted: "Interrupted", cancelled: "Cancelled" })[PBOX.run.status] || PBOX.run.status;
+      return "\u2713 " + _lbl + (_facts ? " \u2014 " + _facts + " fact(s) confirmed"
+                                         : " \u2014 no facts confirmed");
+    }
     for (var i = PBOX.events.length - 1; i >= 0; i--) {
       var e = PBOX.events[i], p = e.payload || {};
       // W6c: carry the WHY, not just WHAT was refused. W6b's pboxErrClass supersedes the older
@@ -10228,7 +10244,9 @@
   function pboxIsRunning() { return !!(PBOX.run && PBOX.run.status === "running"); }
   function pboxUpdateChrome() {
     // update just the pill/step/dot without rebuilding the feed (so scroll position is preserved).
-    var step = V.$("#pb-step"); if (step) step.textContent = pboxStepText() || "waiting…";
+    var step = V.$("#pb-step");
+    if (step) { step.textContent = pboxStepText() || "waiting…";
+      step.className = "pb-step" + (pboxIsTerminal() ? " pb-done" : ""); }
     var pill = V.$("#pb-pill");
     if (pill) {
       pill.className = "pb-pill" + (pboxIsRunning() ? " live" : "");
@@ -10351,7 +10369,7 @@
           onClick: function () { PBOX.ui.dismissed = true; pboxSaveUI(); pboxHost().style.display = "none"; } }, "×"),
       ]),
     ]);
-    var step = h("div.pb-step#pb-step", null, pboxStepText() || "waiting…");
+    var step = h("div.pb-step" + (pboxIsTerminal() ? ".pb-done" : "") + "#pb-step", null, pboxStepText() || "waiting…");
     // S1/S1b: pending approvals for the followed run — sovereign (seq-based) AND offense-engage (request_id)
     // cards right in the box, so a chat-launched engage's queued tool is actionable without leaving the chat.
     var sovCards = (PBOX.pendingApprovals && PBOX.pendingApprovals.length)
