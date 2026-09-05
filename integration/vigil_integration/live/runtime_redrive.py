@@ -388,6 +388,7 @@ def access_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[
     base_send, state = _gated_web_send(slug, timeout=timeout)
     victim_send = _cookie_send(base_send, victim_cookie)
     attacker_send = _cookie_send(base_send, attacker_cookie)
+    anon_send = _cookie_send(base_send, None)   # the "is this object actually access-controlled?" control
 
     # object-level: render the object reference into the named query point (synthesising the param if the
     # proposed url does not already carry it); page-level: use the url as-is.
@@ -412,23 +413,32 @@ def access_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[
     try:
         victim = victim_send(victim_req)
         attacker = attacker_send(attacker_req)
+        anon = anon_send(attacker_req)   # same object reference, NO session — the access-control control
     except Exception as e:  # noqa: BLE001 — a transport error confirms nothing (fail-closed)
         res.notes.append(f"access probe error: {type(e).__name__}: {e}")
         return res
-    if state["channels"] - before < 2:
-        res.inconclusive.append((bug_class, item))   # both identities must establish a real channel
+    if state["channels"] - before < 3:
+        res.inconclusive.append((bug_class, item))   # victim + attacker + anon must each open a real channel
         return res
 
     victim_body = (str(victim.get("body", "")) if isinstance(victim, dict) else str(victim)).strip()
     attacker_body = str(attacker.get("body", "")) if isinstance(attacker, dict) else str(attacker)
     attacker_status = int(attacker.get("status", 0)) if isinstance(attacker, dict) else 0
+    anon_body = str(anon.get("body", "")) if isinstance(anon, dict) else str(anon)
 
+    # SOUND cross-tenant BOLA: the attacker (a DIFFERENT authenticated identity) received the victim's object
+    # content, AND the object is demonstrably access-controlled — an ANONYMOUS request does NOT receive it.
+    # Without the anon leg a PUBLIC object (served to everyone) or a total-no-auth endpoint would false-FACT:
+    # a public object read by another user is not a broken object-level authorization. When anon also receives
+    # the content the case is indistinguishable (public vs missing-auth) from the wire, so it stays a LEAD.
     context = FindingContext.from_predicate(
-        {"attacker_status": attacker_status, "victim_body": victim_body, "attacker_body": attacker_body},
+        {"attacker_status": attacker_status, "victim_body": victim_body, "attacker_body": attacker_body,
+         "anon_body": anon_body},
         {"all": [
             {"eq": [{"var": "attacker_status"}, 200]},
             {"min_len": [{"var": "victim_body"}, 8]},
             {"contains": [{"var": "attacker_body"}, {"var": "victim_body"}]},
+            {"not": {"contains": [{"var": "anon_body"}, {"var": "victim_body"}]}},
         ]},
         bug_class=bug_class,
     ).to_verifier_context()

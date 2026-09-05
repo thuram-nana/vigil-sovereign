@@ -107,11 +107,14 @@ _OBJECTS = {"1": '{"id":1,"owner":"aturing","national_id":"MRD-100001","email":"
 
 
 class _VulnApp(http.server.BaseHTTPRequestHandler):
-    """BROKEN object-level authz: returns ANY object's private data to ANY caller (ignores identity)."""
+    """BROKEN object-level authz: any AUTHENTICATED user may read ANY object (no ownership check), but an
+    ANONYMOUS request is denied — so the object IS access-controlled, and a cross-tenant read is a real BOLA."""
     def do_GET(self):  # noqa: N802
         from urllib.parse import parse_qs, urlsplit
         q = parse_qs(urlsplit(self.path).query)
         oid = (q.get("id") or [""])[0]
+        if not _session(self):
+            self.send_response(401); self.end_headers(); self.wfile.write(b'{"error":"login required"}'); return
         if oid in _OBJECTS:
             return self._json(_OBJECTS[oid])
         self.send_response(404); self.end_headers()
@@ -139,6 +142,17 @@ class _SafeApp(_VulnApp):
             return self._json(_OBJECTS[oid])
         if oid in _OBJECTS:
             self.send_response(403); self.end_headers(); self.wfile.write(b'{"error":"forbidden"}'); return
+        self.send_response(404); self.end_headers()
+
+
+class _PublicApp(_VulnApp):
+    """near-miss: the object is PUBLIC — served to EVERYONE including anonymous. A cross-tenant read of a
+    public object is NOT a BOLA; the anon-control leg must refuse it (anon also receives the content)."""
+    def do_GET(self):  # noqa: N802
+        from urllib.parse import parse_qs, urlsplit
+        oid = (parse_qs(urlsplit(self.path).query).get("id") or [""])[0]
+        if oid in _OBJECTS:
+            return self._json(_OBJECTS[oid])   # no auth check at all — public
         self.send_response(404); self.end_headers()
 
 
@@ -208,3 +222,11 @@ def test_out_of_scope_url_mints_nothing(monkeypatch, tmp_path):
         "victim_cookie": "session=glovelace", "attacker_cookie": "session=aturing",
         "ref_param": "id", "victim_ref": "2"})
     assert ref is None, "an out-of-scope target must never mint a FACT"
+
+
+def test_negctl_public_object_mints_nothing(monkeypatch, tmp_path):
+    """near-miss: a PUBLIC object (served to anon too) must not mint a BOLA FACT — the anon-control leg
+    refuses it, since a public object read by another user is not a broken object-level authorization."""
+    ref = _access("http://127.0.0.1:{port}/api/applications", victim_cookie="session=glovelace",
+                  attacker_cookie="session=aturing", handler=_PublicApp)(monkeypatch, tmp_path)
+    assert ref is None, "a public object (also served to anon) must not mint a BOLA FACT"
