@@ -598,11 +598,15 @@ class VigilEngine:
             # T3b — the ORACLE INTAKE result on the spine: each oracle-confirmed FACT as a finding event
             # (linked to the raw observation), each LEAD as a labelled observation (never a finding — only a
             # fired oracle mints a fact, mirrored honestly here).
+            _ftarget = extract_target(getattr(decision.tool, "tool_args", None)) if decision.tool else ""
             for _f in intake.facts:
                 self._spine_post("finding", {
                     "ref": getattr(_f, "ref", ""), "title": getattr(_f, "title", ""),
                     "severity": getattr(_f, "severity", ""), "bug_class": getattr(_f, "bug_class", ""),
                     "surface": getattr(_f, "source", ""), "summary": getattr(_f, "title", ""),
+                    # the endpoint the FACT was confirmed against, so the Findings screen shows a location
+                    # instead of a blank (the surface stays the tool that surfaced it).
+                    "target": _ftarget,
                     "status": "fact", "verified_by_oracle": True}, parent_id=_obs_id)
             for _ld in intake.leads:
                 self._spine_post("observation", {

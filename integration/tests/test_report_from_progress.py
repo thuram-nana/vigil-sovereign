@@ -53,3 +53,33 @@ def test_run_report_falls_back_to_progress_when_no_report_json(tmp_path, monkeyp
     assert doc["summary"]["facts"] == 1
     assert doc["source"] == "progress-stream"
     assert doc["findings"][0]["verified_by_oracle"] is True
+
+
+def test_finding_row_shows_the_oracle_class_endpoint_and_oracle_not_the_tool(tmp_path):
+    """The Findings row for a chat-launched FACT must show the CONFIRMED class (open_redirect), the
+    endpoint as the location, and 'oracle' as the confirmer — never the tool (httpx)."""
+    prog = tmp_path / "progress.jsonl"
+    rows = [
+        {"kind": "finding", "payload": {
+            "title": "open_redirect — oracle-confirmed exploit", "surface": "httpx",
+            "bug_class": "open_redirect", "target": "http://127.0.0.1:19010/auth/continue?next=x",
+            "ref": "exploit:open_redirect", "verified_by_oracle": True, "status": "fact"}},
+    ]
+    prog.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    findings = api._findings_from_progress(tmp_path)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["bug_class"] == "open_redirect"       # NOT "httpx"
+    assert f["confirmed_by"] == "oracle"           # NOT "httpx"
+    assert f["location"] == "http://127.0.0.1:19010/auth/continue?next=x"
+    assert f["grounding"] == "fact"
+
+
+def test_finding_bug_class_never_falls_back_to_the_tool_surface(tmp_path):
+    """Even if a finding event somehow lacks bug_class, the row must NOT display the tool surface as the
+    bug class (the old bug)."""
+    prog = tmp_path / "progress.jsonl"
+    rows = [{"kind": "finding", "payload": {"title": "x", "surface": "httpx", "verified_by_oracle": True}}]
+    prog.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    f = api._findings_from_progress(tmp_path)[0]
+    assert f["bug_class"] != "httpx"

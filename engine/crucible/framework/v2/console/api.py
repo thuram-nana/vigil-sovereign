@@ -598,10 +598,14 @@ def _findings_from_progress(run_dir: Any) -> list[dict[str, Any]]:
         fact = bool(pl.get("verified_by_oracle"))
         out.append({
             "title": pl.get("title") or pl.get("summary") or pl.get("bug_class") or "finding",
-            "bug_class": pl.get("bug_class") or pl.get("surface") or "",
+            # the CONFIRMED bug class, never the tool that surfaced it — no fall back to `surface`
+            # (that displayed "httpx" as the bug class before the finding carried its real class).
+            "bug_class": pl.get("bug_class") or "",
             "severity": pl.get("severity") or ("High" if fact else "Info"),
             "confidence": "Certain" if fact else "Tentative",
-            "confirmed_by": pl.get("surface") or ("oracle" if fact else ""),
+            # a FACT is confirmed by the deterministic ORACLE (its re-drive), not by the recon tool; a LEAD
+            # is attributed to the surface/tool that proposed it.
+            "confirmed_by": ("oracle" if fact else "") or pl.get("surface") or "",
             "verified_by_oracle": fact,
             "grounding": "fact" if fact else "lead",
             "kind": "finding",
