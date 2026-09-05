@@ -8314,6 +8314,7 @@
       let onClick = null;
       let icon = "bolt";
       if (action === "scan_codebase") { onClick = function () { launchScan(String(p.target || "")); }; }
+      else if (action === "scan_sast") { icon = "assess"; onClick = function () { launchSast(String(p.target || "")); }; }
       else if (action === "scan_url") { icon = "live"; onClick = function () { launchUrlScan(String(p.target || "")); }; }
       else if (action === "open_screen") {
         icon = "book";
@@ -8517,6 +8518,24 @@
 
     // The same gated launcher every other entry point uses — scope charter-signed, target-touching steps
     // held for approval. The chat only ASKS for it; it cannot widen scope or skip a gate.
+    function launchSast(path) {
+      // Native source review (framework.v2 analysis review — DAA static analysis + per-finding confirm/
+      // refute). Distinct from launchScan (the vendored Strix codebase mode); mode:"sast", no Docker.
+      if (C.busy || !path) return;
+      C.busy = true;
+      V.postJSON(OFF("/api/chat/send"), {
+        chat_id: C.id || undefined,
+        message: "Run the native source review (static analysis + confirm/refute) over the files at " + path,
+        target: path, mode: "sast",
+      }).then(function (r) {
+        if (r && r.error && !r.reply) V.toast(r.error, true);
+        if (r && r.run_id && r.slug) setEngagement(String(r.slug));
+        if (r && r.chat_id) adoptChatId(String(r.chat_id));
+        return refreshTranscript();
+      }).catch(function (e) { V.toast((e && e.message) || "Could not start the source review — is the offense console up?", true); })
+        .then(function () { C.busy = false; loadChatList().then(function () { drawSessions(); drawMain(); scrollDown(); }); });
+    }
+
     function launchScan(path) {
       if (C.busy || !path) return;
       C.busy = true;

@@ -235,7 +235,7 @@ def launch_cloud(slug: str, mode: str, target: str, *, provider: str = "") -> di
 _AEGIS_MODES = frozenset({"observe", "enforce"})
 
 # The valid assessment modes and the wizard target-types they back.
-_MODES = frozenset({"url", "codebase", "tool", "suite", "aegis"})
+_MODES = frozenset({"url", "codebase", "tool", "suite", "aegis", "sast"})
 
 # The offense engine's ENGAGE capability packs — the "tools" the wizard offers under
 # "pick tools". Each id maps to a REAL, already-gated `engage` flag (single source of
@@ -2332,6 +2332,25 @@ def launch_assessment(body: dict) -> dict:
                                      **_sbx_env, **strix_llm_env, **_alias_extra},
                           env_remove=_alias_remove)
         return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "progress",
+                **unapplied}
+
+    # ---- sast → the NATIVE source review (DAA static analysis → URK confirm/refute) ----
+    # A white-box review of a codebase path/repo, distinct from the vendored Strix codebase mode: it runs
+    # the engine's own `framework.v2 analysis review`, needs NO Docker, and emits a per-finding confirm/
+    # refute verdict. Path-validated; background-spawned; capability packs do not apply (engage flags).
+    if mode == "sast":
+        src = Path(target).expanduser()
+        if not src.exists():
+            return {"error": f"source-review path does not exist: {target}"}
+        slug = _slugify(body.get("slug") or "source-review", fallback="source-review")
+        cmd = [sys.executable, "-m", "framework.v2", "analysis", "review",
+               "--root", str(src), "--slug", slug, "--max-reviews", "5"]
+        unapplied = _unapplied("a native source review (DAA → URK confirm/refute)",
+                               "Capability packs are offensive engage flags; the analysis reviewer takes none.")
+        meta = {**base, **unapplied, "slug": slug, "cmd": cmd, "stream": "none", "status": "running"}
+        _write_meta(run_id, **meta)
+        _spawn_background(run_id, rd, cmd, meta, capture_report=False)
+        return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "none",
                 **unapplied}
 
     # ---- aegis → the defensive dual (detect over a telemetry/log file) -----

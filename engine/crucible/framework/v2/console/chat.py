@@ -136,7 +136,7 @@ _CHAT_RETRYABLE_NAMES = frozenset({
 # `_scan_offer` from reading a target out of a manifest field), a url is shape-checked, a screen must be
 # in the allowlist. Anything unknown, malformed, or unavailable is dropped, not surfaced.
 # ---------------------------------------------------------------------------
-_PROPOSAL_ACTIONS = frozenset({"scan_codebase", "scan_url", "open_screen"})
+_PROPOSAL_ACTIONS = frozenset({"scan_codebase", "scan_sast", "scan_url", "open_screen"})
 # Only screens the interface actually ROUTES (app.js dispatch) — a proposal must never open a dead stub.
 _PROPOSAL_SCREENS = frozenset({"findings", "report", "proof", "live", "replay"})
 _MAX_PROPOSALS = 5
@@ -385,6 +385,13 @@ def _validate_proposals(chat_id: str, raw: list, offer: dict) -> list:
             spec["name"] = str((offer or {}).get("name") or "")[:_MAX_FILENAME]
             spec["label"] = label or "Run the gated scan on these files"
             key = ("scan_codebase", offer_target)
+        elif action == "scan_sast":
+            if not offer_target:                    # only when a real extracted codebase is present
+                continue
+            spec["target"] = offer_target           # server-computed, NEVER the model's (same rule as scan_codebase)
+            spec["name"] = str((offer or {}).get("name") or "")[:_MAX_FILENAME]
+            spec["label"] = label or "Run the native source review (DAA) on these files"
+            key = ("scan_sast", offer_target)
         elif action == "scan_url":
             target = str(entry.get("target") or "").strip()[:_PROPOSAL_TARGET_MAX]
             # a proper URL, not free text — and no control chars / backtick (belt-and-suspenders: the
@@ -1098,6 +1105,7 @@ _CHAT_SYSTEM = (
     "Allowed actions ONLY (anything else is dropped): "
     "\"scan_codebase\" (offer the gated codebase assessment of the attached code — the server supplies the "
     "path, you never do; propose it only when code is attached); "
+    "\"scan_sast\" (offer the NATIVE source review — DAA static analysis + per-finding confirm/refute — of the attached code; the server supplies the path, you never do; propose it only when code is attached); "
     "\"scan_url\" with a \"target\" URL drawn from the conversation (the gated web/API assessment); "
     "\"open_screen\" with a \"screen\" in {findings, report, proof, live, replay}. "
     "Each entry: an \"action\", a short \"label\", a one-line \"why\". Omit the block entirely if nothing "

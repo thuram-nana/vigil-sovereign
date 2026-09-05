@@ -500,3 +500,21 @@ def test_capabilities_route_serves_catalog(monkeypatch, tmp_path):
         with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310
             d = json.loads(r.read())
         assert any(c["id"] == "recon" for c in d["capabilities"])
+
+
+def test_sast_is_a_valid_mode():
+    assert "sast" in actions._MODES
+
+
+def test_sast_routes_to_native_analysis_review_and_validates_path(stub_launch, tmp_path):
+    src = tmp_path / "repo"; src.mkdir()
+    (src / "app.py").write_text("import os\nos.system('x')\n", encoding="utf-8")
+    r = actions.launch_assessment({"mode": "sast", "target": str(src)})
+    cmd, meta = stub_launch(r["run_id"])
+    assert cmd[:4] == [actions.sys.executable, "-m", "framework.v2", "analysis"]
+    assert "review" in cmd and "--root" in cmd and str(src) in cmd
+    assert "--slug" in cmd and "--max-reviews" in cmd
+    assert meta["mode"] == "sast" and r["mode"] == "sast"
+    # a missing path fails honestly (no spawn)
+    missing = actions.launch_assessment({"mode": "sast", "target": str(tmp_path / "gone")})
+    assert "error" in missing
