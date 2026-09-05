@@ -41,3 +41,12 @@ def test_process_box_prints_done_when_the_run_finishes():
     assert 'PBOX.run.status !== "running"' in APP
     assert '"Done"' in APP and "fact(s) confirmed" in APP
     assert "pb-done" in APP and ".pb-step.pb-done" in CSS
+
+
+def test_a_finding_row_opens_the_result_fact_card():
+    # "where do I see the fact": a finding row in the process box is clickable and opens a card showing the
+    # oracle VERDICT (FACT vs LEAD) + details.
+    assert "function findingCardBody" in APP
+    assert "isFinding = e.kind === \"finding\"" in APP
+    assert 'openDrawer(isFact(p) ? "Confirmed FACT"' in APP
+    assert "FACT \u2014 oracle-confirmed" in APP

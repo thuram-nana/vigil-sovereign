@@ -10185,6 +10185,31 @@
     }
     return { cls: "", label: "" };
   }
+  // The RESULT card an operator opens from a finding row — the oracle VERDICT + details, XSS-safe (all
+  // values are DOM text nodes). A FACT is a deterministic oracle re-execution over the target's own bytes;
+  // a LEAD is an unconfirmed model/tool proposal.
+  function findingCardBody(p) {
+    p = p || {};
+    var fact = isFact(p);
+    var kv = [];
+    function add(k, v) { if (v) { kv.push(h("span.k", null, k)); kv.push(h("span.v", null, String(v))); } }
+    add("Verdict", fact ? "FACT — oracle-confirmed" : "LEAD — unconfirmed");
+    add("Finding", p.title || p.summary || p.bug_class || "finding");
+    add("Bug class", p.bug_class);
+    add("Surface", p.surface);
+    add("Target", p.target || p.host);
+    add("Severity", p.severity);
+    add("Reference", p.ref);
+    add("Evidence", p.evidence_ref ? "signed evidence certificate attached"
+                                   : (fact ? "oracle re-drive over fresh target bytes" : ""));
+    return h("div.stack", null, [
+      h("div.why" + (fact ? ".ok" : ""), null, fact
+        ? "Confirmed by a deterministic oracle re-executing the exploit over the target's OWN response bytes — a signed FACT, not a model claim."
+        : "An unconfirmed LEAD (a model/tool proposal). Only an oracle-confirmed finding is a FACT."),
+      h("div.kv", null, kv),
+    ]);
+  }
+
   function pboxRow(e) {
     var p = e.payload || {};
     var m = KIND_META[e.kind] || { label: e.kind, sum: function () { return ""; } };
@@ -10197,9 +10222,14 @@
     // THINKING rows (decision/hypothesis/reasoning) show the model's plain-words rationale — let them WRAP
     // (full text) instead of the one-line-ellipsis every other row uses.
     var isThink = e.kind === "decision" || e.kind === "hypothesis" || e.kind === "reasoning";
+    // A FINDING row opens the RESULT card — "where do I see the fact": click the finding to see the full
+    // oracle verdict (FACT vs LEAD) + details, right here in the chat.
+    var isFinding = e.kind === "finding";
     var attrs = isTool ? { style: { cursor: "pointer" }, title: "Show the command + output",
-      onClick: function () { var pr = toolPairFrom(PBOX.events, e); openDrawer("Tool call", toolCardBody(pr.call, pr.result)); } } : null;
-    return h("div.pb-row" + (st.cls ? "." + st.cls : "") + (isTool ? ".pb-clickable" : "") + (isThink ? ".pb-think-row" : ""), attrs, [
+      onClick: function () { var pr = toolPairFrom(PBOX.events, e); openDrawer("Tool call", toolCardBody(pr.call, pr.result)); } }
+      : (isFinding ? { style: { cursor: "pointer" }, title: "Show the finding / fact",
+        onClick: function () { openDrawer(isFact(p) ? "Confirmed FACT" : "Lead (unconfirmed)", findingCardBody(p)); } } : null);
+    return h("div.pb-row" + (st.cls ? "." + st.cls : "") + (isTool || isFinding ? ".pb-clickable" : "") + (isThink ? ".pb-think-row" : ""), attrs, [
       h("span.pb-ico", null, V.icon(isErr ? "x" : kindIcon(e.kind, p))),
       h("div.pb-body", null, [
         h("div.pb-k", null, [isErr ? "Backend error" : m.label,
