@@ -29,7 +29,7 @@ fi
 DIRS=(
   "packages/vigil-ui"
   "engine/crucible/framework/v2/console"
-  "integration/vigil_integration/live"
+  "integration/vigil_integration"
 )
 FILES=(
   "docs/capability-matrix/evidence-branches.json"

@@ -20,7 +20,7 @@ def test_deploy_script_exists_and_is_executable():
 def test_deploy_script_mirrors_the_manifest_and_restarts():
     body = SCRIPT.read_text(encoding="utf-8")
     for path in ("packages/vigil-ui", "engine/crucible/framework/v2/console",
-                 "integration/vigil_integration/live", "docs/capability-matrix/evidence-branches.json"):
+                 "integration/vigil_integration", "docs/capability-matrix/evidence-branches.json"):
         assert path in body, f"the deploy manifest is missing {path}"
     assert "VIGIL_DEPLOY_DIR" in body and "systemctl --user restart" in body
     # safe by construction: it must NOT rsync the whole tree, and it refuses src==dest

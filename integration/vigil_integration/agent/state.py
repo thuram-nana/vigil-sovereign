@@ -22,7 +22,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class Phase(str, Enum):
@@ -72,6 +72,34 @@ class OutputAnalysis(BaseModel):
     findings: list[dict[str, Any]] = Field(default_factory=list)   # proposed findings → LEADs
     extracted_info: dict[str, Any] = Field(default_factory=dict)
     notes: str = ""
+
+    @field_validator("findings", mode="before")
+    @classmethod
+    def _coerce_findings(cls, v: Any) -> Any:
+        """ROBUSTNESS: real models routinely emit ``findings`` as a list of STRINGS (or a bare string)
+        instead of the documented list-of-dicts. Without this, that one malformed field raises a
+        ValidationError that rejects the WHOLE ``LLMDecision`` — silently dropping ``exploit_succeeded`` /
+        ``extracted_info`` and downgrading a genuine confirmation to the safest action (ask_user), so the
+        live re-drive never fires. Coerce each non-dict element to ``{"summary": <text>}``. Findings are
+        ADVISORY leads only — the FACT-minting re-drive reads ``exploit_succeeded`` + ``extracted_info``,
+        never ``findings`` — so this loosening cannot affect oracle soundness."""
+        if v is None:
+            return []
+        if isinstance(v, (str, bytes)):
+            v = [v]
+        if not isinstance(v, list):
+            return v            # a truly unexpected shape → let pydantic raise its normal error
+        out: list = []
+        for item in v:
+            if isinstance(item, dict):
+                out.append(item)
+            elif isinstance(item, bytes):
+                out.append({"summary": item.decode("utf-8", "replace")})
+            elif isinstance(item, str):
+                out.append({"summary": item})
+            else:
+                out.append({"summary": str(item)})
+        return out
 
 
 class LLMDecision(BaseModel):
