@@ -36,4 +36,6 @@ def test_ui_shows_paused_and_offers_resume():
 
 def test_ui_auto_resumes_after_approving_a_paused_run():
     assert "function _afterOffenseApprove(" in APPJS
-    assert 'String(PBOX.run.paused || "") === "awaiting_approval"' in APPJS and "pboxRetry();" in APPJS
+    # ENH1: the auto-resume guard now fires for a re-approval of BOTH pause reasons.
+    assert '_pp === "awaiting_approval"' in APPJS and "pboxRetry();" in APPJS
+    assert '_pp === "approval_rejected"' in APPJS, "re-approving an approval_rejected pause must auto-resume"

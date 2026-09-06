@@ -9,6 +9,12 @@ from pathlib import Path
 
 import pytest
 
+# This test drives the CONSOLE launch path, which lives in `framework` — absent in the sovereign CI leg by
+# design (the two-env boundary). importorskip so it SKIPS there instead of erroring collection; it RUNS in
+# the offense leg, where it is registered in .github/workflows/ci.yml (guard:
+# integration/tests/test_ci_framework_tests_run_in_offense_leg.py).
+pytest.importorskip("framework")
+
 from framework.v2.console import actions as A
 
 

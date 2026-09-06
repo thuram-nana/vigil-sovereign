@@ -160,7 +160,7 @@ def test_propose_mocked_llm_command_is_still_dryrun_checked(monkeypatch):
     r = actions.terminal_propose("show the files here")
     assert r["ok"] is True and r["command"] == "ls -la"
     assert r["verdict"]["verdict"] == "queued"                     # the proposal was re-checked, not trusted
-    assert captured["create_kwargs"]["model"] == "claude-opus-5"   # uses the configured model
+    assert captured["create_kwargs"]["model"] == "claude-opus-4-8"   # the branch default (feat: opus 4.8)
 
 
 def test_propose_hallucinated_destructive_command_is_refused(monkeypatch):

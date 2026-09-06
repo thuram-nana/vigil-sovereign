@@ -13,7 +13,16 @@ ACTIONS = (REPO / "engine" / "crucible" / "framework" / "v2" / "console" / "acti
 def test_backend_surfaces_awaiting_approval_in_the_transcript():
     assert "def post_engine_notice(" in CHAT
     assert 'kind="awaiting_approval"' in ACTIONS
-    assert '"paused") or "") == "awaiting_approval"' in ACTIONS
+    # ENH1: _maybe_surface now branches on BOTH pause reasons off one read.
+    assert '_paused in ("awaiting_approval", "approval_rejected")' in ACTIONS
+
+
+def test_backend_surfaces_approval_rejected_distinctly():
+    # ENH1: a FOUND-but-rejected (expired / already-used) approval posts a DISTINCT notice telling the
+    # operator to approve AGAIN, not the generic awaiting_approval invisible loop.
+    assert 'kind="approval_rejected"' in ACTIONS
+    assert 'm.kind === "approval_rejected"' in APPJS, "the approval_rejected bubble render is gone"
+    assert "approval_rejected: 1" in APPJS, "approval_rejected must be an engine kind (not tagged a Lead)"
 
 
 def test_ui_renders_the_awaiting_approval_bubble_as_an_engine_kind():
