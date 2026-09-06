@@ -311,10 +311,26 @@ def write_signed_token(root: Any, request_id: str, token: ApprovalToken) -> Path
     return path
 
 
-def find_signed_token(root: Any, action: ApprovalAction) -> Optional[tuple[ApprovalToken, ApprovalAction]]:
-    """OFFENSE: the first owner-signed token under ``signed/`` whose ``(tool_name, target, action_digest)``
-    match ``action`` exactly, as ``(token, action)`` — else None. Reconstructs with EXACT types so the
-    downstream ``consume_token`` re-derives byte-identical signing material. Total (any read error skipped)."""
+def find_signed_token(root: Any, action: ApprovalAction, *,
+                      now: Optional[float] = None,
+                      is_consumed: Optional[Callable[[str], bool]] = None,
+                      ) -> Optional[tuple[ApprovalToken, ApprovalAction]]:
+    """OFFENSE: an owner-signed token under ``signed/`` whose ``(tool_name, target, action_digest)`` match
+    ``action`` exactly, as ``(token, action)`` — else None. Reconstructs with EXACT types so the downstream
+    ``consume_token`` re-derives byte-identical signing material. Total (any read error skipped).
+
+    LIVE-PREFERENCE (SITE 8, fixes the re-approval loop): signed files are named by
+    ``request_id = sha256(action_digest||nonce)[:16]``, which is UNCORRELATED with the token's validity
+    window, and a fresh ``--resume`` mints a NEW nonce ⇒ a NEW non-overwriting file, so STALE EXPIRED /
+    already-spent tokens for one action ACCUMULATE. First-by-name would then keep re-selecting the same
+    doomed shadow, so every re-approval re-rejects and the run loops. When ``now`` is given this instead
+    prefers a token that would actually PASS ``consume_token`` — window-live AND (if ``is_consumed`` given)
+    not already burned — choosing the one with the LATEST ``not_before`` for determinism; only if NO live
+    candidate exists does it fall back to a match (latest ``not_after``) so the gate can still emit an
+    honest ``approval_rejected``. This is a PURE PRE-FILTER: ``consume_token`` remains the SOLE authority
+    (it re-verifies signature + binding + window and atomically burns), so surfacing a live candidate can
+    never authorize anything a name-ordered pick could not. ``now=None`` keeps the exact legacy
+    first-by-name behaviour for callers that do not supply a clock."""
     if type(action) is not ApprovalAction:
         return None
     d = _signed_dir(root)
@@ -322,6 +338,7 @@ def find_signed_token(root: Any, action: ApprovalAction) -> Optional[tuple[Appro
         names = sorted(os.listdir(d))
     except OSError:
         return None
+    matches: list[ApprovalToken] = []
     for name in names:
         if not name.endswith(".json"):
             continue
@@ -330,11 +347,36 @@ def find_signed_token(root: Any, action: ApprovalAction) -> Optional[tuple[Appro
         except (OSError, ValueError):
             continue
         token = _token_from_json(obj)
-        if token is None:
+        if token is None or not token.matches(action):
             continue
-        if token.matches(action):
-            return token, action
-    return None
+        if now is None:
+            return token, action                 # legacy: first match by sorted filename
+        matches.append(token)
+    if not matches:
+        return None
+
+    def _live(t: ApprovalToken) -> bool:
+        # window-live (NaN comparisons are False, excluding a malformed token — consistent with
+        # consume_token's own window check) AND not already single-use-spent (when the ledger is wired).
+        in_window = (t.not_before <= now <= t.not_after)
+        if not in_window:
+            return False
+        if is_consumed is not None:
+            try:
+                if is_consumed(t.nonce):
+                    return False
+            except Exception:  # noqa: BLE001 — an is_consumed error must not hide a token; consume re-checks
+                return False
+        return True
+
+    live = [t for t in matches if _live(t)]
+    if live:
+        best = max(live, key=lambda t: t.not_before)   # freshest live token, deterministic
+        return best, action
+    # no live candidate — return the least-stale match so the gate still emits approval_rejected (never None
+    # while a match exists, so a rejected token is never misread as "no approval yet").
+    best = max(matches, key=lambda t: t.not_after)
+    return best, action
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -414,7 +456,8 @@ class ApprovalBroker:
 
     def __init__(self, root: Any, *, wait_seconds: Optional[float] = None,
                  now: Callable[[], float] = time.time, clock_iso: Optional[Callable[[], str]] = None,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep,
+                 is_consumed: Optional[Callable[[str], bool]] = None) -> None:
         self._root = Path(root)
         self._wait = _resolve_wait(wait_seconds)
         self._now = now
@@ -423,6 +466,9 @@ class ApprovalBroker:
         self._current: Optional[ApprovalAction] = None
         self._preview: Any = None
         self._nonces: dict[str, str] = {}  # action_digest -> offense-minted nonce (stable per run)
+        # SITE 8: the single-use nonce ledger's is_consumed, so token_source can PREFER a live, unspent
+        # token over an accumulated expired/spent shadow (consume_token stays the sole authority).
+        self._is_consumed = is_consumed
 
     @property
     def root(self) -> Path:
@@ -461,7 +507,7 @@ class ApprovalBroker:
         self.publish_current()
         deadline = self._now() + self._wait
         while True:
-            found = find_signed_token(self._root, action)
+            found = find_signed_token(self._root, action, now=self._now(), is_consumed=self._is_consumed)
             if found is not None:
                 return found
             remaining = deadline - self._now()

@@ -376,3 +376,71 @@ def test_is_awaiting_approval_denial_helper():
     assert not _is_awaiting_approval_denial("target out of scope")
     assert not _is_awaiting_approval_denial("kill-switch tripped")
     assert not _is_awaiting_approval_denial("")
+
+
+# --- ENH1: a FOUND-but-REJECTED approval pauses DISTINCTLY (approval_rejected), not awaiting -------
+def test_executor_reject_pauses_approval_rejected():
+    """When the executor denies because a FOUND owner-signed token was REJECTED (expired / already spent —
+    the M2 gate's approval_rejected marker), the engine pauses at 'approval_rejected' on the FIRST deny (so
+    the operator is told to APPROVE AGAIN), never the generic 'awaiting_approval' invisible loop."""
+    calls = {"n": 0}
+
+    def _run_tool(tool, phase, seq, **kw):
+        calls["n"] += 1
+        return SimpleNamespace(
+            ran=False, outcome="deny", tool=tool.tool_name, record=None,
+            reason="authorization denied: owner approval rejected: your last approval expired or was "
+                   "already used — approve again")
+
+    seams = EngineSeams(
+        attest=_attest_allow,
+        think=ReplayThinker([_use_tool(), _use_tool(), _use_tool(), _complete()]),
+        gate=lambda *a: SimpleNamespace(allowed=True, outcome="allow", reason="ok"),
+        run_tool=_run_tool)
+    rep = _engine(seams).engage(TARGET)
+    assert rep.paused == "approval_rejected", f"expected approval_rejected, got {rep.paused!r}"
+    assert calls["n"] == 1, f"paused on the FIRST deny, not after re-proposing (ran {calls['n']}x)"
+    assert rep.done is False
+
+
+def test_no_token_deny_pauses_awaiting_not_rejected():
+    """NEGATIVE CONTROL: a WARDEN 'needs owner approval' deny (NO token yet) still pauses at
+    awaiting_approval, NOT approval_rejected — the two are distinct and the ordering never misclassifies."""
+    def _run_tool(tool, phase, seq, **kw):
+        return SimpleNamespace(ran=False, outcome="deny", tool=tool.tool_name, record=None,
+                               reason="authorization denied: in envelope, but WARDEN needs owner approval: "
+                                      "A2 requires owner approval (>= A2 or above the offense ceiling A1)")
+    seams = EngineSeams(
+        attest=_attest_allow,
+        think=ReplayThinker([_use_tool(), _use_tool(), _use_tool(), _complete()]),
+        gate=lambda *a: SimpleNamespace(allowed=True, outcome="allow", reason="ok"),
+        run_tool=_run_tool)
+    rep = _engine(seams).engage(TARGET)
+    assert rep.paused == "awaiting_approval", f"a no-token deny must stay awaiting_approval, got {rep.paused!r}"
+
+
+def test_rejected_first_ordering_wins_over_awaiting_substring():
+    """A reason that contains BOTH the approval_rejected marker AND the WARDEN 'requires owner approval'
+    phrase must resolve to approval_rejected — the engine's rejected-FIRST check ORDERING (not string
+    disjointness) is the guarantee (a consume key-id-mismatch reason can legitimately carry 'owner approval')."""
+    def _run_tool(tool, phase, seq, **kw):
+        return SimpleNamespace(ran=False, outcome="deny", tool=tool.tool_name, record=None,
+                               reason="authorization denied: owner approval rejected: ... A2 requires owner approval")
+    seams = EngineSeams(
+        attest=_attest_allow,
+        think=ReplayThinker([_use_tool(), _use_tool(), _use_tool(), _complete()]),
+        gate=lambda *a: SimpleNamespace(allowed=True, outcome="allow", reason="ok"),
+        run_tool=_run_tool)
+    rep = _engine(seams).engage(TARGET)
+    assert rep.paused == "approval_rejected", f"rejected-first ordering must win, got {rep.paused!r}"
+
+
+def test_is_rejected_approval_denial_helper():
+    from vigil_integration.live.engine import _is_rejected_approval_denial, _is_awaiting_approval_denial
+    r = "authorization denied: owner approval rejected: your last approval expired or was already used"
+    assert _is_rejected_approval_denial(r)
+    assert not _is_rejected_approval_denial("authorization denied: A2 requires owner approval")
+    # a both-marker reason: rejected matches; awaiting also matches its own phrase — the ENGINE resolves by
+    # checking rejected FIRST (see test_rejected_first_ordering_wins_over_awaiting_substring).
+    both = "authorization denied: owner approval rejected: ... A2 requires owner approval"
+    assert _is_rejected_approval_denial(both) and _is_awaiting_approval_denial(both)

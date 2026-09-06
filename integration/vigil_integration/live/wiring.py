@@ -470,13 +470,18 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     elif effective_authority is not None:
         import time as _time
         _nonce_dir = config.approval_nonce_dir or str(base / "approval-nonces")
+        # ONE ledger, shared by the broker's live-token PRE-FILTER (SITE 8) and the gate's authoritative
+        # check-AND-burn (consume_token). Sharing it lets token_source skip an already-single-use-spent
+        # shadow token in favour of a live one, while consume_token stays the SOLE burn authority.
+        _nonce_ledger = NonceLedger(_nonce_dir)
         if config.approval_token_source is not None:
             _token_source = config.approval_token_source        # injectable (tests)
         else:
-            approval_broker = ApprovalBroker(approvals_root(config.base_dir), now=_time.time)
+            approval_broker = ApprovalBroker(approvals_root(config.base_dir), now=_time.time,
+                                             is_consumed=_nonce_ledger.is_consumed)
             _token_source = approval_broker.token_source
         approval_gate = build_approval_gate(
-            gate, authority=effective_authority, ledger=NonceLedger(_nonce_dir),
+            gate, authority=effective_authority, ledger=_nonce_ledger,
             now=_time.time, token_source=_token_source,
         )
     else:
@@ -1272,9 +1277,27 @@ def build_approval_gate(
             from .approval_token import consume_token
             decision = consume_token(token, action, authority=authority, now=float(now()), ledger=ledger)
         except Exception:  # noqa: BLE001 — any verification/burn error leaves the action queued (fail-closed)
-            return verdict
+            return verdict                       # infra/burn error (NOT a rejected signature) → stays queued
         if not decision.authorized:
-            return verdict                       # invalid / expired / replayed token → stays queued
+            # A token WAS found + bound to THIS action, but the owner-signed approval was REJECTED (expired
+            # past its dead-man's-switch window, already single-use-spent, or otherwise no longer valid). This
+            # is DISTINCT from "no approval yet" (the no-token / mismatch branches above, which stay generic):
+            # the operator DID approve, but that approval can't be spent, so the run must pause telling them to
+            # APPROVE AGAIN — not the generic "awaiting your first approval" that reads as an invisible loop.
+            #
+            # SECURITY UNCHANGED: outcome stays "queue" (allowed=False) exactly as the old `return verdict`
+            # did — the executor still DENIES; consume_token burns the nonce ONLY after every check passes, so
+            # a reject spends nothing. ONLY the reason string differs. The reason is a FIXED marker + fixed
+            # copy — the raw `decision.reason` is NOT interpolated, so a planted-token field (e.g. token.key_id
+            # inside a key-id-mismatch reason) can never reach report.queued_edges or the append-only spine,
+            # and the marker stays a clean signal. The engine classifies this by CHECK ORDERING (rejected
+            # BEFORE awaiting), so this need not be string-disjoint from the WARDEN "requires owner approval".
+            from .approval_token import APPROVAL_REJECTED_REASON
+            from ..conjunctive_gate import GateVerdict
+            return GateVerdict(False, "queue",
+                               f"{APPROVAL_REJECTED_REASON}: your last approval expired or was already used "
+                               "— approve again",
+                               getattr(verdict, "crucible_allowed", True), getattr(verdict, "warden", None))
 
         from ..conjunctive_gate import GateVerdict
         return GateVerdict(True, "allow",

@@ -47,6 +47,7 @@ from ..agent.react import apply_intake, authorize_edge, intake_result
 from ..agent.state import ActionType, AgentState, Finding, LLMDecision, Phase
 from ..agent.targets import extract_target
 from .tool_intake import analysis_from_tool_output
+from .approval_token import APPROVAL_REJECTED_REASON, APPROVAL_REJECTED_PAUSE
 
 # The governed LOCAL terminal tool name (mirrors executor._TERMINAL_TOOL — kept as a local literal so engine
 # imports nothing from executor). A terminal command inspects HOST state; its output is advisory, never
@@ -132,6 +133,18 @@ def _is_awaiting_approval_denial(reason: str) -> bool:
     return ("needs owner approval" in r) or ("requires owner approval" in r)
 
 
+def _is_rejected_approval_denial(reason: str) -> bool:
+    """True when an executor deny is the "the operator DID approve, but the approval can no longer be spent"
+    condition — a token was FOUND + bound to this action but ``consume_token`` REJECTED it (expired past its
+    window / already single-use-spent / otherwise invalid). Set by the M2 gate as a FIXED
+    ``APPROVAL_REJECTED_REASON`` phrase (spaces → never spoofable by an echoed host). DISTINCT from :func:`_is_awaiting_approval_denial` (no approval yet):
+    both PAUSE resumably, but this one tells the operator to APPROVE AGAIN rather than showing the same
+    "awaiting your first approval" that reads as an invisible loop. The engine checks THIS matcher BEFORE the
+    awaiting one — that ordering (not string-disjointness) makes the label deterministic even if a consume
+    reason happened to also contain "owner approval"."""
+    return APPROVAL_REJECTED_REASON in (reason or "").lower()
+
+
 def _action_signature(tool: Any) -> str:
     """A stable (tool_name, canonical args) signature for anti-spin repeat detection. json.dumps with
     sort_keys recurses into NESTED dicts (so insertion order can never make two identical actions look
@@ -215,7 +228,7 @@ class RunReport(BaseModel):
     detection_facts: int = 0
     detection_leads: int = 0
     checkpoints: list[str] = Field(default_factory=list)
-    paused: str = ""                       # "" | "ask_user" | "awaiting_approval"
+    paused: str = ""                       # "" | "ask_user" | "awaiting_approval" | "approval_rejected"
     done: bool = False
     resumed: bool = False                  # True iff this run CONTINUED a prior checkpointed state (W2b)
 
@@ -535,8 +548,19 @@ class VigilEngine:
                 # re-propose the identical action into anti-spin. The operator signs it and RESUMES; on resume
                 # the token exists and the executor allows it. Without this, approve-then-continue dies on
                 # anti-spin right as the signature lands (the pre-approval denials had already accumulated).
-                if _is_awaiting_approval_denial(str(getattr(exec_res, "reason", "") or "")):
-                    report.queued_edges.append(str(getattr(exec_res, "reason", "") or "awaiting approval"))
+                # REJECTED-FIRST ordering (load-bearing): a token was FOUND + bound but consume REJECTED it
+                # (expired / already-spent). Distinct from "no approval yet" so the operator is told to
+                # APPROVE AGAIN, not shown the same "awaiting your first approval" invisible loop. Checked
+                # BEFORE the awaiting matcher because a consume reject reason could also contain the WARDEN
+                # "requires owner approval" phrase — the ORDER, not string-disjointness, decides the label.
+                _dr = str(getattr(exec_res, "reason", "") or "")
+                if _is_rejected_approval_denial(_dr):
+                    report.queued_edges.append(_dr or "approval rejected")
+                    report.paused = APPROVAL_REJECTED_PAUSE
+                    state.awaiting_approval = True
+                    break
+                if _is_awaiting_approval_denial(_dr):
+                    report.queued_edges.append(_dr or "awaiting approval")
                     report.paused = "awaiting_approval"
                     state.awaiting_approval = True
                     break

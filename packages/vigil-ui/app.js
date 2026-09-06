@@ -5343,7 +5343,8 @@
     // an explicit Resume. Only resume one that is actually paused-awaiting-approval, so this never
     // double-fires (the backend also refuses a second running run of a slug). Followed-run only.
     setTimeout(function () {
-      if (PBOX.run && PBOX.run.status === "paused" && String(PBOX.run.paused || "") === "awaiting_approval") {
+      var _pp = PBOX.run && String(PBOX.run.paused || "");
+      if (PBOX.run && PBOX.run.status === "paused" && (_pp === "awaiting_approval" || _pp === "approval_rejected")) {
         V.toast("Resuming the run with your approval…");
         pboxRetry();
       }
@@ -7304,7 +7305,7 @@
   const CHAT_MAX_ATTACH = 12;
   // Records the ENGINE authors itself: a launch, a refusal, an error, a prompt for a target, an
   // attachment receipt. Anything else an assistant says is model prose → a LEAD, and is badged as one.
-  const CHAT_ENGINE_KINDS = { launched: 1, refused: 1, error: 1, need_target: 1, attached: 1, system: 1, agent_question: 1, awaiting_approval: 1 };
+  const CHAT_ENGINE_KINDS = { launched: 1, refused: 1, error: 1, need_target: 1, attached: 1, system: 1, agent_question: 1, awaiting_approval: 1, approval_rejected: 1 };
 
   function fmtBytes(n) {
     const b = Number(n) || 0;
@@ -8214,6 +8215,21 @@
       // approval. Surface it IN the transcript (not only the floating process box), styled amber so a
       // blocked run never reads as idle. The interactive Approve / Deny / Deny & redirect live in the
       // process box below (owner key stays sovereign-side); a reply here steers + resumes.
+      if (m.kind === "approval_rejected") {
+        // ENH1: the operator DID approve, but the approval expired or was already used, so it couldn't be
+        // spent. A DISTINCT red register (vs awaiting's amber) + "approve again" copy, so a recoverable
+        // state never reads as the same "awaiting your first approval" invisible loop. Placed BEFORE the
+        // isLead markdown push with an early return (mirrors awaiting_approval; isLead falls through).
+        box.style.borderColor = "var(--st-deny, #d9534f)";
+        box.style.borderLeftWidth = "3px";
+        kids.push(h("div", { style: { marginBottom: "6px", display: "flex", alignItems: "center", gap: "6px" } },
+          [h("span.shield", { style: { color: "var(--st-deny, #d9534f)" } },
+            [V.icon("key"), "Paused — your last approval expired or was already used"])]));
+        kids.push(h("div", null, String(m.text || "")));
+        kids.push(h("div.dim", { style: { fontSize: "var(--fs-xs)", marginTop: "8px" } },
+          "Approve it AGAIN in the process box (Approve / Deny / Deny & redirect), or reply here to steer me — then I continue."));
+        return h("div", wrap, h("div", box, kids));
+      }
       if (m.kind === "awaiting_approval") {
         box.style.borderColor = "var(--st-queued, #d4af37)";
         box.style.borderLeftWidth = "3px";
@@ -10331,7 +10347,8 @@
       // operator never reads a blocked run as finished, and can approve/reply then Resume.
       if (PBOX.run.status === "paused") {
         var _pr = String((PBOX.run && PBOX.run.paused) || "");
-        var _pm = _pr === "awaiting_approval" ? "Paused \u2014 awaiting your approval; approve the pending action, then Resume"
+        var _pm = _pr === "approval_rejected" ? "Paused \u2014 your last approval expired or was already used; approve the pending action again, then Resume"
+                : _pr === "awaiting_approval" ? "Paused \u2014 awaiting your approval; approve the pending action, then Resume"
                 : _pr === "anti-spin" ? "Paused \u2014 stopped after repeating an action; Resume to continue"
                 : _pr === "ask_user" ? "Paused \u2014 waiting for your reply below"
                 : _pr === "plan-only" ? "Paused \u2014 plan ready (no tools were run)"
